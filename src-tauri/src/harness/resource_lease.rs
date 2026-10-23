@@ -126,7 +126,9 @@ mod tests {
         let next = ResourceLease::acquire(&store, &root);
         release.join().expect("release thread");
         assert!(next.is_ok(), "{next:?}");
-        assert!(started.elapsed() < TRANSIENT_HOLD + Duration::from_millis(200));
+        // Generous slack: a loaded CI runner can delay the waiting thread. The bound itself is
+        // covered by a_lease_still_held_is_refused_as_busy_after_the_bounded_wait.
+        assert!(started.elapsed() < TRANSIENT_HOLD + Duration::from_secs(2));
     }
 
     #[test]

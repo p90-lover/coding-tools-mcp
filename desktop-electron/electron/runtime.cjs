@@ -15,7 +15,7 @@ const {
 } = require("./connector-identity.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
-const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const { DETACH_OWNED_CHILD, terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
@@ -679,35 +679,36 @@ class RuntimeHost {
           ? setTimeout(() => {
               if (settled) return;
               timedOut = new Error(`${name} timed out after ${options.timeoutMs}ms`);
-              try {
-                terminateOwnedProcessTree(child);
-              } catch (error) {
+              // taskkill runs without blocking the main thread; a failure rejects as before.
+              terminateOwnedProcessTreeAsync(child).then(() => {
+                if (settled) return;
+                terminationTimeout = setTimeout(() => {
+                  if (settled) return;
+                  terminateOwnedProcessTreeAsync(child, "SIGKILL").then(() => {
+                    if (settled) return;
+                    forceTimeout = setTimeout(() => {
+                      if (settled) return;
+                      settled = true;
+                      clearTimers();
+                      reject(new Error(`${timedOut.message}; the child process did not exit after forced termination`));
+                    }, 2_000);
+                  }, (error) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimers();
+                    reject(new Error(
+                      `${timedOut.message}; forced child process tree termination failed: ${error instanceof Error ? error.message : String(error)}`,
+                    ));
+                  });
+                }, 5_000);
+              }, (error) => {
+                if (settled) return;
                 settled = true;
                 clearTimers();
                 reject(new Error(
                   `${timedOut.message}; child process tree termination failed: ${error instanceof Error ? error.message : String(error)}`,
                 ));
-                return;
-              }
-              terminationTimeout = setTimeout(() => {
-                if (settled) return;
-                try {
-                  terminateOwnedProcessTree(child, "SIGKILL");
-                } catch (error) {
-                  settled = true;
-                  clearTimers();
-                  reject(new Error(
-                    `${timedOut.message}; forced child process tree termination failed: ${error instanceof Error ? error.message : String(error)}`,
-                  ));
-                  return;
-                }
-                forceTimeout = setTimeout(() => {
-                  if (settled) return;
-                  settled = true;
-                  clearTimers();
-                  reject(new Error(`${timedOut.message}; the child process did not exit after forced termination`));
-                }, 2_000);
-              }, 5_000);
+              });
             }, options.timeoutMs)
           : null;
         child.once("error", (error) => {
@@ -728,14 +729,11 @@ class RuntimeHost {
           settled = true;
           clearTimers();
           if (timedOut) {
-            try {
-              terminateOwnedProcessTree(child, "SIGKILL");
-              reject(timedOut);
-            } catch (error) {
+            terminateOwnedProcessTreeAsync(child, "SIGKILL").then(() => reject(timedOut), (error) => {
               reject(new Error(
                 `${timedOut.message}; final process-group cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
               ));
-            }
+            });
             return;
           }
           if (pipeErrors.length > 0) {

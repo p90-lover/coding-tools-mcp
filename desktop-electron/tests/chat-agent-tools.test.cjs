@@ -1,4 +1,5 @@
 "use strict";
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -35,12 +36,12 @@ function tempTree() {
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
-  wakeups = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null } = {}) {
+  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, chatHistory,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
@@ -618,6 +619,7 @@ test("the terminal is its own group, off by default, and turning it on reaches o
     assert.ok((await listed(opted.url, opted.auth)).includes("exec_command"));
     const optedInit = await post(opted.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, opted.auth);
     assert.match(optedInit.body.result.instructions, /NOT confined/, "the agent is told plainly that commands are not confined");
+    assert.doesNotMatch(optedInit.body.result.instructions, /hidden desktop/, "outside the sandbox a program's windows do show");
     assert.match(optedInit.body.result.instructions, /anything the user's account can/);
     assert.match(optedInit.body.result.instructions, /confirms each command/);
     terminal = false;
@@ -942,6 +944,41 @@ test("schedule_wakeup hands the chat's own session to the app's scheduler and te
   } finally { await tools.close(); await plain.tools.close(); }
 });
 
+test("the goal tools are Codex's, take the chat's own session, and are offered only with a goal service", async () => {
+  const asked = [];
+  const goals = { call: async (request) => {
+    asked.push(request);
+    if (request.action === "update" && request.status === "active") throw new Error("update_goal can only mark the existing goal complete");
+    return { goal: { objective: "ship it", status: request.status === "complete" ? "complete" : "active", tokenBudget: null, tokensUsed: null,
+      timeUsedSeconds: 0 }, remainingTokens: null, completionBudgetReport: null };
+  } };
+  const { tools } = fixture({ goals });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "goal-owner" });
+    const names = await listed(client.url, client.auth);
+    for (const name of ["get_goal", "create_goal", "update_goal"]) assert.ok(names.includes(name), `${name} is listed`);
+    const created = await callTool(client.url, client.auth, "create_goal", { objective: "ship it", token_budget: 5000 });
+    assert.equal(created.isError, undefined);
+    assert.equal(JSON.parse(created.content[0].text).goal.status, "active");
+    await callTool(client.url, client.auth, "update_goal", { status: "complete" });
+    await callTool(client.url, client.auth, "update_goal", { objective: "ship it twice" });
+    await callTool(client.url, client.auth, "get_goal", {});
+    assert.deepEqual(asked, [
+      { workspaceId: "ws1", session: "goal-owner", action: "create", objective: "ship it", tokenBudget: 5000 },
+      { workspaceId: "ws1", session: "goal-owner", action: "update", status: "complete", objective: undefined },
+      { workspaceId: "ws1", session: "goal-owner", action: "update", status: undefined, objective: "ship it twice" },
+      { workspaceId: "ws1", session: "goal-owner", action: "get" },
+    ], "the session is the server's own, never one the agent names");
+    const refused = await callTool(client.url, client.auth, "update_goal", { status: "active" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /only mark the existing goal complete/);
+    const other = await session(plain.tools, { id: "no-goal" });
+    assert.equal((await listed(other.url, other.auth)).includes("create_goal"), false);
+    assert.equal((await callTool(other.url, other.auth, "get_goal", {})).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
 test("completed pane owners are bounded while live and user terminals stay reachable", async () => {
   const tree = tempTree();
   const sandbox = fakeSandbox();
@@ -1080,6 +1117,9 @@ test("Claude Code on Approve for me: the reviewed command runs in Codex's sandbo
     assert.match(description, /foreground/);
     assert.match(description, /preview_open/);
     assert.doesNotMatch(init.body.result.instructions, /NOT confined|No confirmation/);
+    // Codex's sandbox runs on a hidden desktop of its own: the agent is told its windows never show.
+    assert.match(description, /hidden desktop: its windows never reach the user's screen/);
+    assert.match(init.body.result.instructions, /give the user the exact command to open it themselves/);
 
     const ran = await callTool(url, auth, "exec_command", { cmd: 'npm run dev -- --host "127.0.0.1"', workdir: "src" });
     assert.equal(ran.isError, false);
@@ -1099,6 +1139,7 @@ test("Claude Code on Approve for me: the reviewed command runs in Codex's sandbo
     assert.equal((await callTool(url, auth, "read_output", { output_ref: "command:sbx-1:stdout" })).structuredContent.content, "hello");
     const environment = await callTool(url, auth, "check_exec_environment", {});
     assert.deepEqual(environment.structuredContent.writable_roots, [path.resolve(tree.root), "C:/cache/npm"]);
+    assert.equal(environment.structuredContent.gui_windows, "hidden");
     assert.equal(confirmations.length, 0, "no dialog for any of it");
     assert.equal(calls.length, before, "nothing went to the unsandboxed terminal");
 

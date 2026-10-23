@@ -1,4 +1,5 @@
 "use strict";
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -208,5 +209,35 @@ test("health blips with a live PID do not kill the process, then a reconnect gen
   await clock.flush(HEALTH_POLL_MS);
   assert.equal(starts.length, 1);
   assert.equal(controller.snapshot().tools[0].longRun.reconnectGeneration, 1);
+  controller.dispose();
+});
+
+test("healthy polls that change nothing do not rewrite the state file every time", async () => {
+  // Each atomic rewrite blocked the main thread for seconds on a busy hard disk, every 45 s.
+  const clock = fakeClock();
+  const statePath = path.join(temporaryDirectory("coding-tools-long-run-quiet-"), "state.json");
+  const tool = { id: "cpa", status: "ready", pid: 9, originalChrome: true };
+  const inner = {
+    snapshot: () => ({ version: 1, tools: [tool] }),
+    inspect: async () => tool,
+    start: async () => tool,
+    stop: async () => tool,
+    restart: async () => tool,
+    openEmbedded: async () => ({ tool, section: "dashboard", url: "", embedded: true }),
+    openExternalTool: async () => ({ tool, section: "dashboard", url: "", embedded: false }),
+    copyCpaManagementKey: () => ({ copied: true, length: 36 }),
+    dispose() {},
+  };
+  const controller = attachCpaCodexLongRun(inner, {
+    statePath, now: clock.now, setTimeoutFn: clock.setTimeoutFn, clearTimeoutFn: clock.clearTimeoutFn, resumeOnCreate: false,
+  });
+  await controller.start("cpa");
+  await clock.flush(0);
+  const settled = fs.readFileSync(statePath, "utf8");
+  for (let poll = 0; poll < 3; poll++) await clock.flush(HEALTH_POLL_MS);
+  assert.equal(fs.readFileSync(statePath, "utf8"), settled, "three quiet polls wrote nothing");
+  assert.notEqual(controller.snapshot().tools[0].longRun.keptAliveAt, JSON.parse(settled).tools.cpa.keptAliveAt, "the live time still moves");
+  for (let poll = 0; poll < 12; poll++) await clock.flush(HEALTH_POLL_MS);
+  assert.notEqual(fs.readFileSync(statePath, "utf8"), settled, "the time on disk is refreshed now and then");
   controller.dispose();
 });

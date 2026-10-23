@@ -23,6 +23,13 @@ const TIMEOUT_MS = 8_000;
 const MAX_ACCOUNTS = 40;
 /** Accounts whose usage is split by model (one more CPA Helper read each). */
 const MAX_SPLIT_ACCOUNTS = 24;
+/**
+ * Those split reads in flight at once. All of them together (up to 24 range aggregations over CPA
+ * Helper's records, beside the overall ones) hit the CPA that serves the chats' model requests in
+ * one burst, every refresh of every chat's context meter; on 2026-10-22 sixteen of them timed out
+ * in the same second.
+ */
+const SPLIT_CONCURRENCY = 3;
 const MAX_MODELS = 12;
 const DAY_MS = 24 * 60 * 60_000;
 const RANGES = Object.freeze({ "24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_MS, all: null });
@@ -280,6 +287,20 @@ function aggregateUsage({ authRows = [], modelsByAuth = new Map(), modelRows = [
   return { accounts, totals, models };
 }
 
+/** `fn` over `items`, at most `limit` at a time; the results keep the items' order. */
+async function mapLimited(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = Date.now, logger = console } = {}) {
   const cache = new Map(); // range -> { at, value }
   const pending = new Map(); // range -> Promise
@@ -336,10 +357,10 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
       optional(target, `/cpa-helper/rankings?${query({ group: "model" })}`),
       optional(target, "/auth-files"),
       quota?.read ? quota.read().catch(() => null) : null,
-      Promise.all(authRows.slice(0, MAX_SPLIT_ACCOUNTS).filter((row) => row?.key).map(async (row) => {
+      mapLimited(authRows.slice(0, MAX_SPLIT_ACCOUNTS).filter((row) => row?.key), SPLIT_CONCURRENCY, async (row) => {
         const listing = await optional(target, `/cpa-helper/rankings?${query({ group: "model", auth: String(row.key) })}`);
         return [String(row.key), Array.isArray(listing?.items) ? listing.items : null];
-      })),
+      }),
     ]);
     const authFiles = Array.isArray(fileListing?.files) ? fileListing.files : null;
     // The switcher's pool only matters when CPA has its bridge account (or the list is unreadable).
@@ -425,6 +446,40 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
   return Object.freeze({ read, turnStats });
 }
 
+/** A record's time (CPA Helper's `ts`) in Unix ms, from ms, seconds or an ISO date; null when absent. */
+function recordTime(item) {
+  const value = item?.ts;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value < 1e12 ? value * 1000 : value;
+  if (typeof value === "string" && value) { const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : null; }
+  return null;
+}
+
+/**
+ * The run of failed requests since the turn's model last answered: how many, with which HTTP status,
+ * from when to when. A turn whose requests (its own, or a subagent's on the same model) CPA keeps
+ * refusing shows nothing in the chat, where it read as a slow start or "may be stuck"; seen live
+ * 2026-10-22 on MiMo V2.6 Pro. Only timed records count, newest last. Null without a failure there.
+ */
+function refusalOf(items) {
+  const timed = items.filter((item) => item && typeof item === "object" && recordTime(item) !== null)
+    .sort((a, b) => recordTime(a) - recordTime(b));
+  let streak = 0;
+  for (let index = timed.length - 1; index >= 0 && timed[index].failed === true; index -= 1) streak += 1;
+  if (!streak) return null;
+  const run = timed.slice(-streak);
+  const statuses = {};
+  for (const item of run) {
+    const code = Number.isInteger(item.status_code) && item.status_code >= 100 && item.status_code < 600 ? String(item.status_code) : "none";
+    statuses[code] = (statuses[code] ?? 0) + 1;
+  }
+  const latest = run.at(-1);
+  return {
+    streak,
+    status: Number.isInteger(latest.status_code) && latest.status_code >= 100 && latest.status_code < 600 ? latest.status_code : null,
+    statuses, since: recordTime(run[0]), lastAt: recordTime(latest),
+  };
+}
+
 /** CPA Helper records -> one turn's totals; failed requests count as steps but not as speed. */
 function summarizeRecords(items) {
   let steps = 0, failed = 0, latencyMs = 0, ttftSum = 0, ttftCount = 0, inputTokens = 0, outputTokens = 0, cachedTokens = 0;
@@ -450,9 +505,10 @@ function summarizeRecords(items) {
     tokensPerSecond: speedMs ? Math.round((speedTokens / speedMs) * 1000) : null,
     cacheHit: inputTokens ? Math.min(1, cachedTokens / inputTokens) : null,
     inputTokens, outputTokens, cachedTokens,
+    refusal: refusalOf(items),
   };
 }
 
 module.exports = Object.freeze({
-  createCpaUsage, aggregateUsage, summarizeRecords, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
+  createCpaUsage, aggregateUsage, summarizeRecords, refusalOf, recordTime, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
 });

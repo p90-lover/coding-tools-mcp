@@ -32,7 +32,25 @@ function renameAtomicFile(
   }
 }
 
-function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirectory = true } = {}) {
+/** Writes `payload` to a new file at `target` ("wx"), flushed to disk before it is closed. */
+function writeFlushedFile(target, payload, mode) {
+  const fd = fs.openSync(target, "wx", mode);
+  try {
+    for (let offset = 0; offset < payload.length;) offset += fs.writeSync(fd, payload, offset, payload.length - offset);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * `durable`: the temp file is flushed to disk before it replaces `filePath`. Without it, a power cut
+ * or hard reset can leave the replaced file the right size but full of NUL bytes: the rename reached
+ * the disk and the data did not (launcher-supervisor.json, 2026-10-23, after four unexpected
+ * shutdowns; the bridge watchdog then failed every restart for 25 minutes). Flushing costs a disk
+ * round trip, so it is for small state files written now and then, not ones written as the app is used.
+ */
+function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirectory = true, durable = false } = {}) {
   const directory = path.dirname(filePath);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (protectDirectory) {
@@ -48,7 +66,8 @@ function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirect
   for (let attempt = 0; temporary === null; attempt += 1) {
     const candidate = `${filePath}.tmp-${process.pid}-${Date.now()}-${++sequence}`;
     try {
-      fs.writeFileSync(candidate, payload, { flag: "wx", mode });
+      if (durable) writeFlushedFile(candidate, payload, mode);
+      else fs.writeFileSync(candidate, payload, { flag: "wx", mode });
       temporary = candidate;
     } catch (error) {
       if (error?.code !== "EEXIST") {
@@ -67,8 +86,62 @@ function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirect
   }
 }
 
+// The write in flight per file: async writes to one file land in the order they were asked for.
+const pendingAsyncWrites = new Map();
+
+/**
+ * writePrivateFileAtomic off the main thread (resolves when the file is in place). A rename the
+ * system holds (EBUSY/EPERM/EACCES on Windows) is retried on timers instead of Atomics.wait, which
+ * blocked the whole app for up to 1.4 s. For writes nothing waits on at once, made while the app
+ * is in use (a window being moved); a write that must land before the app exits stays synchronous.
+ */
+function writePrivateFileAtomicAsync(filePath, content, { mode = 0o600, protectDirectory = true, platform = process.platform } = {}) {
+  const previous = pendingAsyncWrites.get(filePath) ?? Promise.resolve();
+  const write = previous.catch(() => {}).then(async () => {
+    const directory = path.dirname(filePath);
+    await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+    if (protectDirectory) await fs.promises.chmod(directory, 0o700).catch(() => {});
+    const payload = Buffer.isBuffer(content) ? content : Buffer.from(String(content).replace(/^﻿/, ""), "utf8");
+    let temporary = null;
+    for (let attempt = 0; temporary === null; attempt += 1) {
+      const candidate = `${filePath}.tmp-${process.pid}-${Date.now()}-${++sequence}`;
+      try {
+        await fs.promises.writeFile(candidate, payload, { flag: "wx", mode });
+        temporary = candidate;
+      } catch (error) {
+        if (error?.code !== "EEXIST") {
+          await fs.promises.rm(candidate, { force: true });
+          throw error;
+        }
+        if (attempt >= 4) throw error;
+      }
+    }
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await fs.promises.rename(temporary, filePath);
+          break;
+        } catch (error) {
+          const transientWindowsError = platform === "win32" && ["EBUSY", "EPERM", "EACCES"].includes(error?.code);
+          const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
+          if (!transientWindowsError || delay === undefined) throw error;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+      await fs.promises.chmod(filePath, mode).catch(() => {});
+    } finally {
+      await fs.promises.rm(temporary, { force: true });
+    }
+  });
+  pendingAsyncWrites.set(filePath, write);
+  const forget = () => { if (pendingAsyncWrites.get(filePath) === write) pendingAsyncWrites.delete(filePath); };
+  write.then(forget, forget);
+  return write;
+}
+
 module.exports = {
   WINDOWS_RENAME_RETRY_DELAYS_MS,
   renameAtomicFile,
   writePrivateFileAtomic,
+  writePrivateFileAtomicAsync,
 };

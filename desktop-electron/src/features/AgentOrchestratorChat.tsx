@@ -6,22 +6,24 @@ import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatWorkbench, navigatePreview, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
-  chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, type ChatWakeup,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
+  chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
+  cpaRefusalNote, type ChatWakeup, type CpaRefusal,
+  chatLoopParse, loopInterval, loopLabel, type ChatLoop,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -48,7 +50,7 @@ function AutoRetryToggle({ disabled, onRetryNow }: { disabled: boolean; onRetryN
     return () => { live = false; };
   }, []);
   // A switch, not a checkbox: the box and its words wrapped onto two lines beside the button.
-  return <label className="cx-auto-retry" title="A failed step runs again by itself, up to three times with a growing pause; account or sign-in failures still wait for you">
+  return <label className="cx-auto-retry" title="Retries a failed step up to 3 times. Sign-in errors still wait for you">
     <input type="checkbox" role="switch" checked={on === true} disabled={disabled || on === null} onChange={(event) => {
       const next = event.target.checked;
       setOn(next);
@@ -68,12 +70,13 @@ function FailedStepCard({ step, notice, busy, onRetry }: {
   step?: { name?: string; error?: string }; notice?: string; busy: boolean; onRetry: () => void;
 }) {
   const reason = notice || step?.error || "The step stopped before it finished.";
-  return <section className="cx-card tone-error cx-fail-card" aria-labelledby="cx-fail-title">
+  // Named by its own words, not an id: two split view panes can each show a failed step.
+  return <section className="cx-card tone-error cx-fail-card" aria-label={`Step failed${step?.name ? `: ${step.name}` : ""}`}>
     <svg className="cx-fail-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
       <circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5M12 16.4v.1" />
     </svg>
     <div className="cx-fail-body">
-      <p className="cx-fail-title" id="cx-fail-title">Step failed{step?.name ? <span className="cx-fail-step">{step.name}</span> : null}</p>
+      <p className="cx-fail-title">Step failed{step?.name ? <span className="cx-fail-step">{step.name}</span> : null}</p>
       <p className="cx-fail-reason">{reason}</p>
       <div className="cx-card-actions">
         <button className="button-primary" type="button" disabled={busy} onClick={onRetry}>
@@ -105,6 +108,8 @@ let annotationIds = 0;
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 /** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
 const PET_KEY = "coding-tools:ao:pet";
+/** Sent to every chat in the window when the pet is shown or hidden (its detail: shown). */
+const PET_EVENT = "coding-tools:ao:pet-shown";
 /** What an AO agent is started with; a follow-up with any of them changed gets a new agent (continuationCard). */
 type RouteFields = Record<string, unknown>;
 /** A route's model as the composer's picker names it ("MiMo V2.6 Pro"), not its id. */
@@ -156,6 +161,10 @@ export type ChatThreadActions = {
   pinned: boolean;
 };
 
+/** What a stuck turn's Restart sends the same agent as its next turn. */
+export const RESTART_MESSAGE = "Your previous turn stopped responding and was restarted. Continue the same task from where you left off; "
+  + "do not start over or repeat work that is already done. If a command or tool call never returned, do not run it the same way again.";
+
 /**
  * How long since `since`, counting up once a second by itself while `live`: only this label
  * re-renders on a tick, never the transcript around it. Stopped, it holds at `until`.
@@ -175,7 +184,9 @@ function Elapsed({ since, live = true, until, format = chatDuration }: { since: 
  * is on what, and how long nothing new has come (or that its model is being retried). The "Working
  * for" label sat at the turn's top, hundreds of steps up, so a stuck turn could not be told apart.
  */
-function TurnRunning({ turn }: { turn: ChatTurn }) {
+function TurnRunning({ turn, refusal }: { turn: ChatTurn; refusal?: CpaRefusal | null }) {
+  // Through context: the transcript around it is memoized and would keep a stale callback.
+  const { onRestart, restarting } = useContext(TurnRestart);
   const step = turn.steps.find((item) => item.working) ?? (turn.final?.working ? turn.final : undefined);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -184,11 +195,25 @@ function TurnRunning({ turn }: { turn: ChatTurn }) {
   }, []);
   if (!step?.working) return null;
   const heardAt = Math.max(0, ...[...turn.steps, ...(turn.final ? [turn.final] : [])].map((item) => item.working?.heardAtMs ?? 0)) || undefined;
-  const note = dshRetryNote(turn.steps) || dshQuietNote(heardAt, now);
-  return <p className={`cx-note cx-turn-running${step.working.stalled ? " is-stalled" : ""}`} role="status" aria-live="polite">
+  // Claude Code's own retry notice first; else CPA refusing the model (a subagent's requests too,
+  // which post no notice); then how long nothing new has come.
+  const retry = dshRetryNote(turn.steps);
+  const refused = retry ? "" : cpaRefusalNote(refusal, now);
+  // A turn waiting on the person's answer is not stuck: it says so, with no Restart to press.
+  const asking = waitsForPerson(step.working.activity);
+  const note = `${retry || refused}${dshQuietNote(heardAt, now, asking)}`;
+  // A restart does not lift a rate limit or a refused sign-in: it says what does instead.
+  const hint = refused && (refusal?.status === 429 || refusal?.status === 402) ? " · switch the model or wait"
+    : refused && (refusal?.status === 401 || refusal?.status === 403) ? " · sign in again in CPA" : "";
+  return <p className={`cx-note cx-turn-running${(step.working.stalled && !asking) || refused ? " is-stalled" : ""}`} role="status" aria-live="polite">
     <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
-    {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}`}
-    {note.includes("may be stuck") ? " · send a message to restart it" : ""}
+    {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}${hint}`}
+    {/* A stuck turn has a button of its own: the person looking at "may be stuck" had nothing to
+        press, and a tool call that never returned held a chat for hours (Restart: chat_steer's restart). */}
+    {!hint && note.includes("may be stuck") ? onRestart
+      ? <> · <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
+        title="Stop this turn and have the same agent continue where it left off">{restarting ? "Restarting…" : "Restart"}</button></>
+      : " · send a message to restart it" : ""}
   </p>;
 }
 
@@ -319,6 +344,17 @@ const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === 
   && a.input === b.input && a.output === b.output && a.receipt === b.receipt && sameFiles(a.files, b.files));
 const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
 
+/**
+ * Messages steered into the running turn that its timeline does not show yet: the same bubble the
+ * timeline gives a steer, where it will show it, checked "Sending…" until the agent has it.
+ */
+function PendingSteers({ steers }: { steers: { id: string; text: string; sent?: boolean }[] }) {
+  return <>{steers.map((entry) => <div key={entry.id} className="cx-user cx-steer" data-pending={entry.sent ? "sent" : "sending"}>
+    <SentMessage text={entry.text} />
+    <div className="cx-msg-foot"><SteerReceiptMark receipt={entry.sent ? "unread" : "sending"} /><MessageActions text={chatMessageReadable(entry.text)} /></div>
+  </div>)}</>;
+}
+
 function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
@@ -377,11 +413,19 @@ function LiveTimeline({ items, live = false, finished = false, reply }: { items:
 const CHAT_WORK = new Map<string, ChatLiveItem[]>();
 const CHAT_WORK_LIVE = new Set<string>();
 type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
+// Kept per attempt: a retried card starts again (a new start time) with nothing of the last one.
+const stepWorkKey = (step: ChatStep) => `${step.key}@${step.startedAtMs ?? ""}`;
+/** Whether the chat details panel is open, kept across chats and restarts. */
+const DETAILS_OPEN_KEY = "coding-tools:chat:details-open";
+/** The details panel reads back the finished cards of this many newest turns, each card once. */
+const DETAILS_READ_TURNS = 3;
+const DETAILS_READ = new Set<string>();
+/** Newest first, the panel lists this many outputs and this many sources. */
+const DETAILS_LIST_LIMIT = 12;
 
 function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: LoadWork): ChatLiveItem[] | null {
-  // Kept per attempt: a retried card starts again (a new start time) with nothing of the last one.
   // Within an attempt nothing seen is ever dropped (mergeTimeline).
-  const workKey = `${step.key}@${step.startedAtMs ?? ""}`;
+  const workKey = stepWorkKey(step);
   const live = step.working?.timeline;
   const [, setLoaded] = useState(0);
   // A poll carries only the turn's newest items; the ones before them stay (mergeTimeline).
@@ -411,26 +455,25 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
   const work = useStepWork(step, runId, open, loadWork);
   const compact = useContext(CompactActivity);
   const body = step.error || step.text || (work?.length || step.hasWork || step.earlier?.length ? "work" : "");
+  // One line from its dot: the card's name, then how it runs (harness · provider · model · effort ·
+  // context). A working card says nothing more here: what it runs and for how long is at the turn's
+  // foot (TurnRunning), and its tool calls are right below. Any other state leads the line.
+  const state = step.working ? (step.working.stalled ? "may be stuck" : "")
+    : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state);
   return <li className={`cx-step tone-${stepTone(step)}`}>
     <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
-      title={step.working?.detail || undefined}>
+      title={step.working?.detail || step.detail || undefined}>
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
-      <span className="cx-step-meta">
-        {/* A stalled card still says where: "may be stuck · running pytest … (timeout 5m)". */}
-        {step.working ? (step.working.stalled ? `may be stuck${step.working.activity ? ` · ${step.working.activity}` : ""}` : step.working.activity || "working")
-          : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state)}
-        {step.working && step.startedAtMs ? <> · <Elapsed since={step.startedAtMs} /></> : null}
-      </span>
+      <span className="cx-step-meta">{[state, step.detail].filter(Boolean).join(" · ")}</span>
       {body ? <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} /> : null}
     </button>
     {open ? <div className="cx-step-body">
-      {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
       {/* Its earlier rounds first, folded (oldest first), then the attempt now: a retried card's
           failed attempt showed under the new attempt's work, as if it came after it. */}
       <EarlierRounds rounds={step.earlier} />
-      {work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+      {work?.length ? <SteerReader.Provider value={steerReader(step)}>
         <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={step.text} />
       </SteerReader.Provider> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
@@ -456,7 +499,7 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+    {open ? work?.length ? <SteerReader.Provider value={steerReader(step)}>
       <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} />
     </SteerReader.Provider> : <p className="cx-tool-empty">Loading…</p> : null}
   </div>;
@@ -496,7 +539,7 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
 const WorkGroup = memo(WorkGroupView, sameWork);
 /** A DeepSeek turn's work (DshTranscript), skipped on re-render by the same check as WorkGroup. */
 const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live
-  && prev.useWork === next.useWork && prev.errorShownBelow === next.errorShownBelow && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
+  && prev.useWork === next.useWork && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
 
 function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
   const working = turn.steps.find((step) => step.working);
@@ -509,16 +552,15 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
-  const label = working
-    ? <>{working.working!.stalled ? "May be stuck" : "Working"}{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
-      {` · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`}</>
-    : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
+  // While it works the turn has no head of its own: its steps start at their dots, and how long it
+  // has worked and on what is said once, at the turn's foot (TurnRunning, whose verb alone shimmers).
+  // Once done it folds under "Worked · N steps".
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
-    <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span className={working ? "cx-shimmer" : undefined}>{label}</span>
+    {working ? null : <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
+      <span>{`Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
-    </button>
-    {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
+    </button>}
+    {open || working ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
   </div>;
 }
 
@@ -568,7 +610,7 @@ function SentMessage({ text }: { text: string }) {
       {parts.attachments.map((item, index) => item.image && item.path
         ? <SentImage key={`${item.path}:${index}`} item={item} onOpen={setOpen} />
         : <button key={`${item.name}:${index}`} type="button" className="cx-sent-file" disabled={!item.path || !reveal}
-          title={item.path ? `${item.path}\nClick to show it in its folder` : `${item.name} (sent inline)`} onClick={() => item.path && reveal?.(item.path)}>
+          title={item.path ? `${item.path}\nClick to show in folder` : `${item.name} · sent inline`} onClick={() => item.path && reveal?.(item.path)}>
           <span className="cx-sent-file-icon" aria-hidden="true">{/\.pdf$/i.test(item.name) ? "PDF" : "TXT"}</span>
           <span className="cx-sent-file-name">{item.name}</span>
         </button>)}
@@ -591,68 +633,99 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
   </div>;
 }
 
-/** A message in the queued-message bar: waiting to be sent ("queued"), or on its way to the agent ("pending"). */
-type QueuedBarItem = {
-  key: string; text: string; state: "queued" | "pending";
+/**
+ * A message in the queued-message bar, waiting to be sent. A steer on its way to the agent is not
+ * one: it shows in the chat from the moment it is sent (PendingSteers).
+ */
+export type QueuedBarItem = {
+  key: string; text: string; state: "queued";
   onRemove?: () => void; onEdit?: () => void; onSendNow?: () => void; sendNowBlocked?: string;
 };
 
-/** Whether a click inside a queued bubble came from a control of its own (an attachment's button, link or image). */
-function queuedNestedControl(target: EventTarget | null, bubble: EventTarget | null): boolean {
-  const element = target as { closest?: (selector: string) => unknown } | null;
-  const control = typeof element?.closest === "function" ? element.closest("button, a, input, img, [role='button'], [role='link']") : null;
-  return Boolean(control) && control !== bubble;
-}
-
-/** The X of Claude Code's "Discard queued message" (its cds "X" icon, 16 px). */
-function QueuedDiscardGlyph() {
-  return <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d="M18 6 6 18M6 6l12 12" />
+/** Claude Code's queue glyphs (its Anthropicons ArrowReturn, Edit, X, DotsVertical and CaretDown, as outlines). */
+function QueuedGlyph({ name, size = 16 }: { name: "send" | "edit" | "remove" | "more" | "caret"; size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {name === "send" ? <><path d="m9 10-5 5 5 5" /><path d="M20 4v7a4 4 0 0 1-4 4H4" /></>
+      : name === "edit" ? <path d="M21.17 6.81a2.82 2.82 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z" />
+      : name === "remove" ? <path d="M18 6 6 18M6 6l12 12" />
+      : name === "more" ? <><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></>
+      : <path d="m6 9 6 6 6-6" />}
   </svg>;
 }
 
+/** A queued message on one line, as Claude Code previews it: its readable text, whitespace collapsed. */
+const queuedPreview = (text: string) => chatMessageReadable(text).replace(/\s+/g, " ").trim() || "…";
+
 /**
- * Claude Code's queued messages (claude.ai's composer queue rows, data-testid "pending-queue-row"):
- * a message sent while the agent works waits right above the composer, newest last, as the
- * person's own bubble collapsed to one line with its text greyed, and "Queued" under it. Its X
- * ("Discard queued message") shows on hover or focus just past the bubble's end; the first one also
- * has "Send now". One on its way to the agent pulses and has no actions. Screen readers hear Claude
- * Code's own status line. Not in Claude Code: clicking a queued bubble puts it back in the composer
- * to edit (the earlier bar's "Edit in composer").
+ * Claude Code's queued-message bar (its Code tab's QueuedMessageBar): a band right above the
+ * composer, above the branch bar. One message is one row: "1 message queued", the message greyed
+ * on one line, then Send now (↵), Edit in composer and Remove from queue. Two or more collapse to
+ * "N messages queued · Next: …", which opens the list: each message on up to two lines with a ⋮
+ * menu (Edit in composer, Send now, Remove from queue), and Clear all. Only the first can be sent now.
  */
-function QueuedMessageBar({ items }: { items: QueuedBarItem[] }) {
+export function QueuedMessageBar({ items, onMenu, onClearAll }: {
+  items: QueuedBarItem[]; onMenu: (owner: HTMLElement, items: ChatMenuItem[]) => void; onClearAll?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
   if (!items.length) return null;
-  const waiting = items.filter((item) => item.state === "queued").length;
-  const head = items.findIndex((item) => item.state === "queued");
+  const sendNow = (item: QueuedBarItem, index: number) => index === 0 ? item.onSendNow : undefined;
+  if (items.length === 1) {
+    const [item] = items;
+    return <div className="cx-queued">
+      <div className="cx-queued-band" role="group" aria-label="Queued messages" data-state={item.state}>
+        <span className="cx-queued-count">1 message queued</span>
+        <span className="cx-queued-preview">{queuedPreview(item.text)}</span>
+        {sendNow(item, 0) ? <button type="button" className="cx-queued-icon" aria-label="Send now" data-tip={item.sendNowBlocked ?? "Send now"}
+          disabled={Boolean(item.sendNowBlocked)} onMouseDown={(event) => event.preventDefault()} onClick={item.onSendNow}><QueuedGlyph name="send" /></button> : null}
+        {item.onEdit ? <button type="button" className="cx-queued-icon" aria-label="Edit in composer" data-tip="Edit in composer"
+          onMouseDown={(event) => event.preventDefault()} onClick={item.onEdit}><QueuedGlyph name="edit" /></button> : null}
+        {item.onRemove ? <button type="button" className="cx-queued-icon" aria-label="Remove from queue" data-tip="Remove from queue"
+          onMouseDown={(event) => event.preventDefault()} onClick={item.onRemove}><QueuedGlyph name="remove" /></button> : null}
+      </div>
+    </div>;
+  }
+  const count = `${items.length} messages queued`;
+  if (!open) {
+    return <div className="cx-queued">
+      <button type="button" className="cx-queued-band cx-queued-stack" aria-expanded={false} onClick={() => setOpen(true)}>
+        <span className="cx-queued-count">{count}</span>
+        <span className="cx-queued-preview">Next: {queuedPreview(items[0].text)}</span>
+        <span className="cx-queued-caret" aria-hidden="true"><QueuedGlyph name="caret" /></span>
+      </button>
+    </div>;
+  }
+  // The ⋮ menu of one message: Claude Code's Edit in composer, Send now, then Remove from queue.
+  const actions = (item: QueuedBarItem, index: number): ChatMenuItem[] => {
+    const send = sendNow(item, index);
+    const list: ChatMenuItem[] = [
+      ...(item.onEdit ? [{ label: "Edit in composer", run: item.onEdit }] : []),
+      ...(send ? [item.sendNowBlocked ? { label: "Send now", reason: item.sendNowBlocked } : { label: "Send now", run: send }] : []),
+    ];
+    return item.onRemove ? [...list, ...(list.length ? [{ kind: "separator" as const }] : []), { label: "Remove from queue", danger: true, run: item.onRemove }] : list;
+  };
   return <div className="cx-queued">
-    <span className="cx-sr-only" role="status">{waiting === 0 ? "" : waiting === 1 ? "1 message queued. Will send after the current response."
-      : `${waiting} messages queued. Will send after the current response.`}</span>
-    <ol className="cx-queued-list" aria-label="Queued messages">
-      {items.map((item, index) => <li key={item.key} className="cx-queued-row" data-state={item.state}>
-        <div className="cx-queued-bubble">
-          {item.state === "queued" && item.onEdit
-            ? <div className="cx-user cx-queued-message" role="button" tabIndex={0} aria-label="Edit in composer" title="Edit in composer"
-              // A click on the message's own attachment (an image preview, a file) is for that control:
-              // bubbled up, it dequeued the message and unmounted the preview it had just opened.
-              onClick={(event) => { if (!queuedNestedControl(event.target, event.currentTarget)) item.onEdit?.(); }}
-              onKeyDown={(event) => {
-                if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) { event.preventDefault(); item.onEdit?.(); }
-              }}>
-              <SentMessage text={item.text} /></div>
-            : <div className="cx-user cx-queued-message"><SentMessage text={item.text} /></div>}
-          {item.state === "queued" ? <span className="cx-queued-discard">
-            <button type="button" aria-label="Discard queued message" data-tip="Discard queued message" onClick={item.onRemove}><QueuedDiscardGlyph /></button>
-          </span> : null}
-        </div>
-        {item.state === "queued" ? <div className="cx-queued-meta">
-          {index === head && item.onSendNow ? <button type="button" className="cx-queued-send-now" aria-label="Send now"
-            data-tip={item.sendNowBlocked ?? "Send now"} disabled={Boolean(item.sendNowBlocked)} onClick={item.onSendNow}>Send now</button> : null}
-          <span className="cx-queued-status">Queued</span>
-        </div>
-          // On its way to the agent: Claude Code's "Sending…" under the message until the agent has it.
-          : <div className="cx-queued-meta"><span className="cx-queued-status" role="status">Sending…</span></div>}
-      </li>)}
-    </ol>
+    <div className="cx-queued-card">
+      <div className="cx-queued-head">
+        <span className="cx-queued-count">{count}</span>
+        <button type="button" className="cx-queued-icon is-collapse" aria-expanded aria-label="Collapse queued messages" data-tip="Collapse queued messages"
+          onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(false)}><QueuedGlyph name="caret" /></button>
+      </div>
+      <div className="cx-queued-list" role="list" aria-label="Queued messages">
+        {items.map((item, index) => {
+          const menu = actions(item, index);
+          return <div key={item.key} role="listitem" className="cx-queued-row" data-state={item.state}>
+            <span className="cx-queued-text">{queuedPreview(item.text)}</span>
+            {menu.length ? <span className="cx-queued-actions">
+                <button type="button" className="cx-queued-icon is-sm" aria-label="Queued message actions" aria-haspopup="menu"
+                  onClick={(event) => onMenu(event.currentTarget, menu)}><QueuedGlyph name="more" size={14} /></button>
+              </span> : null}
+          </div>;
+        })}
+      </div>
+      {onClearAll && items.some((item) => item.onRemove)
+        ? <div className="cx-queued-foot"><button type="button" className="cx-queued-clear" onMouseDown={(event) => event.preventDefault()} onClick={onClearAll}>Clear all</button></div>
+        : null}
+    </div>
   </div>;
 }
 
@@ -667,8 +740,11 @@ function GoalGlyph({ name }: { name: "target" | "trash" | "play" | "pause" | "ex
   </svg>;
 }
 
-/** The agent asked to be woken later (schedule_wakeup): when, its note, and Cancel. The label ticks alone. */
-function WakeupBar({ wakeup, onCancel }: { wakeup: ChatWakeup; onCancel: () => void }) {
+/**
+ * The agent asked to be woken later (schedule_wakeup): when, its note, then Delete and Edit, drawn as
+ * the goal bar's icons. Clicking the note edits it too. The label ticks alone.
+ */
+function WakeupBar({ wakeup, onEdit, onDelete }: { wakeup: ChatWakeup; onEdit?: () => void; onDelete: () => void }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -677,8 +753,28 @@ function WakeupBar({ wakeup, onCancel }: { wakeup: ChatWakeup; onCancel: () => v
   return <div className="cx-goal cx-wakeup is-active" role="status">
     <span className="cx-wakeup-glyph" aria-hidden="true">◷</span>
     <span className="cx-goal-state" title={`Asked for ${wakeup.minutes} min at ${new Date(wakeup.scheduledAt).toLocaleTimeString()}`}>{wakeupLabel(wakeup, now)}</span>
-    <span className="cx-goal-objective" title={wakeup.reason}>{wakeup.reason}</span>
-    <button type="button" title="Cancel wake-up" aria-label="Cancel wake-up" onClick={onCancel}>Cancel</button>
+    {onEdit
+      ? <button type="button" className="cx-goal-objective cx-wakeup-note" title={`${wakeup.reason}\n\nClick to edit`} onClick={onEdit}>{wakeup.reason}</button>
+      : <span className="cx-goal-objective" title={wakeup.reason}>{wakeup.reason}</span>}
+    <button type="button" className="cx-goal-icon" title="Delete wake-up" aria-label="Delete wake-up" onClick={onDelete}><GoalGlyph name="trash" /></button>
+    {onEdit ? <button type="button" className="cx-goal-icon" title="Edit wake-up" aria-label="Edit wake-up" onClick={onEdit}><GoalGlyph name="expand" /></button> : null}
+  </div>;
+}
+
+/** The chat's loop (/loop): how often it runs and when next, its prompt, then Stop. The label ticks alone. */
+function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (loop.minutes === null) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [loop.minutes]);
+  return <div className="cx-goal cx-wakeup is-active" role="status">
+    <span className="cx-wakeup-glyph" aria-hidden="true">⟳</span>
+    <span className="cx-goal-state" title={loop.note || `Round ${loop.round}; ends by ${new Date(loop.expiresAt).toLocaleString()}`}>{loopLabel(loop, now)}</span>
+    <span className="cx-goal-objective" title={loop.prompt}>{loop.prompt}</span>
+    {loop.note ? <span className="cx-goal-note" title={loop.note}>{loop.note}</span> : null}
+    <button type="button" className="cx-goal-icon" title="Stop loop" aria-label="Stop loop" onClick={onStop}><GoalGlyph name="trash" /></button>
   </div>;
 }
 
@@ -686,8 +782,10 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork, onClosePane,
 }: {
+  /** Close split view: set on every pane while the window is split (ChatSplit). */
+  onClosePane?: () => void;
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
   loadWork?: LoadWork;
   /** Codex slash commands that need the page: goal, compact, diff, MCP, status, recent chats, plan mode. */
@@ -714,7 +812,8 @@ export function AgentOrchestratorChat({
   send: (input: { taskId?: string; title?: string; message: string; goal?: string }) => Promise<void>;
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
-  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
+  /** `restart`: stop the turn and send the message as its next turn, whatever its quiet time (Restart). */
+  steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -781,10 +880,14 @@ export function AgentOrchestratorChat({
   const [draft, setDraft] = useState("");
   const [title, setTitle] = useState("");
   const [sending, setSending] = useState(false);
+  // CPA refusing the running turn's model, as the line under the chat box reads it (ChatTurnStats):
+  // the turn's status line says so instead of only "may be stuck".
+  const [cpaRefusal, setCpaRefusal] = useState<CpaRefusal | null>(null);
+  useEffect(() => { setCpaRefusal(null); }, [selectedTaskId]);
   // Steers shown at once while they reach the agent (deliver), until the turn shows them itself.
   // `waiting`: the agent was busy with a request of its own, so the steer waits in the chat's queue
-  // and goes in once the request is answered; it stays shown meanwhile.
-  const [pendingSteers, setPendingSteers] = useState<{ id: string; taskId: string | undefined; text: string; at: number; waiting?: boolean }[]>([]);
+  // and goes in once the request is answered; it stays shown meanwhile. `sent`: the agent has it.
+  const [pendingSteers, setPendingSteers] = useState<{ id: string; taskId: string | undefined; text: string; at: number; waiting?: boolean; sent?: boolean }[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
@@ -818,21 +921,31 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem(workKey, next ? "on" : "off"); } catch { /* the choice still applies now */ }
     setWorkPrefs((current) => ({ ...current, [workKey]: next }));
   };
-  // The chat's details panel (like Claude's session panel): changes, agents, setup.
+  // The chat's details panel (Codex's task panel): changes, agents, setup, outputs and sources. It
+  // stays open, in every chat and after a restart, until its button closes it: a click anywhere
+  // else closed it, so it was never there to glance at while the agents worked.
+  const [detailsOpen, setDetailsOpen] = useState(() => { try { return localStorage.getItem(DETAILS_OPEN_KEY) === "on"; } catch { return false; } });
+  const toggleDetails = () => setDetailsOpen((open) => {
+    try { localStorage.setItem(DETAILS_OPEN_KEY, open ? "off" : "on"); } catch { /* the choice still applies now */ }
+    return !open;
+  });
+  const detailsToggle = useRef<HTMLButtonElement>(null);
   const [details, setDetails] = useState<{ left: number; top: number } | null>(null);
-  const detailsPanel = useRef<HTMLDivElement>(null);
+  // Anchored under its button, following it when the window or a split pane resizes (it shows once
+  // placed, so it never flashes at the window's corner).
   useEffect(() => {
-    if (!details) return;
-    const outside = (event: MouseEvent) => {
-      const target = event.target as Node | null;
-      if (target && (detailsPanel.current?.contains(target) || (target as Element).closest?.("[data-details-toggle]"))) return;
-      setDetails(null);
+    const button = detailsToggle.current;
+    if (!detailsOpen || !button) { setDetails(null); return; }
+    const place = () => {
+      const box = button.getBoundingClientRect();
+      setDetails({ left: Math.max(8, Math.min(box.right - 300, window.innerWidth - 308)), top: box.bottom + 6 });
     };
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setDetails(null); };
-    document.addEventListener("mousedown", outside, true);
-    document.addEventListener("keydown", escape);
-    return () => { document.removeEventListener("mousedown", outside, true); document.removeEventListener("keydown", escape); };
-  }, [details]);
+    place();
+    const observer = new ResizeObserver(place);
+    if (button.parentElement) observer.observe(button.parentElement);
+    window.addEventListener("resize", place);
+    return () => { observer.disconnect(); window.removeEventListener("resize", place); };
+  }, [detailsOpen, selectedTaskId]);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<ChatMenuState>(null);
   // A menu button toggles its menu: pressing it again closes the menu instead of reopening it.
@@ -924,6 +1037,29 @@ export function AgentOrchestratorChat({
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
   useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
+  // The details panel's Outputs and Sources: the cards' work this window has seen (CHAT_WORK holds
+  // live polls and turns read back), plus the newest turns' finished cards, read back once each
+  // while the panel is open. Older turns count once their work is opened in the chat.
+  const [detailsWorkTick, setDetailsWorkTick] = useState(0);
+  useEffect(() => {
+    if (!detailsOpen || !loadWork) return;
+    for (const turn of turns.slice(-DETAILS_READ_TURNS)) {
+      for (const step of [...turn.steps, ...(turn.final ? [turn.final] : [])]) {
+        const key = stepWorkKey(step);
+        if (!step.hasWork || step.working || CHAT_WORK.has(key) || DETAILS_READ.has(key)) continue;
+        DETAILS_READ.add(key);
+        void loadWork(turn.runId, step.nodeId).then((items) => {
+          if (!items.length) return;
+          CHAT_WORK.set(key, mergeTimeline(CHAT_WORK.get(key), items, { cap: Infinity }));
+          setDetailsWorkTick((tick) => tick + 1);
+        }).catch(() => undefined);
+      }
+    }
+  }, [detailsOpen, loadWork, turns]);
+  const detailLinks = useMemo(() => detailsOpen ? chatDetailLinks(turns.flatMap((turn) => [...turn.steps, ...(turn.final ? [turn.final] : [])])
+    .flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])) : null,
+  // CHAT_WORK changes with the polls that change turns, or with a read back (the tick).
+  [detailsOpen, turns, detailsWorkTick]);
   // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
   // stream and flashes the ↓ button. Only that button scrolls smoothly.
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" }); }, [turns.length, stepCount, atBottom]);
@@ -957,10 +1093,18 @@ export function AgentOrchestratorChat({
   });
   // Bit, the chat's pet (ChatPet), shown unless turned off from the header menu or its own right-click.
   const [petOn, setPetOn] = useState(() => { try { return localStorage.getItem(PET_KEY) !== "off"; } catch { return true; } });
-  const togglePet = () => setPetOn((current) => {
-    try { localStorage.setItem(PET_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
-    return !current;
-  });
+  // In split view the panes share one pet: hiding it in one pane hides it in all of them.
+  const togglePet = () => {
+    const next = !petOn;
+    try { localStorage.setItem(PET_KEY, next ? "on" : "off"); } catch { /* applies now regardless */ }
+    setPetOn(next);
+    window.dispatchEvent(new CustomEvent<boolean>(PET_EVENT, { detail: next }));
+  };
+  useEffect(() => {
+    const shown = (event: Event) => setPetOn((event as CustomEvent<boolean>).detail === true);
+    window.addEventListener(PET_EVENT, shown);
+    return () => window.removeEventListener(PET_EVENT, shown);
+  }, []);
   // The context ring's reading, which the pet's belly follows.
   const [contextShare, setContextShare] = useState<number | null>(null);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
@@ -1066,8 +1210,13 @@ export function AgentOrchestratorChat({
   // A message typed while the previous one is still being sent waits in the queue, as Claude Code
   // queues one typed during a response. Enter did nothing at all then, so a quick second message
   // looked dropped.
-  const queueWhileSending = sending && Boolean(selectedTaskId) && !steering;
-  const canSend = (!busy || steering || queueing || queueWhileSending) && (!sending || queueWhileSending) && !(deciding && !selectedTaskId)
+  // Also a steer typed while the last message is still being sent, and a message typed while the
+  // surface's one-action lock is held (a refresh, an approval): Enter did nothing for 2-5 s after a
+  // send ("it will stop then freeze"), as the new run turned the chat steerable before the send
+  // returned. The composer never refuses, as in Claude Code: it waits in the queued-message bar and
+  // goes (steered or sent) the moment the send or the lock is done.
+  const queueWhileSending = Boolean(selectedTaskId) && (sending || (busy && !steering));
+  const canSend = !(deciding && !selectedTaskId) && (!sending || queueWhileSending)
     && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing || queueWhileSending);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
@@ -1075,24 +1224,30 @@ export function AgentOrchestratorChat({
   const [card, setCard] = useState<ChatCommandCard | null>(null);
   // Edit goal: the objective being edited, or null.
   const [goalEditing, setGoalEditing] = useState<string | null>(null);
+  const [goalBusy, setGoalBusy] = useState(false);
+  // Edit wake-up: its note and the minutes from now being edited, or null.
+  const [wakeupEditing, setWakeupEditing] = useState<{ reason: string; minutes: string } | null>(null);
   // Another chat's card or goal edit never shows over this one (its queue says so itself, below).
-  useEffect(() => { setCard(null); setGoalEditing(null); }, [selectedTaskId]);
+  useEffect(() => { setCard(null); setGoalEditing(null); setWakeupEditing(null); }, [selectedTaskId]);
   const say = (title: string, text: string, quote?: string) => setCard({ title, text, ...(quote ? { quote } : {}) });
 
   /**
    * Sends a message the way the composer does: into this chat, or as a new chat. A queued message
    * sent in the background (fromComposer false) leaves whatever the user is typing alone.
    */
-  const deliver = async (message: string, goal?: string, fromComposer = true) => {
+  /** `restart`: the stuck turn's Restart: stop it and send `message` as its next turn (chat_steer's restart). */
+  const deliver = async (message: string, goal?: string, fromComposer = true, restart = false) => {
     const owner = composing.current;
     const here = () => alive.current && composing.current.taskId === owner.taskId;
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
     const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments
       && composing.current.annotations === owner.annotations;
-    // A steer shows at once, as in Claude Code: the composer clears and the message waits in the
-    // queued-message bar, pulsing, while it reaches the agent, which can take seconds (it waits out
-    // an approval being answered). Until then the box held the text and the Stop button stayed.
-    const steerNow = !goal && steering && Boolean(steer && selectedTaskId);
+    // A steer shows at once, as in Claude Code: the composer clears and the message is in the chat,
+    // at the end of the running turn where the turn will show it, its check pulsing while it reaches
+    // the agent, which can take seconds (it waits out an approval being answered). It sat in the
+    // queued bar under the goal at first and then jumped up into the chat once delivered.
+    // A /goal steers in too: its condition is the goal's first round (see chat_steer's goal).
+    const steerNow = (steering || restart) && Boolean(steer && selectedTaskId);
     // A steer sent again from the queue keeps the bubble it already has, not a second one.
     const pendingId = steerNow ? pendingSteers.find((entry) => entry.taskId === selectedTaskId && entry.text === message)?.id
       ?? `steer-${Date.now()}-${Math.random().toString(36).slice(2)}` : "";
@@ -1104,14 +1259,15 @@ export function AgentOrchestratorChat({
     } else setSending(true);
     const dropPending = () => { if (pendingId) setPendingSteers((list) => list.filter((entry) => entry.id !== pendingId)); };
     try {
-      // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
-      const steered = steerNow ? await steer!({ taskId: selectedTaskId, message }) : false;
+      // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead.
+      const steered = steerNow ? await steer!({ taskId: selectedTaskId, message, ...(restart ? { restart: true } : {}), ...(goal ? { goal } : {}) }) : false;
       // The agent is busy with a request of its own (or still starting): the steer waits in the queue
       // and goes in once it can. It stays shown as steering; a "Queued" card here read as if the
       // message had not been sent at all ("it pop up as queued for no reason").
       const waits = steered === "wait" || steered === "starting";
       // Delivered: it stays shown until the turn shows it (see pendingSteers); anything else drops it.
       if (steered !== true && !waits) dropPending();
+      if (steered === true) setPendingSteers((list) => list.map((entry) => entry.id === pendingId ? { ...entry, sent: true } : entry));
       if (waits) setPendingSteers((list) => list.map((entry) => entry.id === pendingId ? { ...entry, waiting: true } : entry));
       if (steerNow && steered === false) setSending(true);
       if ((steered === "wait" || steered === "restart" || steered === "interrupt" || steered === "starting") && selectedTaskId) {
@@ -1119,13 +1275,13 @@ export function AgentOrchestratorChat({
         // steering would cancel that request, so the message waits for the turn like a queued one.
         // Or its turn had hung, or sat in a long command that would have kept it from reading the
         // message, and was stopped: the message goes as the same agent's next turn once it settles.
-        setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message }));
+        setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), goal ? { what: "Goal", message, goal } : { what: "Message", message }));
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         // The queued-message bar shows a waiting steer, as Claude Code does; only a stopped turn is told.
         if (here() && !waits) {
           say(steered === "restart" ? "Restarting" : "Interrupting", steered === "restart"
-            ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
-            : "A command was still running, so it was stopped; the same agent gets your message next, with everything it already knows.",
+            ? "The agent stopped responding, so its turn was stopped. Your message goes in as the next turn."
+            : "A command was still running, so it was stopped. The same agent gets your message next.",
             chatMessageReadable(message));
         }
         return true;
@@ -1193,6 +1349,12 @@ export function AgentOrchestratorChat({
       return false;
     } finally { setSending(false); }
   };
+  // Restart on a stuck turn's foot: the same agent continues where it left off, told why.
+  const [restarting, setRestarting] = useState(false);
+  const restartTurn = steer && selectedTaskId ? () => {
+    setRestarting(true);
+    void deliver(RESTART_MESSAGE, undefined, false, true).finally(() => setRestarting(false));
+  } : undefined;
 
   const submit = async () => {
     // A whole draft that is a command runs it, even while the chat is working (/status, /goal pause);
@@ -1206,7 +1368,7 @@ export function AgentOrchestratorChat({
     const text = chatMessageWithAnnotations(commands?.planMode ? planMessage(body) : body, annotations);
     // The chat sends at most 8,192 characters; long selections could pass that and the send failed.
     if (text.length > CHAT_MESSAGE_LIMIT) {
-      say("Too long", `This message is ${text.length.toLocaleString()} characters with its annotations; the limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
+      say("Too long", `This message is ${text.length.toLocaleString()} characters with annotations. The limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
       return;
     }
     if (queueing || queueWhileSending) {
@@ -1265,7 +1427,7 @@ export function AgentOrchestratorChat({
       // Nothing is lost: a plain message goes back into the composer to send again, after anything
       // already typed there.
       if (next.what === "Message") setDraft((typed) => (typed.trim() ? `${typed}\n\n${next.message}` : next.message));
-      say(next.what, next.what === "Message" ? "The queued message couldn't be sent; it's back in the composer." : "The queued message couldn't be sent; run the command again.");
+      say(next.what, next.what === "Message" ? "Couldn't send the queued message. It's back in the composer." : "Couldn't send the queued message. Run the command again.");
     });
   }, [queueVersion, selectedTaskId, accepts, busy, sending, windowFocused]);
   // In steer mode a queued message (the agent was waiting on a request, or still starting) is
@@ -1285,11 +1447,12 @@ export function AgentOrchestratorChat({
   useEffect(() => () => window.clearTimeout(steerRetryTimer.current), []);
   useEffect(() => {
     const task = selectedTaskId, [next, ...rest] = queueOf(task);
-    if (!task || !next || accepts || !steering || awaitingAnswer || next.goal || next.what !== "Message"
+    // A queued command (/goal, /review, /init) steers in like a message, as Claude Code's do.
+    if (!task || !next || accepts || !steering || awaitingAnswer
       || busy || sending || steeringQueue.current || Date.now() < steerRetry.current.until || !windowFocused) return;
     steeringQueue.current = true;
     setQueue(task, rest);
-    void deliver(next.message, undefined, false).then((sent) => {
+    void deliver(next.message, next.goal, false).then((sent) => {
       const here = alive.current && composing.current.taskId === task;
       if (sent) {
         steerRetry.current = { attempts: 0, until: 0 };
@@ -1307,17 +1470,18 @@ export function AgentOrchestratorChat({
   }, [queueVersion, selectedTaskId, accepts, steering, awaitingAnswer, busy, sending, windowFocused, steerRetryTick]);
   /**
    * Sends a command's message now when the chat is free, steers it into the working agent when it
-   * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
+   * can be steered (a goal too, as its first round), and otherwise queues it for when the current turn finishes.
    */
   const dispatch = async (what: string, message: string, goal?: string): Promise<"sent" | "queued" | false> => {
-    if (busy || sending) { say(what, "Another action is still running; try again in a moment."); return false; }
-    if (accepts || (steering && !goal)) return await deliver(message, goal) ? "sent" : false;
+    if (busy || sending) { say(what, "Another action is running. Try again in a moment."); return false; }
+    if (accepts || steering) return await deliver(message, goal) ? "sent" : false;
     setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message, ...(goal ? { goal } : {}) }));
-    say(what, `Queued: it's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
+    say(what, `Queued. It's sent when this turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
     return "queued";
   };
-  // The queued-message bar: this chat's queued messages (a command or a goal waits out of sight, as
-  // before), then the steers still on their way to the agent. Send now steers a message in at once,
+  // The queued-message bar: the steers still on their way to the agent (Claude Code's head of the
+  // queue, which goes first), then this chat's queued messages (a command or a goal waits out of
+  // sight, as before). Send now steers a message in at once,
   // or sends it when the chat is free; while the agent waits on its own request steering would
   // cancel that request, so it waits too.
   const sendNowBlocked = busy || sending ? "Another message is being sent"
@@ -1328,8 +1492,11 @@ export function AgentOrchestratorChat({
     if (item) setQueue(selectedTaskId, queue.filter((_, at) => at !== index));
     return item;
   };
+  // A steer is in the chat from the moment it is sent (pendingShown), not in this bar. One that waits
+  // for the agent's own request is in the queue too, to go in later; it shows once, in the chat.
+  const steerWaiting = (message: string) => pendingSteers.some((entry) => entry.taskId === selectedTaskId && entry.waiting && entry.text === message);
   const queuedBar: QueuedBarItem[] = [
-    ...queued.flatMap((item, index): QueuedBarItem[] => item.what !== "Message" || item.goal ? [] : [{
+    ...queued.flatMap((item, index): QueuedBarItem[] => item.what !== "Message" || item.goal || steerWaiting(item.message) ? [] : [{
       key: `queued:${index}:${item.message.length}`, text: item.message, state: "queued", sendNowBlocked,
       onRemove: () => { takeQueued(index); },
       onEdit: () => {
@@ -1349,10 +1516,6 @@ export function AgentOrchestratorChat({
         void deliver(taken.message, undefined, false).then((sent) => { if (!sent) setQueue(task, [taken, ...queueOf(task)]); });
       },
     }]),
-    // A steer that waits for the agent's own request is in the queue too: it shows once, as queued.
-    ...pendingSteers.filter((entry) => entry.taskId === selectedTaskId
-      && !queued.some((item) => item.what === "Message" && item.message === entry.text))
-      .map((entry): QueuedBarItem => ({ key: entry.id, text: entry.text, state: "pending" })),
   ];
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
   const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
@@ -1366,7 +1529,7 @@ export function AgentOrchestratorChat({
   // A message is deleted with the runs its turn showed, so exactly that reply leaves the chat.
   const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
     ? { index: turn.messageIndex, runIds: chatRunsOfMessage(chatRuns, turn.runId) } : null;
-  const notYet = "This message hasn't run yet; it can be deleted once its turn has run";
+  const notYet = "This message hasn't run yet. Delete it after its turn runs";
   const confirmDelete = async () => {
     const target = deleting === null ? null : deletion(turns[deleting]), task = selectedTaskId;
     if (!target || !thread?.deleteMessage || deleteBlocked) return;
@@ -1379,19 +1542,22 @@ export function AgentOrchestratorChat({
     } finally { setDeletingBusy(false); setDeleting(null); }
   };
 
-  const runCommand = async (name: string, arg = "") => {
+  /** `typed`: the command was typed or picked in the box, which it then clears; a button (the goal
+   * bar's icons, Stop loop, Compact) leaves what is typed alone. Clicking the goal bar's icons wiped
+   * the draft ("remove boxes when clicked on logos"). */
+  const runCommand = async (name: string, arg = "", typed = true) => {
     setSlashIndex(0);
-    const keep = name === "goal" && arg === "edit";
-    if (!keep) setDraft("");
+    if (typed) setDraft("");
     try {
       switch (name) {
         case "goal": {
           const goal = commands?.goal;
           const action = arg.toLowerCase();
+          // A bare /goal opens the goal to edit, or with none set waits for one in the box: the line
+          // under the box already says how /goal is used, and a card repeating it only got in the way.
           if (!arg) {
-            setCard(goal ? { title: GOAL_SUMMARY[goal.status], rows: [["Goal", goal.objective], ["Round", goalRounds(goal)],
-              ["Running for", goalElapsed(goal.startedAt)], ...(goal.note ? [["Note", goal.note] as [string, string]] : [])] }
-              : { title: "Goal", text: "No goal is currently set.\nUsage: /goal <objective> | pause | resume | edit | clear\nExample: /goal make every test in this project pass" });
+            if (goal) { setCard(null); setGoalEditing(goal.objective); }
+            else { setDraft("/goal "); input.current?.focus(); }
             break;
           }
           if (["pause", "resume", "clear"].includes(action)) {
@@ -1399,31 +1565,67 @@ export function AgentOrchestratorChat({
               setQueue(selectedTaskId, queued.filter((item) => !item.goal)); say("Goal", "The queued goal was dropped."); break;
             }
             if (!commands) break;
-            if (!goal) { say("Goal", "No goal is currently set."); break; }
-            await commands.goalAction(action as "pause" | "resume" | "clear");
-            say("Goal", action === "clear" ? "Goal cleared." : action === "pause" ? "Goal paused; the current round finishes, then it waits." : "Goal resumed.");
+            if (!goal) { say("Goal", "No goal set."); break; }
+            // The bar's icons wait while it is applied, so a second click can't stack another action.
+            setGoalBusy(true);
+            try { await commands.goalAction(action as "pause" | "resume" | "clear"); } finally { setGoalBusy(false); }
+            say("Goal", action === "clear" ? "Goal cleared." : action === "pause" ? "Goal paused. The current round finishes first." : "Goal resumed.");
             break;
           }
           if (action === "edit") {
-            setDraft("");
-            if (!goal) say("Goal", "No goal is currently set."); else { setCard(null); setGoalEditing(goal.objective); }
+            if (!goal) say("Goal", "No goal set."); else { setCard(null); setGoalEditing(goal.objective); }
             break;
           }
           if (goal && ["active", "paused"].includes(goal.status)
-            && !window.confirm("Replace current goal?\n\nThis keeps the chat but replaces the saved goal with this one.")) { setDraft(`/goal ${arg}`); break; }
-          // While a turn is working the goal is queued; it starts once the turn finishes.
+            && !window.confirm("Replace the current goal?\n\nThe chat stays. Only its goal changes.")) { setDraft(`/goal ${arg}`); break; }
+          // While a turn is working the goal steers in (its first round); if the agent can't be steered it waits for the turn.
           const outcome = await dispatch("Goal", arg, arg);
           if (!outcome) setDraft(`/goal ${arg}`);
           else if (outcome === "sent") setCard(null);
           break;
         }
+        case "loop": {
+          const loop = commands?.loop;
+          if (!arg) {
+            setCard(loop ? { title: "Loop", rows: [["Prompt", loop.prompt],
+              ["Runs", loop.minutes === null ? "When the agent asks (schedule_wakeup)" : `Every ${loopInterval(loop.minutes)}`],
+              ["Round", String(loop.round)], ["Ends by", new Date(loop.expiresAt).toLocaleString()],
+              ...(loop.note ? [["Note", loop.note] as [string, string]] : [])] }
+              : { title: "Loop", text: "No loop is running in this chat.\nUsage: /loop [interval] <prompt> | stop\n"
+                + "Examples: /loop 5m check whether the deploy finished\n/loop 30m /review\n"
+                + "/loop watch the CI run and fix what fails (no interval: the agent picks when to look again)" });
+            break;
+          }
+          if (["stop", "cancel", "clear"].includes(arg.toLowerCase())) {
+            if (!loop) { say("Loop", "No loop is running in this chat."); break; }
+            await commands?.stopLoop?.();
+            say("Loop", "Loop stopped; a round already running finishes.");
+            break;
+          }
+          if (!selectedTaskId || !commands?.startLoop) { say("Loop", "Open a chat first: a loop runs in the chat it was started in."); break; }
+          const parsed = chatLoopParse(arg);
+          if ("error" in parsed) { say("Loop", parsed.error); setDraft(`/loop ${arg}`); break; }
+          // A command that sends a prompt runs as that prompt each round; the others act on the app.
+          const inner = chatSlashParse(parsed.prompt);
+          const prompt = inner?.name === "review" ? reviewPrompt(inner.arg) : inner?.name === "init" ? INIT_PROMPT : parsed.prompt;
+          if (inner && !["review", "init"].includes(inner.name)) {
+            say("Loop", `/${inner.name} acts on the app, so it can't loop. A loop runs a prompt, /review or /init.`); setDraft(`/loop ${arg}`); break;
+          }
+          if (loop && !window.confirm("Replace this chat's loop?\n\nThe running loop stops and this one starts.")) { setDraft(`/loop ${arg}`); break; }
+          await commands.startLoop({ prompt, minutes: parsed.minutes });
+          const first = accepts ? "runs now" : "runs when the current turn finishes";
+          say("Loop", parsed.minutes === null
+            ? `Looping: it ${first}, then the agent picks when to run it again. It ends when the agent stops scheduling rounds, after 7 days, or with /loop stop.`
+            : `Looping every ${loopInterval(parsed.minutes)}: it ${first}, then every ${loopInterval(parsed.minutes)} for up to 7 days. /loop stop ends it.`);
+          break;
+        }
         case "plan":
           commands?.setPlanMode(!commands.planMode);
-          say("Plan mode", commands?.planMode ? "Plan mode is off." : "Plan mode is on: messages ask for a plan and no changes, until you turn it off with /plan.");
+          say("Plan mode", commands?.planMode ? "Plan mode is off." : "Plan mode is on. Messages ask for a plan, not changes. Send /plan to turn it off.");
           break;
         case "compact":
           if (!commands || !selectedTaskId) break;
-          if (!accepts) { say("Compact", "Compact is disabled while a chat is in progress."); break; }
+          if (!accepts) { say("Compact", "Can't compact while the chat is running."); break; }
           say("Compact", "Compacting this chat's context…");
           say("Compact", await commands.compact());
           break;
@@ -1435,16 +1637,16 @@ export function AgentOrchestratorChat({
           break;
         case "rewind": {
           if (!thread?.rewind) break;
-          if (!rewindPoints.length) { say("Rewind", "There is no message to go back to yet."); break; }
+          if (!rewindPoints.length) { say("Rewind", "No message to go back to yet."); break; }
           const pick = Number(arg);
           if (arg) {
             const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
             if (point) thread.rewind(point.messageIndex);
-            else say("Rewind", `Choose a message from 1 to ${rewindPoints.length}, e.g. /rewind ${rewindPoints.length}.`);
+            else say("Rewind", `Choose a message from 1 to ${rewindPoints.length}, like /rewind ${rewindPoints.length}.`);
             break;
           }
           setCard({ title: "Rewind",
-            text: "Go back to a message: a new chat opens with the conversation up to it and that message ready to edit. This chat and the files on disk stay as they are.",
+            text: "Pick a message to go back to. A new chat opens with it ready to edit. This chat and your files don't change.",
             items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
               run: () => { setCard(null); thread.rewind?.(point.messageIndex); } })).reverse() });
           break;
@@ -1457,10 +1659,10 @@ export function AgentOrchestratorChat({
             const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
             if (point && !deletion(turns[point.turnIndex])) say("Delete message", `${notYet}.`);
             else if (point) { setCard(null); setDeleting(point.turnIndex); }
-            else say("Delete message", `Choose a message from 1 to ${rewindPoints.length}, e.g. /delete ${rewindPoints.length}.`);
+            else say("Delete message", `Choose a message from 1 to ${rewindPoints.length}, like /delete ${rewindPoints.length}.`);
             break;
           }
-          setCard({ title: "Delete message", text: "Choose the message to delete; you are asked to confirm.",
+          setCard({ title: "Delete message", text: "Choose a message to delete. You confirm before it goes.",
             items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
               run: () => deletion(turns[point.turnIndex]) ? setDeleting(point.turnIndex) : say("Delete message", `${notYet}.`) })).reverse() });
           break;
@@ -1480,8 +1682,9 @@ export function AgentOrchestratorChat({
         case "stop": if (latest && runOpen) stop?.(latest.id); break;
         case "retry": if (latest) restart?.(latest.id); break;
         case "model":
-          (document.querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose model"]')
-            ?? document.querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose saved team"]'))?.click();
+          // This chat's own picker: in split view every pane has one.
+          ((chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose model"]')
+            ?? (chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose saved team"]'))?.click();
           break;
         case "structure": setShowStructure((value) => !value); break;
         case "board": onOpenMissionBoard?.(); break;
@@ -1522,8 +1725,8 @@ export function AgentOrchestratorChat({
         }
       }
       if (path) { added.push({ name: file.name || fileName(path), path, image, ...(preview ? { preview } : {}) }); continue; }
-      if (image) { freePreview(preview); notes.push(`${file.name}: images need their file path, which isn't available here`); continue; }
-      if (file.size > INLINE_ATTACHMENT_BYTES) { notes.push(`${file.name}: too large to attach inline (over 200 KB)`); continue; }
+      if (image) { freePreview(preview); notes.push(`${file.name}: can't attach an image without its file path`); continue; }
+      if (file.size > INLINE_ATTACHMENT_BYTES) { notes.push(`${file.name}: over 200 KB, too large to attach inline`); continue; }
       added.push({ name: file.name, text: await file.text() });
     }
     if (added.length) setAttachments((current) => [...current, ...added].slice(0, 8));
@@ -1537,6 +1740,7 @@ export function AgentOrchestratorChat({
     shownPreviews.current = now;
   }, [attachments]);
 
+  const chatRoot = useRef<HTMLDivElement>(null);
   const headerMenu = (): ChatMenuItem[] => [
     ...(thread && chat ? [
       { label: "Rename", shortcut: "Alt+Ctrl+R", run: () => setRenaming(chat.title) },
@@ -1557,8 +1761,9 @@ export function AgentOrchestratorChat({
     { label: "Mission Board", ...(onOpenMissionBoard ? { run: onOpenMissionBoard } : { reason: "No board is available" }) },
     { label: "Orchestrator settings", ...(onSettings ? { run: onSettings } : { reason: "Settings are unavailable" }) },
     ...(thread && chat ? [{ kind: "separator" }, chat.status === "running"
-      ? { label: "Archive", reason: "Stop the running mission before archiving this chat" }
+      ? { label: "Archive", reason: "Stop the mission to archive this chat" }
       : { label: "Archive", shortcut: "Ctrl+Shift+A", run: thread.archive }] as ChatMenuItem[] : []),
+    ...(onClosePane ? [{ kind: "separator" }, { label: "Close split view", shortcut: "Ctrl+Alt+W", run: onClosePane }] as ChatMenuItem[] : []),
   ];
 
   const commitRename = async () => {
@@ -1576,6 +1781,10 @@ export function AgentOrchestratorChat({
   const recovering = Boolean(latest && chat?.status === "attention");
   const failedTurn = recovering ? turns.findLast((turn) => turn.runId === latest?.id) : undefined;
   const failedStep = failedTurn ? [...failedTurn.steps, ...(failedTurn.final ? [failedTurn.final] : [])].find((step) => step.error) : undefined;
+  // This chat's steers on their way, and the turn that shows them: the running one (else the last).
+  const pendingShown = useMemo(() => pendingSteers.filter((entry) => entry.taskId === selectedTaskId), [pendingSteers, selectedTaskId]);
+  const liveIndex = turns.findLastIndex(liveTurn);
+  const steerHost = !pendingShown.length ? -1 : liveIndex >= 0 ? liveIndex : turns.length - 1;
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
     // A turn on a DeepSeek model shows as DeepSeek Harness shows one (DshTranscript); others as Claude Code.
     const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
@@ -1585,10 +1794,16 @@ export function AgentOrchestratorChat({
       dshReaders.set(turn.runId, readWork);
     }
     const idle = notStarted && turn.runId === latest?.id;
+    // A goal's next round is its Stop hook's feedback, shown as Claude Code shows it, not as a message the person sent.
+    const feedback = turn.user ? goalFeedback(turn.user.text) : null;
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
     return <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
-              {turn.user ? <div className="cx-user">
+              {feedback ? <div className="cx-hook-feedback" role="note">
+                <span className="cx-hook-feedback-mark" aria-hidden="true">⎿</span>
+                <span className="cx-hook-feedback-text">Stop hook feedback:{"\n"}[{feedback.objective}]: {feedback.reason}</span>
+                {turn.user?.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
+              </div> : turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
                 <MessageActions text={chatMessageReadable(turn.user.text)}>
                   {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}
@@ -1601,7 +1816,7 @@ export function AgentOrchestratorChat({
               {/* Messages steered into this turn. While it works they show in its live timeline, where
                   they were sent; once it is done, here under the turn's message. */}
               {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
-                ? <SteerReader.Provider value={steerReader(turn.steps[0]?.detail)}>{turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
+                ? <SteerReader.Provider value={steerReader(turn.steps[0])}>{turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
                   <SentMessage text={steer.text} />
                   {/* Saved only once the agent took it; a turn that finished read it, one that stopped may not have. */}
                   <div className="cx-msg-foot"><SteerReceiptMark receipt={turn.status === "done" ? "read" : liveTurn(turn) ? "unread" : undefined} />
@@ -1610,9 +1825,10 @@ export function AgentOrchestratorChat({
                 </div>)}</SteerReader.Provider> : null}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
-                  errorShownBelow={turn === failedTurn} />
+                  errorShownBelow={turn === failedTurn} refusal={!idle && liveTurn(turn) ? cpaRefusal : null} />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
-              {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} /> : null}
+              {turnIndex === steerHost ? <PendingSteers steers={pendingShown} /> : null}
+              {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
                 {dsh ? (turn.final.verdict ? <div className="cx-answer-meta"><span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span></div> : null)
@@ -1631,12 +1847,13 @@ export function AgentOrchestratorChat({
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
               {turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
-              {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
+              {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
             </article></PartErrorBoundary>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerHost, pendingShown]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
-    <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
+    <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>
+    <div ref={chatRoot} className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
           <span className="cx-head-folder" title={projectName}><ChatGlyph name="folder" size={15} /></span>
@@ -1654,53 +1871,78 @@ export function AgentOrchestratorChat({
           {headerExtra}
           {/* The agent's browser keeps running when its tab or the panel is closed: this brings it back. */}
           {selectedTaskId && livePage && workbench !== "preview" ? <button type="button" className="cx-browser-chip"
-            title={`The agent's browser is still open: ${livePage.url}\nShow it`} onClick={() => setWorkbench("preview")}>
+            title={`Agent's browser: ${livePage.url}\nClick to show`} onClick={() => setWorkbench("preview")}>
             <span className="cx-browser-dot" aria-hidden="true" /><Icon name="browser" width="13" height="13" />
             <span>{livePage.title || (() => { try { return new URL(livePage.url).host; } catch { return livePage.url; } })()}</span></button> : null}
+          {/* Preview, as Claude Code's header has it: the chat's browser in one click, open page or not
+              (the user found it only behind Side panel → Overview → Preview). */}
+          {selectedTaskId && !(livePage && workbench !== "preview") ? <button type="button" className="cx-icon-button" aria-pressed={workbench === "preview"}
+            title="Preview: the chat's browser" aria-label="Preview" onClick={() => setWorkbench((open) => (open === "preview" ? null : "preview"))}>
+            <Icon name="globe" width="16" height="16" /></button> : null}
           {selectedTaskId ? <button type="button" className="cx-icon-button cx-compact-toggle" aria-pressed={compactActivity}
-            title={compactActivity ? "Compact activity: tool calls and thinking fold into one line (click to show every step)" : "Every step shown (click to compact)"}
+            title={compactActivity ? "Show every step" : "Compact activity"}
             aria-label="Compact activity" onClick={toggleCompact}>
             <Icon name={compactActivity ? "expand" : "minus"} width="16" height="16" /></button> : null}
-          {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
+          {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
           {/* The side panel opens on its Overview, as Claude Code's side column: context, changes,
               tasks and usage, each a click from its tab (the browser chip still opens Preview). */}
-          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Side panel: overview, preview, terminal, changes and files"
+          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Show side panel"
             aria-label="Show side panel" onClick={() => setWorkbench((open) => (open ? null : "overview"))}>
             <Icon name="browser" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}
-          {selectedTaskId ? <button type="button" className="cx-icon-button" data-details-toggle="" title="Chat details" aria-label="Chat details"
-            aria-haspopup="dialog" aria-expanded={Boolean(details)}
-            onClick={(event) => {
-              const box = event.currentTarget.getBoundingClientRect();
-              setDetails((open) => open ? null : { left: Math.max(8, Math.min(box.right - 300, window.innerWidth - 308)), top: box.bottom + 6 });
-            }}><ChatGlyph name="section" size={16} /></button> : null}
+          {selectedTaskId ? <button type="button" ref={detailsToggle} className="cx-icon-button" data-details-toggle=""
+            title={detailsOpen ? "Hide chat details" : "Chat details: changes, agents, setup, outputs and sources"} aria-label="Chat details"
+            aria-pressed={detailsOpen} onClick={toggleDetails}><ChatGlyph name="section" size={16} /></button> : null}
           <button type="button" className="cx-icon-button" title="More" aria-label="More chat actions" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }))}>⋯</button>
+          {/* Claude Code's pane close: on every split view pane, the window's own chat included. */}
+          {onClosePane ? <button type="button" className="cx-icon-button cx-pane-close" aria-label="Close split view" title="Close split view (Ctrl+Alt+W)"
+            onMouseDown={(event) => event.preventDefault()} onClick={onClosePane}><Icon name="close" width="14" height="14" /></button> : null}
         </header>
         {details ? (() => {
           const nodes = latest?.nodes ?? [];
           const lead = nodes.find((node) => node.role === "planner") ?? nodes[0];
           const agents = chatAgentSummary(nodes);
-          return <FloatingLayer className="cx-details" role="dialog" style={{ left: details.left, top: details.top }}>
-            <div ref={detailsPanel} aria-label="Chat details">
+          const { outputs = [], sources = [] } = detailLinks ?? {};
+          // A file opens the worktree's files, a page on this machine the agent's preview, a web page
+          // the browser; an MCP server only names what was called.
+          const linkRow = (link: ChatDetailLink) => {
+            const icon = link.kind === "file" ? <ChatGlyph name="edit" size={15} /> : link.kind === "image" ? <ChatGlyph name="spark" size={15} />
+              : <Icon name={link.kind === "page" ? "globe" : link.kind === "tool" ? "mcp" : "external"} width="15" height="15" />;
+            const body = <>{icon}<span>{link.kind === "image" ? `Generated image · ${link.label}` : link.label}</span></>;
+            if (link.kind === "link") return <a key={link.key} className="cx-details-row" href={link.title} target="_blank" rel="noreferrer noopener" title={link.title}>{body}</a>;
+            if (link.kind === "tool") return <p key={link.key} className="cx-details-row is-static" title={link.title}>{body}</p>;
+            return <button key={link.key} type="button" className="cx-details-row" title={link.title} onClick={() => {
+              if (link.kind === "page" && agentSessionIds[0]) { navigatePreview(agentSessionIds[0], link.title); setWorkbench("preview"); }
+              else if (link.kind !== "page") setWorkbench("files");
+            }}>{body}</button>;
+          };
+          return <FloatingLayer className="cx-details" role="complementary" style={{ left: details.left, top: details.top, maxHeight: `calc(100vh - ${details.top + 12}px)` }}>
+            <div aria-label="Chat details">
               <div className="cx-details-head"><strong>{projectName || "Project"}</strong>{branch ? <small>{branch}</small> : null}</div>
               <button type="button" className="cx-details-row" disabled={!commands || !latest}
-                onClick={() => { setDetails(null); void runCommand("diff"); }}>
+                onClick={() => { void runCommand("diff", "", false); }}>
                 <ChatGlyph name="edit" size={15} /><span>Changes</span></button>
               <p className="cx-details-label">Agents</p>
               {latest ? <button type="button" className="cx-details-row" title="Open the cards"
-                onClick={() => { setDetails(null); if (structure) setShowStructure(true); else openStructure(latest.id); }}>
+                onClick={() => { if (structure) setShowStructure(true); else openStructure(latest.id); }}>
                 <span className="cx-details-dots" aria-hidden="true">{agents.dots.slice(0, 8).map((state, index) =>
                   <span key={index} className={`cx-details-dot is-${state}`} />)}</span><span>{agents.text}</span></button>
-                : <p className="cx-details-empty">No agents yet; they start with the first message.</p>}
+                : <p className="cx-details-empty">No agents yet. They start with your first message.</p>}
               <p className="cx-details-label">Setup</p>
               {lead ? <>
                 <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>
                 <p className="cx-details-line">Approvals: {chatApprovalMode(lead.route as { approval_policy?: string; approvals_reviewer?: string } | undefined)}</p>
               </> : <p className="cx-details-empty">Chosen when you send.</p>}
+              <p className="cx-details-label">Outputs</p>
+              {outputs.length ? outputs.slice(0, DETAILS_LIST_LIMIT).map(linkRow)
+                : <p className="cx-details-empty">Files, images and local pages the agents make show here.</p>}
+              <p className="cx-details-label">Sources</p>
+              {sources.length ? sources.slice(0, DETAILS_LIST_LIMIT).map(linkRow)
+                : <p className="cx-details-empty">Web pages and MCP servers the agents use show here.</p>}
             </div>
           </FloatingLayer>;
         })() : null}
@@ -1723,8 +1965,8 @@ export function AgentOrchestratorChat({
             {threadTurns}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
-                <strong>{notice ? "The run could not start" : "This run hasn't started"}</strong>
-                <p>{notice || "Its start stopped before any card ran. Start it again to run the team."}</p>
+                <strong>{notice ? "Couldn't start the run" : "This run hasn't started"}</strong>
+                <p>{notice || "It stopped before any agent ran. Start it again."}</p>
                 <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>{notice ? "Retry" : "Start"}</button></div>
               </div>
             ) : null}
@@ -1742,7 +1984,7 @@ export function AgentOrchestratorChat({
           <button type="button" className="cx-chip" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.left, y: box.top - 96, label: "Work in", items: [
               { label: "This computer", icon: "monitor", checked: true, run: () => undefined },
-              { label: "Cloud", icon: "share", reason: "No cloud runner is set up; chats run on this computer" },
+              { label: "Cloud", icon: "share", reason: "No cloud runner set up. Chats run on this computer" },
             ] }))}>
             <ChatGlyph name="monitor" size={13} />This computer<Caret className="cx-chip-caret" /></button>
           {/* The project's branch sits with where the chat runs, as in Claude Code's start bar. */}
@@ -1751,8 +1993,8 @@ export function AgentOrchestratorChat({
           <button type="button" className="cx-chip-icon" aria-label="Configure local environment" title="Configure local environment" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 260, y: box.top - 116, label: "Configure local environment", items: [
               // Codex's environment popover. Orchestrator settings live in the header's ⋯ menu, not here.
-              { label: "New worktree", icon: "fork", toggle: false, reason: "Chats run in the project folder itself; separate worktrees aren't available yet" },
-              { label: "Branch", icon: "repo", detail: branch || "current", reason: "Chats use whatever branch the project folder has checked out" },
+              { label: "New worktree", icon: "fork", toggle: false, reason: "Worktrees aren't available yet. Chats run in the project folder" },
+              { label: "Branch", icon: "repo", detail: branch || "current", reason: "Chats use the project folder's current branch" },
               { label: "Environment", icon: "settings", detail: "No environment", reason: "Saved environments aren't available yet" },
             ] }))}>
             <ChatGlyph name="settings" size={14} /></button>
@@ -1774,7 +2016,7 @@ export function AgentOrchestratorChat({
           <hr />
           <button type="button" className="cx-picker-action" disabled={!onAddProject} onClick={() => { setProjectPicker(null); onAddProject?.(); }}>
             <ChatGlyph name="plus" size={13} />New project</button>
-          <button type="button" className="cx-picker-action" disabled title="Chats run in a project's folder, so a project is required">
+          <button type="button" className="cx-picker-action" disabled title="Chats need a project">
             <span aria-hidden="true">✕</span>Don't work in a project</button>
         </FloatingLayer> : null}
         {card ? <section className="cx-command-card" role="status" aria-label={card.title}>
@@ -1789,22 +2031,56 @@ export function AgentOrchestratorChat({
         {deleting !== null ? <section className="cx-command-card cx-delete-confirm" role="alertdialog" aria-label="Delete message">
           <header><strong>Delete message</strong>
             <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setDeleting(null)}><Icon name="close" width="12" height="12" /></button></header>
-          <p>Delete this message? It and its reply are removed from this chat. The agent's files are not changed.</p>
+          <p>Delete this message and its reply? Files on disk don't change.</p>
           {deleteBlocked ? <p className="cx-delete-reason">{deleteBlocked}.</p> : null}
           <footer><button type="button" className="cx-text-button" onClick={() => setDeleting(null)}>Cancel</button>
             <button type="button" className="cx-primary-button" disabled={Boolean(deleteBlocked) || deletingBusy} onClick={() => void confirmDelete()}>Delete</button></footer>
         </section> : null}
-        {goalEditing !== null && commands?.goal ? <section className="cx-command-card cx-goal-editor" aria-label="Edit goal">
-          <header><strong>Edit goal</strong>
-            <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setGoalEditing(null)}><Icon name="close" width="12" height="12" /></button></header>
-          <textarea aria-label="Goal" rows={4} maxLength={2000} value={goalEditing} placeholder="Describe your goal, define measurable outcomes for best results"
-            onChange={(event) => setGoalEditing(event.target.value)} />
-          <footer><button type="button" className="cx-text-button" onClick={() => setGoalEditing(null)}>Cancel</button>
-            <button type="button" className="cx-primary-button" disabled={!goalEditing.trim() || goalEditing.trim() === commands.goal.objective}
-              onClick={() => void commands.goalEdit(goalEditing.trim()).then(() => setGoalEditing(null), (cause) => say("Edit goal", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
-        </section> : null}
-        {commands?.goal || commands?.planMode || commands?.wakeup ? <div className="cx-composer-modes">
-          {commands?.wakeup ? <WakeupBar wakeup={commands.wakeup} onCancel={() => void commands.cancelWakeup?.().catch((cause) => say("Cancel wake-up", cause instanceof Error ? cause.message : String(cause)))} /> : null}
+        {goalEditing !== null && commands?.goal ? (() => {
+          // The goal bar opened for editing: its target and "Edit goal", the objective in a box that
+          // grows with it, then how long it may be, Cancel and Save. Ctrl+Enter saves, Esc cancels.
+          const next = goalEditing.trim();
+          const changed = Boolean(next) && next !== commands.goal.objective;
+          const save = () => {
+            if (changed) void commands.goalEdit(next).then(() => setGoalEditing(null), (cause) => say("Edit goal", cause instanceof Error ? cause.message : String(cause)));
+          };
+          return <section className="cx-goal-edit" aria-label="Edit goal">
+            <header><GoalGlyph name="target" /><strong>Edit goal</strong>
+              <button type="button" className="cx-goal-icon" aria-label="Cancel" title="Cancel (Esc)" onClick={() => setGoalEditing(null)}><Icon name="close" width="12" height="12" /></button></header>
+            <textarea aria-label="Goal" autoFocus rows={2} maxLength={2000} value={goalEditing} placeholder="What should be true when it's done? Name an outcome you can check."
+              onChange={(event) => setGoalEditing(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); save(); }
+                else if (event.key === "Escape") { event.preventDefault(); setGoalEditing(null); }
+              }} />
+            <footer><span className="cx-goal-edit-hint">{goalEditing.length > 1600 ? `${goalEditing.length} / 2000` : "Ctrl+Enter to save"}</span>
+              <button type="button" className="cx-goal-edit-cancel" onClick={() => setGoalEditing(null)}>Cancel</button>
+              <button type="button" className="cx-goal-edit-save" disabled={!changed} onClick={save}>Save</button></footer>
+          </section>;
+        })() : null}
+        {wakeupEditing !== null && commands?.wakeup && commands.editWakeup ? (() => {
+          const minutes = Number(wakeupEditing.minutes);
+          const valid = wakeupEditing.reason.trim() !== "" && Number.isSafeInteger(minutes) && minutes >= 1 && minutes <= 720;
+          return <section className="cx-command-card cx-goal-editor cx-wakeup-editor" aria-label="Edit wake-up">
+            <header><strong>Edit wake-up</strong>
+              <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setWakeupEditing(null)}><Icon name="close" width="12" height="12" /></button></header>
+            <textarea aria-label="What to check when it wakes" rows={3} maxLength={500} value={wakeupEditing.reason} placeholder="What the agent should check when it wakes"
+              onChange={(event) => setWakeupEditing({ ...wakeupEditing, reason: event.target.value })} />
+            <label className="cx-wakeup-minutes">Wake in
+              <input type="number" min={1} max={720} step={1} inputMode="numeric" aria-label="Minutes from now" value={wakeupEditing.minutes}
+                onChange={(event) => setWakeupEditing({ ...wakeupEditing, minutes: event.target.value })} /> min</label>
+            <footer><button type="button" className="cx-text-button" onClick={() => setWakeupEditing(null)}>Cancel</button>
+              <button type="button" className="cx-primary-button" disabled={!valid}
+                onClick={() => void commands.editWakeup?.({ reason: wakeupEditing.reason.trim(), minutes })
+                  .then(() => setWakeupEditing(null), (cause) => say("Edit wake-up", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
+          </section>;
+        })() : null}
+        {commands?.goal || commands?.planMode || commands?.wakeup || commands?.loop ? <div className="cx-composer-modes">
+          {commands?.loop ? <LoopBar loop={commands.loop} onStop={() => void runCommand("loop", "stop", false)} /> : null}
+          {commands?.wakeup ? <WakeupBar wakeup={commands.wakeup}
+            onEdit={commands.editWakeup ? () => { setCard(null); setWakeupEditing({ reason: commands.wakeup!.reason,
+              minutes: String(Math.min(720, Math.max(1, Math.ceil((commands.wakeup!.dueAt - Date.now()) / 60_000)))) }); } : undefined}
+            onDelete={() => { setWakeupEditing(null); void commands.cancelWakeup?.().catch((cause) => say("Delete wake-up", cause instanceof Error ? cause.message : String(cause))); }} /> : null}
           {/* Codex's goal bar: state, objective, how long it has run, then Clear / Resume or Pause / Edit. */}
           {commands?.goal ? <div className={`cx-goal is-${commands.goal.status}`} role="status">
             <GoalGlyph name="target" />
@@ -1815,11 +2091,11 @@ export function AgentOrchestratorChat({
               {/* A goal being pursued counts to the second, as Codex shows it; the label ticks alone. */}
               <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
                 format={(ms) => goalElapsed(0, ms)} /></span>
-            <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" onClick={() => void runCommand("goal", "clear")}><GoalGlyph name="trash" /></button>
+            <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" disabled={goalBusy} onClick={() => void runCommand("goal", "clear", false)}><GoalGlyph name="trash" /></button>
             {commands.goal.status === "active"
-              ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" onClick={() => void runCommand("goal", "pause")}><GoalGlyph name="pause" /></button>
-              : commands.goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" onClick={() => void runCommand("goal", "resume")}><GoalGlyph name="play" /></button> : null}
-            <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => void runCommand("goal", "edit")}><GoalGlyph name="expand" /></button>
+              ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" disabled={goalBusy} onClick={() => void runCommand("goal", "pause", false)}><GoalGlyph name="pause" /></button>
+              : commands.goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" disabled={goalBusy} onClick={() => void runCommand("goal", "resume", false)}><GoalGlyph name="play" /></button> : null}
+            <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => void runCommand("goal", "edit", false)}><GoalGlyph name="expand" /></button>
           </div> : null}
           {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
             <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
@@ -1831,7 +2107,7 @@ export function AgentOrchestratorChat({
           const running = lead?.route?.model;
           const picked = composer?.mode === "single" ? composer.route?.model : undefined;
           if (runOpen && latest?.execution_mode === "single" && running && picked && picked !== running) {
-            return <p className="cx-route-note" role="status">This turn runs on <b>{routeModelName({ model: running })}</b>; your next message uses <b>{routeModelName({ model: picked })}</b>.</p>;
+            return <p className="cx-route-note" role="status">This turn runs on <b>{routeModelName({ model: running })}</b>. Your next message uses <b>{routeModelName({ model: picked })}</b>.</p>;
           }
           // An agent keeps the model, effort, window and permissions it started with, so a follow-up
           // with any of them changed starts a new agent that gets only a summary of the chat (it
@@ -1842,6 +2118,11 @@ export function AgentOrchestratorChat({
           return change ? <p className="cx-route-note" role="status"><b>{change.now}</b> starts a new agent with only a summary of this chat.
             Switch back to <b>{change.back}</b> to keep this one.</p> : null;
         })()}
+        {/* Queued and steering messages wait above the branch picker, as Claude Code's queued bar sits
+            above its branch (PR) bar: under it, a steer sat between "main" and the box. */}
+        <QueuedMessageBar items={queuedBar}
+          onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
+          onClearAll={() => setQueue(selectedTaskId, queueOf(selectedTaskId).filter((item) => item.what !== "Message" || item.goal))} />
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
             Harness shows its approval panel: in the thread it took the thread's own margins and sat
@@ -1856,7 +2137,6 @@ export function AgentOrchestratorChat({
         </div> : null}
         {/* Outside the chat box's form: its comment box submits on Enter, and that must not send the message. */}
         {selectedTaskId ? <SelectionAnnotator root={scroller} annotations={annotations} onAdd={addAnnotation} onComment={commentAnnotation} /> : null}
-        <QueuedMessageBar items={queuedBar} />
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
@@ -1872,7 +2152,7 @@ export function AgentOrchestratorChat({
                 <span>/{command.name}{command.args ? <em> {command.args}</em> : null}</span><small>{command.hint}</small></button>
             </li>)}
           </ul> : null}
-          {typing && !slash.length ? <p className="cx-slash-usage" role="status">/{typing.name} {typing.args} — {typing.hint}. Press Enter to run it.</p> : null}
+          {typing && !slash.length ? <p className="cx-slash-usage" role="status">/{typing.name} {typing.args} — {typing.hint}. Press Enter to run.</p> : null}
           {carried?.length && !selectedTaskId ? <div className="cx-attachments">
             <span className="cx-attachment" title={carried.join("\n\n").slice(0, 600)}>
               ↶ Includes {carried.length} earlier message{carried.length === 1 ? "" : "s"} as context
@@ -1886,7 +2166,7 @@ export function AgentOrchestratorChat({
                 is on hover, and a click shows it in its folder. */}
             {attachments.map((item, index) => <span key={`${item.name}:${index}`} className={`cx-attachment${item.preview ? " is-image" : ""}`}>
               <button type="button" className="cx-attachment-open" disabled={!item.path || !revealFile}
-                title={item.path ? `${item.path}${revealFile ? "\nClick to show it in its folder" : ""}` : `${item.name} (sent inline)`}
+                title={item.path ? `${item.path}${revealFile ? "\nClick to show in folder" : ""}` : `${item.name} · sent inline`}
                 onClick={() => { if (item.path) revealFile?.(item.path); }}>
                 {item.preview ? <img src={item.preview} alt={item.name} /> : <span aria-hidden="true">{item.image ? "🖼" : "📄"}</span>}
                 <span className="cx-attachment-name">{item.name}</span>
@@ -1899,8 +2179,8 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above first — a message now is sent after it"
-              : queueing ? "Running — a message now is sent when it finishes" : !accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
+            placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above. New messages send after it"
+              : queueing ? "Running. New messages send when it finishes" : !accepts ? "Running. Send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
@@ -1929,18 +2209,18 @@ export function AgentOrchestratorChat({
                 && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
               agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
               launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
-              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact")} onFraction={setContextShare} /> : null}
+              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
             {latest && runOpen && stop && !accepts && !((steering || queueing) && canSend)
               ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
               : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : queueing ? "Queue message" : "Send message"}
-                title={steering ? "Steer — sent to the working agent now (Enter)" : queueing ? "Queue — sent when the current turn finishes (Enter)" : "Send (Enter)"} disabled={!canSend}>
+                title={steering ? "Steer now (Enter)" : queueing ? "Queue for after this turn (Enter)" : "Send (Enter)"} disabled={!canSend}>
                   <Icon name="forward" width="18" height="18" /></button>}
           </div>
         </form>
         {selectedTaskId ? <ChatTurnStats model={agentSessions[0]?.model} rounds={turns.filter((turn) => turn.runId).length}
-          from={statsSpan.from} models={statsSpan.models} running={runOpen} /> : null}
+          from={statsSpan.from} models={statsSpan.models} running={runOpen} onRefusal={setCpaRefusal} /> : null}
       </section>
       {showStructure && structure ? <aside className="cx-structure" aria-label="Cards" style={cardsWidth ? { flexBasis: cardsWidth } : undefined}>
         <div className="cx-structure-resize" role="separator" aria-orientation="vertical" aria-label="Resize the cards panel" tabIndex={0}
@@ -1959,5 +2239,5 @@ export function AgentOrchestratorChat({
       {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
-  </CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
+  </TurnRestart.Provider></CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
 }

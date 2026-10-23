@@ -8,63 +8,97 @@
   --cx-bubble: color-mix(in srgb, var(--color-text-primary) 6%, var(--color-bg-primary));
   --cx-radius: 12px;
   --cx-tray: color-mix(in srgb, var(--color-text-primary) 5%, var(--color-bg-primary));
+  /* Claude Code's sidebar (the Claude desktop app 3.1623 Code tab: ion-dist shared-styles and token
+     CSS, light theme, its desktop "web" variant at compact density). The sidebar sits on a mix of
+     surface-0 #f9f9f7 and surface-1 #fcfcfb; its font is "anthropic-sans" with system-ui behind it. */
+  --cc-side-bg: #fbfbf9;
+  --cc-text: #0b0b0b;
+  --cc-text-2: #52514e;
+  --cc-muted: #898781;
+  --cc-hover: #f0efec;
+  --cc-hover-selected: #edece8;
+  --cc-border: rgb(11 11 11 / 10%);
+  --cc-accent: #2a78d6;
+  --cc-warning: #fab219;
+  --cc-side-font: "anthropic-sans", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 /* ---------- Thread list ---------- */
-/* min-width: 0 so long chat titles ellipsize instead of widening the column. */
-.ao-workflow > .cx-threads { position: relative; display: flex; flex: 0 0 248px; flex-direction: column; width: 248px; min-width: 0; min-height: 0; overflow: hidden;
-  padding: calc(env(titlebar-area-height, 34px) + 8px) 8px 8px; border-right: 1px solid var(--ao-line); background: var(--cx-sidebar); }
-.cx-new-chat { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border: 0; border-radius: 8px;
-  background: transparent; color: var(--color-text-primary); font-size: 13px; text-align: left; cursor: pointer; }
-.cx-new-chat:hover, .cx-new-chat[aria-pressed="true"] { background: var(--cx-hover); }
-.cx-thread-scroll { flex: 1 1 auto; min-height: 0; margin-top: 8px; overflow-x: hidden; overflow-y: auto; }
-.cx-thread-group { margin-bottom: 12px; }
-.cx-thread-group > h3 { margin: 6px 10px 4px; color: var(--ao-muted); font-size: 11px; font-weight: 500; }
+/* Claude Code's sidebar: 288 px, flush, a hairline border, 13 px rows 28 px high with 6 px corners.
+   min-width: 0 so long titles fade out instead of widening the column. */
+.ao-workflow > .cx-threads { position: relative; display: flex; flex: 0 0 288px; flex-direction: column; width: 288px; min-width: 0; min-height: 0; overflow: hidden;
+  padding: calc(env(titlebar-area-height, 36px) + 12px) 8px 6px; border-right: .5px solid var(--cc-border); background: var(--cc-side-bg);
+  color: var(--cc-text-2); font-family: var(--cc-side-font); line-height: 1.5; user-select: none; }
+/* The top row: a round "+" (df-new-circle) and its label. */
+.cx-new-chat { display: flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px 0 2px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--cc-text-2); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cx-new-chat:hover, .cx-new-chat[aria-pressed="true"] { background: var(--cc-hover); color: var(--cc-text); }
+.cx-new-circle { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; color: var(--cc-text); }
+.cx-thread-scroll { flex: 1 1 auto; min-height: 0; margin-top: 4px; overflow-x: hidden; overflow-y: auto; }
+.cx-thread-group { margin-bottom: 0; }
+/* A section title (Pinned, Projects) and a folder group header: 28 px, 12 px regular, muted, 10 px in. */
+.cx-thread-group > h3 { display: flex; align-items: center; height: 28px; margin: 8px 0 0; padding: 0 2px 0 10px; color: var(--cc-muted); font-size: 12px; line-height: 16px; font-weight: 400; }
 .cx-thread-group ul { margin: 0; padding: 0; list-style: none; }
-.cx-project { display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; padding: 0 8px; border: 0; border-radius: 8px;
-  background: transparent; color: var(--color-text-primary); font-size: 13px; font-weight: 500; text-align: left; cursor: pointer; }
-.cx-project:hover { background: var(--cx-hover); }
-/* The chevron icon points right: right when closed, down when open. */
-.cx-project svg { flex: 0 0 auto; color: var(--ao-muted); transition: transform var(--duration-micro, 140ms); }
-.cx-project svg.is-open { transform: rotate(90deg); }
+.cx-project { display: flex; align-items: center; gap: 4px; width: 100%; height: 28px; padding: 0 28px 0 10px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--cc-muted); font: inherit; font-size: 12px; line-height: 16px; font-weight: 400; text-align: left; cursor: pointer; }
+.cx-project:hover, .cx-project:focus-visible { color: var(--cc-text-2); }
+/* A folder name is only as wide as itself (the caret follows it), so the row fade would dim its own
+   end: it ellipsizes when too long instead. */
+.cx-project .cx-thread-title { flex: 0 1 auto; -webkit-mask-image: none; mask-image: none; text-overflow: ellipsis; }
+/* The caret follows the name, shows on hover, and turns from right (closed) to down (open). */
+.cx-project .cx-caret { flex: 0 0 auto; color: currentColor; opacity: 0; transition: transform var(--duration-micro, 140ms), opacity var(--duration-micro, 140ms); }
+.cx-project:hover .cx-caret, .cx-project:focus-visible .cx-caret { opacity: 1; }
+.cx-project .cx-caret.is-open { transform: rotate(90deg); }
+/* A collapsed folder's most urgent session, as a dot: waiting on you, running, or unread. */
+.cx-project-badge { flex: 0 0 auto; width: 6px; height: 6px; margin-left: 2px; border-radius: 50%; box-shadow: 0 0 0 .5px var(--cc-side-bg); }
+.cx-project-badge.is-attention { background: var(--cc-warning); }
+.cx-project-badge.is-running { background: var(--cc-muted); animation: cx-cc-blink 1.2s ease-in-out infinite alternate; }
+.cx-project-badge.is-unread { background: var(--cc-accent); }
 .cx-project-pin { margin-left: auto; font-size: 10px; opacity: .7; }
-/* A project folder's git label ("worktree", "not git"): quiet, amber when chats can't use the folder. */
+/* A folder chats can't use ("not git"): amber, the one git label kept on the header. */
 .cx-project-tag { flex: none; padding: 0 5px; border: 1px solid var(--ao-line); border-radius: 4px; color: var(--ao-muted); font-size: 10px; line-height: 15px; }
-.cx-project-tag.is-warn { border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 55%, transparent); color: var(--ao-amber, #c98a12); }
+.cx-project-tag.is-warn { margin-left: auto; border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 55%, transparent); color: var(--ao-amber, #c98a12); }
 .cx-project-tag + .cx-project-pin { margin-left: 4px; }
-.cx-projects > li > ul { padding-left: 10px; }
-.cx-thread-row { position: relative; display: flex; align-items: center; border-radius: 8px; }
-.cx-thread-row:hover { background: var(--cx-hover); }
-.cx-thread-select { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; height: 30px; padding: 0 8px; border: 0;
-  border-radius: 8px; background: transparent; color: var(--color-text-primary); font-size: 13px; text-align: left; cursor: pointer; }
-.cx-thread-select[aria-current="true"] { background: var(--cx-active); }
-.cx-thread-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cx-thread-age { flex: 0 0 auto; color: var(--ao-muted); font-size: 11px; }
-.cx-thread-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: transparent; }
-.cx-thread-dot.status-running { background: var(--ao-green); animation: cx-pulse 1.4s ease-in-out infinite; }
-.cx-thread-dot.status-attention { background: var(--ao-red); }
-.cx-thread-dot.status-queued, .cx-thread-dot.status-paused { background: var(--ao-amber); }
-.cx-thread-row.is-unread .cx-thread-title { font-weight: 600; }
-.cx-thread-row.is-unread .cx-thread-dot:not(.status-running):not(.status-attention) { background: var(--ao-blue); }
-/* Codex shows Pin and Archive in place of the age while a row is hovered. */
-.cx-thread-hover { position: absolute; right: 4px; display: none; gap: 2px; }
-.cx-thread-row:hover .cx-thread-hover, .cx-thread-row:focus-within .cx-thread-hover { display: flex; }
-.cx-thread-row:hover .cx-thread-age, .cx-thread-row:focus-within .cx-thread-age,
-.cx-thread-row:hover .cx-thread-dot, .cx-thread-row:focus-within .cx-thread-dot { visibility: hidden; }
-.cx-thread-hover button { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; font-size: 12px; cursor: pointer; opacity: .75; }
-.cx-thread-hover button:hover:not(:disabled) { background: var(--cx-active); opacity: 1; }
-.cx-thread-hover button:disabled { cursor: not-allowed; opacity: .3; }
-.cx-thread-row.is-renaming input { width: 100%; height: 28px; padding: 0 8px; border: 1px solid var(--ao-blue); border-radius: 8px; background: var(--color-bg-primary); color: inherit; font: inherit; font-size: 13px; }
-.cx-thread-empty { padding: 4px 10px; color: var(--ao-muted); font-size: 12px; }
-/* Codex: "Show more" under a long project, the list's settings button beside "Projects", drag to reorder. */
-/* Codex's project row: hover reveals its menu and a new-chat pencil; a card opens beside it. */
+.cx-project-item { margin-top: 8px; }
+/* A folder's sessions sit flush under its header: their titles start 10 px in, like its name. */
+.cx-projects > li > ul { padding-left: 0; }
+.cx-thread-row { position: relative; display: flex; align-items: center; margin-bottom: 2px; border-radius: 6px; }
+.cx-thread-row:hover { background: var(--cc-hover); }
+.cx-thread-select { display: flex; flex: 1 1 auto; align-items: center; gap: 4px; min-width: 0; height: 28px; padding: 0 26px 0 2px; border: 0;
+  border-radius: 6px; background: transparent; color: var(--cc-text-2); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }
+.cx-thread-select[aria-current="true"] { background: var(--cc-hover); color: var(--cc-text); }
+.cx-thread-row:hover .cx-thread-select[aria-current="true"] { background: var(--cc-hover-selected); }
+/* Titles fade out over their last 24 px instead of an ellipsis (dframe-fade-label). */
+.cx-thread-title { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
+.cx-thread-select .cx-thread-title { padding-left: 8px; }
+.cx-thread-age { flex: 0 0 auto; color: var(--cc-muted); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
+/* The status dot, only when the session is not idle: 6 px, centred in the row's 24 px end control. */
+.cx-thread-dot { position: absolute; top: calc(50% - 3px); right: 9px; width: 6px; height: 6px; border-radius: 50%; background: transparent;
+  box-shadow: 0 0 0 .5px var(--cc-side-bg); pointer-events: none; transition: opacity .15s ease; }
+.cx-thread-dot:not(.status-running):not(.status-queued):not(.status-attention) { box-shadow: none; }
+.cx-thread-dot.status-running, .cx-thread-dot.status-queued { background: var(--cc-muted); animation: cx-cc-blink 1.2s ease-in-out infinite alternate; }
+.cx-thread-dot.status-attention { background: var(--cc-warning); }
+.cx-thread-row.is-unread .cx-thread-dot:not(.status-running):not(.status-queued):not(.status-attention) { background: var(--cc-accent); box-shadow: 0 0 0 .5px var(--cc-side-bg); }
+@keyframes cx-cc-blink { from { opacity: .3; } to { opacity: 1; } }
+/* On hover the dot gives way to "More options" (24 px). */
+.cx-thread-more { position: absolute; top: 50%; right: 0; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+  padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; opacity: 0; transform: translateY(-50%);
+  transition: opacity .15s ease; }
+.cx-thread-row:hover .cx-thread-more, .cx-thread-row:focus-within .cx-thread-more { opacity: 1; }
+.cx-thread-row:hover .cx-thread-dot, .cx-thread-row:focus-within .cx-thread-dot { opacity: 0; }
+.cx-thread-more:hover { background: var(--cc-hover-selected); color: var(--cc-text); }
+.cx-thread-row.is-renaming input { width: 100%; height: 28px; padding: 0 10px; border: 1px solid var(--cc-accent); border-radius: 6px; background: var(--color-bg-primary); color: inherit; font: inherit; font-size: 13px; }
+.cx-thread-empty { padding: 4px 10px; color: var(--cc-muted); font-size: 12px; }
+/* A folder header's one hover action: "+", a new chat in that folder. */
 .cx-project-row { position: relative; display: flex; align-items: center; }
-.cx-project-hover { position: absolute; right: 4px; display: none; gap: 2px; }
-.cx-project-row:hover .cx-project-hover, .cx-project-row:focus-within .cx-project-hover { display: flex; }
+.cx-project-hover { position: absolute; right: 2px; display: flex; opacity: 0; transition: opacity .15s ease; }
+.cx-project-row:hover .cx-project-hover, .cx-project-row:focus-within .cx-project-hover { opacity: 1; }
 .cx-project-row:hover .cx-project-pin { visibility: hidden; }
 .cx-project-hover button { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0;
-  border-radius: 6px; background: transparent; color: var(--ao-muted); cursor: pointer; }
-.cx-project-hover button:hover { background: var(--cx-active); color: var(--color-text-primary); }
+  border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; }
+.cx-project-hover button:hover { background: var(--cc-hover); color: var(--cc-text); }
+@media (prefers-reduced-motion: reduce) { .cx-thread-dot, .cx-project-badge { animation: none !important; } }
 .cx-project-card { position: fixed; z-index: 65; display: grid; gap: 6px; width: 280px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 12px;
   background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 16%); color: var(--color-text-primary); font-size: 12px; }
 .cx-project-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -73,6 +107,8 @@
 .cx-project-card-head button[aria-pressed="true"] { color: var(--color-text-primary); }
 .cx-project-card-line { display: flex; align-items: flex-start; gap: 6px; color: var(--ao-muted); }
 .cx-project-card-line svg, .cx-project-card-line .cx-thread-dot { flex: 0 0 auto; margin-top: 2px; }
+/* In the card the dot sits in the line, not at a sidebar row's end. */
+.cx-project-card-line .cx-thread-dot { position: static; margin-top: 5px; }
 .cx-project-card-line.is-path { overflow-wrap: anywhere; font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11px; }
 .cx-project-card-line.is-git { overflow-wrap: anywhere; }
 .cx-project-card-line.is-warn { color: var(--ao-amber, #c98a12); }
@@ -80,14 +116,16 @@
 .cx-project-card-action { display: flex; align-items: center; gap: 6px; padding: 4px 2px; border: 0; background: transparent; color: var(--color-text-primary);
   font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .cx-project-card-action:hover { color: var(--ao-blue); }
-.cx-show-more { width: 100%; height: 26px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ao-muted);
-  font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
-.cx-show-more:hover { background: var(--cx-hover); color: var(--color-text-primary); }
-.cx-group-head { display: flex; align-items: center; justify-content: space-between; margin: 6px 6px 4px 10px; }
-.cx-group-head h3 { margin: 0; color: var(--ao-muted); font-size: 11px; font-weight: 500; }
-.cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0;
-  border-radius: 6px; background: transparent; color: var(--ao-muted); cursor: pointer; }
-.cx-list-settings:hover, .cx-list-settings[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
+/* Claude Code's "Show more": a 28 px row in muted 13 px text, its label where the titles start. */
+.cx-show-more { display: flex; align-items: center; gap: 4px; width: 100%; height: 28px; padding: 0 8px 0 10px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--cc-muted); font: inherit; font-size: 13px; font-weight: 400; text-align: left; cursor: pointer; }
+.cx-show-more:hover { background: var(--cc-hover); color: var(--cc-text-2); }
+.cx-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 28px; margin: 8px 0 0; padding: 0 2px 0 10px; }
+.cx-group-head h3 { margin: 0; color: var(--cc-muted); font-size: 12px; line-height: 16px; font-weight: 400; }
+/* A section header's ghost icon button (24 px). */
+.cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0;
+  border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; }
+.cx-list-settings:hover, .cx-list-settings[aria-expanded="true"] { background: var(--cc-hover); color: var(--cc-text); }
 .cx-thread-row[draggable="true"] { cursor: grab; }
 .cx-thread-row.is-dragging { opacity: .45; }
 /* The label that follows the pointer while a chat is dragged (ChatThreadList); drawn off screen. */
@@ -116,8 +154,9 @@
 .cx-popover-hint { margin: 0; color: var(--ao-muted); font-size: 12px; }
 .cx-popover-reset { justify-self: start; height: 26px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px; background: transparent;
   color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
-.cx-archived-toggle { width: 100%; height: 28px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ao-muted); font-size: 12px; text-align: left; cursor: pointer; }
-.cx-archived-toggle:hover { background: var(--cx-hover); }
+.cx-archived-toggle { width: 100%; height: 28px; margin-top: 8px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--cc-muted);
+  font: inherit; font-size: 12px; line-height: 16px; text-align: left; cursor: pointer; }
+.cx-archived-toggle:hover { color: var(--cc-text-2); }
 .cx-thread-row.is-archived { gap: 6px; padding: 2px 6px 2px 10px; color: var(--ao-muted); font-size: 12px; }
 .cx-restore { height: 24px; padding: 0 8px; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary); color: inherit; font-size: 11px; cursor: pointer; }
 .cx-hover-card { position: fixed; z-index: 60; display: grid; gap: 3px; width: 260px; padding: 10px 12px; border: 1px solid var(--ao-line); border-radius: 10px;
@@ -155,7 +194,10 @@
 /* ---------- Conversation ---------- */
 .ao-workflow .cx-chat { position: relative; display: flex; flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; background: var(--color-bg-primary); }
 .cx-thread { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; }
-.cx-thread-head { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: calc(env(titlebar-area-height, 0px)) 16px 0 20px; }
+/* The head sits under the window's drag strip (.ao-dragstrip, the title bar's height), in a split
+   pane too: padding it by the title bar's height again squeezed its 48 px to nothing, and the title
+   drew over the chat's first lines. */
+.cx-thread-head { display: flex; flex: none; align-items: center; gap: 10px; min-height: 48px; padding: 0 16px 0 20px; }
 .cx-head-folder { display: inline-flex; flex: 0 0 auto; color: var(--ao-muted); }
 .cx-head-team { display: inline-flex; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 12px; }
 .cx-head-team select { max-width: 200px; height: 26px; padding: 0 6px; border: 1px solid var(--ao-line); border-radius: 6px;
@@ -315,14 +357,20 @@
 
 /* The chat's details panel (Changes / Agents / Setup), like Claude's session panel. */
 .cx-details { position: fixed; z-index: 60; width: 300px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 14px;
-  background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 12px 32px rgb(0 0 0 / 0.14); font-size: 13px; }
+  background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 12px 32px rgb(0 0 0 / 0.14); font-size: 13px;
+  overflow-y: auto; overscroll-behavior: contain; }
 .cx-details-head { display: flex; align-items: baseline; gap: 8px; margin: 0 4px 8px; }
 .cx-details-head small { color: var(--color-text-secondary); font-size: 12px; }
 .cx-details-label { margin: 12px 4px 4px; color: var(--color-text-secondary); font-size: 12px; }
 .cx-details-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 6px; border: 0; border-radius: 8px;
   background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.cx-details-row:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-details-row:hover:not(:disabled):not(.is-static) { background: var(--cx-hover); }
 .cx-details-row:disabled { opacity: 0.5; cursor: default; }
+/* Outputs and Sources: a link or a static line looks like the buttons, one ellipsised line each. */
+a.cx-details-row, p.cx-details-row { box-sizing: border-box; margin: 0; text-decoration: none; }
+.cx-details-row.is-static { cursor: default; }
+.cx-details-row > svg { flex: none; color: var(--color-text-secondary); }
+.cx-details-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cx-details-dots { display: inline-flex; gap: 3px; }
 .cx-details-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--color-text-secondary); }
 .cx-details-dot.is-working { background: #2f80ed; }
@@ -370,39 +418,59 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-empty p { margin: 0; color: var(--ao-muted); font-size: 13px; }
 .cx-turn { display: flex; flex-direction: column; gap: 10px; }
 .cx-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
-/* Claude Code's queued messages (claude.ai's composer queue rows, "pending-queue-row"), right above
-   the composer at its width: right-aligned, newest last, each the person's own bubble collapsed to
-   one line with its text greyed (UserMessage state "queued"), "Queued" under it, and its X
-   ("Discard queued message", ghost sm) shown on hover or focus 32px past the bubble's end; the
-   first has "Send now" (ghost xs). One on its way to the agent pulses (state "pending"). The list
-   is at most min(40vh, 22rem) tall, then scrolls; its right padding holds the X. */
-.cx-queued { flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 8px; }
-.cx-queued-list { display: flex; flex-direction: column; align-items: flex-end; max-height: min(40vh, 22rem); margin: 0; padding: 0 36px 0 0;
-  overflow-y: auto; list-style: none; }
-.cx-queued-row { display: flex; flex-direction: column; align-items: flex-end; width: 100%; min-width: 0; margin: 4px 0; }
-.cx-queued-bubble { position: relative; display: flex; justify-content: flex-end; min-width: 0; max-width: 85%; }
-.cx-queued-message { flex: 0 1 auto; min-width: 0; max-width: 100%; }
-.cx-queued-message[role="button"] { cursor: pointer; border-radius: 16px; }
-.cx-queued-message[role="button"]:focus-visible { outline: 2px solid var(--color-focus, #2c84db); outline-offset: 2px; }
-.cx-queued-message .cx-bubble { max-width: none; }
-/* Collapsed to its first line, as Claude's collapsible bubble is. */
-.cx-queued-message .cx-bubble > * + * { display: none; }
-.cx-queued-message .cx-bubble > * { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.cx-queued-row[data-state="queued"] .cx-bubble { color: var(--ao-muted); }
-.cx-queued-row[data-state="pending"] .cx-bubble { animation: cx-queued-pulse 2s cubic-bezier(.4, 0, .6, 1) infinite; }
-@keyframes cx-queued-pulse { 50% { opacity: .5; } }
-@media (prefers-reduced-motion: reduce) { .cx-queued-row[data-state="pending"] .cx-bubble { animation: none; color: var(--ao-muted); } }
-.cx-queued-discard { position: absolute; top: 0; right: -32px; display: flex; align-items: center; height: 100%; opacity: 0; transition: opacity .15s ease; }
-.cx-queued-row:hover .cx-queued-discard, .cx-queued-row:focus-within .cx-queued-discard { opacity: 1; }
-.cx-queued-discard button { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
-  background: transparent; color: var(--ao-muted); cursor: pointer; }
-.cx-queued-discard button:hover { background: var(--cx-hover); color: var(--color-text-primary); }
-.cx-queued-meta { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 4px; }
-.cx-queued-status { font-size: 11px; line-height: 16px; color: var(--ao-muted); }
-.cx-queued-send-now { height: 20px; padding: 0 6px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted);
-  font: inherit; font-size: 12px; line-height: 20px; cursor: pointer; }
-.cx-queued-send-now:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
-.cx-queued-send-now:disabled { opacity: .4; cursor: default; }
+/* Claude Code's queued-message bar (the Claude desktop app 3.1623 Code tab's QueuedMessageBar, compact
+   density), right above the branch bar at the composer's width. A band 40 px high with 10 px corners
+   (rounded-card) on 5% ink (bg-alpha-1), 8 px by 12 px padding and 5 px gaps: "1 message queued" in
+   13/20 medium ink, the message muted (#898781) on one line, then 28 px ghost icon buttons, muted
+   until hovered. Two or more fold into one band ("Next: …" and a caret, alpha-2 on hover) that opens
+   a card: a 40 px header with Collapse, the messages on up to two lines in a list that scrolls past
+   min(40vh, 22rem), each fading out under a ⋮ shown on hover, and Clear all in red; 10% ink lines
+   between them. The band slides up 6 px as it appears (epitaxy-band-enter, .12 s ease-out). */
+.cx-queued { flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 8px;
+  --cq-ink: var(--color-text-primary); --cq-muted: #898781;
+  --cq-fill: color-mix(in srgb, var(--cq-ink) 5%, transparent); --cq-fill-2: color-mix(in srgb, var(--cq-ink) 10%, transparent);
+  animation: cx-band-enter .12s cubic-bezier(.165, .84, .44, 1); }
+@keyframes cx-band-enter { from { opacity: 0; translate: 0 6px; } }
+.cx-queued-band { display: flex; align-items: center; gap: 5px; width: 100%; min-width: 0; min-height: 40px; padding: 8px 12px; border: 0; border-radius: 10px;
+  background: var(--cq-fill); color: var(--cq-ink); font: inherit; font-size: 13px; line-height: 20px; text-align: start; user-select: none; }
+.cx-queued-stack { cursor: pointer; }
+.cx-queued-stack:hover { background: var(--cq-fill-2); }
+.cx-queued-stack:focus-visible { outline: 2px solid var(--color-focus, #2c84db); outline-offset: 2px; }
+.cx-queued-count { flex: 0 0 auto; color: var(--cq-ink); font-weight: 500; }
+.cx-queued-preview { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--cq-muted); white-space: nowrap; text-overflow: ellipsis; }
+.cx-queued-caret { display: grid; flex: 0 0 auto; place-items: center; width: 28px; height: 28px; color: var(--cq-muted); }
+.cx-queued-icon { display: inline-grid; flex: 0 0 auto; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--cq-muted); cursor: pointer; }
+.cx-queued-icon:hover:not(:disabled) { background: var(--cq-fill); color: var(--cq-ink); }
+.cx-queued-icon:focus-visible { outline: 2px solid var(--color-focus, #2c84db); outline-offset: 1px; }
+.cx-queued-icon:disabled { opacity: .4; cursor: default; }
+.cx-queued-icon.is-sm { width: 20px; height: 20px; border-radius: 5px; }
+.cx-queued-icon.is-collapse svg { rotate: 180deg; }
+.cx-queued-card { display: flex; flex-direction: column; width: 100%; overflow: clip; border-radius: 10px; background: var(--cq-fill);
+  color: var(--cq-ink); font-size: 13px; line-height: 20px; user-select: none; }
+.cx-queued-card > * + * { border-top: 1px solid var(--cq-fill-2); }
+.cx-queued-head { display: flex; align-items: center; gap: 5px; min-height: 40px; padding: 0 12px; }
+.cx-queued-head .cx-queued-count { flex: 1 1 auto; min-width: 0; }
+.cx-queued-list { display: flex; flex-direction: column; max-height: min(40vh, 22rem); padding: 4px; overflow-y: auto; overscroll-behavior: contain; }
+.cx-queued-row { position: relative; display: flex; align-items: flex-start; gap: 5px; min-width: 0; padding: 5px; border-radius: 6px; }
+.cx-queued-row + .cx-queued-row { margin-top: 1px; }
+.cx-queued-row + .cx-queued-row::before { content: ""; position: absolute; top: -1px; right: 0; left: 0; border-top: 1px solid var(--cq-fill-2); }
+.cx-queued-text { display: -webkit-box; flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--cq-ink); overflow-wrap: anywhere;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; user-select: text; }
+.cx-queued-row:hover .cx-queued-text, .cx-queued-row:focus-within .cx-queued-text {
+  mask-image: linear-gradient(to right, black calc(100% - 76px), transparent calc(100% - 28px)); }
+.cx-queued-actions { position: absolute; top: 50%; right: 5px; display: flex; align-items: center; gap: 2px; opacity: 0; translate: 0 -50%; }
+.cx-queued-row:hover .cx-queued-actions, .cx-queued-row:focus-within .cx-queued-actions { opacity: 1; }
+.cx-queued-foot { display: flex; justify-content: flex-end; padding: 6px 12px; }
+.cx-queued-clear { padding: 0; border: 0; background: transparent; color: var(--ao-red, #c4372c); font: inherit; font-size: 12px; line-height: 16px; cursor: pointer; }
+.cx-queued-clear:hover { text-decoration: underline; }
+@media (pointer: coarse) { .cx-queued-actions { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .cx-queued { animation: none; } }
+/* A stuck turn's Restart, inline in its "may be stuck" line: the one thing to press there. */
+.cx-turn-restart { height: 20px; padding: 0 8px; border: 1px solid var(--cx-border, rgb(0 0 0 / .14)); border-radius: 5px; background: transparent;
+  color: var(--color-text-primary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; vertical-align: baseline; }
+.cx-turn-restart:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-turn-restart:disabled { opacity: .5; cursor: default; }
 .cx-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 /* A message steered into a working turn: the user's own bubble, in the live timeline where it was sent. */
 .cx-live-item.kind-steer { display: block; margin: 6px 0; }
@@ -436,6 +504,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-msg-foot { display: flex; align-items: center; justify-content: flex-end; gap: 2px; min-height: 26px; }
 .cx-receipt { position: relative; display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; color: var(--ao-muted); outline: none; }
 .cx-receipt[data-receipt="unread"] svg { opacity: .5; }
+/* On its way to the agent: the check fades in and out until the agent has it. */
+.cx-receipt[data-receipt="sending"] svg { opacity: .3; animation: cx-receipt-sending 1.2s ease-in-out infinite; }
+@keyframes cx-receipt-sending { 50% { opacity: .65; } }
+@media (prefers-reduced-motion: reduce) { .cx-receipt[data-receipt="sending"] svg { animation: none; } }
 .cx-receipt[data-receipt="unread"]:is(:hover, :focus-visible) svg { opacity: 1; }
 .cx-receipt:focus-visible { box-shadow: 0 0 0 2px var(--cx-focus, rgb(59 130 246 / .5)); }
 /* Its tooltip shows at once, as Claude Code's (delay 0). */
@@ -452,7 +524,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-work-head svg.is-open, .cx-step-head svg.is-open { transform: rotate(90deg); }
 .cx-work.is-stalled .cx-work-head { color: var(--ao-amber); }
 .cx-shimmer { background: linear-gradient(90deg, var(--ao-muted) 0%, var(--color-text-primary) 50%, var(--ao-muted) 100%); background-size: 200% 100%;
-  -webkit-background-clip: text; background-clip: text; color: transparent; animation: cx-shimmer 2.2s linear infinite; }
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: cx-shimmer 2.2s steps(66) infinite; }
+/* background-position cannot run on the compositor, so each step repaints the text. steps() holds it
+   to 30 updates a second instead of every refresh (165 on a 165 Hz screen); a theme that changes the
+   duration keeps 30 per second with its own step count. */
 .cx-steps { display: grid; gap: 2px; margin: 6px 0 0; padding: 0 0 0 4px; border-left: 2px solid var(--ao-line); list-style: none; }
 .cx-step-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-primary); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .cx-step-head:hover:not(:disabled) { background: var(--cx-hover); }
@@ -462,8 +537,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-step.tone-working .cx-step-dot { background: var(--ao-green); animation: cx-pulse 1.4s ease-in-out infinite; }
 .cx-step.tone-stalled .cx-step-dot { background: var(--ao-amber); }
 .cx-step.tone-error .cx-step-dot, .cx-step.tone-held .cx-step-dot { background: var(--ao-red); }
-.cx-step-name { font-weight: 500; }
-.cx-step-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--ao-muted); text-overflow: ellipsis; white-space: nowrap; }
+/* The name stays whole on the dot's line; how the card runs takes the rest and ellipsizes. */
+.cx-step-name { flex: 0 0 auto; font-weight: 500; white-space: nowrap; }
+.cx-step-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--ao-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .cx-step.tone-stalled .cx-step-meta { color: var(--ao-amber); }
 .cx-step.tone-error .cx-step-meta { color: var(--ao-red); }
 .cx-step-body { margin: 2px 0 8px 22px; color: var(--color-text-primary); }
@@ -661,6 +737,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-turn-stats span { padding: 0 10px; white-space: nowrap; transition: color .15s ease; }
 .cx-turn-stats span + span { border-left: 1px solid color-mix(in srgb, var(--ao-muted) 35%, transparent); }
 .cx-turn-stats span:hover { color: var(--color-text-primary); }
+/* CPA refusing the turn's model (ChatTurnStats): amber, so a rate limit reads apart from slow work. */
+.cx-turn-stats span.is-warn, .cx-turn-stats span.is-warn:hover { color: var(--ao-amber, #c98a12); }
+.cx-turn-stats.is-dsh span.is-warn { border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 45%, transparent); }
 .cx-turn-stats.is-running span:first-child::before { display: inline-block; width: 6px; height: 6px; margin: 0 6px 1px 0; border-radius: 50%;
   background: var(--ao-green, #2e9d5b); content: ""; animation: cx-pulse 1.4s ease-in-out infinite; }
 @keyframes cx-turn-stats-in { from { opacity: 0; transform: translateY(-3px); } }
@@ -1022,6 +1101,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }
 .cx-goal-meta, .cx-goal-note { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A goal's later round, as Claude Code shows a Stop hook's feedback: a dim "⎿" line, not a message bubble. */
+.cx-hook-feedback { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0 0 8px; color: var(--ao-muted); font-size: 12px; }
+.cx-hook-feedback-mark { flex: 0 0 auto; }
+.cx-hook-feedback-text { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .cx-goal button, .cx-plan-chip button { display: inline-flex; align-items: center; padding: 2px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font-size: 12px; cursor: pointer; }
 .cx-goal button:hover, .cx-plan-chip button:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-plan-chip { display: inline-flex; align-items: center; gap: 2px; padding: 4px 4px 4px 10px; border-radius: 10px; background: color-mix(in srgb, var(--ao-blue) 10%, transparent); color: var(--ao-blue); font-size: 12px; font-weight: 600; }
@@ -1031,14 +1114,47 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal > svg { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-state { font-weight: 500; color: var(--color-text-primary); }
 .cx-goal-objective { color: var(--ao-muted); }
-.cx-goal .cx-goal-icon { display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 6px; color: var(--ao-muted); }
+/* Its icons get room: 26 px targets 4 px apart, and 6 px between the running time and the first. */
+.cx-goal .cx-goal-icon { display: inline-grid; flex: 0 0 auto; place-items: center; width: 26px; height: 26px; padding: 0; border-radius: 6px; color: var(--ao-muted); }
 .cx-goal .cx-goal-icon:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-goal .cx-goal-icon:disabled { background: none; color: var(--ao-muted); opacity: .45; cursor: default; }
+.cx-goal .cx-goal-icon + .cx-goal-icon { margin-left: 4px; }
+.cx-goal .cx-goal-meta { margin-right: 6px; font-variant-numeric: tabular-nums; }
+/* Edit goal: the goal bar opened up. Its target and title, the objective in a soft box that grows
+   with its text (up to 40% of the window), then a hint, Cancel and an ink Save. */
+.cx-goal-edit { width: calc(100% - 48px); max-width: 780px; margin: 0 auto 8px; padding: 10px 12px 12px; box-sizing: border-box;
+  border: 1px solid var(--ao-line); border-radius: 12px; background: var(--color-bg-primary); box-shadow: 0 6px 18px rgb(16 24 40 / 6%);
+  --ge-ink: var(--color-text-primary); color: var(--ge-ink); font-size: 13px; }
+.cx-goal-edit header { display: flex; align-items: center; gap: 8px; }
+.cx-goal-edit header > svg { flex: 0 0 auto; color: var(--ao-muted); }
+.cx-goal-edit header strong { flex: 1 1 auto; font-size: 13px; font-weight: 500; }
+.cx-goal-edit .cx-goal-icon { display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ao-muted); cursor: pointer; }
+.cx-goal-edit .cx-goal-icon:hover { background: var(--cx-hover); color: var(--ge-ink); }
+.cx-goal-edit textarea { display: block; width: 100%; min-height: 64px; max-height: 40vh; margin: 8px 0 0; padding: 8px 10px; box-sizing: border-box;
+  border: 1px solid transparent; border-radius: 8px; outline: none; background: color-mix(in srgb, var(--ge-ink) 4%, transparent); color: var(--ge-ink);
+  font: inherit; font-size: 13px; line-height: 20px; resize: none; field-sizing: content; overflow-wrap: anywhere; }
+.cx-goal-edit textarea:focus { border-color: color-mix(in srgb, var(--ge-ink) 18%, transparent); background: transparent; }
+.cx-goal-edit textarea::placeholder { color: var(--ao-muted); }
+.cx-goal-edit footer { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.cx-goal-edit-hint { flex: 1 1 auto; min-width: 0; color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cx-goal-edit-cancel, .cx-goal-edit-save { height: 28px; padding: 0 12px; border: 0; border-radius: 8px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; }
+.cx-goal-edit-cancel { background: transparent; color: var(--ao-muted); }
+.cx-goal-edit-cancel:hover { background: var(--cx-hover); color: var(--ge-ink); }
+.cx-goal-edit-save { background: var(--ge-ink); color: var(--color-bg-primary); }
+.cx-goal-edit-save:disabled { opacity: .3; cursor: default; }
+.cx-goal-edit :is(button, textarea):focus-visible { outline: 2px solid var(--color-focus, #2c84db); outline-offset: 1px; }
 .cx-goal-editor textarea { width: 100%; min-height: 84px; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; resize: vertical; }
 .cx-goal-editor footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .cx-goal-editor .cx-text-button, .cx-goal-editor .cx-primary-button { padding: 5px 12px; border: 0; border-radius: 8px; font-size: 12px; cursor: pointer; }
 .cx-goal-editor .cx-text-button { background: transparent; color: var(--ao-muted); }
 .cx-goal-editor .cx-primary-button { background: var(--color-text-primary); color: var(--color-bg-primary); }
 .cx-goal-editor .cx-primary-button:disabled { opacity: .4; cursor: default; }
+/* The wake-up's note opens its editor: drawn as the bar's plain text, not a pill. */
+.cx-goal button.cx-wakeup-note { display: block; padding: 0; overflow: hidden; color: var(--ao-muted); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.cx-goal button.cx-wakeup-note:hover { background: transparent; color: var(--color-text-primary); }
+.cx-wakeup-minutes { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--ao-muted); font-size: 12px; }
+.cx-wakeup-minutes input { width: 64px; padding: 4px 6px; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; }
 /* Delete message: the same in-chat confirmation, its Delete button in the danger colour. */
 .cx-delete-confirm footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .cx-delete-confirm .cx-text-button, .cx-delete-confirm .cx-primary-button { padding: 5px 12px; border: 0; border-radius: 8px; font-size: 12px; cursor: pointer; }
@@ -1105,6 +1221,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* On the pointer: carried along above everything, never in the way of a click. */
 .cx-pet.is-riding { z-index: 60; transition: none; }
 .cx-pet.is-riding .cx-pet-body { pointer-events: none; }
+/* Leaping between split panes, or to and from its house under the chat list: over everything. */
+.cx-pet.is-leaping .cx-pet-body { pointer-events: none; }
+/* Split view: one Clawd for all panes, its house in a yard under the chat list (empty otherwise). */
+.cx-pet-yard { position: relative; flex: none; }
+.cx-pet-lot { position: relative; width: 136px; height: 104px; margin: 6px auto 10px; }
 @keyframes cx-pet-z { 0% { transform: translateY(6px); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateY(-14px); opacity: 0; } }
 @keyframes cx-pet-rise { to { transform: translateY(-36px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {

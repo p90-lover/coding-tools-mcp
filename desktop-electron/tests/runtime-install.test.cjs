@@ -1,3 +1,4 @@
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
@@ -7,9 +8,44 @@ const path = require("node:path");
 const { runtimeInvocation } = require("../electron/runtime-command.cjs");
 const {
   ensurePackagedRuntime,
+  pruneOldRuntimes,
   validateRuntimeBundle,
   waitForPackagedRuntimeSource,
 } = require("../electron/runtime-install.cjs");
+
+test("older versions' runtime copies are removed, keeping this version, the newest other and fresh temporaries", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-prune-"));
+  const coreHome = path.join(root, "core-home");
+  const versions = path.join(coreHome, "versions");
+  const suffix = `-${process.platform}-${process.arch}`;
+  const now = Date.now();
+  const make = (name, ageMs) => {
+    const folder = path.join(versions, name);
+    fs.mkdirSync(path.join(folder, "app"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "app", "cli.js"), name);
+    const when = new Date(now - ageMs);
+    fs.utimesSync(folder, when, when);
+  };
+  const hour = 60 * 60_000;
+  make(`0.8.11${suffix}`, 1 * hour);                       // this version
+  make(`0.8.11${suffix}-0123456789ab`, 1 * hour);          // its side bundle: ensurePackagedRuntime's
+  make(`0.8.10${suffix}`, 5 * hour);                       // newest other: kept for a rollback
+  make(`0.8.6${suffix}`, 30 * hour);
+  make(`0.7.0-rc.26${suffix}`, 90 * hour);
+  make(`0.8.1${suffix}.tmp-35972-1792488529502`, 50 * hour); // stale temporary
+  make(`0.8.9${suffix}.tmp-1-2`, 5 * 60_000);              // a temporary still being written
+  fs.writeFileSync(path.join(versions, "stray.txt"), "x");
+  try {
+    const removed = await pruneOldRuntimes({ app: { isPackaged: true, getVersion: () => "0.8.11" }, coreHome, now });
+    assert.deepEqual(removed.sort(), [`0.7.0-rc.26${suffix}`, `0.8.1${suffix}.tmp-35972-1792488529502`, `0.8.6${suffix}`].sort());
+    assert.deepEqual(fs.readdirSync(versions).sort(), [`0.8.10${suffix}`, `0.8.11${suffix}`, `0.8.11${suffix}-0123456789ab`,
+      `0.8.9${suffix}.tmp-1-2`, "stray.txt"].sort());
+    assert.deepEqual(await pruneOldRuntimes({ app: { isPackaged: false, getVersion: () => "0.8.11" }, coreHome, now }), [],
+      "a development run leaves the core home alone");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function comparePaths(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;

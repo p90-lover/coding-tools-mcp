@@ -13,7 +13,7 @@ const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 const { createDaemonLogFilter } = require("./ao-daemon-log.cjs");
 const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
-const { withAgentShellCommands, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
+const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 
 const API_OPERATIONS = Object.freeze({
@@ -117,6 +117,17 @@ const WORKSPACE_MODES = new Set(["worktree", "shared", "folder"]);
 // Agents without an AO chat controller run in their own terminal UI and report here.
 // How often the harness list re-runs AO's install checks, so a newly installed CLI shows up.
 const AGENT_RECHECK_MS = 60_000;
+// How long a started AO daemon that is still running may take to answer /readyz (see start).
+const AO_READY_TIMEOUT_MS = 90_000;
+// To profile AO's CPU on a user's machine: a one-line "pprof-addr" file in AO's data folder holding
+// a loopback host:port turns on AO's pprof listener (AO_PPROF_ADDR) at its next start. Without it AO
+// starts as before; the app clears AO_* from its own environment, so this is the only switch.
+const PROFILER_FILE = "pprof-addr";
+async function profilerAddress(dataRoot) {
+  let text = "";
+  try { text = (await fs.promises.readFile(path.join(dataRoot, PROFILER_FILE), "utf8")).trim(); } catch { return ""; }
+  return /^(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}$/.test(text) ? text : "";
+}
 
 // A plain GET lists only the agents whose install check has finished, which right after the
 // daemon starts is often just one; the list was then read once and Codex, opencode and others
@@ -183,7 +194,8 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console,
+  readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -244,12 +256,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   async function defaultToFolderMode(project) {
     if (folderModeChecked.has(project.id)) return;
     const endpoint = `/api/v1/projects/${encodeURIComponent(project.id)}`;
+    const settled = current => !current || (current.kind && current.kind !== "single_repo") || Boolean(current.config?.workspaceMode);
+    // Only a write waits its turn. Seen live: the first launch in a project after the app started
+    // waited 19 s behind its dependency-link sync just to read a mode that was already "folder".
+    if (settled(project) && project.config || settled((await internalApi("GET", endpoint))?.project)) {
+      folderModeChecked.add(project.id);
+      return;
+    }
     // On the dependency-link sync's queue: both rewrite the whole config.
     await dependencyLinks.exclusive(project.id, async () => {
       const current = (await internalApi("GET", endpoint))?.project;
-      if (!current || (current.kind && current.kind !== "single_repo")) return;
+      if (settled(current)) return;
       const config = current.config && typeof current.config === "object" ? current.config : {};
-      if (config.workspaceMode) return;
       await internalApi("PUT", `${endpoint}/config`, { config: { ...config, workspaceMode: "folder" } });
     });
     folderModeChecked.add(project.id);
@@ -319,10 +337,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  async function requestApi(method, endpoint, body, { maxBytes } = {}) {
+  async function requestApi(method, endpoint, body, { maxBytes, timeoutMs } = {}) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
-    const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
+    const waitMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : method === "GET" ? 30000 : 180000;
+    const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(waitMs) });
     const text = await response.text();
     // A conversation read is trimmed below before anything uses it, so it may arrive larger; every
     // other AO call keeps the 900 KB limit.
@@ -355,7 +374,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    */
   async function chatHostGone(id) {
     let address;
-    try { address = JSON.parse(fs.readFileSync(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
+    try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
     catch { return false; }
     const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
     if (!match) return false;
@@ -533,6 +552,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           : timelineActivity(activity)),
     ];
     return items.sort((a, b) => a.sequence - b.sequence).slice(-TIMELINE_ITEMS);
+  }
+  // Callers of a working chat's observe() (the run loop, the chat's activity poll and its follow-ups,
+  // the approval screen, the panel's status poll) share one tail read, but each built its timeline
+  // again: ~13 ms of main-thread work per call on a 100-item tail, several calls a second for each
+  // chat on screen. Seen 2026-10-22: the main process at 70-100% of a core with two working chats
+  // open, 7% once the window was hidden. A page is never changed once read, so its timeline is
+  // built once per turn; each caller gets its own array of the shared (read-only) items.
+  const builtTimelines = new WeakMap(); // conversation page -> Map(`${turnId}|${turnOver}` -> items)
+  function sharedTurnTimeline(conversation, turnId, turnOver) {
+    if (!conversation || typeof conversation !== "object") return turnTimeline(conversation, turnId, turnOver);
+    let built = builtTimelines.get(conversation);
+    if (!built) builtTimelines.set(conversation, built = new Map());
+    const key = `${turnId}|${turnOver}`;
+    if (!built.has(key)) built.set(key, turnTimeline(conversation, turnId, turnOver));
+    return built.get(key).slice();
   }
   /**
    * The page of a session's conversation before `beforeSequence`. A page over the handler limit
@@ -835,18 +869,6 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut -= 1;
     return bytes.toString("utf8", 0, cut);
   }
-  /** The longest suffix of `text` that is at most `maxBytes` of UTF-8: the newest part of live text. */
-  function utf8Suffix(text, maxBytes) {
-    const value = String(text);
-    if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-    let start = Math.max(0, value.length - maxBytes);
-    while (start < value.length && Buffer.byteLength(value.slice(start), "utf8") > maxBytes) start += Math.max(1, Math.floor((value.length - start) * 0.05));
-    while (start > 0 && Buffer.byteLength(value.slice(start - 1), "utf8") <= maxBytes) start -= 1;
-    // Never start on the second half of a surrogate pair.
-    const first = value.charCodeAt(start);
-    if (start < value.length && first >= 0xdc00 && first <= 0xdfff) start += 1;
-    return value.slice(start);
-  }
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
   async function internalApi(method, endpoint, body, options) {
@@ -918,14 +940,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
     const at = Date.now();
     const kept = projectBindings.get(workspaceId);
-    if (kept && at - kept.at < PROJECT_BINDING_TTL_MS) return kept.promise;
-    const entry = { at, promise: workspaceBoard.bind(workspaceId).then(binding => {
+    if (kept && at - kept.at < PROJECT_BINDING_TTL_MS) return kept.projectId ?? kept.promise;
+    // A workspace bound before keeps its project while the binding (git, the dependency-link sync,
+    // up to 3 s) is refreshed behind the launch: every send more than a minute after the last one
+    // waited for it. A failed refresh or start forgets the binding, so the next one binds afresh.
+    const entry = { at, projectId: kept?.projectId ?? null, promise: workspaceBoard.bind(workspaceId).then(binding => {
       if (!binding.projectId) throw new Error("AO harness workers need this workspace to be a git repository registered in AO");
       return binding.projectId;
     }) };
-    entry.promise.catch(() => forgetProject(workspaceId, entry));
+    entry.promise.then(projectId => { entry.projectId = projectId; }, () => forgetProject(workspaceId, entry));
     projectBindings.set(workspaceId, entry);
-    return entry.promise;
+    return entry.projectId ?? entry.promise;
   }
   // One send bound its workspace up to four times (model checks, the default window, the launch):
   // each listed AO's projects, ran git and synced dependency links for up to 3 s. A binding is kept
@@ -1076,7 +1101,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .filter(message => message.role === "assistant" && message.turnId === turn.id && typeof message.text === "string")
         .map(message => message.text).join("\n\n").trim();
       const status = session?.session?.status;
-      const timeline = turnTimeline(conversation, turn?.id, turnOver);
+      const timeline = sharedTurnTimeline(conversation, turn?.id, turnOver);
       // A chat started in the background (spawn's async) whose agent failed to come up: one that
       // failed only for time is resumed once (AO keeps the queued prompt, so it is never sent twice);
       // otherwise the turn fails with AO's reason.
@@ -1111,12 +1136,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // the same way and the card can be resumed. (AO's wording: storage/sqlite/queries/
       // conversations.sql, SettleOrphanedConversationTurns.)
       const reconciled = turn?.state === "failed" && turn.errorMessage === "controller ended before the turn completed";
-      if (reconciled || ((settling || settled) && await chatHostGone(id))) {
+      // AO drops a session's controller when its agent process exits (seen live 2026-10-22: a
+      // MiMo turn whose requests kept failing with 429), but leaves the turn "running" until the
+      // daemon restarts. The chat then read "may be stuck" for half an hour, and every steer or
+      // Stop hit "the agent controller for this session is not running". The snapshot says so
+      // itself (controller "stopped" while nothing is provisioning): the turn is over.
+      const agentGone = conversation?.controller === "stopped" && session?.session?.provisionState !== "provisioning";
+      const lastFailure = (Array.isArray(conversation?.activities) ? conversation.activities : [])
+        .filter(item => item.turnId === turn?.id && item.activityKind === "system" && item.detail?.event === "provider.failure"
+          && typeof item.detail.text === "string" && item.detail.text.trim()).at(-1)?.detail.text.trim();
+      const deadAgent = agentGone && turn?.state === "running";
+      if (reconciled || deadAgent || ((settling || settled) && await chatHostGone(id))) {
         if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
         return {
           status, turnId: turn.id, turnState: "interrupted",
-          error: "The agent's process ended before it finished (the app restarted); retry this card.",
-          needsInput: false, exited: false, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
+          error: deadAgent
+            ? `The agent's process stopped mid-turn${lastFailure ? ` after: ${utf8Prefix(lastFailure, 160)}` : ""}. Retry or send a message to continue.`
+            : "The agent's process ended before it finished (the app restarted); retry this card.",
+          needsInput: false, exited: false, agentGone: deadAgent || undefined, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         };
       }
       // When the turn last showed any sign of life (a message, a tool step): a turn whose agent hung
@@ -1140,6 +1177,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
         ...(toolStarts.length ? { toolSince: Math.min(...toolStarts) } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
+        // No agent process behind this session (released while idle, or it exited): nothing runs,
+        // so a stop has nothing to wait for and a steer nothing to reach.
+        ...(agentGone ? { agentGone: true } : {}),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         // A question the agent asked waits like an approval: the chat shows it and the card needs you.
         approvals: [...pendingApprovals(conversation), ...pendingInputs(conversation)],
@@ -1156,7 +1196,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // started a fresh session beside the agent coming back. Callers share the first check.
       const key = sessionId(id);
       if (!continuing.has(key)) continuing.set(key, (async () => {
-        const uncertain = cause => Object.assign(new Error("The existing agent's restoration could not be confirmed; retry this chat without starting a replacement"),
+        const uncertain = cause => Object.assign(new Error("Couldn't confirm the agent was restored. Retry this chat. No new agent was started."),
           { code: "AO_SESSION_RESTORE_UNCONFIRMED", cause });
         const read = async () => {
           try {
@@ -1167,8 +1207,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         };
         const invalid = session => !session || session.mode === "tui" || session.isTerminated
           || ["terminated", "killed", "errored"].includes(session.status) || session.provisionState === "failed";
+        // Why a chat's follow-up could not continue its agent (and started a fresh one, without what
+        // it knew): only "ao.continuation_lost" was logged, which named neither the session nor why.
+        const refuse = (why, session, extra = {}) => {
+          logger?.info?.("ao.continuable_refused", { session: key, why, ...(session ? { status: session.status ?? null,
+            provisionState: session.provisionState ?? null, terminated: session.isTerminated === true } : {}), ...extra });
+          return false;
+        };
         let session = await read();
-        if (invalid(session)) return false;
+        if (invalid(session)) return refuse(session ? "invalid" : "not_found", session);
         if (session.id !== key) throw uncertain();
         if (session.status === "exited") {
           // Startup may already own restoration. A conflict is not readiness: wait for this
@@ -1185,13 +1232,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             }
             if (resumed?.ok !== true) throw uncertain();
           } catch (error) {
-            if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) return false;
+            if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) {
+              return refuse("restore_refused", session, { code: error.code, message: String(error?.message ?? "").slice(0, 200) });
+            }
             if (error.status !== 409 || error.code !== "AGENT_RESUME_IN_PROGRESS") throw uncertain(error);
           }
           const deadline = Date.now() + 30000;
           for (let attempt = 0; attempt < 150 && Date.now() < deadline; attempt++) {
             session = await read();
-            if (invalid(session)) return false;
+            if (invalid(session)) return refuse(session ? "invalid_after_restore" : "not_found_after_restore", session);
             if (session.id !== key) throw uncertain();
             // Status is a display value: an idle live agent may show its pull request state.
             const activity = session.activity?.state;
@@ -1204,7 +1253,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           }
           throw uncertain();
         }
-        return !(await chatHostGone(key));
+        return (await chatHostGone(key)) ? refuse("host_gone", session) : true;
       })().finally(() => continuing.delete(key)));
       return continuing.get(key);
     },
@@ -1253,6 +1302,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return idle.filter(Boolean);
     },
     /**
+     * Chat sessions AO still calls "working" whose agent has done nothing for `quietMs`. A turn that
+     * dies with an app or daemon restart leaves its session "working" for good, and its chat host
+     * waits for a controller that never comes: neither the idle sweep (idle and exited only) nor AO's
+     * reaper (exited only) stopped it. Seen 2026-10-22: two hosts and their agents, quiet 8 hours and
+     * a day, while their chats had moved on to new sessions. A working agent reports activity with
+     * every tool call; AO's activity time restarts with the host, which only makes it look newer.
+     */
+    async quietWorkingChatSessions(quietMs, now = Date.now()) {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      return sessions.filter(session => session?.mode === "chat" && !session.isTerminated && session.status === "working")
+        .filter(session => {
+          const at = Date.parse(session.activity?.lastActivityAt ?? "");
+          return Number.isFinite(at) && now - at >= quietMs;
+        })
+        .map(session => String(session.id));
+    },
+    /**
      * Sessions of these workspaces' AO projects that nobody has used for at least `idleMs`: live
      * (not terminated), not working, not pinned, with no message to them since, or since they were
      * made. AO's board keeps every exited session, so old workers, subagents and replaced chats
@@ -1270,10 +1337,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .map(session => String(session.id));
     },
     /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
-    async send(id, text, clientMessageId) {
+    async send(id, text, clientMessageId, { timeoutMs } = {}) {
       forgetTail(id);
       const data = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/messages`,
-        { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) });
+        { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) },
+        timeoutMs ? { timeoutMs } : undefined);
       if (typeof data?.turnId !== "string" || !data.turnId) throw new Error("AO did not start a turn for the follow-up");
       return { turnId: data.turnId, state: data.state };
     },
@@ -1386,7 +1454,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (record?.session?.provisionState === "provisioning") {
           await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
           agentTools?.forgetSession?.(id);
-        } else await interrupt();
+          return;
+        }
+        // Not starting and no controller: the agent's process has exited, so nothing is running
+        // to interrupt. Asking again threw the same refusal into the chat ("the agent controller
+        // for this session is not running") and Stop never finished. One that came up meanwhile
+        // is interrupted.
+        await interrupt().catch((again) => { if (!/CHAT_CONTROLLER_NOT_READY/.test(String(again?.message))) throw again; });
       });
     },
     // A standalone AO terminal running one program (e.g. the Antigravity CLI) with
@@ -1423,9 +1497,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (answer) return { status, turnId: `tui-${id}`, turnState: "completed", answer, needsInput: false, exited: ended };
     if (silent) {
       return { status, turnId: `tui-${id}`, turnState: "failed", answer: "", exited: true,
-        error: `The terminal agent stopped reporting and has been idle since ${new Date(lostSince).toISOString()} without ${TUI_RESULT_FILE}; send a follow-up to continue in a new session` };
+        error: `The terminal agent stopped reporting. It has been idle since ${new Date(lostSince).toISOString()} with no ${TUI_RESULT_FILE}, so send a follow-up to continue in a new session.` };
     }
-    if (ended) return { status, turnId: `tui-${id}`, turnState: "failed", error: `AO session ended without ${TUI_RESULT_FILE}`, answer: "", exited: true };
+    if (ended) return { status, turnId: `tui-${id}`, turnState: "failed", error: `The agent's session ended with no ${TUI_RESULT_FILE}`, answer: "", exited: true };
     // Idle without a report: the agent is waiting for the user in its terminal.
     return { status, needsInput: true, exited: false, answer: "" };
   }
@@ -1532,6 +1606,30 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     throw new Error("This desktop operation is unavailable; manage runtime lifecycle from the Coding Tools host bar");
   }
 
+  // { file, size, mtimeMs, digest } of the daemon last hashed. It is kept in dataRoot too, so a
+  // launch of the same install does not read the 41 MB file again; an update or a swapped daemon
+  // changes its size or time and is hashed anew.
+  let verifiedDaemon = null;
+  const verifiedDaemonFile = path.join(dataRoot, "daemon-verified.json");
+  async function daemonDigest(file) {
+    const stat = await fs.promises.stat(file);
+    if (!verifiedDaemon) {
+      try { verifiedDaemon = JSON.parse(await fs.promises.readFile(verifiedDaemonFile, "utf8")); } catch { /* none yet */ }
+    }
+    if (verifiedDaemon && verifiedDaemon.file === file && verifiedDaemon.size === stat.size && verifiedDaemon.mtimeMs === stat.mtimeMs
+      && typeof verifiedDaemon.digest === "string") {
+      return verifiedDaemon.digest;
+    }
+    const digest = await new Promise((resolve, reject) => {
+      const hash = crypto.createHash("sha256");
+      fs.createReadStream(file).on("error", reject).on("data", (chunk) => hash.update(chunk)).on("end", () => resolve(hash.digest("hex")));
+    });
+    verifiedDaemon = { file, size: stat.size, mtimeMs: stat.mtimeMs, digest };
+    fs.promises.mkdir(dataRoot, { recursive: true, mode: 0o700 })
+      .then(() => fs.promises.writeFile(verifiedDaemonFile, JSON.stringify(verifiedDaemon)))
+      .catch(() => { /* hashed again next launch */ });
+    return digest;
+  }
   async function start() {
     if (stopping) await stopping;
     if (state === "ready") return snapshot();
@@ -1551,7 +1649,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const manifest = JSON.parse(fs.readFileSync(path.join(resourceRoot, "manifest.json"), "utf8"));
         if (manifest.localOnly !== true || manifest.standaloneInstall !== false) throw new Error("AO local-only source bundle is required");
         const executable = path.join(resourceRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
-        const digest = crypto.createHash("sha256").update(fs.readFileSync(executable)).digest("hex");
+        // Read in chunks off the main thread: the 41 MB daemon read in one readFileSync on a busy
+        // hard disk froze the whole app for 17-28 s while AO started. A file unchanged since it was
+        // verified is not read again.
+        const digest = await daemonDigest(executable);
+        checkStartup();
         if (digest !== manifest.daemonSha256) throw new Error("AO daemon does not match its build manifest");
         fs.mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
         // Once per app session, before AO opens it: a database that is mostly empty pages gives the
@@ -1587,11 +1689,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // tool runs: on Windows it carries SystemRoot, TEMP and the rest a process needs to start,
         // and a de-duplicated PATH of bounded length (forks failed with 0xC0000142 without them).
         const daemonEnvironment = windowsChildEnvironment(environment, { system: systemEnvironment() });
+        const profiler = await profilerAddress(dataRoot);
+        checkStartup();
+        if (profiler) logger.info?.("ao.profiler_enabled", { address: profiler });
           // The AO CLI build answers the daemon command and the internal commands the daemon
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
           child = spawn(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-          env: { ...daemonEnvironment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
+          env: { ...daemonEnvironment, ...(profiler ? { AO_PPROF_ADDR: profiler } : {}), AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
             // AO bounds every request at 60 s, and starting a chat agent (worktree, agent process,
             // its handshake) took longer on a busy machine: the chat failed with SPAWN_TIMEOUT
             // while the agent came up seconds later. Just under this app's own 180 s for a POST,
@@ -1620,9 +1725,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             error = `AO exited (${code})${daemonLines ? `: ${daemonLines.trimEnd().slice(-600)}` : ""}`;
           }
         });
-        const deadline = Date.now() + 30000;
-        while (Date.now() < deadline) {
+        // A daemon that exits fails at once (checkStartup); one still starting is waited for. 30 s
+        // was too short on this machine's HDD: on 2026-10-22, right after an update (with the
+        // database compaction running), the first start was given up as "AO readiness timed out",
+        // its daemon killed and a new one started from nothing, and the chats that outlived the
+        // update were not reattached. Earlier that day AO stayed down 12 minutes (16 such starts).
+        // ao.start_slow records how long a slow start really takes, to tell whether the limit fits.
+        const startedAt = Date.now();
+        let slowLogged = false;
+        while (Date.now() - startedAt < readyLimitMs) {
           checkStartup();
+          if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
+            slowLogged = true;
+            logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
+          }
           try {
             const response = await fetch(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", signal: AbortSignal.timeout(1000) });
             checkStartup();
@@ -1633,7 +1749,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           await new Promise((resolve) => setTimeout(resolve, 200));
           checkStartup();
         }
-        throw new Error(`AO readiness timed out. ${logTail.slice(-1500)}`);
+        // "timed out" keeps TRANSIENT_CHAT_START treating it as a start to retry, not a failure.
+        throw new Error(`Agent Orchestrator timed out getting ready. ${logTail.slice(-1500)}`);
       } catch (cause) {
         // Do not call stop here: stop waits for this startup to settle.
         await cleanup();
@@ -1744,7 +1861,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (operation === "upstream_status") return snapshot();
     if (operation === "upstream_start") return start();
     if (operation === "upstream_stop") {
-      if (!await confirm({ message: "Stop Agent Orchestrator?", detail: "Active upstream sessions may be interrupted. Coding Tools missions remain saved." })) return { ok: true, cancelled: true };
+      if (!await confirm({ message: "Stop Agent Orchestrator?", detail: "Running agent sessions may stop. Your chats stay saved." })) return { ok: true, cancelled: true };
       return stop();
     }
     if (operation === "upstream_bind_workspace") {
@@ -1799,7 +1916,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
       if (state !== "ready") return { ok: true, available: false, reason: "Agent Orchestrator is not running" };
       const { projectId } = await workspaceBoard.project(args.workspaceId);
-      if (!projectId) return { ok: true, available: false, reason: "This project's first chat sets it up; choose after that" };
+      if (!projectId) return { ok: true, available: false, reason: "This project's first chat sets this up. Choose after that." };
       if (args.mode !== undefined && !WORKSPACE_MODES.has(args.mode)) throw new Error("Choose worktree, shared or folder");
       const endpoint = `/api/v1/projects/${encodeURIComponent(projectId)}`;
       const read = async () => {
@@ -1822,7 +1939,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // is always written, "worktree" too, so the folder default never overrides a choice.
           await internalApi("PUT", `${endpoint}/config`, { config: { ...config, workspaceMode: args.mode } });
           const saved = (await read()).config.workspaceMode;
-          if (saved !== args.mode) throw new Error("This Agent Orchestrator does not support choosing where chats work yet; update the app");
+          if (saved !== args.mode) throw new Error("This Agent Orchestrator can't choose where chats work yet. Update the app.");
         }
         return { ok: true, available: true, mode: args.mode };
       });
@@ -1917,7 +2034,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const pathArgument = (value) => (typeof value === "string" && value.length <= 1024 && !value.includes("\0") ? value : ".");
       switch (operation) {
         case "chat_terminal_start": return agentTools.terminalStart({ sessionId: args.sessionId, workspaceId: args.workspaceId });
-        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId, workspaceId: args.workspaceId });
+        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId, workspaceId: args.workspaceId, summary: args.summary === true });
         case "chat_files": return agentTools.files({ sessionId: args.sessionId, workspaceId: args.workspaceId, path: pathArgument(args.path) });
         case "chat_file": {
           if (typeof args.path !== "string" || !args.path || args.path.length > 1024) throw new Error("Choose a file");

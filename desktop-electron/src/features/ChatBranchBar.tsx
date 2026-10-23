@@ -2,7 +2,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
 import { useComposerPopover } from "./AgentOrchestratorComposerControls";
-import { useSurfaceHidden } from "./page-visibility";
+import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibility";
 
 type Branch = {
   name: string; updatedAt: string | null; upstream: string | null; worktree: string | null; current: boolean; chat: boolean; default?: boolean;
@@ -65,7 +65,7 @@ const resultOf = (reply: ModuleReply) => {
 /** A refused operation's reason, where moduleCall() reads it too. */
 const failureOf = (reply: ModuleReply) => {
   const result = (reply.result && typeof reply.result === "object" ? reply.result : {}) as { reason?: unknown; detail?: unknown };
-  return String(result.reason || result.detail || "The branch could not be switched");
+  return String(result.reason || result.detail || "Couldn't switch the branch");
 };
 
 /**
@@ -85,17 +85,26 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
   useEffect(() => {
     if (!workspaceId) { setData(null); return; }
     let live = true;
-    const read = () => void getCodingToolsClient().apps.call({
-      moduleId: "agent-orchestrator", operation: "chat_branches", arguments: { workspaceId, ...(sessionId ? { sessionId } : {}) },
-    }).then((reply) => {
-      const result = resultOf(reply as ModuleReply);
-      if (live) setData(result && Array.isArray(result.branches) ? result as ChatBranches : null);
-    }).catch(() => { if (live) setData(null); });
+    // One read at a time: on a busy disk a read took longer than the interval and the next one
+    // started on top of it, so git processes piled up.
+    let reading = false;
+    const read = () => {
+      if (reading) return;
+      reading = true;
+      void getCodingToolsClient().apps.call({
+        moduleId: "agent-orchestrator", operation: "chat_branches", arguments: { workspaceId, ...(sessionId ? { sessionId } : {}) },
+      }).then((reply) => {
+        const result = resultOf(reply as ModuleReply);
+        if (live) setData(result && Array.isArray(result.branches) ? result as ChatBranches : null);
+      }).catch(() => { if (live) setData(null); }).finally(() => { reading = false; });
+    };
     read();
-    // Each read runs about a dozen git commands in the main process. A minimized window or a hidden
-    // tab skips its refreshes, and the list is read again when the menu opens (below).
-    const timer = window.setInterval(() => { if (!surfaceHidden()) read(); }, REFRESH_MS);
-    return () => { live = false; window.clearInterval(timer); };
+    // Each read runs about a dozen git commands in the main process. A minimized window, a hidden
+    // tab or another app in front skips its refreshes; the list is read again when the window gets
+    // focus back and when the menu opens (below).
+    const timer = window.setInterval(() => { if (!surfaceHidden() && !windowUnfocused()) read(); }, REFRESH_MS);
+    const offFocus = onWindowFocus(() => { if (!surfaceHidden()) read(); });
+    return () => { live = false; window.clearInterval(timer); offFocus(); };
   }, [workspaceId, sessionId, revision, surfaceHidden]);
   // Opening the menu shows the branches as they are now, not as of the last refresh.
   useEffect(() => { if (popup.open) setRevision((value) => value + 1); }, [popup.open]);
@@ -104,7 +113,7 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
   // Inline, it is one chip in the new-chat strip; otherwise a bar over the composer of a chat.
   const barClass = inline ? "cx-branch-bar is-inline" : "cx-branch-bar";
   if (!data.git) {
-    return <div className={barClass}><span className="cx-branch-note" title="Agent harnesses need a git repository; Native Codex works here">
+    return <div className={barClass}><span className="cx-branch-note" title="Agents need a git repository. Native Codex works here">
       <Icon name="git" width="14" height="14" />Not a git repository</span></div>;
   }
   const choose = (branch: Branch) => {
@@ -135,7 +144,7 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
     <div className="ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
       <button type="button" className="cx-branch-chip" ref={popup.trigger} aria-haspopup="dialog" aria-expanded={popup.open}
         aria-label={`Branch: ${inUse}`} title={data.chatBranch && data.chatBranch !== data.current
-          ? `This chat works on ${data.chatBranch}; the project folder is on ${data.current}` : `On ${inUse}`}
+          ? `Chat on ${data.chatBranch} · project folder on ${data.current}` : `On ${inUse}`}
         onClick={() => popup.setOpen((value) => !value)}>
         <Icon name="git" width="14" height="14" /><span>{inUse}</span><Caret />
       </button>
@@ -176,7 +185,7 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
                       title={[branch.name, branch.commit ? `${branch.commit} ${branch.subject ?? ""}` : "",
                         branch.updatedAt ? `last commit ${new Date(branch.updatedAt).toLocaleString()}` : "",
                         branch.upstream ? `tracks ${branch.upstream}${branch.track ? ` (${branch.track})` : ""}` : "",
-                        held ? `checked out in ${branch.worktree}; finish or remove that chat to use it here` : "",
+                        held ? `Checked out in ${branch.worktree}. Finish or remove that chat to use it here` : "",
                         !held && !branch.current ? "Check out in the project folder" : ""].filter(Boolean).join("\n")}>
                       <span className="cx-branch-main">
                         <span className="cx-branch-name">{branch.name}</span>

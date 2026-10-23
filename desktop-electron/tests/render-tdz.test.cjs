@@ -1,4 +1,5 @@
 "use strict";
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 
 // A const read during render before its declaration throws "Cannot access 'x' before
 // initialization" and unmounts the whole window (2026-10-20: the approval filter read

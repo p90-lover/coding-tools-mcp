@@ -1,3 +1,4 @@
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -222,6 +223,68 @@ test("DEV runtime supervision ignores launcher version mismatch and starts only 
     assert.equal(state.tunnelPid, 123_456_789);
   } finally {
     supervisor.tunnel = null;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a process is inspected without blocking the main thread", { skip: process.platform !== "win32" }, async () => {
+  // PowerShell through spawnSync (10 s timeout) froze the app while the bridge started or recovered.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-process-info-"));
+  try {
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: path.join(root, "runtime", "launcher-browser.json"),
+    });
+    let ticks = 0;
+    const ticker = setInterval(() => { ticks += 1; }, 5);
+    const pending = supervisor.processInfo(process.pid);
+    assert.ok(pending instanceof Promise);
+    const info = await pending;
+    clearInterval(ticker);
+    assert.ok(ticks > 0, "timers kept running while PowerShell ran");
+    assert.ok(info === null || path.basename(info.executablePath).toLowerCase() === path.basename(process.execPath).toLowerCase(), JSON.stringify(info));
+    assert.equal(await supervisor.processInfo(-1), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the runtime config is parsed once per change, not on every monitor read", () => {
+  // The monitors read config.json every 2-60 s; on a busy hard disk each synchronous read stalled the app.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-config-cache-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const configPath = path.join(root, "config.json");
+  const { readFileSync } = fs;
+  let reads = 0;
+  try {
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath))}\n`);
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: descriptorPath,
+    });
+    fs.readFileSync = function (file, ...rest) { if (file === configPath) reads += 1; return readFileSync.call(this, file, ...rest); };
+    for (let i = 0; i < 5; i++) {
+      assert.equal(supervisor.readSetupConfig().port, 17841);
+      assert.equal(supervisor.readConfig().port, 17841);
+    }
+    assert.equal(reads, 1, "ten reads, one parse");
+    supervisor.readSetupConfig().port = 1;
+    assert.equal(supervisor.readSetupConfig().port, 17841, "a caller's change does not leak into the next read");
+    // Another writer (the setup command) changes it: the next read sees it.
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath, { port: 17999, appName: "Changed app" }))}\n`);
+    fs.utimesSync(configPath, new Date(), new Date(Date.now() + 5_000));
+    assert.equal(supervisor.readConfig().port, 17999);
+    fs.rmSync(configPath);
+    assert.equal(supervisor.readSetupConfig(), null);
+    assert.equal(supervisor.readConfig(), null);
+  } finally {
+    fs.readFileSync = readFileSync;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -1475,6 +1538,31 @@ test("launcher marks compensation ready only after both owned runtime processes 
   assert.equal(await supervisor.ownedRuntimeReady({ mode: "full" }), true);
 });
 
+test("the owned-runtime check says which part failed, for the launcher watchdog's log", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  const full = { mode: "full" };
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "daemon_missing" });
+  supervisor.daemon = { pid: 123_456_785, exitCode: 1, signalCode: null };
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "daemon_exited" });
+  supervisor.daemon = { pid: 123_456_785, exitCode: null, signalCode: null };
+  supervisor.proxyHealth = async () => false;
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "daemon_health" });
+  supervisor.proxyHealth = async () => true;
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "tunnel_missing" });
+  supervisor.tunnel = { pid: 123_456_786, exitCode: null, signalCode: null };
+  supervisor.tunnelHealth = async () => false;
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "tunnel_health" });
+  supervisor.tunnelHealth = async () => true;
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: true });
+  assert.deepEqual(await supervisor.ownedRuntimeCheck({ mode: "browser-only" }), { ready: true });
+});
+
 test("failed initial health checks stop their child without scheduling crash recovery", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-startup-cleanup-"));
   const childPath = path.join(root, "child.cjs");
@@ -1657,6 +1745,56 @@ test("stale ownership recovery stops a managed tmux runtime even though it has n
   }
 });
 
+for (const [label, content] of [["empty", Buffer.alloc(0)], ["zero-filled", Buffer.alloc(179)]]) {
+  test(`launcher recovers a ${label} ownership marker without losing its bytes`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-empty-ownership-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const descriptor = path.join(root, "launcher.json");
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root, coreHome: root, browserDescriptorPath: descriptor,
+    });
+    fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+    fs.writeFileSync(supervisor.statePath, content);
+    assert.equal(supervisor.readState(), null);
+    assert.deepEqual(fs.readFileSync(supervisor.statePath), content, "reading must not consume the marker");
+    supervisor.readConfig = () => launcherConfig(descriptor);
+    supervisor.proxyHealth = async () => false;
+    let starts = 0;
+    supervisor.startDaemon = async () => { starts += 1; };
+    supervisor.startTunnel = async () => {};
+    assert.equal((await supervisor.startConfigured()).status, "ready");
+    assert.equal(starts, 1);
+    assert.equal(JSON.parse(fs.readFileSync(supervisor.statePath, "utf8")).status, "ready");
+    const trash = path.join(root, "Trash");
+    const backups = fs.readdirSync(trash);
+    assert.ok(backups.length > 0);
+    for (const backup of backups) {
+      assert.deepEqual(fs.readFileSync(path.join(trash, backup, "launcher-supervisor.json")), content);
+    }
+  });
+}
+
+test("a zero-filled marker never authorizes taking over a healthy unowned runtime", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-empty-unowned-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const descriptor = path.join(root, "launcher.json");
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root, coreHome: root, browserDescriptorPath: descriptor,
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  fs.writeFileSync(supervisor.statePath, Buffer.alloc(179));
+  supervisor.readConfig = () => launcherConfig(descriptor);
+  supervisor.proxyHealth = async () => true;
+  supervisor.startDaemon = async () => assert.fail("must not start a second runtime");
+  supervisor.control = async () => assert.fail("must not control an unowned runtime");
+  assert.equal((await supervisor.startConfigured()).status, "external");
+  assert.equal(supervisor.daemon, null);
+});
+
 test("launcher fails closed on a corrupt runtime ownership marker", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-corrupt-runtime-state-"));
   const supervisor = new RuntimeSupervisor({
@@ -1670,6 +1808,34 @@ test("launcher fails closed on a corrupt runtime ownership marker", () => {
   fs.writeFileSync(supervisor.statePath, "{\"version\":1}\n");
   try {
     assert.throws(() => supervisor.readState(), /ownership state is invalid/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cleared, not as corrupt", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-torn-runtime-state-"));
+  const warnings = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn(event, detail) { warnings.push([event, detail]); }, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  try {
+    // 2026-10-23: after a hard reset the file kept its 233-byte size, all NULs, and every watchdog
+    // restart failed on it for 25 minutes.
+    for (const torn of [Buffer.alloc(233), Buffer.alloc(0), Buffer.from("\n")]) {
+      fs.writeFileSync(supervisor.statePath, torn);
+      assert.equal(supervisor.readState(), null);
+      assert.equal(fs.existsSync(supervisor.statePath), false, "it is set aside");
+    }
+    assert.deepEqual(warnings.map(([event]) => event), ["runtime.state_torn", "runtime.state_torn", "runtime.state_torn"]);
+    assert.equal(warnings[0][1].bytes, 233);
+    supervisor.writeState("idle");
+    assert.equal(supervisor.readState().status, "idle");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

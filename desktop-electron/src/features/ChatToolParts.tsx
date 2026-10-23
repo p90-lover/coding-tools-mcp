@@ -12,6 +12,12 @@ import { chatMessageReadable, numberedDiff, type ChatStepRound, type SteerReceip
 export const SentMessageView = createContext<(text: string) => ReactNode>(
   (text) => <div className="cx-bubble"><p>{chatMessageReadable(text)}</p></div>);
 
+/**
+ * A stuck turn's Restart (AgentOrchestratorChat's restartTurn), for a running footer drawn inside a
+ * memoized transcript (DshTurnWork) that a prop would not reach.
+ */
+export const TurnRestart = createContext<{ onRestart?: () => void; restarting: boolean }>({ restarting: false });
+
 /** Who reads the person's steers in this card ("Read by Claude"), from steerReader. */
 export const SteerReader = createContext("Claude");
 
@@ -23,7 +29,7 @@ export const SteerReader = createContext("Claude");
 export function SteerReceiptMark({ receipt }: { receipt?: SteerReceipt }) {
   const reader = useContext(SteerReader);
   if (!receipt) return null;
-  const words = receipt === "read" ? `Read by ${reader}` : "Unread";
+  const words = receipt === "read" ? `Read by ${reader}` : receipt === "sending" ? "Sending…" : "Unread";
   return <span className="cx-receipt" data-receipt={receipt} role="img" aria-label={words} data-tip={words} tabIndex={0}>
     <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       {receipt === "read" ? <><path d="M18 6 7 17l-5-5" /><path d="m22 10-7.5 7.5L13 16" /></> : <path d="M20 6 9 17l-5-5" />}

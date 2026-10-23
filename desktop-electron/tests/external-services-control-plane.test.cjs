@@ -642,12 +642,19 @@ test("rewriting the live service file with the same content does not snapshot re
   const archive = path.join(directory, "archives", "retired-services");
   const snapshots = () => (fs.existsSync(path.join(archive, "snapshots")) ? fs.readdirSync(path.join(archive, "snapshots")).length : 0);
   const before = snapshots();
+  const manifest = path.join(archive, "manifest.json");
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(manifest, old, old);
+  const manifestWritten = fs.statSync(manifest).mtimeMs;
   // Same bytes, newer mtime: what every launch does to this file.
-  const later = new Date(Date.now() + 60_000);
-  fs.writeFileSync(filePath, fs.readFileSync(filePath));
-  fs.utimesSync(filePath, later, later);
-  createExternalServicesController(options).dispose();
+  for (const offset of [60_000, 120_000]) {
+    const later = new Date(Date.now() + offset);
+    fs.writeFileSync(filePath, fs.readFileSync(filePath));
+    fs.utimesSync(filePath, later, later);
+    createExternalServicesController(options).dispose();
+  }
   assert.equal(snapshots(), before, "no new snapshot for an unchanged file");
+  assert.equal(fs.statSync(manifest).mtimeMs, manifestWritten, "nor a rewrite of the manifest, which lists every retired file");
   // A real change still gets its own snapshot.
   fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {}, secrets: { changed: true } }));
   createExternalServicesController(options).dispose();

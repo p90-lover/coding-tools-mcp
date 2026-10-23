@@ -11,7 +11,6 @@
   --claude-raised: #ffffff;
   --claude-text: #141413;
   --claude-text-2: #73726c;
-  --claude-queued-text: #52514e;
   --claude-line: rgb(31 30 29 / 15%);
   --claude-line-soft: rgb(31 30 29 / 9%);
   --claude-accent: #d97757;
@@ -60,7 +59,6 @@
   --claude-raised: #30302e;
   --claude-text: #faf9f5;
   --claude-text-2: #a6a39a;
-  --claude-queued-text: #a5a49a;
   --claude-line: rgb(222 220 209 / 15%);
   --claude-line-soft: rgb(222 220 209 / 9%);
   --claude-accent-soft: rgb(217 119 87 / 18%);
@@ -79,13 +77,13 @@
 }
 
 /* The window's drag strip sits above the chat in the same column: paint it the chat's background. */
-.ao-workflow .ao-main:has(> .ao-stage > .cx-chat) { background: #faf9f5; }
-.ao-workflow[data-theme="dark"] .ao-main:has(> .ao-stage > .cx-chat) { background: #262624; }
+.ao-workflow .ao-main:has(> .ao-stage .cx-chat) { background: #faf9f5; }
+.ao-workflow[data-theme="dark"] .ao-main:has(> .ao-stage .cx-chat) { background: #262624; }
 
 /* Beside a chat, the thread list is Claude's sidebar: its bg-200 a step deeper than the bg-100
    canvas, with the same warm hovers, instead of the orchestrator's cool grey (and white behind). */
-.ao-workflow:has(> .ao-main > .ao-stage > .cx-chat) { background: #faf9f5; }
-.ao-workflow:has(> .ao-main > .ao-stage > .cx-chat) > .cx-threads {
+.ao-workflow:has(> .ao-main > .ao-stage .cx-chat) { background: #faf9f5; }
+.ao-workflow:has(> .ao-main > .ao-stage .cx-chat) > .cx-threads {
   --cx-sidebar: #f5f4ed;
   --cx-hover: rgb(31 30 29 / 5%);
   --cx-active: rgb(31 30 29 / 8%);
@@ -96,8 +94,8 @@
   background: #f5f4ed;
   color: #141413;
 }
-.ao-workflow[data-theme="dark"]:has(> .ao-main > .ao-stage > .cx-chat) { background: #262624; }
-.ao-workflow[data-theme="dark"]:has(> .ao-main > .ao-stage > .cx-chat) > .cx-threads {
+.ao-workflow[data-theme="dark"]:has(> .ao-main > .ao-stage .cx-chat) { background: #262624; }
+.ao-workflow[data-theme="dark"]:has(> .ao-main > .ao-stage .cx-chat) > .cx-threads {
   --cx-sidebar: #1f1e1d;
   --cx-hover: rgb(250 249 245 / 6%);
   --cx-active: rgb(250 249 245 / 10%);
@@ -217,7 +215,7 @@
 .ao-workflow .cx-chat .cx-reasoning-body { margin: 2px 0 6px 6px; padding-left: 12px; border-left: 1px solid var(--claude-line-soft); color: var(--claude-text-2); }
 .ao-workflow .cx-chat .cx-reasoning-body .cx-md { color: var(--claude-text-2); font-size: 13px; line-height: 1.6; }
 .ao-workflow .cx-chat .cx-shimmer { background-image: linear-gradient(90deg, var(--claude-text-2) 0%, var(--claude-text) 50%, var(--claude-text-2) 100%);
-  animation-duration: 2.8s; }
+  animation-duration: 2.8s; animation-timing-function: steps(84); }
 
 /* ---------- Cards: approvals, questions, plans, errors ---------- */
 .ao-workflow .cx-chat .ao-msg-approval, .ao-workflow .cx-chat .cx-card { padding: 14px 16px; border: 1px solid var(--claude-line); border-radius: 12px;
@@ -259,11 +257,12 @@
 .ao-workflow .cx-chat .cx-delete-confirm .cx-primary-button { background: var(--ao-red); }
 
 /* ---------- Composer ---------- */
-.ao-workflow .cx-chat .cx-queued-message .cx-bubble { max-width: none; }
-/* A queued message's text is Claude's text-secondary (neutral-600): #52514e light, #a5a49a dark. */
-.ao-workflow .cx-chat .cx-queued-row[data-state="queued"] .cx-bubble { color: var(--claude-queued-text, #52514e); }
-.ao-workflow .cx-chat .cx-queued-discard button, .ao-workflow .cx-chat .cx-queued-send-now, .ao-workflow .cx-chat .cx-queued-status { color: var(--claude-text-2); }
-.ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card, .ao-workflow .cx-chat .cx-queued,
+/* The queued bar's ink is Claude's text; its muted text stays Claude Code's gray-400 (#898781). */
+.ao-workflow .cx-chat .cx-queued { --cq-ink: var(--claude-text); }
+/* Edit goal in Claude's palette: its raised surface, line and shadow, and Claude's text as ink. */
+.ao-workflow .cx-chat .cx-goal-edit { --ge-ink: var(--claude-text); border-color: var(--claude-line); background: var(--claude-raised); box-shadow: var(--claude-shadow); }
+.ao-workflow .cx-chat .cx-goal-edit-save { color: var(--claude-raised); }
+.ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card, .ao-workflow .cx-chat .cx-queued, .ao-workflow .cx-chat .cx-goal-edit,
 .ao-workflow .cx-chat .cx-composer-modes, .ao-workflow .cx-chat .cx-route-note,
 /* The approval card docks above the composer at its exact width, as Codex's does (it was 40px wider). */
 .ao-workflow .cx-chat .cx-approval-dock { max-width: 740px; }
@@ -346,3 +345,48 @@
   .ao-workflow .cx-chat :is(.cx-send, .cx-card-actions button, .ao-msg-actions button, .cx-primary-button):active:not(:disabled) { transform: none; }
   .ao-workflow .cx-chat .cx-shimmer { background: none; color: var(--claude-text-2); }
 }
+
+/* ---------- Split view ----------
+   Claude Code's split view (its desktop app's pane host): the window's chat and the other panes in
+   a grid of columns, each one pane or a top and a bottom one; 12 px dividers whose pill shows on
+   hover; panes not focused are dimmed; a chat dragged from the sidebar shows a badge where it opens. */
+.ao-stage > .cx-split, .cx-pane > .cx-pane-surface > .ao-main > .ao-stage > .cx-split {
+  --cx-pane-row: 0.5;
+  position: relative; display: grid; flex: 1 1 auto; min-width: 0; min-height: 0; gap: 0;
+  grid-template-columns: var(--cx-col-tracks, minmax(0, 1fr));
+  grid-template-rows: minmax(0, calc(var(--cx-pane-row) * 100%)) minmax(0, 1fr);
+}
+.cx-split > .cx-pane { position: relative; display: flex; min-width: 0; min-height: 0; transition: filter 0.12s ease-out; }
+.cx-split > .cx-pane:not([data-col="0"]) { border-left: 1px solid rgb(31 30 29 / 15%); }
+.cx-split > .cx-pane[data-row="1"] { border-top: 1px solid rgb(31 30 29 / 15%); }
+.cx-split[data-split] > .cx-pane:not([data-focused]) { filter: opacity(0.75) saturate(0.85); }
+.cx-split > .cx-pane-extra { animation: cx-pane-in 0.18s cubic-bezier(0.2, 0, 0, 1); }
+@keyframes cx-pane-in { from { opacity: 0; } }
+/* A pane is a Surface of its own: it fills its cell and draws no sidebar or drag strip. */
+.cx-pane > .cx-pane-surface { flex: 1 1 auto; height: auto; background: #faf9f5; }
+.cx-split[data-split] .cx-pane-close { color: var(--ao-muted); }
+
+.cx-split-resize { position: absolute; z-index: 11; display: flex; align-items: center; justify-content: center; touch-action: none; -webkit-app-region: no-drag; }
+.cx-split-resize.is-col { top: 0; bottom: 0; width: 12px; margin-left: -6px; cursor: col-resize; }
+.cx-split-resize.is-row { height: 12px; top: calc(var(--cx-pane-row) * 100%); transform: translateY(-50%); cursor: row-resize; }
+.cx-split-pill { border-radius: 9999px; background: #73726c; opacity: 0; transition: opacity 0.15s ease-out; }
+.cx-split-resize.is-col .cx-split-pill { width: 3px; height: 100%; max-height: 48px; }
+.cx-split-resize.is-row .cx-split-pill { height: 3px; width: 100%; max-width: 48px; }
+.cx-split-resize:hover .cx-split-pill { opacity: 1; transition-delay: 0.2s; }
+.cx-split-resize[data-dragging] .cx-split-pill { opacity: 1; background: #3d3d3a; transition-delay: 0s; }
+.cx-split-resize:focus-visible { outline: none; }
+.cx-split-resize:focus-visible .cx-split-pill { opacity: 1; background: #d97757; }
+
+.cx-drop-overlay { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
+.cx-drop-badge {
+  position: absolute; display: flex; align-items: center; justify-content: center;
+  border: 1px solid rgb(31 30 29 / 25%); border-radius: 12px;
+  background: color-mix(in srgb, #faf9f5 40%, transparent); backdrop-filter: blur(2px);
+  box-shadow: inset 0 0 0 2px #d97757;
+  font-size: 0.875rem; font-weight: 500;
+  transition: left 0.12s cubic-bezier(0.33, 1, 0.68, 1), top 0.12s cubic-bezier(0.33, 1, 0.68, 1), width 0.12s cubic-bezier(0.33, 1, 0.68, 1), height 0.12s cubic-bezier(0.33, 1, 0.68, 1), opacity 0.12s cubic-bezier(0.33, 1, 0.68, 1);
+}
+.cx-drop-badge::before { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 24px 0 color-mix(in srgb, #d97757 20%, transparent); }
+.cx-drop-label { position: relative; padding: 4px 10px; border-radius: 9999px; background: #d97757; color: #fff; }
+.cx-drop-badge[data-hint] { opacity: 0.45; }
+.cx-drop-badge[data-hint] .cx-drop-label { background: rgb(31 30 29 / 10%); color: #3d3d3a; }

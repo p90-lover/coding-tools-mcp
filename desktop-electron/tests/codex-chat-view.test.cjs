@@ -24,10 +24,17 @@ const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancel
 
 // The page the agent's browser has open, as useWorkbenchAutoOpen reports it (null: none).
 let openPage = null;
+// A stuck turn's Restart: its Provider stays in the tree (so a test can read the value the chat
+// gives it), and its value is what TurnRunning reads.
+const turnRestart = { Provider: "TurnRestartProvider", value: { restarting: false } };
 function mount(props) {
-  const states = []; let cursor = 0;
+  // Hook state per component, as React keeps it: by the component's name and its place among
+  // components of that name. One shared list shifted every later component's state whenever a
+  // component appeared earlier in the tree (a steer's bubble turned the stuck footer's clock back).
+  const frames = new Map(); let frame = "root", cursor = 0, seen = {};
   const react = {
     useState(initial) {
+      const states = frames.get(frame) ?? frames.set(frame, []).get(frame);
       const at = cursor++;
       if (!(at in states)) states[at] = typeof initial === "function" ? initial() : initial;
       return [states[at], (value) => { states[at] = typeof value === "function" ? value(states[at]) : value; }];
@@ -39,7 +46,14 @@ function mount(props) {
     createContext: (value) => ({ Provider: ({ children }) => children, value }), useContext: (context) => context.value,
   };
   // Function components render inline, so their output (work lines, steps, actions) is visible.
-  const jsx = (type, props, key) => typeof type === "function" ? type(props || {}) : ({ type, props: props || {}, key });
+  const jsx = (type, props, key) => {
+    if (typeof type !== "function") return { type, props: props || {}, key };
+    const name = type.name || "anonymous";
+    seen[name] = (seen[name] ?? 0) + 1;
+    const outer = [frame, cursor];
+    frame = `${name}#${seen[name]}`; cursor = 0;
+    try { return type(props || {}); } finally { [frame, cursor] = outer; }
+  };
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
@@ -47,9 +61,13 @@ function mount(props) {
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
           : name === "./AgentOrchestratorRoleEditor" ? { modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
           : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage }
-            : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark" } : {},
+            : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
-  return { render: (next = {}) => { cursor = 0; return module.AgentOrchestratorChat({ ...props, ...next }); } };
+  return {
+    render: (next = {}) => { frame = "root"; cursor = 0; seen = {}; return module.AgentOrchestratorChat({ ...props, ...next }); },
+    // The queued-message bar alone, for a queue the chat itself rarely builds (two separate messages).
+    bar: (barProps) => { frame = "bar"; cursor = 0; seen = {}; return module.QueuedMessageBar(barProps); },
+  };
 }
 
 function base(extra = {}) {
@@ -121,8 +139,15 @@ test("a turn shows the user bubble, the live work line and a stop button; Esc st
   });
   const chatView = mount(props);
   const view = chatView.render();
-  const work = walk(view).find((element) => element.props?.className === "cx-work-head");
-  assert.match(text(work), /^Working for 1m · Worker — running a command$/);
+  // No head over live work: the steps start at their dots, and the turn's foot says what runs.
+  assert.equal(walk(view).find((element) => element.props?.className === "cx-work-head"), undefined);
+  const step = walk(view).find((element) => element.props?.className === "cx-step-head" && text(element).startsWith("Worker"));
+  assert.ok(step, "the working card's line starts at its dot");
+  assert.doesNotMatch(text(step), /running a command/, "its activity is not repeated on its line");
+  const foot = walk(view).find((element) => String(element.props?.className).startsWith("cx-note cx-turn-running"));
+  assert.match(text(foot), /Working for 1m · Worker — running a command/);
+  // The shimmer repaints its box every frame, so it covers the verb only, not the whole line.
+  assert.deepEqual(walk(foot).filter((element) => element.props?.className === "cx-shimmer").map(text), ["Working"]);
   const stop = walk(view).find((element) => element.props?.["aria-label"] === "Stop (Esc)");
   assert.ok(stop, "a running chat shows Stop in place of Send");
   stop.props.onClick();
@@ -215,6 +240,12 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   const option = walk(newChat.render({ commands: commands() })).find((element) => element.props?.role === "option");
   walk(option).find((element) => element.type === "button").props.onClick();
   assert.equal(walk(newChat.render({ commands: commands() })).find((element) => element.type === "textarea").props.value, "/goal ");
+  // A bare /goal with no goal set shows no usage card: it waits for the objective in the box, where
+  // the line under it says how /goal is used.
+  type(newChat, "/goal"); await enter(newChat);
+  assert.doesNotMatch(text(cardOf(newChat)), /Usage|No goal/, "no card repeating the usage line");
+  assert.equal(walk(newChat.render({ commands: commands() })).find((element) => element.type === "textarea").props.value, "/goal ");
+  type(newChat, "");
 
   // A working team chat: /status, /goal pause and /compact's refusal still run; a goal shows its pill.
   goal = { objective: "ship the release", status: "active", round: 2, rounds: 6, startedAt: Date.now() - 5 * 60_000, updatedAt: Date.now(), note: "" };
@@ -225,26 +256,37 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   type(teamChat, "/goal pause"); await enter(teamChat);
   assert.deepEqual(actions.at(-1), ["goal", "pause"]);
   type(teamChat, "/compact"); await enter(teamChat);
-  assert.match(text(cardOf(teamChat)), /Compact is disabled while a chat is in progress/);
+  assert.match(text(cardOf(teamChat)), /Can't compact while the chat is running/);
   type(teamChat, "/review"); await enter(teamChat);
-  assert.match(text(cardOf(teamChat)), /Queued: it's sent when the current turn finishes/, "a command that sends queues behind the working turn");
+  assert.match(text(cardOf(teamChat)), /Queued\. It's sent when this turn finishes/, "a command that sends queues behind the working turn");
   assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the release5m \d+s$/, "Codex's goal bar: state, objective, running time");
   assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
+  // The bar's icons are buttons, not typed commands: what is typed in the box stays.
+  type(teamChat, "half a message");
+  const typed = () => walk(teamChat.render({ commands: commands() })).find((element) => element.type === "textarea" && element.props["aria-label"] !== "Goal").props.value;
   walk(pill).find((element) => element.type === "button" && element.props.title === "Pause goal").props.onClick();
   await settle(); await settle();
   assert.deepEqual(actions.at(-1), ["goal", "pause"]);
+  assert.equal(typed(), "half a message", "Pause leaves the draft alone");
   // Edit goal opens an editor; Save sends the new objective and closes it.
   walk(pill).find((element) => element.type === "button" && element.props.title === "Edit goal").props.onClick();
   await settle(); await settle();
   const editor = () => walk(teamChat.render({ commands: commands() })).find((element) => element.type === "section" && element.props?.["aria-label"] === "Edit goal");
   assert.equal(walk(editor()).find((element) => element.type === "textarea").props.value, "ship the release");
+  assert.equal(typed(), "half a message", "and so does Edit");
+  walk(teamChat.render({ commands: commands() })).find((element) => element.type === "textarea" && element.props["aria-label"] !== "Goal").props.onChange({ target: { value: "" } });
   walk(editor()).find((element) => element.type === "textarea").props.onChange({ target: { value: "ship the release with notes" } });
   walk(editor()).find((element) => element.type === "button" && text(element) === "Save").props.onClick();
   await settle(); await settle();
   assert.deepEqual(actions.at(-1), ["edit", "ship the release with notes"]);
   assert.equal(editor(), undefined, "the editor closes after saving");
+  // A bare /goal with a goal opens the same editor; Esc closes it unsaved.
+  type(teamChat, "/goal"); await enter(teamChat);
+  assert.equal(walk(editor()).find((element) => element.type === "textarea").props.value, "ship the release");
+  walk(editor()).find((element) => element.type === "textarea").props.onKeyDown({ key: "Escape", preventDefault() {} });
+  assert.equal(editor(), undefined);
   // A paused goal offers Resume instead of Pause.
   goal = { ...goal, status: "paused" };
   const pausedPill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
@@ -281,7 +323,50 @@ test("while the agent works, a typed message steers it at once; Esc on an empty 
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "a delivered steer is not also sent as a follow-up");
 });
 
-test("while the agent works, /review and /init steer it; a new goal waits for the turn; /rewind goes back to a message", async () => {
+test("a turn that may be stuck has a Restart button; it stops the turn and has the same agent continue", async () => {
+  // Seen live 2026-10-22: "may be stuck 3h 39m" on a tool call that never returned, with nothing to press.
+  const now = Date.now();
+  const steered = [];
+  const { props, calls } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { started_at_ms: now - 4 * 3_600_000 } })], { execution_mode: "single" })],
+    activity: { "r1:w": { activity: "running Find detection log files", last_event_at_ms: now - 11 * 60_000, turn_started: true } },
+    steer: async (input) => { steered.push(input); return true; } });
+  const view = mount(props);
+  const provided = walk(view.render()).find((element) => element.type === "TurnRestartProvider").props.value;
+  assert.equal(typeof provided.onRestart, "function", "a steerable chat offers Restart");
+  try {
+    turnRestart.value = { onRestart: provided.onRestart, restarting: false };
+    const running = walk(view.render()).find((element) => String(element.props?.className).includes("cx-turn-running"));
+    assert.match(text(running), /may be stuck/);
+    const button = walk(running).find((element) => element.props?.className === "cx-turn-restart");
+    assert.ok(button && !button.props.disabled, "the stuck footer has its own Restart");
+    assert.equal(text(button), "Restart");
+    button.props.onClick();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(steered.length, 1);
+    assert.equal(steered[0].restart, true, "the turn is restarted whatever its quiet time");
+    assert.match(steered[0].message, /^Your previous turn stopped responding and was restarted\. Continue the same task/);
+    assert.equal(calls.filter(([kind]) => kind === "stop").length, 0, "the run is not stopped: the same agent continues");
+    turnRestart.value = { onRestart: provided.onRestart, restarting: true };
+    const pressed = walk(walk(view.render()).find((element) => String(element.props?.className).includes("cx-turn-running")))
+      .find((element) => element.props?.className === "cx-turn-restart");
+    assert.equal(pressed.props.disabled, true);
+    assert.equal(text(pressed), "Restarting…");
+  } finally { turnRestart.value = { restarting: false }; }
+});
+
+test("a chat that cannot be steered keeps the old hint on a stuck turn instead of a Restart", () => {
+  const now = Date.now();
+  const { props } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { receipt: { started_at_ms: now - 3_600_000 } })], { execution_mode: "single" })],
+    activity: { "r1:w": { activity: "running a command", last_event_at_ms: now - 11 * 60_000, turn_started: true } } });
+  const view = mount(props).render();
+  assert.equal(walk(view).find((element) => element.type === "TurnRestartProvider").props.value.onRestart, undefined);
+  const running = walk(view).find((element) => String(element.props?.className).includes("cx-turn-running"));
+  assert.match(text(running), /may be stuck · send a message to restart it$/);
+});
+
+test("while the agent works, /review, /init and a new goal steer it; /rewind goes back to a message", async () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const steered = [], rewound = [];
   const { props, calls } = base({ selectedTaskId: "t", working: true,
@@ -303,10 +388,10 @@ test("while the agent works, /review and /init steer it; a new goal waits for th
   type("/init"); await enter();
   assert.match(steered.at(-1).message, /^Generate a file named AGENTS\.md/);
   type("/goal finish the migration"); await enter();
-  assert.equal(steered.length, 2, "a goal is never steered");
-  assert.match(text(card()), /Queued: it's sent when the current turn finishes/);
-  type("/goal clear"); await enter();
-  assert.match(text(card()), /The queued goal was dropped/);
+  // As in Claude Code, the goal steers in mid-turn (its first round) instead of waiting for the turn.
+  assert.equal(steered.length, 3, "a goal steers in too");
+  assert.deepEqual([steered[2].message, steered[2].goal], ["finish the migration", "finish the migration"]);
+  assert.doesNotMatch(text(card() ?? { props: {} }), /Queued/);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
 
   // /rewind lists the messages (newest first) and opens the chosen one to edit; a number picks directly.
@@ -328,7 +413,7 @@ test("a working chat on a non-AO model is not offered steering; a message typed 
     steer: async () => { throw new Error("not steerable"); } });
   const view = mount(props);
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
-  assert.equal(textarea().props.placeholder, "Running — a message now is sent when it finishes");
+  assert.equal(textarea().props.placeholder, "Running. New messages send when it finishes");
   textarea().props.onChange({ target: { value: "also check the logs" } });
   const button = walk(view.render()).find((element) => element.props?.["aria-label"] === "Queue message");
   assert.ok(button && !button.props.disabled, "Send queues instead of being replaced by Stop");
@@ -342,7 +427,23 @@ test("a working chat on a non-AO model is not offered steering; a message typed 
   assert.ok(!walk(view.render()).some((element) => String(element.props?.className).includes("cx-command-card")), "no notice card says it was queued");
 });
 
-test("a queued message waits as Claude Code's queue row: greyed, Queued, Discard on hover, Send now on the first, click to edit", async () => {
+test("Enter is never refused while another action holds the surface: the message waits in the queue, as in Claude Code", async () => {
+  // The user: "when sending a message, it will stop then freeze, wait for like 2-5 seconds to able
+  // to send". The surface's one-action lock (a refresh, an approval) left Send disabled meanwhile.
+  const { props, calls } = base({ selectedTaskId: "t", busy: true,
+    runs: [run("r1", "t", [node("w", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })] });
+  const view = mount(props);
+  const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+  textarea().props.onChange({ target: { value: "keep going" } });
+  const button = walk(view.render()).find((element) => element.type === "button" && element.props?.type === "submit");
+  assert.ok(button && !button.props.disabled, "Send stays live while the surface is busy");
+  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "it waits for the lock instead of being refused");
+  assert.equal(textarea().props.value, "", "the composer is free at once");
+  assert.match(text(walk(view.render()).find((element) => element.props?.["aria-label"] === "Queued messages")), /keep going/);
+});
+
+test("a queued message waits in Claude Code's queued bar: 1 message queued, its text greyed, Send now, Edit and Remove", async () => {
   const { props, calls } = base({ selectedTaskId: "t-bar", working: true,
     runs: [run("r1", "t-bar", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
     steer: async () => { throw new Error("not steerable"); } });
@@ -353,41 +454,79 @@ test("a queued message waits as Claude Code's queue row: greyed, Queued, Discard
     textarea().props.onChange({ target: { value: message } });
     await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   };
-  await queue("first note");
-  const rows = () => all().filter((element) => element.type === "li" && element.props.className === "cx-queued-row");
-  assert.equal(rows().length, 1);
-  assert.equal(rows()[0].props["data-state"], "queued", "drawn in Claude's queued state (greyed text)");
-  const status = all().find((element) => element.props?.role === "status" && element.props.className === "cx-sr-only");
-  assert.equal(text(status), "1 message queued. Will send after the current response.", "Claude Code's status line, for screen readers");
-  const action = (label, row = rows()[0]) => walk(row).find((element) => element.props?.["aria-label"] === label);
-  assert.deepEqual(walk(rows()[0]).filter((element) => element.type === "button").map((element) => element.props["aria-label"]),
-    ["Discard queued message", "Send now"], "Claude Code's row: its X, and Send now on the first queued message");
-  assert.equal(text(walk(rows()[0]).find((element) => element.props?.className === "cx-queued-status")), "Queued");
-  assert.equal(action("Edit in composer").props.role, "button", "the bubble itself puts the message back to edit");
+  await queue("first   note\nsecond line");
+  const band = () => all().find((element) => String(element.props?.className).startsWith("cx-queued-band"));
+  assert.equal(band().props["data-state"], "queued");
+  assert.deepEqual(walk(band()).filter((element) => element.type === "span").map((element) => [element.props.className, text(element)]),
+    [["cx-queued-count", "1 message queued"], ["cx-queued-preview", "first note second line"]], "Claude Code's row: the count, then the message on one line");
+  const action = (label) => walk(band()).find((element) => element.props?.["aria-label"] === label);
+  assert.deepEqual(walk(band()).filter((element) => element.type === "button").map((element) => element.props["aria-label"]),
+    ["Send now", "Edit in composer", "Remove from queue"], "then its ↵, pencil and X");
   // The agent can't be steered and the turn still runs: Send now waits, and says why.
   assert.equal(action("Send now").props.disabled, true);
   assert.equal(action("Send now").props["data-tip"], "Sent when the current turn finishes");
-  // A click on a control inside the bubble (an attachment's preview or file button) is that control's:
-  // the message stays queued.
-  const bubble = { closest: () => bubble };
-  const attachmentButton = { closest: () => attachmentButton };
-  action("Edit in composer").props.onClick({ target: attachmentButton, currentTarget: bubble });
-  assert.equal(rows().length, 1, "opening an attachment does not dequeue the message");
-  action("Edit in composer").props.onKeyDown({ key: "Enter", target: attachmentButton, currentTarget: bubble, preventDefault() {} });
-  assert.equal(rows().length, 1, "nor does Enter on that control");
   // Edit in composer takes it out of the queue and back into the box, ahead of anything typed.
   textarea().props.onChange({ target: { value: "typed meanwhile" } });
-  action("Edit in composer").props.onClick({ target: bubble, currentTarget: bubble });
-  assert.equal(rows().length, 0, "it leaves the queue");
-  assert.equal(textarea().props.value, "first note\n\ntyped meanwhile");
-  // Discard drops it; nothing is sent. Only the first queued message has Send now.
+  action("Edit in composer").props.onClick();
+  assert.equal(band(), undefined, "it leaves the queue");
+  assert.equal(textarea().props.value, "first   note\nsecond line\n\ntyped meanwhile");
+  // Remove from queue drops it; nothing is sent.
   textarea().props.onChange({ target: { value: "" } });
   await queue("second note");
-  assert.equal(rows().length, 1);
-  action("Discard queued message").props.onClick();
-  assert.equal(rows().length, 0);
+  action("Remove from queue").props.onClick();
   assert.equal(all().some((element) => element.props?.["aria-label"] === "Queued messages"), false, "an empty queue shows no bar");
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
+});
+
+test("a steer on its way stays in the chat while a message waiting for the next turn is in the queued bar", async () => {
+  const { props, calls } = base({ selectedTaskId: "t-stack", working: false,
+    runs: [run("r1", "t-stack", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    // The first steer is still on its way; the agent stops for the second, which waits as its next turn.
+    steer: ({ message }) => message === "use the other API" ? new Promise(() => {}) : Promise.resolve("restart") });
+  const view = mount(props);
+  const all = () => walk(view.render());
+  const type = (message) => {
+    all().find((element) => element.type === "textarea").props.onChange({ target: { value: message } });
+    return all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  };
+  type("use the other API");
+  type("then rerun the tests");
+  await new Promise((resolve) => setImmediate(resolve));
+  // The steer is in the chat, in its turn: it sat under the goal in the queued bar, then jumped up.
+  const steer = all().find((element) => element.props?.className === "cx-user cx-steer");
+  assert.equal(steer?.props["data-pending"], "sending");
+  assert.match(text(steer), /use the other API/);
+  assert.equal(walk(steer).find((element) => element.type === "SteerReceiptMark").props.receipt, "sending");
+  // Only the message that waits for the next turn is in the bar, with its actions.
+  const band = all().find((element) => element.props?.className === "cx-queued-band");
+  assert.equal(text(band), "1 message queuedthen rerun the tests");
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
+});
+
+test("two queued messages fold into Claude Code's stack: Next: …, then a list with ⋮ and Clear all", () => {
+  const { props } = base();
+  const view = mount(props);
+  const done = [];
+  const item = (text) => ({ key: text, text, state: "queued", onEdit: () => done.push(["edit", text]), onRemove: () => done.push(["remove", text]), onSendNow: () => done.push(["send", text]) });
+  let menu = null, cleared = 0;
+  const barProps = { items: [item("use the other API"), item("then rerun the tests")], onMenu: (_owner, items) => { menu = items; }, onClearAll: () => { cleared += 1; } };
+  const stack = walk(view.bar(barProps)).find((element) => element.props?.className === "cx-queued-band cx-queued-stack");
+  assert.equal(stack.props["aria-expanded"], false, "folded at first");
+  assert.equal(text(stack), "2 messages queuedNext: use the other API", "the first message is the head");
+  stack.props.onClick();
+  const open = walk(view.bar(barProps));
+  const rows = open.filter((element) => element.props?.className === "cx-queued-row");
+  assert.deepEqual(rows.map((row) => [text(row), row.props["data-state"]]), [["use the other API", "queued"], ["then rerun the tests", "queued"]]);
+  assert.ok(open.some((element) => element.props?.["aria-label"] === "Collapse queued messages"));
+  // The ⋮ opens Claude Code's menu: Edit in composer, Send now (the head only), then Remove from queue.
+  walk(rows[0]).find((element) => element.props?.["aria-label"] === "Queued message actions").props.onClick({ currentTarget: {} });
+  const labels = (shape) => JSON.parse(JSON.stringify(menu.map(shape)));
+  assert.deepEqual(labels((entry) => entry.kind === "separator" ? "-" : [entry.label, Boolean(entry.danger)]),
+    [["Edit in composer", false], ["Send now", false], "-", ["Remove from queue", true]]);
+  walk(rows[1]).find((element) => element.props?.["aria-label"] === "Queued message actions").props.onClick({ currentTarget: {} });
+  assert.deepEqual(labels((entry) => entry.kind === "separator" ? "-" : entry.label), ["Edit in composer", "-", "Remove from queue"], "only the first can be sent now");
+  open.find((element) => element.props?.className === "cx-queued-clear").props.onClick();
+  assert.equal(cleared, 1);
 });
 
 test("Edit in composer gives a queued message's annotations back as the composer's own, not as the block the agent reads", async () => {
@@ -405,14 +544,14 @@ test("Edit in composer gives a queued message's annotations back as the composer
   assert.equal(tray().props.annotations.length, 0, "the annotation went with the queued message");
   // A new selection made meanwhile stays, after the queued message's own.
   annotator().props.onAdd("another line");
-  const row = all().find((element) => element.type === "li" && element.props.className === "cx-queued-row");
-  walk(row).find((element) => element.props?.["aria-label"] === "Edit in composer").props.onClick({ target: null, currentTarget: null });
+  const band = all().find((element) => element.props?.className === "cx-queued-band");
+  walk(band).find((element) => element.props?.["aria-label"] === "Edit in composer").props.onClick();
   assert.equal(all().find((element) => element.type === "textarea").props.value, "first note", "only the text goes in the box");
   assert.deepEqual(JSON.parse(JSON.stringify(tray().props.annotations.map((item) => [item.text, item.comment]))),
     [["the parser drops tabs", "fix this too"], ["another line", ""]], "its annotations come back as chips, ahead of the new one");
 });
 
-test("a steer on its way pulses in the queued-message bar; once taken it is an ordinary sent message", async () => {
+test("a steer is in the chat from the moment it is sent: Sending…, then Unread once the agent has it", async () => {
   let release;
   const { props } = base({ selectedTaskId: "t-steer", working: false,
     runs: [run("r1", "t-steer", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
@@ -421,15 +560,21 @@ test("a steer on its way pulses in the queued-message bar; once taken it is an o
   const all = () => walk(view.render());
   all().find((element) => element.type === "textarea").props.onChange({ target: { value: "use the other API" } });
   const sending = all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
-  const row = all().find((element) => element.type === "li" && element.props.className === "cx-queued-row");
-  assert.equal(row?.props["data-state"], "pending", "on its way: Claude's pending state");
-  assert.match(text(row), /use the other API/);
-  assert.equal(text(walk(row).find((element) => element.props?.className === "cx-queued-status")), "Sending…", "Claude Code's Sending… under it");
-  assert.equal(walk(row).filter((element) => element.type === "button" && element.props["aria-label"] !== "Copy message").length, 0,
-    "nothing to act on while it is delivered");
+  const bubble = () => all().find((element) => element.props?.className === "cx-user cx-steer");
+  const receipt = () => walk(bubble()).find((element) => element.type === "SteerReceiptMark").props.receipt;
+  assert.match(text(bubble()), /use the other API/, "in the chat at once");
+  assert.equal(bubble().props["data-pending"], "sending");
+  assert.equal(receipt(), "sending", "its check pulses, read as Sending…");
+  // It sits after the turn's work, where the turn's own record of it will show: it does not move.
+  const article = all().find((element) => element.type === "article");
+  const order = walk(article).map((element) => element.props?.className);
+  assert.ok(order.indexOf("cx-user cx-steer") > order.findIndex((name) => String(name).startsWith("cx-work")), "after the work");
+  assert.ok(!all().some((element) => element.props?.["aria-label"] === "Queued messages"), "not in the queued bar under the goal");
   assert.ok(!text(all()).includes("Steering…"), "no Steering… bubble at the end of the chat");
   release(true);
   await sending;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(receipt(), "unread", "delivered: the agent has it");
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   assert.ok(!source.includes("Steered · "), "a steered message shows its time as any sent message does");
   assert.match(source, /<SentMessage text=\{steer\.text\} \/>[\s\S]{0,400}?<MessageActions text=\{chatMessageReadable\(steer\.text\)\} \/>/, "and its Copy action");
@@ -472,7 +617,8 @@ test("each chat has its own queue: queuing in another chat never replaces one, a
   assert.ok(queue.includes("queueOf(task)") && queue.includes("setQueue(task, rest)"), "a chat's queue is sent only into that chat, one item at a time");
   assert.ok(queue.includes("sentWhileFree.current"), "one item per finished turn, never two into the same free spell");
   assert.ok(queue.includes("setDraft((typed) => (typed.trim() ? `${typed}\\n\\n${next.message}` : next.message))"), "a queued message that can't be sent goes back into the composer, after what is typed");
-  assert.ok(queue.includes("deliver(next.message, next.goal, false)") && queue.includes("deliver(next.message, undefined, false)"), "a background send leaves the composer alone");
+  assert.equal(queue.split("deliver(next.message, next.goal, false)").length, 3, "a background send or steer leaves the composer alone");
+  assert.ok(!queue.includes('next.what !== "Message"'), "a queued command steers in like a message");
   // A failed steer waits a growing pause (15 s, 30 s, 60 s) before the next try, never a loop.
   assert.ok(queue.includes("steerRetry.current = { attempts, until: Date.now() + wait }") && queue.includes("Date.now() < steerRetry.current.until"),
     "a steer that fails is not retried in a loop");
@@ -517,7 +663,7 @@ test("Delete on a message asks in the chat first, then removes it with its reply
   // The button only asks; Cancel leaves the chat as it is.
   buttons()[1].props.onClick();
   assert.equal(confirm().props["aria-label"], "Delete message");
-  assert.match(text(confirm()), /Delete this message\? It and its reply are removed from this chat\. The agent's files are not changed\./);
+  assert.match(text(confirm()), /Delete this message and its reply\? Files on disk don't change\./);
   assert.deepEqual(deleted, []);
   walk(confirm()).find((element) => element.type === "button" && text(element) === "Cancel").props.onClick();
   assert.equal(confirm(), undefined);
@@ -633,7 +779,7 @@ test("while a single-model turn runs on one model and the picker shows another, 
   const view = mount(props).render();
   const note = walk(view).find((element) => element.props?.className === "cx-route-note");
   assert.ok(note, "the switch is never silent");
-  assert.match(text(note), /This turn runs on gpt-6-luna; your next message uses deepseek-v4\./, "the models' names, not their ids");
+  assert.match(text(note), /This turn runs on gpt-6-luna\. Your next message uses deepseek-v4\./, "the models' names, not their ids");
   const same = mount(base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route })], { execution_mode: "single" })],
     composer: { mode: "single", route, onModeChange() {}, onRouteChange() {} } }).props).render();
@@ -739,5 +885,23 @@ test("a hidden agent browser is offered back from the chat header, and opens the
     const after = walk(view.render());
     assert.ok(after.some((element) => element.type === "Workbench" && element.props.tab === "preview"), "the panel opens on the browser");
     assert.ok(!after.some((element) => element.props?.className === "cx-browser-chip"), "no chip while it shows");
+  } finally { openPage = null; }
+});
+
+test("the chat header has a Preview button that opens the chat's browser with no page open, and closes it again", () => {
+  const { props } = base({ selectedTaskId: "t",
+    runs: [run("r1", "t", [node("w", "planner", "finished", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { thread_id: "s1" } })], { execution_mode: "single" })] });
+  const view = mount(props);
+  const preview = () => walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview");
+  assert.ok(preview(), "one click away, not behind Side panel → Overview");
+  assert.equal(preview().props["aria-pressed"], false);
+  preview().props.onClick();
+  assert.ok(walk(view.render()).some((element) => element.type === "Workbench" && element.props.tab === "preview"), "it opens the Preview tab");
+  assert.equal(preview().props["aria-pressed"], true);
+  preview().props.onClick();
+  assert.ok(!walk(view.render()).some((element) => element.type === "Workbench"), "a second click closes it");
+  openPage = { sessionId: "s1", url: "http://127.0.0.1:5173/", title: "App" };
+  try {
+    assert.ok(!preview(), "while a hidden page is open the browser chip takes its place");
   } finally { openPage = null; }
 });

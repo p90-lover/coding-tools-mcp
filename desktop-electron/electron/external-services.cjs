@@ -432,18 +432,15 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
     }
     // The launcher rewrites external-services.json with the same content on every start, so a
     // newer mtime alone does not mean a change. The small live files are compared by content
-    // (retired state never is); when only their mtimes moved, the stats are refreshed in place
-    // instead of hard-linking every retired file into yet another snapshot.
+    // (retired state never is); when only their mtimes moved, nothing is written. Refreshing the
+    // stats in place rewrote the whole manifest (~10 MB: every retired file is listed) at each
+    // start to save the next start a read of two small files.
     const sameLiveContent = (relative) => {
       if (isRetiredState(relative)) return false;
       try { return fs.readFileSync(sources[relative]).equals(fs.readFileSync(path.join(destination, relative))); } catch { return false; }
     };
     if (sameSources && previous.stats
         && keys.every((relative) => sameStat(previous.stats[relative], stats[relative]) || sameLiveContent(relative))) {
-      // Keep stateRoot: a snapshot that inherits its retired state must go on pointing at it.
-      writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({
-        schemaVersion: 1, sources, stats, ...(previous.stateRoot !== undefined ? { stateRoot: previous.stateRoot } : {}),
-      }, null, 2));
       return destination;
     }
     if (sameSources && !previous.stats

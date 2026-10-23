@@ -1,3 +1,4 @@
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -7,7 +8,40 @@ const {
   WINDOWS_RENAME_RETRY_DELAYS_MS,
   renameAtomicFile,
   writePrivateFileAtomic,
+  writePrivateFileAtomicAsync,
 } = require("../electron/atomic-file.cjs");
+
+test("async atomic writes land in the order asked, leave no temp file, and never block", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-async-"));
+  const file = path.join(root, "nested", "state.json");
+  try {
+    const writes = Array.from({ length: 20 }, (_, index) => writePrivateFileAtomicAsync(file, `{"n":${index}}\n`));
+    assert.ok(writes.every((write) => write instanceof Promise));
+    assert.equal(fs.existsSync(file), false, "nothing is written before the caller yields");
+    await Promise.all(writes);
+    assert.equal(fs.readFileSync(file, "utf8"), '{"n":19}\n', "the last write asked for is the one on disk");
+    assert.deepEqual(fs.readdirSync(path.dirname(file)), ["state.json"], "no temp file is left");
+    // A BOM is dropped, as in the synchronous form.
+    await writePrivateFileAtomicAsync(file, "﻿{}\n");
+    assert.equal(fs.readFileSync(file, "utf8"), "{}\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed async write rejects and does not stop the next one", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-async-fail-"));
+  const blocker = path.join(root, "not-a-directory");
+  fs.writeFileSync(blocker, "x");
+  try {
+    await assert.rejects(writePrivateFileAtomicAsync(path.join(blocker, "state.json"), "{}"));
+    const file = path.join(root, "state.json");
+    await writePrivateFileAtomicAsync(file, "ok");
+    assert.equal(fs.readFileSync(file, "utf8"), "ok");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("atomic replacement retries bounded transient Windows file locks", () => {
   const waits = [];
@@ -76,6 +110,25 @@ test("private JSON writes UTF-8 without a BOM", () => {
   assert.notEqual(raw[0], 0xEF);
   assert.equal(raw.toString("utf8").startsWith("{"), true);
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a durable write flushes its temp file to disk before it replaces the target", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-atomic-durable-"));
+  const filePath = path.join(directory, "launcher-supervisor.json");
+  fs.writeFileSync(filePath, "old");
+  const { fsyncSync, renameSync } = fs;
+  const order = [];
+  t.after(() => { fs.fsyncSync = fsyncSync; fs.renameSync = renameSync; fs.rmSync(directory, { recursive: true, force: true }); });
+  fs.fsyncSync = (fd) => { order.push("fsync"); return fsyncSync.call(fs, fd); };
+  fs.renameSync = (from, to) => { order.push("rename"); return renameSync.call(fs, from, to); };
+  writePrivateFileAtomic(filePath, "{\"status\":\"idle\"}", { durable: true });
+  assert.deepEqual(order, ["fsync", "rename"]);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "{\"status\":\"idle\"}");
+  assert.deepEqual(fs.readdirSync(directory), ["launcher-supervisor.json"], "no temp file is left");
+  // An ordinary write is not flushed: most callers write while the app is in use, on the main thread.
+  order.length = 0;
+  writePrivateFileAtomic(filePath, "{}");
+  assert.deepEqual(order, ["rename"]);
 });
 
 test("a fresh temp name that Windows reports as existing is left alone and the write retries", (t) => {

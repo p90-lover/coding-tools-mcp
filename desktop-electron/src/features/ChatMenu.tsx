@@ -30,7 +30,21 @@ const MENU_ICONS = {
   repo: <><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></>,
 } satisfies Record<string, ReactNode>;
 
+/**
+ * Codex 26.1016's own sidebar icons, verbatim (filled 16 px paths from its app-shared bundle:
+ * folder-light-16, folder-open-light-16, square-and-pencil-light-16, ellipsis-horizontal-light-16,
+ * plus-md-light-16). ChatGlyph draws these where Codex does; the menus keep their outlines.
+ */
+const CODEX_GLYPHS = {
+  "folder": <path fillRule="evenodd" clipRule="evenodd" d="M5.55933 2.14136C6.06479 2.14136 6.55777 2.30207 6.96655 2.59937L7.81812 3.21851C8.04741 3.38523 8.32368 3.47534 8.60718 3.47534H11.9666C13.2874 3.47534 14.3582 4.54606 14.3582 5.86694V11.4666C14.3582 12.7874 13.2874 13.8582 11.9666 13.8582H4.03296C2.71229 13.8579 1.64136 12.7873 1.64136 11.4666V4.53296C1.6416 3.21244 2.71244 2.1416 4.03296 2.14136H5.55933ZM2.69214 7.85913V11.4666C2.69214 12.2074 3.29219 12.8081 4.03296 12.8083H11.9666C12.7075 12.8083 13.3083 12.2075 13.3083 11.4666V7.85913H2.69214ZM4.03296 3.19214C3.29234 3.19238 2.69239 3.79234 2.69214 4.53296V6.80835H13.3083V5.86694C13.3083 5.12596 12.7075 4.52515 11.9666 4.52515H8.60718C8.10172 4.52515 7.60874 4.36541 7.19995 4.06812L6.34839 3.448C6.11917 3.28145 5.84268 3.19214 5.55933 3.19214H4.03296Z" fill="currentColor" />,
+  "folderOpen": <path fillRule="evenodd" clipRule="evenodd" d="M4.81201 2.14124C5.31747 2.14124 5.81045 2.30195 6.21924 2.59924L7.0708 3.21838C7.30005 3.38501 7.57645 3.47522 7.85986 3.47522H11.3862C12.0185 3.47532 12.5577 3.67505 12.9692 4.06604C13.3715 4.44832 13.6089 4.9722 13.73 5.54846C13.775 5.76289 13.8477 6.09046 13.9097 6.36682C13.9228 6.42541 13.9351 6.48168 13.9468 6.53381H14.1099C15.0509 6.53385 15.6585 7.52947 15.229 8.36682L13.2769 12.1725C12.8674 12.9704 12.0458 13.4733 11.1489 13.4733H3.49854C2.29874 13.4731 1.42701 12.5185 1.37354 11.4489L1.36963 11.4498L0.72998 4.58167L0.727051 4.55725V4.53284C0.727297 3.21232 1.79813 2.14148 3.11865 2.14124H4.81201ZM5.16357 7.58459C4.67855 7.5847 4.23107 7.8462 3.99365 8.26917L2.56104 10.8219C2.15931 11.5383 2.67708 12.4223 3.49854 12.4225H11.1489C11.6519 12.4225 12.1135 12.1414 12.3433 11.694L14.2954 7.88733C14.3662 7.74877 14.2655 7.58463 14.1099 7.58459H5.16357ZM3.11865 3.19202C2.38162 3.19226 1.78385 3.78642 1.77783 4.52209L2.22119 9.28088L3.07764 7.75549C3.50089 7.00144 4.29887 6.53392 5.16357 6.53381H12.8716C12.8128 6.27117 12.7458 5.96987 12.7026 5.76428C12.6101 5.32415 12.4475 5.01958 12.2456 4.82776C12.0532 4.64496 11.7843 4.52512 11.3862 4.52502H7.85986C7.35447 4.52502 6.86139 4.36522 6.45264 4.06799L5.60107 3.44788C5.37181 3.28123 5.09545 3.19202 4.81201 3.19202H3.11865Z" fill="currentColor" />,
+  "compose": <><path d="M6.33325 1.80763C6.62314 1.80763 6.85855 2.04315 6.85864 2.33302C6.85864 2.62297 6.6232 2.85841 6.33325 2.85841H4.66626C3.66786 2.85859 2.85891 3.66765 2.85864 4.66603V11.333C2.85864 12.3316 3.66769 13.1414 4.66626 13.1416H11.3333C12.332 13.1416 13.1418 12.3317 13.1418 11.333V9.66603C13.1421 9.37642 13.3766 9.14179 13.6663 9.14161C13.956 9.14161 14.1914 9.37631 14.1917 9.66603V11.333C14.1917 12.9116 12.9119 14.1914 11.3333 14.1914H4.66626C3.0878 14.1912 1.80786 12.9115 1.80786 11.333V4.66603C1.80813 3.08775 3.08796 1.80781 4.66626 1.80763H6.33325Z" fill="currentColor" /><path fillRule="evenodd" clipRule="evenodd" d="M10.842 2.32228C11.6259 1.55049 12.8863 1.55435 13.6643 2.33204C14.4442 3.11205 14.4469 4.37706 13.6702 5.16017L9.41626 9.4463C9.05652 9.80879 8.59956 10.0601 8.10083 10.1699L6.19263 10.5899C5.7111 10.6958 5.28165 10.2666 5.38794 9.78517L5.80884 7.88185C5.9196 7.38036 6.17342 6.92096 6.53931 6.56056L10.842 2.32228ZM12.9221 3.07521C12.552 2.7051 11.9524 2.70322 11.5793 3.07033L7.27563 7.30861C7.05429 7.52663 6.90125 7.80504 6.83423 8.10841L6.54028 9.43849L7.87524 9.14454C8.17687 9.07807 8.45355 8.92625 8.67114 8.70704L12.9241 4.41993C13.2934 4.04741 13.2928 3.44631 12.9221 3.07521Z" fill="currentColor" /></>,
+  "more": <><path d="M3.33362 6.80811C3.99161 6.80828 4.52502 7.34246 4.52502 8.00049C4.52485 8.65837 3.9915 9.19172 3.33362 9.19189C2.67559 9.19189 2.14141 8.65848 2.14124 8.00049C2.14124 7.34235 2.67548 6.80811 3.33362 6.80811Z" fill="currentColor" /><path d="M8.00061 6.80811C8.65849 6.80841 9.19202 7.34254 9.19202 8.00049C9.19184 8.65829 8.65838 9.19159 8.00061 9.19189C7.34258 9.19189 6.8084 8.65848 6.80823 8.00049C6.80823 7.34235 7.34247 6.80811 8.00061 6.80811Z" fill="currentColor" /><path d="M12.6666 6.80811C13.3246 6.80828 13.858 7.34246 13.858 8.00049C13.8579 8.65837 13.3245 9.19172 12.6666 9.19189C12.0088 9.1917 11.4744 8.65836 11.4742 8.00049C11.4742 7.34247 12.0087 6.8083 12.6666 6.80811Z" fill="currentColor" /></>,
+  "plus": <path d="M8 2.47461C8.28995 2.47461 8.52539 2.71005 8.52539 3V7.47461H13C13.2899 7.47461 13.5254 7.71005 13.5254 8C13.5254 8.28995 13.2899 8.52539 13 8.52539H8.52539V13C8.52539 13.2899 8.28995 13.5254 8 13.5254C7.71005 13.5254 7.47461 13.2899 7.47461 13V8.52539H3C2.71005 8.52539 2.47461 8.28995 2.47461 8C2.47461 7.71005 2.71005 7.47461 3 7.47461H7.47461V3C7.47461 2.71005 7.71005 2.47461 8 2.47461Z" fill="currentColor" />,
+} satisfies Record<string, ReactNode>;
+
 export type ChatMenuIcon = keyof typeof MENU_ICONS;
+export type ChatGlyphName = ChatMenuIcon | keyof typeof CODEX_GLYPHS;
 
 /**
  * One Codex context-menu item. An item with no `run` and no `items` is shown disabled with its
@@ -48,8 +62,11 @@ export type ChatMenuState = { x: number; y: number; items: ChatMenuItem[]; label
 const actionable = (item: ChatMenuItem) => item.kind !== "separator" && Boolean(item.run || item.items?.length);
 
 /** One of the menu's glyphs, for other Codex chrome (the sidebar's project folders). */
-export function ChatGlyph({ name, size = 14 }: { name: ChatMenuIcon; size?: number }) {
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{MENU_ICONS[name]}</svg>;
+export function ChatGlyph({ name, size = 14 }: { name: ChatGlyphName; size?: number }) {
+  if (name in CODEX_GLYPHS) {
+    return <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">{CODEX_GLYPHS[name as keyof typeof CODEX_GLYPHS]}</svg>;
+  }
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{MENU_ICONS[name as ChatMenuIcon]}</svg>;
 }
 
 function MenuIcon({ name }: { name?: ChatMenuIcon }) {
@@ -86,6 +103,13 @@ function MenuList({ items, label, onClose, autoFocus, style }: {
       }
     } else if (event.key === "Escape") {
       event.preventDefault(); event.stopPropagation(); onClose();
+    } else if (/^[1-9]$/.test(event.key) && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      // Claude Code's numbered items ("Open in ▸ 1 Split view"): the digit chooses the item.
+      const index = items.findIndex((item) => item.kind !== "separator" && item.shortcut === event.key && actionable(item));
+      if (index < 0) return;
+      event.preventDefault(); event.stopPropagation();
+      list.current?.querySelectorAll<HTMLButtonElement>(":scope > div > button[role=menuitem]")
+        [items.slice(0, index).filter((item) => item.kind !== "separator").length]?.click();
     }
   };
   const placed = flip ? { ...style, left: "auto", right: "100%" } : style;
@@ -163,8 +187,12 @@ export function ChatMenu({ menu, onClose }: { menu: ChatMenuState; onClose: () =
   </>;
 }
 
-/** Palette variables the menu's CSS reads; defined on .ao-workflow for the dark and light themes. */
-const THEME_VARIABLES = ["--color-bg-primary", "--color-text-primary", "--ao-line", "--ao-muted", "--ao-red", "--ao-blue", "--ao-green", "--ao-amber", "--cx-hover", "--cx-active"] as const;
+/**
+ * Palette variables the menu's CSS reads; defined on .ao-workflow for the dark and light themes.
+ * One missing here falls back to <body>'s dark-theme value: --color-text-secondary did, and the chat
+ * details panel's labels, branch and setup lines were white on its light background.
+ */
+const THEME_VARIABLES = ["--color-bg-primary", "--color-text-primary", "--color-text-secondary", "--ao-line", "--ao-muted", "--ao-red", "--ao-blue", "--ao-green", "--ao-amber", "--cx-hover", "--cx-active"] as const;
 
 /**
  * A position:fixed layer (e.g. a hover card) rendered on <body> with the chat surface's palette,

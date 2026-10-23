@@ -27,27 +27,44 @@ const CONVERSATION_LIMITS = [60, 20];
 const MAX_BACKGROUND_COMMANDS = 10;
 const MAX_REMEMBERED_SESSIONS = 64;
 
+// The cuts below count each character's UTF-8 bytes as they walk, so they read only the part they
+// keep. They used to measure a whole slice per step and step back one character at a time: with
+// Chinese text (3 bytes a character) every guess overshot by hundreds of characters, and a running
+// chat's thinking cost ~7 ms of main-thread time per poll, several polls a second (2026-10-22).
+const isHighSurrogate = (unit) => unit >= 0xd800 && unit <= 0xdbff;
+const isLowSurrogate = (unit) => unit >= 0xdc00 && unit <= 0xdfff;
+/** UTF-8 bytes of one UTF-16 unit; a lone surrogate counts 3, as Buffer.byteLength counts it. */
+const unitBytes = (unit) => unit < 0x80 ? 1 : unit < 0x800 ? 2 : 3;
+
+/** The longest prefix of `text` that is at most `maxBytes` of UTF-8; a surrogate pair stays whole. */
 function utf8Prefix(text, maxBytes) {
   const value = String(text);
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  let end = Math.min(value.length, maxBytes);
-  while (end > 0 && Buffer.byteLength(value.slice(0, end), "utf8") > maxBytes) end = Math.floor(end * 0.95);
-  while (end < value.length && Buffer.byteLength(value.slice(0, end + 1), "utf8") <= maxBytes) end += 1;
-  const last = value.charCodeAt(end - 1);
-  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
+  // A UTF-16 unit is at most 3 bytes (a pair is 4 for two units), so a short text fits whole.
+  if (value.length * 3 <= maxBytes) return value;
+  let end = 0, bytes = 0;
+  while (end < value.length) {
+    const pair = isHighSurrogate(value.charCodeAt(end)) && isLowSurrogate(value.charCodeAt(end + 1));
+    const size = pair ? 4 : unitBytes(value.charCodeAt(end));
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    end += pair ? 2 : 1;
+  }
   return value.slice(0, end);
 }
 
 /** The longest suffix of `text` that is at most `maxBytes` of UTF-8: a command's newest output. */
 function utf8Suffix(text, maxBytes) {
   const value = String(text);
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  let start = Math.max(0, value.length - maxBytes);
-  while (start < value.length && Buffer.byteLength(value.slice(start), "utf8") > maxBytes) start = Math.ceil(start + (value.length - start) * 0.05);
-  while (start > 0 && Buffer.byteLength(value.slice(start - 1), "utf8") <= maxBytes) start -= 1;
-  // Never start on the second half of a surrogate pair.
-  const first = value.charCodeAt(start);
-  if (start < value.length && first >= 0xdc00 && first <= 0xdfff) start += 1;
+  if (value.length * 3 <= maxBytes) return value;
+  let start = value.length, bytes = 0;
+  while (start > 0) {
+    // Never start on the second half of a surrogate pair: the pair is kept or dropped whole.
+    const pair = start > 1 && isLowSurrogate(value.charCodeAt(start - 1)) && isHighSurrogate(value.charCodeAt(start - 2));
+    const size = pair ? 4 : unitBytes(value.charCodeAt(start - 1));
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    start -= pair ? 2 : 1;
+  }
   return value.slice(start);
 }
 
@@ -276,4 +293,4 @@ async function withAgentShellCommands(appSessions, sessionIds, readConversation,
   return out;
 }
 
-module.exports = { agentShellCommands, withAgentShellCommands, backgroundOutputPath, utf8Suffix, CONVERSATION_LIMITS, MAX_OUTPUT_BYTES };
+module.exports = { agentShellCommands, withAgentShellCommands, backgroundOutputPath, utf8Prefix, utf8Suffix, CONVERSATION_LIMITS, MAX_OUTPUT_BYTES };

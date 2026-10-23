@@ -54,10 +54,10 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, State> 
     return <div role="alert" style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", padding: 24,
       background: "Canvas", color: "CanvasText", font: "14px/1.5 system-ui, sans-serif" }}>
       <div style={{ maxWidth: 520, display: "grid", gap: 10 }}>
-        <strong style={{ fontSize: 16 }}>{reloading ? "Coding Tools hit an error and is reloading…" : "Coding Tools keeps hitting an error"}</strong>
+        <strong style={{ fontSize: 16 }}>{reloading ? "Something went wrong. Reloading…" : "The same error keeps coming back"}</strong>
         <span style={{ opacity: 0.75 }}>{reloading
-          ? "Your chats and running agents are not affected; only this window reloads."
-          : "It reloaded several times and the error came back, so it stopped. Reload to try again; the details are in the app log."}</span>
+          ? "Your chats and running agents are safe. Only this window reloads."
+          : "The window reloaded 3 times and still fails. Reload to try again. Details are in the app log."}</span>
         <code style={{ display: "block", maxHeight: 120, overflow: "auto", padding: 8, borderRadius: 6, background: "color-mix(in srgb, CanvasText 6%, transparent)",
           fontSize: 12, whiteSpace: "pre-wrap" }}>{error.message || error.name}</code>
         <div style={{ display: "flex", gap: 8 }}>

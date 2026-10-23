@@ -211,12 +211,6 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setGlobalProxyRouting: (input) => ipcRenderer.invoke("launcher:proxy-global-routing", input),
   setProviderProxyPolicy: (input) => ipcRenderer.invoke("launcher:proxy-provider-policy", input),
   setAccountProxyPolicy: (input) => ipcRenderer.invoke("launcher:proxy-account-policy", input),
-  proxyGatewayStatus: () => ipcRenderer.invoke("launcher:proxy-gateway-status"),
-  configureProxyGateway: (input) => ipcRenderer.invoke("launcher:proxy-gateway-configure", input),
-  setProxyGatewayRunning: (running) => ipcRenderer.invoke("launcher:proxy-gateway-running", running),
-  setProxyGatewayForApp: (enabled) => ipcRenderer.invoke("launcher:proxy-gateway-use-for-app", enabled),
-  rotateProxyGatewayKey: () => ipcRenderer.invoke("launcher:proxy-gateway-rotate-key"),
-  testProxyGateway: () => ipcRenderer.invoke("launcher:proxy-gateway-test"),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),
   exportLogs: () => ipcRenderer.invoke("launcher:export-logs"),
   checkForUpdates: () => ipcRenderer.invoke("launcher:update-check"),
@@ -233,7 +227,6 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onExternalServicesChanged: (listener) => subscription("launcher:external-services-changed", listener),
   onManagedBootstrapChanged: (listener) => subscription("launcher:managed-bootstrap-changed", listener),
   onProviderNetworkChanged: (listener) => subscription("launcher:provider-network-changed", listener),
-  onProxyGatewayChanged: (listener) => subscription("launcher:proxy-gateway-changed", listener),
   onAoChanged: (listener) => subscription("launcher:ao-changed", listener),
 });
 

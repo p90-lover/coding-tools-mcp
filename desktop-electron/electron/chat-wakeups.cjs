@@ -47,7 +47,8 @@ function wakePrompt(wakeup, at = Date.now()) {
 function wakeupAction(wakeup, chat) {
   if (!chat?.active) return "drop";
   // Someone spoke after it was asked for (the user, or a goal's next round): that turn has the floor.
-  if (chat.latestRunId !== wakeup.runId) return "drop";
+  // A self-paced /loop's next round (chat-loops.cjs) still comes, as Claude Code's does.
+  if (!wakeup.loop && chat.latestRunId !== wakeup.runId) return "drop";
   // Usually the very turn that asked, still finishing: wake once it settles.
   return chat.working ? "wait" : "send";
 }
@@ -81,11 +82,13 @@ function createWakeupStore({ file = null, now = Date.now } = {}) {
     },
     /** Every saved wake-up, for arming the timers when the app starts. */
     all: () => Object.entries(wakeups).map(([name, wakeup]) => ({ workspaceId: wakeup.workspaceId, taskId: wakeup.taskId, name, wakeup })),
-    set(workspaceId, taskId, { minutes, reason, session, runId }) {
+    /** `loop`: the wake-up paces a self-paced /loop, whose next round it starts. */
+    set(workspaceId, taskId, { minutes, reason, session, runId, loop = false }) {
       const at = now();
       const checked = cleanWakeup({ minutes, reason });
       const wakeup = { id: `wake-${at.toString(36)}-${Math.random().toString(36).slice(2, 8)}`, workspaceId, taskId,
-        ...checked, session: String(session), runId: String(runId), scheduledAt: at, dueAt: at + checked.minutes * 60_000, due: false };
+        ...checked, session: String(session), runId: String(runId), scheduledAt: at, dueAt: at + checked.minutes * 60_000, due: false,
+        ...(loop ? { loop: true } : {}) };
       wakeups[key(workspaceId, taskId)] = wakeup;
       persist();
       return wakeup;
@@ -94,6 +97,19 @@ function createWakeupStore({ file = null, now = Date.now } = {}) {
       const wakeup = wakeups[key(workspaceId, taskId)];
       if (!wakeup) return null;
       Object.assign(wakeup, change);
+      persist();
+      return wakeup;
+    },
+    /**
+     * The user's change to the chat's wake-up `id`: its note and/or the minutes from now, checked as
+     * the agent's own are. A new time restarts the clock. Null when that wake-up is gone or replaced.
+     */
+    edit(workspaceId, taskId, id, { minutes, reason } = {}) {
+      const wakeup = wakeups[key(workspaceId, taskId)];
+      if (!wakeup || wakeup.id !== id) return null;
+      const checked = cleanWakeup({ minutes: minutes ?? wakeup.minutes, reason: reason ?? wakeup.reason });
+      const at = now();
+      Object.assign(wakeup, checked, minutes === undefined ? {} : { scheduledAt: at, dueAt: at + checked.minutes * 60_000, due: false });
       persist();
       return wakeup;
     },
