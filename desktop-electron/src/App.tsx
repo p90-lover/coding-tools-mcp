@@ -855,6 +855,7 @@ function LauncherShell({
                 active={surface === "settings"}
                 icon="settings"
                 label={copy.settings}
+                meta={snapshot.version ? `v${snapshot.version}` : undefined}
                 onClick={() => navigateSurface("settings")}
               />
             </div>
@@ -1148,6 +1149,7 @@ function SidebarItem({
   disabled = false,
   icon,
   label,
+  meta,
   onClick,
   tone,
 }: {
@@ -1156,6 +1158,8 @@ function SidebarItem({
   disabled?: boolean;
   icon: IconName;
   label: string;
+  /** Quiet text at the row's right end (Settings shows the app's version). */
+  meta?: string;
   onClick: () => void;
   tone?: "update";
 }) {
@@ -1169,6 +1173,7 @@ function SidebarItem({
     >
       {icon === "mcp" ? <McpMark /> : <Icon name={icon} />}
       <span>{label}</span>
+      {meta ? <small className="sidebar-item-meta">{meta}</small> : null}
       {badge ? <i className="sidebar-item-badge">{badge}</i> : null}
     </button>
   );
