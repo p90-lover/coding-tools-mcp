@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BUN_VERSION: '1.4.0'
+  BUN_VERSION: '1.4.3'
   NODE_VERSION: '22'
   RUST_TOOLCHAIN: '1.98.1'
   BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/cache/bun-release-rc6-csc

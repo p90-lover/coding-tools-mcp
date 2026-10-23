@@ -16,7 +16,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -82,9 +82,12 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
-// How long a request the "Approve for me" reviewer has not answered stays hidden. One review takes
-// at most ~50 s (25 s, then 25 s more to decide); past that, nothing is screening it.
-const REVIEW_GRACE_MS = 120_000;
+// How long a request the "Approve for me" reviewer has not answered stays hidden. One review pass
+// takes at most REVIEW_BUDGET_MS (45 s); past a minute the reviewer is struggling (retrying a model
+// that fails, or nothing screens it), and the person can answer it themselves. At two minutes the
+// chat sat on "waiting for approval" with nothing to answer (seen live: a PowerShell check the
+// reviewer allowed after 114 s). The card still says the reviewer is on it.
+const REVIEW_GRACE_MS = 60_000;
 /**
  * A chat message refused only for the moment: the chat started working again under it (its
  * automatic retry), or the app window was not in front. The chat keeps it at the front of its queue
@@ -535,6 +538,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [workspaceName, setWorkspaceName] = useState("");
   const [board, setBoard] = useState<Board | null>(null);
   const [missions, setMissions] = useState<AoMission[]>([]);
+  // Runs whose Stop is still going through; the chat shows them stopped already (stopChatRun).
+  const [stoppingRuns, setStoppingRuns] = useState<string[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [showInactive, setShowInactive] = useState(false);
   // What agent worktrees get of the project's installed dependencies (null: not read yet):
@@ -1031,12 +1036,19 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [loops, setLoops] = useState<Record<string, ChatLoop>>({});
   // A model picked while the open chat's goal runs is used from its next round on (the running
   // round keeps the model it started with; the composer says so).
-  const goalRouteKey = chatTaskId && composerMode === "single" && goals[chatTaskId]?.status === "active"
-    ? JSON.stringify([workspaceId, chatTaskId, singleRoute]) : "";
+  // A team picked the same way runs the next rounds as that team (its current revision then).
+  const goalActive = Boolean(chatTaskId && goals[chatTaskId]?.status === "active");
+  const goalRouteKey = !goalActive ? ""
+    : composerMode === "single" ? JSON.stringify([workspaceId, chatTaskId, "single", singleRoute])
+    : composerTeamId ? JSON.stringify([workspaceId, chatTaskId, "team", composerTeamId]) : "";
   useEffect(() => {
-    if (!goalRouteKey || !chatTaskId || !singleRoute.model || singleRoute.model === "default") return;
+    if (!goalRouteKey || !chatTaskId) return;
+    const pick: JsonObject | null = composerMode === "single"
+      ? (singleRoute.model && singleRoute.model !== "default" ? { singleRoute: { ...singleRoute } as unknown as JsonObject } : null)
+      : { teamId: composerTeamId };
+    if (!pick) return;
     const timer = setTimeout(() => {
-      void moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "route", singleRoute: { ...singleRoute } as unknown as JsonObject }).catch(() => undefined);
+      void moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "route", ...pick }).catch(() => undefined);
     }, 600);
     return () => clearTimeout(timer);
   }, [goalRouteKey]);
@@ -1594,6 +1606,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           throw new Error("This chat is in another project. Open it there, or start a new chat here.");
         }
         const execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId);
+        // A new chat shows its message and "Starting" the moment it is sent, as Claude Code does,
+        // before the answer below. A follow-up shows its own (AgentOrchestratorChat).
+        if (!input.taskId) setPendingChat({ title: input.title || "New task", message: input.message });
         // deferStart: the answer comes once the run exists, and it starts in the background. Waiting
         // for the start too (resolving the agent, the grant, two more run reads) held the send button
         // and Enter for seconds after every message. A start that fails is still told: the run's
@@ -1997,10 +2012,24 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     await loadMissions(workspaceId);
   });
 
-  const stopChatRun = (runId: string) => void run("stop", async () => {
-    await moduleCall("control_run", { workspaceId, runId, action: "stop" });
-    await loadMissions(workspaceId);
-  });
+  // Stop shows at once, as Claude Code's Esc does: the run reads as stopped (chatRunStopping) while
+  // the stop goes through. It is not run(): its one-action lock dropped a Stop clicked while anything
+  // else was in flight, and the stop's agent interrupts and reloads took seconds before anything changed.
+  const stopChatRun = (runId: string) => {
+    if (stoppingRuns.includes(runId)) return;
+    const owner = workspaceId;
+    setStoppingRuns((current) => [...current, runId]);
+    if (selectedRun?.id === runId) setAutoStatus("held");
+    setError(null);
+    void moduleCall("control_run", { workspaceId: owner, runId, action: "stop" })
+      .then(() => loadMissions(owner))
+      // Not stopped after all: the error says why, and a fresh read shows the run as it really is.
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        return loadMissions(owner).catch(() => undefined);
+      })
+      .finally(() => setStoppingRuns((current) => current.filter((id) => id !== runId)));
+  };
 
   const approve = (approval: AoApproval, reply: ApprovalReply) => {
     const owner = approvalScope.current;
@@ -2299,8 +2328,10 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // What the chat list and the open chat are given stays the same object until it changes. Built
   // inline it was new on every render (each second's activity read, each poll), and the open chat
   // rebuilds its whole transcript from it, so a project switch rebuilt the conversation many times.
-  const threadChats = useMemo(() => chatList(missions, allTasks, taskLifecycle), [missions, allTasks, taskLifecycle]);
-  const threadArchived = useMemo(() => chatArchived(missions, allTasks, taskLifecycle), [missions, allTasks, taskLifecycle]);
+  const shownMissions = useMemo(() => stoppingRuns.length
+    ? missions.map((mission) => stoppingRuns.includes(mission.id) ? chatRunStopping(mission) : mission) : missions, [missions, stoppingRuns]);
+  const threadChats = useMemo(() => chatList(shownMissions, allTasks, taskLifecycle), [shownMissions, allTasks, taskLifecycle]);
+  const threadArchived = useMemo(() => chatArchived(shownMissions, allTasks, taskLifecycle), [shownMissions, allTasks, taskLifecycle]);
   const chatRuns = useMemo(() => {
     const replaced = new Map<string, string>();
     for (const item of taskLifecycle) {
@@ -2309,8 +2340,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         if (id && !replaced.has(id)) replaced.set(id, intent.previous_run_id);
       }
     }
-    return missions.map(mission => ({ ...mission, replaces_run_id: replaced.get(mission.id) }));
-  }, [missions, taskLifecycle]);
+    return shownMissions.map(mission => ({ ...mission, replaces_run_id: replaced.get(mission.id) }));
+  }, [shownMissions, taskLifecycle]);
   // The chat's actions call the current handlers through this ref, so the objects it holds keep
   // their identity across renders (they are only called after a render has committed).
   const chatHandlers = useRef({ openNewChat, renameChat, missionAction, forkChat, rewindChat, deleteChatMessage, copyChat, togglePin, restartChatRun, stopChatRun });

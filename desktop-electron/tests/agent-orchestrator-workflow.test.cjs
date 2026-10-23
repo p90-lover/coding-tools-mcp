@@ -113,6 +113,18 @@ test("a chat whose launch came back without a session can be archived: it owns n
   assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),"the chat is archived");
 });
 
+test("a chat whose card still reads running but never got a session can be archived", async()=>{
+  // Seen live (2026-10-21): archive_task failed with "Owned session identity is unknown; stop needs
+  // attention" for chats whose launch died mid-way (an app restart), so Archive did nothing.
+  const world=reconfigureWorld();
+  const lead=world.saved.runs[0].nodes[0];
+  lead.state="running"; lead.receipt={status:"running",request_key:"request-one"};
+  await world.workflow.call("archive_task",{workspaceId:"ws",taskId:"task"});
+  assert.ok(world.calls.some(c=>c[0]==="/api/v1/ao/control"&&c[1].action==="stop"),"the run is still stopped natively");
+  assert.ok(!world.calls.some(c=>c[0]==="interrupt"),"there is no session to interrupt");
+  assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),"the chat is archived");
+});
+
 test("a chat whose agent has no controller running can be archived: its run is stopped and it has no turn to stop", async()=>{
   // Seen live 2026-10-22: Archive failed twice with "the agent controller for this session is not
   // running (CHAT_CONTROLLER_NOT_READY)": the run was already stopped, then the agent's interrupt
@@ -241,6 +253,28 @@ test("explicit stop revokes a pending schedule and its timer rather than leaving
   assert.equal(life.schedule.state,"cancelled");
   assert.equal(timers.size,0);
   workflow.dispose();
+});
+
+test("a chat reads a subagent's work: live while it works, whole once it ends", async () => {
+  // Seen live: the chat showed only its agent's subagent_start call; what the subagent did could not be read.
+  let observed = { turnId: "t1", turnState: "running", timeline: [{ id: "c1", kind: "command", status: "running", text: "rg gate", output: "x".repeat(5000) }] };
+  const pastReads = [];
+  const runs = [{ subagent_id: "sub-1", agent: "explorer", name: "Explorer", state: "running", task: "Find it", elapsed_seconds: 3, parent: "ao-1" }];
+  const workflow = createAgentOrchestratorWorkflow({
+    subagents: { runs: () => runs },
+    aoHarness: { observe: async () => observed,
+      timeline: async (id, turnId) => { pastReads.push([id, turnId]); return [{ id: "m1", kind: "message", status: "completed", text: "Report" }]; } },
+  });
+  const working = await workflow.call("subagent_transcript", { subagentId: "sub-1" });
+  assert.equal(working.run.parent, "ao-1");
+  assert.equal(working.timeline[0].text, "rg gate");
+  assert.ok(working.timeline[0].output.length <= 2001, "a live read keeps tool output short");
+  assert.deepEqual(pastReads, []);
+  observed = { turnId: "t1", turnState: "completed", timeline: [] };
+  const done = await workflow.call("subagent_transcript", { subagentId: "sub-1" });
+  assert.deepEqual(pastReads, [["sub-1", "t1"]], "a finished turn is read back whole");
+  assert.equal(done.timeline[0].text, "Report");
+  assert.equal((await workflow.call("subagent_transcript", { subagentId: "sub-9" })).ok, false, "an unknown subagent is not read");
 });
 
 test("team settings use their local UI operation and cannot be changed through mission graph tools", async () => {
@@ -2078,10 +2112,13 @@ test("activity reports each working card's runtime and current step without adva
   const done = { id: "p", role: "planner", state: "finished", route: native.route, receipt: { status: "completed" } };
   const testing = { ...agent, id: "w4", receipt: { status: "submitted", thread_id: "sess-4" } };
   const asking = { ...agent, id: "w5", receipt: { status: "submitted", thread_id: "sess-5" } };
+  // "Approve for me": the reviewer answers this card's requests, so it is not waiting on the person.
+  const reviewed = { ...agent, id: "w6", route: { ...agent.route, approval_policy: "on-request", approvals_reviewer: "auto_review" },
+    receipt: { status: "submitted", thread_id: "sess-6" } };
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async (endpoint, body) => {
       calls.push(endpoint);
-      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking] }] };
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking, reviewed] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
         return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN npm run task-runner sk-abcdefghijklmnopqrst1234" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
@@ -2093,14 +2130,17 @@ test("activity reports each working card's runtime and current step without adva
       ? { turnState: "running", turnId: "t-4", timeline: [{ id: "a1", kind: "command", status: "pending", text: "python -m pytest tests -q", timeoutMs: 300_000 }] }
       // AO marks the session needs_input while a permission request waits: the card names the command.
       : session === "sess-5" ? { turnState: "running", turnId: "t-5", needsInput: true, approvals: [{ approval_id: "r1", kind: "command", command: "npm run build", tool: "Bash" }] }
+      : session === "sess-6" ? { turnState: "running", turnId: "t-6", needsInput: true, approvals: [{ approval_id: "r2", kind: "command", command: "Get-CimInstance Win32_Process", tool: "PowerShell" }] }
       : { turnState: "running", turnId: "t-3" } },
     confirm: async () => true,
   });
   await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   await new Promise(resolve => setImmediate(resolve));
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
-  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5"], "only working cards");
+  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5", "w6"], "only working cards");
   assert.equal(result.nodes.w5.activity, "waiting for approval: npm run build");
+  // Seen live: "waiting for approval" for the two minutes a review took, with nothing to answer.
+  assert.equal(result.nodes.w6.activity, "the reviewer is checking: Get-CimInstance Win32_Process");
   assert.equal(result.nodes.w1.activity, "running a command");
   // "sk-" inside a word (task-runner) is not a key; a whole sk- token is.
   assert.equal(result.nodes.w1.output, "native partial [redacted] npm run task-runner [redacted]");
@@ -2699,9 +2739,10 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.match(message, /no longer in this agent's model list/, message);
 });
 
-test("Claude Code is not offered Antigravity's Claude models, and says why; other agents and providers keep them", async () => {
+test("Claude Code is not offered Antigravity's models, Claude or Gemini, and says why; other agents and providers keep them", async () => {
   // Seen live: Antigravity answers every request carrying Claude Code's "Claude Agent SDK" system
-  // line with "Resource has been exhausted", so those cards retried ten times and failed.
+  // line with "Resource has been exhausted", so those cards retried ten times and failed; Gemini
+  // subagents on Claude Code hit the same wall.
   const catalog = { data: [
     { id: "claude-sonnet-4-6", owned_by: "antigravity", context_window: 200000 },
     { id: "claude-opus-4-6-thinking", owned_by: "antigravity", context_window: 200000 },
@@ -2719,9 +2760,18 @@ test("Claude Code is not offered Antigravity's Claude models, and says why; othe
   assert.ok(!claudeCode.models.includes("cpa/claude-sonnet-4-6") && !claudeCode.models.includes("cpa/claude-opus-4-6-thinking"));
   assert.match(claudeCode.unavailable["cpa/claude-sonnet-4-6"], /Antigravity refuses Claude Code's requests.*Native Codex/);
   assert.ok(claudeCode.models.includes("cpa/claude-haiku-4-5"), "a Claude model another provider serves stays");
-  assert.ok(claudeCode.models.includes("cpa/gemini-3.8-flash-high"), "Antigravity's other models stay");
+  assert.ok(!claudeCode.models.includes("cpa/gemini-3.8-flash-high"), "Antigravity's Gemini is refused too");
+  assert.match(claudeCode.unavailable["cpa/gemini-3.8-flash-high"], /not quota/);
   const native = await workflow.call("models", { harness: "codex-native" }).catch(() => null);
   if (native?.models) assert.ok(native.models.some(model => /claude-sonnet-4-6$/.test(model)), "Native Codex still runs it");
+  // A subagent saved on one of them is refused at launch with the reason; other routes are not.
+  assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high" }),
+    /^gemini-3\.8-flash-high: Antigravity refuses Claude Code's requests/);
+  assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high(high)" }),
+    /^gemini-3\.8-flash-high: Antigravity refuses/, "a saved effort suffix is looked up by its base model");
+  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/claude-haiku-4-5" }), null);
+  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:codex", model: "cpa/gemini-3.8-flash-high" }), null);
+  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/not-listed" }), null);
 });
 
 test("each model is filed under the provider CPA says serves it, though CPA's full catalog names none", async () => {
@@ -2748,13 +2798,19 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
     confirm: async () => true,
   });
-  const listed = await workflow.call("models", { harness: "ao:claude-code" });
-  const provider = id => listed.capabilities[`cpa/${id}`]?.provider;
+  // Filed as opencode lists them: Claude Code is offered no Antigravity model at all (see below).
+  const other = await workflow.call("models", { harness: "ao:opencode" });
+  const provider = id => other.capabilities[`cpa/${id}`]?.provider;
   assert.equal(provider("gemini-3.8-flash-high"), "antigravity", "Antigravity's Gemini, not Gemini's");
+  assert.equal(provider("claude-sonnet-4-6"), "antigravity", "Antigravity's Claude, not Claude's");
   assert.equal(provider("claude-haiku-4-5"), "claude", "a Claude sign-in's model stays Claude's");
   assert.equal(provider("gpt-5.5"), "openai");
-  assert.ok(!listed.models.includes("cpa/claude-sonnet-4-6"), "Claude Code is not offered Antigravity's Claude model");
-  assert.match(listed.unavailable["cpa/claude-sonnet-4-6"], /Antigravity refuses Claude Code's requests/);
+  const listed = await workflow.call("models", { harness: "ao:claude-code" });
+  assert.equal(listed.capabilities["cpa/claude-haiku-4-5"]?.provider, "claude");
+  for (const id of ["claude-sonnet-4-6", "gemini-3.8-flash-high"]) {
+    assert.ok(!listed.models.includes(`cpa/${id}`), `Claude Code is not offered Antigravity's ${id}`);
+    assert.match(listed.unavailable[`cpa/${id}`], /Antigravity refuses Claude Code's requests/);
+  }
 });
 
 test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
@@ -3117,7 +3173,7 @@ test("a start blocked on the browser returns its reason instead of a generic tra
 
 // ---- Codex slash commands: /goal, /compact, /diff ----
 
-const { closingAnswers, createGoalStore, goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck } = require("../electron/chat-goals.cjs");
+const { closingAnswers, createGoalStore, goalMessage, roundAnswers, roundTranscript, goalCheckPrompt, parseGoalCheck } = require("../electron/chat-goals.cjs");
 
 test("a goal round says what Claude Code's /goal says: the condition first, then stop-hook feedback with the evaluator's reason", () => {
   assert.equal(goalMessage("ship it", 1), "ship it", "the first round is the condition itself");
@@ -3182,6 +3238,7 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
   assert.equal(goals["task-1"].objective, "make every test pass");
   assert.equal(goals["task-1"].status, "active");
   assert.equal(goals["task-1"].round, 1);
+  assert.equal(goals["task-1"].rounds, 0, "no round limit, as in Claude Code");
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "x", goal: "   " }), /Describe your goal/);
 });
 
@@ -3246,13 +3303,14 @@ test("a goal check a model refuses is asked of the next model; only all refusing
   let { world, workflow, checks } = await goalChat({ refuse: (model) => model === "gemini-3-flash" ? 404 : 0 });
   world.runs.push(round("r1"));
   await workflow.goalAfterRun("ws-1", "r1", "finished", null);
-  assert.deepEqual(checks.map((check) => check.model), ["gemini-3-flash", "gpt-6-luna"]);
+  // gpt-6-luna is billed to the person's Codex quota, so the check goes on to deepseek-v4.
+  assert.deepEqual(checks.map((check) => check.model), ["gemini-3-flash", "deepseek-v4"]);
   assert.equal((await goalOf(workflow)).status, "achieved");
 
   ({ world, workflow, checks } = await goalChat({ refuse: () => 404 }));
   world.runs.push(round("r1"));
   await workflow.goalAfterRun("ws-1", "r1", "finished", null);
-  assert.equal(checks.length, 3, "three models tried, not the whole catalog");
+  assert.equal(checks.length, 2, "every model a check may use (at most three), none on the Codex quota");
   const goal = await goalOf(workflow);
   assert.equal(goal.status, "stalled");
   assert.match(goal.note, /HTTP 404 for deepseek-v4/, "the note names the model that refused");
@@ -3274,6 +3332,9 @@ test("a message the person sends into a chat whose goal stalled picks the goal u
   // A goal the person paused stays paused when they send a message.
   world.runs.forEach((run) => { run.nodes.forEach((node) => { node.state = "finished"; }); });
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  // A check of the settled round that fails after the pause leaves it paused, not stalled.
+  await goalSettle();
+  assert.equal((await goalOf(workflow)).status, "paused");
   await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "one more thing" });
   assert.equal((await goalOf(workflow)).status, "paused");
 });
@@ -3349,41 +3410,46 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(achieved.status, "achieved");
   assert.equal(achieved.note, "The transcript shows every test passing.", "the evaluator's reason is shown");
 
-  for (const [status, attention, expected] of [["failed", "error", "stalled"], ["held", null, "stalled"], ["held", "stopped", "paused"]]) {
+  // How the round ended: failed or needing the person stalls the goal; the person's Stop pauses it.
+  for (const [outcome, expected, note] of [["failed", "stalled", /failed/], ["held", "stalled", /needs you/], ["stopped", "paused", /Stopped; \/goal resume/]]) {
     ({ world, workflow, checks } = await goalChat());
     world.runs.push(teamRun("t3", "anything"));
     const count = world.updates.length;
-    await workflow.goalAfterRun("ws-1", "t3", status, attention);
-    assert.equal((await goalOf(workflow)).status, expected, `${status}/${attention}`);
+    await workflow.goalAfterRun("ws-1", "t3", outcome);
+    assert.equal((await goalOf(workflow)).status, expected, outcome);
+    assert.match((await goalOf(workflow)).note, note);
     assert.equal(world.updates.length, count, "no new round");
     assert.equal(checks.length, 0, "nothing to evaluate");
   }
 
-  // The evaluator cannot be reached: the goal waits instead of going round blind.
-  ({ world, workflow } = await goalChat({ evaluator: () => new Error("down") }));
+  // The evaluator cannot be reached: the goal waits instead of going round blind. Every model it may
+  // use is tried, never one billed to the person's Codex quota (gpt-6-luna).
+  ({ world, workflow, checks } = await goalChat({ evaluator: () => new Error("down") }));
   world.runs.push(teamRun("t6", "anything"));
   const quiet = world.updates.length;
-  await workflow.goalAfterRun("ws-1", "t6", "finished", null);
+  await workflow.goalAfterRun("ws-1", "t6", "finished");
+  assert.deepEqual(checks.map((check) => check.model), ["gemini-3-flash", "deepseek-v4"]);
   assert.equal((await goalOf(workflow)).status, "stalled");
-  assert.match((await goalOf(workflow)).note, /The goal could not be checked \(the evaluator returned HTTP 503 for deepseek-v4\); \/goal resume tries again/);
+  assert.match((await goalOf(workflow)).note, /The goal could not be checked \(the evaluator returned HTTP 503 for deepseek-v4\); resume tries again/);
   assert.equal(world.updates.length, quiet);
 
   ({ world, workflow } = await goalChat());
-  // No round limit, as in Claude Code: it goes on until the condition holds, or the person stops it.
+  // No round limit, as in Claude Code: a goal not yet met goes on round after round.
   for (let round = 0; round < 10; round++) {
     world.runs.push(teamRun(`t4-${round}`, "more to do"));
-    await workflow.goalAfterRun("ws-1", `t4-${round}`, "finished", null);
+    await workflow.goalAfterRun("ws-1", `t4-${round}`, "finished");
   }
   let goal = await goalOf(workflow);
   assert.equal(goal.status, "active");
   assert.equal(goal.round, 11);
   assert.equal(goal.rounds, 0);
-  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "build green on CI" });
-  assert.equal((await goalOf(workflow)).objective, "build green on CI");
-  assert.equal((await goalOf(workflow)).round, 11, "editing starts no round");
+  // An edited goal that is not running waits for Resume rather than starting by itself.
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "build green on CI" });
   goal = await goalOf(workflow);
-  assert.equal(goal.status, "paused");
+  assert.equal(goal.objective, "build green on CI");
+  assert.equal(goal.round, 11, "editing starts no round");
+  assert.equal(goal.status, "paused", "an edited goal that had stopped waits for Resume");
   const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
   assert.equal(resumed.goal.status, "active");
   // The click returns at once; the round it starts follows in the background, not after a frozen wait.
@@ -3401,6 +3467,72 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal((await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" })).cleared, true);
   assert.equal(await goalOf(workflow), undefined);
   await assert.rejects(workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" }), /No goal set/);
+});
+
+test("resuming a goal first judges the round nobody judged: one that ran while paused, or was stopped part-way", async () => {
+  const single = (id, answer, extra = {}) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { answer } }], ...extra });
+  // Paused mid-round; the round then finished with the goal met. Resume finds that out, starts nothing.
+  let { world, workflow, checks } = await goalChat();
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  world.runs.push(single("p1", "ALL DONE: 40/40 pass."));
+  await workflow.goalAfterRun("ws-1", "p1", "finished");
+  assert.equal(checks.length, 0, "a paused goal judges nothing");
+  let before = world.updates.length;
+  // Resume answers at once; the judging follows in the background.
+  let resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  assert.equal(resumed.goal.status, "active");
+  for (let tick = 0; tick < 50 && (await goalOf(workflow)).status === "active"; tick += 1) await goalSettle();
+  assert.equal(checks.length, 1, "the round that ran while paused is judged on resume");
+  assert.equal((await goalOf(workflow)).status, "achieved");
+  assert.equal(world.updates.length, before, "no extra round on a goal already met");
+
+  // Stopped by the person: paused, not stalled; resume judges the part done, then goes on with its reason.
+  ({ world, workflow, checks } = await goalChat());
+  world.runs.push(single("s1", "half way", { cancelled: true }));
+  await workflow.goalAfterRun("ws-1", "s1", "stopped");
+  assert.equal((await goalOf(workflow)).status, "paused");
+  before = world.updates.length;
+  resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  assert.equal(resumed.goal.status, "active");
+  await goalSettle(() => world.updates.length > before && /Stop hook feedback/.test(world.edits.at(-1)?.description ?? ""));
+  assert.equal(checks.length, 1);
+  const going = await goalOf(workflow);
+  assert.equal(going.status, "active");
+  assert.equal(going.round, 2);
+  assert.equal(world.updates.length, before + 1, "the next round started");
+  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green\]: Two tests still fail\./);
+  assert.equal(going.feedback, "Two tests still fail.", "the reason it goes on stays readable while the round runs");
+});
+
+test("a round that settled while nobody watched (the app was closed) is judged on the next read of the chat", async () => {
+  const { world, workflow, checks } = await goalChat();
+  world.runs.push({ id: "w1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { answer: "ALL DONE: shipped." } }] });
+  // A run still going is left alone.
+  world.runs.push({ id: "w0", workspace_id: "ws-1", project_id: "other", cancelled: false, nodes: [{ id: "x", role: "planner", parents: [], state: "running" }] });
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  for (let tick = 0; tick < 20 && (await goalOf(workflow)).status === "active"; tick++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(checks.length, 1);
+  assert.equal((await goalOf(workflow)).status, "achieved");
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  assert.equal(checks.length, 1, "judged once");
+});
+
+test("a team round's evaluator reads every card's answer, named by its card, with the closing answer last", () => {
+  const mission = { nodes: [
+    { id: "lead", role: "planner", title: "Lead", parents: [], receipt: { answer: "plan: fix auth, then docs" } },
+    { id: "w", role: "worker", title: "Fix auth", parents: ["lead"], receipt: { answer: "x".repeat(5000) + "npm test: 40/40 pass" } },
+    { id: "rev", role: "reviewer", title: "Review", parents: ["w"], receipt: { answer: "APPROVED" } },
+    { id: "ap", role: "approver", parents: [], receipt: { answer: "allow" } },
+  ] };
+  const answers = roundAnswers(mission);
+  assert.deepEqual(answers.map((answer) => (typeof answer === "string" ? answer : answer.label)), ["Lead", "Fix auth", "APPROVED"]);
+  assert.ok(answers[1].text.endsWith("npm test: 40/40 pass") && answers[1].text.length <= 3001, "a long worker answer keeps its end");
+  const transcript = roundTranscript("ship it", answers);
+  assert.match(transcript, /Assistant \(Fix auth\):\n…x+npm test: 40\/40 pass/);
+  assert.ok(transcript.endsWith("Assistant:\nAPPROVED"), "the closing answer comes last, where a cut keeps it");
+  assert.deepEqual(roundAnswers({ nodes: [{ id: "one", role: "planner", parents: [], receipt: { answer: "done" } }] }), ["done"], "a Single round is its one answer");
 });
 
 // ---- schedule_wakeup ----
@@ -3847,10 +3979,10 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
-  async function review(failing) {
+  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"] } = {}) {
     const request = { approval_id: "write", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions };
     const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
-      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+      { id: "one", role: "planner", state: "running", parents: [], route: { ...route, model }, receipt: { thread_id: "session-1", request_key: "k" } }] };
     const asked = [], resolved = [];
     let detail = "";
     const workflow = createAgentOrchestratorWorkflow({
@@ -3858,7 +3990,7 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
       resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
       cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
       fetchImpl: async (url, init) => {
-        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: catalog.map((id) => ({ id })) }) };
         const model = JSON.parse(init.body).model;
         asked.push(model);
         if (failing.includes(model)) return { ok: false, status: 503, json: async () => ({}) };
@@ -3896,6 +4028,18 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   const down = await review(["codex-auto-review", "test-model"]);
   assert.deepEqual(down.resolved, [], "nothing is answered for the person when no reviewer answers");
   assert.match(down.detail, /couldn't answer/, "and the request says why it is waiting for them");
+  // Seen live: 375 of 1,453 reviews in two days fell back to the chat's own gpt-6.1-sol, billed to
+  // the person's Codex quota. A fallback is never a Codex-quota model; another one serves instead.
+  const codexCard = await review(["codex-auto-review"], { model: "cpa/gpt-6.1-sol",
+    catalog: ["gpt-6.1-sol", "codex-auto-review", "cline-pass/deepseek-v4.1-flash"] });
+  assert.deepEqual(codexCard.asked, ["codex-auto-review", "cline-pass/deepseek-v4.1-flash"], "never the chat's Codex model");
+  assert.deepEqual(codexCard.resolved, ["yes"]);
+  const onlyCodex = await review(["codex-auto-review"], { model: "cpa/gpt-6.1-sol", catalog: ["gpt-6.1-sol", "codex-auto-review"] });
+  // Its own retry (REVIEW_RETRY_MS later) may come inside the test's wait on a slow machine; what
+  // matters is that only the free review model is ever asked.
+  assert.ok(onlyCodex.asked.length >= 1 && onlyCodex.asked.every((model) => model === "codex-auto-review"),
+    `with no other model the person decides rather than a paid review (asked ${onlyCodex.asked.join(", ")})`);
+  assert.deepEqual(onlyCodex.resolved, []);
 });
 
 test("Approve for me reviews with codex-auto-review although CPA hides it from model menus, and menus still leave it out", async () => {
@@ -3972,13 +4116,15 @@ test("the reviewer is told the agent's workspace folder, so a path inside it is 
   }
   const folderMode = await promptFor(() => ({ root: "G:\\Projects\\app", projectFolder: "G:\\Projects\\app" }));
   assert.deepEqual(folderMode.looked, [["session-1", "ws"]], "the folder of the session that asked, in this workspace");
-  assert.match(folderMode.prompt, /Workspace folder: G:\\Projects\\app\. Paths inside this folder, and relative paths, are inside the workspace/);
+  assert.match(folderMode.prompt, /Workspace folder \(the agent's writable root\): G:\\Projects\\app\. Relative paths and a command with no working folder are in it/);
+  // Judged by Codex's Auto-review rules, which do not treat a path outside that root as risky by itself.
+  assert.match(folderMode.prompt, /Do not assign `high` or `critical` solely because a path is outside the writable workspace roots/);
   assert.deepEqual(folderMode.resolved, ["yes"]);
   const worktree = await promptFor(() => ({ root: "C:\\Users\\me\\.ao\\worktrees\\one" }));
-  assert.match(worktree.prompt, /Workspace folder: C:\\Users\\me\\\.ao\\worktrees\\one\./, "a worktree session names its worktree");
+  assert.match(worktree.prompt, /Workspace folder \(the agent's writable root\): C:\\Users\\me\\\.ao\\worktrees\\one\./, "a worktree session names its worktree");
   // AO not answering never holds the review up: the prompt just has no folder line.
   const unknown = await promptFor(() => { throw new Error("AO is restarting"); });
-  assert.doesNotMatch(unknown.prompt, /Workspace folder:/);
+  assert.doesNotMatch(unknown.prompt, /Workspace folder \(/);
   assert.deepEqual(unknown.resolved, ["yes"]);
 });
 
@@ -4089,18 +4235,18 @@ test("the reviewer sees what the user asked in the chat and the worker's own des
   const chat = await promptFor({ projectId: "task", board: () => ({ ok: true, operation: { state: "completed",
     result: { ok: true, revision: 1, tasks: [], task: { id: "task", title: "API tests", description: asked } } } }) });
   assert.ok(chat.listed.some(call => JSON.stringify(call).includes('"task_id":"task"')), "the chat's own task is read");
-  assert.ok(chat.prompt.includes(`What the user asked in this chat (their own words, latest last; this is the task):\n${asked}`));
-  assert.match(chat.prompt, /Request: taskkill \/PID 31332 \/T \/F\nThe worker describes this request as: Kill uvicorn backend process tree/);
+  assert.ok(chat.prompt.includes(`# The user's request for this chat (trusted user content: their own words, latest last)\n${asked}`));
+  assert.match(chat.prompt, /Request: taskkill \/PID 31332 \/T \/F\nThe agent describes this request as: Kill uvicorn backend process tree/);
   assert.deepEqual(chat.resolved, ["yes"]);
   // A long chat keeps its latest words: the task is cut from the front.
   const long = await promptFor({ projectId: "task", board: () => ({ ok: true, operation: { state: "completed",
     result: { ok: true, revision: 1, tasks: [], task: { id: "task", title: "API tests", description: "x".repeat(5000) + "\nkill the backend" } } } }) });
-  assert.match(long.prompt, /x+\nkill the backend\nRequest:/);
+  assert.match(long.prompt, /x+\nkill the backend\n# Planned action/);
   assert.ok(!long.prompt.includes("x".repeat(2001)));
   // A task that cannot be read never holds the review up: the prompt just has no task line.
   const unread = await promptFor({ projectId: "task", board: () => { throw new Error("AO is restarting"); } });
-  assert.doesNotMatch(unread.prompt, /What the user asked/);
-  assert.match(unread.prompt, /The worker describes this request as:/);
+  assert.doesNotMatch(unread.prompt, /The user's request for this chat/);
+  assert.match(unread.prompt, /The agent describes this request as:/);
   assert.deepEqual(unread.resolved, ["yes"]);
 });
 
@@ -4252,8 +4398,9 @@ test("a review that keeps hanging still hands its request to the person at the d
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
     await waitFor(() => reviews >= 1);
     assert.equal(reviews, 1, "the review began");
-    // The pass hangs; once it is stale a later pass starts the review again.
-    clock += 128_000;
+    // The pass hangs; once it is stale a later pass starts the review again. The deadline is
+    // REVIEW_TRIES × (REVIEW_BUDGET_MS + REVIEW_RETRY_MS) + REVIEW_BUDGET_MS + 15 s = 3 × 49 + 60 = 207 s.
+    clock += 208_000;
     await waitFor(() => reviews >= 2);
     assert.equal(reviews, 2, "a later pass tried again");
     assert.equal((await shown()).awaiting_review, undefined,

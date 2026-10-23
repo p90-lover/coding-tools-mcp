@@ -166,7 +166,7 @@ function cleanConfig(input) {
  * `teams()` the workflow's subagentTeams (list, start, followUp, state, stop).
  */
 function createSubagents({ statePath = null, launchArgs, harness, blockedRequest = () => true, recommendedAnswer = () => ({ action: "decline" }),
-  models = null, teams = () => null, logger = console, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  routeRefusal = async () => null, models = null, teams = () => null, logger = console, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   let config = null;
   const runs = new Map(); // AO session id -> run
   const launching = []; // the parent chat of each start AO has not answered yet
@@ -535,6 +535,15 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   }
 
   async function launch(parent, workspaceId, agent, route, brief, settings, generation) {
+    // A route its provider refuses (Claude Code on an Antigravity model) fails here, with the
+    // reason, instead of minutes of "quota exhausted" retries. Asked once the launch holds its slot
+    // and a parent stop can wait for it; a check that cannot answer lets the launch go ahead.
+    const refusal = await Promise.resolve().then(() => routeRefusal(route)).catch(() => null);
+    // A stop during the check wins over its answer: nothing started, so the stop did not fail.
+    if ((stopGenerations.get(parent) ?? 0) !== generation) {
+      throw Object.assign(new Error("The chat stopped its subagents before this one started"), { cancelledByStop: true });
+    }
+    if (refusal) throw new Error(`"${agent.name}" cannot run on its model: ${refusal}. The user can give it another model on the Subagents page.`);
     const permissions = settings.permission === "full"
       ? { permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }
       : { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
@@ -642,7 +651,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       ...children.flatMap(run => [stop(run.id, parent, true), stopParent(run.id)]),
       ...(pendingLaunches.get(parent) ?? []),
     ]);
-    const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));
+    // A launch this stop cancelled before it started anything is what the stop wanted, not a failure.
+    const failures = outcomes.filter(outcome => outcome.status === "rejected" && !outcome.reason?.cancelledByStop).map(outcome => String(outcome.reason?.message || outcome.reason));
     if (failures.length) throw new Error(failures.join("; "));
   }
 
@@ -817,7 +827,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     call,
     config: () => read(),
     save,
-    runs: () => [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).map((run) => ({ ...view(run), workspace_id: run.workspaceId })),
+    // `parent` (the chat agent's AO session) lets a chat show the subagents its own agents started.
+    runs: () => [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).map((run) => ({ ...view(run), workspace_id: run.workspaceId,
+      parent: run.parent, started_at: run.startedAt })),
     stop: (id) => stop(id).then(view),
     stopParent,
     dispose() { if (poller) clearTimer(poller); poller = null; },

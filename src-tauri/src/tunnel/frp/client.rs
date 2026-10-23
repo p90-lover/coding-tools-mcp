@@ -819,7 +819,15 @@ fn extract_frpc_from_zip(archive_path: &Path, dest: &Path, binary_suffix: &str) 
         let mut entry = archive
             .by_index(i)
             .map_err(|err| AppError::Message(format!("读取 frpc 安装包失败: {err}")))?;
-        let name = entry.name().replace('\\', "/");
+        // Only a regular file's bytes are copied (never a folder or a symlink entry, whose "content"
+        // is a link target), into `dest`, a path chosen here; nothing in the archive picks a path.
+        if !entry.is_file() {
+            continue;
+        }
+        let name = entry
+            .name()
+            .map_err(|err| AppError::Message(format!("读取 frpc 安装包失败: {err}")))?
+            .replace('\\', "/");
         if name.ends_with(binary_suffix) || name.ends_with("frpc") || name.ends_with("frpc.exe") {
             let mut out = std::fs::File::create(dest)?;
             std::io::copy(&mut entry, &mut out)?;

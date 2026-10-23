@@ -14,8 +14,10 @@ const OBJECTIVE_LIMIT = 2000;
 const STATUSES = new Set(["active", "paused", "achieved", "stalled", "limited"]);
 // How much of a round the evaluator reads, the end kept: an agent's conclusion comes last.
 const TRANSCRIPT_LIMIT = 24_000;
+// A team round's other cards (workers, reviewers) are the evidence the closing card summarises;
+// each is cut to its end so one long worker cannot crowd out the rest.
+const EVIDENCE_LIMIT = 3_000;
 const REASON_LIMIT = 1_500;
-
 /**
  * The message a goal round sends. The first round sends the condition itself, as the person set
  * it; every later one is Claude Code's stop-hook feedback: the condition in brackets and the
@@ -27,11 +29,18 @@ function goalMessage(objective, round, reason = "") {
   return `Stop hook feedback:\n[${objective}]: ${why}`;
 }
 
-/** What a settled round showed: the message it was sent and the closing cards' answers. */
+/**
+ * What a settled round showed: the message it was sent, then its answers. An answer is a string (a
+ * closing card's final answer) or { label, text } (a team card's evidence, named by its card). The
+ * closing answers come last, so the cut, which keeps the end, keeps them.
+ */
 function roundTranscript(message, answers) {
   const parts = [`User:\n${String(message || "").trim() || "(no message)"}`];
-  const said = (answers ?? []).filter((answer) => typeof answer === "string" && answer.trim());
-  parts.push(said.length ? said.map((answer) => `Assistant:\n${answer.trim()}`).join("\n\n") : "Assistant:\n(no final answer)");
+  const said = (answers ?? []).map((answer) => (typeof answer === "string" ? { label: "", text: answer } : answer))
+    .filter((answer) => typeof answer?.text === "string" && answer.text.trim());
+  parts.push(said.length
+    ? said.map(({ label, text }) => `${label ? `Assistant (${label})` : "Assistant"}:\n${text.trim()}`).join("\n\n")
+    : "Assistant:\n(no final answer)");
   const text = parts.join("\n\n");
   return text.length > TRANSCRIPT_LIMIT ? `…${text.slice(-TRANSCRIPT_LIMIT)}` : text;
 }
@@ -67,15 +76,38 @@ function parseGoalCheck(text) {
   return { met: parsed.met, reason: reason || (parsed.met ? "The condition is met." : "The condition is not met yet.") };
 }
 
-/** The answers of a settled run's closing cards: cards no other card waits on (the retry sidecar aside). */
+/**
+ * The answers of a settled run's closing cards: cards no other card waits on. The retry sidecar and
+ * a Command approver aside: nothing waits on an approver either, but its answers are verdicts on
+ * commands, not the work.
+ */
 function closingAnswers(mission) {
-  const nodes = (mission?.nodes ?? []).filter(node => node.role !== "retry");
+  const nodes = (mission?.nodes ?? []).filter(node => node.role !== "retry" && node.role !== "approver");
   const parents = new Set(nodes.flatMap(node => node.parents ?? []));
   const closing = nodes.filter(node => !parents.has(node.id));
   const planner = nodes.find(node => node.role === "planner");
   // An orchestrator that answered alone ("solo") closes the mission itself.
   if (mission?.solo && planner) closing.push(planner);
   return closing.map(node => node.receipt?.answer).filter(answer => typeof answer === "string" && answer.trim());
+}
+
+/**
+ * Everything a settled round answered, for the evaluator: in a team, the other cards' answers first
+ * (each cut to its end, named by its card), then the closing answers in full. The closing card only
+ * summarises; judged from it alone, a team's goal was seldom shown to hold and went on round after
+ * round. A Single round has one card, so this is its answer.
+ */
+function roundAnswers(mission) {
+  const closing = closingAnswers(mission);
+  const nodes = (mission?.nodes ?? []).filter(node => node.role !== "retry" && node.role !== "approver");
+  if (nodes.length <= 1) return closing;
+  const evidence = nodes.map(node => ({ node, answer: node.receipt?.answer }))
+    .filter(({ answer }) => typeof answer === "string" && answer.trim() && !closing.includes(answer))
+    .map(({ node, answer }) => ({
+      label: String(node.title || node.role || node.id || "card").replace(/\s+/g, " ").trim().slice(0, 80),
+      text: answer.length > EVIDENCE_LIMIT ? `…${answer.slice(-EVIDENCE_LIMIT)}` : answer,
+    }));
+  return [...evidence, ...closing];
 }
 
 function cleanObjective(value) {
@@ -113,9 +145,10 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
       const prefix = `${workspaceId}:`;
       return Object.fromEntries(Object.entries(goals).filter(([name]) => name.startsWith(prefix)).map(([name, goal]) => [name.slice(prefix.length), goal]));
     },
-    set(workspaceId, taskId, objective) {
+    set(workspaceId, taskId, objective, { rounds = 0 } = {}) {
       const at = now();
-      const goal = { objective: cleanObjective(objective), status: "active", round: 0, rounds: 0,
+      const limit = Number.isInteger(rounds) && rounds > 0 ? rounds : 0;
+      const goal = { objective: cleanObjective(objective), status: "active", round: 0, rounds: limit,
         startedAt: at, updatedAt: at, lastRunId: "", evaluatedRunId: "", note: "", feedback: "" };
       goals[key(workspaceId, taskId)] = goal;
       persist();
@@ -138,4 +171,4 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
   };
 }
 
-module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, cleanObjective, createGoalStore };
+module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore };

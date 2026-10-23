@@ -77,7 +77,7 @@ const sections = [...visited.values()]
     ].join("\n");
   });
 
-const bunLicense = readFileSync(join(root, "LICENSES", "Bun-1.4.0.md"), "utf8").trim();
+const bunLicense = readFileSync(join(root, "LICENSES", "Bun-1.4.3.md"), "utf8").trim();
 const libnotifyLicense = readFileSync(
   join(root, "LICENSES", "libnotify-0.8.7-LGPL-2.1.md"),
   "utf8",
@@ -86,10 +86,10 @@ const output = [
   "codex-chatgpt-web third-party notices",
   "",
   "This file covers runtime JavaScript packages bundled into the standalone executable.",
-  "The executable also embeds Bun 1.4.0; Bun's licensing and relinking notice follows first.",
+  "The executable also embeds Bun 1.4.3; Bun's licensing and relinking notice follows first.",
   "",
   "=".repeat(80),
-  "Bun 1.4.0 runtime",
+  "Bun 1.4.3 runtime",
   "=".repeat(80),
   bunLicense,
   "",

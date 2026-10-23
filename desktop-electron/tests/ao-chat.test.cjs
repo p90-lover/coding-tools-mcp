@@ -234,6 +234,18 @@ test("chats group runs by task, newest first, titled 'New task' when the task is
   assert.deepEqual(list[0].runIds, ["r1", "r3"]);
 });
 
+test("a run being stopped reads as stopped at once; its working cards end, its finished ones keep their work", () => {
+  const receipt = { thread_id: "s1", answer: "partial" };
+  const live = run("r", "t", [node("p", "planner", "finished", { receipt }), node("w", "worker", "running", { receipt }),
+    node("v", "reviewer", "pending"), node("h", "worker", "held")]);
+  const stopping = chat.chatRunStopping(live);
+  assert.equal(chat.chatRunStatus(stopping), "stopped");
+  assert.deepEqual(stopping.nodes.map((item) => item.state), ["finished", "cancelled", "cancelled", "held"]);
+  assert.deepEqual(stopping.nodes[1].receipt, receipt, "a stopped card keeps its receipt, so its work can still be opened");
+  assert.equal(live.cancelled, false, "the run it was given is left as it was");
+  assert.equal(live.nodes[1].state, "running");
+});
+
 test("a chat whose earlier run still works reads Running, though its newest run was stopped", () => {
   const stopped = run("r2", "a", [node("p", "planner", "failed")]);
   stopped.cancelled = true;
@@ -365,8 +377,9 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
-      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {} }
-      : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), TurnRestart: react.createContext({ restarting: false }) } : {},
+      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [] }
+      : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
+        TurnRestart: react.createContext({ restarting: false }) } : {},
   });
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const base = { runs: [], tasks: [], selectedTaskId: "", busy: false, loadDescription: async () => "", send: async () => {}, openStructure() {}, approvals: [], approve() {}, describeRoute: () => "", retryStart() {} };
@@ -1068,7 +1081,7 @@ test("late chat creation never overwrites another project, another chat, or an u
 
 test("send completion preserves the next chat's draft and edits typed during the pending send", async () => {
   for (const taskId of ["task-b", "task-a"]) {
-    const reply = delayedReply(), attachments = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments } };
+    const reply = delayedReply(), attachments = [], annotations = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments, annotations } };
     const state = { draft: "sent text" }, set = key => value => { state[key] = value; };
     const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
       selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),

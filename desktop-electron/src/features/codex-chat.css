@@ -126,14 +126,14 @@
 .cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0;
   border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; }
 .cx-list-settings:hover, .cx-list-settings[aria-expanded="true"] { background: var(--cc-hover); color: var(--cc-text); }
-.cx-thread-row[draggable="true"] { cursor: grab; }
-.cx-thread-row.is-dragging { opacity: .45; }
+.cx-thread-row[draggable="true"], .cx-project-row[draggable="true"] .cx-project { cursor: grab; }
+.cx-thread-row.is-dragging, .cx-project-row.is-dragging { opacity: .45; }
 /* The label that follows the pointer while a chat is dragged (ChatThreadList); drawn off screen. */
 .cx-drag-ghost { position: fixed; top: -1000px; left: -1000px; max-width: 240px; padding: 4px 10px; overflow: hidden;
   border: 1px solid var(--ao-blue); border-radius: 6px; background: var(--color-bg-primary); color: var(--color-text-primary);
   font-size: 12px; white-space: nowrap; text-overflow: ellipsis; box-shadow: 0 4px 12px rgb(0 0 0 / 18%); }
-/* Where a dragged chat would land: a line above or below the row under the pointer. */
-.cx-thread-row[data-drop]::before { content: ""; position: absolute; left: 6px; right: 6px; z-index: 1; height: 2px; border-radius: 1px;
+/* Where a dragged chat or project would land: a line above or below the row under the pointer. */
+.cx-thread-row[data-drop]::before, .cx-project-row[data-drop]::before { content: ""; position: absolute; left: 6px; right: 6px; z-index: 1; height: 2px; border-radius: 1px;
   background: var(--ao-blue); pointer-events: none; }
 .cx-thread-row[data-drop="before"]::before { top: -1px; }
 .cx-thread-row[data-drop="after"]::before { bottom: -1px; }
@@ -655,6 +655,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-edit-diff tr.is-hunk td { padding: 1px 10px; color: var(--ao-muted); background: color-mix(in srgb, var(--ao-line) 40%, transparent); text-align: center; }
 .cx-tool.tone-failed .cx-tool-io.is-output { color: var(--ao-red); }
 .cx-tool-empty { margin: 2px 0; color: var(--ao-muted); font-size: 12px; font-style: italic; }
+/* Images a tool returned (a screenshot): left-aligned under the call, larger than a sent thumbnail. */
+.cx-tool-images { justify-content: flex-start; max-width: 100%; margin: 2px 0; }
+.cx-tool-images .cx-sent-image { width: 240px; height: 160px; }
+.cx-tool-image-count { flex: none; margin-left: 6px; padding: 0 5px; border: 1px solid var(--ao-line); border-radius: 4px;
+  color: var(--ao-muted); font-size: 11px; line-height: 16px; }
 @media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
 
 .cx-answer { display: grid; gap: 4px; }
@@ -1217,14 +1222,14 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* Clawd's house, standing beside the box's right side (on its top edge near the right end when the
    window leaves no room there): a doll's house with its front
    open. Its room is drawn behind Clawd and its roof and side walls in front, so Clawd shows inside. */
-.cx-pet-house-spot { position: absolute; z-index: 3; width: 136px; height: 104px; pointer-events: none; }
+.cx-pet-house-spot { position: absolute; z-index: 3; width: 160px; height: 160px; pointer-events: none; }
 .cx-pet-house-spot.is-inside { z-index: 1; }
 .cx-pet-house-spot.is-inside svg { display: block; }
-.cx-pet-house { position: relative; display: block; width: 136px; height: 104px; padding: 0; border: 0; background: transparent;
+.cx-pet-house { position: relative; display: block; width: 160px; height: 160px; padding: 0; border: 0; background: transparent;
   cursor: pointer; pointer-events: auto; }
 .cx-pet-house svg { display: block; }
 .cx-pet-house:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }
-.cx-pet-house-z { position: absolute; top: -6px; right: 14px; display: flex; gap: 3px; color: var(--ao-muted, #8a8986); font-size: 12px; font-weight: 700; }
+.cx-pet-house-z { position: absolute; top: -6px; right: 18px; display: flex; gap: 3px; color: var(--ao-muted, #8a8986); font-size: 12px; font-weight: 700; }
 .cx-pet-house-z span { animation: cx-pet-z 2.4s ease-in-out infinite; opacity: 0; }
 .cx-pet-house-z span:nth-child(2) { animation-delay: .8s; }
 .cx-pet-house-z span:nth-child(3) { animation-delay: 1.6s; font-size: 14px; }
@@ -1235,7 +1240,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-pet.is-leaping .cx-pet-body { pointer-events: none; }
 /* Split view: one Clawd for all panes, its house in a yard under the chat list (empty otherwise). */
 .cx-pet-yard { position: relative; flex: none; }
-.cx-pet-lot { position: relative; width: 136px; height: 104px; margin: 6px auto 10px; }
+.cx-pet-lot { position: relative; width: 160px; height: 160px; margin: 6px auto 10px; }
 @keyframes cx-pet-z { 0% { transform: translateY(6px); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateY(-14px); opacity: 0; } }
 @keyframes cx-pet-rise { to { transform: translateY(-36px); opacity: 0; } }
 @keyframes cx-pet-shadow { from { transform: scale(.4); opacity: .3; } to { transform: scale(1); opacity: 1; } }
@@ -1285,7 +1290,43 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-overview-usage li > span:last-child { align-items: flex-end; flex: none; }
 .cx-overview-usage b { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .cx-overview-usage small { color: var(--ao-muted); font-size: 11.5px; }
+.cx-overview-tasks button.is-idle i { background: var(--ao-muted); opacity: .5; animation: none; }
 @media (prefers-reduced-motion: reduce) { .cx-overview-tasks i { animation: none; } }
+/* The chat's subagents (ChatWorkbench's Subagents tab and the line above the chat box), as Codex
+   shows a thread's: a dot per subagent, green and pulsing while it works. */
+.cx-subagent-strip { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; width: calc(100% - 48px); max-width: 760px; margin: 0 auto 6px;
+  padding: 4px 10px; border: 0; border-radius: 8px; background: none; color: var(--ao-muted); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.cx-subagent-strip:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-subagent-strip > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-subagent-dots { display: inline-flex; flex: none; gap: 3px; }
+.cx-subagent-dots i, .cx-subagent-list i, .cx-subagent-title i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
+.cx-subagent-dots i, .cx-subagent-list .is-starting i, .cx-subagent-list .is-running i, .cx-subagent-title.is-starting i, .cx-subagent-title.is-running i {
+  background: var(--ao-green, #2e9d5b); animation: cx-pulse 1.4s ease-in-out infinite; }
+.cx-subagent-dots i:nth-child(2) { animation-delay: .2s; }
+.cx-subagent-dots i:nth-child(3) { animation-delay: .4s; }
+.cx-subagent-list .is-completed i, .cx-subagent-title.is-completed i { background: var(--ao-blue, #2f6fdd); }
+.cx-subagent-list .is-failed i, .cx-subagent-list .is-timed_out i, .cx-subagent-title.is-failed i, .cx-subagent-title.is-timed_out i { background: var(--ao-red, #c0392b); }
+.cx-subagent-list { display: flex; flex: 1 1 auto; flex-direction: column; gap: 2px; min-height: 0; margin: 0; padding: 8px; overflow: auto; list-style: none; }
+.cx-subagent-list button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: none;
+  color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cx-subagent-list button:hover { background: var(--cx-hover); }
+.cx-subagent-list button > span { display: flex; flex-direction: column; min-width: 0; }
+.cx-subagent-list b, .cx-subagent-title b { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.cx-subagent-list small, .cx-subagent-title small { color: var(--ao-muted); font-size: 11.5px; }
+.cx-subagent { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.cx-subagent-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--ao-line); }
+.cx-subagent-title { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; }
+.cx-subagent-title small { flex: none; }
+.cx-subagent-stop { flex: none; height: 26px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 7px; background: none;
+  color: var(--ao-red, #c0392b); font: inherit; font-size: 12px; cursor: pointer; }
+.cx-subagent-stop:disabled { opacity: .6; cursor: default; }
+.cx-subagent-body { flex: 1 1 auto; min-height: 0; padding: 8px 14px 16px; overflow: auto; font-size: 13px; }
+.cx-subagent-task { margin: 0 0 8px; color: var(--ao-muted); }
+.cx-subagent-task summary { cursor: pointer; font-size: 12px; }
+.cx-subagent-task p { margin: 6px 0 0; white-space: pre-wrap; }
+.cx-subagent-report { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--ao-line); }
+.cx-subagent-report h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ao-muted); }
+@media (prefers-reduced-motion: reduce) { .cx-subagent-dots i, .cx-subagent-list i, .cx-subagent-title i { animation: none; } }
 /* A DeepSeek model's turn, as DeepSeek Harness's web client draws one (DshTranscript.tsx; its
    ui-chat, ui-tool, ui-primitives and ui-theme stylesheets, MIT License, Copyright (c) 2026
    DeepSeek). The colors are its design-platform tokens, light then dark. */

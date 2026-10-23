@@ -1913,7 +1913,11 @@ class BrowserHost {
     if (!this.clipboard || typeof this.clipboard.writeText !== "function") {
       throw new Error("Electron clipboard is unavailable");
     }
-    this.clipboard.writeText(prompt);
+    // Electron 44+ returns a promise here. The user pastes by hand later, so the
+    // turn need not wait; only keep a failed write from becoming an unhandled rejection.
+    Promise.resolve(this.clipboard.writeText(prompt)).catch((error) => {
+      this.logger.warn("browser.manual_prompt_copy_failed", { error: error instanceof Error ? error.message : String(error) });
+    });
   }
 
   beginManualTurn(traceId, helperPid, prompt, conversationKey, resumePrompt, compaction = false) {

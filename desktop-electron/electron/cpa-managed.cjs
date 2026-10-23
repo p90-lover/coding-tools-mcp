@@ -131,14 +131,16 @@ function yamlString(value) {
   return JSON.stringify(String(value));
 }
 
+// Every Go plugin is built with Go 1.26.10/1.27.3 or later: before them, crypto/x509 trusted chains
+// through distrusted intermediates (CVE-2026-111943, the leaked emSign CA keys).
 const COMMANDCODE_PLUGINS = [
   { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.7.dll", sha256: "55ae02ccdad336f0e1418fd15f42cb4273e30ad9416dc566f4ddb2fb10d8bc9e" },
   { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.3.dll", sha256: "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343" },
-  { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
+  { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.2.dll", sha256: "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
   { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
   // Grok Build/Web/Console provider built from chenyme/grok2api (vendor/cpa-plugins/grok-login-provider).
-  { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.1.dll", sha256: "57fbdce4ad770499e604a7d3654bc7b700532e0572c0980ff040818a83117cb7" },
+  { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.2.dll", sha256: "9894157b26546b325e308b36fcb4fde6795b3ed813bc866e79ab78dfb0a39937" },
 ];
 
 function installBundledCommandCodePlugin(state) {

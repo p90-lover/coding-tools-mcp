@@ -6,23 +6,24 @@ import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatWorkbench, navigatePreview, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatWorkbench, navigatePreview, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SentImage, ToolImages } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
+  subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
 } from "./ao-chat";
 
@@ -272,14 +273,19 @@ function ToolItem({ item }: { item: ChatLiveItem }) {
   const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
     <span className="cx-live-text">{toolHeadline(item)}</span><ApprovedMark text={item.approval} /></>;
-  const opens = item.kind === "command" || item.input || item.output;
+  const images = item.images ?? [];
+  // A returned image is read from disk only once its row is opened, not for every row in the turn.
+  const [opened, setOpened] = useState(false);
+  const opens = item.kind === "command" || item.input || item.output || images.length;
   return opens
-    ? <details className={`cx-tool tone-${tone}`}><summary>{head}</summary>
+    ? <details className={`cx-tool tone-${tone}`} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}>
+      <summary>{head}{images.length ? <span className="cx-tool-image-count">{images.length === 1 ? "image" : `${images.length} images`}</span> : null}</summary>
       <div className="cx-tool-body">
         {item.kind === "command" ? <pre className="cx-tool-io"><code>{item.text}</code></pre> : null}
         {item.input ? <pre className="cx-tool-io"><code>{item.input}</code></pre> : null}
+        {opened && images.length ? <ToolImages paths={images} /> : null}
         {item.output ? <pre className="cx-tool-io is-output"><code>{item.output}</code></pre>
-          : tone === "running" ? null : <p className="cx-tool-empty">No output</p>}
+          : tone === "running" || images.length ? null : <p className="cx-tool-empty">No output</p>}
       </div></details>
     : <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
 }
@@ -564,29 +570,6 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
   </div>;
 }
 
-/** Reads an attached image for its thumbnail and shows a file in its folder (the desktop app's). */
-type AttachmentAccess = { preview?: (path: string) => Promise<string>; reveal?: (path: string) => void };
-const Attachments = createContext<AttachmentAccess>({});
-/** Thumbnails already read, by path: a poll re-renders every message, and each image is read once. */
-const PREVIEWS = new Map<string, Promise<string>>();
-
-function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string) => void }) {
-  const { preview } = useContext(Attachments);
-  const [url, setUrl] = useState<string | null>(null);
-  const [missing, setMissing] = useState(false);
-  useEffect(() => {
-    if (!item.path || !preview) return;
-    let current = true;
-    let read = PREVIEWS.get(item.path);
-    if (!read) { read = preview(item.path); PREVIEWS.set(item.path, read); }
-    read.then((value) => { if (current) setUrl(value); }, () => { PREVIEWS.delete(item.path!); if (current) setMissing(true); });
-    return () => { current = false; };
-  }, [item.path, preview]);
-  return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url)}>
-    {url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>}
-  </button>;
-}
-
 /** SentMessage for the DeepSeek transcript (SentMessageView), which cannot import this file. */
 const sentMessageView = (text: string) => <SentMessage text={text} />;
 
@@ -599,12 +582,6 @@ function SentMessage({ text }: { text: string }) {
   const { reveal } = useContext(Attachments);
   const [open, setOpen] = useState<string | null>(null);
   const parts = chatMessageParts(text);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(null); };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [open]);
   return <>
     {parts.attachments.length ? <div className="cx-sent-attachments">
       {parts.attachments.map((item, index) => item.image && item.path
@@ -617,10 +594,7 @@ function SentMessage({ text }: { text: string }) {
     </div> : null}
     {parts.annotations?.length ? <SentAnnotations annotations={parts.annotations} /> : null}
     {parts.text ? <div className="cx-bubble"><p>{parts.text}</p></div> : null}
-    {open ? <div className="cx-lightbox" role="dialog" aria-label="Image preview" onClick={() => setOpen(null)}>
-      <img src={open} alt="" onClick={(event) => event.stopPropagation()} />
-      <button type="button" className="cx-lightbox-close" aria-label="Close image preview" onClick={() => setOpen(null)}>×</button>
-    </div> : null}
+    {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
   </>;
 }
 
@@ -1036,6 +1010,13 @@ export function AgentOrchestratorChat({
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  // A subagent starting opens the panel on its Subagents tab, as Codex's panel shows a thread's
+  // subagents; a Preview, Terminal or diff the person has open stays (the line above the chat box says it).
+  const subagents = useChatSubagents(selectedTaskId ? agentSessionIds : [],
+    () => setWorkbench((open) => (open === null || open === "overview" || open === "new" ? "subagents" : open)));
+  const subagentLine = useMemo(() => (subagents.some(subagentActive) ? subagentsSummary(subagents) : null), [subagents]);
+  const renderSubagentWork = useMemo(() => (items: ChatLiveItem[], live: boolean, reply?: string) =>
+    <LiveTimeline items={items} live={live} finished={!live} reply={reply} />, []);
   useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
   // The details panel's Outputs and Sources: the cards' work this window has seen (CHAT_WORK holds
   // live polls and turns read back), plus the newest turns' finished cards, read back once each
@@ -1822,7 +1803,7 @@ export function AgentOrchestratorChat({
               {feedback ? <div className="cx-hook-feedback" role="note">
                 <span className="cx-hook-feedback-mark" aria-hidden="true">⎿</span>
                 <span className="cx-hook-feedback-text">Stop hook feedback:{"\n"}[{feedback.objective}]: {feedback.reason}</span>
-                {turn.user?.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
+                {turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
               </div> : turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
                 <MessageActions text={chatMessageReadable(turn.user.text)}>
@@ -2106,9 +2087,10 @@ export function AgentOrchestratorChat({
             <GoalGlyph name="target" />
             <span className="cx-goal-state" title={commands.goal.note || `Round ${goalRounds(commands.goal)}`}>{GOAL_SUMMARY[commands.goal.status]}</span>
             <span className="cx-goal-objective" title={commands.goal.objective}>{commands.goal.objective}</span>
-            {commands.goal.note ? <span className="cx-goal-note" title={commands.goal.note}>{commands.goal.note}</span> : null}
+            {goalDetail(commands.goal) ? <span className="cx-goal-note" title={goalDetail(commands.goal)}>{goalDetail(commands.goal)}</span> : null}
             <span className="cx-goal-meta" title={`Round ${goalRounds(commands.goal)}`}>
-              {/* A goal being pursued counts to the second, as Codex shows it; the label ticks alone. */}
+              {/* Which round it is on, then how long it has run, to the second as Codex shows it. */}
+              <span className="cx-goal-round">Round {goalRounds(commands.goal)} · </span>
               <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
                 format={(ms) => goalElapsed(0, ms)} /></span>
             <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" disabled={goalBusy} onClick={() => void runCommand("goal", "clear", false)}><GoalGlyph name="trash" /></button>
@@ -2138,6 +2120,12 @@ export function AgentOrchestratorChat({
           return change ? <p className="cx-route-note" role="status"><b>{change.now}</b> starts a new agent with only a summary of this chat.
             Switch back to <b>{change.back}</b> to keep this one.</p> : null;
         })()}
+        {/* Codex's "… started working" line for a thread's subagents: who works now, a click from their work. */}
+        {selectedTaskId && subagentLine ? <button type="button" className="cx-subagent-strip" role="status" title="Show the subagents and what they are doing"
+          onClick={() => setWorkbench("subagents")}>
+          <span className="cx-subagent-dots" aria-hidden="true">{subagents.filter(subagentActive).slice(0, 3).map((run) => <i key={run.subagent_id} />)}</span>
+          <span className="cx-shimmer">{subagentLine}</span>
+        </button> : null}
         {/* Queued and steering messages wait above the branch picker, as Claude Code's queued bar sits
             above its branch (PR) bar: under it, a steer sat between "main" and the box. */}
         <QueuedMessageBar items={queuedBar}
@@ -2257,7 +2245,8 @@ export function AgentOrchestratorChat({
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
-      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
+      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
+        subagents={subagents} renderWork={renderSubagentWork} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   </TurnRestart.Provider></CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);

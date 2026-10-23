@@ -676,16 +676,18 @@ function previewMenuTemplate({ contents, params, openLink, canOpen, clipboard })
   const flags = params?.editFlags ?? {};
   const history = contents.navigationHistory;
   const sections = [];
+  // Electron 44+ writes the clipboard asynchronously; a failed copy is not worth a crash.
+  const copyText = (text) => Promise.resolve(clipboard?.writeText(text)).catch(() => undefined);
   if (params?.linkURL) {
     sections.push([
       { label: "Open link", enabled: canOpen(params.linkURL), click: () => openLink(params.linkURL) },
-      { label: "Copy link address", enabled: Boolean(clipboard), click: () => clipboard?.writeText(params.linkURL) },
+      { label: "Copy link address", enabled: Boolean(clipboard), click: () => copyText(params.linkURL) },
     ]);
   }
   if (params?.mediaType === "image" && params.srcURL) {
     sections.push([
       { label: "Copy image", click: () => contents.copyImageAt?.(params.x, params.y) },
-      { label: "Copy image address", enabled: Boolean(clipboard), click: () => clipboard?.writeText(params.srcURL) },
+      { label: "Copy image address", enabled: Boolean(clipboard), click: () => copyText(params.srcURL) },
     ]);
   }
   if (params?.isEditable) {

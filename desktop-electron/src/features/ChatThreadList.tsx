@@ -165,6 +165,23 @@ export function orderProjects<T extends { id: string }>(items: T[], pinned: stri
 }
 
 /**
+ * The kept project order with every project not placed yet (new, or still loading when the order
+ * was first kept) added at the end, where it then stays: left to the list's own order it could
+ * still move. The same array when nothing is new.
+ */
+export function placeNewProjects(saved: string[], ids: string[]): string[] {
+  const unplaced = ids.filter((id) => !saved.includes(id));
+  return unplaced.length ? [...saved, ...unplaced] : saved;
+}
+
+/** The order a project list had when projects still rose with use: kept once as where they stand. */
+export function projectsByLastUse<T extends { id: string }>(items: T[], usedAt: Record<string, number>): string[] {
+  const index = new Map(items.map((item, at) => [item.id, at]));
+  return [...items].sort((a, b) => (usedAt[b.id] ?? 0) - (usedAt[a.id] ?? 0) || (index.get(a.id) ?? 0) - (index.get(b.id) ?? 0))
+    .map((item) => item.id);
+}
+
+/**
  * Chats that started a new run since the list last saw them (you sent them a message) leave the
  * order you dragged chats into, so they rise with the newest chats as in Codex instead of staying
  * where you once placed them. Returns the manual order without them, and whether any moved.
@@ -174,6 +191,8 @@ export function releaseUsedChats(manual: string[], seenRuns: Record<string, stri
   return { order: used.length ? manual.filter((id) => !used.includes(id)) : manual, used };
 }
 
+// Where projects stood by last use, from before projects kept their place; read once to keep it.
+const PROJECT_USED_KEY = "coding-tools:ao:project-used";
 const PROJECT_ORDER_KEY = "coding-tools:ao:project-order";
 const OPEN_PROJECTS_KEY = "coding-tools:ao:open-projects";
 function readStored<T>(key: string, fallback: T, valid: (value: unknown) => value is T): T {
@@ -394,13 +413,26 @@ export function ChatThreadList(props: ThreadListProps) {
     }
     return () => { live = false; };
   }, [loadProjectChats, openOtherIds, now]);
-  // A chat that got a new run was just used: it rises to the top of its project, as in Codex. Its
-  // project stays where it is; projects move only when you drag them (projectManual).
-  const [projectManual, setProjectManual] = useState<string[]>(() => readStored(PROJECT_ORDER_KEY, [], isIds));
+  // The order you dragged projects into. Before there was one, projects rose as they were used; the
+  // first list seen keeps that order, so nothing moves on the update.
+  const [projectOrderSaved, setProjectOrderSaved] = useState<string[] | null>(() => {
+    try { return localStorage.getItem(PROJECT_ORDER_KEY) === null ? null : readStored(PROJECT_ORDER_KEY, [], isIds); } catch { return []; }
+  });
   const saveProjectOrder = (next: string[]) => {
-    setProjectManual(next);
-    try { localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(next)); } catch { /* per-session only */ }
+    setProjectOrderSaved(next);
+    try { localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(next)); localStorage.removeItem(PROJECT_USED_KEY); } catch { /* per-session only */ }
   };
+  useEffect(() => {
+    if (!workspaces.length) return;
+    if (projectOrderSaved === null) {
+      saveProjectOrder(projectsByLastUse(workspaces, readStored(PROJECT_USED_KEY, {}, isTimes)));
+      return;
+    }
+    const placed = placeNewProjects(projectOrderSaved, workspaces.map((item) => item.id));
+    if (placed !== projectOrderSaved) saveProjectOrder(placed);
+  }, [projectOrderSaved, workspaces]);
+  // A chat that got a new run was just used: it rises to the top of its project, as in Codex. Its
+  // project stays where it is; projects move only when you drag them.
   const seenRuns = useRef<{ workspaceId: string; runs: Record<string, string> }>({ workspaceId, runs: {} });
   useEffect(() => {
     if (seenRuns.current.workspaceId !== workspaceId) seenRuns.current = { workspaceId, runs: {} };
@@ -699,7 +731,7 @@ export function ChatThreadList(props: ThreadListProps) {
     value={naming?.name ?? ""} onChange={(event) => setNaming((current) => current && { ...current, name: event.target.value })}
     onKeyDown={(event) => { if (event.key === "Enter") commitNaming(); if (event.key === "Escape") setNaming(null); }}
     onBlur={commitNaming} />;
-  const projectOrder = orderProjects(workspaces, props.pinnedProjects, projectManual);
+  const projectOrder = orderProjects(workspaces, props.pinnedProjects, projectOrderSaved ?? []);
   // Projects are dragged into place like chats, and only within Projects; that order is kept.
   const projectsDrag: DragList = { list: "projects", order: projectOrder.map((item) => item.id), save: saveProjectOrder };
   return (

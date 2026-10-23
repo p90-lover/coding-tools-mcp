@@ -36,12 +36,12 @@ function tempTree() {
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
-  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null } = {}) {
+  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory, appProcesses,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
@@ -941,6 +941,33 @@ test("schedule_wakeup hands the chat's own session to the app's scheduler and te
     const other = await session(plain.tools, { id: "no-wake" });
     assert.equal((await listed(other.url, other.auth)).includes("schedule_wakeup"), false);
     assert.equal((await callTool(other.url, other.auth, "schedule_wakeup", { minutes: 1, reason: "x" })).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
+test("app_processes lists the app's processes through the app's reader, read-only, and is offered only with one", async () => {
+  const asked = [];
+  const appProcesses = async (options) => {
+    asked.push(options);
+    if (options.limit === 999) throw new Error("PowerShell is unavailable");
+    return { sampled_ms: 1000, cores: 8, total: { processes: 1, cpu_percent: 12.5, memory_mb: 300 }, notes: [],
+      processes: [{ pid: 10, name: "ao-daemon.exe", role: "AO daemon", cpu_percent: 12.5, memory_mb: 300 }] };
+  };
+  const { tools } = fixture({ appProcesses });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "watcher" });
+    assert.ok((await listed(client.url, client.auth)).includes("app_processes"), "listed with the agent's own tools");
+    const result = await callTool(client.url, client.auth, "app_processes", { sample_ms: 500, sort: "memory", limit: 5 });
+    assert.equal(result.isError, undefined);
+    assert.equal(JSON.parse(result.content[0].text).processes[0].role, "AO daemon");
+    assert.deepEqual(asked, [{ sampleMs: 500, sort: "memory", limit: 5 }], "only the agent's sample, sort and limit reach the reader");
+    const failed = await callTool(client.url, client.auth, "app_processes", { limit: 999 });
+    assert.equal(failed.isError, true);
+    assert.match(failed.content[0].text, /could not be read: PowerShell is unavailable/);
+    // Without a reader the tool is not offered at all.
+    const other = await session(plain.tools, { id: "no-reader" });
+    assert.equal((await listed(other.url, other.auth)).includes("app_processes"), false);
+    assert.equal((await callTool(other.url, other.auth, "app_processes", {})).isError, true);
   } finally { await tools.close(); await plain.tools.close(); }
 });
 

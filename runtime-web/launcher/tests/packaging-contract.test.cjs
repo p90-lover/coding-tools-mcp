@@ -132,7 +132,7 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(ci, /prepare-linux-libnotify\.sh/);
   assert.match(ci, /prepare-linux-appimage-tools\.cjs/);
   assert.match(ci, /archlinux:base/);
-  assert.match(ci, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.0/);
+  assert.match(ci, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.3/);
   for (const runner of ["macos-15", "macos-15-intel", "ubuntu-latest", "windows-latest"]) {
     assert.match(release, new RegExp(runner));
   }
@@ -141,7 +141,7 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(release, /prepare-linux-libnotify\.sh/);
   assert.match(release, /prepare-linux-appimage-tools\.cjs/);
   assert.match(release, /archlinux:base/);
-  assert.match(release, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.0/);
+  assert.match(release, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.3/);
   assert.match(release, /codesign --verify --deep --strict --verbose=2/);
   assert.match(release, /Codex Web GPT\.app/);
   assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);

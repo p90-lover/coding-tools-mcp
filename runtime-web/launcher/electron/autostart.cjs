@@ -69,7 +69,7 @@ function setAutostart(app, enabled) {
   if (process.platform === "darwin" || process.platform === "win32") {
     app.setLoginItemSettings({
       openAtLogin: Boolean(enabled),
-      openAsHidden: Boolean(enabled),
+      // Electron 44 removed openAsHidden; --hidden starts the app in the tray.
       args: ["--hidden"],
     });
     return requireAutostartState({

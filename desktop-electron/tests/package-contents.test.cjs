@@ -73,7 +73,7 @@ function createRuntime(resourcesRoot) {
     schemaVersion: 2,
     appVersion: PRODUCT_VERSION,
     bundleId: runtimeBundleId(files),
-    bunVersion: "1.4.0",
+    bunVersion: "1.4.3",
     platform: "win32",
     arch: "x64",
     launcher: "bin/codex-chatgpt-web.cmd",
