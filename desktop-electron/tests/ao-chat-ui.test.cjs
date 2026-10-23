@@ -233,18 +233,19 @@ test("an image steered into a running turn shows as the image, not as its path",
   assert.match(html, /<p>switch number ,if met the number is unable to verify on text<\/p>/, "the typed words stay in the bubble");
 });
 
-test("a steer carries Claude Code's read receipt: Unread while the agent holds it, Read by Claude once read", () => {
+test("a steer carries Claude Code's read receipt: Unread while the agent holds it, Read by its model once read", () => {
   const render = (timeline) => renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, {
     runs: [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single", nodes: [{ id: "lead", role: "planner", state: "running",
-      route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-4", started_at_ms: Date.now() - 5_000 } }] }],
+      route: { harness_id: "ao:claude-code", model: "cpa/gpt-5.5" }, receipt: { thread_id: "sess-4", started_at_ms: Date.now() - 5_000 } }] }],
     activity: { "run:lead": { activity: "working", timeline } },
-    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [], modelName: () => "GPT-5.5",
     loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "Claude Code · m", retryStart() {} }));
   const item = (id, kind) => ({ id, kind, status: "completed", text: kind === "steer" ? "check the logs too" : "x" });
   const unread = render([item("m1", "message"), item("s1", "steer")]);
   assert.match(unread, /class="cx-receipt" data-receipt="unread" role="img" aria-label="Unread"/, "a faded check, Unread");
   const read = render([item("m1", "message"), item("s1", "steer"), item("t1", "tool"), item("m2", "message")]);
-  assert.match(read, /data-receipt="read" role="img" aria-label="Read by Claude"/, "a double check, Read by Claude");
+  // Claude Code here runs GPT-5.5, so GPT-5.5 read it, not Claude.
+  assert.match(read, /data-receipt="read" role="img" aria-label="Read by GPT-5.5"/, "a double check, Read by its model");
   assert.ok(read.indexOf("cx-receipt") < read.indexOf("Copy message"), "the receipt leads the row, before Copy");
 });
 

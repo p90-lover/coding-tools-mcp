@@ -1261,9 +1261,20 @@ test("a steer reads as Claude Code's receipt: unread until the model's next requ
   const marked = chat.steerReceipts(items, false);
   assert.equal(chat.steerReceipts(marked, false), marked, "already marked: the same list");
   assert.equal(marked[0], items[0]);
-  assert.equal(chat.steerReader("Claude Code · deepseek-v4.1-flash · high"), "Claude");
-  assert.equal(chat.steerReader("Codex · gpt-5.5"), "Codex");
+  // Its reader is the card's model; a step without one falls back to the harness, then Claude.
+  assert.equal(chat.steerReader({ reader: "DeepSeek V4.1 Flash", detail: "Claude Code · deepseek-v4.1-flash · high" }), "DeepSeek V4.1 Flash");
+  assert.equal(chat.steerReader({ detail: "Claude Code · deepseek-v4.1-flash · high" }), "Claude");
+  assert.equal(chat.steerReader({ detail: "Codex · gpt-5.5" }), "Codex");
   assert.equal(chat.steerReader(undefined), "Claude");
+});
+
+test("a steer is read by the card's model, not by Claude when Claude Code runs another provider's model", () => {
+  const reader = (model, modelName) => chat.chatTurns([{ id: "r", project_id: "t", cancelled: false, execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "running", x: 0, route: { harness_id: "ao:claude-code", model } }] }], "hi",
+    modelName ? { modelName } : {})[0].steps[0].reader;
+  assert.equal(reader("cpa/cline-pass/deepseek-v4.1-flash", () => "DeepSeek V4.1 Flash"), "DeepSeek V4.1 Flash");
+  assert.equal(reader("cpa/claude-opus-4-7", () => "Opus 4.7"), "Claude Opus 4.7", "a Claude model keeps its maker's name");
+  assert.equal(reader("cpa/cline-pass/deepseek-v4.1-flash(high)"), "deepseek-v4.1-flash", "without a namer: the bare id, no effort");
 });
 
 test("an answered request is no row of its own: its answer shows on the call it let run", () => {

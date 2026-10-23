@@ -132,10 +132,20 @@ function steerRead(items: ChatLiveItem[], at: number): boolean {
   return false;
 }
 
-/** Who reads a steer, by the card's harness ("Claude Code · model · …"): Claude Code's own words name Claude. */
-export function steerReader(detail: string | undefined): string {
-  const harness = (detail ?? "").split(" · ")[0]?.trim();
+/**
+ * Who reads a steer: the card's model, as the chat names it ("DeepSeek V4.1 Flash", "Claude Opus 4.7"),
+ * since Claude Code runs other providers' models too. Without one, the harness ("Codex"), else Claude.
+ */
+export function steerReader(step: Pick<ChatStep, "reader" | "detail"> | undefined): string {
+  if (step?.reader) return step.reader;
+  const harness = (step?.detail ?? "").split(" · ")[0]?.trim();
   return !harness || /^claude code$/i.test(harness) ? "Claude" : harness;
+}
+
+/** A model's name for its read receipt; a Claude model keeps "Claude", which its short label drops. */
+function modelReader(model: string, modelName?: (model: string) => string): string {
+  const label = modelName?.(model) || model.slice(model.lastIndexOf("/") + 1).replace(/\([^)]*\)$/, "");
+  return /claude/i.test(model) && !/^claude/i.test(label) ? `Claude ${label}` : label;
 }
 /**
  * A turn's activity as it reads. A request "Approve for me" (or the user) allowed is no row of its
@@ -769,6 +779,8 @@ export type ChatStep = {
   name: string;
   /** How the card runs: harness · model · effort · context · role. */
   detail: string;
+  /** The model that reads the person's steers ("Read by DeepSeek V4.1 Flash"), from modelReader. */
+  reader?: string;
   state: string;
   text?: string;
   verdict?: string;
@@ -894,6 +906,7 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     key, nodeId: node.id, role: node.role,
     // A single-model chat's one card reads as the model it runs ("Single assistant" said nothing).
     name: (run.execution_mode === "single" && node.route?.model && options.modelName?.(node.route.model)) || chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
+    ...(node.route?.model ? { reader: modelReader(node.route.model, options.modelName) } : {}),
     ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
     ...(node.receipt?.thread_id && node.route?.harness_id?.startsWith("ao:") && node.state !== "running" && node.state !== "reserved"
       ? { hasWork: true } : {}),

@@ -230,7 +230,7 @@ function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseSt
   // not shown at all here, and the other view drew them under the new attempt's work.
   const earlier = <EarlierRounds rounds={step.earlier} />;
   if (!work.length) return <>{earlier}{step.hasWork && !step.working ? <p className="dsh-hint">Loading…</p> : null}</>;
-  return <>{earlier}<SteerReader.Provider value={steerReader(step.detail)}>
+  return <>{earlier}<SteerReader.Provider value={steerReader(step)}>
     <DshFlow items={work} grouped={!step.working} finished={!step.working && step.state === "finished"} hideReply={answer} />
   </SteerReader.Provider></>;
 }
@@ -248,7 +248,7 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
     open={open} expandable={Boolean(step.hasWork || work?.length || step.text || step.earlier?.length)} onToggle={() => setChosen(!open)}>
     <div className="dsh-agent-body">
       <EarlierRounds rounds={step.earlier} />
-      {work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+      {work?.length ? <SteerReader.Provider value={steerReader(step)}>
         <DshFlow items={work} grouped={!live} finished={!live && step.state === "finished"} hideReply={answer} />
       </SteerReader.Provider> : null}
       {step.text && step.text.trim() !== answer?.trim() ? <div className="dsh-reply"><ChatMarkdown text={step.text} /></div> : null}

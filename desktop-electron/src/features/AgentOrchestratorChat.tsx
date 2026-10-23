@@ -449,7 +449,7 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
       {/* Its earlier rounds first, folded (oldest first), then the attempt now: a retried card's
           failed attempt showed under the new attempt's work, as if it came after it. */}
       <EarlierRounds rounds={step.earlier} />
-      {work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+      {work?.length ? <SteerReader.Provider value={steerReader(step)}>
         <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={step.text} />
       </SteerReader.Provider> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
@@ -475,7 +475,7 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+    {open ? work?.length ? <SteerReader.Provider value={steerReader(step)}>
       <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} />
     </SteerReader.Provider> : <p className="cx-tool-empty">Loading…</p> : null}
   </div>;
@@ -1689,7 +1689,7 @@ export function AgentOrchestratorChat({
               {/* Messages steered into this turn. While it works they show in its live timeline, where
                   they were sent; once it is done, here under the turn's message. */}
               {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
-                ? <SteerReader.Provider value={steerReader(turn.steps[0]?.detail)}>{turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
+                ? <SteerReader.Provider value={steerReader(turn.steps[0])}>{turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
                   <SentMessage text={steer.text} />
                   {/* Saved only once the agent took it; a turn that finished read it, one that stopped may not have. */}
                   <div className="cx-msg-foot"><SteerReceiptMark receipt={turn.status === "done" ? "read" : liveTurn(turn) ? "unread" : undefined} />
