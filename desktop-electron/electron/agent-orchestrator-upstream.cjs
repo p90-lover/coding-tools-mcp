@@ -34,6 +34,10 @@ const EDIT_DIFF_BYTES = 6000;
 const TIMELINE_TEXT_BYTES = 64 * 1024;
 // The most items a turn's timeline carries: a finished turn's read-back pages in up to 6 × 60.
 const TIMELINE_ITEMS = 400;
+// How much of a tool call's arguments and of what came back its row carries (toolDetails). At 1 KB
+// and 2 KB a file's contents or a search's matches stopped a few lines in.
+const TOOL_INPUT_BYTES = 4 * 1024;
+const TOOL_OUTPUT_BYTES = 16 * 1024;
 // How much of AO's recent meaningful output stays in memory.
 const DAEMON_LINES_CHARS = 64 * 1024;
 // The largest AO reply the main process reads. At 900 KB two screenshot reads (~1 MB each, the
@@ -624,19 +628,45 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   /**
    * What a tool call did, for the row that opens on it (as Claude Code's do): the agent's own
    * one-line description, its arguments as JSON (without the command and description, which the row
-   * shows already) and what came back. Capped: every working card's timeline is polled.
+   * shows already), what came back, and any images it returned. Capped: every working card's
+   * timeline is polled, so an image goes by the path Claude Code saved it to, and the chat reads it
+   * only when its row is opened.
+   *
+   * An image result (preview_screenshot, Read of a picture) left the row empty: AO's `output` for it
+   * is the provider's JSON with the picture as base64, and that was shown before the readable text
+   * (the page's url and title) that the call's content carries.
    */
   function toolDetails(detail, input) {
     const description = typeof input.description === "string" ? input.description.trim() : "";
     const { command: _command, description: _description, ...rest } = input;
-    const args = Object.keys(rest).length ? utf8Prefix(JSON.stringify(rest, null, 2), 1000) : "";
-    const output = typeof detail.output === "string" && detail.output.trim() ? detail.output
-      : (Array.isArray(detail.content) ? detail.content : [])
-        .map(entry => entry?.content?.text).filter(text => typeof text === "string").join("\n");
+    const args = Object.keys(rest).length ? utf8Prefix(JSON.stringify(rest, null, 2), TOOL_INPUT_BYTES) : "";
+    const texts = [], images = [];
+    let unsaved = 0;
+    for (const entry of Array.isArray(detail.content) ? detail.content : []) {
+      const part = entry?.content && typeof entry.content === "object" ? entry.content : entry;
+      if (part?.type === "image") { unsaved += 1; continue; }
+      if (typeof part?.text !== "string") continue;
+      // Claude Code saves each image a tool returns and says where; that line becomes the picture.
+      const kept = part.text.replace(/^\[Image: source: (.+?)\]\s*$/gm, (_line, file) => {
+        if (images.length < 4 && file.length <= 1000) images.push(file.trim());
+        return "";
+      });
+      if (kept.trim()) texts.push(kept.trim());
+    }
+    unsaved = Math.max(0, unsaved - images.length);
+    const fromContent = texts.join("\n");
+    const raw = typeof detail.output === "string" ? detail.output.trim() : "";
+    // An image result's own `output` can be the provider's JSON around the picture (its data cut to a
+    // note by dropInlineBlobs); its readable text is then the content's. A plain-text output (a tool
+    // saying what it captured) is kept.
+    const pictureJson = /^[[{]/.test(raw) && /"(source|data|mimeType)"\s*:/.test(raw);
+    const output = (unsaved || images.length) ? fromContent || (pictureJson ? "" : raw) : raw || fromContent;
+    const shown = output || (unsaved ? `[${unsaved === 1 ? "An image" : `${unsaved} images`} came back that the agent's tool did not save]` : "");
     return {
       ...(description ? { description: utf8Prefix(description, 200) } : {}),
       ...(args ? { input: args } : {}),
-      ...(output.trim() ? { output: utf8Prefix(output.trim(), 2000) } : {}),
+      ...(shown ? { output: utf8Prefix(shown, TOOL_OUTPUT_BYTES) } : {}),
+      ...(images.length ? { images } : {}),
     };
   }
   /**

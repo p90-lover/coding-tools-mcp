@@ -34,14 +34,14 @@ jobs:
           }
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: launcher
       - name: Prepare AVX2-independent Windows runtime
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/prepare-windows-baseline-bun.ps1 -Version 1.4.0 -GitHubEnv $env:GITHUB_ENV
+        run: ./scripts/prepare-windows-baseline-bun.ps1 -Version 1.4.3 -GitHubEnv $env:GITHUB_ENV
       - name: Prepare compatible Linux libnotify
         if: runner.os == 'Linux'
         run: |

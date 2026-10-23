@@ -26,14 +26,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: launcher
       - name: Prepare AVX2-independent Windows runtime
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/prepare-windows-baseline-bun.ps1 -Version 1.4.0 -GitHubEnv $env:GITHUB_ENV
+        run: ./scripts/prepare-windows-baseline-bun.ps1 -Version 1.4.3 -GitHubEnv $env:GITHUB_ENV
       - name: Prepare compatible Linux libnotify
         if: runner.os == 'Linux'
         run: |
@@ -92,7 +92,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: launcher
@@ -108,7 +108,7 @@ jobs:
       - name: Add licenses and installers
         run: |
           cp LICENSE release-assets/LICENSE
-          cp LICENSES/Bun-1.4.0.md release-assets/Bun-1.4.0.md
+          cp LICENSES/Bun-1.4.3.md release-assets/Bun-1.4.3.md
           cp LICENSES/libnotify-0.8.7-LGPL-2.1.md release-assets/libnotify-0.8.7-LGPL-2.1.md
           cp dist/THIRD_PARTY_NOTICES.txt release-assets/THIRD_PARTY_NOTICES.txt
           cp scripts/install.sh release-assets/install.sh

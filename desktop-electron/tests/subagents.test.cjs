@@ -65,6 +65,9 @@ test("a parent stop exits a completed child's retained host without changing its
     const saved = w.service.runs()[0];
     assert.equal(saved.state, "completed");
     assert.equal(saved.report, "Saved report");
+    // The chat that started it finds it by its own agent's session (the chat's Subagents tab).
+    assert.equal(saved.parent, "chat-1");
+    assert.equal(typeof saved.started_at, "number");
   } finally { w.cleanup(); }
 });
 

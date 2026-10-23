@@ -99,7 +99,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
 
       - name: Prepare retained temporary directories
         run: mkdir -p aiTemp/provider-execution-gates-ci/renderer-dist aiTemp/Trash/provider-execution-gates-ci

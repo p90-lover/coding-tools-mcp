@@ -19,11 +19,13 @@ const TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ENTRIES: usize = 20_000;
 #[cfg(not(all(windows, test)))]
 const DEADLINE: Duration = Duration::from_secs(8);
+// A cold git start on Windows (antivirus scanning git.exe, a slow disk) can take over 3 s outside
+// the tests too: the scan then failed on "Git metadata deadline reached" for nothing.
 #[cfg(all(windows, not(test)))]
-const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(3);
+const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(6);
 // Hosted Windows runners running the whole suite at once took over 3 s to start Git, and a scan's
 // several Git calls together ran past 8 s, failing tests that are not about the deadline. No test
-// waits for either deadline, so test builds on Windows allow more; the app keeps 3 s and 8 s.
+// waits for either deadline, so test builds on Windows allow more; the app keeps 6 s and 8 s.
 #[cfg(all(windows, test))]
 const DEADLINE: Duration = Duration::from_secs(30);
 #[cfg(all(windows, test))]

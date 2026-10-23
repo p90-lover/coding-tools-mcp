@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+// First: distrusted certificate authorities leave the CA list before anything can connect.
+import "./ca-distrust";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";

@@ -36,6 +36,7 @@ const BACKEND_MODULES = Object.freeze([
   "chat-edits.cjs",
   "chat-archive.cjs",
   "chat-agent-tools.cjs",
+  "app-processes.cjs",
   "chat-agent-shell.cjs",
   "chat-preview.cjs",
   "chat-sandbox.cjs",
@@ -52,6 +53,8 @@ const BACKEND_MODULES = Object.freeze([
   "ao-daemon-log.cjs",
   "ao-db-maintenance.cjs",
   "ao-dependency-links.cjs",
+  // Codex's Auto-review policy, which agent-orchestrator-workflow.cjs reviews requests by.
+  "codex-guardian-policy.cjs",
   "ao-context-breakdown.cjs",
   "cpa-antigravity-reauth.cjs",
   "cpa-oauth-adapter.cjs",

@@ -346,7 +346,7 @@ test("overview resize keeps the native mission board mounted while collapsing it
   const nativeBoard = () => {};
   const jsx = (type, props, key) => ({ type, props, key });
   const rendered = {};
-  vm.runInNewContext(ts.transpileModule(`export function renderBoard({ overviewResizing, view = "overview", sheet = "", workspaceReady = true, workspaceId = "workspace" }) {
+  vm.runInNewContext(ts.transpileModule(`export function renderBoard({ overviewResizing, view = "overview", sheet = "", workspaceReady = true, workspaceId = "workspace", projectEdit = null }) {
     return (${board.getText(file)});
   }`, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: rendered, AgentOrchestratorOriginalSurface: nativeBoard, setView: () => {},
@@ -384,8 +384,10 @@ function mountResizableCanvas() {
     require: name => name === "react" ? {
       useRef: value => ({ current: value }), useState: value => [typeof value === "function" ? value() : value, () => {}],
       useLayoutEffect: effect => callbacks.push(effect),
+      // The canvas's other effects (not its resize handling) do not run here.
+      useEffect: () => {}, useMemo: (make) => make(), useCallback: (callback) => callback,
     } : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : { ROLE_TITLE: {} },
-    window: { clearTimeout() {}, setTimeout() {} },
+    window: { clearTimeout() {}, setTimeout() {}, addEventListener() {}, removeEventListener() {} },
     matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
     ResizeObserver: class { constructor(callback) { observers.push(callback); } observe() {} disconnect() {} },
     requestAnimationFrame: callback => { const id = nextFrame++; frames.set(id, callback); return id; },

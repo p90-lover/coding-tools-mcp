@@ -60,8 +60,11 @@ function mount(props) {
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
           : name === "./AgentOrchestratorRoleEditor" ? { modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
-          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage }
-            : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
+          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [] }
+            // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
+            : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
+              SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox",
+              SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
   return {
     render: (next = {}) => { frame = "root"; cursor = 0; seen = {}; return module.AgentOrchestratorChat({ ...props, ...next }); },
@@ -261,7 +264,11 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   assert.match(text(cardOf(teamChat)), /Queued\. It's sent when this turn finishes/, "a command that sends queues behind the working turn");
   assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
-  assert.match(text(pill), /^Pursuing goalship the release5m \d+s$/, "Codex's goal bar: state, objective, running time");
+  assert.match(text(pill), /^Pursuing goalship the releaseRound \d+( of \d+)? · 5m \d+s$/, "Codex's goal bar: state, objective, round, running time");
+  // While pursued, the bar says why the last check found the goal not met yet.
+  const told = walk(teamChat.render({ commands: { ...commands(), goal: { ...commands().goal, feedback: "Two tests still fail." } } }))
+    .find((element) => String(element.props?.className).startsWith("cx-goal "));
+  assert.match(text(told), /Not met yet: Two tests still fail\./);
   assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
   // The bar's icons are buttons, not typed commands: what is typed in the box stays.
   type(teamChat, "half a message");
