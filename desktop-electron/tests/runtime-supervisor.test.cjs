@@ -1758,7 +1758,7 @@ for (const [label, content] of [["empty", Buffer.alloc(0)], ["zero-filled", Buff
     fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
     fs.writeFileSync(supervisor.statePath, content);
     assert.equal(supervisor.readState(), null);
-    // Set aside as missing (a power cut tore it), with its bytes kept in Trash (checked below).
+    // Set aside as missing (a power cut's torn marker), its bytes kept in Trash: checked below.
     assert.equal(fs.existsSync(supervisor.statePath), false);
     supervisor.readConfig = () => launcherConfig(descriptor);
     supervisor.proxyHealth = async () => false;

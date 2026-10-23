@@ -3097,6 +3097,19 @@ async function start() {
           own: [process.pid],
           electron: app.getAppMetrics().map((metric) => ({ pid: metric.pid, type: metric.type })),
         }),
+        // chat_list / chat_read: the app's chats as the chat list reads them (the workflow's board
+        // and runs), read-only; another project's only after the user allows it.
+        chatHistory: backendBundles.requireModule(backend, "chat-history.cjs").createChatHistory({
+          workspaces: listHeadlessWorkspaces,
+          board: (workspaceId, taskId) => {
+            if (!missionWorkflowRuntime?.call) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.call("board", { workspaceId, ...(taskId ? { taskId } : {}) });
+          },
+          runs: (workspaceId) => {
+            if (!missionWorkflowRuntime?.call) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.call("runs", { workspaceId });
+          },
+        }),
         // schedule_wakeup: the chat is sent a follow-up after the minutes its agent chose.
         wakeups: {
           schedule: (request) => {
