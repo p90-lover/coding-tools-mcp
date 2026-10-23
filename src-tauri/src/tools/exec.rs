@@ -1021,6 +1021,44 @@ mod tests {
         );
     }
 
+    /// Starts Windows PowerShell once, untimed, before a test times PowerShell commands. Its first
+    /// start on a hosted runner (a cold .NET load scanned by Defender, while the rest of the suite
+    /// runs in parallel) can outlast a 30 s exec limit with no output, which read as a hung `.ps1`.
+    /// The timed calls still go through exec_command's own launch, so a launch that hangs still fails.
+    #[cfg(windows)]
+    fn warm_windows_powershell() {
+        let Ok(shell) = which::which("powershell").or_else(|_| which::which("pwsh")) else {
+            return;
+        };
+        let mut child = std::process::Command::new(shell)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "exit 0",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(windows_hidden_creation_flags())
+            .spawn()
+            .expect("start Windows PowerShell");
+        let started = Instant::now();
+        while child
+            .try_wait()
+            .expect("wait for Windows PowerShell")
+            .is_none()
+        {
+            if started.elapsed() >= Duration::from_secs(120) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("Windows PowerShell did not start and exit within 120 s on this machine");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_workspace_scripts_and_python_unicode_execute_successfully() {
@@ -1044,6 +1082,7 @@ mod tests {
         let ctx =
             ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
                 .expect("context");
+        warm_windows_powershell();
 
         for command in [
             "any-name.cmd",

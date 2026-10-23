@@ -1694,3 +1694,16 @@ test("the chat list's clock stops while the window is hidden and ticks as soon a
   cleanup();
   assert.ok(cleared && !listeners.has("visibilitychange"), "unmounting stops both");
 });
+
+test("a message stamp saved in UTC shows in this computer's own time zone", () => {
+  const two = (value) => String(value).padStart(2, "0");
+  const at = new Date(Date.UTC(2026, 9, 23, 7, 53));
+  const local = `${at.getFullYear()}-${two(at.getMonth() + 1)}-${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}`;
+  assert.equal(chat.localChatStamp("2026-10-23 07:53"), local);
+  // Hong Kong (UTC+8) reads 15:53 the same day; a stamp near midnight UTC moves to the next day.
+  if (at.getTimezoneOffset() === -480) {
+    assert.equal(chat.localChatStamp("2026-10-23 07:53"), "2026-10-23 15:53");
+    assert.equal(chat.localChatStamp("2026-10-23 20:10"), "2026-10-24 04:10");
+  }
+  assert.equal(chat.localChatStamp("earlier"), "earlier", "a stamp in any other form is shown as saved");
+});

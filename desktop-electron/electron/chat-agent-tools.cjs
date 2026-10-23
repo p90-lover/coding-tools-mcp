@@ -279,6 +279,13 @@ const groupOf = (name) => (AGENT_TOOLS.has(name) ? "agent" : TERMINAL_TOOLS.has(
 // The app's own chat_list / chat_read (chat-history.cjs): another project's chats need the user's
 // yes, once per project per chat; a dialog names at most this many projects.
 const MAX_ASKED_PROJECTS = 12;
+/**
+ * Whether "Approve for me" leaves a call of this tool to the chat's reviewer: the calls this app
+ * itself confirms when nothing reviewed them upstream (a command, typed input, the screen). Every
+ * other tool the app serves is answered as routine, a tool added later included, so a new tool no
+ * longer asks the person until someone lists it for the reviewer as well.
+ */
+const reviewedTool = (name) => name === "exec_command" || name === "write_stdin" || CONFIRMED_TOOLS.has(name) || CONTROL_TOOLS.has(name);
 // Commands remembered per session for the chat's Terminal pane, newest kept.
 const MAX_TRACKED_COMMANDS = 40;
 const MAX_PANE_READ_BYTES = 64 * 1024;
@@ -2413,6 +2420,8 @@ module.exports = Object.freeze({
   previewOriginDecision,
   processWindow,
   instructionsFor,
+  groupOf,
+  reviewedTool,
   scopePath,
   toolResult,
   windowsQuirk,

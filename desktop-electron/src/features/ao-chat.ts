@@ -620,6 +620,20 @@ const SETTLED = ["finished", "cancelled", "archived"];
 const STEER = /\n\n↳ Steer \(([^)]+) UTC\): /;
 export type ChatSteer = { text: string; stamp: string };
 
+/**
+ * A saved message stamp ("YYYY-MM-DD HH:MM", UTC: the agent reads it that way in "Follow-up (… UTC)")
+ * shown in this computer's own time zone, in the same shape. A stamp in any other form is shown as saved.
+ */
+export function localChatStamp(stamp: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(stamp.trim());
+  if (!match) return stamp;
+  const [, year, month, day, hour, minute] = match.map(Number);
+  const at = new Date(Date.UTC(year, month - 1, day, hour, minute));
+  if (Number.isNaN(at.getTime())) return stamp;
+  const two = (value: number) => String(value).padStart(2, "0");
+  return `${at.getFullYear()}-${two(at.getMonth() + 1)}-${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}`;
+}
+
 /** Splits the steers off a message: the message itself, then each steer in the order they were sent. */
 function withSteers(raw: string): { text: string; steers?: ChatSteer[] } {
   const parts = raw.split(STEER);
@@ -1544,8 +1558,11 @@ export function goalFeedback(text: string): { objective: string; reason: string 
   const match = GOAL_FEEDBACK.exec(text.trim());
   return match ? { objective: match[1], reason: match[2].trim() } : null;
 }
-/** Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's message. */
-export type QueuedChatMessage = { what: string; message: string; goal?: string };
+/**
+ * Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's
+ * message. `typed` is a command as the person typed it ("/goal …"), which its queued bubble shows.
+ */
+export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string };
 /**
  * Adds to one chat's queue. A plain message joins a plain message queued just before it (they are
  * sent together); anything else (a command, a goal) waits for a turn of its own. Nothing is replaced.
