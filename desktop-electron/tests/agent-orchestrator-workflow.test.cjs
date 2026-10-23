@@ -2739,9 +2739,10 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.match(message, /no longer in this agent's model list/, message);
 });
 
-test("Claude Code is not offered Antigravity's Claude models, and says why; other agents and providers keep them", async () => {
+test("Claude Code is not offered Antigravity's models, Claude or Gemini, and says why; other agents and providers keep them", async () => {
   // Seen live: Antigravity answers every request carrying Claude Code's "Claude Agent SDK" system
-  // line with "Resource has been exhausted", so those cards retried ten times and failed.
+  // line with "Resource has been exhausted", so those cards retried ten times and failed; Gemini
+  // subagents on Claude Code hit the same wall.
   const catalog = { data: [
     { id: "claude-sonnet-4-6", owned_by: "antigravity", context_window: 200000 },
     { id: "claude-opus-4-6-thinking", owned_by: "antigravity", context_window: 200000 },
@@ -2759,9 +2760,18 @@ test("Claude Code is not offered Antigravity's Claude models, and says why; othe
   assert.ok(!claudeCode.models.includes("cpa/claude-sonnet-4-6") && !claudeCode.models.includes("cpa/claude-opus-4-6-thinking"));
   assert.match(claudeCode.unavailable["cpa/claude-sonnet-4-6"], /Antigravity refuses Claude Code's requests.*Native Codex/);
   assert.ok(claudeCode.models.includes("cpa/claude-haiku-4-5"), "a Claude model another provider serves stays");
-  assert.ok(claudeCode.models.includes("cpa/gemini-3.8-flash-high"), "Antigravity's other models stay");
+  assert.ok(!claudeCode.models.includes("cpa/gemini-3.8-flash-high"), "Antigravity's Gemini is refused too");
+  assert.match(claudeCode.unavailable["cpa/gemini-3.8-flash-high"], /not quota/);
   const native = await workflow.call("models", { harness: "codex-native" }).catch(() => null);
   if (native?.models) assert.ok(native.models.some(model => /claude-sonnet-4-6$/.test(model)), "Native Codex still runs it");
+  // A subagent saved on one of them is refused at launch with the reason; other routes are not.
+  assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high" }),
+    /^gemini-3\.8-flash-high: Antigravity refuses Claude Code's requests/);
+  assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high(high)" }),
+    /^gemini-3\.8-flash-high: Antigravity refuses/, "a saved effort suffix is looked up by its base model");
+  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/claude-haiku-4-5" }), null);
+  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:codex", model: "cpa/gemini-3.8-flash-high" }), null);
+  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/not-listed" }), null);
 });
 
 test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
