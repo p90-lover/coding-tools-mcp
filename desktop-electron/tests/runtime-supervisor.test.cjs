@@ -1763,8 +1763,36 @@ test("launcher fails closed on a corrupt runtime ownership marker", () => {
   }
 });
 
-test("a marker a crash left unreadable is dropped only when it was written before this boot", () => {
+test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cleared, not as corrupt", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-torn-runtime-state-"));
+  const warnings = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn(event, detail) { warnings.push([event, detail]); }, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  try {
+    // 2026-10-23: after a hard reset the file kept its 233-byte size, all NULs, and every watchdog
+    // restart failed on it for 25 minutes.
+    for (const torn of [Buffer.alloc(233), Buffer.alloc(0), Buffer.from("\n")]) {
+      fs.writeFileSync(supervisor.statePath, torn);
+      assert.equal(supervisor.readState(), null);
+      assert.equal(fs.existsSync(supervisor.statePath), false, "it is set aside");
+    }
+    assert.deepEqual(warnings.map(([event]) => event), ["runtime.state_torn", "runtime.state_torn", "runtime.state_torn"]);
+    assert.equal(warnings[0][1].bytes, 233);
+    supervisor.writeState("idle");
+    assert.equal(supervisor.readState().status, "idle");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable marker is dropped only when it was written before this boot", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-preboot-runtime-state-"));
   const warnings = [];
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
@@ -1774,8 +1802,8 @@ test("a marker a crash left unreadable is dropped only when it was written befor
     browserDescriptorPath: path.join(root, "launcher.json"),
   });
   fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
-  // What Windows left after an unexpected restart: the file's length, all NUL bytes.
-  fs.writeFileSync(supervisor.statePath, Buffer.alloc(233));
+  // Cut off mid-write: not the NULs the torn check sets aside, and not JSON either.
+  fs.writeFileSync(supervisor.statePath, "{\n  \"version\": 1,\n  \"ownerPid\": 324");
   try {
     // Written since this boot: its processes may be alive, so it still fails closed.
     assert.throws(() => supervisor.readState(), /ownership state is invalid/);
