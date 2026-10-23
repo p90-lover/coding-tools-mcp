@@ -1,3 +1,4 @@
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { BrowserHost } = require("../electron/browser-host.cjs");

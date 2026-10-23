@@ -164,7 +164,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
     // synchronously inside the effect (that would unmount the tree and blank the app).
     try {
       if (typeof api.emailStatus !== "function") {
-        throw new Error("This build's bridge has no email support — rebuild the app (preload out of date).");
+        throw new Error("This build doesn't support Email. Update Coding Tools.");
       }
       void Promise.resolve(api.emailStatus())
         .then((next) => { if (alive) { setStatus(next); setLoadError(null); } })
@@ -248,7 +248,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
 
   const createAddress = () => run(async () => {
     const domain = status?.capabilities?.domains[0];
-    if (!domain) throw new Error("The Worker reported no configured domain");
+    if (!domain) throw new Error("The Worker has no domain set up.");
     await api.createEmailAddress({ name: newAddress.trim(), domain });
     setNewAddress("");
     await loadMailboxes(mailboxQuery);
@@ -291,11 +291,11 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
         <div className="email-connect-card">
           <Icon name="mail" width={28} height={28} />
           <h1>Connect your mail Worker</h1>
-          <p>Reuse your Cloudflare mailbox Worker read-only first. The admin credential is encrypted
-            with your OS keychain in the main process and never shown again or sent to the page.</p>
+          <p>Connect your Cloudflare mailbox Worker. The admin credential is encrypted with your
+            OS keychain and never shown again.</p>
           {!status.encryptionAvailable ? (
-            <p className="email-warn">OS-backed encryption is unavailable, so the credential can't be
-              stored securely. Connecting is disabled until it's available.</p>
+            <p className="email-warn">OS encryption isn't available, so the credential can't be stored
+              safely. Connecting stays off until it is.</p>
           ) : null}
           <label>Mail API origin
             <input value={origin} placeholder="https://mail-api.example.com"
@@ -428,16 +428,16 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
           <div className="email-modal" onClick={(e) => e.stopPropagation()}>
             {confirm.kind === "delete-message" ? (
               <><h3>Delete this message?</h3>
-                <p>“{confirm.subject}” will be permanently deleted from the Worker. This cannot be undone.</p></>
+                <p>“{confirm.subject}” will be deleted from the Worker. This can't be undone.</p></>
             ) : confirm.kind === "clear-inbox" ? (
               <><h3>Clear this inbox?</h3>
-                <p>All received messages for <strong>{confirm.mailbox.address}</strong> will be permanently
-                  deleted from the Worker. The address itself stays. This cannot be undone.</p></>
+                <p>All mail received at <strong>{confirm.mailbox.address}</strong> will be deleted.
+                  The address stays. This can't be undone.</p></>
             ) : (
               <><h3>Remove this mailbox?</h3>
-                <p>The Worker will <strong>permanently remove</strong> <strong>{confirm.mailbox.address}</strong>:
-                  its received mail, sent records, sender settings, auto-reply records, and address links.
-                  There is no restore, and this affects every client of this mail service.</p></>
+                <p>The Worker will <strong>permanently remove</strong> <strong>{confirm.mailbox.address}</strong> with
+                  its mail, sent records, sender settings, auto-replies and address links.
+                  This affects every client of this mail service and can't be undone.</p></>
             )}
             <div className="email-modal-actions">
               <button onClick={() => setConfirm(null)}>Cancel</button>

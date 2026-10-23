@@ -19,7 +19,7 @@ function createAntigravityAuthBrowser({ BrowserWindow, sessionFor, proxyEnvironm
     signal?.throwIfAborted();
     const env = await proxyEnvironment();
     if (openingGeneration !== generation) throw new Error("Antigravity sign-in cancelled");
-    if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy in Network Proxy first");
+    if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
     const proxy = new URL(env.HTTPS_PROXY);
     if (!["http:", "https:"].includes(proxy.protocol)) throw new Error("Antigravity sign-in needs an HTTP or HTTPS proxy");
     const username = decodeURIComponent(proxy.username);

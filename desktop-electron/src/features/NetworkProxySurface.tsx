@@ -291,10 +291,10 @@ export function NetworkProxySurface({
       const next = await api.restartExternalService("cpa");
       setCpa(next);
       if (next.status !== "ready" || next.outboundProxy?.configMatches !== true) {
-        throw new Error(next.outboundProxy?.error || next.error || "CPA did not apply the selected proxy route");
+        throw new Error(next.outboundProxy?.error || next.error || "CPA didn't apply the proxy route. Try again.");
       }
       setNotice(localText(language,
-        "CPA restarted with the selected route. Test a model request to verify outbound traffic.",
+        "CPA restarted on the selected route. Send a model request to check it.",
         "CPA 已用所選路由重新啟動。請測試模型請求以驗證外連。",
         "CPA 已使用所选路由重启。请测试模型请求以验证外连。",
         "CPA を選択した経路で再起動しました。モデル要求で送信経路を確認してください。"));
@@ -312,7 +312,7 @@ export function NetworkProxySurface({
     if (nextMode !== mode) {
       setNotice(localText(
         language,
-        "Claude and Anthropic traffic stays on the proxy/SOCKS path; Direct is not used.",
+        "Claude and Anthropic traffic always uses the proxy, never Direct.",
         "Claude 同 Anthropic 流量必須走代理／SOCKS，唔會改成 Direct。",
         "Claude 和 Anthropic 流量必须走代理／SOCKS，不会改为 Direct。",
         "Claude / Anthropic の通信はプロキシ/SOCKS 経路のままです。Direct にはしません。",
@@ -334,7 +334,7 @@ export function NetworkProxySurface({
     if (nextMode !== mode) {
       setNotice(localText(
         language,
-        "Claude and Anthropic traffic stays on the proxy/SOCKS path; Direct is not used.",
+        "Claude and Anthropic traffic always uses the proxy, never Direct.",
         "Claude 同 Anthropic 流量必須走代理／SOCKS，唔會改成 Direct。",
         "Claude 和 Anthropic 流量必须走代理／SOCKS，不会改为 Direct。",
         "Claude / Anthropic の通信はプロキシ/SOCKS 経路のままです。Direct にはしません。",
@@ -367,10 +367,10 @@ export function NetworkProxySurface({
       <header className="control-heading">
         <div>
           <span className="surface-kicker">{localText(language, "NETWORK", "網路", "网络", "ネットワーク")}</span>
-          <h1>{localText(language, "Network Proxy", "網路代理", "网络代理", "ネットワークプロキシ")}</h1>
+          <h1>{localText(language, "Proxy", "代理", "代理", "プロキシ")}</h1>
           <p>{localText(
             language,
-            "Manage the browser route and CPA outbound proxy from one place. Saved provider and account rules remain available below.",
+            "Set the proxy for the browser and CPA. Provider and account rules are below.",
             "喺同一頁管理瀏覽器同 CPA 嘅外連代理。供應商及帳戶規則喺下方。",
             "在同一页管理浏览器和 CPA 的出站代理。供应商和账户规则在下方。",
             "ブラウザーと CPA の送信プロキシをまとめて管理します。プロバイダーとアカウントの規則は下にあります。",
@@ -389,7 +389,7 @@ export function NetworkProxySurface({
             onChange={(event) => void setGlobal(event.target.checked)}
             type="checkbox"
           />
-          <span>{localText(language, "Use the global proxy profile", "使用全域代理設定檔", "使用全局代理配置", "グローバルプロキシを使用")}</span>
+          <span>{localText(language, "Use the global proxy", "使用全域代理設定檔", "使用全局代理配置", "グローバルプロキシを使用")}</span>
         </label>
         <select
           aria-label={localText(language, "Global proxy profile", "全域代理設定檔", "全局代理配置", "グローバルプロキシ設定")}
@@ -402,7 +402,7 @@ export function NetworkProxySurface({
         </select>
         <small>{localText(
           language,
-          "Browser routing updates immediately. Restart CPA below to apply its outbound route. Local control connections stay on loopback.",
+          "The browser switches at once. Restart CPA below to apply its route. Local connections stay on loopback.",
           "瀏覽器路由即時更新。喺下方重新啟動 CPA 以套用外連路由。本機控制連線維持喺 loopback。",
           "浏览器路由立即更新。在下方重启 CPA 以应用出站路由。本地控制连接保持 loopback。",
           "ブラウザー経路はすぐに更新されます。CPA の送信経路は下で再起動して適用します。ローカル制御はループバックのままです。",
@@ -437,7 +437,7 @@ export function NetworkProxySurface({
             {localText(language, "Apply route to CPA", "套用路由至 CPA", "应用路由到 CPA", "CPA に経路を適用")}
           </button>
           <small>{localText(language,
-            "This restarts CPA and interrupts active CPA model requests. A reachable proxy alone does not prove a model can answer.",
+            "Restarts CPA and stops its running model requests.",
             "呢個動作會重新啟動 CPA，並中斷進行中嘅 CPA 模型請求。代理可連線唔代表模型一定會回應。",
             "此操作会重启 CPA，并中断正在进行的 CPA 模型请求。代理可连接不代表模型一定能回答。",
             "CPA を再起動し、進行中のモデル要求を中断します。プロキシへの接続だけではモデルの応答は確認できません。")}</small>
@@ -480,7 +480,7 @@ export function NetworkProxySurface({
           <details className="proxy-detail-group">
             <summary>{localText(language, "Traffic categories for this profile", "此設定檔嘅流量類別", "此配置的流量类别", "このプロキシの通信区分")} <span>{draft.scopes.length}</span></summary>
             <p className="proxy-secret-help">{localText(language,
-              "These categories limit planned provider work. The global browser and CPA route use the selected profile regardless of category.",
+              "Categories limit provider work only. The browser and CPA use the global proxy in every case.",
               "呢啲類別限制供應商任務路由。全域瀏覽器同 CPA 路由仍會使用所選設定檔。",
               "这些类别限制供应商任务路由。全局浏览器和 CPA 路由仍使用所选配置。",
               "この区分はプロバイダーの作業経路を制限します。ブラウザーと CPA のグローバル経路は選択した設定を使用します。")}</p>

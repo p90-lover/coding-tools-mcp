@@ -116,17 +116,20 @@ async function dispatched(agent, model, tuning, catalog = DISPATCH_CATALOG) {
   return spawned[0];
 }
 
-test("CPA effort becomes exactly one session-local wire suffix and context is forwarded separately for each supported client", async () => {
+test("CPA effort goes once, in the request body (Claude Code, Codex) or as a session-local suffix (opencode), and context is forwarded for each client", async () => {
   for (const agent of ["codex", "claude-code", "opencode"]) {
+    // Claude Code and Codex send the bare model and the effort in the body (output_config.effort,
+    // reasoning.effort); opencode has no body transport in AO and keeps CPA's "(level)" suffix.
+    const body = agent !== "opencode";
     const input = await dispatched(agent, "cpa/gpt-5.5(low)", { effort: "high", context_window: 262144 });
-    assert.equal(input.model, (agent === "opencode" ? "openai/" : "") + "gpt-5.5(high)");
-    assert.deepEqual(input.gateway, { provider: "cpa", model: "gpt-5.5(high)" });
+    assert.equal(input.model, body ? "gpt-5.5" : "openai/gpt-5.5(high)");
+    assert.deepEqual(input.gateway, { provider: "cpa", model: body ? "gpt-5.5" : "gpt-5.5(high)" });
     assert.equal(input.contextWindow, 262144);
-    assert.equal(input.effort, undefined, "foreign model is not checked as native-agent effort");
+    assert.equal(input.effort, body ? "high" : undefined, "the effort goes once: in the body or in the name");
     // A card left blank on a model without "auto" starts on a real effort (High: there is no
     // Medium), so a send made before the composer's list loaded still names one.
     const untuned = await dispatched(agent, "cpa/gpt-5.5", {});
-    assert.equal(untuned.gateway.model, "gpt-5.5(high)");
+    assert.deepEqual([untuned.gateway.model, untuned.effort], body ? ["gpt-5.5", "high"] : ["gpt-5.5(high)", undefined]);
     assert.equal(untuned.contextWindow, 262144, "a card left blank starts with the model's full known window");
   }
   const own = await dispatched("codex", "own-model", { effort: "high", context_window: 131072 });
@@ -147,14 +150,17 @@ test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged
     });
     const result = await workflow.call("models", { harness: "ao:" + agent });
     assert.deepEqual(result.capabilities["cpa/" + id].efforts, ["none", "low", "high", "max"], agent);
+    // Claude Code and Codex carry the effort in the body, opencode in the model's name.
+    const body = agent !== "opencode";
     for (const effort of ["none", "low", "high", "max"]) {
       const input = await dispatched(agent, "cpa/" + id + "(high)", { effort }, catalog);
-      assert.equal(input.model, (agent === "opencode" ? "openai/" : "") + id + "(" + effort + ")");
-      assert.deepEqual(input.gateway, { provider: "cpa", model: id + "(" + effort + ")" });
-      assert.equal(input.effort, undefined);
+      assert.equal(input.model, body ? id : "openai/" + id + "(" + effort + ")");
+      assert.deepEqual(input.gateway, { provider: "cpa", model: body ? id : id + "(" + effort + ")" });
+      assert.equal(input.effort, body ? effort : undefined);
     }
-    await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "xhigh" }, catalog), /reasoning.*not.*support/i);
-    assert.equal((await dispatched(agent, "cpa/" + id, {}, catalog)).gateway.model, id + "(high)",
+    await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "xhigh" }, catalog), /doesn't support the chosen reasoning effort/i);
+    const blank = await dispatched(agent, "cpa/" + id, {}, catalog);
+    assert.deepEqual([blank.gateway.model, blank.effort], body ? [id, "high"] : [id + "(high)", undefined],
       "None/Low/High/Max has no Auto: a blank card starts on High, not on no effort CPA cannot serve");
   }
 });
@@ -166,7 +172,8 @@ test("agy gets the bare model name and runs unattended only with Full access", a
   const blank = await dispatched("agy", "cpa/gemini-3-flash", {}, catalog);
   assert.deepEqual([blank.model, blank.gateway.model], ["gemini-3-flash", "gemini-3-flash"], "no start effort suffix");
   assert.equal((await dispatched("agy", "cpa/gemini-3-flash(low)", { effort: "low" }, catalog)).model, "gemini-3-flash", "a picked or saved suffix is dropped");
-  assert.equal((await dispatched("claude-code", "cpa/gemini-3-flash", {}, catalog)).model, "gemini-3-flash(medium)", "other harnesses keep the start effort");
+  const other = await dispatched("claude-code", "cpa/gemini-3-flash", {}, catalog);
+  assert.deepEqual([other.model, other.effort], ["gemini-3-flash", "medium"], "other harnesses keep the start effort (Claude Code's in the body)");
   const full = await dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }, catalog);
   assert.equal(full.approvalMode, "bypass-permissions");
   // Ask stays at an approval in agy's terminal, which nobody sees, and Approve for me (--mode auto)
@@ -183,7 +190,8 @@ test("a blank CPA card's start effort follows the effort rank, and Auto or a mod
     { slug: "rank-b", supported_reasoning_levels: levels("low", "medium", "high") },
     { slug: "takes-auto", supported_reasoning_levels: levels("low", "high", "auto") },
     { slug: "gemini-3.8-flash-high", supported_reasoning_levels: levels("low", "high") }];
-  const wire = async (model, tuning = {}) => (await dispatched("claude-code", "cpa/" + model, tuning, catalog)).gateway.model;
+  // opencode still names the effort in the model ("(level)"), which shows the start effort picked.
+  const wire = async (model, tuning = {}) => (await dispatched("opencode", "cpa/" + model, tuning, catalog)).gateway.model;
   assert.equal(await wire("rank-a"), "rank-a(low)", "the lowest by rank, not the catalog's first");
   assert.equal(await wire("rank-b"), "rank-b(medium)");
   assert.equal(await wire("rank-b", { effort: "high" }), "rank-b(high)", "a picked effort is kept");
@@ -196,16 +204,19 @@ test("every provider plugin's model reaches CPA by its bare name, by namespace o
   const levels = [{ effort: "low" }, { effort: "high" }];
   const catalog = [...DISPATCH_CATALOG, { slug: "commandcode-go/deepseek-v4.1-flash", supported_reasoning_levels: levels },
     { slug: "kimi-k3", owned_by: "kimi", supported_reasoning_levels: levels }];
-  // Command Code's plugin 1.0.0-codingtools.2 reads the suffix as the request's reasoning level.
+  // Command Code's plugin 1.0.0-codingtools.2 reads the suffix as the request's reasoning level;
+  // Claude Code sends the bare model and the picked level in the body instead.
   for (const model of ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/commandcode-go/deepseek-v4.1-flash(low)"]) {
     const input = await dispatched("claude-code", model, { effort: "high" }, catalog);
-    assert.deepEqual(input.gateway, { provider: "cpa", model: "commandcode-go/deepseek-v4.1-flash(high)" }, "the picked level is its suffix");
+    assert.deepEqual([input.gateway, input.effort], [{ provider: "cpa", model: "commandcode-go/deepseek-v4.1-flash" }, "high"], "the picked level, in the body");
+    const named = await dispatched("opencode", model, { effort: "high" }, catalog);
+    assert.deepEqual(named.gateway, { provider: "cpa", model: "commandcode-go/deepseek-v4.1-flash(high)" }, "opencode's is its suffix");
   }
   const owned = await dispatched("opencode", "cpa/kimi-k3", { effort: "high" }, catalog);
   assert.equal(owned.model, "openai/kimi-k3", "a plugin model without a namespace is known by its owner");
   assert.deepEqual(owned.gateway, { provider: "cpa", model: "kimi-k3" });
-  const plain = await dispatched("claude-code", "cpa/gpt-5.5", { effort: "high" }, catalog);
-  assert.equal(plain.gateway.model, "gpt-5.5(high)", "CPA's own providers still get the suffix");
+  const plain = await dispatched("opencode", "cpa/gpt-5.5", { effort: "high" }, catalog);
+  assert.equal(plain.gateway.model, "gpt-5.5(high)", "CPA's own providers still get the suffix where it is the transport");
   const workflow = createAgentOrchestratorWorkflow({
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
     fetchImpl: async () => ({ ok: true, json: async () => ({ models: catalog }) }),
@@ -267,11 +278,11 @@ test("a launch that fails before returning a session saves the launcher's reason
 });
 
 test("persisted CPA tuning is checked against the current model capabilities before dispatch", async () => {
-  await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { effort: "xhigh" }), /reasoning.*not.*support|unsupported.*effort/i);
+  await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { effort: "xhigh" }), /doesn't support the chosen reasoning effort/i);
   await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { context_window: 1048576 }), /context.*262144|context.*limit/i);
 });
 
-test("upstream spawn preserves context on Chat/TUI fallback without adding native effort to a CPA session", async () => {
+test("upstream spawn preserves context and the effort on Chat/TUI fallback, the effort going in a CPA session's body", async () => {
   const file = path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs");
   const source = fs.readFileSync(file, "utf8");
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
@@ -302,13 +313,13 @@ test("upstream spawn preserves context on Chat/TUI fallback without adding nativ
       return { session: { id: "session" } };
     },
   });
-  assert.equal(await spawn({ workspaceId: "ws", agent: "codex", model: "gpt-5.5(high)", prompt: "task",
-    gateway: { provider: "cpa", model: "gpt-5.5(high)" }, effort: "high", contextWindow: 262144 }), "session");
+  assert.equal(await spawn({ workspaceId: "ws", agent: "codex", model: "gpt-5.5", prompt: "task",
+    gateway: { provider: "cpa", model: "gpt-5.5" }, effort: "high", contextWindow: 262144 }), "session");
   assert.equal(bodies.length, 2);
   for (const body of bodies) {
     assert.equal(body.contextWindow, 262144);
-    assert.equal(body.effort, undefined);
-    assert.equal(body.gateway.model, "gpt-5.5(high)");
+    assert.equal(body.effort, "high", "through CPA too: the agent sends it in the request body");
+    assert.equal(body.gateway.model, "gpt-5.5");
   }
 });
 

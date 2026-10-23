@@ -171,7 +171,7 @@ async function resolveAuthFile({
   });
   if (!selected) {
     const provider = adapter.providers[0];
-    throw new Error(`No available ${provider} account exists in CPA; complete its CPA/CLI login first`);
+    throw new Error(`No ${provider} account is available in CPA. Sign in to it in CPA or its CLI first.`);
   }
   let models = [];
   let modelError = null;

@@ -324,7 +324,7 @@ test("every message names how its card runs; a working card shows runtime, step 
   const live = { "r1:w": { activity: "running a command", last_event_at_ms: now - 30_000, turn_started: true } };
   const transcript = plain(chat.chatTranscript(runs, "go", { describe, activity: live, now }));
   assert.equal(transcript[1].detail, "chatgpt-web/high · planner", "finished answers carry their card's description");
-  assert.equal(transcript[2].detail, "cpa/gpt-6-luna · Auditor · running 2h 58m · running a command (last heard 30s ago)");
+  assert.equal(transcript[2].detail, "cpa/gpt-6-luna · Auditor · running 2h 58m · running a command · last heard 30s ago");
   assert.equal(transcript[2].stalled, false);
   assert.equal(transcript[2].text, "Worker is working…");
 });
@@ -366,7 +366,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   assert.equal(placeholder({ composer: { mode: "team" } }), "Do anything");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task" }), "Send a follow-up…");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task", working: true,
-    runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running — a message now is sent when it finishes");
+    runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running. New messages send when it finishes");
 });
 
 test("mission drafts retain actual role routes and instructions rather than another task's newer global template",()=>{
@@ -803,7 +803,7 @@ test("an install command's approval says what it does to the project's own packa
   assert.equal(chat.dependencyInstallNote("python -m pip install -r requirements.txt", links).tone, "warn");
   assert.equal(chat.dependencyInstallNote("uv sync", links).tone, "warn");
   assert.equal(chat.dependencyInstallNote("npm ci --prefix frontend", links).tone, "info", "a farmed node_modules installs privately");
-  assert.match(chat.dependencyInstallNote("pnpm add zod", links).text, /privately/);
+  assert.match(chat.dependencyInstallNote("pnpm add zod", links).text, /only in this worktree/);
   assert.equal(chat.dependencyInstallNote("npm ci", { shared: ["node_modules"], farmed: [] }).tone, "warn", "a user's own node_modules link is shared");
   assert.equal(chat.dependencyInstallNote("pip install requests", { shared: [], farmed: ["node_modules"] }), null, "no shared venv, nothing to say");
   assert.equal(chat.dependencyInstallNote("npm run dev", links), null, "not an install");
@@ -1261,9 +1261,20 @@ test("a steer reads as Claude Code's receipt: unread until the model's next requ
   const marked = chat.steerReceipts(items, false);
   assert.equal(chat.steerReceipts(marked, false), marked, "already marked: the same list");
   assert.equal(marked[0], items[0]);
-  assert.equal(chat.steerReader("Claude Code · deepseek-v4.1-flash · high"), "Claude");
-  assert.equal(chat.steerReader("Codex · gpt-5.5"), "Codex");
+  // Its reader is the card's model; a step without one falls back to the harness, then Claude.
+  assert.equal(chat.steerReader({ reader: "DeepSeek V4.1 Flash", detail: "Claude Code · deepseek-v4.1-flash · high" }), "DeepSeek V4.1 Flash");
+  assert.equal(chat.steerReader({ detail: "Claude Code · deepseek-v4.1-flash · high" }), "Claude");
+  assert.equal(chat.steerReader({ detail: "Codex · gpt-5.5" }), "Codex");
   assert.equal(chat.steerReader(undefined), "Claude");
+});
+
+test("a steer is read by the card's model, not by Claude when Claude Code runs another provider's model", () => {
+  const reader = (model, modelName) => chat.chatTurns([{ id: "r", project_id: "t", cancelled: false, execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "running", x: 0, route: { harness_id: "ao:claude-code", model } }] }], "hi",
+    modelName ? { modelName } : {})[0].steps[0].reader;
+  assert.equal(reader("cpa/cline-pass/deepseek-v4.1-flash", () => "DeepSeek V4.1 Flash"), "DeepSeek V4.1 Flash");
+  assert.equal(reader("cpa/claude-opus-4-7", () => "Opus 4.7"), "Claude Opus 4.7", "a Claude model keeps its maker's name");
+  assert.equal(reader("cpa/cline-pass/deepseek-v4.1-flash(high)"), "deepseek-v4.1-flash", "without a namer: the bare id, no effort");
 });
 
 test("an answered request is no row of its own: its answer shows on the call it let run", () => {
@@ -1508,12 +1519,22 @@ test("a turn whose agent is waiting out a model error says so, instead of \"may 
     { id: "a", kind: "command", status: "completed", text: "ls" },
     { id: "r", kind: "system", status, text } ] } });
   assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 8 of 10. API error 429. Trying again in 38.6s.")]),
-    " · the model is rate-limited (429), retrying (8 of 10)");
+    " · rate limited (429), retrying 8 of 10");
   assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10. API error 503. Trying again in 2s.")]),
-    " · the model's service is failing (503), retrying (2 of 10)");
+    " · model service error (503), retrying 2 of 10");
   assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10.", "completed")]), "", "a retry that is over says nothing");
   assert.equal(chat.dshRetryNote([{ key: "s", working: { timeline: [{ id: "a", kind: "command", status: "running", text: "npm test" }] } }]), "",
     "a card busy with a tool is not retrying");
+});
+test("a quiet turn whose model CPA keeps refusing says so, with what the refusal means", () => {
+  const now = 1_000_000_000;
+  assert.equal(chat.cpaRefusalNote({ streak: 6, status: 429, since: now - 300_000, lastAt: now - 125_000 }, now),
+    " · CPA refused the last 6 requests: rate limited (429), latest 2m 5s ago");
+  assert.equal(chat.cpaRefusalNote({ streak: 2, status: 503, since: now - 20_000, lastAt: now - 5_000 }, now),
+    " · CPA refused the last 2 requests: model service error (503), just now");
+  assert.equal(chat.cpaRefusalNote({ streak: 3, status: 401, since: null, lastAt: null }, now), " · CPA refused the last 3 requests: sign-in refused (401)");
+  assert.equal(chat.cpaRefusalNote({ streak: 1, status: 429, since: now, lastAt: now }, now), "", "one failure is usually retried at once");
+  assert.equal(chat.cpaRefusalNote(null, now), "");
 });
 test("the approvals poll skips a card whose attempt changed mid-read instead of raising an error", async () => {
   const state = { approvals: null, policies: null, errors: [] };
