@@ -17,13 +17,17 @@ use walkdir::WalkDir;
 const FILE_BYTES: u64 = 32 * 1024 * 1024;
 const TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ENTRIES: usize = 20_000;
+#[cfg(not(all(windows, test)))]
 const DEADLINE: Duration = Duration::from_secs(8);
 #[cfg(all(windows, not(test)))]
 const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(3);
-// Hosted Windows runners running the whole suite at once took over 3 s to start Git, failing
-// unrelated tests; the overall DEADLINE still bounds a scan.
+// Hosted Windows runners running the whole suite at once took over 3 s to start Git, and a scan's
+// several Git calls together ran past 8 s, failing tests that are not about the deadline. No test
+// waits for either deadline, so test builds on Windows allow more; the app keeps 3 s and 8 s.
 #[cfg(all(windows, test))]
-const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(7);
+const DEADLINE: Duration = Duration::from_secs(30);
+#[cfg(all(windows, test))]
+const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(20);
 #[cfg(not(windows))]
 const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(1);
 static ACTIVE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();

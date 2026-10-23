@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactElement } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type PointerEvent as ReactPointerEvent,
+  type ReactElement } from "react";
 import { createPortal } from "react-dom";
 
 // Bit, the chat's pet: Claude Code's Clawd living on the chat box. It walks all the way around the
@@ -13,8 +14,15 @@ import { createPortal } from "react-dom";
 // go, it falls back onto the box). Pure view: it reads the chat's state and changes nothing.
 //
 // Clawd itself (Clawd.tsx) is Claude Code's: the CLI's glyphs, poses and animations, frame for frame.
+//
+// In split view there is one Clawd for all the panes (chat-pet-stage.ts). It lives on one pane's box
+// and leaps across to the others: to visit, to follow you to the pane you click into, to deliver its
+// file box to another working chat, and when another chat asks for you, finishes or fails. Its house
+// stands under the chat list; it leaps there to sleep, and out again to the pane you are in. Drop it
+// over another pane's box and it lands there.
 
 import type { PetMood } from "./ao-chat";
+import { petCall, petStage, type PetArrival } from "./chat-pet-stage";
 import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, ROWS, pickOne, useClawdPlayer,
   type AnimationName, type Arms as ClawdArms, type Eyes, type Feet, type Frame } from "./Clawd";
 
@@ -86,6 +94,11 @@ const MAX_RIDE = 4_000;
 const SHAKE = 90;
 /** What it does now and then while riding, from Claude Code's own animations. */
 const RIDE_PLAYS: AnimationName[] = ["jump", "wink", "look", "boop", "tap"];
+/** In split view: the yard under the chat list where its house stands. */
+const YARD = ".ao-workflow > .cx-threads .cx-pet-yard";
+/** How often it follows you into the pane you click into, and how long it takes to notice (ms). */
+const FOLLOW_CHANCE = 0.6;
+const FOLLOW_MS = 900;
 
 const LINES: Record<PetMood, string> = {
   idle: "Nothing running. Want to start something?",
@@ -97,6 +110,8 @@ const LINES: Record<PetMood, string> = {
 const PETTED = ["Hehe", "More pets, please", "I like you", "*purr*"];
 const MUSINGS = ["Hmm…", "*looks around*", "What are we building?", "♪", "Nice code"];
 const RIDING = ["Wheee!", "Take me somewhere", "Faster!", "Hold on tight"];
+const VISITING = ["Knock knock", "What's going on here?", "Just visiting", "Hi, neighbour"];
+const FOLLOWING = ["Wait for me!", "Coming along", "Right behind you"];
 
 // Props and the house, in Clawd's pixels.
 const P = { frame: "#3d3d3a", screen: "#1f2a33", glow: "#7fd1ff", key: "#b4b2a7", mug: "#efede6", rim: "#8c8a82", steam: "#c9c7bd",
@@ -327,11 +342,18 @@ const housePlace = (loop: Loop) => loop.beside
 /** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
 const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
 
-export function ChatPet({ mood, context, onHide }: {
+type PetProps = {
   mood: PetMood;
   /** Share of the context window in use (0–1), when the agent reports it. */
   context: number | null;
   onHide: () => void;
+};
+/** Where Clawd's feet are on the screen (the middle of its bottom edge). */
+type Point = { x: number; y: number };
+
+function PetBody({ mood, context, onHide, split }: PetProps & {
+  /** In split view: the pane it lives in now (one pet for all panes). Null outside split view. */
+  split: { pane: HTMLElement } | null;
 }) {
   const box = useRef<HTMLDivElement>(null);
   // The chat box it lives on: its parent when first mounted (it rides the pointer outside it).
@@ -401,6 +423,18 @@ export function ChatPet({ mood, context, onHide }: {
   doorNow.current = door;
   const rideNow = useRef(ride);
   rideNow.current = ride;
+  // Leaping across the screen (to another pane's box, or to and from its house under the chat list):
+  // its feet, and how long the leap takes (ms; 0 at the start, before it takes off). Its own timer.
+  const [leap, setLeap] = useState<(Point & { ms: number }) | null>(null);
+  const leapNow = useRef(leap);
+  leapNow.current = leap;
+  const leapTimer = useRef<number | undefined>(undefined);
+  // In split view, the yard under the chat list where its house stands (none while the list is
+  // hidden or too narrow: the house then stands by the box as outside split view), and the house's lot.
+  const [yard, setYard] = useState<HTMLElement | null>(null);
+  const yardNow = useRef(yard);
+  yardNow.current = yard;
+  const lot = useRef<HTMLDivElement>(null);
   const [still] = useState(() => { try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; } });
   const clawd = useClawdPlayer(still);
 
@@ -420,7 +454,21 @@ export function ChatPet({ mood, context, onHide }: {
     window.setTimeout(() => setFloaters((current) => current.filter((item) => item.id !== id)), 1100);
   };
   const busyElsewhere = () => asleepNow.current || drag.current !== null || heldNow.current !== null || rideNow.current !== null || homeNow.current
-    || doorNow.current;
+    || doorNow.current || leapNow.current !== null;
+  /** The other panes' boxes it can leap to (split view). */
+  const otherPanes = () => split ? [...petStage.seats().keys()].filter((pane) => pane !== split.pane && pane.isConnected) : [];
+
+  // Its yard under the chat list, while the list shows wide enough for the house.
+  useEffect(() => {
+    if (!split) return undefined;
+    const found = document.querySelector<HTMLElement>(YARD);
+    const check = () => setYard(found && found.isConnected && found.offsetWidth >= HOUSE_W ? found : null);
+    check();
+    if (!found) return undefined;
+    const observer = new ResizeObserver(check);
+    observer.observe(found);
+    return () => observer.disconnect();
+  }, []);
 
   // The box it walks around: measured now and whenever it resizes.
   useEffect(() => {
@@ -455,14 +503,37 @@ export function ChatPet({ mood, context, onHide }: {
     window.addEventListener("resize", measure);
     return () => { observer.disconnect(); window.removeEventListener("resize", measure); };
   }, []);
-  // First placement: the saved fraction of the way round, else near the top-right corner.
+  // First placement: where it just leapt to from another pane, else the saved fraction of the way
+  // round, else near the top-right corner.
   useEffect(() => {
     if (!loop || !Number.isNaN(atNow.current)) return;
+    const arrival = split ? petStage.arrivalFor(split.pane) : null;
+    if (arrival) { land(arrival); return; }
     let saved = Number.NaN;
     try { saved = Number(localStorage.getItem(POSITION_KEY) ?? Number.NaN); } catch { /* first visit */ }
     setAt(saved >= 0 && saved < 1 ? saved * loop.length : Math.max(WIDTH / 2, loop.width - 2 * WIDTH));
     if (!entrancePlayed && !still) { entrancePlayed = true; play(pickOne(ENTRANCES)); }
   }, [loop]);
+  /** Landed on this pane's box from another pane: a hop, a word, and on with what it came to do. */
+  const land = (arrival: PetArrival) => {
+    const current = loopNow.current;
+    if (!current) return;
+    atNow.current = nearLap(current, Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, arrival.x)), 0);
+    setAt(atNow.current);
+    play("jump");
+    if (arrival.line) say(arrival.line, 1600);
+    remember();
+    poke();
+    cancelPlans();
+    if (moodNow.current === "ask") { runToSend(); wander(); return; }
+    if (arrival.carry && !still) {
+      // The file box it brought: carried a little way along and set down here.
+      setJob("carry");
+      walkTo(nextSpot(true), SCURRY * 0.8, () => { setJob("none"); play("jump"); float("📦"); wander(); });
+      return;
+    }
+    wander();
+  };
   const remember = () => {
     const current = loopNow.current;
     if (!current || Number.isNaN(atNow.current)) return;
@@ -502,6 +573,8 @@ export function ChatPet({ mood, context, onHide }: {
   const homeSpot = () => {
     const current = loopNow.current;
     if (!current) return atNow.current;
+    // With its house under the chat list, it leaps off the top edge's left end, the end nearest the list.
+    if (yardNow.current) return nearLap(current, WIDTH / 2, atNow.current);
     return nearLap(current, current.beside ? current.width + current.height - WIDTH / 2 : houseLeft(current) + HOME_X, atNow.current);
   };
   /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in.
@@ -509,7 +582,7 @@ export function ChatPet({ mood, context, onHide }: {
    *  house is taller than the box and stands up past its top; on the top edge, the house's span. */
   const inHouse = (spot: number) => {
     const current = loopNow.current;
-    if (!current || current.beside) return false;
+    if (!current || current.beside || yardNow.current) return false;
     const { x, side } = spotAt(current, spot);
     const left = houseLeft(current);
     return side === 0 && x > left - WIDTH / 2 && x < left + HOUSE_W + WIDTH / 2;
@@ -573,15 +646,27 @@ export function ChatPet({ mood, context, onHide }: {
   /** One thing to do on arriving somewhere, so a stroll never looks like sliding. */
   const act = () => {
     if (busyElsewhere()) return;
+    const others = otherPanes();
     if (moodNow.current === "working") {
-      // At work: settle at a tool for a while; carrying walks on to drop the box somewhere.
+      // At work: settle at a tool for a while; carrying walks on to drop the box somewhere. In split
+      // view a box is sometimes for another working chat: it carries it over and leaps across with it.
       const next = pick(WORK);
+      const working = others.filter((pane) => petStage.seats().get(pane)?.mood === "working");
+      if (next === "carry" && working.length && Math.random() < 0.5) {
+        setJob("carry");
+        walkTo(nextSpot(true), SCURRY * 0.8, () => { if (!hop(pick(working), "Delivery!", true)) { setJob("none"); play("jump"); } });
+        return;
+      }
       if (next === "carry") { setJob("carry"); walkTo(nextSpot(true), SCURRY * 0.8, () => { setJob("none"); play("jump"); }); return; }
       setJob(next);
       later(5000 + Math.random() * 4000, () => setJob("none"));
       return;
     }
-    const choice = pick(["play", "play", "play", "sit", "muse", "coffee", "read", "rest"] as const);
+    // In split view, now and then it leaps over to visit another pane.
+    const choices: ("play" | "sit" | "muse" | "coffee" | "read" | "rest" | "visit")[] = ["play", "play", "play", "sit", "muse", "coffee", "read", "rest"];
+    if (others.length) choices.push("visit", "visit");
+    const choice = pick(choices);
+    if (choice === "visit") { hop(pick(others), pick(VISITING)); return; }
     if (choice === "play") play(pickOne(CLICKABLE));
     else if (choice === "sit") { setPose({ ...REST, sit: true }); later(2600, () => setPose(REST)); }
     else if (choice === "coffee" || choice === "read") { setJob(choice); later(3500 + Math.random() * 2500, () => setJob("none")); }
@@ -598,6 +683,63 @@ export function ChatPet({ mood, context, onHide }: {
       setJob("none");
       walkTo(nextSpot(working), working ? SCURRY : STROLL, () => { act(); wander(); });
     });
+  };
+
+  /** Feet on the box's top edge at `x` (px from its left end), on the screen. */
+  const topEdge = (composer: HTMLElement, x: number): Point & { along: number } => {
+    const frame = composer.getBoundingClientRect();
+    const along = Math.max(WIDTH / 2, Math.min(frame.width - WIDTH / 2, x));
+    return { x: frame.left + along, y: frame.top, along };
+  };
+  /** Its feet in its room in the house under the chat list, on the screen. */
+  const roomFeet = (): Point | null => {
+    const spot = lot.current?.getBoundingClientRect();
+    return spot ? { x: spot.left + HOME_X, y: spot.top + HOUSE_H } : null;
+  };
+  /**
+   * A leap across the screen, feet from `from` to `to` (an arc: up first, then down onto the spot),
+   * then `done`. It flies on the page itself, over every pane, so no pane's edge clips it.
+   */
+  const leapTo = (from: Point, to: Point, done: () => void) => {
+    window.clearTimeout(leapTimer.current);
+    const ms = still ? 0 : Math.round(Math.min(900, Math.max(380, Math.hypot(to.x - from.x, to.y - from.y) * 0.9)));
+    leapNow.current = { ...from, ms: 0 };
+    setLeap(leapNow.current);
+    setPose({ ...REST, arms: "both", walking: true, look: to.x < from.x ? -1 : 1 });
+    // Two frames later, so the leap starts from where it stood.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => setLeap((current) => current && { ...to, ms })));
+    leapTimer.current = window.setTimeout(() => {
+      leapNow.current = null;
+      setLeap(null);
+      setPose(REST);
+      done();
+    }, ms + 34);
+  };
+  /**
+   * Over to another pane's box (split view): it leaps onto that box's top edge, and the pet there
+   * carries on (with the file box, when it brought one). False when it cannot go there now.
+   */
+  const hop = (pane: HTMLElement, line: string, carry = false) => {
+    const seat = petStage.seats().get(pane);
+    if (!split || !seat || pane === split.pane || !seat.composer.isConnected || seat.composer.offsetWidth < 2 * WIDTH) return false;
+    cancelPlans();
+    window.clearTimeout(doorTimer.current);
+    setJob(carry ? "carry" : "none");
+    const from = screenAt(atNow.current);
+    const frame = seat.composer.getBoundingClientRect();
+    const to = topEdge(seat.composer, from.x - frame.left);
+    leapTo(from, to, () => {
+      if (petStage.handoff(pane, { x: to.along, carry, line })) return;
+      // That pane closed mid-leap: it is back where it took off.
+      setJob("none");
+      wander();
+    });
+    return true;
+  };
+  /** It runs to the top-right corner, by the send button, and waves for attention. */
+  const runToSend = () => {
+    const current = loopNow.current;
+    if (!still && current && !leapNow.current) walkTo(freeNear(nearLap(current, current.width - WIDTH / 2, atNow.current)), SCURRY * 1.4, () => play("jump"));
   };
 
   /** Bedtime: it walks home to its house on the box's top edge, goes in and falls asleep there. A
@@ -620,6 +762,9 @@ export function ChatPet({ mood, context, onHide }: {
     // Beside the box it steps down off the box's side onto its doorstep, then walks in through the
     // open front to the middle of its room, the walls passing in front of it.
     const settle = () => {
+      // Its house under the chat list: from the box's left end it leaps across into its room.
+      const room = yardNow.current && !still ? roomFeet() : null;
+      if (room) { leapTo(screenAt(atNow.current), room, inside); return; }
       if (still || !loopNow.current?.beside) { inside(); return; }
       setDoor(true);
       setPose({ ...REST, walking: true, look: 1 });
@@ -632,10 +777,35 @@ export function ChatPet({ mood, context, onHide }: {
     if (still) { atNow.current = homeSpot(); setAt(atNow.current); settle(); return; }
     walkTo(homeSpot(), nap ? STROLL * 1.3 : SCURRY, settle);
   };
-  /** Out of the house, through the door on the side facing the box; `walkOut` strolls off too. */
-  const leaveHome = (walkOut = true) => {
+  /** Out of the house, through the door on the side facing the box; `walkOut` strolls off too. From
+   *  its house under the chat list it leaps out onto a box: `toward`'s, else the focused pane's. */
+  const leaveHome = (walkOut = true, toward?: HTMLElement) => {
     if (!homeNow.current && !doorNow.current) return;
     window.clearTimeout(doorTimer.current);
+    const room = homeNow.current && yardNow.current && split ? roomFeet() : null;
+    if (room && split) {
+      const focused = petStage.focused();
+      const pane = toward ?? (focused && petStage.seats().has(focused) ? focused : split.pane);
+      const target = (pane === split.pane ? null : petStage.seats().get(pane)?.composer) ?? composer.current;
+      if (target) {
+        homeNow.current = false;
+        setHome(false);
+        setAsleep(false);
+        // It lands near the box's left end, the end nearest the house.
+        const to = topEdge(target, 1.5 * WIDTH);
+        leapTo(room, to, () => {
+          if (target !== composer.current && petStage.handoff(pane, { x: to.along, carry: false, line: "" })) return;
+          const current = loopNow.current;
+          if (current) { atNow.current = nearLap(current, to.along, atNow.current); setAt(atNow.current); }
+          play("jump");
+          remember();
+          poke();
+          if (moodNow.current === "ask") runToSend();
+          wander();
+        });
+        return;
+      }
+    }
     const out = () => {
       homeNow.current = false;
       setHome(false);
@@ -744,15 +914,35 @@ export function ChatPet({ mood, context, onHide }: {
     setCheering(false);
     if (mood === "working" && !still) later(400, () => setJob("laptop"));
     if (mood === "error") { play("look"); say("Uh oh", 1600); }
-    if (mood === "ask") {
-      // It runs to the top-right corner, by the send button, and waves for attention.
-      say(LINES.ask, 2600);
-      const current = loopNow.current;
-      if (!still && current) walkTo(freeNear(nearLap(current, current.width - WIDTH / 2, atNow.current)), SCURRY * 1.4, () => play("jump"));
-    }
+    if (mood === "ask") { say(LINES.ask, 2600); runToSend(); }
     wander();
     return cancelPlans;
   }, [mood]);
+
+  // Split view: another pane's chat calls it over (a request waiting on you, a finished turn, a
+  // failure), and it now and then follows you into the pane you click into.
+  useEffect(() => {
+    if (!split || still) return undefined;
+    let follow = 0;
+    const off = petStage.subscribe((event) => {
+      if (event.kind === "host" || event.pane === split.pane) return;
+      if (drag.current || heldNow.current || rideNow.current || leapNow.current || moodNow.current === "ask") return;
+      if (event.kind === "mood") {
+        const line = petCall(event.mood, event.was, Math.random());
+        if (line === null) return;
+        window.clearTimeout(follow);
+        if (homeNow.current) { setAsleep(false); leaveHome(true, event.pane); return; }
+        cancelPlans();
+        hop(event.pane, line);
+        return;
+      }
+      window.clearTimeout(follow);
+      const calm = moodNow.current === "idle" || moodNow.current === "done";
+      if (!calm || asleepNow.current || homeNow.current || Math.random() >= FOLLOW_CHANCE) return;
+      follow = window.setTimeout(() => { if (!busyElsewhere() && petStage.focused() === event.pane) hop(event.pane, pick(FOLLOWING)); }, FOLLOW_MS);
+    });
+    return () => { off(); window.clearTimeout(follow); };
+  }, []);
   const full = context !== null && context >= 0.8;
   useEffect(() => { if (full) say("I'm getting full. Compact soon?", 2600); }, [full]);
 
@@ -819,7 +1009,7 @@ export function ChatPet({ mood, context, onHide }: {
         return;
       }
       const body = box.current?.getBoundingClientRect();
-      if (!body || asleepNow.current || drag.current || heldNow.current) return;
+      if (!body || asleepNow.current || drag.current || heldNow.current || leapNow.current) return;
       const middle = body.left + body.width / 2;
       const distance = Math.hypot(x - middle, y - (body.top + body.height / 2));
       const calm = moodNow.current === "idle" || moodNow.current === "done";
@@ -870,7 +1060,8 @@ export function ChatPet({ mood, context, onHide }: {
 
   useEffect(() => () => {
     window.clearTimeout(rideTimer.current); window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current);
-    window.clearTimeout(napTimer.current); window.clearTimeout(fallTimer.current); window.clearTimeout(doorTimer.current); dragEnd.current?.(); cancelPlans();
+    window.clearTimeout(napTimer.current); window.clearTimeout(fallTimer.current); window.clearTimeout(doorTimer.current); window.clearTimeout(leapTimer.current);
+    dragEnd.current?.(); cancelPlans();
   }, []);
 
   const shown: PetMood = mood === "done" && !cheering ? "idle" : mood;
@@ -911,21 +1102,30 @@ export function ChatPet({ mood, context, onHide }: {
     const frame = composer.current?.getBoundingClientRect();
     if (!current || !frame) { setPose(REST); setHeld(null); wander(); return; }
     setPose({ ...REST, arms: "both", walking: true });
+    // In split view, let go over another pane, it falls onto that pane's box and lives there.
+    const other = otherPanes().find((pane) => {
+      const area = pane.getBoundingClientRect();
+      return state.lastX >= area.left && state.lastX <= area.right && state.lastY >= area.top && state.lastY <= area.bottom;
+    });
+    const otherBox = other && petStage.seats().get(other)?.composer;
+    const across = otherBox ? topEdge(otherBox, state.lastX - otherBox.getBoundingClientRect().left) : null;
     const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, state.lastX - frame.left));
     const spot = nearLap(current, x, atNow.current);
-    const to = { x: frame.left + x, y: frame.top - HEIGHT / 2 };
+    const to = across ? { x: across.x, y: across.y - HEIGHT / 2 } : { x: frame.left + x, y: frame.top - HEIGHT / 2 };
     // How far above the box's top edge it was let go (0 level with it or below).
     const height = Math.max(0, Math.round(to.y - state.lastY));
     // A longer drop takes longer, as a fall does: 420 ms from 400 px.
     const distance = Math.hypot(to.x - state.lastX, to.y - state.lastY);
     const fallMs = still ? 0 : Math.round(Math.min(1100, Math.max(260, FALL_MS * Math.sqrt(Math.max(distance, 1) / 400))));
     if (height > 40) say("Wheee", 900);
-    setDropX(x);
+    // Its shadow grows on this box only: falling onto another pane's box, that pane's pet lands.
+    setDropX(across ? Number.NaN : x);
     // Two frames later, so the fall starts from where it was let go.
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => setHeld({ ...to, fall: fallMs })));
     // Its own timer: a mood change clears the wander plans, and must not leave it in the air.
     window.clearTimeout(fallTimer.current);
     fallTimer.current = window.setTimeout(() => {
+      if (other && across && petStage.handoff(other, { x: across.along, carry: false, line: "" })) return;
       atNow.current = spot;
       setAt(spot);
       setHeld(null);
@@ -974,22 +1174,28 @@ export function ChatPet({ mood, context, onHide }: {
   const percent = context === null ? null : Math.round(context * 100);
   // Home in the house beside the box: upright in the middle of its room, feet on its floor, as it
   // stands in the house on the top edge (its walk ends sideways at the foot of the box's right side).
-  const inRoom = home && !ride && !held && loop?.beside ? housePlace(loop) : null;
+  // Home in its house under the chat list (split view): in the middle of the room there.
+  const inLot = Boolean(yard && home && !ride && !held && !leap);
+  const inRoom = home && !ride && !held && !leap && (yard ? { left: 0, top: 0 } : loop?.beside ? housePlace(loop) : null) || null;
   // On its doorstep in the yard: upright on the ground, just out from the box's right side, facing the
   // open front. Between there and the room it walks at DOOR_MS (the walls are drawn over it).
-  const atDoor = door && !home && !ride && !held && loop?.beside ? { left: loop.width + 2, top: loop.height - HEIGHT } : null;
+  const atDoor = door && !home && !ride && !held && !leap && !yard && loop?.beside ? { left: loop.width + 2, top: loop.height - HEIGHT } : null;
   const doorWalk: CSSProperties = door && (inRoom || atDoor) ? { transition: `left ${DOOR_MS}ms linear, top .2s ease-in, transform .18s ease-out` } : {};
   // Upright on the ground, as many whole turns as the laps it walked: stepping off the box's side is
   // a quarter turn back, not a spin through every lap.
   const upright: CSSProperties = { transform: `rotate(${loop && !Number.isNaN(at) ? Math.floor(at / loop.length) * 360 : 0}deg)`,
     transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
-  const side = loop && !Number.isNaN(at) && !ride && !held && !inRoom && !atDoor ? spotAt(loop, at).side : 0;
+  const side = loop && !Number.isNaN(at) && !ride && !held && !leap && !inRoom && !atDoor ? spotAt(loop, at).side : 0;
   // On the box: feet on the outline, body outward, so upright on top, sideways on the sides and
   // upside down under it. On the pointer or held: upright, above everything.
   const placement: CSSProperties = inRoom
     ? { left: inRoom.left + HOME_X - WIDTH / 2, top: inRoom.top + HOUSE_H - HEIGHT, ...upright, ...doorWalk }
     : atDoor
     ? { ...atDoor, ...upright, ...doorWalk }
+    : leap
+    // Leaping: across in a straight line, up and then down (the overshoot of the curve is the arc).
+    ? { position: "fixed", left: leap.x - WIDTH / 2, top: leap.y - HEIGHT, zIndex: 60, pointerEvents: "none",
+      transition: leap.ms ? `left ${leap.ms}ms linear, top ${leap.ms}ms cubic-bezier(.3,-.6,.6,1)` : "none" }
     : ride
     ? { position: "fixed", left: ride.x - WIDTH / 2, top: ride.y - HEIGHT + 4, zIndex: 60, pointerEvents: "none",
       transition: ride.mode === "riding" ? "none" : "left .42s ease-out, top .42s cubic-bezier(.3,-.7,.6,1)" }
@@ -1001,7 +1207,7 @@ export function ChatPet({ mood, context, onHide }: {
       return { left: x - WIDTH / 2, top: y - HEIGHT, transform: `rotate(${side * 90 + Math.floor(at / loop.length) * 360}deg)`,
         transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
     })() : { visibility: "hidden" };
-  const pet = <div ref={box} className={`cx-pet side-${side}${held ? " is-held" : ""}${ride ? ` is-riding ride-${ride.mode}` : ""}${home ? " is-home" : ""}`}
+  const pet = <div ref={box} className={`cx-pet side-${side}${held ? " is-held" : ""}${ride ? ` is-riding ride-${ride.mode}` : ""}${home ? " is-home" : ""}${leap ? " is-leaping" : ""}`}
     style={{ ...placement, ...(landing !== null ? { "--cx-pet-impact": landing } as CSSProperties : {}) }}>
     {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
     {landing !== null ? <><span className="cx-pet-dust is-left" aria-hidden="true" /><span className="cx-pet-dust is-right" aria-hidden="true" /></> : null}
@@ -1011,7 +1217,7 @@ export function ChatPet({ mood, context, onHide }: {
       // The squash ends itself, so no cancelled plan can leave it squashed.
       onAnimationEnd={(event) => { if (event.animationName === "cx-pet-land") setLanding(null); }}
       aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
-      title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag it anywhere on the screen`}
+      title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag to move`}
       onPointerDown={onPointerDown}
       onClick={() => {
         if (drag.current?.moved) return;
@@ -1041,15 +1247,59 @@ export function ChatPet({ mood, context, onHide }: {
     </button>
   </div>;
   // The room behind Clawd, the roof and walls in front of it: with the front open, it shows inside.
-  const house = loop ? <>
-    <div className="cx-pet-house-spot is-inside" style={housePlace(loop)}><HouseInside home={home} asleep={asleep} /></div>
-    <div className="cx-pet-house-spot" style={housePlace(loop)}>
+  // In split view the house stands in its yard under the chat list, with Clawd in it when home.
+  const rooms = (place: CSSProperties, inside: ReactElement | null) => <>
+    <div className="cx-pet-house-spot is-inside" style={place}><HouseInside home={home} asleep={asleep} /></div>
+    {inside}
+    <div className="cx-pet-house-spot" style={place}>
       <House home={home} asleep={asleep} onKnock={() => { if (!wake()) goHome(false); }} />
     </div>
-  </> : null;
-  // Aboard the pointer or carried, it lives on the page itself, so no panel's edge clips it.
+  </>;
+  const house = yard ? createPortal(<div ref={lot} className="cx-pet-lot">{rooms({ left: 0, top: 0 }, inLot ? pet : null)}</div>, yard)
+    : loop ? rooms(housePlace(loop), null) : null;
   // Falling, its shadow grows on the box's top edge where it will land.
-  const shadow = held?.fall ? <span className="cx-pet-drop-shadow" aria-hidden="true"
+  const shadow = held?.fall && !Number.isNaN(dropX) ? <span className="cx-pet-drop-shadow" aria-hidden="true"
     style={{ left: dropX, animationDuration: `${held.fall}ms` }} /> : null;
-  return <>{house}{shadow}{(ride || held) && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
+  // Aboard the pointer, carried or leaping, it lives on the page itself, so no panel's edge clips it.
+  return <>{house}{shadow}{inLot ? null : (ride || held || leap) && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
+}
+
+/**
+ * Bit on a chat box. Outside split view each chat box has its own; in split view there is one for
+ * all the panes, living on one pane's box at a time (chat-pet-stage.ts): every other pane only
+ * offers it a seat, its box and its chat's mood, and draws nothing.
+ */
+export function ChatPet(props: PetProps) {
+  const anchor = useRef<HTMLSpanElement>(null);
+  // The split pane this box is in, null outside split view. Read from the split grid: opening a
+  // split marks the same grid (data-split) without remounting the window's own chat.
+  const [pane, setPane] = useState<HTMLElement | null>(null);
+  const host = useSyncExternalStore(petStage.subscribe, petStage.host, () => null);
+  useLayoutEffect(() => {
+    const at = anchor.current;
+    if (!at) return undefined;
+    // The window's grid is the outermost one: a pane's own chat has a grid of its own, never split.
+    let grid: Element | null = null;
+    for (let found = at.closest(".cx-split"); found; found = found.parentElement?.closest(".cx-split") ?? null) grid = found;
+    const read = () => {
+      const split = grid?.hasAttribute("data-split") ? grid : null;
+      setPane(split ? [...split.children].find((child): child is HTMLElement => child instanceof HTMLElement && child.contains(at)) ?? null : null);
+      petStage.focus(split?.querySelector<HTMLElement>(":scope > .cx-pane[data-focused]") ?? null);
+    };
+    read();
+    if (!grid) return undefined;
+    const watch = new MutationObserver(read);
+    watch.observe(grid, { attributes: true, subtree: true, attributeFilter: ["data-split", "data-focused"] });
+    return () => watch.disconnect();
+  }, []);
+  useEffect(() => {
+    const composer = anchor.current?.parentElement;
+    if (pane && composer) petStage.seat(pane, { composer, mood: props.mood });
+  }, [pane, props.mood]);
+  useEffect(() => pane ? () => petStage.leave(pane) : undefined, [pane]);
+  return <>
+    <span ref={anchor} hidden />
+    {!pane ? <PetBody key="solo" {...props} split={null} />
+      : host === pane ? <PetBody key="split" {...props} split={{ pane }} /> : null}
+  </>;
 }

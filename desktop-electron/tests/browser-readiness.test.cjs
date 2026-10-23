@@ -29,12 +29,40 @@ test("browser readiness freshly checks idle session without navigation or cached
   assert.equal(world.calls[0].options.redirect, "manual");
   assert.equal((await fixture({}).host.authenticationReadiness()).authenticated, false);
 });
+test("Electron's empty response URL is the session asked for, not a redirect", async () => {
+  // session.fetch answers with url "" (seen on Electron 41.10.7): every check read as unusable and
+  // fell back to a script in the ChatGPT page, logging "browser.readiness_fetch_unusable" every 20 s.
+  const warnings = [];
+  const world = fixture({ user: { id: "x" }, expires: new Date(Date.now() + 60_000).toISOString() }, { url: "" });
+  world.host.logger = { warn: (event) => warnings.push(event), info() {} };
+  world.host.view.webContents.executeJavaScript = async () => { throw new Error("the page must not be asked"); };
+  assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: true, ready: true });
+  assert.deepEqual(warnings, []);
+});
+
 test("invalid or expired sessions never become authenticated", async () => {
   for (const payload of [{user:{}},{user:[]},{user:{id:"x"},error:"expired"},
     {user:{id:"x"},expires:"invalid"},{user:{id:"x"},expires:"2000-01-01T00:00:00Z"}]) {
     assert.equal((await fixture(payload).host.authenticationReadiness()).authenticated, false);
   }
 });
+test("the session JSON counts when Electron's fetch gives no url or the endpoint with a query, not from elsewhere", async () => {
+  // Seen 2026-10-23: 169 warnings, each status 200 with the session JSON, all rejected on the url,
+  // and every minute's check then ran in the ChatGPT page.
+  const warnings = [];
+  for (const url of ["", "https://chatgpt.com/api/auth/session?x=1"]) {
+    const world = fixture({ user: { id: "x" } }, { url });
+    world.host.logger = { warn: (event, detail) => warnings.push([event, detail]) };
+    assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: true, ready: true });
+  }
+  assert.deepEqual(warnings, []);
+  const elsewhere = fixture({ user: { id: "x" } }, { url: "https://chatgpt.com/auth/login?next=secret" });
+  elsewhere.host.logger = { warn: (event, detail) => warnings.push([event, detail]) };
+  assert.equal((await elsewhere.host.authenticationReadiness()).ready, false);
+  assert.equal(warnings[0][1].at, "https://chatgpt.com/auth/login", "the query is never logged");
+  assert.equal(warnings[0][1].sameUrl, false);
+});
+
 test("unavailable, redirected or non-JSON readiness stays unknown", async () => {
   for (const response of [{ok:false,status:503},{url:"https://auth.openai.com/login"},
     {headers:{get:()=>"text/html"}}]) {

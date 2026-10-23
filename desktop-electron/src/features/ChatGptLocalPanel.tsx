@@ -42,13 +42,13 @@ function errorText(cause: unknown) {
 function emptyText(preview: ChatGptLocalPreview | null, installed: boolean | null) {
   if (!preview) return "Looking for your ChatGPT app…";
   switch (preview.state) {
-    case "unsupported": return "The ChatGPT app preview is available on Windows only.";
+    case "unsupported": return "The preview works on Windows only.";
     case "not-running": return installed === false
-      ? "Install the ChatGPT desktop app from the Microsoft Store and open it, then check again."
-      : "Your ChatGPT desktop app is not open. Open it, then check again.";
-    case "minimized": return "Your ChatGPT app is minimized. Restore its window to see the preview.";
-    case "hidden": return "Your ChatGPT app is running in the background. Open its window to see the preview.";
-    default: return "Windows returned an empty picture of the ChatGPT window.";
+      ? "Install the ChatGPT app from the Microsoft Store, open it, then check again."
+      : "Your ChatGPT app isn't open. Open it, then check again.";
+    case "minimized": return "Your ChatGPT app is minimized. Restore it to see the preview.";
+    case "hidden": return "Your ChatGPT app is in the background. Open its window to see the preview.";
+    default: return "Windows returned a blank image of the ChatGPT window.";
   }
 }
 
@@ -162,8 +162,8 @@ export function ChatGptLocalPanel({ api, active, installed }: {
           <strong>Send extension</strong>
           <p className="cgd-muted">
             {extension
-              ? "Send types your message into your ChatGPT app and presses Enter. ChatGPT comes to the front for a moment."
-              : "Turn on to send messages to your ChatGPT app from here."}
+              ? "Send types your message into your ChatGPT app and presses Enter. ChatGPT briefly comes to the front."
+              : "Turn on to message your ChatGPT app from here."}
           </p>
         </div>
       </div>

@@ -91,10 +91,11 @@ export type ChatLiveItem = {
 };
 
 /**
- * Claude Code's receipt on a message the person sent mid-turn: "unread" once the agent has it (a
- * faded check, "Unread"), "read" once its model has taken it (a double check, "Read by Claude").
+ * Claude Code's receipt on a message the person sent mid-turn: "sending" while it is on its way to
+ * the agent (a pulsing faint check), "unread" once the agent has it (a faded check, "Unread"), "read"
+ * once its model has taken it (a double check, "Read by Claude").
  */
-export type SteerReceipt = "unread" | "read";
+export type SteerReceipt = "sending" | "unread" | "read";
 const TOOL_KINDS = new Set(["tool", "command", "edit"]);
 const MODEL_OUTPUT_KINDS = new Set(["message", "reasoning", ...TOOL_KINDS]);
 
@@ -132,10 +133,20 @@ function steerRead(items: ChatLiveItem[], at: number): boolean {
   return false;
 }
 
-/** Who reads a steer, by the card's harness ("Claude Code · model · …"): Claude Code's own words name Claude. */
-export function steerReader(detail: string | undefined): string {
-  const harness = (detail ?? "").split(" · ")[0]?.trim();
+/**
+ * Who reads a steer: the card's model, as the chat names it ("DeepSeek V4.1 Flash", "Claude Opus 4.7"),
+ * since Claude Code runs other providers' models too. Without one, the harness ("Codex"), else Claude.
+ */
+export function steerReader(step: Pick<ChatStep, "reader" | "detail"> | undefined): string {
+  if (step?.reader) return step.reader;
+  const harness = (step?.detail ?? "").split(" · ")[0]?.trim();
   return !harness || /^claude code$/i.test(harness) ? "Claude" : harness;
+}
+
+/** A model's name for its read receipt; a Claude model keeps "Claude", which its short label drops. */
+function modelReader(model: string, modelName?: (model: string) => string): string {
+  const label = modelName?.(model) || model.slice(model.lastIndexOf("/") + 1).replace(/\([^)]*\)$/, "");
+  return /claude/i.test(model) && !/^claude/i.test(label) ? `Claude ${label}` : label;
 }
 /**
  * A turn's activity as it reads. A request "Approve for me" (or the user) allowed is no row of its
@@ -366,6 +377,46 @@ export function chatApprovalMode(route?: { approval_policy?: string; approvals_r
   return route.approvals_reviewer === "auto_review" ? "Approve for me" : "Ask me";
 }
 
+/**
+ * Something the chat's agents made or used, as Codex's task panel lists it: an output (a file it
+ * wrote, an image, a page it served on this machine) or a source (a web page it read, an MCP server
+ * it called).
+ */
+export type ChatDetailLink = { key: string; kind: "file" | "image" | "page" | "link" | "tool"; label: string; title: string };
+const DETAIL_IMAGE = /\.(?:png|jpe?g|gif|webp|svg)$/i;
+const DETAIL_URL = /\bhttps?:\/\/[^\s"'`<>()[\]{}]+/gi;
+// host (port and all), then the path without its query: what the row shows.
+const DETAIL_URL_PARTS = /^https?:\/\/([^/?#]+)([^?#]*)/i;
+const DETAIL_LOCAL_HOST = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?$/i;
+/** The details panel's Outputs and Sources from the agents' timelines, newest first and each once. */
+export function chatDetailLinks(items: ChatLiveItem[]): { outputs: ChatDetailLink[]; sources: ChatDetailLink[] } {
+  const outputs = new Map<string, ChatDetailLink>(), sources = new Map<string, ChatDetailLink>();
+  const add = (into: Map<string, ChatDetailLink>, link: ChatDetailLink) => { into.delete(link.key); into.set(link.key, link); };
+  for (const item of items) {
+    for (const file of item.files ?? []) {
+      add(outputs, { key: `file:${file.path}`, kind: DETAIL_IMAGE.test(file.path) ? "image" : "file",
+        label: file.path.split(/[\\/]/).pop() || file.path, title: file.path });
+    }
+    if (item.kind !== "tool" && item.kind !== "command") continue;
+    // claude-agent-acp's own tools are mcp__acp__*; a real MCP server's tool is mcp__<server>__<tool>.
+    const server = /\bmcp__([\w-]+?)__/.exec(item.text)?.[1];
+    if (server && server !== "acp") add(sources, { key: `tool:${server}`, kind: "tool", label: server, title: `MCP server ${server}` });
+    // A page is a source when the agent asked for it, an output when it serves on this machine
+    // (a dev server prints its address in the command's output).
+    for (const [text, external] of [[`${item.text}\n${item.input ?? ""}`, true], [item.kind === "command" ? item.output ?? "" : "", false]] as const) {
+      for (const raw of text.match(DETAIL_URL) ?? []) {
+        const href = raw.replace(/[.,;:!?]+$/, "");
+        const [, host = "", path = ""] = DETAIL_URL_PARTS.exec(href) ?? [];
+        const local = DETAIL_LOCAL_HOST.test(host);
+        if (!host || (!local && !external)) continue;
+        add(local ? outputs : sources, { key: `${local ? "page" : "link"}:${href}`, kind: local ? "page" : "link",
+          label: `${host.toLowerCase()}${path === "/" ? "" : path}`, title: href });
+      }
+    }
+  }
+  return { outputs: [...outputs.values()].reverse(), sources: [...sources.values()].reverse() };
+}
+
 /** One line of an edit's diff as the chat draws it: old and new line numbers, the change and its text. */
 export type ChatDiffLine = { kind: "add" | "del" | "ctx" | "hunk"; text: string; old?: number; new?: number };
 /**
@@ -435,14 +486,14 @@ const isNodeModules = (dir: string) => /(?:^|\/)node_modules$/i.test(dir);
 export function dependencyInstallNote(command: string | undefined, links: DependencyLinks | null): DependencyNote | null {
   if (!command || !links) return null;
   if (PYTHON_INSTALL.test(command) && links.shared.some(isVenv)) {
-    return { tone: "warn", text: "This worktree shares the project's Python environment: installing here changes the project's packages too." };
+    return { tone: "warn", text: "This worktree shares the project's Python environment. Installing here changes the project's packages too." };
   }
   if (NODE_INSTALL.test(command)) {
     if (links.shared.some(isNodeModules)) {
-      return { tone: "warn", text: "This worktree shares the project's node_modules: installing here changes the project's packages too." };
+      return { tone: "warn", text: "This worktree shares the project's node_modules. Installing here changes the project's packages too." };
     }
     if (links.farmed.some(isNodeModules)) {
-      return { tone: "info", text: "Node packages install privately in this worktree; the project's own stay as they are." };
+      return { tone: "info", text: "Node packages install only in this worktree. The project's packages don't change." };
     }
   }
   return null;
@@ -489,7 +540,7 @@ export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined
   const heard = live?.last_event_at_ms || live?.activity_at_ms || null;
   const parts = [describe?.(node, run) ?? ""];
   if (started) parts.push(`running ${chatDuration(now - started)}`);
-  if (live?.activity) parts.push(heard ? `${live.activity} (last heard ${chatDuration(now - heard)} ago)` : live.activity);
+  if (live?.activity) parts.push(heard ? `${live.activity} · last heard ${chatDuration(now - heard)} ago` : live.activity);
   const quietSince = heard ?? started;
   const stalled = Boolean(quietSince && now - quietSince >= STALL_MS && (heard || live?.turn_started === false));
   return { detail: parts.filter(Boolean).join(" · "), stalled, ...(heard ? { heardAtMs: heard } : {}) };
@@ -607,6 +658,23 @@ export function chatRunOpen(status: ChatStatus | undefined): boolean {
 }
 
 /**
+ * The run an open chat shows as its own: the selected one while it is still open; once it has
+ * settled, the chat's run that is working, else its newest. The chat read its working state, its
+ * approvals and steer-or-send from the selected run alone, and kept the one it was opened on. Seen
+ * live 2026-10-23: two rounds started two seconds apart, the newer was stopped and the older retried,
+ * and the chat sat on the stopped one for an hour: no Approve or Deny for the request its agent
+ * waited on, and every message sent as a new turn and refused ("This chat is still running").
+ * A selected run not loaded yet (a send's new run) is kept.
+ */
+export function chatLiveRun(runs: ChatRun[], taskId: string, selected: string): string {
+  const mine = runs.filter((run) => run.project_id === taskId);
+  const current = mine.find((run) => run.id === selected);
+  if (!mine.length || (selected && !current) || (current && chatRunOpen(chatRunStatus(current)))) return selected;
+  const working = [...mine].reverse().find((run) => chatRunStatus(run) === "running");
+  return (working ?? mine[mine.length - 1]).id;
+}
+
+/**
  * Chats in a workspace, most recently started first. Runs arrive oldest first. Archived and
  * deleted chats (by their lifecycle, or an archived board task) are left out unless showInactive.
  */
@@ -644,7 +712,10 @@ function chatSummaries(runs: ChatRun[], tasks: ChatTask[], lifecycle: TaskLifecy
         schedule: lifeByTask.get(taskId)?.schedule,
         status: lifeByTask.get(taskId)?.schedule?.run_id === latest.id && lifeByTask.get(taskId)?.schedule?.state === "scheduled"
           ? "scheduled" : ["missed", "needs_attention"].includes(lifeByTask.get(taskId)?.schedule?.state ?? "")
-          ? "attention" : chatRunStatus(latest),
+          // An earlier run still working (one retried after a newer run was stopped) keeps the chat
+          // Running, with its green dot: the header said Stopped while the agent kept working.
+          ? "attention" : chatRunStatus(latest) !== "running" && entry.runs.some((run) => chatRunStatus(run) === "running")
+          ? "running" : chatRunStatus(latest),
         ...(byId.get(taskId)?.updated_at ? { updatedAtMs: byId.get(taskId)!.updated_at! * 1000 } : {}),
         ...(visibility !== "active" ? { archived: true } : {}),
       };
@@ -718,7 +789,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
   runs.forEach((run) => {
     const user = run.replaces_run_id ? undefined : said[messageIndex++];
     if (run.replaces_run_id) messages.push({ kind: "status", key: `${run.id}:reconfigured`,
-      text: "Configuration changed; continuing from quoted visible work.", state: "finished" });
+      text: "Settings changed. Continuing from the work so far.", state: "finished" });
     if (user) messages.push({ kind: "user", key: `${run.id}:user`, text: user.text, stamp: user.stamp });
     for (const node of chatNodeOrder(run.nodes)) {
       const name = chatNodeName(node);
@@ -740,14 +811,14 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
         const working = chatWorkingDetail(node, options.activity?.[key], now, options.describe, run);
         messages.push({
           kind: "status", key, state: node.state, detail: working.detail, stalled: working.stalled,
-          text: working.stalled ? `${name} may be stuck: nothing heard for a while. Stop or restart the mission if it does not recover.` : `${name} is working…`,
+          text: working.stalled ? `${name} may be stuck. Stop or restart the mission if nothing changes.` : `${name} is working…`,
         });
       } else if (node.state === "held") {
         messages.push({ kind: "status", key, text: `${name} needs your attention`, state: node.state });
       }
     }
     if (run.solo) {
-      messages.push({ kind: "status", key: `${run.id}:solo`, text: "Simple mission: the orchestrator answered alone; no workers ran.", state: "finished" });
+      messages.push({ kind: "status", key: `${run.id}:solo`, text: "The orchestrator answered alone. No workers ran.", state: "finished" });
     }
     if (run.cancelled) messages.push({ kind: "status", key: `${run.id}:stopped`, text: "Stopped", state: "cancelled" });
   });
@@ -769,6 +840,8 @@ export type ChatStep = {
   name: string;
   /** How the card runs: harness · model · effort · context · role. */
   detail: string;
+  /** The model that reads the person's steers ("Read by DeepSeek V4.1 Flash"), from modelReader. */
+  reader?: string;
   state: string;
   text?: string;
   verdict?: string;
@@ -894,6 +967,7 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     key, nodeId: node.id, role: node.role,
     // A single-model chat's one card reads as the model it runs ("Single assistant" said nothing).
     name: (run.execution_mode === "single" && node.route?.model && options.modelName?.(node.route.model)) || chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
+    ...(node.route?.model ? { reader: modelReader(node.route.model, options.modelName) } : {}),
     ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
     ...(node.receipt?.thread_id && node.route?.harness_id?.startsWith("ao:") && node.state !== "running" && node.state !== "reserved"
       ? { hasWork: true } : {}),
@@ -1122,10 +1196,19 @@ export function dshDuration(ms: number): string {
  * stuck card (STALL_MS). A long model request can be silent for minutes; without this the turn
  * looked frozen.
  */
-export function dshQuietNote(heardAtMs: number | undefined, now: number): string {
+export function dshQuietNote(heardAtMs: number | undefined, now: number, waitingForYou = false): string {
   const quiet = heardAtMs ? now - heardAtMs : 0;
+  // A turn waiting on a request is quiet because it waits for the person, not stuck: "may be stuck"
+  // offered Restart, which only waited on that same request and then sent nothing (seen live
+  // 2026-10-23: 17 minutes on a PowerShell approval, then five "This chat is still running").
+  if (waitingForYou) return quiet >= 60_000 ? ` · waiting for you for ${dshDuration(quiet)}` : "";
   if (quiet >= STALL_MS) return ` · nothing new for ${dshDuration(quiet)}, may be stuck`;
   return quiet >= 60_000 ? ` · quiet for ${dshDuration(quiet)}` : "";
+}
+
+/** Whether a working card's activity is a request waiting for the person (an approval, a question, a plan). */
+export function waitsForPerson(activity: string | undefined): boolean {
+  return /^waiting for (approval|your answer|you to review)/.test(activity ?? "");
 }
 
 /**
@@ -1141,10 +1224,36 @@ export function dshRetryNote(steps: ChatStep[]): string {
     if (!last || last.kind !== "system" || last.status !== "running" || !/^Retrying\b/i.test(last.text)) continue;
     const attempt = last.text.match(/attempt (\d+) of (\d+)/i);
     const status = last.text.match(/API error (\d{3})/i)?.[1];
-    const why = status === "429" ? "the model is rate-limited (429)" : status ? `the model's service is failing (${status})` : "the model request failed";
-    return ` · ${why}, retrying${attempt ? ` (${attempt[1]} of ${attempt[2]})` : ""}`;
+    const why = status === "429" ? "rate limited (429)" : status ? `model service error (${status})` : "model request failed";
+    return ` · ${why}, retrying${attempt ? ` ${attempt[1]} of ${attempt[2]}` : ""}`;
   }
   return "";
+}
+
+/** The failed requests in a row since the turn's model last answered through CPA (cpa-usage.cjs refusalOf). */
+export type CpaRefusal = { streak: number; status: number | null; statuses?: Record<string, number>; since: number | null; lastAt: number | null };
+
+/** What an HTTP status from CPA means to the person waiting on the turn. */
+export function cpaStatusWord(status: number | null): string {
+  if (status === 429) return "rate limited (429)";
+  if (status === 401 || status === 403) return `sign-in refused (${status})`;
+  if (status === 402) return "out of credit (402)";
+  if (status !== null && status >= 500) return `model service error (${status})`;
+  return status ? `HTTP ${status}` : "failed";
+}
+
+/**
+ * Why a running turn is quiet when CPA keeps refusing its model: from CPA Helper's request records,
+ * so it covers a Claude Code subagent's requests too, whose retries never reach the chat as a
+ * "Retrying…" notice. Seen live 2026-10-22: a MiMo turn sat on "may be stuck" for half an hour
+ * while its requests failed, and nothing said why. Two failures in a row before it says so: a single
+ * one is usually retried at once.
+ */
+export function cpaRefusalNote(refusal: CpaRefusal | null | undefined, now: number): string {
+  if (!refusal || refusal.streak < 2) return "";
+  const age = refusal.lastAt ? now - refusal.lastAt : null;
+  const when = age === null ? "" : age < 60_000 ? ", just now" : `, latest ${dshDuration(age)} ago`;
+  return ` · CPA refused the last ${refusal.streak} requests: ${cpaStatusWord(refusal.status)}${when}`;
 }
 
 /** A tool row's title (ui-tool tool-call-model.ts): its variant's word, or the tool's own. */
@@ -1281,6 +1390,7 @@ export type ChatSlashCommand = { name: string; hint: string; args?: string; need
  */
 export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
   { name: "goal", hint: "Set a goal to keep pursuing", args: "<objective> | pause | resume | edit | clear" },
+  { name: "loop", hint: "Run a prompt or command on a recurring interval", args: "[interval] <prompt or /review, /init> | stop", needsChat: true },
   { name: "plan", hint: "Turn plan mode on or off" },
   { name: "compact", hint: "Compact this chat's context", needsChat: true },
   { name: "review", hint: "Review the current changes", args: "[what to focus on]" },
@@ -1341,6 +1451,47 @@ export function wakeupLabel(wakeup: Pick<ChatWakeup, "dueAt" | "due">, now = Dat
   return `Wakes in ${seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.ceil(seconds / 60)}m`
     : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`}`;
 }
+/**
+ * A chat's loop (/loop), as the bridge keeps it: `minutes` between rounds, or null when the agent
+ * paces itself (schedule_wakeup). `nextAt` is when an interval loop's next round is due.
+ */
+export type ChatLoop = {
+  id: string; prompt: string; minutes: number | null; round: number; startedAt: number; expiresAt: number;
+  nextAt: number | null; due?: boolean; note?: string;
+};
+const LOOP_UNIT_MINUTES: Record<string, number> = { s: 1 / 60, m: 1, h: 60, d: 1440 };
+export const LOOP_MAX_MINUTES = 1440;
+/**
+ * /loop's argument, read as Claude Code's /loop reads it: a leading interval ("5m check the deploy"),
+ * or a trailing "every" clause ("check the deploy every 2 hours"); with neither, the agent paces
+ * itself (minutes null). Seconds round up to a whole minute, the finest a loop runs at.
+ */
+export function chatLoopParse(arg: string): { prompt: string; minutes: number | null } | { error: string } {
+  const text = arg.trim();
+  const leading = /^(\d+)([smhd])\s+([\s\S]+)$/i.exec(text);
+  const trailing = /^([\s\S]+?)\s+every\s+(\d+)\s*(s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\.?$/i.exec(text);
+  if (/^\d+[smhd]$/i.test(text)) return { error: "Say what to run each time, after the interval: /loop 5m check the deploy" };
+  const [count, unit, prompt] = leading ? [leading[1], leading[2], leading[3]] : trailing ? [trailing[2], trailing[3], trailing[1]] : [null, null, text];
+  if (!prompt.trim()) return { error: "Say what to run each time: /loop 5m check the deploy" };
+  if (count === null || unit === null) return { prompt: prompt.trim(), minutes: null };
+  const minutes = Math.ceil(Number(count) * LOOP_UNIT_MINUTES[unit[0].toLowerCase()]);
+  if (minutes < 1 || minutes > LOOP_MAX_MINUTES) return { error: "The interval must be from 1 minute to 1 day" };
+  return { prompt: prompt.trim(), minutes };
+}
+/** 5 -> "5m"; 90 -> "1h 30m"; 1440 -> "1d". */
+export function loopInterval(minutes: number): string {
+  if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440}d`;
+  if (minutes < 60) return `${minutes}m`;
+  return minutes % 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes / 60}h`;
+}
+/** The loop bar's words: "Every 5m · next in 3m", "Every 5m · next after this turn", "Self-paced · round 4". */
+export function loopLabel(loop: Pick<ChatLoop, "minutes" | "round" | "nextAt" | "due">, now = Date.now()): string {
+  if (loop.minutes === null) return `Self-paced · round ${Math.max(1, loop.round)}`;
+  const seconds = Math.max(0, Math.ceil(((loop.nextAt ?? now) - now) / 1000));
+  const next = loop.due || !seconds ? "next after this turn"
+    : `next in ${seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.ceil(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`}`;
+  return `Every ${loopInterval(loop.minutes)} · ${next}`;
+}
 /** Codex's goal summary words for each state. */
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
@@ -1348,6 +1499,17 @@ export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
 /** "3" for a goal with no round limit (Claude Code's), "3 of 6" for one saved with a limit. */
 export function goalRounds(goal: Pick<ChatGoal, "round" | "rounds">): string {
   return goal.rounds > 0 ? `${goal.round} of ${goal.rounds}` : String(goal.round);
+}
+
+const GOAL_FEEDBACK = /^Stop hook feedback:\n\[([\s\S]*?)\]: ([\s\S]+)$/;
+/**
+ * A goal's later round (chat-goals goalMessage): the goal's own feedback to the agent, which Claude
+ * Code shows as its Stop hook's feedback under the turn, not as something the person typed. It
+ * showed as the person's message bubble. Null for any other message.
+ */
+export function goalFeedback(text: string): { objective: string; reason: string } | null {
+  const match = GOAL_FEEDBACK.exec(text.trim());
+  return match ? { objective: match[1], reason: match[2].trim() } : null;
 }
 /** Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's message. */
 export type QueuedChatMessage = { what: string; message: string; goal?: string };
@@ -1383,6 +1545,10 @@ export type ChatCommands = {
   cancelWakeup?: () => Promise<void>;
   /** Saves the wake-up's note and the minutes from now it fires in. */
   editWakeup?: (change: { reason: string; minutes: number }) => Promise<void>;
+  /** The chat's loop (/loop): a prompt it runs again every interval, or whenever its agent asks. */
+  loop?: ChatLoop | null;
+  startLoop?: (loop: { prompt: string; minutes: number | null }) => Promise<void>;
+  stopLoop?: () => Promise<void>;
   /** Edit goal: saves a new objective for the rounds still to come. */
   goalEdit: (objective: string) => Promise<void>;
   /** Compacts the chat's context; says what happened. */

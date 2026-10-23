@@ -310,11 +310,11 @@ function buildJob({ version, platform, executablePath, assetPath, stagingRoot, t
     const target = process.env.CODEX_WEB_GPT_APPIMAGE?.trim()
       || process.env.APPIMAGE?.trim();
     if (!target || !path.isAbsolute(target)) {
-      throw new Error("The running Linux AppImage path is unavailable; reinstall with install-launcher.sh");
+      throw new Error("Couldn't find the running Linux AppImage. Reinstall with install-launcher.sh.");
     }
     const wrapper = process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE?.trim();
     if (!wrapper || !path.isAbsolute(wrapper)) {
-      throw new Error("Linux auto-update requires the stable install-launcher.sh wrapper; reinstall once");
+      throw new Error("Linux auto-update needs the install-launcher.sh wrapper. Reinstall once with it.");
     }
     return {
       version,

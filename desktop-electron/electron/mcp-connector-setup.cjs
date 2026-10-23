@@ -70,7 +70,7 @@ function extensionHelpersSource() {
       if (pluginCardLinks().length || pluginsPageRenderState(settings.name) === 'empty') return { absent: true };
       return null;
     }, 40_000);
-    if (!listed) throw new Error('The Personal plugins list did not finish loading; connector creation was stopped.');
+    if (!listed) throw new Error('The Personal plugins list did not finish loading, so the connector was not created.');
     if (listed.card) return { created: false, href: listed.card.getAttribute('href') };
     if (!await openCreateFormStrict()) throw new Error('ChatGPT did not open its connector form.');
     let form = activeSurface();

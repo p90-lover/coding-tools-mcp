@@ -31,7 +31,7 @@ export class PartErrorBoundary extends Component<Props, State> {
     if (this.state.error === null) return this.props.children;
     return (
       <div className="part-error" role="alert">
-        <span>{this.props.label} could not be shown: {this.state.error.slice(0, 300)}</span>
+        <span>{this.props.label} couldn't be shown: {this.state.error.slice(0, 300)}</span>
         <button type="button" onClick={() => this.setState({ error: null })}>Try again</button>
       </div>
     );

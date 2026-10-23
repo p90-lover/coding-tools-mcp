@@ -32,7 +32,25 @@ function renameAtomicFile(
   }
 }
 
-function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirectory = true } = {}) {
+/** Writes `payload` to a new file at `target` ("wx"), flushed to disk before it is closed. */
+function writeFlushedFile(target, payload, mode) {
+  const fd = fs.openSync(target, "wx", mode);
+  try {
+    for (let offset = 0; offset < payload.length;) offset += fs.writeSync(fd, payload, offset, payload.length - offset);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * `durable`: the temp file is flushed to disk before it replaces `filePath`. Without it, a power cut
+ * or hard reset can leave the replaced file the right size but full of NUL bytes: the rename reached
+ * the disk and the data did not (launcher-supervisor.json, 2026-10-23, after four unexpected
+ * shutdowns; the bridge watchdog then failed every restart for 25 minutes). Flushing costs a disk
+ * round trip, so it is for small state files written now and then, not ones written as the app is used.
+ */
+function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirectory = true, durable = false } = {}) {
   const directory = path.dirname(filePath);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (protectDirectory) {
@@ -48,7 +66,8 @@ function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirect
   for (let attempt = 0; temporary === null; attempt += 1) {
     const candidate = `${filePath}.tmp-${process.pid}-${Date.now()}-${++sequence}`;
     try {
-      fs.writeFileSync(candidate, payload, { flag: "wx", mode });
+      if (durable) writeFlushedFile(candidate, payload, mode);
+      else fs.writeFileSync(candidate, payload, { flag: "wx", mode });
       temporary = candidate;
     } catch (error) {
       if (error?.code !== "EEXIST") {

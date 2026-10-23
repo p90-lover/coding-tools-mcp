@@ -516,11 +516,27 @@ test("a daemon that exits while starting fails at once instead of waiting out th
   assert.ok(Date.now() - begun < 5000, "no wait for a daemon that is gone");
 });
 
+test("a pprof-addr file with a loopback address turns on AO's profiler; anything else leaves it off", async () => {
+  const flag = path.join(path.resolve("ao-lifecycle-fixture/data"), "pprof-addr");
+  const started = async (content) => {
+    const files = new Map(content === undefined ? [] : [[flag, content]]);
+    const harness = createHarness({ files });
+    try {
+      await harness.controller.start();
+      return harness.children[0].options.env.AO_PPROF_ADDR;
+    } finally { await harness.controller.stop(); }
+  };
+  assert.equal(await started("127.0.0.1:6061\n"), "127.0.0.1:6061");
+  assert.equal(await started(undefined), undefined, "no file, no profiler");
+  assert.equal(await started("0.0.0.0:6061"), undefined, "never on a non-loopback address");
+  assert.equal(await started("127.0.0.1:6061; rm -rf /"), undefined, "only a bare host:port");
+});
+
 test("a daemon that never listens fails at the limit", async (context) => {
   const harness = createHarness({ readySlowMs: 20, readyLimitMs: 300, readyFetch: () => { throw new Error("ECONNREFUSED"); } });
   const { controller } = harness;
   context.after(() => controller.stop());
-  await assert.rejects(controller.start(), /AO readiness timed out/);
+  await assert.rejects(controller.start(), /Agent Orchestrator timed out getting ready/);
   assert.equal(controller.snapshot().state, "error");
 });
 
