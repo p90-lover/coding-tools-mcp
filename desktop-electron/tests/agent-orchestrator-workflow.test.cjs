@@ -3269,15 +3269,16 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
  */
 async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
   ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." }, refuse = () => 0,
-  timers = null, request = null } = {}) {
-  const world = chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
+  timers = null, request = null, goalsFile = null, now = Date.now, world: restarted = null } = {}) {
+  // `world` given: the app restarting on the same AO state (and `goalsFile`), its goal kept.
+  const world = restarted ?? chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
   const checks = [];
   // A goal's own pauses (30 s and longer) are kept in `timers` to fire by hand; shorter ones run.
   const timerOptions = timers ? {
     setTimer: (callback, ms) => { if (ms < 30_000) return setTimeout(callback, ms); timers.push({ callback, ms }); return timers.at(-1); },
     clearTimer: (timer) => { const at = timers.indexOf(timer); if (at >= 0) timers.splice(at, 1); else clearTimeout(timer); },
   } : {};
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: request ? request(world) : world.requestHeadless, findCodexExecutable: () => "C:/codex.exe", ...timerOptions,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: request ? request(world) : world.requestHeadless, findCodexExecutable: () => "C:/codex.exe", ...timerOptions, goalsFile, now,
     resolveHarness: async () => { throw new Error("stop before the background loop"); },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     fetchImpl: async (url, init) => {
@@ -3290,7 +3291,7 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
       if (verdict instanceof Error) return { ok: false, status: 503, json: async () => ({}) };
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
     } });
-  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "build green", goal: "build green" });
+  if (!restarted) await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "build green", goal: "build green" });
   return { world, workflow, checks };
 }
 const goalOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
@@ -3538,6 +3539,74 @@ test("a judged goal round that runs again (the app restarted, Retry) is judged a
   const checked = checks.length;
   await workflow.goalAfterRun("ws-1", "r2", "finished");
   assert.equal(checks.length, checked + 1, "and judged when it settles again");
+
+  // A team round stalled on a card that needs approval: its workers wait pending under that card,
+  // which is not the round running again; the goal stays stalled on it.
+  const team = { id: "r3", workspace_id: "ws-1", project_id: "task-1", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+    { id: "lead", role: "planner", parents: [], state: "held", history: [], receipt: { error: "needs approval" } },
+    { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+  world.runs.push(team);
+  await workflow.goalAfterRun("ws-1", "r3", "held");
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  goal = await goalOf(workflow);
+  assert.equal(goal.status, "stalled", "pending workers under a held card do not wake the goal");
+  assert.equal(goal.evaluatedRunId, "r3");
+  // The card is retried and can run: now the round runs again.
+  team.nodes[0].state = "pending";
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  goal = await goalOf(workflow);
+  assert.equal(goal.status, "active");
+  assert.equal(goal.evaluatedRunId, "");
+});
+
+test("a goal waiting out a pause carries on after an app restart, is not judged early by reads, and stops with the app", async () => {
+  // Codex review of #559: the pause lived only in a timer, so an app closed during it left the goal
+  // "Pursuing" with its failed round marked judged and nothing to start the next one.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const directory = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "ct-goals-retry-"));
+  const goalsFile = path.join(directory, "chat-goals.json");
+  let clock = 1_000_000;
+  const now = () => clock;
+  try {
+    const timers = [];
+    const first = await goalChat({ timers, goalsFile, now });
+    const { world } = first;
+    world.runs.push({ id: "f1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state: "failed", route, receipt: { error: "upstream 500 from the model" } }] });
+    await first.workflow.goalAfterRun("ws-1", "f1", "failed");
+    assert.deepEqual((await goalOf(first.workflow)).retry, { at: clock + 30_000, runId: "f1", check: false }, "the pause is saved with the goal");
+    // The app closes during the pause: its timer goes, and one that fires anyway does nothing.
+    const pending = timers[0];
+    first.workflow.dispose();
+    assert.equal(timers.length, 0, "dispose clears the goal's timer");
+    const before = world.updates.length;
+    pending.callback();
+    await goalSettle();
+    assert.equal(world.updates.length, before, "a disposed app starts no round");
+
+    // The next app reads the chat while the pause still runs: it waits out the rest, once.
+    const laterTimers = [];
+    const second = await goalChat({ timers: laterTimers, goalsFile, now, world });
+    await second.workflow.call("runs", { workspaceId: "ws-1" });
+    await second.workflow.call("runs", { workspaceId: "ws-1" });
+    await goalSettle();
+    assert.equal(laterTimers.length, 1, "armed again, once");
+    assert.equal(laterTimers[0].ms, 30_000);
+    assert.equal(world.updates.length, before, "not before it is due");
+    second.workflow.dispose();
+
+    // An app that starts after the pause was due carries on at its first read.
+    clock += 60_000;
+    const third = await goalChat({ timers: [], goalsFile, now, world });
+    await third.workflow.call("runs", { workspaceId: "ws-1" });
+    await goalSettle(() => world.updates.length > before);
+    assert.equal(world.updates.length, before + 1, "the next round started");
+    assert.match(world.edits.at(-1).description, /The last round failed \(upstream 500 from the model\)\. Carry on from where it stopped\./);
+    assert.equal((await goalOf(third.workflow)).retry, null);
+    third.workflow.dispose();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and there is no round limit", async () => {
@@ -3584,6 +3653,11 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.deepEqual(checks.map((check) => check.model), ["gemini-3-flash", "deepseek-v4"]);
   assert.equal((await goalOf(workflow)).status, "active", "one failed check does not stall the goal");
   assert.match((await goalOf(workflow)).note, /could not be checked \(the evaluator returned HTTP 503 for deepseek-v4\); checking again shortly/);
+  // Reads of the chat (it polls them) wait for the pause too: two reads used up all three checks.
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  await goalSettle();
+  assert.equal(checks.length, 2, "not checked again before the pause is over");
   for (let again = 0; again < 2; again += 1) {
     assert.equal(timers.length, 1, "one pending check per chat");
     assert.equal(timers[0].ms, 2 * 60_000);

@@ -4226,6 +4226,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const result = await chatSend(input);
       if (stalled && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalled.note });
       else if (stalled && result?.runId) goals.update(id, task, { lastRunId: String(result.runId) });
+      // Sent while the goal waited out a pause (a failed round or check): this turn is its next round.
+      if (result?.runId && id && task && goals.get(id, task)?.retry) dropGoalRetry(id, task);
       return result;
     } catch (error) {
       if (stalled) goals.update(id, task, { status: "stalled", note: stalled.note });
@@ -4483,23 +4485,49 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const GOAL_RETRY_DELAY_MS = 30_000;
   const GOAL_CHECK_RETRY_MS = 2 * 60_000;
   const goalTimers = new Map();
+  let goalsDisposed = false;
+  const goalTimerKey = (workspaceId, task) => JSON.stringify([workspaceId, task]);
   /**
-   * Carries a goal on after a pause: judges `runId` again when given (a check that failed), else
-   * starts the next round after `previous`. One timer per chat; nothing happens if the goal was
-   * paused, edited to another state or cleared meanwhile, or the chat is working by then.
+   * Carries a goal on after a pause: judges run `runId` again (`check`: its check failed), else
+   * starts the next round after it. The pause is saved with the goal (`retry`), so an app closed
+   * meanwhile carries on when it next reads the chat (sweepGoals arms it again), and until it is
+   * due the sweep leaves that round alone: a read judged it again at once, and two reads used up
+   * the goal's three checks.
    */
-  function goalLater(workspaceId, task, delay, previous, runId = null) {
-    const key = JSON.stringify([workspaceId, task]);
+  function goalLater(workspaceId, task, delay, runId, check = false) {
+    goals.update(workspaceId, task, { retry: { at: now() + delay, runId, check } });
+    armGoalRetry(workspaceId, task);
+  }
+  /**
+   * One timer per chat. Nothing happens if the goal was paused, edited to another state or cleared
+   * meanwhile, its pause was replaced, the chat is working by then, or the app is shutting down
+   * (the saved pause is armed again by the next app).
+   */
+  function armGoalRetry(workspaceId, task) {
+    const retry = goals.get(workspaceId, task)?.retry;
+    if (!retry || goalsDisposed) return;
+    const key = goalTimerKey(workspaceId, task);
     if (goalTimers.has(key)) clearTimer(goalTimers.get(key));
     const timer = setTimer(() => {
       goalTimers.delete(key);
+      if (goalsDisposed) return;
       const goal = goals.get(workspaceId, task);
-      if (goal?.status !== "active") return;
-      const next = runId ? goalAfterRun(workspaceId, runId, "finished") : continueGoal(workspaceId, task, goal, previous);
+      if (goal?.status !== "active" || goal.retry?.at !== retry.at) return;
+      goals.update(workspaceId, task, { retry: null });
+      const next = retry.check
+        ? goalAfterRun(workspaceId, retry.runId, "finished")
+        : runs({ workspaceId }).then(saved => continueGoal(workspaceId, task, goals.get(workspaceId, task),
+          saved.runs.find(run => run.id === retry.runId && run.project_id === task)));
       void next.catch((error) => { logger?.warn?.("ao.goal_retry_failed", { message: publicText(error?.message || error, 200) }); });
-    }, delay);
+    }, Math.max(0, retry.at - now()));
     timer?.unref?.();
     goalTimers.set(key, timer);
+  }
+  /** A pause made moot (resume, or its round runs again): its timer and its saved deadline go. */
+  function dropGoalRetry(workspaceId, task) {
+    const key = goalTimerKey(workspaceId, task);
+    if (goalTimers.has(key)) { clearTimer(goalTimers.get(key)); goalTimers.delete(key); }
+    if (goals.get(workspaceId, task)?.retry) goals.update(workspaceId, task, { retry: null });
   }
   /**
    * A round the goal already judged that runs again: the app restarted under it and its step was
@@ -4511,11 +4539,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   function reopenGoalRound(workspaceId, run) {
     const task = run?.project_id;
     const goal = task ? goals.get(workspaceId, task) : null;
-    // Running again means a step of it runs or is about to: a round held on the person is still the
-    // one the goal judged (it stalled on it), not one that runs again.
-    const again = !run.cancelled && (run.nodes ?? []).some(node => ["pending", "reserved", "running"].includes(node.state));
+    // Running again means a step of it runs or can start: a round held on the person is still the
+    // one the goal judged (it stalled on it), not one that runs again. A pending step counts only
+    // when every card it waits on finished: a team's workers stay pending under a parent card that
+    // needs approval, and counting them woke a goal stalled on that very approval.
+    const nodes = run.nodes ?? [];
+    const ready = node => (node.parents ?? []).every(parent => nodes.some(entry => entry.id === parent && entry.state === "finished"));
+    const again = !run.cancelled && nodes.some(node => ["reserved", "running"].includes(node.state) || (node.state === "pending" && ready(node)));
     if (!goal || !run.id || goal.evaluatedRunId !== run.id || !again) return;
     const wake = goal.status === "stalled";
+    // A next round waiting after this one failed is moot: this round's own settle is judged.
+    dropGoalRetry(workspaceId, task);
     goals.update(workspaceId, task, { evaluatedRunId: "", ...(wake ? { status: "active", note: "" } : {}) });
     logger?.info?.("ao.goal_round_reopened", { woke: wake });
   }
@@ -4564,7 +4598,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         goals.update(workspaceId, task, { evaluatedRunId: runId, failedRounds: failures,
           note: `Round ${goal.round} failed; the next round starts shortly (${failures} of ${GOAL_FAILED_ROUNDS} failures in a row)`,
           feedback: `The last round failed${error ? ` (${publicText(error, 300)})` : ""}. Carry on from where it stopped.` });
-        goalLater(workspaceId, task, failures * GOAL_RETRY_DELAY_MS, mission);
+        goalLater(workspaceId, task, failures * GOAL_RETRY_DELAY_MS, runId);
         return;
       }
       if (outcome === "held") { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, note: "The last round needs you; answer it, then /goal resume" }); return; }
@@ -4592,11 +4626,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           return;
         }
         goals.update(workspaceId, task, { checkFailures: failures, note: `The goal could not be checked (${reason}); checking again shortly` });
-        goalLater(workspaceId, task, GOAL_CHECK_RETRY_MS, mission, runId);
+        goalLater(workspaceId, task, GOAL_CHECK_RETRY_MS, runId, true);
         return;
       }
       if (!still()) return;
-      goals.update(workspaceId, task, { evaluatedRunId: runId, checkedAt: now(), checkFailures: 0, failedRounds: 0, note: "" });
+      goals.update(workspaceId, task, { evaluatedRunId: runId, checkedAt: now(), checkFailures: 0, failedRounds: 0, note: "", retry: null });
       if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
       goals.update(workspaceId, task, { feedback: check.reason });
       if (goal.rounds > 0 && goal.round >= goal.rounds) {
@@ -4632,6 +4666,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const active = Object.entries(goals.forWorkspace(workspaceId))
       .filter(([task, goal]) => goal.status === "active" && taskLifecycle(saved, task).visibility === "active");
     for (const [task, goal] of active) {
+      // A goal waiting out a pause (a failed round or check) carries on when it is due; after an app
+      // restart nothing was counting it down, so it is armed again here.
+      if (goal.retry) {
+        if (!goalTimers.has(goalTimerKey(workspaceId, task))) armGoalRetry(workspaceId, task);
+        continue;
+      }
       const latest = runsOfWorkspace.filter(run => run.project_id === task).at(-1);
       if (!latest || latest.id === goal.evaluatedRunId || !runSettled(latest) || chatWorking(workspaceId, task, runsOfWorkspace)) continue;
       // A run this session still drives reports its own settle; only an orphaned one is swept.
@@ -4668,6 +4708,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (action !== "resume") throw new Error("Choose clear, pause, resume, edit or route");
     // A goal that used up its rounds (limited, or limited and then edited) gets as many more again.
     const rounds = goal.rounds > 0 && goal.round >= goal.rounds ? goal.round + goal.rounds : goal.rounds;
+    // Resuming carries on now: a pause still waiting is dropped.
+    dropGoalRetry(id, task);
     goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0 });
     // The next round starts in the background: setting it up (board writes, a compaction when the
     // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
@@ -5609,6 +5651,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     wakeTimers.clear();
     for (const timer of loopTimers.values()) clearTimer(timer);
     loopTimers.clear();
+    // Saved goal pauses (retry) stay on disk too; the next app arms them when it reads the chat.
+    goalsDisposed = true;
+    for (const timer of goalTimers.values()) clearTimer(timer);
+    goalTimers.clear();
     autoRetryDisposed = true;
     for (const timer of autoRetryTimers) clearTimer(timer);
     autoRetryTimers.clear();
