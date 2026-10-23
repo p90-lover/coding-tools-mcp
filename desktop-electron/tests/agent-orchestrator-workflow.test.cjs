@@ -1137,7 +1137,7 @@ test("a CPA-only agent reports a CPA failure instead of falling back to its own 
 
 // A fake headless service holding one workspace's board, runs and team.
 function chatWorld({ runs = [], tasks = [] } = {}) {
-  const state = { revision: 3, tasks: tasks.map((task) => ({ ...task })), runs, updates: [], edits: [] };
+  const state = { revision: 3, tasks: tasks.map((task) => ({ ...task })), runs, updates: [], edits: [], lifecycle: [] };
   const requestHeadless = async (endpoint, body) => {
     if (endpoint === "/api/v1/tools/call") {
       const args = body.arguments;
@@ -1154,7 +1154,7 @@ function chatWorld({ runs = [], tasks = [] } = {}) {
     }
     if (endpoint === "/api/v1/ao/read") {
       const pending = body.run_id ? [{ id: body.run_id, workspace_id: "ws-1", revision: 1, nodes: [{ id: "lead", state: "pending", route: { model: "chatgpt-web/high" } }] }] : state.runs;
-      return { ok: true, runs: pending, team: { id: "team-1", revision: 7, worker_limit: 2 } };
+      return { ok: true, runs: pending, team: { id: "team-1", revision: 7, worker_limit: 2 }, task_lifecycle: state.lifecycle };
     }
     if (endpoint === "/api/v1/ao/update") {
       state.updates.push(body.change);
@@ -3355,6 +3355,41 @@ test("a refused message leaves a stalled goal stalled, with its note", async () 
   assert.equal(after.note, before.note);
 });
 
+test("a goal round that finished while the app was not driving it goes on at the next read of the chat", async () => {
+  // Seen live: after an app restart AO finished the chat's turn on its own, nothing reported it,
+  // and the goal read "Pursuing goal" for hours under a Done chat.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const { world, workflow, checks } = await goalChat();
+  // The goal's first round, as AO keeps it (this test world does not store the runs it creates).
+  const first = (await goalOf(workflow)).lastRunId;
+  assert.ok(first);
+  world.runs.push({ id: first, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Started." } }] });
+  world.runs.push({ id: "r-unwatched", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Half done." } }] });
+  const before = world.updates.length;
+  // An archived or deleted chat keeps its goal, but is neither judged nor sent another round.
+  for (const visibility of ["archived", "deleted"]) {
+    world.lifecycle = [{ workspace_id: "ws-1", task_id: "task-1", revision: 1, visibility, reconfigure: [], schedule: null }];
+    await workflow.call("runs", { workspaceId: "ws-1" });
+    await goalSettle();
+    assert.equal(checks.length, 0, `no check in a ${visibility} chat`);
+    assert.equal(world.updates.length, before);
+  }
+  world.lifecycle = [];
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  await goalSettle(() => world.updates.length > before);
+  assert.equal(checks.length, 1, "the unwatched round was judged");
+  assert.equal(world.updates.length, before + 1, "and the next round started");
+  const goal = await goalOf(workflow);
+  assert.equal(goal.status, "active");
+  assert.equal(goal.round, 2);
+  // Reading again does not judge it twice.
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  await goalSettle();
+  assert.equal(checks.length, 1);
+});
+
 test("an app restart under a goal's round does not stall the goal; the round's real outcome is judged", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
   const { world, workflow, checks } = await goalChat();
@@ -4191,6 +4226,55 @@ test("the reviewer sees what the worker did in its turn before a request, and a 
   assert.match(long.prompts[0], /- worker said: Found 4 processes/);
   assert.ok(!long.prompts[0].includes("- worker ran: step 0\n"), "the oldest steps go first");
   assert.ok(long.prompts[0].split("What the worker did")[1].length < 3200);
+});
+
+test("after three denials in a row a chat's next requests wait for the person instead of costing more reviews", async () => {
+  // Seen live 2026-10-23: denied, the agent reworded one batch launch six times in two minutes,
+  // each a new Codex review ("The user keeps refusing").
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const launch = (index) => ({ approval_id: `launch-${index}`, source: "ao", kind: "command", tool: "PowerShell",
+    command: `& ./run-batch-${index}.ps1`, summary: "PowerShell", decisions });
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const queue = [1, 2, 3, 4, 5].map(launch);
+  const prompts = [], resolved = [];
+  let clock = Date.parse("2026-10-23T10:00:00Z");
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      prompts.push(JSON.parse(init.body).messages[0].content);
+      const action = prompts.length <= 3 ? "deny" : "allow";
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ action, reason: "fixture" }) } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", timeline: [], approvals: queue.slice(resolved.length, resolved.length + 1) }),
+      resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const wait = async (done) => { for (let tries = 0; tries < 300 && !done(); tries++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  await wait(() => resolved.length >= 3);
+  // The fourth is not reviewed, and is never answered for the person however long it waits.
+  await wait(() => false);
+  clock += 60_000;
+  await wait(() => resolved.length > 3);
+  assert.deepEqual(resolved, ["no", "no", "no"]);
+  assert.equal(prompts.length, 3, "no review after the third denial");
+  // A while later the streak has lapsed: a new request (the agent asked again) is the reviewer's again.
+  clock += 11 * 60_000;
+  queue[3] = { ...launch(4), approval_id: "launch-4-again" };
+  await wait(() => resolved.length >= 4);
+  mission.nodes[0].state = "finished";
+  assert.deepEqual(resolved, ["no", "no", "no", "yes"]);
+  assert.equal(prompts.length, 4);
 });
 
 test("the reviewer sees what the user asked in the chat and the worker's own description of a shell command", async () => {
