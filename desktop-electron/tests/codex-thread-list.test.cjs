@@ -56,26 +56,29 @@ function fixture() {
   return { props, calls };
 }
 
-test("each chat row has Codex's hover Pin and Archive buttons, not the old envelope and funnel icons", () => {
+test("each chat row is Claude Code's: its title, a status dot, and one hover \"More options\" holding Pin and Archive", () => {
   const { props, calls } = fixture();
-  const view = mount("ChatThreadList.tsx", props).render();
-  const rows = walk(view).filter((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row") && !String(element.props.className).includes("is-archived"));
-  assert.equal(rows.length, 2);
-  for (const row of rows) {
+  const list = mount("ChatThreadList.tsx", props);
+  const rows = () => walk(list.render()).filter((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row") && !String(element.props.className).includes("is-archived"));
+  assert.equal(rows().length, 2);
+  for (const row of rows()) {
     const labels = walk(row).filter((element) => element.type === "button").map((button) => button.props["aria-label"]).filter(Boolean);
-    assert.deepEqual(labels, ["Pin chat", "Archive chat"]);
+    assert.equal(labels.length, 1, "no row of separate hover buttons");
+    assert.match(labels[0], /^More options for /);
     assert.ok(!walk(row).some((element) => element.type === "Icon" && ["mail", "orchestrator"].includes(element.props.name)), "the envelope and funnel icons are gone");
   }
+  assert.match(rows()[0].props.className, /is-unread/, "an unread chat that isn't open is marked");
+  const more = (index) => walk(rows()[index]).find((element) => String(element.props?.["aria-label"]).startsWith("More options for"));
+  const menu = () => walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
+  more(1).props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 4, bottom: 20 }) } });
+  menu().items.find((item) => item.label === "Pin").run();
+  more(1).props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 4, bottom: 20 }) } });
   // Archive goes through the lifecycle, which asks before stopping a running chat's work.
-  const archiveRunning = walk(rows[0]).find((element) => element.props?.["aria-label"] === "Archive chat");
-  assert.equal(archiveRunning.props.disabled, false);
-  assert.match(rows[0].props.className, /is-unread/, "an unread chat that isn't open is marked");
-  walk(rows[1]).find((element) => element.props?.["aria-label"] === "Pin chat").props.onClick();
-  walk(rows[1]).find((element) => element.props?.["aria-label"] === "Archive chat").props.onClick();
-  walk(rows[1]).find((element) => element.props?.className === "cx-thread-select").props.onClick();
+  menu().items.find((item) => item.label === "Archive").run();
+  walk(rows()[1]).find((element) => element.props?.className === "cx-thread-select").props.onClick();
   assert.deepEqual(calls, [["pin", "t2"], ["lifecycle", "t2", "archive"], ["select", "t2"]]);
   // Ctrl-click opens the chat in split view, as in Claude Code.
-  walk(rows[0]).find((element) => element.props?.className === "cx-thread-select").props.onClick({ ctrlKey: true });
+  walk(rows()[0]).find((element) => element.props?.className === "cx-thread-select").props.onClick({ ctrlKey: true });
   assert.deepEqual(calls.at(-1), ["openSplit", "a", "t1"]);
 });
 
@@ -265,15 +268,20 @@ test("chat order: active chats stay on top, new chats come next, then the order 
   const list = compile("ChatThreadList.tsx", (name) => name === "./ao-chat" ? chat : name === "react" ? { useState() {}, useRef() {}, useEffect() {} } : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : {});
   const chats = [{ taskId: "new", status: "done" }, { taskId: "a", status: "done" }, { taskId: "b", status: "running" }, { taskId: "c", status: "stopped" }];
   // Arrays from the sandbox have their own prototype; compare them as plain JSON.
-  const ids = (order, manual, keep = true) => JSON.parse(JSON.stringify(list.orderChats(order, manual, keep).map((item) => item.taskId)));
+  const ids = (order, manual, keep = true, placed = []) => JSON.parse(JSON.stringify(list.orderChats(order, manual, keep, placed).map((item) => item.taskId)));
   const move = (...args) => JSON.parse(JSON.stringify(list.moveChat(...args)));
   assert.deepEqual(ids(chats, []), ["b", "new", "a", "c"], "running first, then newest first");
   assert.deepEqual(ids(chats, ["c", "a"]), ["b", "new", "c", "a"], "a chat you haven't placed stays above your order");
   assert.deepEqual(ids(chats, ["c", "a", "new", "b"], false), ["c", "a", "new", "b"], "without the setting, only your order counts");
-  // A chat waiting on you floats until you place it; placed, it stays where you put it.
+  // A chat waiting on you, or running, floats until you move it; moved, it stays where you put it.
   const waiting = [{ taskId: "w", status: "attention" }, { taskId: "a", status: "done" }];
   assert.deepEqual(ids(waiting, []), ["w", "a"], "an unplaced chat waiting on you is on top");
-  assert.deepEqual(ids(waiting, ["a", "w"]), ["a", "w"], "dragged below another, it stays there");
+  assert.deepEqual(ids(waiting, ["a", "w"], true, ["w"]), ["a", "w"], "dragged below another, it stays there");
+  assert.deepEqual(ids(chats, ["new", "a", "c", "b"], true, ["b"]), ["new", "a", "c", "b"], "a running chat you dragged stays where you put it");
+  // A drag saves the whole list's order: another running chat it carried along stays on top.
+  const two = [{ taskId: "r1", status: "running" }, { taskId: "r2", status: "running" }, { taskId: "d", status: "done" }];
+  assert.deepEqual(ids(two, ["r1", "d", "r2"], true, ["r2"]), ["r1", "d", "r2"], "only the dragged one leaves the top");
+  assert.deepEqual(ids(two, ["d", "r1", "r2"], true, ["r2"]), ["r1", "d", "r2"], "r1 was only carried along: still on top");
   assert.deepEqual(move(["x", "y", "z"], "z", "x"), ["z", "x", "y"]);
   assert.deepEqual(move(["x", "y", "z"], "x", null), ["y", "z", "x"]);
 });
@@ -293,6 +301,26 @@ test("a drop lands before a row's upper half and after its lower half; Pinned an
 const dragEvent = (lower) => ({ preventDefault() {}, stopPropagation() {}, clientY: lower ? 15 : 5, dataTransfer: { setData() {} },
   currentTarget: { getBoundingClientRect: () => ({ top: 0, height: 20 }) } });
 const rowOf = (view, title) => walk(view).find((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row") && text(element).includes(title));
+
+test("a running chat dragged below others stays there, and the running chat it passed stays on top", async () => {
+  for (const key of Object.keys(stored)) delete stored[key];
+  const { props } = fixture();
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  const list = mount("ChatThreadList.tsx", { ...props, loadProjectChats: async () => [
+    { taskId: "b1", title: "Beta busy", status: "running", runIds: ["rb1"], latestRunId: "rb1" },
+    { taskId: "b2", title: "Beta also busy", status: "running", runIds: ["rb2"], latestRunId: "rb2" },
+    { taskId: "b3", title: "Beta idle", status: "done", runIds: ["rb3"], latestRunId: "rb3" }] }, { effects: true });
+  list.render();
+  await new Promise((resolve) => setImmediate(resolve));
+  const order = () => { const shown = text(list.render()); return ["Beta busy", "Beta also busy", "Beta idle"].sort((a, b) => shown.indexOf(a) - shown.indexOf(b)); };
+  assert.deepEqual(order(), ["Beta busy", "Beta also busy", "Beta idle"]);
+  rowOf(list.render(), "Beta busy").props.onDragStart(dragEvent(true));
+  rowOf(list.render(), "Beta idle").props.onDragOver(dragEvent(true));
+  walk(list.render()).find((element) => element.props?.className === "cx-threads").props.onDrop(dragEvent(true));
+  // Before, it jumped straight back to the top: running chats were always kept there.
+  assert.deepEqual(order(), ["Beta also busy", "Beta idle", "Beta busy"]);
+  assert.deepEqual(JSON.parse(stored["coding-tools:ao:chat-placed:b"]), ["b1"]);
+});
 
 test("chats can be dragged into place in every list: Pinned, another open project and Archived, each within itself", async () => {
   for (const key of Object.keys(stored)) delete stored[key];
@@ -394,15 +422,18 @@ test("a long project shows 5 chats and Show more, like Codex; the count is a lis
   assert.equal(JSON.parse(stored["coding-tools:ao:chat-list-settings"]).visible, 3);
 });
 
-test("a project row has Codex's hover actions (its menu and a new chat there), and Edit opens the project", () => {
+test("a project is Claude Code's folder group: its name and a caret, no folder icon, \"+\" on hover; its menu is on right-click", () => {
   const { props, calls } = fixture();
   const list = mount("ChatThreadList.tsx", props);
   const button = (label) => walk(list.render()).find((element) => element.type === "button" && element.props["aria-label"] === label);
-  assert.ok(button("Alpha actions") && button("New chat in Alpha") && button("New chat in Beta"));
+  assert.ok(button("New chat in Alpha") && button("New chat in Beta"));
+  assert.equal(button("Alpha actions"), undefined, "one hover action, as Claude Code's");
+  const header = projectButton(list.render(), "Alpha");
+  assert.ok(!walk(header).some((element) => element.type === "Glyph"), "no folder icon");
+  assert.ok(walk(header).some((element) => element.type === "Icon" && element.props.name === "chevron" && /cx-caret/.test(element.props.className)), "a caret after the name");
   button("New chat in Beta").props.onClick();
-  button("Alpha actions").props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 5, bottom: 9 }) } });
+  header.props.onContextMenu({ preventDefault() {}, clientX: 5, clientY: 9 });
   const menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
-  assert.deepEqual([menu.x, menu.y], [5, 13], "the menu opens under the button");
   menu.items.find((item) => item.label === "Edit").run();
   assert.deepEqual(calls, [["newChatIn", "b"], ["editProject", "a"]]);
 });

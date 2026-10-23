@@ -29,10 +29,10 @@ function resolveCpaProxyRoute(dataRoot, safeStorage, componentId = "cpa") {
   try { saved = JSON.parse(fs.readFileSync(filePath, "utf8")); }
   catch (error) {
     if (error?.code === "ENOENT") return { profileId: null, url: "" };
-    throw new Error("Saved proxy settings are unavailable; CPA was not started");
+    throw new Error("Couldn't read the saved proxy settings, so CPA didn't start");
   }
   if (!saved || saved.version !== 1 || !saved.routing || typeof saved.routing !== "object") {
-    throw new Error("Saved proxy settings are invalid; CPA was not started");
+    throw new Error("The saved proxy settings are invalid, so CPA didn't start");
   }
   const store = createProviderNetworkStore({
     filePath, keyPath: path.join(directory, "provider-network.key"), safeStorage,
@@ -45,18 +45,18 @@ function resolveCpaProxyRoute(dataRoot, safeStorage, componentId = "cpa") {
   const profileId = policy?.profileId || (routing.globalEnabled ? routing.globalProfileId : null);
   if (!profileId) return { profileId: null, url: "" };
   const profile = store.activeProxy(profileId);
-  if (!profile) throw new Error("Selected network proxy is unavailable; CPA was not started");
+  if (!profile) throw new Error("The selected network proxy is unavailable, so CPA didn't start");
   if (profile.endpoint.protocol === "socks4") {
     throw new Error("CPA needs an HTTP, HTTPS or SOCKS5 proxy profile");
   }
   const credentials = store.proxySecret(profile.id);
   if (profile.hasAuthentication && !credentials?.username && !credentials?.password) {
-    throw new Error("Saved proxy authentication is unavailable; CPA was not started");
+    throw new Error("Couldn't read the proxy's saved sign-in, so CPA didn't start");
   }
   const url = proxyUrl(profile, credentials);
   const parsed = new URL(url);
   if (parsed.hostname.replace(/^\[|\]$/g, "") !== profile.endpoint.host.replace(/^\[|\]$/g, "")) {
-    throw new Error("Invalid proxy host; CPA was not started");
+    throw new Error("The proxy host is invalid, so CPA didn't start");
   }
   return { profileId: profile.id, url };
 }

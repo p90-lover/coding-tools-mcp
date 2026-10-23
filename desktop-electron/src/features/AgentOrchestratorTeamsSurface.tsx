@@ -37,12 +37,12 @@ export function removeFromTeam(team: AoTeam, id: string, defaults: AoTeam): { te
     const what = node.role === "planner" ? "an orchestrator" : node.role === "reviewer" ? "a main reviewer" : "at least one worker";
     return { team: { ...team, nodes: team.nodes.map(item => item.id === id
       ? { ...item, route: structuredClone(fresh.route), settings: structuredClone(fresh.settings) } : item) },
-      confirm: `A team needs ${what}, so removing "${name}" puts a fresh ${fresh.settings?.name || node.role} in its place, keeping its links. Continue?` };
+      confirm: `A team needs ${what}. Replace "${name}" with a fresh ${fresh.settings?.name || node.role}? Its links stay.` };
   }
   if (node.role === "review_split") {
     const subs = team.nodes.filter(item => item.role === "sub_reviewer");
     return { team: { ...team, nodes: team.nodes.filter(item => item.id !== id && item.role !== "sub_reviewer") },
-      ...(subs.length ? { confirm: `The review split only feeds its sub-reviewers, so removing it removes ${subs.length === 1 ? "the sub-reviewer" : `all ${subs.length} sub-reviewers`} too. Continue?` } : {}) };
+      ...(subs.length ? { confirm: `Removing the review split removes ${subs.length === 1 ? "the sub-reviewer" : `all ${subs.length} sub-reviewers`} too. Continue?` } : {}) };
   }
   return { team: { ...team, nodes: team.nodes.filter(item => item.id !== id) } };
 }
@@ -314,7 +314,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
         }}>Duplicate</button>
         <button type="button" className="button-secondary" disabled={locked || !draft || draft.id === defaultId} onClick={() => void save(true)}>Make default</button>
         <button type="button" className="button-secondary" disabled={locked || saving || !draft || (Boolean(saved) && teams.length < 2)}
-          title={saved && teams.length < 2 ? "Keep at least one team" : "Delete this team; chats keep their own copy"} onClick={() => void removeTeam()}>Delete team</button>
+          title={saved && teams.length < 2 ? "Keep at least one team" : "Delete this team. Chats keep their own copy."} onClick={() => void removeTeam()}>Delete team</button>
         <button type="button" className="button-secondary" disabled={locked || !workspaceId} onClick={() => {
           if (canLeave()) { setLoading(true); void moduleCall("runs", { workspaceId }).then(result => accept(result, draft?.id))
             .catch(cause => setError(String(cause instanceof Error ? cause.message : cause))).finally(() => setLoading(false)); }
@@ -329,7 +329,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
           onChange={event => setDraft({ ...draft, worker_limit: Number(event.target.value) })} /></label>
         <label>Review rounds<input aria-label="Team review rounds" type="number" min={1} max={10} value={draft.max_review_rounds ?? 3} disabled={locked}
           onChange={event => setDraft({ ...draft, max_review_rounds: Number(event.target.value) })} /></label>
-        <label className="ao-teams-loop" title="When the reviewer asks for changes, the orchestrator gets the review and decides: plan another round for the workers, or end the mission. Review rounds caps the loop.">
+        <label className="ao-teams-loop" title="When the reviewer asks for changes, the orchestrator plans another round or ends the mission. Review rounds sets the limit.">
           <input type="checkbox" aria-label="Reviewer reports back to the orchestrator" checked={Boolean(draft.review_loop)} disabled={locked}
             onChange={event => setDraft({ ...draft, review_loop: event.target.checked })} />Reviewer reports back to the orchestrator</label>
         <span className="ao-hint">{draft.id === defaultId ? "Default for new chats" : "Choose this team when starting a chat"}</span>
@@ -370,11 +370,11 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
               discard={() => { setDraft(saved ? structuredClone(saved) : freshTeam(workspaceId, !defaultId)); setSelectedId(""); }}
               taskName={() => "Team template"} />
           </div> : null}
-          {!inspected ? <p className="ao-teams-hint">Click a block to edit its role, model and instructions · drag to arrange · Shift-click to connect or unlink</p> : null}
-        </> : <div className="ao-empty-state"><p>Add a workspace in Chat to configure a team.</p></div>}
+          {!inspected ? <p className="ao-teams-hint">Click a block to edit it · Drag to arrange · Shift-click to link or unlink</p> : null}
+        </> : <div className="ao-empty-state"><p>Add a project in Chat to set up a team.</p></div>}
       </div>
       {draft ? <footer className="ao-teams-footer">
-        <span role="status" className="ao-hint">{saving || dirty && !failed ? "Saving…" : failed && dirty ? "Not saved — fix the error above" : notice || "Changes save automatically · existing chats keep their original team"}</span>
+        <span role="status" className="ao-hint">{saving || dirty && !failed ? "Saving…" : failed && dirty ? "Not saved. Fix the error above." : notice || "Changes save automatically. Existing chats keep their team."}</span>
       </footer> : null}
     </div>
   </section>;

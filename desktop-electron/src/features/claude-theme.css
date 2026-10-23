@@ -11,7 +11,6 @@
   --claude-raised: #ffffff;
   --claude-text: #141413;
   --claude-text-2: #73726c;
-  --claude-queued-text: #52514e;
   --claude-line: rgb(31 30 29 / 15%);
   --claude-line-soft: rgb(31 30 29 / 9%);
   --claude-accent: #d97757;
@@ -60,7 +59,6 @@
   --claude-raised: #30302e;
   --claude-text: #faf9f5;
   --claude-text-2: #a6a39a;
-  --claude-queued-text: #a5a49a;
   --claude-line: rgb(222 220 209 / 15%);
   --claude-line-soft: rgb(222 220 209 / 9%);
   --claude-accent-soft: rgb(217 119 87 / 18%);
@@ -259,11 +257,12 @@
 .ao-workflow .cx-chat .cx-delete-confirm .cx-primary-button { background: var(--ao-red); }
 
 /* ---------- Composer ---------- */
-.ao-workflow .cx-chat .cx-queued-message .cx-bubble { max-width: none; }
-/* A queued message's text is Claude's text-secondary (neutral-600): #52514e light, #a5a49a dark. */
-.ao-workflow .cx-chat .cx-queued-row[data-state="queued"] .cx-bubble { color: var(--claude-queued-text, #52514e); }
-.ao-workflow .cx-chat .cx-queued-discard button, .ao-workflow .cx-chat .cx-queued-send-now, .ao-workflow .cx-chat .cx-queued-status { color: var(--claude-text-2); }
-.ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card, .ao-workflow .cx-chat .cx-queued,
+/* The queued bar's ink is Claude's text; its muted text stays Claude Code's gray-400 (#898781). */
+.ao-workflow .cx-chat .cx-queued { --cq-ink: var(--claude-text); }
+/* Edit goal in Claude's palette: its raised surface, line and shadow, and Claude's text as ink. */
+.ao-workflow .cx-chat .cx-goal-edit { --ge-ink: var(--claude-text); border-color: var(--claude-line); background: var(--claude-raised); box-shadow: var(--claude-shadow); }
+.ao-workflow .cx-chat .cx-goal-edit-save { color: var(--claude-raised); }
+.ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card, .ao-workflow .cx-chat .cx-queued, .ao-workflow .cx-chat .cx-goal-edit,
 .ao-workflow .cx-chat .cx-composer-modes, .ao-workflow .cx-chat .cx-route-note,
 /* The approval card docks above the composer at its exact width, as Codex's does (it was 40px wider). */
 .ao-workflow .cx-chat .cx-approval-dock { max-width: 740px; }

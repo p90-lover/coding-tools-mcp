@@ -208,6 +208,9 @@ function assertSafeManifest(manifest, expectedId) {
   for (const processEntry of manifest.launch.processes) {
     assertSafeCommand({ ...processEntry, kind: "command" }, `${expectedId} launch process`);
   }
+  for (const adoptEntry of manifest.launch.adopt || []) {
+    assertSafeCommand({ ...adoptEntry, kind: "command" }, `${expectedId} adopt step`);
+  }
   for (const stopEntry of manifest.launch.stop || []) {
     assertSafeCommand({ ...stopEntry, kind: "command" }, `${expectedId} stop process`);
   }
@@ -1287,7 +1290,7 @@ function createManagedComponentController({
     if (source.state === "installed" && !repair) return project(id);
     if (operationState(id)?.state === "installing") throw new Error(`${manifest.name} installation is already running`);
     const missing = missingCredentials(manifest);
-    if (missing.length > 0) throw new Error(`${manifest.name} requires configured credentials: ${missing.join(", ")}`);
+    if (missing.length > 0) throw new Error(`${manifest.name} needs these credentials first: ${missing.join(", ")}`);
     fs.mkdirSync(componentState(manifest), { recursive: true, mode: 0o700 });
     if (platform !== "win32") fs.chmodSync(componentState(manifest), 0o700);
 
@@ -1361,7 +1364,7 @@ function createManagedComponentController({
   function launchContext(manifest) {
     const home = componentHome(manifest);
     const marker = readMarker(manifest);
-    if (!markerMatches(manifest, marker)) throw new Error(`${manifest.name} is not installed or requires repair`);
+    if (!markerMatches(manifest, marker)) throw new Error(`${manifest.name} isn't installed or needs repair`);
     const artifact = marker.artifact ? path.join(home, assertSafeRelativePath(marker.artifact, "Managed artifact")) : "";
     return {
       id: manifest.id,
@@ -1436,6 +1439,18 @@ function createManagedComponentController({
     if (manifest.id === "cpa" && record.dependencyFingerprint !== dependencyFingerprint) return false;
     // A component from another version, or one that no longer answers, is replaced.
     if (record.version !== manifest.version || !await probeHealth(manifest.id)) return false;
+    // The running process kept the files an earlier build wrote (CPA's config.yaml); the manifest's
+    // adopt steps bring them up to date in place. A failed step keeps the component running.
+    for (const adoptEntry of manifest.launch.adopt || []) {
+      try { await runCommand(adoptEntry, launchContext(manifest), adoptEntry.timeoutMs); }
+      catch (error) {
+        logger?.warn?.("managed-component.adopt-step-failed", {
+          componentId: manifest.id,
+          step: adoptEntry.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const primaryId = persistentPrimaryId(manifest);
     const handle = new PersistedComponentProcess(record.pid);
     active.set(primaryId, handle);

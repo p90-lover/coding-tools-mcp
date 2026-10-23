@@ -65,7 +65,7 @@ const resultOf = (reply: ModuleReply) => {
 /** A refused operation's reason, where moduleCall() reads it too. */
 const failureOf = (reply: ModuleReply) => {
   const result = (reply.result && typeof reply.result === "object" ? reply.result : {}) as { reason?: unknown; detail?: unknown };
-  return String(result.reason || result.detail || "The branch could not be switched");
+  return String(result.reason || result.detail || "Couldn't switch the branch");
 };
 
 /**
@@ -113,7 +113,7 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
   // Inline, it is one chip in the new-chat strip; otherwise a bar over the composer of a chat.
   const barClass = inline ? "cx-branch-bar is-inline" : "cx-branch-bar";
   if (!data.git) {
-    return <div className={barClass}><span className="cx-branch-note" title="Agent harnesses need a git repository; Native Codex works here">
+    return <div className={barClass}><span className="cx-branch-note" title="Agents need a git repository. Native Codex works here">
       <Icon name="git" width="14" height="14" />Not a git repository</span></div>;
   }
   const choose = (branch: Branch) => {
@@ -144,7 +144,7 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
     <div className="ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
       <button type="button" className="cx-branch-chip" ref={popup.trigger} aria-haspopup="dialog" aria-expanded={popup.open}
         aria-label={`Branch: ${inUse}`} title={data.chatBranch && data.chatBranch !== data.current
-          ? `This chat works on ${data.chatBranch}; the project folder is on ${data.current}` : `On ${inUse}`}
+          ? `Chat on ${data.chatBranch} · project folder on ${data.current}` : `On ${inUse}`}
         onClick={() => popup.setOpen((value) => !value)}>
         <Icon name="git" width="14" height="14" /><span>{inUse}</span><Caret />
       </button>
@@ -185,7 +185,7 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
                       title={[branch.name, branch.commit ? `${branch.commit} ${branch.subject ?? ""}` : "",
                         branch.updatedAt ? `last commit ${new Date(branch.updatedAt).toLocaleString()}` : "",
                         branch.upstream ? `tracks ${branch.upstream}${branch.track ? ` (${branch.track})` : ""}` : "",
-                        held ? `checked out in ${branch.worktree}; finish or remove that chat to use it here` : "",
+                        held ? `Checked out in ${branch.worktree}. Finish or remove that chat to use it here` : "",
                         !held && !branch.current ? "Check out in the project folder" : ""].filter(Boolean).join("\n")}>
                       <span className="cx-branch-main">
                         <span className="cx-branch-name">{branch.name}</span>

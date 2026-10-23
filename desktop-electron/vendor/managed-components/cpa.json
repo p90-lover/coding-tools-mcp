@@ -116,6 +116,22 @@
         }
       }
     ],
+    "adopt": [
+      {
+        "id": "refresh-cpa-config",
+        "executable": "{runtime}",
+        "arguments": [
+          "{adapterRoot}/cpa-managed.cjs",
+          "refresh",
+          "{state}"
+        ],
+        "environment": {
+          "CODING_TOOLS_CPA_MANAGEMENT_KEY": "{secret:managementKey}",
+          "CODING_TOOLS_CPA_PROXY_API_KEY": "{secret:proxyApiKey}"
+        },
+        "timeoutMs": 30000
+      }
+    ],
     "stop": []
   },
   "health": {

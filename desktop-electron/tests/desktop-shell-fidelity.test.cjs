@@ -33,6 +33,16 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(i18n, /product: "Coding Tools"/);
 });
 
+test("a chat's head sits under the window's drag strip and is not padded by the title bar again", () => {
+  // Seen live in split view: the head's own titlebar-area-height padding (46 px) inside its 48 px
+  // squeezed the title down onto the chat's first lines in every pane.
+  assert.match(read("src/features/AgentOrchestratorSurface.tsx"), /<div className="ao-dragstrip"/);
+  const head = /\.cx-thread-head\s*\{([^}]*)\}/.exec(read("src/features/codex-chat.css"));
+  assert.ok(head, "the chat head keeps its rule");
+  assert.doesNotMatch(head[1], /titlebar-area-height/);
+  assert.match(head[1], /min-height:\s*48px/);
+});
+
 test("the MCP wizard matches the bundled upstream surface and keeps live tools separate", () => {
   const app = read("src/App.tsx");
   const upstream = fs.readFileSync(

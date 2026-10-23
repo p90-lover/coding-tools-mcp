@@ -123,7 +123,7 @@ export function WorkspaceAuthPanel({ copy, language, setError }: WorkspaceAuthPa
       useSharedSecrets: shared,
     });
     if (result.cancelled === true) { setNotice({ text: copy.workspaceAuthCancelled }); return; }
-    if (result.ok !== true) throw new Error("Workspace authentication save was not confirmed");
+    if (result.ok !== true) throw new Error("Couldn't save workspace authentication. Try again.");
     await refresh();
     setNotice({ text: copy.workspaceAuthSaved, restart: true });
   });
@@ -133,7 +133,7 @@ export function WorkspaceAuthPanel({ copy, language, setError }: WorkspaceAuthPa
     const result = await getCodingToolsClient().workspaces.copySecret({ workspaceId: selected.id, key });
     if (result.cancelled === true) setNotice({ text: copy.workspaceAuthCancelled });
     else if (result.copied === true) setNotice({ text: copy.workspaceCredentialCopied });
-    else throw new Error("Workspace credential copy was not confirmed");
+    else throw new Error("Couldn't copy the credential. Try again.");
   });
 
   const control = (operation: "start" | "stop" | "restart") => act(async () => {
@@ -141,7 +141,7 @@ export function WorkspaceAuthPanel({ copy, language, setError }: WorkspaceAuthPa
     const result = await getCodingToolsClient().workspaces.service({ workspaceId: selected.id, service, operation });
     if (result.cancelled === true) setNotice({ text: copy.workspaceAuthCancelled });
     else if (result.ok === true) setListener(listenerState(result.status));
-    else throw new Error("Workspace listener change was not confirmed");
+    else throw new Error("Couldn't change the listener. Try again.");
   });
 
   const listenerPill: [Tone, string] = listener === "running" ? ["ok", copy.wsListenerRunning]

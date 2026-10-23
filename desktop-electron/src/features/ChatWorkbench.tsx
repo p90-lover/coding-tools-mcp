@@ -175,7 +175,7 @@ const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b
 async function paneCall(operation: string, args: JsonObject = {}) {
   const outer = await getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation, arguments: args });
   const result = (outer.result && typeof outer.result === "object" ? outer.result : {}) as Record<string, unknown>;
-  if (outer.ok === false || result.ok === false) throw new Error(String(result.error || result.reason || "That did not work"));
+  if (outer.ok === false || result.ok === false) throw new Error(String(result.error || result.reason || "Something went wrong. Try again."));
   return result;
 }
 
@@ -274,7 +274,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
           <button type="button" role="tab" aria-selected={item.id === current?.id} onClick={() => { setActive(item.id); onTab(item.kind); }}>
             {TAB_TITLES[item.kind]}</button>
           <button type="button" className="cx-workbench-tab-close" aria-label={`Close ${TAB_TITLES[item.kind]}`}
-            title={item.kind === "preview" ? "Hide the browser: it keeps running for the agent, and the Browser chip in the chat header brings it back" : `Close ${TAB_TITLES[item.kind]}`}
+            title={item.kind === "preview" ? "Hide browser. It keeps running for the agent" : `Close ${TAB_TITLES[item.kind]}`}
             onClick={() => close(item.id)}>×</button>
         </div>)}
         <button type="button" className="cx-icon-button cx-workbench-add" aria-label="New tab" title="New tab" onClick={addTab}>
@@ -283,11 +283,11 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
       {sessions.length > 1 ? <select className="cx-workbench-agent" aria-label="Agent" value={sessionId} onChange={(event) => setSessionId(event.target.value)}>
         {sessions.map((session) => <option key={session.id} value={session.id}>{session.label}</option>)}
       </select> : null}
-      <button type="button" className="cx-icon-button" aria-label="Hide side panel" title="Hide the panel: the agent's browser and commands keep running" onClick={onClose}>
+      <button type="button" className="cx-icon-button" aria-label="Hide side panel" title="Hide side panel" onClick={onClose}>
         <Icon name="close" width="14" height="14" /></button>
     </header>
     {!sessionId
-      ? <p className="cx-workbench-empty">No agent has started in this chat yet. The pages it opens, its changes, files and commands show here.</p>
+      ? <p className="cx-workbench-empty">No agent yet. Its pages, changes, files and commands show here.</p>
       : current?.kind === "overview" ? <OverviewPane key={sessionId} session={sessions.find((item) => item.id === sessionId)} sessionId={sessionId} workspaceId={workspaceId} onTool={show} />
       : current?.kind === "preview" ? <PreviewPane key={sessionId} sessionId={sessionId} />
         : current?.kind === "terminal" ? <TerminalPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
@@ -297,11 +297,16 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
   </aside>;
 }
 
+/** Loads a page in the chat agent's preview browser; the caller shows the Preview tab. */
+export function navigatePreview(sessionId: string, url: string) {
+  void paneCall("chat_preview_navigate", { sessionId, url }).catch(() => undefined);
+}
+
 /** The new-tab page: the panel's tools and the pages this chat's agent opened. */
 function NewTabPage({ sessionId, onTool }: { sessionId: string; onTool: (kind: WorkbenchTab) => void }) {
   const recents = RECENT_PAGES.get(sessionId) ?? [];
   const open = (url: string) => {
-    void paneCall("chat_preview_navigate", { sessionId, url }).catch(() => undefined);
+    navigatePreview(sessionId, url);
     onTool("preview");
   };
   return <div className="cx-newtab">
@@ -391,7 +396,7 @@ function OverviewPane({ session, sessionId, workspaceId, onTool }: {
       <h4>Context<small>{fraction === null ? "" : `${Math.round(fraction * 100)}%`}</small></h4>
       <div className={`cx-ctx-bar is-${fraction === null ? "unknown" : fraction >= 0.85 ? "high" : fraction >= 0.6 ? "mid" : "low"}`}>
         <span style={{ width: `${Math.round((fraction ?? 0) * 100)}%` }} /></div>
-      <p className="cx-overview-note">{context?.used === null || context?.used === undefined ? "The agent has not reported its context yet."
+      <p className="cx-overview-note">{context?.used === null || context?.used === undefined ? "Context not reported yet."
         : `${tokensShort(context.used)} of ${tokensShort(context.window)} used`}</p>
     </section>
     <section className="cx-overview-block">
@@ -421,7 +426,7 @@ function OverviewPane({ session, sessionId, workspaceId, onTool }: {
             <span><b>{account.label}</b><small>{account.provider ?? ""}</small></span>
             <span><b>{costLabel(account.cost, account.costPartial)}</b><small>{tokensShort(account.totalTokens)} · {account.requests.toLocaleString()} req</small></span>
           </li>)}</ul> : <p className="cx-overview-note">No requests in this period.</p>}
-          <p className="cx-overview-note">Costs are estimated at API list prices; subscription accounts are not billed per token. Keys used outside CPA report no usage.</p>
+          <p className="cx-overview-note">Costs are estimates at API list prices. Subscriptions aren't billed per token. Keys used outside CPA report no usage.</p>
         </>}
     </section>
   </div>;
@@ -500,11 +505,11 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
         <Icon name="reload" width="14" height="14" /></button>
       <input aria-label="Address" placeholder="http://localhost:5173" value={address} spellCheck={false}
         onFocus={() => setEditing(true)} onBlur={() => setEditing(false)} onChange={(event) => setAddress(event.target.value)} />
-      {state?.errors ? <span className="cx-preview-errors" title="Console errors and failed requests the agent can read with preview_console">{state.errors} errors</span> : null}
+      {state?.errors ? <span className="cx-preview-errors" title="Console errors and failed requests">{state.errors} errors</span> : null}
     </form>
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
     {state ? <div ref={slot} className="cx-preview-slot" aria-label={state.title || state.url} />
-      : <p className="cx-workbench-empty">The agent has not opened a page yet. When it starts a dev server it can open it here with preview_open, or enter a localhost address above.</p>}
+      : <p className="cx-workbench-empty">No page open yet. The agent opens its dev server here, or you can enter a localhost address above.</p>}
   </div>;
 }
 
@@ -630,11 +635,11 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
       .finally(() => setStarting(false));
   };
   const shellButton = <button type="button" className="cx-terminal-new" disabled={starting} onClick={startShell}
-    title="A PowerShell in the agent's worktree, yours to type in">{starting ? "Starting…" : "New terminal"}</button>;
+    title="Open PowerShell in the agent's worktree">{starting ? "Starting…" : "New terminal"}</button>;
 
   const live = commands.filter((item) => isLive(item));
   const history = commands.filter((item) => !isLive(item));
-  const agentShellLabel = <span className="cx-terminal-source" title="Run by the agent with its own shell tool; shown read-only">agent shell</span>;
+  const agentShellLabel = <span className="cx-terminal-source" title="Run by the agent. Read-only">agent shell</span>;
   const row = (item: Command) => <li key={item.id}>
     <button type="button" aria-pressed={item.id === selected} title={[item.cmd, item.workdir].filter(Boolean).join("\n")} onClick={() => setSelected(item.id)}>
       <span className={`cx-terminal-dot is-${isLive(item) ? "running" : item.exitCode === 0 || (isAgentShell(item) && item.exitCode === null && item.status === "completed") ? "ok" : "failed"}`} aria-hidden="true" />
@@ -650,12 +655,12 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
       {shellButton}
     </div>
     {live.length ? <ul className="cx-terminal-list" aria-label="Running">{live.map(row)}</ul>
-      : <p className="cx-terminal-idle">When the agent starts your app (a dev server, a script left running) it shows here with its live output.
-        Its one-off commands are in the chat. For live output and Stop, turn on Settings → "Let chat agents run commands through the app's terminal".
-        New terminal opens your own shell in the agent's worktree.</p>}
+      : <p className="cx-terminal-idle">Dev servers and other long-running commands show here with live output. One-off commands are in the chat.
+        For live output and Stop, turn on Settings → "Let chat agents run commands through the app's terminal".
+        New terminal opens your own shell.</p>}
     {history.length ? <div className="cx-terminal-history">
       <button type="button" className="cx-terminal-history-toggle" aria-expanded={showHistory} onClick={() => setShowHistory((value) => !value)}>
-        <Caret />{showHistory ? "Hide" : "Show"} the agent's finished commands ({history.length})</button>
+        <Caret />{showHistory ? "Hide" : "Show"} finished commands ({history.length})</button>
       {showHistory ? <ul className="cx-terminal-list is-history" aria-label="Finished commands">{history.map(row)}</ul> : null}
     </div> : null}
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
@@ -763,7 +768,7 @@ function ChangesPane({ sessionId, workspaceId }: { sessionId: string; workspaceI
           <table><tbody>{fresh.content.split("\n").map((text, index) => <tr key={index} className="is-add">
             <td className="cx-diff-num" /><td className="cx-diff-num">{index + 1}</td><td className="cx-diff-text">+{text}</td></tr>)}</tbody></table>
         </> : null}
-        {data?.truncated ? <p className="cx-workbench-empty">The diff is large; only its first part is shown.</p> : null}
+        {data?.truncated ? <p className="cx-workbench-empty">Large diff. Showing the first part.</p> : null}
       </div>
       <div className="cx-changes-files">
         <input aria-label="Filter files" placeholder="Filter files…" value={filter} onChange={(event) => setFilter(event.target.value)} />

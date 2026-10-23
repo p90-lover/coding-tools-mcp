@@ -58,7 +58,7 @@ test("a solo turn closes with the orchestrator's answer; a working card carries 
   const working = plain(chat.chatTurns([run("r2", "t", [node("w", "worker", "running", { receipt: { started_at_ms: now - 90_000 } })])], "go",
     { activity: { "r2:w": { activity: "running a command", last_event_at_ms: now - 5_000, turn_started: true } }, now }));
   assert.equal(working[0].steps[0].working.activity, "running a command");
-  assert.match(working[0].steps[0].working.detail, /running 1m · running a command \(last heard 5s ago\)/);
+  assert.match(working[0].steps[0].working.detail, /running 1m · running a command · last heard 5s ago/);
   assert.equal(working[0].final, undefined);
   const pending = plain(chat.chatTurns([], "first message"));
   assert.equal(pending[0].user.text, "first message");

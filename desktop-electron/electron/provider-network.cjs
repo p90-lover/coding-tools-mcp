@@ -558,6 +558,22 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     if (!profile) throw new Error("Proxy profile was not found");
     const now = new Date().toISOString();
     Object.assign(profile, { enabled: false, archivedAt: now, updatedAt: now });
+    dropProxyReferences(profileId);
+    write();
+    return publicSnapshot();
+  }
+
+  // Deletes the profile and its stored credentials outright (archiving keeps both).
+  function removeProxyProfile(profileId) {
+    if (!findProxy(profileId)) return publicSnapshot();
+    state.proxyProfiles = state.proxyProfiles.filter((profile) => profile.id !== profileId);
+    delete state.secrets.proxies[profileId];
+    dropProxyReferences(profileId);
+    write();
+    return publicSnapshot();
+  }
+
+  function dropProxyReferences(profileId) {
     if (state.routing.globalProfileId === profileId) {
       state.routing.globalEnabled = false;
       state.routing.globalProfileId = null;
@@ -571,8 +587,6 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     for (const account of state.accounts) {
       if (account.proxyProfileId === profileId) account.proxyProfileId = undefined;
     }
-    write();
-    return publicSnapshot();
   }
 
   function setGlobalRouting(input) {
@@ -695,6 +709,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     updateAccountConnection,
     saveProxyProfile,
     archiveProxyProfile,
+    removeProxyProfile,
     setGlobalRouting,
     setProviderPolicy,
     setAccountPolicy,
@@ -1138,7 +1153,8 @@ function createProviderNetworkController({
       return persistCpaBinding(account, adapterId, result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!binding.id && /No available .* account exists in CPA/i.test(message)) {
+      // cpa-oauth-adapter's resolveAuthFile: "No <provider> account is available in CPA. …"
+      if (!binding.id && /No \S+ account is available in CPA/i.test(message)) {
         return store.updateAccountConnection(account.id, {
           status: "pending",
           loginAdapterId: adapterId,

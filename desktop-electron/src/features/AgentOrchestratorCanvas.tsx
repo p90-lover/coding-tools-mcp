@@ -437,11 +437,11 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       <button type="button" onClick={() => zoom(1 / 1.2)} aria-label="Zoom out" title="Zoom out">−</button><span ref={zoomLabel}>100%</span>
       <button type="button" onClick={() => zoom(1.2)} aria-label="Zoom in" title="Zoom in">+</button><button type="button" onClick={fit} aria-label="Fit to screen" title="Fit">⤢</button>
       {selected.size > 1 ? <><span role="status">{selected.size}</span><button type="button" disabled={busy} onClick={() => align("x")} aria-label="Align left" title="Align left">⇤</button><button type="button" disabled={busy} onClick={() => align("y")} aria-label="Align top" title="Align top">⤒</button></> : null}
-      <button type="button" disabled={busy} onClick={tidy} aria-label="Tidy layout" title="Tidy: put every card back in rows, top to bottom in the order work flows">▦</button>
+      <button type="button" disabled={busy} onClick={tidy} aria-label="Tidy layout" title="Tidy layout">▦</button>
       <button type="button" onClick={() => setHelp(open => !open)} aria-label="How to keep links clear" aria-expanded={help} title="How to keep links clear">?</button>
       {parentId ? <button type="button" onClick={() => setParentId("")} aria-label="Cancel connection" title="Cancel connection">✕</button> : null}
       {onRemove && selected.size === 1 && canRemove?.([...selected][0]) ? <button type="button" disabled={busy} onClick={() => onRemove([...selected][0])}
-        aria-label="Remove selected card" title="Remove card (its task passes to another worker)">🗑</button> : null}
+        aria-label="Remove selected card" title="Remove card">🗑</button> : null}
     </div>
     {help ? <div className="ao-canvas-overlay ao-canvas-help" role="note" aria-label="Keeping links clear">
       <strong>Keeping links clear</strong>
@@ -461,7 +461,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
           onPointerDown={event => { startBend(event, linkPointKey(parent, node.id)); }}
           onDoubleClick={event => { if (event.shiftKey && !busy) { released.current.set(linkPointKey(parent, node.id), null); onBend?.(linkPointKey(parent, node.id), null); schedule(); } }}
           onClick={event => { if (!busy && !event.shiftKey) onUnlink?.(node.id, parent); }}>
-          <title>{[onUnlink ? "Click to remove this link" : "", onBend ? "Shift-drag to bend it, Shift-double-click to straighten it" : ""].filter(Boolean).join("; ")}</title></path> : null]))}
+          <title>{[onUnlink ? "Click to remove this link" : "", onBend ? "Shift-drag to bend it, Shift-double-click to straighten it" : ""].filter(Boolean).join(". ")}</title></path> : null]))}
         {loop ? <>
           <path key={LOOP_LINK} className={hovered && (hovered === loop.from || hovered === loop.to) ? "is-loop is-related" : "is-loop"} ref={element => { if (element) paths.current.set(LOOP_LINK, element); else paths.current.delete(LOOP_LINK); }} />
           {onBend ? <path key={`${LOOP_LINK}#hit`} className="ao-wire-hit"
@@ -476,7 +476,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
         className={`ao-canvas-card ao-node-${node.state}${selected.has(node.id) ? " is-selected" : ""}${draggingId && selected.has(node.id) ? " is-dragging" : ""}${dropTarget === node.id ? " is-target" : ""}`}>
         <button type="button" className="ao-card-handle" aria-label={showState ? `Edit ${node.settings?.name || node.role}, ${node.state}` : `Edit ${node.settings?.name || node.role}`}
           aria-pressed={selected.has(node.id)}
-          title="Shift-click another card to link or unlink it with this one; Ctrl-click to select several; arrow keys move the selection"
+          title="Shift-click another card to link it. Ctrl-click to select several. Arrow keys move the selection."
           onPointerDown={event => { event.stopPropagation(); begin(event, node.id); }} onClick={event => {
             if (event.detail !== 0) return;
             if (event.shiftKey && shiftLink(node.id)) return;

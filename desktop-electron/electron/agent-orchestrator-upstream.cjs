@@ -1136,12 +1136,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // the same way and the card can be resumed. (AO's wording: storage/sqlite/queries/
       // conversations.sql, SettleOrphanedConversationTurns.)
       const reconciled = turn?.state === "failed" && turn.errorMessage === "controller ended before the turn completed";
-      if (reconciled || ((settling || settled) && await chatHostGone(id))) {
+      // AO drops a session's controller when its agent process exits (seen live 2026-10-22: a
+      // MiMo turn whose requests kept failing with 429), but leaves the turn "running" until the
+      // daemon restarts. The chat then read "may be stuck" for half an hour, and every steer or
+      // Stop hit "the agent controller for this session is not running". The snapshot says so
+      // itself (controller "stopped" while nothing is provisioning): the turn is over.
+      const agentGone = conversation?.controller === "stopped" && session?.session?.provisionState !== "provisioning";
+      const lastFailure = (Array.isArray(conversation?.activities) ? conversation.activities : [])
+        .filter(item => item.turnId === turn?.id && item.activityKind === "system" && item.detail?.event === "provider.failure"
+          && typeof item.detail.text === "string" && item.detail.text.trim()).at(-1)?.detail.text.trim();
+      const deadAgent = agentGone && turn?.state === "running";
+      if (reconciled || deadAgent || ((settling || settled) && await chatHostGone(id))) {
         if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
         return {
           status, turnId: turn.id, turnState: "interrupted",
-          error: "The agent's process ended before it finished (the app restarted); retry this card.",
-          needsInput: false, exited: false, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
+          error: deadAgent
+            ? `The agent's process stopped mid-turn${lastFailure ? ` after: ${utf8Prefix(lastFailure, 160)}` : ""}. Retry or send a message to continue.`
+            : "The agent's process ended before it finished (the app restarted); retry this card.",
+          needsInput: false, exited: false, agentGone: deadAgent || undefined, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         };
       }
       // When the turn last showed any sign of life (a message, a tool step): a turn whose agent hung
@@ -1165,6 +1177,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
         ...(toolStarts.length ? { toolSince: Math.min(...toolStarts) } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
+        // No agent process behind this session (released while idle, or it exited): nothing runs,
+        // so a stop has nothing to wait for and a steer nothing to reach.
+        ...(agentGone ? { agentGone: true } : {}),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         // A question the agent asked waits like an approval: the chat shows it and the card needs you.
         approvals: [...pendingApprovals(conversation), ...pendingInputs(conversation)],
@@ -1181,7 +1196,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // started a fresh session beside the agent coming back. Callers share the first check.
       const key = sessionId(id);
       if (!continuing.has(key)) continuing.set(key, (async () => {
-        const uncertain = cause => Object.assign(new Error("The existing agent's restoration could not be confirmed; retry this chat without starting a replacement"),
+        const uncertain = cause => Object.assign(new Error("Couldn't confirm the agent was restored. Retry this chat. No new agent was started."),
           { code: "AO_SESSION_RESTORE_UNCONFIRMED", cause });
         const read = async () => {
           try {
@@ -1439,7 +1454,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (record?.session?.provisionState === "provisioning") {
           await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
           agentTools?.forgetSession?.(id);
-        } else await interrupt();
+          return;
+        }
+        // Not starting and no controller: the agent's process has exited, so nothing is running
+        // to interrupt. Asking again threw the same refusal into the chat ("the agent controller
+        // for this session is not running") and Stop never finished. One that came up meanwhile
+        // is interrupted.
+        await interrupt().catch((again) => { if (!/CHAT_CONTROLLER_NOT_READY/.test(String(again?.message))) throw again; });
       });
     },
     // A standalone AO terminal running one program (e.g. the Antigravity CLI) with
@@ -1476,9 +1497,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (answer) return { status, turnId: `tui-${id}`, turnState: "completed", answer, needsInput: false, exited: ended };
     if (silent) {
       return { status, turnId: `tui-${id}`, turnState: "failed", answer: "", exited: true,
-        error: `The terminal agent stopped reporting and has been idle since ${new Date(lostSince).toISOString()} without ${TUI_RESULT_FILE}; send a follow-up to continue in a new session` };
+        error: `The terminal agent stopped reporting. It has been idle since ${new Date(lostSince).toISOString()} with no ${TUI_RESULT_FILE}, so send a follow-up to continue in a new session.` };
     }
-    if (ended) return { status, turnId: `tui-${id}`, turnState: "failed", error: `AO session ended without ${TUI_RESULT_FILE}`, answer: "", exited: true };
+    if (ended) return { status, turnId: `tui-${id}`, turnState: "failed", error: `The agent's session ended with no ${TUI_RESULT_FILE}`, answer: "", exited: true };
     // Idle without a report: the agent is waiting for the user in its terminal.
     return { status, needsInput: true, exited: false, answer: "" };
   }
@@ -1728,7 +1749,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           await new Promise((resolve) => setTimeout(resolve, 200));
           checkStartup();
         }
-        throw new Error(`AO readiness timed out. ${logTail.slice(-1500)}`);
+        // "timed out" keeps TRANSIENT_CHAT_START treating it as a start to retry, not a failure.
+        throw new Error(`Agent Orchestrator timed out getting ready. ${logTail.slice(-1500)}`);
       } catch (cause) {
         // Do not call stop here: stop waits for this startup to settle.
         await cleanup();
@@ -1839,7 +1861,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (operation === "upstream_status") return snapshot();
     if (operation === "upstream_start") return start();
     if (operation === "upstream_stop") {
-      if (!await confirm({ message: "Stop Agent Orchestrator?", detail: "Active upstream sessions may be interrupted. Coding Tools missions remain saved." })) return { ok: true, cancelled: true };
+      if (!await confirm({ message: "Stop Agent Orchestrator?", detail: "Running agent sessions may stop. Your chats stay saved." })) return { ok: true, cancelled: true };
       return stop();
     }
     if (operation === "upstream_bind_workspace") {
@@ -1894,7 +1916,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
       if (state !== "ready") return { ok: true, available: false, reason: "Agent Orchestrator is not running" };
       const { projectId } = await workspaceBoard.project(args.workspaceId);
-      if (!projectId) return { ok: true, available: false, reason: "This project's first chat sets it up; choose after that" };
+      if (!projectId) return { ok: true, available: false, reason: "This project's first chat sets this up. Choose after that." };
       if (args.mode !== undefined && !WORKSPACE_MODES.has(args.mode)) throw new Error("Choose worktree, shared or folder");
       const endpoint = `/api/v1/projects/${encodeURIComponent(projectId)}`;
       const read = async () => {
@@ -1917,7 +1939,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // is always written, "worktree" too, so the folder default never overrides a choice.
           await internalApi("PUT", `${endpoint}/config`, { config: { ...config, workspaceMode: args.mode } });
           const saved = (await read()).config.workspaceMode;
-          if (saved !== args.mode) throw new Error("This Agent Orchestrator does not support choosing where chats work yet; update the app");
+          if (saved !== args.mode) throw new Error("This Agent Orchestrator can't choose where chats work yet. Update the app.");
         }
         return { ok: true, available: true, mode: args.mode };
       });

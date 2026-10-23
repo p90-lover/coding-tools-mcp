@@ -26,7 +26,7 @@ export function projectGitLabel(git: ThreadProjectGit | null | undefined): { tag
     case "repo": return { tag: null, line: `Git repository${on}`, warn: false };
     case "worktree": return { tag: "worktree", line: `Worktree of ${git.mainRepo ?? "another repository"}${on}`, warn: false };
     case "inside": return { tag: "subfolder", line: `A folder inside the repository ${git.root ?? ""}${on}. Agent chats need the repository's root folder.`, warn: true };
-    case "none": return { tag: "not git", line: "Not a git repository. Agent chats need a project whose folder is a repository's root.", warn: true };
+    case "none": return { tag: "not git", line: "Not a git repository. Agent chats need a repository's root folder.", warn: true };
     case "missing": return { tag: "missing", line: "This folder no longer exists.", warn: true };
     default: return null;
   }
@@ -132,19 +132,22 @@ const ACTIVE: ReadonlySet<ChatStatus> = new Set(["running", "queued", "attention
 const WORKING: ReadonlySet<ChatStatus> = new Set(["running", "queued"]);
 
 /**
- * The list's order: working chats first (when keepActiveOnTop), and chats waiting on you until you
- * place them; then chats you haven't placed yet, newest first, so a new chat appears at the top as
- * in Codex; then the order you dragged chats into. Each group keeps that order.
+ * The list's order: working chats and chats waiting on you first (when keepActiveOnTop), unless you
+ * moved them yourself; then chats you haven't placed yet, newest first, so a new chat appears at the
+ * top as in Codex; then the order you dragged chats into. Each group keeps that order.
  *
- * A chat waiting on you was always kept on top, so one could never be dragged anywhere else: it
- * jumped back at once. Such chats can sit for days, and a list full of them could not be ordered
- * at all. Placed by hand, one stays where you put it; a new run releases it (releaseUsedChats).
+ * Such a chat was always kept on top, so it could never be dragged anywhere else: it jumped back at
+ * once (a running chat as well as one waiting on you, which can sit for days). One you moved
+ * (`placed`: dragged, or moved with Alt+Shift+↑/↓) stays where you put it; its next run releases it
+ * (releaseUsedChats). A drag saves the whole list's order, so a position alone does not mean the
+ * chat was moved: the other running chats stay on top.
  */
-export function orderChats<T extends { taskId: string; status: ChatStatus }>(chats: T[], manual: string[], keepActiveOnTop: boolean): T[] {
+export function orderChats<T extends { taskId: string; status: ChatStatus }>(chats: T[], manual: string[], keepActiveOnTop: boolean, placed: readonly string[] = []): T[] {
   const position = new Map(manual.map((id, index) => [id, index]));
+  const moved = new Set(placed);
   const recent = new Map(chats.map((chat, index) => [chat.taskId, index]));
   const rank = (chat: T) => position.get(chat.taskId) ?? (recent.get(chat.taskId) ?? 0) - chats.length;
-  const onTop = (chat: T) => WORKING.has(chat.status) || (chat.status === "attention" && !position.has(chat.taskId));
+  const onTop = (chat: T) => (WORKING.has(chat.status) || chat.status === "attention") && !moved.has(chat.taskId);
   return [...chats].sort((a, b) =>
     (keepActiveOnTop ? Number(onTop(b)) - Number(onTop(a)) : 0) || rank(a) - rank(b));
 }
@@ -225,9 +228,18 @@ function readIdsAt(key: string): string[] {
   catch { return []; }
 }
 const readOrder = (workspaceId: string) => readIdsAt(orderKey(workspaceId));
+// The chats of a project you moved yourself (orderChats' `placed`).
+const placedKey = (workspaceId: string) => `coding-tools:ao:chat-placed:${workspaceId}`;
+const readPlaced = (workspaceId: string) => readIdsAt(placedKey(workspaceId));
+function writePlaced(workspaceId: string, ids: string[]) {
+  try { localStorage.setItem(placedKey(workspaceId), JSON.stringify(ids)); } catch { /* per-session only */ }
+}
 
-/** A list a row can be dragged within: its key, the ids in the order shown, and how to keep a new order. */
-type DragList = { list: string; order: string[]; save: (next: string[]) => void };
+/**
+ * A list a row can be dragged within: its key, the ids in the order shown, and how to keep a new
+ * order (`moved` is the chat that was dragged).
+ */
+type DragList = { list: string; order: string[]; save: (next: string[], moved: string) => void };
 
 /**
  * Codex's sidebar: New chat, Pinned, then projects that collapse on click, each with its chats.
@@ -300,6 +312,11 @@ export function ChatThreadList(props: ThreadListProps) {
   const saveOrder = (next: string[]) => {
     setManualOrder(next);
     try { localStorage.setItem(orderKey(workspaceId), JSON.stringify(next)); } catch { /* per-session only */ }
+  };
+  /** A chat of `projectId` you moved: it keeps its place even while it runs or waits on you. */
+  const place = (projectId: string, id: string) => {
+    const placed = readPlaced(projectId);
+    if (!placed.includes(id)) writePlaced(projectId, [...placed, id]);
   };
   const saveSections = (next: ChatSection[]) => {
     setSections(next);
@@ -390,8 +407,13 @@ export function ChatThreadList(props: ThreadListProps) {
     // A switch empties the list before the new project's chats arrive; that load is not a use.
     if (!chats.length) { seenRuns.current.runs = {}; return; }
     const known = seenRuns.current.runs;
-    const { order } = releaseUsedChats(manualOrder, known, chats);
+    const { order, used } = releaseUsedChats(manualOrder, known, chats);
     for (const chat of chats) known[chat.taskId] = chat.latestRunId;
+    // A new run releases a chat you moved, too: running again, it goes back on top.
+    if (used.length) {
+      const placed = readPlaced(workspaceId);
+      if (placed.some((id) => used.includes(id))) writePlaced(workspaceId, placed.filter((id) => !used.includes(id)));
+    }
     if (order !== manualOrder) saveOrder(order);
   }, [chats, workspaceId]);
   const startRename = (chat: ChatSummary) => setRenaming({ taskId: chat.taskId, title: chat.title });
@@ -435,7 +457,7 @@ export function ChatThreadList(props: ThreadListProps) {
       ] },
       scheduled
         ? { label: "Cancel scheduled start", icon: "schedule", run: () => actions.lifecycle(chat.taskId, "cancel_schedule") }
-        : running ? { label: "Schedule start…", icon: "schedule", reason: "Stop this mission before scheduling a start" }
+        : running ? { label: "Schedule start…", icon: "schedule", reason: "Stop this chat before scheduling a start" }
           : { label: "Schedule start…", icon: "schedule", run: () => actions.lifecycle(chat.taskId, "schedule") },
       { kind: "separator" },
       { label: "Share", icon: "share", run: () => actions.share(chat.taskId) },
@@ -519,6 +541,7 @@ export function ChatThreadList(props: ThreadListProps) {
         const to = at + (event.key === "ArrowUp" ? -1 : 1);
         if (at < 0 || to < 0 || to >= shownOrder.length) return;
         event.preventDefault();
+        place(workspaceId, chat.taskId);
         saveOrder(moveChat(shownOrder, chat.taskId, event.key === "ArrowUp" ? shownOrder[to] : shownOrder[to + 1] ?? null));
       }
     };
@@ -551,7 +574,7 @@ export function ChatThreadList(props: ThreadListProps) {
   const listDrop = (event: ReactDragEvent<HTMLElement>) => {
     event.preventDefault();
     if (dragging && dropAt && dropAt.id !== dragging.id && inSourceList(event)) {
-      dragging.drag.save(dropChat(dragging.drag.order, dragging.id, dropAt.id, dropAt.after));
+      dragging.drag.save(dropChat(dragging.drag.order, dragging.id, dropAt.id, dropAt.after), dragging.id);
     }
     endDrag();
   };
@@ -599,7 +622,6 @@ export function ChatThreadList(props: ThreadListProps) {
   const isDragged = (id: string, drag: DragList | undefined) => Boolean(drag && dragging?.list === drag.list && dragging.id === id);
 
   const row = (chat: ChatSummary, drag?: DragList) => {
-    const isPinned = pinned.includes(chat.taskId);
     const isUnread = unread.includes(chat.taskId) && chat.taskId !== selectedTaskId;
     if (renaming?.taskId === chat.taskId) {
       return <li key={chat.taskId} className="cx-thread-row is-renaming">
@@ -621,25 +643,28 @@ export function ChatThreadList(props: ThreadListProps) {
       <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId}
         // Ctrl-click opens it in split view, as in Claude Code.
         onClick={(event) => event?.ctrlKey && actions.openSplit ? actions.openSplit(workspaceId, chat.taskId) : actions.select(chat.taskId)}>
-        <span className="cx-thread-title">{chat.title}</span>
+        <span className="cx-thread-title">{chat.title || "Untitled"}</span>
         {chat.schedule?.state === "scheduled" ? <span className="cx-thread-age" aria-label="Scheduled">◷</span> : null}
         <span className={`cx-thread-dot status-${chat.status}`} aria-label={STATUS_LABEL[chat.status]} />
       </button>
-      <span className="cx-thread-hover">
-        <button type="button" aria-label={isPinned ? "Unpin chat" : "Pin chat"} title={isPinned ? "Unpin chat" : "Pin chat"} aria-pressed={isPinned}
-          onClick={() => props.togglePin(chat.taskId)}>📌</button>
-        <button type="button" aria-label="Archive chat" title="Archive chat"
-          disabled={chatBusy(chat.taskId)} onClick={() => actions.lifecycle(chat.taskId, "archive")}>🗄</button>
-      </span>
+      {/* Claude Code's session row: on hover its status dot gives way to one "More options" button,
+          which holds Pin, Archive and the rest (the row's own menu). */}
+      <button type="button" className="cx-thread-more" aria-label={`More options for ${chat.title || "Untitled"}`} title="More options" aria-haspopup="menu"
+        onClick={(event) => { const owner = event.currentTarget, box = owner.getBoundingClientRect();
+          setMenu((current) => current?.owner === owner ? null : { x: box.left, y: box.bottom + 4, items: chatMenu(chat), label: chat.title, owner }); }}>
+        <ChatGlyph name="more" size={16} />
+      </button>
     </li>;
   };
 
   const pinnedKey = listOrderKey("pinned");
   const pinnedChats = inManualOrder(chats.filter((chat) => pinned.includes(chat.taskId)), readIdsAt(pinnedKey), (chat) => chat.taskId);
   const pinnedDrag: DragList = { list: "pinned", order: pinnedChats.map((chat) => chat.taskId), save: (next) => saveListOrder(pinnedKey, next) };
-  const projectChats = orderChats(chats.filter((chat) => !pinned.includes(chat.taskId) && !sectionOf(chat.taskId)), manualOrder, settings.keepActiveOnTop);
+  const projectChats = orderChats(chats.filter((chat) => !pinned.includes(chat.taskId) && !sectionOf(chat.taskId)), manualOrder, settings.keepActiveOnTop,
+    readPlaced(workspaceId));
   const shownOrder = projectChats.map((chat) => chat.taskId);
-  const projectDrag: DragList = { list: `project:${workspaceId}`, order: shownOrder, save: saveOrder };
+  const projectDrag: DragList = { list: `project:${workspaceId}`, order: shownOrder,
+    save: (next, moved) => { place(workspaceId, moved); saveOrder(next); } };
   // Like Codex, a long project shows its first chats and "Show more"; the open chat always shows.
   const showAll = expanded.has(workspaceId);
   const visibleChats = showAll ? projectChats : projectChats.filter((chat, index) => index < settings.visible || chat.taskId === selectedTaskId);
@@ -649,9 +674,10 @@ export function ChatThreadList(props: ThreadListProps) {
     const list = otherChats[projectId];
     if (!list) return <li className="cx-thread-empty">Loading chats…</li>;
     if (!list.length) return <li className="cx-thread-empty">No chats yet</li>;
-    const ordered = orderChats(list.filter((chat) => !pinned.includes(chat.taskId)), readOrder(projectId), settings.keepActiveOnTop);
+    const ordered = orderChats(list.filter((chat) => !pinned.includes(chat.taskId)), readOrder(projectId), settings.keepActiveOnTop, readPlaced(projectId));
     // Its order is the one the project keeps when it is the open one.
-    const drag: DragList = { list: `project:${projectId}`, order: ordered.map((chat) => chat.taskId), save: (next) => saveListOrder(orderKey(projectId), next) };
+    const drag: DragList = { list: `project:${projectId}`, order: ordered.map((chat) => chat.taskId),
+      save: (next, moved) => { place(projectId, moved); saveListOrder(orderKey(projectId), next); } };
     const all = expanded.has(projectId);
     return <>
       {(all ? ordered : ordered.slice(0, settings.visible)).map((chat) => <li key={chat.taskId} {...dragRow(chat.taskId, drag, projectId)}
@@ -678,8 +704,9 @@ export function ChatThreadList(props: ThreadListProps) {
   const projectsDrag: DragList = { list: "projects", order: projectOrder.map((item) => item.id), save: saveProjectOrder };
   return (
     <aside className="cx-threads" aria-label="Projects and chats" onDragOver={listDragOver} onDrop={listDrop}>
-      <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat}>
-        <Icon name="plus" width="15" height="15" />New chat
+      {/* Claude Code's top row: a round "+" before its label (df-new-circle). */}
+      <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat} title="New chat (Ctrl+N)">
+        <span className="cx-new-circle" aria-hidden="true"><ChatGlyph name="plus" size={16} /></span>New chat
       </button>
       <nav className="cx-thread-scroll">
         {pinnedChats.length ? <section className="cx-thread-group">
@@ -699,8 +726,8 @@ export function ChatThreadList(props: ThreadListProps) {
               : <button type="button" className="cx-project cx-section-head" aria-expanded={open}
                 onClick={() => { const next = new Set(collapsed); if (open) next.add(key); else next.delete(key); saveCollapsed(next); }}
                 onContextMenu={(event) => openMenu(event, sectionMenu(section), section.name)}>
-                <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
                 <span className="cx-thread-title">{section.name}</span>
+                <Icon name="chevron" width="12" height="12" className={`cx-caret${open ? " is-open" : ""}`} />
               </button>}
             {open ? <ul>{members.map((chat) => row(chat, sectionDrag))}{!members.length ? <li className="cx-thread-empty">No chats from this project here</li> : null}</ul> : null}
           </section>;
@@ -711,7 +738,7 @@ export function ChatThreadList(props: ThreadListProps) {
             <h3>Projects</h3>
             <button type="button" className="cx-list-settings" aria-label="Chat list settings" title="Chat list settings" aria-expanded={Boolean(settingsAt)}
               onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setSettingsAt(settingsAt ? null : { top: box.bottom + 4, left: box.left }); }}>
-              <Icon name="settings" width="13" height="13" />
+              <ChatGlyph name="more" size={16} />
             </button>
           </div>
           <ul className="cx-projects">
@@ -719,23 +746,27 @@ export function ChatThreadList(props: ThreadListProps) {
               const current = item.id === workspaceId;
               const open = current ? !collapsed.has(item.id) : openOthers.has(item.id);
               const git = projectGitLabel(item.path ? gits[item.path] : null);
+              // Collapsed, Claude Code's folder header shows the most urgent state of its sessions as a dot.
+              const members = current ? chats : otherChats[item.id] ?? [];
+              const badge = open ? null : members.some((chat) => chat.status === "attention") ? "attention"
+                : members.some((chat) => chat.status === "running" || chat.status === "queued") ? "running"
+                : members.some((chat) => unread.includes(chat.taskId)) ? "unread" : null;
               return <li key={item.id} {...dragRow(item.id, projectsDrag)} className={`cx-project-item${isDragged(item.id, projectsDrag) ? " is-dragging" : ""}`}>
                 <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
+                  {/* Claude Code's folder group header: the folder's name and a caret, no folder icon. */}
                   <button type="button" className="cx-project" aria-expanded={open}
                     onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
-                    <ChatGlyph name="folder" size={15} />
                     <span className="cx-thread-title">{item.name}</span>
-                    {git?.tag ? <span className={`cx-project-tag${git.warn ? " is-warn" : ""}`} title={git.line}>{git.tag}</span> : null}
+                    <Icon name="chevron" width="12" height="12" className={`cx-caret${open ? " is-open" : ""}`} />
+                    {badge ? <span className={`cx-project-badge is-${badge}`} aria-label={badge === "attention" ? "A chat in this project is waiting on you"
+                      : badge === "running" ? "Running" : "Unread response"} /> : null}
+                    {git?.warn ? <span className="cx-project-tag is-warn" title={git.line}>{git.tag}</span> : null}
                     {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
                   </button>
-                  {/* Codex's project row actions: its menu and a new chat in this project. */}
+                  {/* Its one hover action, as Claude Code's: a new chat in this folder. The rest is on right-click. */}
                   <span className="cx-project-hover">
-                    <button type="button" aria-label={`${item.name} actions`} title="More"
-                      onClick={(event) => { const owner = event.currentTarget, box = owner.getBoundingClientRect(); setProjectCard(null);
-                        setMenu((current) => current?.owner === owner ? null : { x: box.left, y: box.bottom + 4, items: projectMenu(item), label: item.name, owner }); }}>
-                      <ChatGlyph name="more" size={14} /></button>
-                    <button type="button" aria-label={`New chat in ${item.name}`} title="New chat in this project" onClick={() => actions.newChatIn(item.id)}>
-                      <ChatGlyph name="edit" size={14} /></button>
+                    <button type="button" aria-label={`New chat in ${item.name}`} title={`New chat in ${item.name}`} onClick={() => actions.newChatIn(item.id)}>
+                      <ChatGlyph name="plus" size={16} /></button>
                   </span>
                 </div>
                 {open && !current ? <ul>{otherRows(item.id)}</ul> : null}
@@ -795,8 +826,8 @@ export function ChatThreadList(props: ThreadListProps) {
                 const { chats: shown, drag } = archivedDrag(group.key, group.chats);
                 return <li key={group.key}>
                   <button type="button" className="cx-project" aria-expanded={open} onClick={() => toggle(key)}>
-                    {group.project ? <ChatGlyph name="folder" size={15} /> : <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />}
                     <span className="cx-thread-title">{group.name}</span>
+                    <Icon name="chevron" width="12" height="12" className={`cx-caret${open ? " is-open" : ""}`} />
                     <span className="cx-archived-count">{group.chats.length}</span>
                   </button>
                   {open ? <ul>{shown.map((chat) => archivedRow(chat, drag))}</ul> : null}
@@ -804,8 +835,8 @@ export function ChatThreadList(props: ThreadListProps) {
               })}
               {gone.length ? <li>
                 <button type="button" className="cx-project cx-deleted-head" aria-expanded={!collapsed.has("archived:deleted")} onClick={() => toggle("archived:deleted")}>
-                  <Icon name="chevron" width="12" height="12" className={!collapsed.has("archived:deleted") ? "is-open" : undefined} />
                   <span className="cx-thread-title">Recently deleted</span>
+                  <Icon name="chevron" width="12" height="12" className={`cx-caret${!collapsed.has("archived:deleted") ? " is-open" : ""}`} />
                   <span className="cx-archived-count">{gone.length}</span>
                 </button>
                 {!collapsed.has("archived:deleted") ? (() => {
@@ -817,6 +848,8 @@ export function ChatThreadList(props: ThreadListProps) {
           </section>;
         })()}
       </nav>
+      {/* In split view the chat pet's house stands here, under the list (ChatPet draws it in). */}
+      <div className="cx-pet-yard" />
       {hover && !menu ? <FloatingLayer className="cx-hover-card" role="tooltip" style={{ top: hover.top, left: hover.left }}>
         <strong>{hover.chat.title}</strong>
         <span>{STATUS_LABEL[hover.chat.status]}{hover.chat.updatedAtMs ? ` · updated ${chatRelativeTime(hover.chat.updatedAtMs, now)} ago`.replace("now ago", "just now") : ""}</span>
@@ -871,7 +904,7 @@ export function ChatThreadList(props: ThreadListProps) {
           <span>days</span>
         </label> : null}
         {props.setArchiveDays ? <p className="cx-popover-hint">0 keeps them archived. Deleted chats can still be restored.</p> : null}
-        <p className="cx-popover-hint">Drag chats to reorder them in any list (a project, Pinned, a section, Archived), or press Alt+Shift+↑/↓ on the open chat.</p>
+        <p className="cx-popover-hint">Drag chats to reorder any list, or press Alt+Shift+↑/↓ on the open chat.</p>
         {manualOrder.length ? <button type="button" className="cx-popover-reset" onClick={() => saveOrder([])}>Reset to newest first</button> : null}
       </FloatingLayer> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
