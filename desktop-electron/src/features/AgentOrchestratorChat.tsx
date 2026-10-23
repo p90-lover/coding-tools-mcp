@@ -23,7 +23,7 @@ import {
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
-  chatLoopParse, loopInterval, loopLabel, type ChatLoop,
+  chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -1761,7 +1761,7 @@ export function AgentOrchestratorChat({
                   {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
                     disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}>🗑</button> : null}
                 </MessageActions>
-                {turn.user.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
+                {turn.user.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
               </div> : null}
               {/* Messages steered into this turn. While it works they show in its live timeline, where
                   they were sent; once it is done, here under the turn's message. */}
@@ -1771,7 +1771,7 @@ export function AgentOrchestratorChat({
                   {/* Saved only once the agent took it; a turn that finished read it, one that stopped may not have. */}
                   <div className="cx-msg-foot"><SteerReceiptMark receipt={turn.status === "done" ? "read" : liveTurn(turn) ? "unread" : undefined} />
                     <MessageActions text={chatMessageReadable(steer.text)} /></div>
-                  <span className="cx-stamp">{steer.stamp} UTC</span>
+                  <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
                 </div>)}</SteerReader.Provider> : null}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}

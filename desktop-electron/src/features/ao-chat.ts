@@ -573,6 +573,20 @@ const SETTLED = ["finished", "cancelled", "archived"];
 const STEER = /\n\n↳ Steer \(([^)]+) UTC\): /;
 export type ChatSteer = { text: string; stamp: string };
 
+/**
+ * A saved message stamp ("YYYY-MM-DD HH:MM", UTC: the agent reads it that way in "Follow-up (… UTC)")
+ * shown in this computer's own time zone, in the same shape. A stamp in any other form is shown as saved.
+ */
+export function localChatStamp(stamp: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(stamp.trim());
+  if (!match) return stamp;
+  const [, year, month, day, hour, minute] = match.map(Number);
+  const at = new Date(Date.UTC(year, month - 1, day, hour, minute));
+  if (Number.isNaN(at.getTime())) return stamp;
+  const two = (value: number) => String(value).padStart(2, "0");
+  return `${at.getFullYear()}-${two(at.getMonth() + 1)}-${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}`;
+}
+
 /** Splits the steers off a message: the message itself, then each steer in the order they were sent. */
 function withSteers(raw: string): { text: string; steers?: ChatSteer[] } {
   const parts = raw.split(STEER);
