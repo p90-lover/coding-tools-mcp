@@ -91,6 +91,7 @@ const {
   scheduleFullIpcAfterPaint,
 } = require("./launcher-ready-path.cjs");
 const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
+const { createMainStallMonitor } = require("./main-stall-monitor.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
 const {
   createStateStore,
@@ -391,17 +392,22 @@ function startBridgeWatchdog(logger, stateStore) {
     if (!config) return;
     bridgeWatchdogBusy = true;
     try {
-      if (await runtimeSupervisor.ownedRuntimeReady(config)) {
+      const checkStarted = Date.now();
+      const check = await runtimeSupervisor.ownedRuntimeCheck(config);
+      if (check.ready) {
         bridgeWatchdogMisses = 0;
         return;
       }
       bridgeWatchdogMisses += 1;
+      // Which part failed and how long the check took: a slow daemon_health on a stalled machine
+      // reads differently from a tunnel that is down.
+      const miss = { mode: config.mode, misses: bridgeWatchdogMisses, failed: check.failed, checkMs: Date.now() - checkStarted };
       if (bridgeWatchdogMisses < BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART) {
-        logger.warn("runtime.watchdog_miss", { mode: config.mode, misses: bridgeWatchdogMisses });
+        logger.warn("runtime.watchdog_miss", miss);
         return;
       }
       bridgeWatchdogMisses = 0;
-      logger.warn("runtime.watchdog_restart", { mode: config.mode });
+      logger.warn("runtime.watchdog_restart", miss);
       const result = await runtimeSupervisor.startIfConfigured();
       logger.info("runtime.watchdog_result", { status: result?.status });
       // Point Codex back at the bridge once it is running again (a failed launch restores the old route).
@@ -3760,6 +3766,8 @@ async function start() {
   // From launch on, keep the bridge and MCP tunnel alive while the app is open; the supervisor
   // coalesces a watchdog start with any launch-time start that is still in flight.
   startBridgeWatchdog(logger, stateStore);
+  // A blocked main loop freezes every window; this is the only thing that can tell afterwards.
+  createMainStallMonitor({ logger }).start();
 
   app.on("activate", () => showMainWindow());
   app.on("will-quit", () => missionWorkflowRuntime?.dispose());

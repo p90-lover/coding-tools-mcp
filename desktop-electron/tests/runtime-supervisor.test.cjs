@@ -1538,6 +1538,31 @@ test("launcher marks compensation ready only after both owned runtime processes 
   assert.equal(await supervisor.ownedRuntimeReady({ mode: "full" }), true);
 });
 
+test("the owned-runtime check says which part failed, for the launcher watchdog's log", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  const full = { mode: "full" };
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "daemon_missing" });
+  supervisor.daemon = { pid: 123_456_785, exitCode: 1, signalCode: null };
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "daemon_exited" });
+  supervisor.daemon = { pid: 123_456_785, exitCode: null, signalCode: null };
+  supervisor.proxyHealth = async () => false;
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "daemon_health" });
+  supervisor.proxyHealth = async () => true;
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "tunnel_missing" });
+  supervisor.tunnel = { pid: 123_456_786, exitCode: null, signalCode: null };
+  supervisor.tunnelHealth = async () => false;
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: false, failed: "tunnel_health" });
+  supervisor.tunnelHealth = async () => true;
+  assert.deepEqual(await supervisor.ownedRuntimeCheck(full), { ready: true });
+  assert.deepEqual(await supervisor.ownedRuntimeCheck({ mode: "browser-only" }), { ready: true });
+});
+
 test("failed initial health checks stop their child without scheduling crash recovery", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-startup-cleanup-"));
   const childPath = path.join(root, "child.cjs");

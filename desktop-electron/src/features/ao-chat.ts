@@ -655,7 +655,10 @@ function chatSummaries(runs: ChatRun[], tasks: ChatTask[], lifecycle: TaskLifecy
         schedule: lifeByTask.get(taskId)?.schedule,
         status: lifeByTask.get(taskId)?.schedule?.run_id === latest.id && lifeByTask.get(taskId)?.schedule?.state === "scheduled"
           ? "scheduled" : ["missed", "needs_attention"].includes(lifeByTask.get(taskId)?.schedule?.state ?? "")
-          ? "attention" : chatRunStatus(latest),
+          // An earlier run still working (one retried after a newer run was stopped) keeps the chat
+          // Running, with its green dot: the header said Stopped while the agent kept working.
+          ? "attention" : chatRunStatus(latest) !== "running" && entry.runs.some((run) => chatRunStatus(run) === "running")
+          ? "running" : chatRunStatus(latest),
         ...(byId.get(taskId)?.updated_at ? { updatedAtMs: byId.get(taskId)!.updated_at! * 1000 } : {}),
         ...(visibility !== "active" ? { archived: true } : {}),
       };
