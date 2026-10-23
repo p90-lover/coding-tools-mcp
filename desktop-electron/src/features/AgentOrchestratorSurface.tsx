@@ -1630,10 +1630,10 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   });
   // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
   // not wait behind another action, and it changes no run state the surface tracks.
-  const steerChat = async (input: { taskId: string; message: string; restart?: boolean }) => {
+  const steerChat = async (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => {
     if (!workspaceId) throw new Error("Add a project first");
     try {
-      const result = await moduleCall("chat_steer", { workspaceId, taskId: input.taskId, message: input.message, ...(input.restart ? { restart: true } : {}) });
+      const result = await moduleCall("chat_steer", { workspaceId, taskId: input.taskId, message: input.message, ...(input.restart ? { restart: true } : {}), ...(input.goal ? { goal: input.goal } : {}) });
       if (result.steered) void loadBoard(workspaceId).catch(() => undefined);
       // The agent waits on a request of its own (or its hung turn, or a long command, was just
       // stopped): the message waits for the turn instead.

@@ -4393,6 +4393,26 @@ test("steering hands the message to the running AO agent and notes it in the cha
   assert.equal(world.edits.length, 1, "nothing is noted for an undelivered steer");
 });
 
+test("a /goal sent mid-turn steers its condition in and becomes the goal of the run it steered", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: { steer: async (id, text) => { steered.push([id, text]); return { steered: true }; } } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "make CI green", goal: "make CI green" });
+  assert.equal(result.steered, true);
+  assert.deepEqual(steered, [["sess-1", "make CI green"]], "its first round is the condition itself");
+  const goal = (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
+  assert.deepEqual([goal.objective, goal.status, goal.round, goal.lastRunId], ["make CI green", "active", 1, "r1"]);
+  // A steer that does not land sets no goal: the chat sends it as a new turn, which sets it then.
+  const missed = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: { steer: async () => ({ steered: false }) } });
+  assert.equal((await missed.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "x", goal: "x" })).steered, false);
+  assert.equal((await missed.call("runs", { workspaceId: "ws-1" })).goals["task-1"], undefined);
+});
+
 test("a message typed while the chat's agent is still starting waits for its turn instead of failing", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
