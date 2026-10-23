@@ -42,8 +42,8 @@ function CodexQuota({ quota, zh }: { quota: CpaCodexQuota; zh: boolean }) {
         <small>{row.name}</small><i><b style={{ width: `${percent}%` }} /></i><small>{percent}%</small>
       </span>;
     })}
-    {quota.paused ? <small className="cpa-usage-warn">{zh ? "已達限額，暫停中" : "paused at its limit"}</small> : null}
-    {!windows.length ? <small className={quota.error ? "cpa-usage-warn" : undefined}>{quota.error || (zh ? "CPA Helper 尚未檢查此帳戶的限額" : "CPA Helper has not checked its limits yet")}</small> : null}
+    {quota.paused ? <small className="cpa-usage-warn">{zh ? "已達限額，暫停中" : "paused at limit"}</small> : null}
+    {!windows.length ? <small className={quota.error ? "cpa-usage-warn" : undefined}>{quota.error || (zh ? "CPA Helper 尚未檢查此帳戶的限額" : "Limits not checked yet")}</small> : null}
     {quota.checkedAt ? <small className="cpa-usage-muted">{zh ? "檢查於" : "checked"} {agoLabel(quota.checkedAt, zh)}</small> : null}
   </div>;
 }
@@ -52,7 +52,7 @@ function ClineQuota({ quota, zh }: { quota: CpaClineQuota; zh: boolean }) {
   return <div className="cpa-usage-quota">
     <small className="cpa-usage-muted" title={zh
       ? "Cline 不提供 Cline Pass 金鑰的剩餘額度，切換器也不記錄；這裡列出每個金鑰的請求數、最後使用時間與最後錯誤（429 表示已達限額）。"
-      : "Cline reports no remaining quota for a Cline Pass key and the switcher keeps none; each key's requests, last use and last error are shown (a 429 means it hit its limit)."}>
+      : "Cline doesn't report remaining quota. Each key shows its requests, last use and last error. A 429 means it hit its limit."}>
       {zh ? "Cline 未提供剩餘額度" : "Quota not reported by Cline"} · {quota.mode === "roundrobin" ? (zh ? "輪詢" : "round-robin") : (zh ? "單一金鑰" : "single key")}
     </small>
     {quota.accounts.length ? <ul className="cpa-usage-keys">
@@ -159,7 +159,7 @@ export function CpaUsagePanel({ language }: { language: Language }) {
     </header>
     {open ? <div className="cpa-usage-body">
       {error ? <p className="cpa-usage-note is-error">{error}</p> : null}
-      {usage && !usage.available ? <p className="cpa-usage-note">{usage.reason || (zh ? "無法讀取 CPA 用量。" : "CPA usage is unavailable.")}</p> : null}
+      {usage && !usage.available ? <p className="cpa-usage-note">{usage.reason || (zh ? "無法讀取 CPA 用量。" : "Couldn't read CPA usage.")}</p> : null}
       {usage?.available ? <div className="cpa-usage-scroll">
         <table className="cpa-usage-table">
           <thead><tr>
@@ -220,7 +220,7 @@ export function CpaUsagePanel({ language }: { language: Language }) {
       </div> : null}
       {usage?.available ? <p className="cpa-usage-note is-quiet">{zh
         ? "token 與請求數取自 CPA Helper 的用量紀錄（保留 90 天）。成本為估算：CPA Helper 價目表有價格時採用，否則使用內建 API 牌價（electron/cpa-model-prices.cjs）；訂閱帳戶並不按 token 計費。「+」表示部分模型沒有價格。"
-        : "Tokens and requests come from CPA Helper's usage log (kept 90 days). Costs are estimates at API prices: CPA Helper's price book where it has one, otherwise the built-in list prices (electron/cpa-model-prices.cjs). Subscription accounts are not billed per token. \"+\" means some models had no price."}</p> : null}
+        : "Tokens and requests come from CPA Helper's usage log, kept 90 days. Costs are estimated at API prices from CPA Helper's price book or the built-in list. Subscriptions aren't billed per token. \"+\" means some models had no price."}</p> : null}
     </div> : null}
   </section>;
 }

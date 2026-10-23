@@ -137,7 +137,7 @@ function createGuiUpdateController({
     if (pending) return pending;
     pending = (async () => {
       const next = state.status === "available" && candidate ? state : await checkNow();
-      if (next.status === "disabled") throw new Error("GUI updates are available in packaged desktop builds");
+      if (next.status === "disabled") throw new Error("GUI updates work only in packaged desktop builds");
       if (next.status === "up-to-date") return false;
       if (next.status === "error") throw new Error(next.message);
       const available = candidate;

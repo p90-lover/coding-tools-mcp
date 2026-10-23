@@ -1287,7 +1287,7 @@ function createManagedComponentController({
     if (source.state === "installed" && !repair) return project(id);
     if (operationState(id)?.state === "installing") throw new Error(`${manifest.name} installation is already running`);
     const missing = missingCredentials(manifest);
-    if (missing.length > 0) throw new Error(`${manifest.name} requires configured credentials: ${missing.join(", ")}`);
+    if (missing.length > 0) throw new Error(`${manifest.name} needs these credentials first: ${missing.join(", ")}`);
     fs.mkdirSync(componentState(manifest), { recursive: true, mode: 0o700 });
     if (platform !== "win32") fs.chmodSync(componentState(manifest), 0o700);
 
@@ -1361,7 +1361,7 @@ function createManagedComponentController({
   function launchContext(manifest) {
     const home = componentHome(manifest);
     const marker = readMarker(manifest);
-    if (!markerMatches(manifest, marker)) throw new Error(`${manifest.name} is not installed or requires repair`);
+    if (!markerMatches(manifest, marker)) throw new Error(`${manifest.name} isn't installed or needs repair`);
     const artifact = marker.artifact ? path.join(home, assertSafeRelativePath(marker.artifact, "Managed artifact")) : "";
     return {
       id: manifest.id,

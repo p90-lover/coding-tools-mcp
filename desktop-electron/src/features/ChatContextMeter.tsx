@@ -295,10 +295,10 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
   useEffect(() => { onFraction?.(fraction); }, [fraction, onFraction]);
   const radius = (RING - 4) / 2;
   const circumference = 2 * Math.PI * radius;
-  const label = !sessionId ? "No agent has started in this chat yet"
-    : !usage ? "The agent has not reported its context yet"
+  const label = !sessionId ? "No agent yet"
+    : !usage ? "Context not reported yet"
       : fraction === null ? `${tokensShort(usage.contextUsed)} tokens in context`
-        : `Context ${tokensShort(usage.contextUsed)} / ${tokensShort(usage.contextWindow)} (${Math.round(fraction * 100)}%)`;
+        : `Context ${tokensShort(usage.contextUsed)} / ${tokensShort(usage.contextWindow)} · ${Math.round(fraction * 100)}%`;
   const limits = snapshot?.rateLimits ?? null;
   const readAt = Date.now();
   const limitRows = limits ? [
@@ -318,7 +318,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
   const scale = usage?.contextWindow ? Math.max(usage.contextWindow, breakdown?.used ?? 0, usage.contextUsed ?? 0) : null;
   // AO's own record of a /compact, else the agent's own compaction found in the history (breakdown).
   const compactedAt = snapshot?.compactedAt || breakdown?.compactedAt || null;
-  const estimated = breakdown ?`Estimated from ${breakdown.counts.messages} messages and ${breakdown.counts.toolCalls} tool calls${breakdown.sinceCompaction ? " since the last compaction" : ""}${breakdown.complete ? "" : " (the most recent ones)"}; the agent reports only its total.` : null;
+  const estimated = breakdown ?`Estimated from ${breakdown.counts.messages} ${breakdown.complete ? "" : "recent "}messages and ${breakdown.counts.toolCalls} tool calls${breakdown.sinceCompaction ? " since the last compaction" : ""}. The agent reports only the total.` : null;
 
   return <>
     <button ref={button} type="button" className={`cx-icon-button cx-context-meter is-${tone(fraction)}`} aria-label={label} title={label}
@@ -352,8 +352,8 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
             segments={breakdown ? breakdown.categories.map((category) => ({ id: category.id, label: category.label, tokens: category.tokens }))
               : [{ id: "used", label: "In use", tokens: usage.contextUsed ?? 0 }]} />
             : <div className="cx-ctx-cc-head"><b>{tokensShort(usage.contextUsed)}</b><span>tokens in context</span></div>}
-          {snapshot?.carriedFrom ? <p className="cx-ctx-meta" title={snapshot.carriedFrom}>Last reading from this chat's previous session; this one reports when its first model request ends</p> : null}
-          {scale && !breakdown && !snapshot?.carriedFrom ? <p className="cx-ctx-meta">Reading the split from the chat's history…</p> : null}
+          {snapshot?.carriedFrom ? <p className="cx-ctx-meta" title={snapshot.carriedFrom}>From the previous session. This one reports after its first reply.</p> : null}
+          {scale && !breakdown && !snapshot?.carriedFrom ? <p className="cx-ctx-meta">Reading the breakdown…</p> : null}
           {pendingWindow ? <p className="cx-ctx-meta"><span className="is-pending">Next run {tokensShort(pendingWindow)}</span></p> : null}
           {/* The conversation's spend as a short list, the cached share beside the input it saved:
               five equal tiles left each number too narrow to read. */}
@@ -387,7 +387,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
           <h4>Limits</h4><p className="cx-ctx-meta">{quota.reason || "CPA's account limits are unavailable."}</p>
         </section> : null}
         {onCpaCline && !limitRows.length && cpaUsage ? <section className="cx-ctx-section">
-          <h4 title="Cline reports no remaining quota for a Cline Pass key; each key's last request says whether it hit its limit.">Cline Pass
+          <h4 title="Cline reports no quota. Each key shows whether it hit its limit">Cline Pass
             {clineKeys?.accounts.length ? <small>{clineKeys.accounts.length} {clineKeys.accounts.length === 1 ? "key" : "keys"}{clineKeys.accounts.length > 1 ? ` · ${clineKeys.mode === "roundrobin" ? "round-robin" : "single key"}` : ""}</small> : null}</h4>
           {!cpaUsage.available ? <p className="cx-ctx-meta">{cpaUsage.reason || "CPA's account usage is unavailable."}</p> : <>
             {(clineKeys?.accounts ?? []).map((key) => <div key={key.name} className={`cx-ctx-key${key.state === "disabled" || key.state === "limited" ? " is-resting" : ""}`} title={key.lastError ?? undefined}>
@@ -396,8 +396,8 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
               {key.active ? <em>in use</em> : null}
               <small>{key.requests.toLocaleString()} req · {agoLabel(key.lastUsedAt, false)}</small>
             </div>)}
-            {!clineKeys ? <p className="cx-ctx-meta">The switcher did not answer through CPA.</p> : null}
-            {clineKeys && !clineKeys.accounts.length ? <p className="cx-ctx-meta">No keys yet: add one in CPA › Plugins › Cline Pass.</p> : null}
+            {!clineKeys ? <p className="cx-ctx-meta">The switcher didn't answer through CPA.</p> : null}
+            {clineKeys && !clineKeys.accounts.length ? <p className="cx-ctx-meta">No keys yet. Add one in CPA › Plugins › Cline Pass.</p> : null}
             <UsageLine account={clineBridge} />
           </>}
         </section> : null}
@@ -410,7 +410,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
         <footer className="cx-ctx-foot">
           <span title={compactedAt ? new Date(compactedAt).toLocaleString() : undefined}>{compactedAt ? `Compacted ${agoLabel(Date.parse(compactedAt), false)}` : "Never compacted"}
             {overridden ? <span title={`The agent's own report says ${tokensShort(reported?.contextWindow ?? null)}`}> · launched at {tokensShort(launched!)}</span> : null}</span>
-          <button type="button" disabled={!canCompact} title={canCompact ? "Summarize the history to free context (/compact)" : "Compact works once the chat is not running"}
+          <button type="button" disabled={!canCompact} title={canCompact ? "Summarize history to free context" : "Available when the chat isn't running"}
             onClick={() => { setOpen(null); onCompact(); }}>Compact session</button>
         </footer>
       </div>

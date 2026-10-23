@@ -454,7 +454,7 @@ function createAppUpdateController({
         logger?.info("launcher.app_update_worker_started", { pid: child.pid, version: available.version });
         transition({ status: "installing", version: available.version });
         const closed = await closeForUpdate();
-        if (closed?.ok === false) throw new Error(closed.message || "The app could not close for the update");
+        if (closed?.ok === false) throw new Error(closed.message || "The app couldn't close for the update. Close it and try again.");
         return true;
       } catch (error) {
         try { child?.kill(); } catch {}

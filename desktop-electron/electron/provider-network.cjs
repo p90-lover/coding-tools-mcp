@@ -1153,7 +1153,8 @@ function createProviderNetworkController({
       return persistCpaBinding(account, adapterId, result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!binding.id && /No available .* account exists in CPA/i.test(message)) {
+      // cpa-oauth-adapter's resolveAuthFile: "No <provider> account is available in CPA. …"
+      if (!binding.id && /No \S+ account is available in CPA/i.test(message)) {
         return store.updateAccountConnection(account.id, {
           status: "pending",
           loginAdapterId: adapterId,

@@ -56,26 +56,29 @@ function fixture() {
   return { props, calls };
 }
 
-test("each chat row has Codex's hover Pin and Archive buttons, not the old envelope and funnel icons", () => {
+test("each chat row is Claude Code's: its title, a status dot, and one hover \"More options\" holding Pin and Archive", () => {
   const { props, calls } = fixture();
-  const view = mount("ChatThreadList.tsx", props).render();
-  const rows = walk(view).filter((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row") && !String(element.props.className).includes("is-archived"));
-  assert.equal(rows.length, 2);
-  for (const row of rows) {
+  const list = mount("ChatThreadList.tsx", props);
+  const rows = () => walk(list.render()).filter((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row") && !String(element.props.className).includes("is-archived"));
+  assert.equal(rows().length, 2);
+  for (const row of rows()) {
     const labels = walk(row).filter((element) => element.type === "button").map((button) => button.props["aria-label"]).filter(Boolean);
-    assert.deepEqual(labels, ["Pin chat", "Archive chat"]);
+    assert.equal(labels.length, 1, "no row of separate hover buttons");
+    assert.match(labels[0], /^More options for /);
     assert.ok(!walk(row).some((element) => element.type === "Icon" && ["mail", "orchestrator"].includes(element.props.name)), "the envelope and funnel icons are gone");
   }
+  assert.match(rows()[0].props.className, /is-unread/, "an unread chat that isn't open is marked");
+  const more = (index) => walk(rows()[index]).find((element) => String(element.props?.["aria-label"]).startsWith("More options for"));
+  const menu = () => walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
+  more(1).props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 4, bottom: 20 }) } });
+  menu().items.find((item) => item.label === "Pin").run();
+  more(1).props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 4, bottom: 20 }) } });
   // Archive goes through the lifecycle, which asks before stopping a running chat's work.
-  const archiveRunning = walk(rows[0]).find((element) => element.props?.["aria-label"] === "Archive chat");
-  assert.equal(archiveRunning.props.disabled, false);
-  assert.match(rows[0].props.className, /is-unread/, "an unread chat that isn't open is marked");
-  walk(rows[1]).find((element) => element.props?.["aria-label"] === "Pin chat").props.onClick();
-  walk(rows[1]).find((element) => element.props?.["aria-label"] === "Archive chat").props.onClick();
-  walk(rows[1]).find((element) => element.props?.className === "cx-thread-select").props.onClick();
+  menu().items.find((item) => item.label === "Archive").run();
+  walk(rows()[1]).find((element) => element.props?.className === "cx-thread-select").props.onClick();
   assert.deepEqual(calls, [["pin", "t2"], ["lifecycle", "t2", "archive"], ["select", "t2"]]);
   // Ctrl-click opens the chat in split view, as in Claude Code.
-  walk(rows[0]).find((element) => element.props?.className === "cx-thread-select").props.onClick({ ctrlKey: true });
+  walk(rows()[0]).find((element) => element.props?.className === "cx-thread-select").props.onClick({ ctrlKey: true });
   assert.deepEqual(calls.at(-1), ["openSplit", "a", "t1"]);
 });
 
@@ -394,15 +397,18 @@ test("a long project shows 5 chats and Show more, like Codex; the count is a lis
   assert.equal(JSON.parse(stored["coding-tools:ao:chat-list-settings"]).visible, 3);
 });
 
-test("a project row has Codex's hover actions (its menu and a new chat there), and Edit opens the project", () => {
+test("a project is Claude Code's folder group: its name and a caret, no folder icon, \"+\" on hover; its menu is on right-click", () => {
   const { props, calls } = fixture();
   const list = mount("ChatThreadList.tsx", props);
   const button = (label) => walk(list.render()).find((element) => element.type === "button" && element.props["aria-label"] === label);
-  assert.ok(button("Alpha actions") && button("New chat in Alpha") && button("New chat in Beta"));
+  assert.ok(button("New chat in Alpha") && button("New chat in Beta"));
+  assert.equal(button("Alpha actions"), undefined, "one hover action, as Claude Code's");
+  const header = projectButton(list.render(), "Alpha");
+  assert.ok(!walk(header).some((element) => element.type === "Glyph"), "no folder icon");
+  assert.ok(walk(header).some((element) => element.type === "Icon" && element.props.name === "chevron" && /cx-caret/.test(element.props.className)), "a caret after the name");
   button("New chat in Beta").props.onClick();
-  button("Alpha actions").props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 5, bottom: 9 }) } });
+  header.props.onContextMenu({ preventDefault() {}, clientX: 5, clientY: 9 });
   const menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
-  assert.deepEqual([menu.x, menu.y], [5, 13], "the menu opens under the button");
   menu.items.find((item) => item.label === "Edit").run();
   assert.deepEqual(calls, [["newChatIn", "b"], ["editProject", "a"]]);
 });

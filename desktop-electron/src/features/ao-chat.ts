@@ -132,10 +132,20 @@ function steerRead(items: ChatLiveItem[], at: number): boolean {
   return false;
 }
 
-/** Who reads a steer, by the card's harness ("Claude Code · model · …"): Claude Code's own words name Claude. */
-export function steerReader(detail: string | undefined): string {
-  const harness = (detail ?? "").split(" · ")[0]?.trim();
+/**
+ * Who reads a steer: the card's model, as the chat names it ("DeepSeek V4.1 Flash", "Claude Opus 4.7"),
+ * since Claude Code runs other providers' models too. Without one, the harness ("Codex"), else Claude.
+ */
+export function steerReader(step: Pick<ChatStep, "reader" | "detail"> | undefined): string {
+  if (step?.reader) return step.reader;
+  const harness = (step?.detail ?? "").split(" · ")[0]?.trim();
   return !harness || /^claude code$/i.test(harness) ? "Claude" : harness;
+}
+
+/** A model's name for its read receipt; a Claude model keeps "Claude", which its short label drops. */
+function modelReader(model: string, modelName?: (model: string) => string): string {
+  const label = modelName?.(model) || model.slice(model.lastIndexOf("/") + 1).replace(/\([^)]*\)$/, "");
+  return /claude/i.test(model) && !/^claude/i.test(label) ? `Claude ${label}` : label;
 }
 /**
  * A turn's activity as it reads. A request "Approve for me" (or the user) allowed is no row of its
@@ -435,14 +445,14 @@ const isNodeModules = (dir: string) => /(?:^|\/)node_modules$/i.test(dir);
 export function dependencyInstallNote(command: string | undefined, links: DependencyLinks | null): DependencyNote | null {
   if (!command || !links) return null;
   if (PYTHON_INSTALL.test(command) && links.shared.some(isVenv)) {
-    return { tone: "warn", text: "This worktree shares the project's Python environment: installing here changes the project's packages too." };
+    return { tone: "warn", text: "This worktree shares the project's Python environment. Installing here changes the project's packages too." };
   }
   if (NODE_INSTALL.test(command)) {
     if (links.shared.some(isNodeModules)) {
-      return { tone: "warn", text: "This worktree shares the project's node_modules: installing here changes the project's packages too." };
+      return { tone: "warn", text: "This worktree shares the project's node_modules. Installing here changes the project's packages too." };
     }
     if (links.farmed.some(isNodeModules)) {
-      return { tone: "info", text: "Node packages install privately in this worktree; the project's own stay as they are." };
+      return { tone: "info", text: "Node packages install only in this worktree. The project's packages don't change." };
     }
   }
   return null;
@@ -489,7 +499,7 @@ export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined
   const heard = live?.last_event_at_ms || live?.activity_at_ms || null;
   const parts = [describe?.(node, run) ?? ""];
   if (started) parts.push(`running ${chatDuration(now - started)}`);
-  if (live?.activity) parts.push(heard ? `${live.activity} (last heard ${chatDuration(now - heard)} ago)` : live.activity);
+  if (live?.activity) parts.push(heard ? `${live.activity} · last heard ${chatDuration(now - heard)} ago` : live.activity);
   const quietSince = heard ?? started;
   const stalled = Boolean(quietSince && now - quietSince >= STALL_MS && (heard || live?.turn_started === false));
   return { detail: parts.filter(Boolean).join(" · "), stalled, ...(heard ? { heardAtMs: heard } : {}) };
@@ -718,7 +728,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
   runs.forEach((run) => {
     const user = run.replaces_run_id ? undefined : said[messageIndex++];
     if (run.replaces_run_id) messages.push({ kind: "status", key: `${run.id}:reconfigured`,
-      text: "Configuration changed; continuing from quoted visible work.", state: "finished" });
+      text: "Settings changed. Continuing from the work so far.", state: "finished" });
     if (user) messages.push({ kind: "user", key: `${run.id}:user`, text: user.text, stamp: user.stamp });
     for (const node of chatNodeOrder(run.nodes)) {
       const name = chatNodeName(node);
@@ -740,14 +750,14 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
         const working = chatWorkingDetail(node, options.activity?.[key], now, options.describe, run);
         messages.push({
           kind: "status", key, state: node.state, detail: working.detail, stalled: working.stalled,
-          text: working.stalled ? `${name} may be stuck: nothing heard for a while. Stop or restart the mission if it does not recover.` : `${name} is working…`,
+          text: working.stalled ? `${name} may be stuck. Stop or restart the mission if nothing changes.` : `${name} is working…`,
         });
       } else if (node.state === "held") {
         messages.push({ kind: "status", key, text: `${name} needs your attention`, state: node.state });
       }
     }
     if (run.solo) {
-      messages.push({ kind: "status", key: `${run.id}:solo`, text: "Simple mission: the orchestrator answered alone; no workers ran.", state: "finished" });
+      messages.push({ kind: "status", key: `${run.id}:solo`, text: "The orchestrator answered alone. No workers ran.", state: "finished" });
     }
     if (run.cancelled) messages.push({ kind: "status", key: `${run.id}:stopped`, text: "Stopped", state: "cancelled" });
   });
@@ -769,6 +779,8 @@ export type ChatStep = {
   name: string;
   /** How the card runs: harness · model · effort · context · role. */
   detail: string;
+  /** The model that reads the person's steers ("Read by DeepSeek V4.1 Flash"), from modelReader. */
+  reader?: string;
   state: string;
   text?: string;
   verdict?: string;
@@ -894,6 +906,7 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     key, nodeId: node.id, role: node.role,
     // A single-model chat's one card reads as the model it runs ("Single assistant" said nothing).
     name: (run.execution_mode === "single" && node.route?.model && options.modelName?.(node.route.model)) || chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
+    ...(node.route?.model ? { reader: modelReader(node.route.model, options.modelName) } : {}),
     ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
     ...(node.receipt?.thread_id && node.route?.harness_id?.startsWith("ao:") && node.state !== "running" && node.state !== "reserved"
       ? { hasWork: true } : {}),
@@ -1141,10 +1154,36 @@ export function dshRetryNote(steps: ChatStep[]): string {
     if (!last || last.kind !== "system" || last.status !== "running" || !/^Retrying\b/i.test(last.text)) continue;
     const attempt = last.text.match(/attempt (\d+) of (\d+)/i);
     const status = last.text.match(/API error (\d{3})/i)?.[1];
-    const why = status === "429" ? "the model is rate-limited (429)" : status ? `the model's service is failing (${status})` : "the model request failed";
-    return ` · ${why}, retrying${attempt ? ` (${attempt[1]} of ${attempt[2]})` : ""}`;
+    const why = status === "429" ? "rate limited (429)" : status ? `model service error (${status})` : "model request failed";
+    return ` · ${why}, retrying${attempt ? ` ${attempt[1]} of ${attempt[2]}` : ""}`;
   }
   return "";
+}
+
+/** The failed requests in a row since the turn's model last answered through CPA (cpa-usage.cjs refusalOf). */
+export type CpaRefusal = { streak: number; status: number | null; statuses?: Record<string, number>; since: number | null; lastAt: number | null };
+
+/** What an HTTP status from CPA means to the person waiting on the turn. */
+export function cpaStatusWord(status: number | null): string {
+  if (status === 429) return "rate limited (429)";
+  if (status === 401 || status === 403) return `sign-in refused (${status})`;
+  if (status === 402) return "out of credit (402)";
+  if (status !== null && status >= 500) return `model service error (${status})`;
+  return status ? `HTTP ${status}` : "failed";
+}
+
+/**
+ * Why a running turn is quiet when CPA keeps refusing its model: from CPA Helper's request records,
+ * so it covers a Claude Code subagent's requests too, whose retries never reach the chat as a
+ * "Retrying…" notice. Seen live 2026-10-22: a MiMo turn sat on "may be stuck" for half an hour
+ * while its requests failed, and nothing said why. Two failures in a row before it says so: a single
+ * one is usually retried at once.
+ */
+export function cpaRefusalNote(refusal: CpaRefusal | null | undefined, now: number): string {
+  if (!refusal || refusal.streak < 2) return "";
+  const age = refusal.lastAt ? now - refusal.lastAt : null;
+  const when = age === null ? "" : age < 60_000 ? ", just now" : `, latest ${dshDuration(age)} ago`;
+  return ` · CPA refused the last ${refusal.streak} requests: ${cpaStatusWord(refusal.status)}${when}`;
 }
 
 /** A tool row's title (ui-tool tool-call-model.ts): its variant's word, or the tool's own. */

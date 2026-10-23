@@ -68,7 +68,7 @@ export function WorkspacePanel({ copy, language, setError }: WorkspacePanelProps
         await refresh();
         setNotice({ workspaceId: id, text: copy.workspacePolicyRestart });
       } else {
-        throw new Error("Workspace permissions were not saved");
+        throw new Error("Couldn't save workspace permissions. Try again.");
       }
     } catch (cause) {
       setError(errorText(cause));

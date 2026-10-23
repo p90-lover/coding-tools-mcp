@@ -1,4 +1,5 @@
 "use strict";
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");

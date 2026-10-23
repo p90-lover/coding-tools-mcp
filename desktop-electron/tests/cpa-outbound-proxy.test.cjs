@@ -129,5 +129,5 @@ test("CPA config follows the selected authenticated global profile", () => {
   broken.routing = { ...broken.routing, globalEnabled: true, globalProfileId: "owned" };
   delete broken.secrets.proxies.owned;
   fs.writeFileSync(savedFile, `${JSON.stringify(broken)}\n`);
-  assert.throws(() => resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage), /authentication is unavailable/);
+  assert.throws(() => resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage), /saved sign-in, so CPA didn't start/);
 });

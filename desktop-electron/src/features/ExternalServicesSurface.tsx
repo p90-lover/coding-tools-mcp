@@ -227,7 +227,7 @@ export function ExternalServicesSurface({
       keepAlive: draft.keepAlive,
     };
     await api.configureExternalService(selected.id, input);
-    setNotice(text(language, "Service configuration saved.", "已儲存服務設定。"));
+    setNotice(text(language, "Settings saved.","已儲存服務設定。"));
   });
 
   const inspect = () => run("inspect", async () => {
@@ -256,7 +256,7 @@ export function ExternalServicesSurface({
     if (!value) throw new Error(text(language, "Enter a GitHub read token first.", "請先輸入 GitHub 唯讀 Token。"));
     await api.setManagedComponentCredential("anneal", "githubReadToken", value);
     setManagedCredential("");
-    setNotice(text(language, "Anneal credential saved securely.", "Anneal 憑證已安全儲存。"));
+    setNotice(text(language, "Anneal credential saved.", "Anneal 憑證已安全儲存。"));
   });
 
   const installOrRepair = () => run("managed-install", async () => {
@@ -283,10 +283,10 @@ export function ExternalServicesSurface({
       <header className="external-services-heading">
         <div>
           <span>{text(language, "EXTERNAL SERVICES", "外部服務")}</span>
-          <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
+          <h1>{text(language, "Integrations","整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Start CPA / CLIProxyAPI from the bundled Coding Tools runtime. CommandCode login is available in CPA Accounts.",
+            "Start CPA / CLIProxyAPI from the bundled runtime. CommandCode login is available in CPA Accounts.",
             "直接由 Coding Tools 內建執行環境啟動 CPA／CLIProxyAPI。CommandCode 登入可在 CPA 帳戶頁面使用。",
           )}</p>
         </div>
@@ -367,7 +367,7 @@ export function ExternalServicesSurface({
               <p className="managed-bundled-hint">
                 {text(
                   language,
-                  "Bundled inside Coding Tools. Start copies the in-app payload. No separate download or GitHub clone.",
+                  "Bundled with Coding Tools. Nothing to download.",
                   "已內建於 Coding Tools。Start 會複製 App 內建 payload，不必另外下載或 git clone。",
                 )}
               </p>
@@ -388,7 +388,7 @@ export function ExternalServicesSurface({
           </section>
 
           <details className="external-service-advanced">
-            <summary>{text(language, "Advanced manual configuration", "進階手動設定")}</summary>
+            <summary>{text(language, "Advanced settings","進階手動設定")}</summary>
             <div className="external-service-form">
             <label className="wide-field">
               <span>{text(language, "Loopback endpoint", "Loopback 端點")}</span>
@@ -417,12 +417,12 @@ export function ExternalServicesSurface({
             </label>
             <label className="service-check"><input checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} type="checkbox" /><span>{text(language, "Enabled", "已啟用")}</span></label>
             <label className="service-check"><input checked={draft.autoStart} onChange={(event) => setDraft({ ...draft, autoStart: event.target.checked })} type="checkbox" /><span>{text(language, "Start with Coding Tools", "隨 Coding Tools 啟動")}</span></label>
-            <label className="service-check"><input checked={draft.keepAlive} onChange={(event) => setDraft({ ...draft, keepAlive: event.target.checked })} type="checkbox" /><span>{text(language, "Keep-alive inspect for multi-day runs (does not spawn engines)", "為多日任務保持探測（不會拉起引擎）")}</span></label>
+            <label className="service-check"><input checked={draft.keepAlive} onChange={(event) => setDraft({ ...draft, keepAlive: event.target.checked })} type="checkbox" /><span>{text(language, "Keep checking during multi-day tasks","為多日任務保持探測（不會拉起引擎）")}</span></label>
             </div>
           </details>
 
           {selected.error ? <p className="external-service-error">{selected.error}</p> : null}
-          {selected.stale ? <p className="external-service-error">{text(language, "Keep-alive snapshot is stale.", "保活快照已過期。")}</p> : null}
+          {selected.stale ? <p className="external-service-error">{text(language, "Status is out of date.","保活快照已過期。")}</p> : null}
           {notice ? <p className="external-service-notice">{notice}</p> : null}
 
           <div className="external-service-actions">
@@ -435,7 +435,7 @@ export function ExternalServicesSurface({
             <button disabled={busy !== null || !selected.owned} onClick={() => void stop()} type="button">{busy === "stop" ? "…" : text(language, "Stop", "停止")}</button>
             <button onClick={openSelected} type="button">
               {selected.id === "cpa"
-                ? text(language, "Open module APIs", "開啟模組 API")
+                ? text(language, "Open CPA","開啟模組 API")
                 : text(language, "Open related controls", "開啟相關控制")}
             </button>
           </div>

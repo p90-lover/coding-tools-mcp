@@ -79,7 +79,7 @@ function createAntigravityReauth({
       // The response carries the refreshed credential; it is deliberately discarded here.
       await management(`/v0/management/auth-files/refresh?name=${encodeURIComponent(name)}`, { method: "POST" });
     } catch (error) {
-      if (error.status === 404) throw new Error("This CPA build cannot refresh accounts; update CPA");
+      if (error.status === 404) throw new Error("This CPA version can't refresh accounts. Update CPA.");
       const current = (await accounts()).find(account => account.name === name);
       return { ok: false, account: current ?? null, error: String(error.message).slice(0, 300) };
     }
