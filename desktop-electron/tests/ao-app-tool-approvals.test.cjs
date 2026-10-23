@@ -19,10 +19,12 @@ test("every tool the app serves is covered by Approve for me as it is added; onl
   const { AGENT_TOOLS, TERMINAL_TOOLS, DESKTOP_TOOLS, reviewedTool } = require("../electron/chat-agent-tools.cjs");
   const { PREVIEW_TOOLS } = require("../electron/chat-preview.cjs");
   const { SUBAGENT_TOOLS } = require("../electron/subagents.cjs");
-  const all = [...AGENT_TOOLS, ...TERMINAL_TOOLS, ...DESKTOP_TOOLS, ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS];
+  const { CHAT_HISTORY_TOOLS } = require("../electron/chat-history.cjs");
+  const all = [...AGENT_TOOLS, ...TERMINAL_TOOLS, ...DESKTOP_TOOLS, ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS, ...CHAT_HISTORY_TOOLS];
   for (const name of all) {
     assert.equal(Boolean(routineAppTool(`mcp__coding-tools__${name}`)), !reviewedTool(name), name);
   }
+  for (const name of CHAT_HISTORY_TOOLS) assert.match(routineAppTool(`mcp__coding-tools__${name}`), /read-only/, name);
   // Seen in the log: the reviewer answered "ask" for these; they start, type and see nothing.
   for (const name of ["kill_command", "kill_session", "read_output", "check_exec_environment", "computer_status", "computer_stop", "vision_status"]) {
     assert.ok(routineAppTool(`mcp__coding-tools__${name}`), name);

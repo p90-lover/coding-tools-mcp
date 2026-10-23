@@ -2639,6 +2639,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (group === "preview") return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
     // subagent_start carries the whole brief, longer than a review reads: it waited for the person.
     if (group === "subagents") return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
+    // Read-only; another project's chats still need the person's own yes in the app (chat-agent-tools.cjs).
+    if (group === "chats") return "Reads the app's chats, read-only; other projects' chats only after you allow them";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";

@@ -36,12 +36,12 @@ function tempTree() {
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
-  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG } = {}) {
+  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
@@ -804,6 +804,74 @@ test("subagent tools reject ended parents without requiring a ready worktree", a
   } finally { await tools.close(); }
 });
 
+
+test("chat_list and chat_read read other chats; another project's need the user's yes once per project, never a subagent's", async () => {
+  const seen = [];
+  // A stand-in for chat-history.cjs: a call naming a project reads it only once permit says yes.
+  const chatHistory = { call: async ({ session, workspaceId, name, args, permit }) => {
+    seen.push({ session, workspaceId, name, args });
+    if (args.project) {
+      const allowed = await permit([{ id: args.project, name: `Project ${args.project}` }]);
+      if (allowed !== true) return allowed;
+    }
+    return { content: [{ type: "text", text: `read ${args.project ?? "own"}` }], isError: false };
+  } };
+  let answer = true;
+  const { tools, confirmations } = fixture({ chatHistory, workspaces: () => ({ ready: false }), confirm: async () => answer });
+  try {
+    const client = await session(tools);
+    const names = await listed(client.url, client.auth);
+    assert.ok(names.includes("chat_list") && names.includes("chat_read"), "offered without a worktree");
+    const init = await post(client.url, { jsonrpc: "2.0", id: nextId++, method: "initialize", params: {} }, client.auth);
+    assert.match(init.body.result.instructions, /chat_list lists this project's chats/);
+
+    // The own project: no dialog, and no worktree needed.
+    assert.equal((await callTool(client.url, client.auth, "chat_list", {})).content[0].text, "read own");
+    assert.deepEqual(seen[0], { session: "ao-1", workspaceId: "ws1", name: "chat_list", args: {} });
+    assert.equal(confirmations.length, 0);
+
+    // Another project: asked once, naming it; the yes holds for the rest of this chat.
+    assert.equal((await callTool(client.url, client.auth, "chat_read", { chat_id: "t1", project: "ws2", confirm: true })).content[0].text, "read ws2");
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0].message, /read chats in another project/);
+    assert.match(unwrapped(confirmations[0].detail), /Project ws2/);
+    assert.equal(seen.at(-1).args.confirm, undefined, "consent the agent gives itself is stripped");
+    assert.equal((await callTool(client.url, client.auth, "chat_list", { project: "ws2" })).isError, false);
+    assert.equal(confirmations.length, 1, "not asked again for the same project");
+
+    // A third project, declined: refused, and asked again next time.
+    answer = false;
+    const refused = await callTool(client.url, client.auth, "chat_list", { project: "ws3" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /did not allow this chat to read the chats of Project ws3/);
+    await callTool(client.url, client.auth, "chat_list", { project: "ws3" });
+    assert.equal(confirmations.length, 3);
+
+    // A subagent reads its own project only, without anyone asked.
+    const sub = await tools.lease({ agent: "codex", workspaceId: "ws1", subagent: true });
+    sub.bind("ao-sub");
+    const [{ url, headers }] = sub.servers;
+    const subAuth = { authorization: headers.Authorization };
+    assert.equal((await callTool(url, subAuth, "chat_list", {})).isError, false);
+    const subRefused = await callTool(url, subAuth, "chat_list", { project: "ws2" });
+    assert.match(subRefused.content[0].text, /A subagent reads only its own project's chats/);
+    assert.equal(confirmations.length, 3);
+
+    // A session launched to bypass permissions is not asked.
+    const bypass = await session(tools, { id: "ao-bypass", approvalMode: "bypass-permissions" });
+    assert.equal((await callTool(bypass.url, bypass.auth, "chat_list", { project: "ws9" })).isError, false);
+    assert.equal(confirmations.length, 3);
+  } finally { await tools.close(); }
+});
+
+test("without the chat history service the chat tools are neither listed nor callable", async () => {
+  const { tools } = fixture({ workspaces: () => ({ ready: false }) });
+  try {
+    const client = await session(tools);
+    assert.equal((await listed(client.url, client.auth)).includes("chat_list"), false);
+    assert.match((await callTool(client.url, client.auth, "chat_list", {})).content[0].text, /Unknown tool/);
+  } finally { await tools.close(); }
+});
 
 test("subagent parent validation also accepts synchronous workspace resolvers", async () => {
   let ended = false, called = 0;

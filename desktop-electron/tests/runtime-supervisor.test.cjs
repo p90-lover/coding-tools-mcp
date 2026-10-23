@@ -1758,7 +1758,8 @@ for (const [label, content] of [["empty", Buffer.alloc(0)], ["zero-filled", Buff
     fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
     fs.writeFileSync(supervisor.statePath, content);
     assert.equal(supervisor.readState(), null);
-    assert.deepEqual(fs.readFileSync(supervisor.statePath), content, "reading must not consume the marker");
+    // Set aside as missing (a power cut's torn marker), its bytes kept in Trash: checked below.
+    assert.equal(fs.existsSync(supervisor.statePath), false);
     supervisor.readConfig = () => launcherConfig(descriptor);
     supervisor.proxyHealth = async () => false;
     let starts = 0;
@@ -1813,7 +1814,7 @@ test("launcher fails closed on a corrupt runtime ownership marker", () => {
   }
 });
 
-test("a marker a power cut tore (NUL bytes, or empty) reads as missing, not as corrupt, and keeps its bytes", () => {
+test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cleared, not as corrupt", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-torn-runtime-state-"));
   const warnings = [];
   const supervisor = new RuntimeSupervisor({
@@ -1830,15 +1831,10 @@ test("a marker a power cut tore (NUL bytes, or empty) reads as missing, not as c
     for (const torn of [Buffer.alloc(233), Buffer.alloc(0), Buffer.from("\n")]) {
       fs.writeFileSync(supervisor.statePath, torn);
       assert.equal(supervisor.readState(), null);
-      assert.deepEqual(fs.readFileSync(supervisor.statePath), torn, "reading must not consume the marker");
+      assert.equal(fs.existsSync(supervisor.statePath), false, "it is set aside");
     }
     assert.deepEqual(warnings.map(([event]) => event), ["runtime.state_torn", "runtime.state_torn", "runtime.state_torn"]);
     assert.equal(warnings[0][1].bytes, 233);
-    assert.deepEqual(fs.readFileSync(warnings[0][1].backup), Buffer.alloc(233), "its bytes are kept in Trash");
-    // Health checks read the marker until the next write replaces it: one copy per version, not per read.
-    assert.equal(supervisor.readState(), null);
-    assert.equal(warnings[3][1].backup, warnings[2][1].backup);
-    assert.equal(fs.readdirSync(path.join(root, "Trash")).length, 3);
     supervisor.writeState("idle");
     assert.equal(supervisor.readState().status, "idle");
   } finally {
@@ -1846,7 +1842,7 @@ test("a marker a power cut tore (NUL bytes, or empty) reads as missing, not as c
   }
 });
 
-test("an unreadable marker reads as missing only when it was written before this boot", () => {
+test("an unreadable marker is set aside only when it was written before this boot", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-preboot-runtime-state-"));
   const warnings = [];
   const supervisor = new RuntimeSupervisor({
@@ -1867,7 +1863,7 @@ test("an unreadable marker reads as missing only when it was written before this
     const beforeBoot = new Date(Date.now() - os.uptime() * 1_000 - 60_000);
     fs.utimesSync(supervisor.statePath, beforeBoot, beforeBoot);
     assert.equal(supervisor.readState(), null);
-    assert.equal(fs.existsSync(supervisor.statePath), true, "reading must not consume the marker");
+    assert.equal(fs.existsSync(supervisor.statePath), false, "it is set aside, as a torn marker is");
     assert.deepEqual(warnings, ["runtime.state_discarded"]);
     const [backup] = fs.readdirSync(path.join(root, "Trash"));
     assert.equal(fs.readFileSync(path.join(root, "Trash", backup, "launcher-supervisor.json"), "utf8"), "{\n  \"version\": 1,\n  \"ownerPid\": 324");

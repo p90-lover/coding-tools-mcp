@@ -509,6 +509,24 @@ test("the pet is Claude Code's Clawd: the CLI's glyphs, poses and frame-by-frame
   assert.match(html, /<svg class="cx-clawd-glyphs" viewBox="0 0 18 12" width="72" height="48"/);
 });
 
+test("the pet stays where it stands while the chat box grows and shrinks a line at a time", () => {
+  const box = (width, height) => ({ width, height, length: 2 * (width + height), beside: true });
+  const short = box(740, 87), tall = box(740, 159);
+  // Four laps backwards round (it never wraps), on the right side 30 px above the bottom: the box
+  // growing from its top keeps it 30 px above the bottom, on the right side, on the same lap.
+  const right = -4 * short.length + 740 + 57;
+  const grown = pet.reanchor(short, tall, right);
+  assert.equal(Math.floor(grown / tall.length), -4, "same lap, so it never spins round");
+  assert.equal(grown - -4 * tall.length, 740 + 129, "right side, 30 px above the bottom");
+  // On the top edge it keeps its distance from the left corner and rides the edge up.
+  assert.equal(pet.reanchor(short, tall, 2 * short.length + 500), 2 * tall.length + 500);
+  // On the bottom it keeps its distance from the left; on the left side, its height above the bottom.
+  assert.equal(pet.reanchor(short, tall, 740 + 87 + 100), 740 + 159 + 100);
+  assert.equal(pet.reanchor(short, tall, 2 * 740 + 87 + 20), 2 * 740 + 159 + 20);
+  // Shrinking back puts it where it was.
+  assert.equal(pet.reanchor(tall, short, grown), right);
+});
+
 test("a walking pet reads no layout per frame and is redrawn at most 60 times a second", () => {
   // Seen 2026-10-23 on a 165 Hz screen: each walk step set the pet's spot and then read the box's
   // rect, a forced layout every frame (1,917 layouts and 3,933 style recalcs in 20 s).
