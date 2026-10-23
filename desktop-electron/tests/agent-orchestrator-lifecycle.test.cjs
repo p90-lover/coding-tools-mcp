@@ -536,7 +536,7 @@ test("a daemon that never listens fails at the limit", async (context) => {
   const harness = createHarness({ readySlowMs: 20, readyLimitMs: 300, readyFetch: () => { throw new Error("ECONNREFUSED"); } });
   const { controller } = harness;
   context.after(() => controller.stop());
-  await assert.rejects(controller.start(), /AO readiness timed out/);
+  await assert.rejects(controller.start(), /Agent Orchestrator timed out getting ready/);
   assert.equal(controller.snapshot().state, "error");
 });
 

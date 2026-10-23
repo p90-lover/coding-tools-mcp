@@ -1676,19 +1676,24 @@ class RuntimeSupervisor {
   }
 
   async ownedRuntimeReady(config) {
+    return (await this.ownedRuntimeCheck(config)).ready;
+  }
+
+  // The same check, saying which part failed: the launcher watchdog logs it with each miss.
+  async ownedRuntimeCheck(config) {
+    const verdict = (failed) => ({ ready: !failed, ...(failed ? { failed } : {}) });
+    const tunnelVerdict = async () => {
+      if (!this.tunnel) return verdict("tunnel_missing");
+      return verdict(await this.tunnelHealth(config) ? null : "tunnel_health");
+    };
     if (this.launcherProfile === "development") {
-      return config.mode !== "full" || Boolean(this.tunnel && await this.tunnelHealth(config));
+      return config.mode !== "full" ? verdict(null) : tunnelVerdict();
     }
     const daemon = this.daemon;
-    if (!daemon
-      || !Number.isInteger(daemon.pid)
-      || daemon.exitCode !== null
-      || daemon.signalCode !== null
-      || !await this.proxyHealth(config, 2_000, daemon.pid, true)) {
-      return false;
-    }
-    if (config.mode !== "full") return true;
-    return Boolean(this.tunnel && await this.tunnelHealth(config));
+    if (!daemon || !Number.isInteger(daemon.pid)) return verdict("daemon_missing");
+    if (daemon.exitCode !== null || daemon.signalCode !== null) return verdict("daemon_exited");
+    if (!await this.proxyHealth(config, 2_000, daemon.pid, true)) return verdict("daemon_health");
+    return config.mode !== "full" ? verdict(null) : tunnelVerdict();
   }
 
   async control(config, action, options = {}) {
