@@ -91,10 +91,11 @@ export type ChatLiveItem = {
 };
 
 /**
- * Claude Code's receipt on a message the person sent mid-turn: "unread" once the agent has it (a
- * faded check, "Unread"), "read" once its model has taken it (a double check, "Read by Claude").
+ * Claude Code's receipt on a message the person sent mid-turn: "sending" while it is on its way to
+ * the agent (a pulsing faint check), "unread" once the agent has it (a faded check, "Unread"), "read"
+ * once its model has taken it (a double check, "Read by Claude").
  */
-export type SteerReceipt = "unread" | "read";
+export type SteerReceipt = "sending" | "unread" | "read";
 const TOOL_KINDS = new Set(["tool", "command", "edit"]);
 const MODEL_OUTPUT_KINDS = new Set(["message", "reasoning", ...TOOL_KINDS]);
 
