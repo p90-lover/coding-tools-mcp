@@ -350,7 +350,7 @@ test("a chat that cannot be steered keeps the old hint on a stuck turn instead o
   assert.match(text(running), /may be stuck · send a message to restart it$/);
 });
 
-test("while the agent works, /review and /init steer it; a new goal waits for the turn; /rewind goes back to a message", async () => {
+test("while the agent works, /review, /init and a new goal steer it; /rewind goes back to a message", async () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const steered = [], rewound = [];
   const { props, calls } = base({ selectedTaskId: "t", working: true,
@@ -372,29 +372,10 @@ test("while the agent works, /review and /init steer it; a new goal waits for th
   type("/init"); await enter();
   assert.match(steered.at(-1).message, /^Generate a file named AGENTS\.md/);
   type("/goal finish the migration"); await enter();
-  assert.equal(steered.length, 2, "a goal is never steered");
-  assert.equal(card(), undefined, "queued like a message: no card");
-  // It waits in Claude Code's queued-message bar, behind the two steers still on their way.
-  const all = () => walk(view.render());
-  const stack = all().find((element) => element.props?.className === "cx-queued-band cx-queued-stack");
-  assert.match(text(stack), /^3 messages queuedNext: Review the current code changes/);
-  stack.props.onClick();
-  const goalRow = () => all().find((element) => element.props?.className === "cx-queued-row" && text(element) === "/goal finish the migration");
-  assert.equal(goalRow()?.props["data-state"], "queued", "the queued goal shows as typed");
-  walk(goalRow()).find((element) => element.props?.["aria-label"] === "Queued message actions").props.onClick({ currentTarget: { getBoundingClientRect: () => ({ right: 700, bottom: 500 }) } });
-  const menu = all().find((element) => element.type === "ChatMenu").props.menu;
-  assert.deepEqual(JSON.parse(JSON.stringify(menu.items.map((item) => item.kind === "separator" ? "-" : [item.label, item.reason ?? null, Boolean(item.danger)]))),
-    [["Edit in composer", null, false], ["Send now", "A goal starts when the current turn finishes", false], "-", ["Remove from queue", null, true]],
-    "a goal is never steered in: Send now waits for the turn");
-  // Edit in composer puts the command back in the box.
-  menu.items[0].run();
-  assert.equal(goalRow(), undefined);
-  assert.equal(walk(view.render()).find((element) => element.type === "textarea").props.value, "/goal finish the migration");
-  type("/goal finish the migration"); await enter();
-  assert.ok(goalRow(), "queued again");
-  type("/goal clear"); await enter();
-  assert.match(text(card()), /The queued goal was dropped/);
-  assert.equal(goalRow(), undefined);
+  // As in Claude Code, the goal steers in mid-turn (its first round) instead of waiting for the turn.
+  assert.equal(steered.length, 3, "a goal steers in too");
+  assert.deepEqual([steered[2].message, steered[2].goal], ["finish the migration", "finish the migration"]);
+  assert.doesNotMatch(text(card() ?? { props: {} }), /Queued/);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
 
   // /rewind lists the messages (newest first) and opens the chosen one to edit; a number picks directly.
@@ -598,7 +579,8 @@ test("each chat has its own queue: queuing in another chat never replaces one, a
   assert.ok(queue.includes("queueOf(task)") && queue.includes("setQueue(task, rest)"), "a chat's queue is sent only into that chat, one item at a time");
   assert.ok(queue.includes("sentWhileFree.current"), "one item per finished turn, never two into the same free spell");
   assert.ok(queue.includes("setDraft((typed) => (typed.trim() ? `${typed}\\n\\n${next.message}` : next.message))"), "a queued message that can't be sent goes back into the composer, after what is typed");
-  assert.ok(queue.includes("deliver(next.message, next.goal, false)") && queue.includes("deliver(next.message, undefined, false)"), "a background send leaves the composer alone");
+  assert.equal(queue.split("deliver(next.message, next.goal, false)").length, 3, "a background send or steer leaves the composer alone");
+  assert.ok(!queue.includes('next.what !== "Message"'), "a queued command steers in like a message");
   // A failed steer waits a growing pause (15 s, 30 s, 60 s) before the next try, never a loop.
   assert.ok(queue.includes("steerRetry.current = { attempts, until: Date.now() + wait }") && queue.includes("Date.now() < steerRetry.current.until"),
     "a steer that fails is not retried in a loop");
