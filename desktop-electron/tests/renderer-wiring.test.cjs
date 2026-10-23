@@ -76,6 +76,11 @@ test("Refresh menu reports every open and close path to the Register native gate
     toggleSidebar() {}, setError: (value) => errors.push(value), onRefreshMenuOpenChange: notify });
   const menu = nodes(titlebar, exports.RefreshMenu)[0];
   assert.equal(menu.props.onOpenChange, notify, "TitleBar must forward the visibility callback");
+  // A clicked sidebar toggle must not keep focus: a later Space or Enter would hide the sidebar.
+  assert.equal(nodes(titlebar, "icon-button")[0].props.releaseFocus, true);
+  assert.match(appSource, /onMouseDown=\{releaseFocus \? \(event\) => event\.preventDefault\(\) : undefined\}/);
+  // A manual browser tab closes only the compact sidebar, never the docked one.
+  assert.match(appSource, /setSurface\("browser"\);\s*\/\/[^\n]*\n\s*if \(window\.matchMedia\(COMPACT_SIDEBAR_QUERY\)\.matches\) setSidebarOpen\(false\);/);
   assert.match(appSource, /onRefreshMenuOpenChange=\{setRefreshMenuOpen\}/);
   const expression = /<RegisterSurface[\s\S]*?active=\{([^}]+)\}/.exec(appSource)[1];
   const gate = new Function("surface", "compactSidebar", "sidebarOpen", "biggerContextRecommendationOpen", "sessionReminderDue", "refreshMenuOpen", "return " + expression);

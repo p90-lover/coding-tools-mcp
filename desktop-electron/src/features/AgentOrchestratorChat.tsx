@@ -24,7 +24,7 @@ import {
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
-  chatLoopParse, loopInterval, loopLabel, type ChatLoop,
+  chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -1453,18 +1453,19 @@ export function AgentOrchestratorChat({
    * Sends a command's message now when the chat is free, steers it into the working agent when it
    * can be steered (a goal too, as its first round), and otherwise queues it for when the current turn finishes.
    */
-  const dispatch = async (what: string, message: string, goal?: string): Promise<"sent" | "queued" | false> => {
+  const dispatch = async (what: string, message: string, goal: string | undefined, typed: string): Promise<"sent" | "queued" | false> => {
     if (busy || sending) { say(what, "Another action is running. Try again in a moment."); return false; }
     if (accepts || steering) return await deliver(message, goal) ? "sent" : false;
-    setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message, ...(goal ? { goal } : {}) }));
-    say(what, `Queued. It's sent when this turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
+    // Queued as Claude Code queues a command: it joins the queued messages above the composer, as
+    // typed. The "Queued. It's sent when this turn finishes" card is gone.
+    setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message, ...(goal ? { goal } : {}), typed }));
+    setCard(null);
     return "queued";
   };
   // The queued-message bar: the steers still on their way to the agent (Claude Code's head of the
-  // queue, which goes first), then this chat's queued messages (a command or a goal waits out of
-  // sight, as before). Send now steers a message in at once,
-  // or sends it when the chat is free; while the agent waits on its own request steering would
-  // cancel that request, so it waits too.
+  // queue, which goes first), then this chat's queued messages and commands. Send now steers one in
+  // at once (a goal too, as its first round), or sends it when the chat is free; while the agent
+  // waits on its own request steering would cancel that request, so it waits too.
   const sendNowBlocked = busy || sending ? "Another message is being sent"
     : accepts || (steering && !awaitingAnswer) ? undefined
     : awaitingAnswer ? "Answer the agent's request first" : "Sent when the current turn finishes";
@@ -1476,8 +1477,27 @@ export function AgentOrchestratorChat({
   // A steer is in the chat from the moment it is sent (pendingShown), not in this bar. One that waits
   // for the agent's own request is in the queue too, to go in later; it shows once, in the chat.
   const steerWaiting = (message: string) => pendingSteers.some((entry) => entry.taskId === selectedTaskId && entry.waiting && entry.text === message);
-  const queuedBar: QueuedBarItem[] = [
-    ...queued.flatMap((item, index): QueuedBarItem[] => item.what !== "Message" || item.goal || steerWaiting(item.message) ? [] : [{
+  const queuedBar: QueuedBarItem[] = queued.flatMap((item, index): QueuedBarItem[] => {
+    if (item.what === "Message" && !item.goal) return steerWaiting(item.message) ? [] : [queuedMessageItem(item, index)];
+    // A command shows as typed; clicking it puts it back in the composer, ahead of anything typed.
+    const typed = item.typed ?? (item.goal ? `/goal ${item.goal}` : `/${item.what.toLowerCase()}`);
+    return [{
+      key: `queued:${index}:${typed.length}`, text: typed, state: "queued", sendNowBlocked,
+      onRemove: () => { takeQueued(index); },
+      onEdit: () => {
+        if (!takeQueued(index)) return;
+        setDraft((draft) => (draft.trim() ? `${typed}\n\n${draft}` : typed));
+        input.current?.focus();
+      },
+      onSendNow: () => {
+        const task = selectedTaskId, taken = takeQueued(index);
+        if (!taken) return;
+        void deliver(taken.message, taken.goal, false).then((sent) => { if (!sent) setQueue(task, [taken, ...queueOf(task)]); });
+      },
+    }];
+  });
+  function queuedMessageItem(item: QueuedChatMessage, index: number): QueuedBarItem {
+    return {
       key: `queued:${index}:${item.message.length}`, text: item.message, state: "queued", sendNowBlocked,
       onRemove: () => { takeQueued(index); },
       onEdit: () => {
@@ -1496,8 +1516,8 @@ export function AgentOrchestratorChat({
         if (!taken) return;
         void deliver(taken.message, undefined, false).then((sent) => { if (!sent) setQueue(task, [taken, ...queueOf(task)]); });
       },
-    }]),
-  ];
+    };
+  }
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
   const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
   // Delete message: the turn whose message waits for the in-chat confirmation, or null. A message
@@ -1560,7 +1580,7 @@ export function AgentOrchestratorChat({
           if (goal && ["active", "paused"].includes(goal.status)
             && !window.confirm("Replace the current goal?\n\nThe chat stays. Only its goal changes.")) { setDraft(`/goal ${arg}`); break; }
           // While a turn is working the goal steers in (its first round); if the agent can't be steered it waits for the turn.
-          const outcome = await dispatch("Goal", arg, arg);
+          const outcome = await dispatch("Goal", arg, arg, `/goal ${arg}`);
           if (!outcome) setDraft(`/goal ${arg}`);
           else if (outcome === "sent") setCard(null);
           break;
@@ -1611,10 +1631,10 @@ export function AgentOrchestratorChat({
           say("Compact", await commands.compact());
           break;
         case "review":
-          if (await dispatch("Review", reviewPrompt(arg)) === "sent" && !accepts) say("Review", "Sent to the working agent.");
+          if (await dispatch("Review", reviewPrompt(arg), undefined, arg ? `/review ${arg}` : "/review") === "sent" && !accepts) say("Review", "Sent to the working agent.");
           break;
         case "init":
-          if (await dispatch("Init", INIT_PROMPT) === "sent" && !accepts) say("Init", "Sent to the working agent.");
+          if (await dispatch("Init", INIT_PROMPT, undefined, "/init") === "sent" && !accepts) say("Init", "Sent to the working agent.");
           break;
         case "rewind": {
           if (!thread?.rewind) break;
@@ -1783,7 +1803,7 @@ export function AgentOrchestratorChat({
               {feedback ? <div className="cx-hook-feedback" role="note">
                 <span className="cx-hook-feedback-mark" aria-hidden="true">⎿</span>
                 <span className="cx-hook-feedback-text">Stop hook feedback:{"\n"}[{feedback.objective}]: {feedback.reason}</span>
-                {turn.user?.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
+                {turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
               </div> : turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
                 <MessageActions text={chatMessageReadable(turn.user.text)}>
@@ -1792,7 +1812,7 @@ export function AgentOrchestratorChat({
                   {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
                     disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}>🗑</button> : null}
                 </MessageActions>
-                {turn.user.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
+                {turn.user.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
               </div> : null}
               {/* Messages steered into this turn. While it works they show in its live timeline, where
                   they were sent; once it is done, here under the turn's message. */}
@@ -1802,7 +1822,7 @@ export function AgentOrchestratorChat({
                   {/* Saved only once the agent took it; a turn that finished read it, one that stopped may not have. */}
                   <div className="cx-msg-foot"><SteerReceiptMark receipt={turn.status === "done" ? "read" : liveTurn(turn) ? "unread" : undefined} />
                     <MessageActions text={chatMessageReadable(steer.text)} /></div>
-                  <span className="cx-stamp">{steer.stamp} UTC</span>
+                  <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
                 </div>)}</SteerReader.Provider> : null}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
@@ -2110,7 +2130,8 @@ export function AgentOrchestratorChat({
             above its branch (PR) bar: under it, a steer sat between "main" and the box. */}
         <QueuedMessageBar items={queuedBar}
           onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
-          onClearAll={() => setQueue(selectedTaskId, queueOf(selectedTaskId).filter((item) => item.what !== "Message" || item.goal))} />
+          // Queued commands and goals show in the bar too now, so Clear all clears all of them.
+          onClearAll={() => setQueue(selectedTaskId, [])} />
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
             Harness shows its approval panel: in the thread it took the thread's own margins and sat

@@ -261,7 +261,12 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   type(teamChat, "/compact"); await enter(teamChat);
   assert.match(text(cardOf(teamChat)), /Can't compact while the chat is running/);
   type(teamChat, "/review"); await enter(teamChat);
-  assert.match(text(cardOf(teamChat)), /Queued\. It's sent when this turn finishes/, "a command that sends queues behind the working turn");
+  // Claude Code queues a command as it queues a message: in its queued-message bar, as typed. The
+  // user: "remake the steer message panel exact the same as claude code" (the "Queued: it's sent
+  // when the current turn finishes" card).
+  const band = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-queued-band"));
+  assert.equal(text(band), "1 message queued/review", "a command that sends queues behind the working turn, shown as typed");
+  assert.equal(cardOf(teamChat), undefined, "no card says it was queued");
   assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the releaseRound \d+( of \d+)? · 5m \d+s$/, "Codex's goal bar: state, objective, round, running time");

@@ -495,7 +495,8 @@ function LauncherShell({
   useEffect(() => {
     if (!selectedManualTab) return;
     setSurface("browser");
-    setSidebarOpen(false);
+    // Only the compact sidebar covers the browser; the docked one stays as the user left it.
+    if (window.matchMedia(COMPACT_SIDEBAR_QUERY).matches) setSidebarOpen(false);
     setBiggerContextRecommendationOpen(false);
     void api!.setBrowserSurfaceActive(true).catch((cause) => setError(messageOf(cause)));
   }, [selectedManualTab?.id, selectedManualTab?.manualState, setError]);
@@ -1126,6 +1127,7 @@ function TitleBar({
           icon="sidebar"
           label={sidebarOpen ? copy.hideSidebar : copy.showSidebar}
           onClick={toggleSidebar}
+          releaseFocus
         />
         <RefreshMenu setError={setError} onOpenChange={onRefreshMenuOpenChange} />
         {devProfile ? <span className="titlebar-dev-profile">{copy.devBadge}</span> : null}
@@ -2946,11 +2948,14 @@ function IconButton({
   icon,
   label,
   onClick,
+  releaseFocus = false,
 }: {
   disabled?: boolean;
   icon: IconName;
   label: string;
   onClick: () => void;
+  /** A mouse click doesn't take focus, so a later Space or Enter can't press the button again. */
+  releaseFocus?: boolean;
 }) {
   return (
     <button
@@ -2958,6 +2963,7 @@ function IconButton({
       className="icon-button"
       disabled={disabled}
       onClick={onClick}
+      onMouseDown={releaseFocus ? (event) => event.preventDefault() : undefined}
       title={label}
       type="button"
     >

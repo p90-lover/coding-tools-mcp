@@ -12,25 +12,37 @@ test("Approve for me answers the app's own reads and worktree edits itself", () 
   }
 });
 
-test("every tool of the chat's own groups is covered by Approve for me as it is added; the terminal and the screen go to the reviewer", () => {
-  // The user: "it doesn't auto register chat harness tools for the auto review list". The groups are
-  // read from the tools' own modules, so a tool added there needs no second list here.
-  const { AGENT_TOOLS, TERMINAL_TOOLS, DESKTOP_TOOLS } = require("../electron/chat-agent-tools.cjs");
+test("every tool the app serves is covered by Approve for me as it is added; only what the app itself confirms goes to the reviewer", () => {
+  // The user: "the auto review still doesnt cover on all chat harness tools and when new chat harness
+  // tools came out, it still didnt registered it into the auto review list". What is reviewed is read
+  // from the tools' own module (reviewedTool), so a tool added to any group needs no second list here.
+  const { AGENT_TOOLS, TERMINAL_TOOLS, DESKTOP_TOOLS, reviewedTool } = require("../electron/chat-agent-tools.cjs");
   const { PREVIEW_TOOLS } = require("../electron/chat-preview.cjs");
   const { SUBAGENT_TOOLS } = require("../electron/subagents.cjs");
   const { CHAT_HISTORY_TOOLS } = require("../electron/chat-history.cjs");
-  for (const name of [...AGENT_TOOLS, ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS, ...CHAT_HISTORY_TOOLS]) assert.ok(routineAppTool(`mcp__coding-tools__${name}`), name);
-  for (const name of [...TERMINAL_TOOLS, ...DESKTOP_TOOLS].filter((tool) => !["check_exec_environment", "read_output"].includes(tool))) {
+  const all = [...AGENT_TOOLS, ...TERMINAL_TOOLS, ...DESKTOP_TOOLS, ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS, ...CHAT_HISTORY_TOOLS];
+  for (const name of all) {
+    assert.equal(Boolean(routineAppTool(`mcp__coding-tools__${name}`)), !reviewedTool(name), name);
+  }
+  for (const name of CHAT_HISTORY_TOOLS) assert.match(routineAppTool(`mcp__coding-tools__${name}`), /read-only/, name);
+  // Seen in the log: the reviewer answered "ask" for these; they start, type and see nothing.
+  for (const name of ["kill_command", "kill_session", "read_output", "check_exec_environment", "computer_status", "computer_stop", "vision_status"]) {
+    assert.ok(routineAppTool(`mcp__coding-tools__${name}`), name);
+  }
+  // A command, typed input, every screen observation and every control action stay reviewed.
+  for (const name of ["exec_command", "write_stdin", "capture_screenshot", "capture_window", "capture_process", "list_windows",
+    "list_displays", "computer_list_windows", "computer_snapshot", "computer_action", "computer_sequence", "computer_route",
+    "computer_select_window", "computer_find_control", "computer_wait"]) {
     assert.equal(routineAppTool(`mcp__coding-tools__${name}`), null, `${name} is reviewed, not routine`);
   }
-  assert.ok(SUBAGENT_TOOLS.size >= 5 && PREVIEW_TOOLS.size >= 10, "the groups are the real ones");
+  assert.ok(SUBAGENT_TOOLS.size >= 8 && PREVIEW_TOOLS.size >= 10, "the groups are the real ones");
 });
 
-test("the terminal, the screen, unknown tools and look-alike servers still go to the person", () => {
+test("the terminal's commands and input, the screen, unknown tools and look-alike servers still go to the reviewer", () => {
   for (const name of [
-    "mcp__coding-tools__exec_command", "mcp__coding-tools__write_stdin", "mcp__coding-tools__kill_command",
+    "mcp__coding-tools__exec_command", "mcp__coding-tools__write_stdin",
     "mcp__coding-tools__computer_click", "mcp__coding-tools__capture_screenshot", "mcp__coding-tools__list_windows",
-    "mcp__coding-tools__vision_status", "mcp__coding-tools__capture_process", "mcp__coding-tools__capture_window",
+    "mcp__coding-tools__computer_action", "mcp__coding-tools__capture_process", "mcp__coding-tools__capture_window",
     "mcp__coding-tools__delete_everything",
     "mcp__coding-tools-evil__read_file", "mcp__coding_tools__read_file", "mcp__other__read_file", "read_file",
     "mcp__coding-tools__read_file_extra", "", undefined,
