@@ -3440,6 +3440,34 @@ function wakeChat({ goal = false, hold = false, loopsFile = null } = {}) {
 }
 const wakeupOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).wakeups["task-1"];
 
+test("the agent's goal tools work as Codex's: it creates, completes, blocks, pauses or edits; resuming stays the user's", async () => {
+  const { workflow } = wakeChat();
+  const tool = (args) => workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", ...args });
+  const saved = async () => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
+  await assert.rejects(tool({ action: "update", status: "complete" }), /this thread has no goal/);
+  assert.equal((await tool({ action: "get" })).goal, null);
+  await assert.rejects(tool({ action: "create", objective: "make CI green", tokenBudget: 0 }), /budgets must be positive/);
+  const created = await tool({ action: "create", objective: "make CI green", tokenBudget: 50_000 });
+  assert.equal(created.goal.status, "active");
+  assert.equal(created.goal.objective, "make CI green");
+  assert.equal(created.goal.tokenBudget, 50_000);
+  assert.equal((await saved()).lastRunId, "r1", "the turn that set it is round 1, judged when it settles");
+  await assert.rejects(tool({ action: "create", objective: "something else" }), /unfinished goal; complete the existing goal first/);
+  assert.equal((await tool({ action: "update", objective: "make CI and lint green" })).goal.objective, "make CI and lint green");
+  assert.equal((await tool({ action: "update", status: "paused" })).goal.status, "paused");
+  assert.equal((await saved()).status, "paused");
+  await assert.rejects(tool({ action: "update", status: "active" }), /controlled by the user or system/);
+  await assert.rejects(tool({ action: "update" }), /a status or an objective/);
+  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "blocked");
+  assert.equal((await saved()).status, "stalled");
+  const done = await tool({ action: "update", status: "complete" });
+  assert.equal(done.goal.status, "complete");
+  assert.match(done.completionBudgetReport, /^Goal achieved\. Report final usage/);
+  assert.equal((await saved()).status, "achieved");
+  assert.equal((await tool({ action: "create", objective: "ship the release" })).goal.objective, "ship the release", "a complete goal is replaced");
+  await assert.rejects(workflow.goalTool({ workspaceId: "ws-1", session: "someone-else", action: "get" }), /not one of this project's chats/);
+});
+
 test("a wake-up sends the chat the agent's note after its minutes, on the same Single model", async () => {
   const { world, workflow, route, advance } = wakeChat();
   const scheduled = await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 10, reason: "see whether CI run 42 passed" });
@@ -5843,6 +5871,9 @@ test("Approve for me: the chat's preview tools and routine commands through the 
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe" });
   for (const tool of ["preview_open", "preview_read", "preview_screenshot", "preview_click", "preview_console"]) {
     assert.ok(workflow.routineAppTool(`mcp__coding-tools__${tool}`), tool);
+  }
+  for (const tool of ["get_goal", "create_goal", "update_goal"]) {
+    assert.match(workflow.routineAppTool(`mcp__coding-tools__${tool}`), /chat's own goal/, tool);
   }
   assert.equal(workflow.routineAppTool("mcp__coding-tools__preview_eval"), null, "only the preview tools that exist");
   assert.equal(workflow.routineAppTool("mcp__other__preview_open"), null, "only the app's own server");
