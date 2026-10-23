@@ -108,6 +108,8 @@ let annotationIds = 0;
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 /** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
 const PET_KEY = "coding-tools:ao:pet";
+/** Sent to every chat in the window when the pet is shown or hidden (its detail: shown). */
+const PET_EVENT = "coding-tools:ao:pet-shown";
 /** What an AO agent is started with; a follow-up with any of them changed gets a new agent (continuationCard). */
 type RouteFields = Record<string, unknown>;
 /** A route's model as the composer's picker names it ("MiMo V2.6 Pro"), not its id. */
@@ -1050,10 +1052,18 @@ export function AgentOrchestratorChat({
   });
   // Bit, the chat's pet (ChatPet), shown unless turned off from the header menu or its own right-click.
   const [petOn, setPetOn] = useState(() => { try { return localStorage.getItem(PET_KEY) !== "off"; } catch { return true; } });
-  const togglePet = () => setPetOn((current) => {
-    try { localStorage.setItem(PET_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
-    return !current;
-  });
+  // In split view the panes share one pet: hiding it in one pane hides it in all of them.
+  const togglePet = () => {
+    const next = !petOn;
+    try { localStorage.setItem(PET_KEY, next ? "on" : "off"); } catch { /* applies now regardless */ }
+    setPetOn(next);
+    window.dispatchEvent(new CustomEvent<boolean>(PET_EVENT, { detail: next }));
+  };
+  useEffect(() => {
+    const shown = (event: Event) => setPetOn((event as CustomEvent<boolean>).detail === true);
+    window.addEventListener(PET_EVENT, shown);
+    return () => window.removeEventListener(PET_EVENT, shown);
+  }, []);
   // The context ring's reading, which the pet's belly follows.
   const [contextShare, setContextShare] = useState<number | null>(null);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
