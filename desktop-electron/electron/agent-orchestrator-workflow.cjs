@@ -2626,11 +2626,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   //     the goal tools).
   //   - PREVIEW_TOOLS: the chat's own browser, loopback pages only, each new address allowed by you.
   //   - SUBAGENT_TOOLS: the user's own subagents, which run under the same safety rules.
+  //   - CHAT_HISTORY_TOOLS (chat-history.cjs): read the app's chats; other projects' after you allow them.
   // The terminal (TERMINAL_TOOLS) and the screen (DESKTOP_TOOLS) are not routine: their requests go
   // to the reviewer (and the routine-command rules), apart from the terminal's two reads.
   const { AGENT_TOOLS, GOAL_TOOLS } = require("./chat-agent-tools.cjs");
   const { PREVIEW_TOOLS } = require("./chat-preview.cjs");
   const { SUBAGENT_TOOLS } = require("./subagents.cjs");
+  const { CHAT_HISTORY_TOOLS } = require("./chat-history.cjs");
   const TERMINAL_READS = new Set(["check_exec_environment", "read_output"]);
   const APP_EDITS = new Set(["apply_patch", "patch_check"]);
   /** Why an app agent-tool call "Approve for me" may answer itself, or null. */
@@ -2641,6 +2643,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (PREVIEW_TOOLS.has(short)) return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
     // subagent_start carries the whole brief, longer than a review reads: it waited for the person.
     if (SUBAGENT_TOOLS.has(short)) return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
+    // Read-only; another project's chats still need the person's own yes in the app (chat-agent-tools.cjs).
+    if (CHAT_HISTORY_TOOLS.has(short)) return "Reads the app's chats, read-only; other projects' chats only after you allow them";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
     if (GOAL_TOOLS.has(short)) return "This chat's own goal, as Codex's goal tools set it; it runs nothing";
