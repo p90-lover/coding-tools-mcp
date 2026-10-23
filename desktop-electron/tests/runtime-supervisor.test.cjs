@@ -1745,6 +1745,56 @@ test("stale ownership recovery stops a managed tmux runtime even though it has n
   }
 });
 
+for (const [label, content] of [["empty", Buffer.alloc(0)], ["zero-filled", Buffer.alloc(179)]]) {
+  test(`launcher recovers a ${label} ownership marker without losing its bytes`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-empty-ownership-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const descriptor = path.join(root, "launcher.json");
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root, coreHome: root, browserDescriptorPath: descriptor,
+    });
+    fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+    fs.writeFileSync(supervisor.statePath, content);
+    assert.equal(supervisor.readState(), null);
+    assert.deepEqual(fs.readFileSync(supervisor.statePath), content, "reading must not consume the marker");
+    supervisor.readConfig = () => launcherConfig(descriptor);
+    supervisor.proxyHealth = async () => false;
+    let starts = 0;
+    supervisor.startDaemon = async () => { starts += 1; };
+    supervisor.startTunnel = async () => {};
+    assert.equal((await supervisor.startConfigured()).status, "ready");
+    assert.equal(starts, 1);
+    assert.equal(JSON.parse(fs.readFileSync(supervisor.statePath, "utf8")).status, "ready");
+    const trash = path.join(root, "Trash");
+    const backups = fs.readdirSync(trash);
+    assert.ok(backups.length > 0);
+    for (const backup of backups) {
+      assert.deepEqual(fs.readFileSync(path.join(trash, backup, "launcher-supervisor.json")), content);
+    }
+  });
+}
+
+test("a zero-filled marker never authorizes taking over a healthy unowned runtime", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-empty-unowned-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const descriptor = path.join(root, "launcher.json");
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root, coreHome: root, browserDescriptorPath: descriptor,
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  fs.writeFileSync(supervisor.statePath, Buffer.alloc(179));
+  supervisor.readConfig = () => launcherConfig(descriptor);
+  supervisor.proxyHealth = async () => true;
+  supervisor.startDaemon = async () => assert.fail("must not start a second runtime");
+  supervisor.control = async () => assert.fail("must not control an unowned runtime");
+  assert.equal((await supervisor.startConfigured()).status, "external");
+  assert.equal(supervisor.daemon, null);
+});
+
 test("launcher fails closed on a corrupt runtime ownership marker", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-corrupt-runtime-state-"));
   const supervisor = new RuntimeSupervisor({

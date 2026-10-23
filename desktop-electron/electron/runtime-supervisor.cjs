@@ -513,7 +513,17 @@ class RuntimeSupervisor {
   readState() {
     if (!fs.existsSync(this.statePath)) return null;
     try {
-      const state = readJson(this.statePath);
+      const bytes = fs.readFileSync(this.statePath);
+      if (bytes.length === 0 || bytes.every((byte) => byte === 0)) {
+        // No ownership can be recovered from an empty file. Keep it and use the normal missing-state checks.
+        const trash = path.join(this.coreHome, "Trash");
+        fs.mkdirSync(trash, { recursive: true, mode: 0o700 });
+        const backup = path.join(fs.mkdtempSync(path.join(trash, "runtime-ownership-")), path.basename(this.statePath));
+        fs.writeFileSync(backup, bytes, { flag: "wx", mode: 0o600 });
+        this.logger.warn("runtime.empty_ownership_state_quarantined", { backup, bytes: bytes.length });
+        return null;
+      }
+      const state = JSON.parse(bytes.toString("utf8"));
       const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
       if (!state
         || state.version !== 1
