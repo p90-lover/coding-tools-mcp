@@ -1698,8 +1698,14 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     lastPrewarm.current = Date.now();
     void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
   }, [prewarmKey, composerMode, singleRoute, savedTeams, composerTeamId, workspaceId, chatTaskId]);
-  const retryChatStart = (runId: string) => void run("start-run", async () => {
+  // Guarded per chat (chatRun), like the chat list's actions: run() skipped Retry without a word
+  // while anything else was in flight (another chat's start awaiting consent, a team save), and the
+  // failed-step card's button sat disabled, so "Retry step" did nothing.
+  const retryChatStart = (runId: string) => {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
+    void chatRun(taskId || runId, () => retryRun(runId, taskId)).catch(() => undefined);
+  };
+  const retryRun = async (runId: string, taskId: string) => {
     try {
       const mission = missions.find(item => item.id === runId);
       // Retry ran the run's saved route again: a model that had gone failed the same way however
@@ -1727,7 +1733,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       if (currentRun()) setChatNotices((current) => ({ ...current, [taskId]: cause instanceof Error ? cause.message : String(cause) }));
     }
     await loadMissions(workspaceId);
-  });
+  };
   // Team opens this chat's own mission graph (never another task's shared template); its role
   // inspector edits that mission's captured draft live. No writes happen on open.
   const openTeam = () => {
@@ -2593,7 +2599,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                   loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies} />}
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}
-                retryStart={retryChatStart}
+                retryStart={retryChatStart} retrying={Boolean(chatTaskId && chatBusy.includes(chatTaskId))}
                 describeNode={describeChatNode} activity={chatActivity} modelName={chatModelName}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
               </ChatSplit>

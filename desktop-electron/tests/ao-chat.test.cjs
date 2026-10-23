@@ -1210,14 +1210,18 @@ test("late start, restart, retry and pause replies cannot change another selecte
     for (const keepSelection of [false, true]) {
       const reply = delayedReply(), done = delayedReply(), calls = [], state = { selected: "run-a", status: "idle" };
       let matching = true;
-      const callback = rendererCallback("AgentOrchestratorSurface.tsx", name, {
+      const globals = {
         selectedRun: { id: "run-a" }, workspaceId: "a", currentRun: () => matching,
         run: async (_name, action) => { await action(); done.resolve(); },
+        // Retry is guarded per chat (chatRun), and its work is retryRun.
+        chatRun: async (_task, action) => { await action(); done.resolve(); },
         moduleCall: async (operation, args) => { calls.push([operation, args]); return reply.promise; }, executableArg: () => ({}), loadMissions: async () => {},
         composerMode: "single", singleRoute: { model: "default" }, missions: [], routeIdentity: value => value,
         setSelectedRunId: value => { state.selected = value; }, setAutoStatus: value => { state.status = value; },
         setAdvanceNotice() {}, setError() {}, setChatNotices() {}, startNotice: () => "",
-      });
+      };
+      if (name === "retryChatStart") globals.retryRun = rendererCallback("AgentOrchestratorSurface.tsx", "retryRun", globals);
+      const callback = rendererCallback("AgentOrchestratorSurface.tsx", name, globals);
       callback(name === "controlRun" ? "pause" : "run-a");
       matching = keepSelection; if (!matching) state.selected = "run-b";
       reply.resolve({ runId: "replacement-a", status: "running" }); await done.promise;
