@@ -1099,8 +1099,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // provider in CPA's config (a Claude API key, say) has no auth file, and its models were hidden.
     // Without the account list nothing is hidden.
     const accountProviders = await providersWithAccounts(cpa);
-    const owners = accountProviders ? await modelOwners(cpa) : null;
-    const unserved = id => Boolean(owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
+    // Who serves each model, from the plain list's owned_by. The enhanced catalog names no provider,
+    // so every model was filed by its name: Antigravity's claude-sonnet-4-6 under Claude and its
+    // gemini-… under Gemini, as if Antigravity and a Claude sign-in or API key were one provider.
+    const listed = rows?.some(entry => typeof entry?.owned_by === "string");
+    const owners = listed ? new Map(rows.filter(entry => typeof entry?.id === "string" && typeof entry.owned_by === "string")
+      .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : await modelOwners(cpa);
+    const unserved = id => Boolean(accountProviders && owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
       && !accountProviders.has(owners.get(id)));
     const capabilities = Object.create(null);
     const ids = [];
@@ -1122,7 +1127,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
       // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
-      const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
+      const provider = [entry.provider, entry.owned_by, entry.ownedBy, owners?.get(id)].find(value => typeof value === "string" && value.trim());
       const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
       if (verbatim) plugins.add(id);
       const reportedLevels = verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
@@ -2661,12 +2666,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // added to a group is covered by Approve for me at once. Before, every new tool (the subagents,
   // the preview browser) asked the person until someone also added it to a list in this file.
   //   - AGENT_TOOLS (chat-agent-tools.cjs): confined to the agent's worktree by the endpoint and
-  //     headless (reads, searches, git history, patches, the plan, show_in_chat, schedule_wakeup).
+  //     headless (reads, searches, git history, patches, the plan, show_in_chat, schedule_wakeup,
+  //     the goal tools).
   //   - PREVIEW_TOOLS: the chat's own browser, loopback pages only, each new address allowed by you.
   //   - SUBAGENT_TOOLS: the user's own subagents, which run under the same safety rules.
   // The terminal (TERMINAL_TOOLS) and the screen (DESKTOP_TOOLS) are not routine: their requests go
   // to the reviewer (and the routine-command rules), apart from the terminal's two reads.
-  const { AGENT_TOOLS } = require("./chat-agent-tools.cjs");
+  const { AGENT_TOOLS, GOAL_TOOLS } = require("./chat-agent-tools.cjs");
   const { PREVIEW_TOOLS } = require("./chat-preview.cjs");
   const { SUBAGENT_TOOLS } = require("./subagents.cjs");
   const TERMINAL_READS = new Set(["check_exec_environment", "read_output"]);
@@ -2681,6 +2687,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (SUBAGENT_TOOLS.has(short)) return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
+    if (GOAL_TOOLS.has(short)) return "This chat's own goal, as Codex's goal tools set it; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
     if (!AGENT_TOOLS.has(short) && !TERMINAL_READS.has(short)) return null;
@@ -4572,6 +4579,58 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, goal: goals.get(id, task) };
   }
 
+  // ---- The agent's goal tools (get_goal, create_goal, update_goal), as Codex's (codex-rs/ext/goal) ----
+
+  // A goal's status in Codex's words: "achieved" is its complete, "stalled" its blocked.
+  const CODEX_GOAL_STATUS = { active: "active", paused: "paused", achieved: "complete", stalled: "blocked", limited: "budgetLimited" };
+  // What update_goal may set: as in Codex, resuming and the limits stay the user's and the app's.
+  const AGENT_GOAL_STATUS = {
+    complete: { status: "achieved", note: "The agent marked it complete" },
+    blocked: { status: "stalled", note: "The agent is blocked and needs you; answer it, then /goal resume" },
+    paused: { status: "paused", note: "Paused at your request; /goal resume picks it up again" },
+  };
+  function codexGoal(goal) {
+    if (!goal) return { goal: null, remainingTokens: null, completionBudgetReport: null };
+    const status = CODEX_GOAL_STATUS[goal.status] ?? "active";
+    const tokenBudget = Number.isSafeInteger(goal.tokenBudget) ? goal.tokenBudget : null;
+    const end = goal.status === "active" ? now() : goal.updatedAt;
+    // The app does not count a chat's tokens yet: unknown, not zero.
+    return {
+      goal: { objective: goal.objective, status, tokenBudget, tokensUsed: null,
+        timeUsedSeconds: Math.max(0, Math.floor((end - goal.startedAt) / 1000)),
+        createdAt: Math.floor(goal.startedAt / 1000), updatedAt: Math.floor(goal.updatedAt / 1000) },
+      remainingTokens: null,
+      completionBudgetReport: status === "complete" && (tokenBudget !== null || end - goal.startedAt >= 1000)
+        ? "Goal achieved. Report final usage from this tool result's structured goal fields. If `goal.tokenBudget` is present, include token usage from `goal.tokensUsed` and `goal.tokenBudget`. If `goal.timeUsedSeconds` is greater than 0, summarize elapsed time in a concise, human-friendly form appropriate to the response language."
+        : null,
+    };
+  }
+  /** A chat agent's goal tool call (chat-agent-tools.cjs): its AO `session` names the chat, as for schedule_wakeup. */
+  async function goalTool({ workspaceId, session, action, objective, status, tokenBudget } = {}) {
+    const id = clean(workspaceId, 128);
+    const { latest } = await sessionChat(id, clean(session, 256), "use a goal");
+    const task = latest.project_id;
+    const goal = goals.get(id, task);
+    if (action === "get") return codexGoal(goal);
+    if (action === "create") {
+      if (tokenBudget !== undefined && tokenBudget !== null && !(Number.isSafeInteger(tokenBudget) && tokenBudget > 0)) throw new Error("goal budgets must be positive when provided");
+      if (goal && goal.status !== "achieved") throw new Error("cannot create a new goal because this thread has an unfinished goal; complete the existing goal first");
+      goals.set(id, task, objective);
+      // The turn that set it is round 1, judged when it settles (goalAfterRun), as a goal set with /goal.
+      return codexGoal(goals.update(id, task, { round: 1, lastRunId: latest.id, ...(tokenBudget ? { tokenBudget } : {}) }));
+    }
+    if (action !== "update") throw new Error("Choose get, create or update");
+    if (!goal) throw new Error("cannot update goal because this thread has no goal");
+    if (status === undefined && objective === undefined) throw new Error("update_goal needs a status or an objective");
+    if (status !== undefined && !Object.hasOwn(AGENT_GOAL_STATUS, status)) {
+      throw new Error("update_goal can only mark the existing goal complete, blocked, or paused at the user's explicit request; resume, budget-limited, and usage-limited status changes are controlled by the user or system");
+    }
+    const change = objective === undefined ? {} : { objective: cleanObjective(objective) };
+    // Limits take precedence over pausing.
+    if (status !== undefined && !(status === "paused" && goal.status === "limited")) Object.assign(change, AGENT_GOAL_STATUS[status]);
+    return codexGoal(goals.update(id, task, change));
+  }
+
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
 
   // A wake-up that could not fire (AO not ready yet after a restart) is tried again a while later.
@@ -4648,17 +4707,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (wakeup.runId === runId || wakeup.loop) await fireWakeup(workspaceId, wakeup.taskId, wakeup.id);
     }
   }
+  /** The chat whose run holds an AO session: that newest run, and the chat's newest run. */
+  async function sessionChat(id, thread, what) {
+    const saved = await runs({ workspaceId: id });
+    const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
+    const run = saved.runs.filter(entry => entry.workspace_id === id && (entry.nodes || []).some(holds)).at(-1);
+    if (!run?.project_id) throw new Error(`This session is not one of this project's chats, so it cannot ${what}`);
+    return { run, latest: saved.runs.filter(entry => entry.project_id === run.project_id).at(-1) };
+  }
   /**
    * schedule_wakeup from a chat agent (chat-agent-tools.cjs): its AO `session` is woken in `minutes`
    * with its `reason`. The chat is the one whose run holds that session; its newest run owns the wake-up.
    */
   async function scheduleWakeup({ workspaceId, session, minutes, reason } = {}) {
     const id = clean(workspaceId, 128), thread = clean(session, 256);
-    const saved = await runs({ workspaceId: id });
-    const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
-    const run = saved.runs.filter(entry => entry.workspace_id === id && (entry.nodes || []).some(holds)).at(-1);
-    if (!run?.project_id) throw new Error("This session is not one of this project's chats, so it cannot be woken later");
-    const latest = saved.runs.filter(entry => entry.project_id === run.project_id).at(-1);
+    const { run, latest } = await sessionChat(id, thread, "be woken later");
     if (latest?.id !== run.id) throw new Error("A newer message was sent in this chat since this turn began; answer it instead of scheduling a wake-up");
     // In a self-paced /loop this is how the agent asks for its next round.
     const wakeup = wakeups.set(id, run.project_id, { minutes, reason, session: thread, runId: run.id,
@@ -5585,7 +5648,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

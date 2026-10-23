@@ -36,12 +36,12 @@ function tempTree() {
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
-  wakeups = null, rewriteCommand = undefined, catalog = CATALOG, appProcesses = null } = {}) {
+  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, appProcesses = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, appProcesses,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, appProcesses,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
@@ -900,6 +900,41 @@ test("app_processes lists the app's processes through the app's reader, read-onl
     const other = await session(plain.tools, { id: "no-reader" });
     assert.equal((await listed(other.url, other.auth)).includes("app_processes"), false);
     assert.equal((await callTool(other.url, other.auth, "app_processes", {})).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
+test("the goal tools are Codex's, take the chat's own session, and are offered only with a goal service", async () => {
+  const asked = [];
+  const goals = { call: async (request) => {
+    asked.push(request);
+    if (request.action === "update" && request.status === "active") throw new Error("update_goal can only mark the existing goal complete");
+    return { goal: { objective: "ship it", status: request.status === "complete" ? "complete" : "active", tokenBudget: null, tokensUsed: null,
+      timeUsedSeconds: 0 }, remainingTokens: null, completionBudgetReport: null };
+  } };
+  const { tools } = fixture({ goals });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "goal-owner" });
+    const names = await listed(client.url, client.auth);
+    for (const name of ["get_goal", "create_goal", "update_goal"]) assert.ok(names.includes(name), `${name} is listed`);
+    const created = await callTool(client.url, client.auth, "create_goal", { objective: "ship it", token_budget: 5000 });
+    assert.equal(created.isError, undefined);
+    assert.equal(JSON.parse(created.content[0].text).goal.status, "active");
+    await callTool(client.url, client.auth, "update_goal", { status: "complete" });
+    await callTool(client.url, client.auth, "update_goal", { objective: "ship it twice" });
+    await callTool(client.url, client.auth, "get_goal", {});
+    assert.deepEqual(asked, [
+      { workspaceId: "ws1", session: "goal-owner", action: "create", objective: "ship it", tokenBudget: 5000 },
+      { workspaceId: "ws1", session: "goal-owner", action: "update", status: "complete", objective: undefined },
+      { workspaceId: "ws1", session: "goal-owner", action: "update", status: undefined, objective: "ship it twice" },
+      { workspaceId: "ws1", session: "goal-owner", action: "get" },
+    ], "the session is the server's own, never one the agent names");
+    const refused = await callTool(client.url, client.auth, "update_goal", { status: "active" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /only mark the existing goal complete/);
+    const other = await session(plain.tools, { id: "no-goal" });
+    assert.equal((await listed(other.url, other.auth)).includes("create_goal"), false);
+    assert.equal((await callTool(other.url, other.auth, "get_goal", {})).isError, true);
   } finally { await tools.close(); await plain.tools.close(); }
 });
 

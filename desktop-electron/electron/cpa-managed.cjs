@@ -299,6 +299,54 @@ function removeOldMainLogs(state) {
   }
 }
 
+/**
+ * Overwrites a file CPA is watching without replacing it. CPA's watcher follows the file itself:
+ * a temp file renamed over config.yaml is never reloaded, and no later write reaches CPA until it
+ * restarts. Shorter content is padded with spaces (valid YAML) so one write covers every old byte,
+ * then trimmed; CPA never sees an empty or cut-off file it could load as a keyless config.
+ */
+function rewriteWatchedFile(filePath, content) {
+  const next = Buffer.from(content, "utf8");
+  const descriptor = fs.openSync(filePath, "r+");
+  try {
+    const size = fs.fstatSync(descriptor).size;
+    const padded = next.length < size ? Buffer.concat([next, Buffer.alloc(size - next.length, 0x20)]) : next;
+    fs.writeSync(descriptor, padded, 0, padded.length, 0);
+    if (padded.length !== next.length) fs.ftruncateSync(descriptor, next.length);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+/**
+ * Brings a running CPA's config.yaml up to this build's configuration. The launcher adopts a CPA
+ * an earlier build started instead of restarting it, so run() never wrote it; CPA hot-reloads the
+ * file. Returns "unchanged" when the file already holds it, else "written".
+ */
+function refreshConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
+  const configPath = path.join(state, "config.yaml");
+  const next = runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl);
+  let current = null;
+  try { current = fs.readFileSync(configPath, "utf8"); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  if (current === next) return "unchanged";
+  if (current === null) writePrivateFileAtomic(configPath, next);
+  else rewriteWatchedFile(configPath, next);
+  return "written";
+}
+
+function refresh(stateValue) {
+  const state = requiredAbsolutePath(stateValue, "CPA state root");
+  const result = refreshConfiguration(
+    state,
+    requiredSecret("CODING_TOOLS_CPA_MANAGEMENT_KEY"),
+    requiredSecret("CODING_TOOLS_CPA_PROXY_API_KEY"),
+    String(process.env.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL || ""),
+  );
+  console.log(`CPA configuration ${result}`);
+}
+
 function run(homeValue, stateValue) {
   const home = requiredAbsolutePath(homeValue, "CPA managed home");
   const state = requiredAbsolutePath(stateValue, "CPA state root");
@@ -365,8 +413,10 @@ if (require.main === module) {
     prepare(process.argv[3], process.argv[4], process.argv[5]);
   } else if (command === "run") {
     run(process.argv[3], process.argv[4]);
+  } else if (command === "refresh") {
+    refresh(process.argv[3]);
   } else {
-    throw new Error("CPA managed adapter command must be prepare or run");
+    throw new Error("CPA managed adapter command must be prepare, run or refresh");
   }
 }
 
@@ -377,6 +427,7 @@ function helperPricesPath(stateRoot) {
 module.exports = {
   helperPricesPath,
   prepare,
+  refreshConfiguration,
   run,
   runtimeConfiguration,
   removeOldMainLogs,

@@ -3104,6 +3104,13 @@ async function start() {
             return missionWorkflowRuntime.scheduleWakeup(request);
           },
         },
+        // get_goal, create_goal, update_goal: Codex's goal tools, on the chat's /goal.
+        goals: {
+          call: (request) => {
+            if (!missionWorkflowRuntime?.goalTool) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.goalTool(request);
+          },
+        },
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
         previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,
