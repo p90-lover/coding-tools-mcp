@@ -59,6 +59,20 @@ const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
 const CHATGPT_AUTH_PAGE_TIMEOUT_MS = 15_000;
 // How long a confirmed ChatGPT session vouches for a check that could not tell.
 const CHATGPT_AUTH_RECENT_MS = 10 * 60_000;
+/**
+ * Whether a session check's answer came from the session endpoint itself. Electron's session.fetch
+ * can hand back a response with no url: the exact comparison rejected every answer (169 warnings
+ * in the log, each status 200 with the session JSON) and sent each minute's check through the
+ * page. With redirects manual, an answer from anywhere else comes back as a redirect.
+ */
+function sessionEndpointUrl(url) {
+  if (!url) return true;
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === CHATGPT_ORIGIN && parsed.pathname === "/api/auth/session";
+  } catch { return false; }
+}
+const urlWithoutQuery = (url) => { try { const parsed = new URL(url); return parsed.origin + parsed.pathname; } catch { return url ? "(not a URL)" : ""; } };
 function authenticatedChatGptSession(payload, now = Date.now()) {
   const user = payload?.user;
   if (!user || typeof user !== "object" || Array.isArray(user) || !Object.keys(user).length) return false;
@@ -3102,12 +3116,12 @@ class BrowserHost {
         headers: { accept: "application/json" }, signal: controller.signal,
       });
       if (response.status === 401) return { authenticated: false, ready: true };
-      if (!response.ok || response.url !== CHATGPT_ORIGIN + "/api/auth/session"
-        || !response.headers.get("content-type")?.includes("application/json")) {
-        // Which check failed (seen 9 times in 45 minutes with status 200 and nothing else to go on):
-        // a redirect elsewhere, or a page that is not the session JSON (a challenge page).
-        this.logger?.warn?.("browser.readiness_fetch_unusable", { status: response.status,
-          sameUrl: response.url === CHATGPT_ORIGIN + "/api/auth/session",
+      const sameUrl = sessionEndpointUrl(response.url);
+      if (!response.ok || !sameUrl || !response.headers.get("content-type")?.includes("application/json")) {
+        // Which check failed: a redirect elsewhere, or a page that is not the session JSON (a challenge
+        // page). Only the address's origin and path are logged, never its query.
+        this.logger?.warn?.("browser.readiness_fetch_unusable", { status: response.status, sameUrl,
+          at: urlWithoutQuery(response.url),
           contentType: String(response.headers.get("content-type") || "").split(";")[0].slice(0, 60) });
         return await this.pageAuthenticationReadiness(contents);
       }
