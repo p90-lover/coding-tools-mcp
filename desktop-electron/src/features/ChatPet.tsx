@@ -368,7 +368,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const heldNow = useRef(held);
   heldNow.current = held;
   // Where along the box's top edge a fall lands (px from its left), for the shadow growing there.
-  const [dropX, setDropX] = useState(0);
+  const [dropX, setDropX] = useState<number | null>(null);
   // Just landed: how hard (0–1), squashing it and kicking up dust until the squash ends (null: not).
   const [landing, setLanding] = useState<number | null>(null);
   const [loop, setLoop] = useState<Loop | null>(null);
@@ -1104,22 +1104,22 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     setPose({ ...REST, arms: "both", walking: true });
     // In split view, let go over another pane, it falls onto that pane's box and lives there.
     const other = otherPanes().find((pane) => {
-      const area = pane.getBoundingClientRect();
-      return state.lastX >= area.left && state.lastX <= area.right && state.lastY >= area.top && state.lastY <= area.bottom;
+      const rect = pane.getBoundingClientRect();
+      return state.lastX >= rect.left && state.lastX <= rect.right && state.lastY >= rect.top && state.lastY <= rect.bottom;
     });
     const otherBox = other && petStage.seats().get(other)?.composer;
     const across = otherBox ? topEdge(otherBox, state.lastX - otherBox.getBoundingClientRect().left) : null;
     const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, state.lastX - frame.left));
     const spot = nearLap(current, x, atNow.current);
     const to = across ? { x: across.x, y: across.y - HEIGHT / 2 } : { x: frame.left + x, y: frame.top - HEIGHT / 2 };
-    // How far above the box's top edge it was let go (0 level with it or below).
+    // How far above the top edge it lands on it was let go (0 level with it or below).
     const height = Math.max(0, Math.round(to.y - state.lastY));
     // A longer drop takes longer, as a fall does: 420 ms from 400 px.
     const distance = Math.hypot(to.x - state.lastX, to.y - state.lastY);
     const fallMs = still ? 0 : Math.round(Math.min(1100, Math.max(260, FALL_MS * Math.sqrt(Math.max(distance, 1) / 400))));
     if (height > 40) say("Wheee", 900);
-    // Its shadow grows on this box only: falling onto another pane's box, that pane's pet lands.
-    setDropX(across ? Number.NaN : x);
+    // The shadow is drawn on this box's top edge; over another pane's box it has none.
+    setDropX(across ? null : x);
     // Two frames later, so the fall starts from where it was let go.
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => setHeld({ ...to, fall: fallMs })));
     // Its own timer: a mood change clears the wander plans, and must not leave it in the air.
@@ -1257,8 +1257,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   </>;
   const house = yard ? createPortal(<div ref={lot} className="cx-pet-lot">{rooms({ left: 0, top: 0 }, inLot ? pet : null)}</div>, yard)
     : loop ? rooms(housePlace(loop), null) : null;
-  // Falling, its shadow grows on the box's top edge where it will land.
-  const shadow = held?.fall && !Number.isNaN(dropX) ? <span className="cx-pet-drop-shadow" aria-hidden="true"
+  // Falling onto this box, its shadow grows on the top edge where it will land.
+  const shadow = held?.fall && dropX !== null ? <span className="cx-pet-drop-shadow" aria-hidden="true"
     style={{ left: dropX, animationDuration: `${held.fall}ms` }} /> : null;
   // Aboard the pointer, carried or leaping, it lives on the page itself, so no panel's edge clips it.
   return <>{house}{shadow}{inLot ? null : (ride || held || leap) && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
