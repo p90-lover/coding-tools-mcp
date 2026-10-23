@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "proxy-gateway" | "activity" | "settings";
+export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 /** Runtime > RTK (rtk.cjs): the installed rtk, if any, and whether agents' commands use it. */
 export interface RtkStatus {
@@ -137,71 +137,6 @@ export interface ProviderNetworkSnapshot {
     providers: ProviderProxyPolicyRecord[];
     accounts: AccountProxyPolicyRecord[];
   };
-}
-
-export interface ProxyGatewayProfileSummary {
-  profileId: string;
-  name: string;
-  protocol: ProxyProtocol;
-  host: string;
-  port: number;
-  hasAuthentication: boolean;
-}
-
-export interface ProxyGatewayStats {
-  activeConnections: number;
-  totalConnections: number;
-  rejectedConnections: number;
-  pendingConnections: number;
-  authFailures: number;
-  /** First tries without a key (the normal 407 challenge); helpers from before this was counted omit it. */
-  authChallenges?: number;
-  /** The newest wrong-key try: when, and from which client port. */
-  lastAuthFailure?: { at: string; remotePort: number | null } | null;
-  tunnels: number;
-  httpRequests: number;
-  failures: number;
-  bytesSent: number;
-  bytesReceived: number;
-  startedAt: string | null;
-}
-
-export interface ProxyGatewayTestResult {
-  ok: boolean;
-  ip?: string;
-  loc?: string;
-  colo?: string;
-  latencyMs?: number;
-  error?: string;
-  at: string;
-}
-
-export interface ProxyGatewayStatus {
-  enabled: boolean;
-  running: boolean;
-  listen: { host: string; port: number };
-  port: number;
-  tokenlessPort: number;
-  tokenlessOpen: boolean;
-  reservedPorts: number[];
-  helperState: "running" | "unverified" | "restarting" | "stopped";
-  helper: { pid: number; runtime: string; adopted: boolean; startedAt: string } | null;
-  unverifiedHelper: { pid: number; port: number; since: string } | null;
-  needsRestart: Array<"bridge" | "mcp">;
-  watchdog: { restarts: number; nextRestartAt: string | null };
-  gatewayProfileId: string;
-  upstreamProfileId: string | null;
-  upstream: ProxyGatewayProfileSummary | null;
-  useForApp: boolean;
-  globalRoute: {
-    enabled: boolean;
-    profileId: string | null;
-    profile: ProxyGatewayProfileSummary | null;
-  };
-  previousGlobal: { enabled: boolean; profileId: string | null } | null;
-  stats: ProxyGatewayStats | null;
-  lastError: { message: string; at: string } | null;
-  lastTest: ProxyGatewayTestResult | null;
 }
 
 export type ProviderExecutionWorkload ="subagent" | "paseo" | "anneal";
@@ -970,16 +905,6 @@ export interface LauncherApi {
     mode: ProxyPolicyMode;
     profileId?: string;
   }): Promise<ProviderNetworkSnapshot>;
-  proxyGatewayStatus(): Promise<ProxyGatewayStatus>;
-  configureProxyGateway(input: {
-    upstreamProfileId?: string | null;
-    port?: number;
-    tokenlessPort?: number;
-  }): Promise<ProxyGatewayStatus>;
-  setProxyGatewayRunning(running: boolean): Promise<ProxyGatewayStatus>;
-  setProxyGatewayForApp(enabled: boolean): Promise<ProxyGatewayStatus>;
-  rotateProxyGatewayKey(): Promise<ProxyGatewayStatus>;
-  testProxyGateway(): Promise<ProxyGatewayStatus>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   checkForUpdates(): Promise<UpdateState>;
@@ -996,7 +921,6 @@ export interface LauncherApi {
   onExternalServicesChanged(listener: (state: ExternalServicesSnapshot) => void): () => void;
   onManagedBootstrapChanged(listener: (state: ManagedBootstrapSnapshot) => void): () => void;
   onProviderNetworkChanged(listener: (state: ProviderNetworkSnapshot) => void): () => void;
-  onProxyGatewayChanged(listener: (state: ProxyGatewayStatus) => void): () => void;
 }
 
 declare global {

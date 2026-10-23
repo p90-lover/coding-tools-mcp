@@ -139,7 +139,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
         {terminal ? <AgentOrchestratorOriginalSurface hostbar={false} openMissions={() => undefined} terminal={terminal} />
           : <div className="agy-empty">
             <p>{!status?.installed ? "Install the Antigravity CLI to run it here." : !proxyReady ? "agy runs only through the network proxy." : "Start agy in the selected workspace."}</p>
-            {status?.installed && !proxyReady ? <button type="button" className="button-secondary" onClick={openNetwork}>Open Network Proxy</button> : null}
+            {status?.installed && !proxyReady ? <button type="button" className="button-secondary" onClick={openNetwork}>Open Proxy</button> : null}
             {status?.installed && proxyReady ? <button type="button" className="button-primary" disabled={Boolean(busy)} onClick={openTerminal}>Open agy</button> : null}
           </div>}
       </div> : <div className="agy-body">
