@@ -4170,6 +4170,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     try { return await mine; } finally { if (chatSends.get(key) === settled) chatSends.delete(key); }
   }
 
+  /**
+   * A message the person sent (the chat's composer; a goal's round, a wakeup and a loop call chatSend
+   * themselves). Into a chat whose goal stalled it picks the goal up again, as /goal resume does: that
+   * message's turn is the goal's next round, judged when it settles. The user: "if goal stalled, i cant
+   * use chat message to retrigger the chat"; the message ran one turn and the goal stayed stalled. A
+   * goal the person paused stays paused. Refused, the goal stays as it was.
+   */
+  async function personChatSend(input = {}) {
+    const id = typeof input?.workspaceId === "string" ? input.workspaceId.trim() : "";
+    const task = typeof input?.taskId === "string" ? input.taskId.trim() : "";
+    const stalled = id && task && input.goal === undefined && goals.get(id, task)?.status === "stalled" ? goals.get(id, task) : null;
+    if (stalled) goals.update(id, task, { status: "active", note: "" });
+    try {
+      const result = await chatSend(input);
+      if (stalled && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalled.note });
+      else if (stalled && result?.runId) goals.update(id, task, { lastRunId: String(result.runId) });
+      return result;
+    } catch (error) {
+      if (stalled) goals.update(id, task, { status: "stalled", note: stalled.note });
+      throw error;
+    }
+  }
+
   async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
@@ -4398,7 +4421,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
           signal: AbortSignal.timeout(60_000),
         });
-        if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status}`);
+        // A model CPA lists can still refuse (seen live 2026-10-23: HTTP 404, and the goal stalled);
+        // the note names it.
+        if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
         const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
         logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
         return { ...check, model };
@@ -4451,14 +4476,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A separate evaluator model judges the condition, as Claude Code's /goal does when the agent
       // stops; the agent's own word is not the verdict.
       let check;
+      // The person may pause, edit or clear the goal while the check runs: then their choice stands,
+      // and the round is judged on resume. A check that failed after a pause marked the goal stalled,
+      // and the next message woke it again.
+      const still = () => goals.get(workspaceId, task)?.status === "active";
       try {
         check = await checkGoal(goal, mission);
       } catch (error) {
+        if (!still()) return;
         // Not marked judged: resume (or the next sweep after the person resumes) checks it again.
         goals.update(workspaceId, task, { status: "stalled",
           note: `The goal could not be checked (${publicText(error?.message || error, 200)}); resume tries again` });
         return;
       }
+      if (!still()) return;
       goals.update(workspaceId, task, { evaluatedRunId: runId, checkedAt: now() });
       if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
       goals.update(workspaceId, task, { feedback: check.reason });
@@ -5421,7 +5452,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function call(operation, args = {}) {
     switch (operation) {
-      case "chat_send": return chatSend(args);
+      case "chat_send": return personChatSend(args);
       case "chat_steer": return chatSteer(args);
       case "chat_prewarm": return chatPrewarm(args);
       case "turn_timeline": return turnTimeline(args);

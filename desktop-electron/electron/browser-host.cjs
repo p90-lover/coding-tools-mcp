@@ -3106,12 +3106,17 @@ class BrowserHost {
         headers: { accept: "application/json" }, signal: controller.signal,
       });
       if (response.status === 401) return { authenticated: false, ready: true };
-      if (!response.ok || response.url !== CHATGPT_ORIGIN + "/api/auth/session"
+      // Electron's session.fetch leaves response.url empty (it builds the Response itself; checked on
+      // Electron 41.10.7), and a redirect under redirect: "manual" throws rather than answers. Requiring
+      // the URL failed every check: "readiness_fetch_unusable" (200, JSON, sameUrl false) every 20 s,
+      // each followed by a script run in the ChatGPT page. An empty URL is the one asked for.
+      const sameUrl = !response.url || response.url === CHATGPT_ORIGIN + "/api/auth/session";
+      if (!response.ok || !sameUrl
         || !response.headers.get("content-type")?.includes("application/json")) {
         // Which check failed (seen 9 times in 45 minutes with status 200 and nothing else to go on):
         // a redirect elsewhere, or a page that is not the session JSON (a challenge page).
         this.logger?.warn?.("browser.readiness_fetch_unusable", { status: response.status,
-          sameUrl: response.url === CHATGPT_ORIGIN + "/api/auth/session",
+          sameUrl,
           contentType: String(response.headers.get("content-type") || "").split(";")[0].slice(0, 60) });
         return await this.pageAuthenticationReadiness(contents);
       }
