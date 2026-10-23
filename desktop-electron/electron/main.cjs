@@ -3259,6 +3259,8 @@ async function start() {
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       // So do the wake-ups chat agents asked for (schedule_wakeup).
       wakeupsFile: path.join(app.getPath("userData"), "integrations", "chat-wakeups.json"),
+      // So do the chats' loops (/loop).
+      loopsFile: path.join(app.getPath("userData"), "integrations", "chat-loops.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
       chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
       archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),
