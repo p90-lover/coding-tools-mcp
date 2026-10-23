@@ -528,8 +528,32 @@ class RuntimeSupervisor {
       }
       return state;
     } catch (error) {
+      if (this.discardUnreadableStateFromBeforeBoot(error)) return null;
       throw new Error(`Launcher runtime ownership state is invalid at ${this.statePath}: ${errorMessage(error)}`);
     }
+  }
+
+  /**
+   * A marker last written before this boot can name only processes the restart ended, which is
+   * why a readable one is cleared (stopStaleOwnedRuntime). One a crash left unreadable, such as a
+   * file of NULs, is dropped the same way instead of failing closed: that kept every chat from
+   * starting for over an hour after an unexpected Windows restart. One written since boot still
+   * fails closed, as its processes may be alive.
+   */
+  discardUnreadableStateFromBeforeBoot(error) {
+    let modifiedAt;
+    try {
+      modifiedAt = fs.statSync(this.statePath).mtimeMs;
+    } catch {
+      return false;
+    }
+    if (!(modifiedAt < CURRENT_BOOT_STARTED_AT_MS - BOOT_TIME_CLOCK_TOLERANCE_MS)) return false;
+    this.clearState();
+    this.logger.warn("runtime.state_discarded", {
+      reason: "unreadable ownership marker from before this boot",
+      message: errorMessage(error),
+    });
+    return true;
   }
 
   snapshot(status = "idle", detail) {
@@ -547,7 +571,7 @@ class RuntimeSupervisor {
 
   writeState(status, detail) {
     const state = this.snapshot(status, detail);
-    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
+    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true });
     return state;
   }
 

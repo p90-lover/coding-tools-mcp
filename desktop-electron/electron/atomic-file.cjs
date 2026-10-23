@@ -32,7 +32,13 @@ function renameAtomicFile(
   }
 }
 
-function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirectory = true } = {}) {
+/**
+ * Writes the file through a temp file and a rename. `durable` also flushes the temp file to disk
+ * before the rename: without it a crash can keep the renamed file's length but not its bytes, a
+ * file of NULs (Windows did this to the runtime ownership marker after an unexpected restart).
+ * It costs a disk flush per write, so it is for small files a startup depends on.
+ */
+function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirectory = true, durable = false } = {}) {
   const directory = path.dirname(filePath);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (protectDirectory) {
@@ -48,7 +54,17 @@ function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirect
   for (let attempt = 0; temporary === null; attempt += 1) {
     const candidate = `${filePath}.tmp-${process.pid}-${Date.now()}-${++sequence}`;
     try {
-      fs.writeFileSync(candidate, payload, { flag: "wx", mode });
+      if (durable) {
+        const descriptor = fs.openSync(candidate, "wx", mode);
+        try {
+          fs.writeFileSync(descriptor, payload);
+          fs.fsyncSync(descriptor);
+        } finally {
+          fs.closeSync(descriptor);
+        }
+      } else {
+        fs.writeFileSync(candidate, payload, { flag: "wx", mode });
+      }
       temporary = candidate;
     } catch (error) {
       if (error?.code !== "EEXIST") {

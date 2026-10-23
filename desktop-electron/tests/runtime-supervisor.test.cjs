@@ -1763,6 +1763,57 @@ test("launcher fails closed on a corrupt runtime ownership marker", () => {
   }
 });
 
+test("a marker a crash left unreadable is dropped only when it was written before this boot", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-torn-runtime-state-"));
+  const warnings = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn: (event) => warnings.push(event), error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  // What Windows left after an unexpected restart: the file's length, all NUL bytes.
+  fs.writeFileSync(supervisor.statePath, Buffer.alloc(233));
+  try {
+    // Written since this boot: its processes may be alive, so it still fails closed.
+    assert.throws(() => supervisor.readState(), /ownership state is invalid/);
+    assert.equal(fs.existsSync(supervisor.statePath), true);
+
+    const beforeBoot = new Date(Date.now() - os.uptime() * 1_000 - 60_000);
+    fs.utimesSync(supervisor.statePath, beforeBoot, beforeBoot);
+    assert.equal(supervisor.readState(), null);
+    assert.equal(fs.existsSync(supervisor.statePath), false);
+    assert.deepEqual(warnings, ["runtime.state_discarded"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the ownership marker is flushed to disk before it replaces the old one", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "electron", "runtime-supervisor.cjs"), "utf8");
+  assert.match(source, /writePrivateFileAtomic\(this\.statePath, [^\n]*\{ durable: true \}\)/);
+  const { writePrivateFileAtomic } = require("../electron/atomic-file.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-durable-write-"));
+  const synced = [];
+  const fsync = fs.fsyncSync;
+  fs.fsyncSync = (descriptor) => { synced.push(descriptor); return fsync(descriptor); };
+  try {
+    const file = path.join(root, "state.json");
+    writePrivateFileAtomic(file, "{\"a\":1}\n", { durable: true });
+    assert.equal(fs.readFileSync(file, "utf8"), "{\"a\":1}\n");
+    assert.equal(synced.length, 1);
+    writePrivateFileAtomic(file, "{\"a\":2}\n");
+    assert.equal(fs.readFileSync(file, "utf8"), "{\"a\":2}\n");
+    assert.equal(synced.length, 1, "only durable writes pay for a flush");
+    assert.deepEqual(fs.readdirSync(root), ["state.json"]);
+  } finally {
+    fs.fsyncSync = fsync;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher clears an empty stale ownership marker when Windows reuses its PID", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-reused-owner-pid-"));
   const pidOccupant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
