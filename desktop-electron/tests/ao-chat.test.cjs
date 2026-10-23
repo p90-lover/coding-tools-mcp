@@ -822,6 +822,23 @@ test("the chat's details panel counts its agents by state and names its approval
   assert.equal(chat.chatApprovalMode(null), "Default");
 });
 
+test("the details panel lists what the agents made as outputs and what they used as sources", () => {
+  const { outputs, sources } = chat.chatDetailLinks([
+    { id: "1", kind: "edit", status: "done", text: "src/app.ts", files: [{ path: "src/app.ts", additions: 3, deletions: 1 }] },
+    { id: "2", kind: "tool", status: "done", label: "Fetch", text: "Fetch https://github.com/PastKing/tgbot-verify.", input: "{\"url\":\"https://github.com/PastKing/tgbot-verify\"}" },
+    { id: "3", kind: "tool", status: "done", label: "MCP", text: "mcp__unified-agent-tools__search_web" },
+    { id: "4", kind: "tool", status: "done", label: "Read", text: "mcp__acp__Read" },
+    { id: "5", kind: "command", status: "done", text: "npm run dev", output: "  Local: http://127.0.0.1:8766/\n  docs: https://vite.dev/guide" },
+    { id: "6", kind: "edit", status: "done", text: "out/hero.png", files: [{ path: "out\\hero.png", additions: 0, deletions: 0 }] },
+    { id: "7", kind: "edit", status: "done", text: "src/app.ts", files: [{ path: "src/app.ts", additions: 1, deletions: 0 }] },
+  ]);
+  assert.deepEqual(plain(outputs.map((link) => [link.kind, link.label])), [["file", "app.ts"], ["image", "hero.png"], ["page", "127.0.0.1:8766"]],
+    "newest first, a file edited twice once; a dev server's address is an output");
+  assert.deepEqual(plain(sources.map((link) => [link.kind, link.label])), [["tool", "unified-agent-tools"], ["link", "github.com/PastKing/tgbot-verify"]],
+    "the agent's own mcp__acp__ tools and a URL only printed in a command's output are not sources");
+  assert.equal(sources[1].title, "https://github.com/PastKing/tgbot-verify", "trailing punctuation is not part of the link");
+});
+
 test("a chat's AO agent sessions for its Preview and Terminal panes: newest first, each once, repeats told apart", () => {
   const card = (id, session, extra = {}) => node(id, "planner", "finished", { route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" }, receipt: { thread_id: session }, ...extra });
   const sessions = chat.chatAgentSessions([
