@@ -73,7 +73,7 @@ function shimBody(executable, platform = process.platform) {
       "@echo off",
       "setlocal",
       "if not defined CODING_TOOLS_AGY_HTTPS_PROXY (",
-      "  echo Antigravity CLI runs only through the Coding Tools network proxy. Select a global proxy in Network Proxy, then restart Agent Orchestrator. 1>&2",
+      "  echo Antigravity CLI runs only through the Coding Tools network proxy. Select a global proxy on the Proxy page, then restart Agent Orchestrator. 1>&2",
       "  exit /b 1",
       ")",
       ...SHIM_PROXY_KEYS.flatMap(key => [
@@ -88,7 +88,7 @@ function shimBody(executable, platform = process.platform) {
   return [
     "#!/bin/sh",
     'if [ -z "$CODING_TOOLS_AGY_HTTPS_PROXY" ]; then',
-    "  echo 'Antigravity CLI runs only through the Coding Tools network proxy. Select a global proxy in Network Proxy, then restart Agent Orchestrator.' >&2",
+    "  echo 'Antigravity CLI runs only through the Coding Tools network proxy. Select a global proxy on the Proxy page, then restart Agent Orchestrator.' >&2",
     "  exit 1",
     "fi",
     ...SHIM_PROXY_KEYS.map(key => `[ -n "$CODING_TOOLS_AGY_${key}" ] && export ${key}="$CODING_TOOLS_AGY_${key}" ${key.toLowerCase()}="$CODING_TOOLS_AGY_${key}"`),

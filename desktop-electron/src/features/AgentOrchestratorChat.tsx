@@ -23,6 +23,7 @@ import {
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
+  chatLoopParse, loopInterval, loopLabel, type ChatLoop,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -741,6 +742,23 @@ function WakeupBar({ wakeup, onEdit, onDelete }: { wakeup: ChatWakeup; onEdit?: 
       : <span className="cx-goal-objective" title={wakeup.reason}>{wakeup.reason}</span>}
     <button type="button" className="cx-goal-icon" title="Delete wake-up" aria-label="Delete wake-up" onClick={onDelete}><GoalGlyph name="trash" /></button>
     {onEdit ? <button type="button" className="cx-goal-icon" title="Edit wake-up" aria-label="Edit wake-up" onClick={onEdit}><GoalGlyph name="expand" /></button> : null}
+  </div>;
+}
+
+/** The chat's loop (/loop): how often it runs and when next, its prompt, then Stop. The label ticks alone. */
+function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (loop.minutes === null) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [loop.minutes]);
+  return <div className="cx-goal cx-wakeup is-active" role="status">
+    <span className="cx-wakeup-glyph" aria-hidden="true">⟳</span>
+    <span className="cx-goal-state" title={loop.note || `Round ${loop.round}; ends by ${new Date(loop.expiresAt).toLocaleString()}`}>{loopLabel(loop, now)}</span>
+    <span className="cx-goal-objective" title={loop.prompt}>{loop.prompt}</span>
+    {loop.note ? <span className="cx-goal-note" title={loop.note}>{loop.note}</span> : null}
+    <button type="button" className="cx-goal-icon" title="Stop loop" aria-label="Stop loop" onClick={onStop}><GoalGlyph name="trash" /></button>
   </div>;
 }
 
@@ -1502,6 +1520,41 @@ export function AgentOrchestratorChat({
           else if (outcome === "sent") setCard(null);
           break;
         }
+        case "loop": {
+          const loop = commands?.loop;
+          if (!arg) {
+            setCard(loop ? { title: "Loop", rows: [["Prompt", loop.prompt],
+              ["Runs", loop.minutes === null ? "When the agent asks (schedule_wakeup)" : `Every ${loopInterval(loop.minutes)}`],
+              ["Round", String(loop.round)], ["Ends by", new Date(loop.expiresAt).toLocaleString()],
+              ...(loop.note ? [["Note", loop.note] as [string, string]] : [])] }
+              : { title: "Loop", text: "No loop is running in this chat.\nUsage: /loop [interval] <prompt> | stop\n"
+                + "Examples: /loop 5m check whether the deploy finished\n/loop 30m /review\n"
+                + "/loop watch the CI run and fix what fails (no interval: the agent picks when to look again)" });
+            break;
+          }
+          if (["stop", "cancel", "clear"].includes(arg.toLowerCase())) {
+            if (!loop) { say("Loop", "No loop is running in this chat."); break; }
+            await commands?.stopLoop?.();
+            say("Loop", "Loop stopped; a round already running finishes.");
+            break;
+          }
+          if (!selectedTaskId || !commands?.startLoop) { say("Loop", "Open a chat first: a loop runs in the chat it was started in."); break; }
+          const parsed = chatLoopParse(arg);
+          if ("error" in parsed) { say("Loop", parsed.error); setDraft(`/loop ${arg}`); break; }
+          // A command that sends a prompt runs as that prompt each round; the others act on the app.
+          const inner = chatSlashParse(parsed.prompt);
+          const prompt = inner?.name === "review" ? reviewPrompt(inner.arg) : inner?.name === "init" ? INIT_PROMPT : parsed.prompt;
+          if (inner && !["review", "init"].includes(inner.name)) {
+            say("Loop", `/${inner.name} acts on the app, so it can't loop. A loop runs a prompt, /review or /init.`); setDraft(`/loop ${arg}`); break;
+          }
+          if (loop && !window.confirm("Replace this chat's loop?\n\nThe running loop stops and this one starts.")) { setDraft(`/loop ${arg}`); break; }
+          await commands.startLoop({ prompt, minutes: parsed.minutes });
+          const first = accepts ? "runs now" : "runs when the current turn finishes";
+          say("Loop", parsed.minutes === null
+            ? `Looping: it ${first}, then the agent picks when to run it again. It ends when the agent stops scheduling rounds, after 7 days, or with /loop stop.`
+            : `Looping every ${loopInterval(parsed.minutes)}: it ${first}, then every ${loopInterval(parsed.minutes)} for up to 7 days. /loop stop ends it.`);
+          break;
+        }
         case "plan":
           commands?.setPlanMode(!commands.planMode);
           say("Plan mode", commands?.planMode ? "Plan mode is off." : "Plan mode is on. Messages ask for a plan, not changes. Send /plan to turn it off.");
@@ -1930,7 +1983,8 @@ export function AgentOrchestratorChat({
                   .then(() => setWakeupEditing(null), (cause) => say("Edit wake-up", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
           </section>;
         })() : null}
-        {commands?.goal || commands?.planMode || commands?.wakeup ? <div className="cx-composer-modes">
+        {commands?.goal || commands?.planMode || commands?.wakeup || commands?.loop ? <div className="cx-composer-modes">
+          {commands?.loop ? <LoopBar loop={commands.loop} onStop={() => void runCommand("loop", "stop")} /> : null}
           {commands?.wakeup ? <WakeupBar wakeup={commands.wakeup}
             onEdit={commands.editWakeup ? () => { setCard(null); setWakeupEditing({ reason: commands.wakeup!.reason,
               minutes: String(Math.min(720, Math.max(1, Math.ceil((commands.wakeup!.dueAt - Date.now()) / 60_000)))) }); } : undefined}

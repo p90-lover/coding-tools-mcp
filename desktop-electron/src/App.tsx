@@ -17,7 +17,6 @@ import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { SurfaceHiddenContext } from "./features/page-visibility";
 import { PartErrorBoundary } from "./PartErrorBoundary";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
-import { ProxyGatewaySurface } from "./features/ProxyGatewaySurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
 import { WorkspacePanel } from "./features/WorkspacePanel";
@@ -455,8 +454,7 @@ function LauncherShell({
     || surface === "integrations"
     || surface === "cpa"
 
-    || surface === "network"
-    || surface === "proxy-gateway";
+    || surface === "network";
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
@@ -828,14 +826,8 @@ function LauncherShell({
                 <SidebarItem
                   active={surface === "network"}
                   icon="globe"
-                  label={language === "zh-TW" ? "網路代理" : copy.networkProxy}
+                  label={copy.networkProxy}
                   onClick={() => navigateSurface("network")}
-                />
-                <SidebarItem
-                  active={surface === "proxy-gateway"}
-                  icon="globe"
-                  label={copy.proxyGateway}
-                  onClick={() => navigateSurface("proxy-gateway")}
                 />
               </details>
             </nav>
@@ -994,14 +986,6 @@ function LauncherShell({
             ) : null}
             {keepAlive("network", () => (
               <NetworkProxySurface language={language} setError={setError} />
-            ))}
-            {keepAlive("proxy-gateway", () => (
-              <ProxyGatewaySurface
-                active={surface === "proxy-gateway"}
-                language={language}
-                openNetwork={() => navigateSurface("network")}
-                setError={setError}
-              />
             ))}
             {keepAlive("settings", () => (
               <SettingsSurface

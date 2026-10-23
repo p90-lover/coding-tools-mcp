@@ -93,6 +93,22 @@ test("slash commands offer only what applies, and attachments become paths or in
   assert.equal(chat.chatSlashParse("/etc/hosts is broken"), null, "a path is a message, not a command");
   assert.equal(chat.chatSlashParse("please /goal x"), null);
   assert.deepEqual(plain(chat.chatSlashParse("/rewind 2")), { name: "rewind", arg: "2" });
+  // /loop reads its interval as Claude Code's does: a leading "5m", a trailing "every …", or none (self-paced).
+  assert.deepEqual(plain(chat.chatSlashParse("/loop 5m /review")), { name: "loop", arg: "5m /review" });
+  assert.deepEqual(plain(chat.chatLoopParse("5m check the deploy")), { prompt: "check the deploy", minutes: 5 });
+  assert.deepEqual(plain(chat.chatLoopParse("2h /review the auth changes")), { prompt: "/review the auth changes", minutes: 120 });
+  assert.deepEqual(plain(chat.chatLoopParse("check the deploy every 20 minutes")), { prompt: "check the deploy", minutes: 20 });
+  assert.deepEqual(plain(chat.chatLoopParse("30s ping")), { prompt: "ping", minutes: 1 }, "seconds round up to a minute");
+  assert.deepEqual(plain(chat.chatLoopParse("1d summarize the day")), { prompt: "summarize the day", minutes: 1440 });
+  assert.deepEqual(plain(chat.chatLoopParse("watch CI and fix what fails")), { prompt: "watch CI and fix what fails", minutes: null });
+  assert.deepEqual(plain(chat.chatLoopParse("5 tests fail, fix them")), { prompt: "5 tests fail, fix them", minutes: null }, "a number alone is not an interval");
+  assert.match(chat.chatLoopParse("5m").error, /Say what to run/);
+  assert.match(chat.chatLoopParse("2d x").error, /1 minute to 1 day/);
+  assert.match(chat.chatLoopParse("0m x").error, /1 minute to 1 day/);
+  assert.equal(chat.loopInterval(90), "1h 30m");
+  assert.equal(chat.loopLabel({ minutes: 5, round: 2, nextAt: 185_000, due: false }, 0), "Every 5m · next in 4m");
+  assert.equal(chat.loopLabel({ minutes: 5, round: 2, nextAt: 0, due: true }, 0), "Every 5m · next after this turn");
+  assert.equal(chat.loopLabel({ minutes: null, round: 3, nextAt: null }, 0), "Self-paced · round 3");
   // A chat's queue: plain messages typed in a row are sent together; a command or goal keeps its own
   // turn, and nothing already queued is ever replaced.
   let queue = chat.chatQueueAdd([], { what: "Message", message: "first" });

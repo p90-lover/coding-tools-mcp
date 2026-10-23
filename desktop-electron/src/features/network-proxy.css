@@ -80,14 +80,6 @@
   outline-offset: 2px;
 }
 
-.proxy-gateway-surface .proxy-gateway-stats { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); row-gap: 12px; }
-.proxy-gateway-surface .proxy-gateway-wide { grid-column: 1 / -1; }
-.proxy-gateway-surface .control-panel .proxy-route-list { margin: 14px 0 0; }
-.proxy-gateway-test { font-size: 13px; margin: 14px 0 0; overflow-wrap: anywhere; }
-.proxy-gateway-test code { font-family: var(--font-mono); margin-right: 8px; }
-.proxy-gateway-test.is-ok { color: var(--color-text-success); }
-.proxy-gateway-test.is-failed { color: var(--color-text-warning); }
-
 @media (max-width: 720px) {
   .proxy-route-list { grid-template-columns: 1fr; gap: 12px; }
   .proxy-route-overview { padding: 16px; }
