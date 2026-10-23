@@ -101,6 +101,9 @@ test("a gateway upstream whose last check failed gives way to a working profile 
   store.recordProxyHealth("stale-copy", { reachable: false, error: "Connection failed: EACCES" });
   store.recordProxyHealth("direct", { reachable: true, latencyMs: 47 });
   store.recordProxyHealth("other-proxy", { reachable: true, latencyMs: 5 });
+  // Saved after the working copy was checked, but never checked itself: it proves nothing.
+  store.saveProxyProfile({ id: "untested-copy", name: "Untested copy", enabled: true,
+    endpoint: { protocol: "http", host: "proxy.example", port: 10000 }, scopes: ["all"] });
   store.setGlobalRouting({ enabled: true, profileId: "builtin-gateway" });
   write("proxy-gateway.json", { version: 1, useForApp: true, upstreamProfileId: "stale-copy",
     previousGlobal: { enabled: true, profileId: "local-relay" } });

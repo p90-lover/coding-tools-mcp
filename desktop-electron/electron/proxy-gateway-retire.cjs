@@ -91,7 +91,8 @@ const endpointKey = (profile) => {
 };
 
 // The gateway's upstream, unless its last check failed and another profile for the same proxy
-// (same protocol, host and port: the same exit) checked fine; then the newest of those. Seen live:
+// (same protocol, host and port: the same exit) passed a check; then the most recently checked of
+// those. A profile never checked proves nothing and is not considered. Seen live:
 // the gateway relayed through an older copy of the user's proxy whose saved credentials the proxy
 // rejected (407), while the copy the user had just re-entered and tested sat unused.
 function upstreamFor(store, profileId) {
@@ -99,8 +100,8 @@ function upstreamFor(store, profileId) {
   const upstream = usableProfile(store, profileId) ? profiles.find((profile) => profile.id === profileId) : null;
   if (!upstream?.lastError) return upstream?.id ?? null;
   const working = profiles
-    .filter((profile) => !profile.lastError && endpointKey(profile) === endpointKey(upstream) && usableProfile(store, profile.id))
-    .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
+    .filter((profile) => profile.lastCheckedAt && !profile.lastError && endpointKey(profile) === endpointKey(upstream) && usableProfile(store, profile.id))
+    .sort((a, b) => String(b.lastCheckedAt).localeCompare(String(a.lastCheckedAt)));
   return working[0]?.id ?? upstream.id;
 }
 
