@@ -32,7 +32,12 @@ function renameAtomicFile(
   }
 }
 
-function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirectory = true } = {}) {
+/**
+ * `durable`: the new content is flushed to disk before it replaces the old. Without it a power loss
+ * can keep the rename and lose the data: Windows rebooted unexpectedly on 2026-10-23 and the launcher's
+ * ownership state came back as 179 zero bytes, so the bridge could not start for 26 minutes.
+ */
+function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirectory = true, durable = false } = {}) {
   const directory = path.dirname(filePath);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (protectDirectory) {
@@ -50,6 +55,10 @@ function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirect
     try {
       fs.writeFileSync(candidate, payload, { flag: "wx", mode });
       temporary = candidate;
+      if (durable) {
+        const descriptor = fs.openSync(candidate, "r+");
+        try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+      }
     } catch (error) {
       if (error?.code !== "EEXIST") {
         // A write that failed after creating the file (e.g. a full disk) leaves no partial temp.

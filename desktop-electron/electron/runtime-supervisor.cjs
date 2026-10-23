@@ -513,6 +513,15 @@ class RuntimeSupervisor {
   readState() {
     if (!fs.existsSync(this.statePath)) return null;
     try {
+      // A power loss can leave the file blank (zero bytes where its text was): Windows rebooted
+      // unexpectedly on 2026-10-23 and every start and watchdog restart then failed on it for 26
+      // minutes. Written before this boot, it can name no process still alive, so it is no owner.
+      const raw = fs.readFileSync(this.statePath);
+      if (!raw.some((byte) => byte !== 0 && byte !== 0x20 && byte !== 0x0a && byte !== 0x0d && byte !== 0x09)
+        && fs.statSync(this.statePath).mtimeMs < CURRENT_BOOT_STARTED_AT_MS - BOOT_TIME_CLOCK_TOLERANCE_MS) {
+        this.logger?.warn?.("runtime.ownership_state_torn", { bytes: raw.length });
+        return null;
+      }
       const state = readJson(this.statePath);
       const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
       if (!state
@@ -547,7 +556,7 @@ class RuntimeSupervisor {
 
   writeState(status, detail) {
     const state = this.snapshot(status, detail);
-    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
+    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true });
     return state;
   }
 

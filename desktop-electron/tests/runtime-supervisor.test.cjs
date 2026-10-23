@@ -252,6 +252,60 @@ test("a process is inspected without blocking the main thread", { skip: process.
   }
 });
 
+test("an ownership state a power loss left blank before this boot is no owner; one from this boot still fails", () => {
+  // Seen live 2026-10-23: Windows rebooted unexpectedly and the file came back as 179 zero bytes;
+  // every start and watchdog restart failed on it ("Unexpected token '\u0000'") for 26 minutes.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-torn-state-"));
+  const warnings = [];
+  try {
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn(event, detail) { warnings.push([event, detail]); }, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: path.join(root, "runtime", "launcher-browser.json"),
+    });
+    fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+    fs.writeFileSync(supervisor.statePath, Buffer.alloc(179));
+    const beforeBoot = new Date(Date.now() - os.uptime() * 1_000 - 60_000);
+    fs.utimesSync(supervisor.statePath, beforeBoot, beforeBoot);
+    assert.equal(supervisor.readState(), null);
+    assert.deepEqual(warnings, [["runtime.ownership_state_torn", { bytes: 179 }]]);
+    // Blank but written since this boot: not a power loss, so it is not passed over.
+    fs.utimesSync(supervisor.statePath, new Date(), new Date());
+    assert.throws(() => supervisor.readState(), /ownership state is invalid/);
+    // Text that is not the state is never passed over, however old.
+    fs.writeFileSync(supervisor.statePath, "{\"version\":");
+    fs.utimesSync(supervisor.statePath, beforeBoot, beforeBoot);
+    assert.throws(() => supervisor.readState(), /ownership state is invalid/);
+    // The state written now is flushed and reads back.
+    const written = supervisor.writeState("idle");
+    assert.equal(supervisor.readState().ownerPid, written.ownerPid);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a durable atomic write flushes the new content before it replaces the old", () => {
+  const { writePrivateFileAtomic } = require("../electron/atomic-file.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-durable-"));
+  const { fsyncSync } = fs;
+  const flushed = [];
+  try {
+    fs.fsyncSync = (descriptor) => { flushed.push(descriptor); return fsyncSync(descriptor); };
+    const target = path.join(root, "state.json");
+    writePrivateFileAtomic(target, "{\"a\":1}\n");
+    assert.equal(flushed.length, 0, "an ordinary write is not flushed");
+    writePrivateFileAtomic(target, "{\"a\":2}\n", { durable: true });
+    assert.equal(flushed.length, 1);
+    assert.equal(fs.readFileSync(target, "utf8"), "{\"a\":2}\n");
+    assert.deepEqual(fs.readdirSync(root), ["state.json"], "no temp file is left");
+  } finally {
+    fs.fsyncSync = fsyncSync;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the runtime config is parsed once per change, not on every monitor read", () => {
   // The monitors read config.json every 2-60 s; on a busy hard disk each synchronous read stalled the app.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-config-cache-"));
