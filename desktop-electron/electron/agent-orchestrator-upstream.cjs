@@ -1218,7 +1218,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(agentGone ? { agentGone: true } : {}),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         // A question the agent asked waits like an approval: the chat shows it and the card needs you.
-        approvals: [...pendingApprovals(conversation), ...pendingInputs(conversation)],
+        // With no agent behind the session nothing can take an answer: AO may still list its last
+        // request as pending (seen live 2026-10-23: Allow failed twice with "the agent controller
+        // for this session is not running"), so no card is shown for it.
+        approvals: agentGone ? [] : [...pendingApprovals(conversation), ...pendingInputs(conversation)],
       };
     },
     /**

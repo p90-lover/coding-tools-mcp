@@ -643,5 +643,7 @@ test("a card clicked after its request was answered or withdrawn just goes, for 
   const gone = [...workflow.matchAll(/throw new Error\("([^"]*no longer (?:pending|waiting)[^"]*)"\)/g)].map(match => match[1]);
   assert.ok(gone.includes("AO tool request is no longer pending"), "the AO tool request's own wording is among them");
   for (const message of gone) assert.match(message, quiet, `"${message}" closes the card quietly`);
+  assert.match("the agent controller for this session is not running (CHAT_CONTROLLER_NOT_READY)", quiet,
+    "nor can a request be answered once its agent stopped");
   assert.doesNotMatch("AO result is unavailable; inspect the run before retrying", quiet, "a real failure is still reported");
 });

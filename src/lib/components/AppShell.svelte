@@ -1,5 +1,5 @@
 <script lang="ts">
- import { page } from '$app/stores';
+ import { page } from '$app/state';
  import { goto } from '$app/navigation';
  import { onMount } from 'svelte';
  import type { Snippet } from 'svelte';
@@ -16,7 +16,7 @@
  let menu=$state(false),searchOpen=$state(false),query=$state(''),repoError=$state('');
  let searchInput=$state<HTMLInputElement>();
  const nav=[{path:'/',en:'Overview',zh:'總覽',icon:LayoutDashboard},{path:'/work',en:'Work board',zh:'任務看板',icon:Columns3},{path:'/tasks',en:'Task monitor',zh:'任務監察',icon:Monitor},{path:'/missions',en:'Mission control',zh:'任務協調',icon:Layers},{path:'/image-studio',en:'Image Studio',zh:'圖片工作室',icon:ImageIcon},{path:'/providers',en:'Providers',zh:'供應商',icon:Cpu},{path:'/orchestrators',en:'Orchestrators',zh:'編排器',icon:GitBranch},{path:'/orchestrator-run',en:'Run orchestrator',zh:'執行編排器',icon:Play},{path:'/sessions',en:'Agent sessions',zh:'Agent 會話',icon:Layers},{path:'/computer',en:'Computer control',zh:'電腦操作',icon:Monitor},{path:'/connections',en:'Connections',zh:'連線',icon:Cable},{path:'/integrations',en:'Integrations',zh:'專案整合',icon:Plug}];
- let title=$derived(nav.find(n=>n.path===$page.url.pathname)?.[$locale==='en'?'en':'zh'] ?? ($page.url.pathname.startsWith('/settings')?translated($locale,'Settings','設定'):translated($locale,'Workspace','工作區')));
+ let title=$derived(nav.find(n=>n.path===page.url.pathname)?.[$locale==='en'?'en':'zh'] ?? (page.url.pathname.startsWith('/settings')?translated($locale,'Settings','設定'):translated($locale,'Workspace','工作區')));
  let results=$derived([...nav.map(n=>({label:translated($locale,n.en,n.zh),path:n.path})),...$workspaces.map(w=>({label:w.name,path:`/workspace/${w.id}`}))].filter(n=>n.label.toLowerCase().includes(query.toLowerCase())).slice(0,12));
  function search(){searchOpen=true;query='';setTimeout(()=>searchInput?.focus(),0);}
  function navigate(path:string){searchOpen=false;menu=false;void goto(path);}
@@ -42,7 +42,7 @@
  {#if menu}<button class="cc-nav-backdrop" aria-label="Close navigation" onclick={()=>menu=false}></button>{/if}
  <aside class:expanded={menu} class="cc-nav">
   <a class="cc-brand" href="/" onclick={()=>menu=false}><span class="cc-brand-mark"><Command size={21}/></span><span>Coding Tools<small>CONTROL CENTER</small></span></a>
-  <nav aria-label="Main navigation" class="cc-primary-nav">{#each nav as n}<a href={n.path} class:active={$page.url.pathname===n.path} aria-current={$page.url.pathname===n.path?'page':undefined} onclick={()=>menu=false}><n.icon size={18}/><span>{translated($locale,n.en,n.zh)}</span>{#if $page.url.pathname===n.path}<span class="cc-nav-current"></span>{/if}</a>{/each}</nav>
+  <nav aria-label="Main navigation" class="cc-primary-nav">{#each nav as n}<a href={n.path} class:active={page.url.pathname===n.path} aria-current={page.url.pathname===n.path?'page':undefined} onclick={()=>menu=false}><n.icon size={18}/><span>{translated($locale,n.en,n.zh)}</span>{#if page.url.pathname===n.path}<span class="cc-nav-current"></span>{/if}</a>{/each}</nav>
   <div class="cc-nav-section"><span>{translated($locale,'WORKSPACES','工作區')}</span>{#if onAddWorkspace}<button onclick={onAddWorkspace} aria-label={translated($locale,'Add workspace','新增工作區')}><Plus size={16}/></button>{/if}</div>
   <div class="cc-workspace-nav">{#if $workspaces.length}{@render sidebar()}{:else}<p class="cc-nav-empty">{translated($locale,'Add your first workspace to get started.','新增第一個工作區以開始使用。')}</p>{/if}</div>
   <div class="cc-nav-bottom">{#if settingsNav}<details><summary><Settings2 size={17}/>{translated($locale,'Settings','設定')}<ChevronRight size={15}/></summary><div class="cc-settings-items">{@render settingsNav()}</div></details>{/if}
