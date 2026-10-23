@@ -1418,9 +1418,13 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
   // A message whose send failed after it was saved (seen 2026-10-23: "Headless request timed out")
   // has no run. Paired by place alone, every later run then showed under the message before its
   // own, and the newest message read "Starting…" for good. A run that started once the message after
-  // the next one had been sent answers that one, and the message it skips shows as not sent. Only a
-  // message with a stamp of its own, from an earlier minute, is skipped, and only while the chat has
-  // more messages than runs: stamps are to the minute, and the first message has none.
+  // the next one had been sent answers that one, and the message it skips shows as not sent. Stamps
+  // are to the minute (the first message has none), so a skip needs it beyond doubt: the next
+  // message's whole minute ended before the run started, or the run started in that minute and the
+  // skipped message is two minutes older or more. A reply that started at 10:11:01 to a message
+  // saved at 10:10:59 is not given to one sent at 10:11:15. Only while the chat has more messages
+  // than runs.
+  const MINUTE = 60_000;
   let messageIndex = 0;
   let spare = said.length - runs.filter((run) => !run.restarts_run_id && !run.replaces_run_id).length;
   const turns: ChatTurn[] = [];
@@ -1431,7 +1435,8 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
       while (started !== undefined && spare > 0 && messageIndex + 1 < said.length) {
         const next = stampMs(said[messageIndex + 1].stamp);
         const own = stampMs(said[messageIndex].stamp);
-        if (next === undefined || own === undefined || own >= next || next > started) break;
+        if (next === undefined || own === undefined || next > started) break;
+        if (next + MINUTE > started && own + 2 * MINUTE > next) break;
         spare -= 1;
         turns.push({ key: `unsent:${messageIndex}`, runId: "", user: said[messageIndex], messageIndex, steps: [], status: "stopped", solo: false, unsent: true });
         messageIndex += 1;

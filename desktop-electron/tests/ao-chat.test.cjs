@@ -173,6 +173,15 @@ test("a message no run answered shows as not sent, and every later run stays und
   assert.deepEqual(sameMinute.map(turn => [turn.key, turn.user.text]), [["a", "a"], ["b", "b"], ["pending:2", "c"]]);
   const firstWaiting = plain(chat.chatTurns([answered("a", at("2026-10-23 10:11") + 5_000)], "a\n\nFollow-up (2026-10-23 10:11 UTC):\nb"));
   assert.deepEqual(firstWaiting.map(turn => [turn.key, turn.user.text]), [["a", "a"], ["pending:1", "b"]]);
+  // Across a minute: B saved at 10:10:59, its run started at 10:11:01, C sent at 10:11:15 waits for its
+  // run. C's stamp (10:11) is before B's start, but B's reply stays B's (review of #560).
+  const boundary = plain(chat.chatTurns([answered("a", at("2026-10-23 10:00") + 5_000), answered("b", at("2026-10-23 10:11") + 1_000)],
+    "a\n\nFollow-up (2026-10-23 10:10 UTC):\nb\n\nFollow-up (2026-10-23 10:11 UTC):\nc"));
+  assert.deepEqual(boundary.map(turn => [turn.key, turn.user.text]), [["a", "a"], ["b", "b"], ["pending:2", "c"]]);
+  // Yet a run that started after the next message's whole minute passed does skip, a minute apart or not.
+  const late = plain(chat.chatTurns([answered("a", at("2026-10-23 10:00") + 5_000), answered("c", at("2026-10-23 10:12") + 1_000)],
+    "a\n\nFollow-up (2026-10-23 10:10 UTC):\nb\n\nFollow-up (2026-10-23 10:11 UTC):\nc"));
+  assert.deepEqual(late.map(turn => [turn.key, turn.user.text]), [["a", "a"], ["unsent:1", "b"], ["c", "c"]]);
   // A just-sent message waits for its run as before.
   const sent = plain(chat.chatTurns([answered("first", at("2026-10-23 04:06"))], "open the browser\n\nFollow-up (2026-10-23 04:30 UTC):\nnext"));
   assert.deepEqual(sent.map(turn => [turn.key, turn.status]), [["first", "done"], ["pending:1", "queued"]]);
