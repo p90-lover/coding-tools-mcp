@@ -1212,6 +1212,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* On the pointer: carried along above everything, never in the way of a click. */
 .cx-pet.is-riding { z-index: 60; transition: none; }
 .cx-pet.is-riding .cx-pet-body { pointer-events: none; }
+/* Leaping between split panes, or to and from its house under the chat list: over everything. */
+.cx-pet.is-leaping .cx-pet-body { pointer-events: none; }
+/* Split view: one Clawd for all panes, its house in a yard under the chat list (empty otherwise). */
+.cx-pet-yard { position: relative; flex: none; }
+.cx-pet-lot { position: relative; width: 136px; height: 104px; margin: 6px auto 10px; }
 @keyframes cx-pet-z { 0% { transform: translateY(6px); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateY(-14px); opacity: 0; } }
 @keyframes cx-pet-rise { to { transform: translateY(-36px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {

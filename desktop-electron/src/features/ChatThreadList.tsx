@@ -822,6 +822,8 @@ export function ChatThreadList(props: ThreadListProps) {
           </section>;
         })()}
       </nav>
+      {/* In split view the chat pet's house stands here, under the list (ChatPet draws it in). */}
+      <div className="cx-pet-yard" />
       {hover && !menu ? <FloatingLayer className="cx-hover-card" role="tooltip" style={{ top: hover.top, left: hover.left }}>
         <strong>{hover.chat.title}</strong>
         <span>{STATUS_LABEL[hover.chat.status]}{hover.chat.updatedAtMs ? ` · updated ${chatRelativeTime(hover.chat.updatedAtMs, now)} ago`.replace("now ago", "just now") : ""}</span>
