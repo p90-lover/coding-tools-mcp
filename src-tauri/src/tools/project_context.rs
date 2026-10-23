@@ -199,7 +199,7 @@ fn path_hint(tool_name: &str, args: &Value) -> Option<String> {
 
     match tool_name {
         "read_file" | "list_dir" | "list_files" | "search_text" | "grep_text" | "grep"
-        | "git_status" | "git_log" | "git_blame" | "view_image" | "image_info"
+        | "git_status" | "git_log" | "git_blame" | "view_image" | "image_info" | "ocr_image"
         | "set_default_cwd" => string("path"),
         "compare_images" => string("before_path"),
         "exec_command" => string("workdir").or_else(|| string("cwd")),

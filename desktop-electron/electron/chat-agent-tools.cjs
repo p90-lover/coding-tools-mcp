@@ -83,7 +83,7 @@ const AGENT_TOOLS = new Set([
   "read_file", "list_dir", "list_files", "search_text", "grep_text",
   "apply_patch", "patch_check",
   "git_status", "git_diff", "git_log", "git_show", "git_blame",
-  "view_image", "image_info", "compare_images",
+  "view_image", "image_info", "compare_images", "ocr_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
   "show_in_chat", "schedule_wakeup", "app_processes", "get_goal", "create_goal", "update_goal",
 ]);
@@ -191,7 +191,7 @@ const TERMINAL_TOOLS = new Set([
 const DESKTOP_TOOLS = new Set([
   "computer_status", "computer_route", "computer_snapshot", "computer_list_windows", "computer_select_window",
   "computer_find_control", "computer_wait", "computer_action", "computer_sequence", "computer_stop",
-  "capture_screenshot", "capture_window", "capture_process", "list_windows", "list_displays", "vision_status",
+  "capture_screenshot", "capture_window", "capture_process", "ocr_screen", "list_windows", "list_displays", "vision_status",
 ]);
 // The app's own vision tool (built on headless's list_windows and capture_window): an image of a
 // program's window, named by its process. The image goes to the model as the tool's result and is
@@ -218,6 +218,7 @@ const CONFIRMED_TOOLS = new Map([
   ["capture_screenshot", "take a screenshot of your screen"],
   ["capture_window", "capture a window on your screen"],
   ["capture_process", "capture a program's window on your screen"],
+  ["ocr_screen", "read the text on your screen"],
   ["list_windows", "list the windows open on your desktop"],
   ["list_displays", "list your displays"],
   ["computer_list_windows", "list the windows open on your desktop"],
@@ -339,7 +340,7 @@ const COMMAND_ID = /^[A-Za-z0-9_.-]{1,128}$/;
 const PATH_ARGUMENTS = Object.freeze({
   read_file: ["path"], list_dir: ["path"], list_files: ["path"], search_text: ["path"], grep_text: ["path"],
   git_status: ["path"], git_diff: ["path"], git_log: ["path"], git_show: ["path"], git_blame: ["path"],
-  view_image: ["path"], image_info: ["path"], compare_images: ["before_path", "after_path"],
+  view_image: ["path"], image_info: ["path"], compare_images: ["before_path", "after_path"], ocr_image: ["path"],
   exec_command: ["workdir", "cwd"],
 });
 const PATH_LIST_ARGUMENTS = Object.freeze({ git_diff: ["paths"], git_show: ["paths"] });
@@ -436,7 +437,8 @@ function toolResult(name, args, structured, seen = null) {
   // Headless's own timing, of no use to a chat agent (`seen` marks a chat session's result).
   if (seen) delete value.server_dispatch_ms;
   const isError = value.ok === false;
-  const wantsImage = name.startsWith("computer_")
+  // computer_* observations and compare_images' optional diff picture carry an image only sometimes.
+  const wantsImage = name.startsWith("computer_") || name === "compare_images"
     ? typeof value.base64 === "string"
     : IMAGE_TOOLS.has(name) && !isError && (args?.output ?? "mcp_image") === "mcp_image";
   if (wantsImage && typeof value.base64 === "string" && value.base64 && IMAGE_TYPES.has(value.mime_type)) {

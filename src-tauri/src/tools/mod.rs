@@ -13,6 +13,7 @@ mod image_tool;
 pub mod live_policy;
 pub mod local_tools;
 pub mod native_sandbox;
+mod ocr;
 pub mod patch;
 pub mod policy;
 mod process_tree;
