@@ -2673,7 +2673,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // subagents, the preview browser), and a group list still sent the harmless rest of the terminal
   // and the screen (kill_command, computer_status, vision_status) to the reviewer, which answered
   // "ask" for some. A name the app does not serve is never routine.
-  const { groupOf, reviewedTool } = require("./chat-agent-tools.cjs");
+  const { GOAL_TOOLS, groupOf, reviewedTool } = require("./chat-agent-tools.cjs");
   const APP_EDITS = new Set(["apply_patch", "patch_check"]);
   /** Why an app agent-tool call "Approve for me" may answer itself, or null. */
   function routineAppTool(tool) {
@@ -2687,6 +2687,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (group === "subagents") return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
+    if (GOAL_TOOLS.has(short)) return "This chat's own goal, as Codex's goal tools set it; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     // Read-only; another project's chats still need the person's own yes in the app (chat-agent-tools.cjs).
     if (group === "chats") return "Reads the app's chats, read-only; other projects' chats only after you allow them";
@@ -4582,6 +4583,58 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, goal: goals.get(id, task) };
   }
 
+  // ---- The agent's goal tools (get_goal, create_goal, update_goal), as Codex's (codex-rs/ext/goal) ----
+
+  // A goal's status in Codex's words: "achieved" is its complete, "stalled" its blocked.
+  const CODEX_GOAL_STATUS = { active: "active", paused: "paused", achieved: "complete", stalled: "blocked", limited: "budgetLimited" };
+  // What update_goal may set: as in Codex, resuming and the limits stay the user's and the app's.
+  const AGENT_GOAL_STATUS = {
+    complete: { status: "achieved", note: "The agent marked it complete" },
+    blocked: { status: "stalled", note: "The agent is blocked and needs you; answer it, then /goal resume" },
+    paused: { status: "paused", note: "Paused at your request; /goal resume picks it up again" },
+  };
+  function codexGoal(goal) {
+    if (!goal) return { goal: null, remainingTokens: null, completionBudgetReport: null };
+    const status = CODEX_GOAL_STATUS[goal.status] ?? "active";
+    const tokenBudget = Number.isSafeInteger(goal.tokenBudget) ? goal.tokenBudget : null;
+    const end = goal.status === "active" ? now() : goal.updatedAt;
+    // The app does not count a chat's tokens yet: unknown, not zero.
+    return {
+      goal: { objective: goal.objective, status, tokenBudget, tokensUsed: null,
+        timeUsedSeconds: Math.max(0, Math.floor((end - goal.startedAt) / 1000)),
+        createdAt: Math.floor(goal.startedAt / 1000), updatedAt: Math.floor(goal.updatedAt / 1000) },
+      remainingTokens: null,
+      completionBudgetReport: status === "complete" && (tokenBudget !== null || end - goal.startedAt >= 1000)
+        ? "Goal achieved. Report final usage from this tool result's structured goal fields. If `goal.tokenBudget` is present, include token usage from `goal.tokensUsed` and `goal.tokenBudget`. If `goal.timeUsedSeconds` is greater than 0, summarize elapsed time in a concise, human-friendly form appropriate to the response language."
+        : null,
+    };
+  }
+  /** A chat agent's goal tool call (chat-agent-tools.cjs): its AO `session` names the chat, as for schedule_wakeup. */
+  async function goalTool({ workspaceId, session, action, objective, status, tokenBudget } = {}) {
+    const id = clean(workspaceId, 128);
+    const { latest } = await sessionChat(id, clean(session, 256), "use a goal");
+    const task = latest.project_id;
+    const goal = goals.get(id, task);
+    if (action === "get") return codexGoal(goal);
+    if (action === "create") {
+      if (tokenBudget !== undefined && tokenBudget !== null && !(Number.isSafeInteger(tokenBudget) && tokenBudget > 0)) throw new Error("goal budgets must be positive when provided");
+      if (goal && goal.status !== "achieved") throw new Error("cannot create a new goal because this thread has an unfinished goal; complete the existing goal first");
+      goals.set(id, task, objective);
+      // The turn that set it is round 1, judged when it settles (goalAfterRun), as a goal set with /goal.
+      return codexGoal(goals.update(id, task, { round: 1, lastRunId: latest.id, ...(tokenBudget ? { tokenBudget } : {}) }));
+    }
+    if (action !== "update") throw new Error("Choose get, create or update");
+    if (!goal) throw new Error("cannot update goal because this thread has no goal");
+    if (status === undefined && objective === undefined) throw new Error("update_goal needs a status or an objective");
+    if (status !== undefined && !Object.hasOwn(AGENT_GOAL_STATUS, status)) {
+      throw new Error("update_goal can only mark the existing goal complete, blocked, or paused at the user's explicit request; resume, budget-limited, and usage-limited status changes are controlled by the user or system");
+    }
+    const change = objective === undefined ? {} : { objective: cleanObjective(objective) };
+    // Limits take precedence over pausing.
+    if (status !== undefined && !(status === "paused" && goal.status === "limited")) Object.assign(change, AGENT_GOAL_STATUS[status]);
+    return codexGoal(goals.update(id, task, change));
+  }
+
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
 
   // A wake-up that could not fire (AO not ready yet after a restart) is tried again a while later.
@@ -4658,17 +4711,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (wakeup.runId === runId || wakeup.loop) await fireWakeup(workspaceId, wakeup.taskId, wakeup.id);
     }
   }
+  /** The chat whose run holds an AO session: that newest run, and the chat's newest run. */
+  async function sessionChat(id, thread, what) {
+    const saved = await runs({ workspaceId: id });
+    const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
+    const run = saved.runs.filter(entry => entry.workspace_id === id && (entry.nodes || []).some(holds)).at(-1);
+    if (!run?.project_id) throw new Error(`This session is not one of this project's chats, so it cannot ${what}`);
+    return { run, latest: saved.runs.filter(entry => entry.project_id === run.project_id).at(-1) };
+  }
   /**
    * schedule_wakeup from a chat agent (chat-agent-tools.cjs): its AO `session` is woken in `minutes`
    * with its `reason`. The chat is the one whose run holds that session; its newest run owns the wake-up.
    */
   async function scheduleWakeup({ workspaceId, session, minutes, reason } = {}) {
     const id = clean(workspaceId, 128), thread = clean(session, 256);
-    const saved = await runs({ workspaceId: id });
-    const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
-    const run = saved.runs.filter(entry => entry.workspace_id === id && (entry.nodes || []).some(holds)).at(-1);
-    if (!run?.project_id) throw new Error("This session is not one of this project's chats, so it cannot be woken later");
-    const latest = saved.runs.filter(entry => entry.project_id === run.project_id).at(-1);
+    const { run, latest } = await sessionChat(id, thread, "be woken later");
     if (latest?.id !== run.id) throw new Error("A newer message was sent in this chat since this turn began; answer it instead of scheduling a wake-up");
     // In a self-paced /loop this is how the agent asks for its next round.
     const wakeup = wakeups.set(id, run.project_id, { minutes, reason, session: thread, runId: run.id,
@@ -5611,7 +5668,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

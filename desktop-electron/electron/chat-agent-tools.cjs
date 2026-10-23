@@ -85,7 +85,7 @@ const AGENT_TOOLS = new Set([
   "git_status", "git_diff", "git_log", "git_show", "git_blame",
   "view_image", "image_info", "compare_images",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
-  "show_in_chat", "schedule_wakeup", "app_processes",
+  "show_in_chat", "schedule_wakeup", "app_processes", "get_goal", "create_goal", "update_goal",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. Seen
 // live: an agent asked to "open the browser and keep checking" started it, but nothing showed in
@@ -140,6 +140,49 @@ const APP_PROCESSES_DEFS = Object.freeze([{
   },
   annotations: { readOnlyHint: true },
 }]);
+// The app's own goal tools, Codex's (codex-rs/ext/goal) word for word, on the chat's /goal
+// (chat-goals.cjs). One addition: update_goal may also change the objective, as the user's Edit does.
+const GOAL_TOOL_DEFS = Object.freeze([{
+  name: "get_goal", title: "Get the goal",
+  description: "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
+  inputSchema: { type: "object", additionalProperties: false, properties: {} },
+}, {
+  name: "create_goal", title: "Create a goal",
+  description: "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\n"
+    + "Set token_budget only when an explicit token budget is requested. Fails if an unfinished goal exists; use update_goal only for status.",
+  inputSchema: {
+    type: "object", additionalProperties: false, required: ["objective"],
+    properties: {
+      objective: { type: "string", description: "Required. The concrete objective to start pursuing. This starts a new active goal when no goal "
+        + "exists or replaces the current goal when it is complete." },
+      token_budget: { type: "integer", description: "Positive token budget for the new goal. Omit unless explicitly requested." },
+    },
+  },
+}, {
+  name: "update_goal", title: "Update the goal",
+  description: "Update the existing goal.\n"
+    + "Set status to `paused` only at the user's explicit request to pause this goal, never on your own initiative. Ask if unclear; a later resume revokes that request. Report the returned status and stop goal work. Budget limits take precedence over pausing.\n"
+    + "Set status to `complete` only when the objective has actually been achieved and no required work remains.\n"
+    + "Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.\n"
+    + "If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.\n"
+    + "Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.\n"
+    + "Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.\n"
+    + "Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\n"
+    + "You cannot use this tool to resume, budget-limit, or usage-limit a goal; those status changes are controlled by the user or system.\n"
+    + "When marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.\n"
+    + "Set objective only when the user asks to change what the goal is; the rounds still to come pursue the new objective.",
+  inputSchema: {
+    type: "object", additionalProperties: false,
+    properties: {
+      status: { type: "string", enum: ["complete", "blocked", "paused"], description: "`paused` requires an explicit user request. Set to "
+        + "`complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking "
+        + "condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked "
+        + "goal is resumed, the resumed run starts a fresh blocked audit." },
+      objective: { type: "string", description: "The goal's new objective, only when the user asks to change it." },
+    },
+  },
+}]);
+const GOAL_TOOLS = new Set(GOAL_TOOL_DEFS.map((tool) => tool.name));
 // Opt-in: commands start in the worktree but are not confined to it.
 const TERMINAL_TOOLS = new Set([
   "exec_command", "write_stdin", "read_output", "kill_command", "kill_session", "check_exec_environment",
@@ -1038,6 +1081,8 @@ function createChatAgentTools({
   appProcesses = null,
   // chat_list / chat_read (chat-history.cjs): the app's other chats, read-only; without it they are not offered.
   chatHistory = null,
+  // The goal tools' service ({ call({ workspaceId, session, action, ... }) }); without it they are not offered.
+  goals = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -1279,9 +1324,9 @@ function createChatAgentTools({
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
     const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
-      ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...CAPTURE_PROCESS_DEFS, ...(appProcesses ? APP_PROCESSES_DEFS : []), ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : [])];
+      ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []), ...CAPTURE_PROCESS_DEFS, ...(appProcesses ? APP_PROCESSES_DEFS : []), ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
-      .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
+      .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !CHAT_HISTORY_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
@@ -1595,6 +1640,25 @@ function createChatAgentTools({
     return true;
   }
 
+  /** Whether a session gets the goal tools: a chat's own agent, as for wake-ups (a subagent's chat is the one that started it). */
+  const canGoal = (entry) => Boolean(goals) && !entry.subagent;
+
+  /** get_goal, create_goal, update_goal: the chat's goal (agent-orchestrator-workflow.cjs goalTool), answered as Codex's JSON. */
+  async function goalCall(entry, name, given) {
+    if (!canGoal(entry)) return failedCall(`Unknown tool: ${name}`);
+    if (!entry.aoSession) return failedCall("This chat's session is not ready yet; try again in a moment.");
+    const request = { workspaceId: entry.workspaceId, session: entry.aoSession };
+    if (name === "get_goal") Object.assign(request, { action: "get" });
+    else if (name === "create_goal") Object.assign(request, { action: "create", objective: given.objective, tokenBudget: given.token_budget });
+    else Object.assign(request, { action: "update", status: given.status, objective: given.objective });
+    try {
+      const value = await goals.call(request);
+      return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
+    } catch (error) {
+      return failedCall(errorMessage(error));
+    }
+  }
+
   async function callTool(entry, params) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
@@ -1608,6 +1672,7 @@ function createChatAgentTools({
     if (name === "show_in_chat") return showInChat(entry, given);
     if (name === "schedule_wakeup") return scheduleWakeup(entry, given);
     if (name === "app_processes") return listProcesses(given);
+    if (GOAL_TOOLS.has(name)) return goalCall(entry, name, given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
       const found = await Promise.resolve().then(() => sessionWorkspace?.(entry.aoSession, entry.workspaceId)).catch(() => null);
@@ -2409,6 +2474,7 @@ function createChatAgentTools({
 module.exports = Object.freeze({
   AGENT_TOOLS,
   DESKTOP_TOOLS,
+  GOAL_TOOLS,
   MCP_HTTP_AGENTS,
   SERVER_NAME,
   TERMINAL_TOOLS,
