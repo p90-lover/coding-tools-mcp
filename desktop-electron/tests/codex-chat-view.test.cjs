@@ -248,14 +248,20 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the release5m \d+s$/, "Codex's goal bar: state, objective, running time");
   assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
+  // The bar's icons are buttons, not typed commands: what is typed in the box stays.
+  type(teamChat, "half a message");
+  const typed = () => walk(teamChat.render({ commands: commands() })).find((element) => element.type === "textarea" && element.props["aria-label"] !== "Goal").props.value;
   walk(pill).find((element) => element.type === "button" && element.props.title === "Pause goal").props.onClick();
   await settle(); await settle();
   assert.deepEqual(actions.at(-1), ["goal", "pause"]);
+  assert.equal(typed(), "half a message", "Pause leaves the draft alone");
   // Edit goal opens an editor; Save sends the new objective and closes it.
   walk(pill).find((element) => element.type === "button" && element.props.title === "Edit goal").props.onClick();
   await settle(); await settle();
   const editor = () => walk(teamChat.render({ commands: commands() })).find((element) => element.type === "section" && element.props?.["aria-label"] === "Edit goal");
   assert.equal(walk(editor()).find((element) => element.type === "textarea").props.value, "ship the release");
+  assert.equal(typed(), "half a message", "and so does Edit");
+  walk(teamChat.render({ commands: commands() })).find((element) => element.type === "textarea" && element.props["aria-label"] !== "Goal").props.onChange({ target: { value: "" } });
   walk(editor()).find((element) => element.type === "textarea").props.onChange({ target: { value: "ship the release with notes" } });
   walk(editor()).find((element) => element.type === "button" && text(element) === "Save").props.onClick();
   await settle(); await settle();
