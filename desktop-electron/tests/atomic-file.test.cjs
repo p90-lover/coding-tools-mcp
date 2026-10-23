@@ -112,6 +112,25 @@ test("private JSON writes UTF-8 without a BOM", () => {
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+test("a durable write flushes its temp file to disk before it replaces the target", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-atomic-durable-"));
+  const filePath = path.join(directory, "launcher-supervisor.json");
+  fs.writeFileSync(filePath, "old");
+  const { fsyncSync, renameSync } = fs;
+  const order = [];
+  t.after(() => { fs.fsyncSync = fsyncSync; fs.renameSync = renameSync; fs.rmSync(directory, { recursive: true, force: true }); });
+  fs.fsyncSync = (fd) => { order.push("fsync"); return fsyncSync.call(fs, fd); };
+  fs.renameSync = (from, to) => { order.push("rename"); return renameSync.call(fs, from, to); };
+  writePrivateFileAtomic(filePath, "{\"status\":\"idle\"}", { durable: true });
+  assert.deepEqual(order, ["fsync", "rename"]);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "{\"status\":\"idle\"}");
+  assert.deepEqual(fs.readdirSync(directory), ["launcher-supervisor.json"], "no temp file is left");
+  // An ordinary write is not flushed: most callers write while the app is in use, on the main thread.
+  order.length = 0;
+  writePrivateFileAtomic(filePath, "{}");
+  assert.deepEqual(order, ["rename"]);
+});
+
 test("a fresh temp name that Windows reports as existing is left alone and the write retries", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-atomic-eexist-"));
   const filePath = path.join(directory, "manifest.json");
