@@ -2758,13 +2758,19 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
     confirm: async () => true,
   });
-  const listed = await workflow.call("models", { harness: "ao:claude-code" });
-  const provider = id => listed.capabilities[`cpa/${id}`]?.provider;
+  // Filed as opencode lists them: Claude Code is offered no Antigravity model at all (see below).
+  const other = await workflow.call("models", { harness: "ao:opencode" });
+  const provider = id => other.capabilities[`cpa/${id}`]?.provider;
   assert.equal(provider("gemini-3.8-flash-high"), "antigravity", "Antigravity's Gemini, not Gemini's");
+  assert.equal(provider("claude-sonnet-4-6"), "antigravity", "Antigravity's Claude, not Claude's");
   assert.equal(provider("claude-haiku-4-5"), "claude", "a Claude sign-in's model stays Claude's");
   assert.equal(provider("gpt-5.5"), "openai");
-  assert.ok(!listed.models.includes("cpa/claude-sonnet-4-6"), "Claude Code is not offered Antigravity's Claude model");
-  assert.match(listed.unavailable["cpa/claude-sonnet-4-6"], /Antigravity refuses Claude Code's requests/);
+  const listed = await workflow.call("models", { harness: "ao:claude-code" });
+  assert.equal(listed.capabilities["cpa/claude-haiku-4-5"]?.provider, "claude");
+  for (const id of ["claude-sonnet-4-6", "gemini-3.8-flash-high"]) {
+    assert.ok(!listed.models.includes(`cpa/${id}`), `Claude Code is not offered Antigravity's ${id}`);
+    assert.match(listed.unavailable[`cpa/${id}`], /Antigravity refuses Claude Code's requests/);
+  }
 });
 
 test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
