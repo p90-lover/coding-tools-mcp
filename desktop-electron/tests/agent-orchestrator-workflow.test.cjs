@@ -3160,7 +3160,7 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
   assert.equal(goals["task-1"].objective, "make every test pass");
   assert.equal(goals["task-1"].status, "active");
   assert.equal(goals["task-1"].round, 1);
-  assert.equal(goals["task-1"].rounds, 30, "a Single goal stops itself after 30 rounds");
+  assert.equal(goals["task-1"].rounds, 0, "no round limit, as in Claude Code");
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "x", goal: "   " }), /Describe your goal/);
 });
 
@@ -3214,7 +3214,41 @@ test("after a round without the goal achieved, the chat runs the next round with
   assert.equal(world.updates.length, updatesBefore + 1);
 });
 
-test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and a team goal stops after 10 rounds", async () => {
+test("an app restart under a goal's round does not stall the goal; the round's real outcome is judged", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const { world, workflow, checks } = await goalChat();
+  const round = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [],
+      receipt: { thread_id: "sess-1", error: "The agent's process ended before it finished (the app restarted)" } }] };
+  world.runs.push(round);
+  await workflow.goalAfterRun("ws-1", "r1", "held", null);
+  let goal = await goalOf(workflow);
+  assert.equal(goal.status, "active", "not \"needs you\": the restart, not the person, stopped it");
+  assert.notEqual(goal.evaluatedRunId, "r1", "left for the round's real outcome");
+  // The step ran again and the round finished: now the goal is judged as usual.
+  round.nodes[0] = { ...round.nodes[0], state: "finished", receipt: { thread_id: "sess-1", answer: "More to do." } };
+  const before = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.equal(checks.length, 1, "the evaluator judged the finished round");
+  assert.equal(world.updates.length, before + 1, "and the next round started");
+  // Two resumes at once (a click and /goal resume, or a resume as a round settles) start one round:
+  // both sent the same round message, and two turns ran on one agent.
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  world.runs.at(-1).nodes[0].state = "finished";
+  const sentBefore = world.updates.length;
+  await Promise.all([workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" }),
+    workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" })]);
+  assert.equal(world.updates.length, sentBefore + 1, "one round, one message");
+  // A round held on the person (no restart) still waits for them.
+  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { thread_id: "sess-1", error: "needs approval" } }] });
+  await workflow.goalAfterRun("ws-1", "r2", "held", null);
+  goal = await goalOf(workflow);
+  assert.equal(goal.status, "stalled");
+  assert.match(goal.note, /needs you/);
+});
+
+test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and there is no round limit", async () => {
   const teamRun = (id, answer) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, team: { id: "team-1", revision: 7 }, nodes: [
     { id: "lead", role: "planner", parents: [], state: "finished", receipt: { answer: "plan" } },
     { id: "rev", role: "reviewer", parents: ["lead"], state: "finished", receipt: { answer } }] });
@@ -3235,7 +3269,7 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(achieved.note, "The transcript shows every test passing.", "the evaluator's reason is shown");
 
   // How the round ended: failed or needing the person stalls the goal; the person's Stop pauses it.
-  for (const [outcome, expected, note] of [["failed", "stalled", /failed/], ["held", "stalled", /needs you/], ["stopped", "paused", /Stopped by you/]]) {
+  for (const [outcome, expected, note] of [["failed", "stalled", /failed/], ["held", "stalled", /needs you/], ["stopped", "paused", /Stopped; \/goal resume/]]) {
     ({ world, workflow, checks } = await goalChat());
     world.runs.push(teamRun("t3", "anything"));
     const count = world.updates.length;
@@ -3258,28 +3292,22 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(world.updates.length, quiet);
 
   ({ world, workflow } = await goalChat());
-  // A team goal stops itself after 10 rounds: a condition never met would otherwise run (several
-  // agents a round) until the chat is full.
+  // No round limit, as in Claude Code: a goal not yet met goes on round after round.
   for (let round = 0; round < 10; round++) {
     world.runs.push(teamRun(`t4-${round}`, "more to do"));
     await workflow.goalAfterRun("ws-1", `t4-${round}`, "finished");
   }
   let goal = await goalOf(workflow);
-  assert.equal(goal.status, "limited");
-  assert.equal(goal.round, 10);
-  assert.equal(goal.rounds, 10);
-  assert.match(goal.note, /Stopped after 10 rounds; resume allows 10 more/);
+  assert.equal(goal.status, "active");
+  assert.equal(goal.round, 11);
+  assert.equal(goal.rounds, 0);
+  // An edited goal that is not running waits for Resume rather than starting by itself.
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "build green on CI" });
   goal = await goalOf(workflow);
   assert.equal(goal.objective, "build green on CI");
-  assert.equal(goal.round, 10, "editing starts no round");
+  assert.equal(goal.round, 11, "editing starts no round");
   assert.equal(goal.status, "paused", "an edited goal that had stopped waits for Resume");
-  const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
-  assert.equal(resumed.goal.status, "active");
-  assert.equal(resumed.goal.round, 11, "resume starts the next round right away (the last one was judged)");
-  assert.equal(resumed.goal.rounds, 20, "with as many rounds again");
-  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green on CI\]: Two tests still fail\./, "with the last feedback");
-  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
   world.runs.push(teamRun("t5", "more"));
   const paused = world.updates.length;
   await workflow.goalAfterRun("ws-1", "t5", "finished", null);

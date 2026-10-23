@@ -18,11 +18,6 @@ const TRANSCRIPT_LIMIT = 24_000;
 // each is cut to its end so one long worker cannot crowd out the rest.
 const EVIDENCE_LIMIT = 3_000;
 const REASON_LIMIT = 1_500;
-// A goal stops itself after this many rounds (status "limited"; /goal resume allows as many more):
-// a condition that is never met would otherwise run until the chat is full, and a team round costs
-// several agents' turns.
-const ROUND_LIMITS = Object.freeze({ single: 30, team: 10 });
-
 /**
  * The message a goal round sends. The first round sends the condition itself, as the person set
  * it; every later one is Claude Code's stop-hook feedback: the condition in brackets and the
@@ -124,8 +119,8 @@ function cleanObjective(value) {
 
 /**
  * The saved goals, one per chat ("<workspace>:<task>"), kept in a small JSON file so a goal survives
- * an app restart. Without a file (tests) they live in memory. A goal set with `rounds` stops itself
- * after that many rounds (ROUND_LIMITS, by Single or team); `rounds` 0 has no limit.
+ * an app restart. Without a file (tests) they live in memory. A goal has no round limit, as in
+ * Claude Code (`rounds` 0); one saved by an earlier version keeps its limit.
  */
 function createGoalStore({ file = null, now = Date.now } = {}) {
   let goals = {};
@@ -176,4 +171,4 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
   };
 }
 
-module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore, ROUND_LIMITS };
+module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore };

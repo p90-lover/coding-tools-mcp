@@ -246,6 +246,15 @@ test("a run being stopped reads as stopped at once; its working cards end, its f
   assert.equal(live.nodes[1].state, "running");
 });
 
+test("a chat whose earlier run still works reads Running, though its newest run was stopped", () => {
+  const stopped = run("r2", "a", [node("p", "planner", "failed")]);
+  stopped.cancelled = true;
+  const list = plain(chat.chatList([run("r1", "a", [node("p", "planner", "running")]), stopped], []));
+  assert.equal(list[0].status, "running", "the green dot stays while the agent works");
+  const done = run("r1", "a", [node("p", "planner", "finished")]);
+  assert.equal(plain(chat.chatList([done, stopped], []))[0].status, "stopped", "nothing working: the newest run's state");
+});
+
 test("chat status and whether a follow-up can be sent", () => {
   assert.equal(chat.chatRunStatus(run("r", "t", [node("p", "planner", "held")])), "attention");
   assert.equal(chat.chatRunStatus(run("r", "t", [node("p", "planner", "finished")], { paused: true })), "paused");

@@ -3,7 +3,7 @@
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore, ROUND_LIMITS } = require("./chat-goals.cjs");
+const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
@@ -4263,7 +4263,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
     }
     if (objective) {
-      goals.set(id, task, objective, { rounds: ROUND_LIMITS[executionMode === "single" ? "single" : "team"] });
+      goals.set(id, task, objective);
       goals.update(id, task, { round: 1, lastRunId: runId, lastMessage: text });
     }
     if (deferStart === true) {
@@ -4302,7 +4302,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     : previous?.execution_mode === "single" && previous.nodes?.[0]?.route
       ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
       : {});
+  // Chats whose next goal round is being started. A resume and a settling round (or two resumes)
+  // both passed the "chat is working" check before either round existed, so the chat got the same
+  // round message twice and ran two turns at once on one agent: one failed "restoration could not
+  // be confirmed" and stalled the goal. One start at a time; the other caller leaves it to the first.
+  const goalStarts = new Set();
   async function continueGoal(id, task, goal, previous) {
+    const key = JSON.stringify([id, task]);
+    if (goalStarts.has(key)) return;
+    goalStarts.add(key);
+    try {
+      // Read again inside the guard: a round another caller started meanwhile is the next round.
+      const saved = await runs({ workspaceId: id });
+      const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+      if (chatWorking(id, task, saved.runs) || (previous && latest && latest.id !== previous.id)) return;
+      await startGoalRound(id, task, goals.get(id, task) ?? goal, previous);
+    } finally { goalStarts.delete(key); }
+  }
+  async function startGoalRound(id, task, goal, previous) {
     const round = goal.round + 1;
     // A model or team picked while the goal ran (chat_goal "route") takes over from the next round
     // on. A team is named by id only: its current revision is used, so editing the team mid-goal
@@ -4395,16 +4412,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!goal || goal.status !== "active" || goal.evaluatedRunId === runId) return;
       const latest = saved.runs.filter(run => run.project_id === task).at(-1);
       if (latest?.id !== runId) return;
+      // A round held only because the app restarted under it, or one "Retry automatically" runs
+      // again, is not the person's turn: its step runs again and the goal is judged when the round
+      // settles. It was marked stalled ("needs you") after every app restart, where Codex's /goal
+      // carries on. Not recorded as evaluated, so the round's real outcome still counts.
+      if (outcome === "held" && (mission.nodes.some(node => node.state === "held" && restartInterrupted(node)) || autoRetryAllowed(mission))) return;
       // Stopped by the person: the goal waits for them, and the round is judged on resume.
-      if (outcome === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped by you; resume carries on from here" }); return; }
-      if (outcome === "failed") {
-        goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, note: "The last round failed; retry it or resume the goal" });
-        return;
-      }
-      if (outcome === "held") {
-        goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, note: "The last round needs you; answer it, then resume the goal" });
-        return;
-      }
+      if (outcome === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped; /goal resume picks it up again" }); return; }
+      if (outcome === "failed") { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, note: "The last round failed; retry it, then /goal resume" }); return; }
+      if (outcome === "held") { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, note: "The last round needs you; answer it, then /goal resume" }); return; }
       // The agent asked to be woken later (schedule_wakeup): as Claude Code defers its check while
       // background work runs, the goal is judged when the agent has woken and finished, not now.
       if (wakeups.get(workspaceId, task)?.runId === runId) return;
