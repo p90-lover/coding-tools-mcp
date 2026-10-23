@@ -28,9 +28,13 @@ let openPage = null;
 // gives it), and its value is what TurnRunning reads.
 const turnRestart = { Provider: "TurnRestartProvider", value: { restarting: false } };
 function mount(props) {
-  const states = []; let cursor = 0;
+  // Hook state per component, as React keeps it: by the component's name and its place among
+  // components of that name. One shared list shifted every later component's state whenever a
+  // component appeared earlier in the tree (a steer's bubble turned the stuck footer's clock back).
+  const frames = new Map(); let frame = "root", cursor = 0, seen = {};
   const react = {
     useState(initial) {
+      const states = frames.get(frame) ?? frames.set(frame, []).get(frame);
       const at = cursor++;
       if (!(at in states)) states[at] = typeof initial === "function" ? initial() : initial;
       return [states[at], (value) => { states[at] = typeof value === "function" ? value(states[at]) : value; }];
@@ -42,7 +46,14 @@ function mount(props) {
     createContext: (value) => ({ Provider: ({ children }) => children, value }), useContext: (context) => context.value,
   };
   // Function components render inline, so their output (work lines, steps, actions) is visible.
-  const jsx = (type, props, key) => typeof type === "function" ? type(props || {}) : ({ type, props: props || {}, key });
+  const jsx = (type, props, key) => {
+    if (typeof type !== "function") return { type, props: props || {}, key };
+    const name = type.name || "anonymous";
+    seen[name] = (seen[name] ?? 0) + 1;
+    const outer = [frame, cursor];
+    frame = `${name}#${seen[name]}`; cursor = 0;
+    try { return type(props || {}); } finally { [frame, cursor] = outer; }
+  };
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
@@ -52,7 +63,11 @@ function mount(props) {
           : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage }
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
-  return { render: (next = {}) => { cursor = 0; return module.AgentOrchestratorChat({ ...props, ...next }); } };
+  return {
+    render: (next = {}) => { frame = "root"; cursor = 0; seen = {}; return module.AgentOrchestratorChat({ ...props, ...next }); },
+    // The queued-message bar alone, for a queue the chat itself rarely builds (two separate messages).
+    bar: (barProps) => { frame = "bar"; cursor = 0; seen = {}; return module.QueuedMessageBar(barProps); },
+  };
 }
 
 function base(extra = {}) {
@@ -253,14 +268,20 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the release5m \d+s$/, "Codex's goal bar: state, objective, running time");
   assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
+  // The bar's icons are buttons, not typed commands: what is typed in the box stays.
+  type(teamChat, "half a message");
+  const typed = () => walk(teamChat.render({ commands: commands() })).find((element) => element.type === "textarea" && element.props["aria-label"] !== "Goal").props.value;
   walk(pill).find((element) => element.type === "button" && element.props.title === "Pause goal").props.onClick();
   await settle(); await settle();
   assert.deepEqual(actions.at(-1), ["goal", "pause"]);
+  assert.equal(typed(), "half a message", "Pause leaves the draft alone");
   // Edit goal opens an editor; Save sends the new objective and closes it.
   walk(pill).find((element) => element.type === "button" && element.props.title === "Edit goal").props.onClick();
   await settle(); await settle();
   const editor = () => walk(teamChat.render({ commands: commands() })).find((element) => element.type === "section" && element.props?.["aria-label"] === "Edit goal");
   assert.equal(walk(editor()).find((element) => element.type === "textarea").props.value, "ship the release");
+  assert.equal(typed(), "half a message", "and so does Edit");
+  walk(teamChat.render({ commands: commands() })).find((element) => element.type === "textarea" && element.props["aria-label"] !== "Goal").props.onChange({ target: { value: "" } });
   walk(editor()).find((element) => element.type === "textarea").props.onChange({ target: { value: "ship the release with notes" } });
   walk(editor()).find((element) => element.type === "button" && text(element) === "Save").props.onClick();
   await settle(); await settle();
@@ -462,7 +483,7 @@ test("a queued message waits in Claude Code's queued bar: 1 message queued, its 
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
 });
 
-test("a steer on its way and a queued message fold into Claude Code's stack: Next: …, then a list with ⋮ and Clear all", async () => {
+test("a steer on its way stays in the chat while a message waiting for the next turn is in the queued bar", async () => {
   const { props, calls } = base({ selectedTaskId: "t-stack", working: false,
     runs: [run("r1", "t-stack", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
     // The first steer is still on its way; the agent stops for the second, which waits as its next turn.
@@ -476,24 +497,41 @@ test("a steer on its way and a queued message fold into Claude Code's stack: Nex
   type("use the other API");
   type("then rerun the tests");
   await new Promise((resolve) => setImmediate(resolve));
-  const stack = all().find((element) => element.props?.className === "cx-queued-band cx-queued-stack");
-  assert.equal(stack.props["aria-expanded"], false, "folded at first");
-  assert.equal(text(stack), "2 messages queuedNext: use the other API", "the steer on its way is the head");
-  stack.props.onClick();
-  const rows = () => all().filter((element) => element.props?.className === "cx-queued-row");
-  assert.deepEqual(rows().map((row) => [text(row), row.props["data-state"]]), [["use the other API", "pending"], ["then rerun the tests", "queued"]]);
-  assert.equal(walk(rows()[0]).find((element) => element.props?.className === "cx-queued-sending").props["aria-label"], "Sending…");
-  assert.ok(!walk(rows()[0]).some((element) => element.props?.["aria-label"] === "Queued message actions"), "nothing to act on while it is delivered");
-  assert.ok(all().some((element) => element.props?.["aria-label"] === "Collapse queued messages"));
-  // The queued one's ⋮ opens Claude Code's menu: Edit in composer, Send now, then Remove from queue.
-  walk(rows()[1]).find((element) => element.props?.["aria-label"] === "Queued message actions").props.onClick({ currentTarget: { getBoundingClientRect: () => ({ right: 700, bottom: 500 }) } });
-  const menu = all().find((element) => element.type === "ChatMenu").props.menu;
-  assert.deepEqual(JSON.parse(JSON.stringify(menu.items.map((item) => item.kind === "separator" ? "-" : [item.label, item.reason ?? null, Boolean(item.danger)]))),
-    [["Edit in composer", null, false], ["Send now", null, false], "-", ["Remove from queue", null, true]]);
-  all().find((element) => element.props?.className === "cx-queued-clear").props.onClick();
-  assert.equal(text(all().find((element) => element.props?.className === "cx-queued-band")), "1 message queueduse the other API",
-    "Clear all drops the queued message; the steer is already on its way");
+  // The steer is in the chat, in its turn: it sat under the goal in the queued bar, then jumped up.
+  const steer = all().find((element) => element.props?.className === "cx-user cx-steer");
+  assert.equal(steer?.props["data-pending"], "sending");
+  assert.match(text(steer), /use the other API/);
+  assert.equal(walk(steer).find((element) => element.type === "SteerReceiptMark").props.receipt, "sending");
+  // Only the message that waits for the next turn is in the bar, with its actions.
+  const band = all().find((element) => element.props?.className === "cx-queued-band");
+  assert.equal(text(band), "1 message queuedthen rerun the tests");
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
+});
+
+test("two queued messages fold into Claude Code's stack: Next: …, then a list with ⋮ and Clear all", () => {
+  const { props } = base();
+  const view = mount(props);
+  const done = [];
+  const item = (text) => ({ key: text, text, state: "queued", onEdit: () => done.push(["edit", text]), onRemove: () => done.push(["remove", text]), onSendNow: () => done.push(["send", text]) });
+  let menu = null, cleared = 0;
+  const barProps = { items: [item("use the other API"), item("then rerun the tests")], onMenu: (_owner, items) => { menu = items; }, onClearAll: () => { cleared += 1; } };
+  const stack = walk(view.bar(barProps)).find((element) => element.props?.className === "cx-queued-band cx-queued-stack");
+  assert.equal(stack.props["aria-expanded"], false, "folded at first");
+  assert.equal(text(stack), "2 messages queuedNext: use the other API", "the first message is the head");
+  stack.props.onClick();
+  const open = walk(view.bar(barProps));
+  const rows = open.filter((element) => element.props?.className === "cx-queued-row");
+  assert.deepEqual(rows.map((row) => [text(row), row.props["data-state"]]), [["use the other API", "queued"], ["then rerun the tests", "queued"]]);
+  assert.ok(open.some((element) => element.props?.["aria-label"] === "Collapse queued messages"));
+  // The ⋮ opens Claude Code's menu: Edit in composer, Send now (the head only), then Remove from queue.
+  walk(rows[0]).find((element) => element.props?.["aria-label"] === "Queued message actions").props.onClick({ currentTarget: {} });
+  const labels = (shape) => JSON.parse(JSON.stringify(menu.map(shape)));
+  assert.deepEqual(labels((entry) => entry.kind === "separator" ? "-" : [entry.label, Boolean(entry.danger)]),
+    [["Edit in composer", false], ["Send now", false], "-", ["Remove from queue", true]]);
+  walk(rows[1]).find((element) => element.props?.["aria-label"] === "Queued message actions").props.onClick({ currentTarget: {} });
+  assert.deepEqual(labels((entry) => entry.kind === "separator" ? "-" : entry.label), ["Edit in composer", "-", "Remove from queue"], "only the first can be sent now");
+  open.find((element) => element.props?.className === "cx-queued-clear").props.onClick();
+  assert.equal(cleared, 1);
 });
 
 test("Edit in composer gives a queued message's annotations back as the composer's own, not as the block the agent reads", async () => {
@@ -518,7 +556,7 @@ test("Edit in composer gives a queued message's annotations back as the composer
     [["the parser drops tabs", "fix this too"], ["another line", ""]], "its annotations come back as chips, ahead of the new one");
 });
 
-test("a steer on its way spins in Claude Code's queued bar; once taken it is an ordinary sent message", async () => {
+test("a steer is in the chat from the moment it is sent: Sending…, then Unread once the agent has it", async () => {
   let release;
   const { props } = base({ selectedTaskId: "t-steer", working: false,
     runs: [run("r1", "t-steer", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
@@ -527,16 +565,21 @@ test("a steer on its way spins in Claude Code's queued bar; once taken it is an 
   const all = () => walk(view.render());
   all().find((element) => element.type === "textarea").props.onChange({ target: { value: "use the other API" } });
   const sending = all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
-  const row = all().find((element) => element.props?.className === "cx-queued-band");
-  assert.equal(row?.props["data-state"], "pending", "on its way to the agent");
-  assert.equal(row.props["aria-busy"], true);
-  assert.match(text(row), /use the other API/);
-  assert.equal(walk(row).find((element) => element.props?.className === "cx-queued-sending").props["aria-label"], "Sending…",
-    "Claude Code's pressed Send now: a spinner read as Sending…");
-  assert.equal(walk(row).filter((element) => element.type === "button").length, 0, "nothing to act on while it is delivered");
+  const bubble = () => all().find((element) => element.props?.className === "cx-user cx-steer");
+  const receipt = () => walk(bubble()).find((element) => element.type === "SteerReceiptMark").props.receipt;
+  assert.match(text(bubble()), /use the other API/, "in the chat at once");
+  assert.equal(bubble().props["data-pending"], "sending");
+  assert.equal(receipt(), "sending", "its check pulses, read as Sending…");
+  // It sits after the turn's work, where the turn's own record of it will show: it does not move.
+  const article = all().find((element) => element.type === "article");
+  const order = walk(article).map((element) => element.props?.className);
+  assert.ok(order.indexOf("cx-user cx-steer") > order.findIndex((name) => String(name).startsWith("cx-work")), "after the work");
+  assert.ok(!all().some((element) => element.props?.["aria-label"] === "Queued messages"), "not in the queued bar under the goal");
   assert.ok(!text(all()).includes("Steering…"), "no Steering… bubble at the end of the chat");
   release(true);
   await sending;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(receipt(), "unread", "delivered: the agent has it");
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   assert.ok(!source.includes("Steered · "), "a steered message shows its time as any sent message does");
   assert.match(source, /<SentMessage text=\{steer\.text\} \/>[\s\S]{0,400}?<MessageActions text=\{chatMessageReadable\(steer\.text\)\} \/>/, "and its Copy action");
