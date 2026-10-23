@@ -2800,7 +2800,9 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
   });
   const listed = await workflow.call("models", { harness: "ao:claude-code" });
   const provider = id => listed.capabilities[`cpa/${id}`]?.provider;
-  assert.equal(provider("gemini-3.8-flash-high"), "antigravity", "Antigravity's Gemini, not Gemini's");
+  // Antigravity's Gemini, not Gemini's: filed under Antigravity, so Claude Code is refused it as well (#493).
+  assert.ok(!listed.models.includes("cpa/gemini-3.8-flash-high"), "Claude Code is not offered Antigravity's Gemini");
+  assert.match(listed.unavailable["cpa/gemini-3.8-flash-high"], /Antigravity refuses Claude Code's requests/);
   assert.equal(provider("claude-haiku-4-5"), "claude", "a Claude sign-in's model stays Claude's");
   assert.equal(provider("gpt-5.5"), "openai");
   assert.ok(!listed.models.includes("cpa/claude-sonnet-4-6"), "Claude Code is not offered Antigravity's Claude model");
