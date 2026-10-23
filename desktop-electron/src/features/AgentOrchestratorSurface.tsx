@@ -16,7 +16,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -455,6 +455,11 @@ export function chatWakeups(result: { wakeups?: unknown }): Record<string, ChatW
   const wakeups = result.wakeups;
   return wakeups && typeof wakeups === "object" && !Array.isArray(wakeups) ? wakeups as Record<string, ChatWakeup> : {};
 }
+/** The chats' loops (/loop) a runs read carries, by chat. */
+export function chatLoops(result: { loops?: unknown }): Record<string, ChatLoop> {
+  const loops = result.loops;
+  return loops && typeof loops === "object" && !Array.isArray(loops) ? loops as Record<string, ChatLoop> : {};
+}
 /** How full a chat's context (its task text, capped at 8,192 characters) is. */
 export const CHAT_CONTEXT_LIMIT = 8192;
 export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: AoTeam[], teamId: string): JsonObject {
@@ -745,6 +750,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setMissions(runs);
     setGoals(chatGoals(current));
     setWakeups(chatWakeups(current));
+    setLoops(chatLoops(current));
     const setups = aoSavedTeams(current);
     setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
     setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
@@ -912,6 +918,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       setMissions(runs);
       setGoals(chatGoals(current));
       setWakeups(chatWakeups(current));
+      setLoops(chatLoops(current));
       const setups = aoSavedTeams(current);
       setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
       setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
@@ -1020,6 +1027,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [goals, setGoals] = useState<Record<string, ChatGoal>>({});
   // Wake-ups the chats' agents asked for (schedule_wakeup), per chat.
   const [wakeups, setWakeups] = useState<Record<string, ChatWakeup>>({});
+  // The chats' loops (/loop), per chat.
+  const [loops, setLoops] = useState<Record<string, ChatLoop>>({});
   // A model picked while the open chat's goal runs is used from its next round on (the running
   // round keeps the model it started with; the composer says so).
   const goalRouteKey = chatTaskId && composerMode === "single" && goals[chatTaskId]?.status === "active"
@@ -1083,6 +1092,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           setGoals((previous) => JSON.stringify(previous) === JSON.stringify(goals) ? previous : goals);
           const wakeups = chatWakeups(current);
           setWakeups((previous) => JSON.stringify(previous) === JSON.stringify(wakeups) ? previous : wakeups);
+          const loops = chatLoops(current);
+          setLoops((previous) => JSON.stringify(previous) === JSON.stringify(loops) ? previous : loops);
           setTeam((previous) => JSON.stringify(previous) === JSON.stringify(team) ? previous : team);
           setSavedTeams((previous) => JSON.stringify(previous) === JSON.stringify(saved) ? previous : saved);
           setTaskLifecycle((previous) => JSON.stringify(previous) === JSON.stringify(lifecycle) ? previous : lifecycle);
@@ -2186,6 +2197,17 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       const wakeup = chatTaskId ? wakeups[chatTaskId] : undefined;
       if (!chatTaskId || !wakeup) throw new Error("This wake-up already fired");
       await moduleCall("chat_wakeup", { workspaceId, taskId: chatTaskId, action: "edit", id: wakeup.id, reason, minutes });
+      await loadMissions(workspaceId);
+    },
+    loop: chatTaskId ? loops[chatTaskId] ?? null : null,
+    startLoop: async ({ prompt, minutes }) => {
+      if (!chatTaskId) throw new Error("Open a chat first");
+      await moduleCall("chat_loop", { workspaceId, taskId: chatTaskId, action: "start", prompt, minutes });
+      await loadMissions(workspaceId);
+    },
+    stopLoop: async () => {
+      if (!chatTaskId) return;
+      await moduleCall("chat_loop", { workspaceId, taskId: chatTaskId, action: "stop" });
       await loadMissions(workspaceId);
     },
     goalEdit: async (objective) => {

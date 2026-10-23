@@ -119,6 +119,15 @@ const WORKSPACE_MODES = new Set(["worktree", "shared", "folder"]);
 const AGENT_RECHECK_MS = 60_000;
 // How long a started AO daemon that is still running may take to answer /readyz (see start).
 const AO_READY_TIMEOUT_MS = 90_000;
+// To profile AO's CPU on a user's machine: a one-line "pprof-addr" file in AO's data folder holding
+// a loopback host:port turns on AO's pprof listener (AO_PPROF_ADDR) at its next start. Without it AO
+// starts as before; the app clears AO_* from its own environment, so this is the only switch.
+const PROFILER_FILE = "pprof-addr";
+async function profilerAddress(dataRoot) {
+  let text = "";
+  try { text = (await fs.promises.readFile(path.join(dataRoot, PROFILER_FILE), "utf8")).trim(); } catch { return ""; }
+  return /^(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}$/.test(text) ? text : "";
+}
 
 // A plain GET lists only the agents whose install check has finished, which right after the
 // daemon starts is often just one; the list was then read once and Codex, opencode and others
@@ -185,7 +194,8 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console,
+  readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -1182,8 +1192,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         };
         const invalid = session => !session || session.mode === "tui" || session.isTerminated
           || ["terminated", "killed", "errored"].includes(session.status) || session.provisionState === "failed";
+        // Why a chat's follow-up could not continue its agent (and started a fresh one, without what
+        // it knew): only "ao.continuation_lost" was logged, which named neither the session nor why.
+        const refuse = (why, session, extra = {}) => {
+          logger?.info?.("ao.continuable_refused", { session: key, why, ...(session ? { status: session.status ?? null,
+            provisionState: session.provisionState ?? null, terminated: session.isTerminated === true } : {}), ...extra });
+          return false;
+        };
         let session = await read();
-        if (invalid(session)) return false;
+        if (invalid(session)) return refuse(session ? "invalid" : "not_found", session);
         if (session.id !== key) throw uncertain();
         if (session.status === "exited") {
           // Startup may already own restoration. A conflict is not readiness: wait for this
@@ -1200,13 +1217,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             }
             if (resumed?.ok !== true) throw uncertain();
           } catch (error) {
-            if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) return false;
+            if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) {
+              return refuse("restore_refused", session, { code: error.code, message: String(error?.message ?? "").slice(0, 200) });
+            }
             if (error.status !== 409 || error.code !== "AGENT_RESUME_IN_PROGRESS") throw uncertain(error);
           }
           const deadline = Date.now() + 30000;
           for (let attempt = 0; attempt < 150 && Date.now() < deadline; attempt++) {
             session = await read();
-            if (invalid(session)) return false;
+            if (invalid(session)) return refuse(session ? "invalid_after_restore" : "not_found_after_restore", session);
             if (session.id !== key) throw uncertain();
             // Status is a display value: an idle live agent may show its pull request state.
             const activity = session.activity?.state;
@@ -1219,7 +1238,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           }
           throw uncertain();
         }
-        return !(await chatHostGone(key));
+        return (await chatHostGone(key)) ? refuse("host_gone", session) : true;
       })().finally(() => continuing.delete(key)));
       return continuing.get(key);
     },
@@ -1649,11 +1668,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // tool runs: on Windows it carries SystemRoot, TEMP and the rest a process needs to start,
         // and a de-duplicated PATH of bounded length (forks failed with 0xC0000142 without them).
         const daemonEnvironment = windowsChildEnvironment(environment, { system: systemEnvironment() });
+        const profiler = await profilerAddress(dataRoot);
+        checkStartup();
+        if (profiler) logger.info?.("ao.profiler_enabled", { address: profiler });
           // The AO CLI build answers the daemon command and the internal commands the daemon
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
           child = spawn(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-          env: { ...daemonEnvironment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
+          env: { ...daemonEnvironment, ...(profiler ? { AO_PPROF_ADDR: profiler } : {}), AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
             // AO bounds every request at 60 s, and starting a chat agent (worktree, agent process,
             // its handshake) took longer on a busy machine: the chat failed with SPAWN_TIMEOUT
             // while the agent came up seconds later. Just under this app's own 180 s for a POST,
@@ -1686,10 +1708,16 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // was too short on this machine's HDD: on 2026-10-22, right after an update (with the
         // database compaction running), the first start was given up as "AO readiness timed out",
         // its daemon killed and a new one started from nothing, and the chats that outlived the
-        // update were not reattached.
-        const deadline = Date.now() + AO_READY_TIMEOUT_MS;
-        while (Date.now() < deadline) {
+        // update were not reattached. Earlier that day AO stayed down 12 minutes (16 such starts).
+        // ao.start_slow records how long a slow start really takes, to tell whether the limit fits.
+        const startedAt = Date.now();
+        let slowLogged = false;
+        while (Date.now() - startedAt < readyLimitMs) {
           checkStartup();
+          if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
+            slowLogged = true;
+            logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
+          }
           try {
             const response = await fetch(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", signal: AbortSignal.timeout(1000) });
             checkStartup();

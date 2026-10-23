@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
+const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
@@ -268,7 +269,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
   // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
   // working chat's activity poll, the run loop and their per-node checks each read the same run
   // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
@@ -287,6 +288,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const chatPreferences = createChatPreferences(chatPreferencesFile);
   // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
   const wakeups = createWakeupStore({ file: wakeupsFile, now });
+  // Chats running a prompt again and again (/loop, chat-loops.cjs).
+  const loops = createLoopStore({ file: loopsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
@@ -314,6 +317,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // A wake-up that came due while its chat's turn was still running fires once that turn settles
     // (not while it is held on the user: their answer comes first).
     if (["finished", "failed"].includes(state.status)) void wakeupAfterRun(workspaceId, runId).catch(() => undefined);
+    // A /loop round that came due while its chat worked runs now; a self-paced one that scheduled nothing ends.
+    if (["finished", "failed"].includes(state.status)) void loopAfterRun(workspaceId, runId).catch(() => undefined);
     if (!onRunState) return;
     try {
       onRunState({
@@ -1256,17 +1261,23 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
         // A session that is gone, or refuses the message, falls back to a fresh start.
-        let sent = null;
+        let sent = null, sendError = null;
         if (continued) stage("reconnecting to the chat's agent");
-        if (continued && await continuableSession(continued.session)) {
+        const usable = Boolean(continued) && await continuableSession(continued.session);
+        if (usable) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           stage("sending your message to the agent");
-          sent = await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null);
+          sent = await harnessService().send(continued.session, continued.text, reserved.request_key)
+            .catch((error) => { sendError = publicText(error?.message || error, 200); return null; });
         }
-        // A follow-up that should have continued the chat's session starts a fresh one: logged, so
-        // "it forgot everything" can be traced to it.
-        if (continued && !sent?.turnId) logger?.warn?.("ao.continuation_lost", { reason: sent ? "send_refused" : "session_gone" });
+        // A follow-up that should have continued the chat's session starts a fresh one: logged with
+        // the session and why, so "it forgot everything" can be traced. "session_gone" covered both a
+        // session that could not be continued (ao.continuable_refused says why) and a failed send.
+        if (continued && !sent?.turnId) {
+          logger?.warn?.("ao.continuation_lost", { session: continued.session,
+            reason: !usable ? "not_continuable" : sendError ? "send_failed" : "send_refused", ...(sendError ? { message: sendError } : {}) });
+        }
         // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
@@ -4353,7 +4364,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const saved = await runs({ workspaceId });
       const chatRuns = saved.runs.filter(run => run.project_id === taskId);
       const latest = chatRuns.at(-1);
-      const action = wakeupAction(wakeup, {
+      // The next round of a self-paced /loop: gone with the loop, or once the loop outlived its days.
+      const loop = wakeup.loop ? loops.get(workspaceId, taskId) : null;
+      const loopOver = wakeup.loop && (!loop || loop.minutes !== null || now() >= loop.expiresAt);
+      if (loopOver && loop) loops.clear(workspaceId, taskId, loop.id);
+      const action = loopOver ? "drop" : wakeupAction(wakeup, {
         active: chatRuns.length > 0 && taskLifecycle(saved, taskId).visibility === "active",
         latestRunId: latest?.id ?? null, working: chatWorking(workspaceId, taskId, saved.runs),
       });
@@ -4362,6 +4377,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       wakeups.clear(workspaceId, taskId, id);
       wakeFailures.delete(id);
       if (action !== "send") { logger?.info?.("ao.wakeup.dropped", { workspaceId, taskId }); return; }
+      if (loop) {
+        // The loop's round is the loop's own (runLoop): kept due, with the agent's note, until it starts,
+        // and retried when it fails to, as an interval loop's round is.
+        loops.update(workspaceId, taskId, { due: true, wakeNote: wakeup.reason });
+        logger?.info?.("ao.wakeup.loop", { workspaceId, taskId, minutes: wakeup.minutes });
+        await runLoop(workspaceId, taskId, loop.id);
+        return;
+      }
       const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true });
       logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false });
     } catch (error) {
@@ -4376,7 +4399,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function wakeupAfterRun(workspaceId, runId) {
     const due = Object.values(wakeups.forWorkspace(workspaceId)).filter(wakeup => wakeup.due || wakeup.dueAt <= now());
     for (const wakeup of due) {
-      if (wakeup.runId === runId) await fireWakeup(workspaceId, wakeup.taskId, wakeup.id);
+      // A self-paced /loop's round also waits out a turn the user started meanwhile.
+      if (wakeup.runId === runId || wakeup.loop) await fireWakeup(workspaceId, wakeup.taskId, wakeup.id);
     }
   }
   /**
@@ -4391,7 +4415,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!run?.project_id) throw new Error("This session is not one of this project's chats, so it cannot be woken later");
     const latest = saved.runs.filter(entry => entry.project_id === run.project_id).at(-1);
     if (latest?.id !== run.id) throw new Error("A newer message was sent in this chat since this turn began; answer it instead of scheduling a wake-up");
-    const wakeup = wakeups.set(id, run.project_id, { minutes, reason, session: thread, runId: run.id });
+    // In a self-paced /loop this is how the agent asks for its next round.
+    const wakeup = wakeups.set(id, run.project_id, { minutes, reason, session: thread, runId: run.id,
+      loop: loops.get(id, run.project_id)?.minutes === null });
     wakeFailures.delete(wakeup.id);
     armWakeup(id, run.project_id);
     return { ok: true, taskId: run.project_id, dueAt: wakeup.dueAt, minutes: wakeup.minutes };
@@ -4414,6 +4440,126 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   function restoreWakeups() {
     for (const { workspaceId, taskId, wakeup } of wakeups.all()) {
       if (typeof workspaceId === "string" && typeof taskId === "string") armWakeup(workspaceId, taskId, Math.max(WAKE_RESTORE_MS, wakeup.dueAt - now()));
+    }
+  }
+
+  // ---- /loop (chat-loops.cjs) ----
+
+  // A loop on an interval has its own timer; a self-paced one is driven by its agent's wake-ups.
+  const loopTimers = new Map();
+  const loopFailures = new Map();
+  const looping = new Set();
+  function disarmLoop(workspaceId, taskId) {
+    const key = wakeKey(workspaceId, taskId);
+    if (loopTimers.has(key)) clearTimer(loopTimers.get(key));
+    loopTimers.delete(key);
+  }
+  function armLoop(workspaceId, taskId, delay = null) {
+    disarmLoop(workspaceId, taskId);
+    const loop = loops.get(workspaceId, taskId);
+    // A self-paced loop's timer is only a retry (a round held or refused); its agent's wake-ups pace it.
+    if (wakeupsDisposed || !loop || (loop.minutes === null && delay === null)) return;
+    const key = wakeKey(workspaceId, taskId);
+    const handle = setTimer(() => {
+      loopTimers.delete(key);
+      void runLoop(workspaceId, taskId, loop.id);
+    }, Math.min(2_147_483_647, Math.max(1, delay ?? loop.nextAt - now())));
+    handle?.unref?.();
+    loopTimers.set(key, handle);
+  }
+  /** Stops a self-paced loop's pending round, so a stopped or replaced loop never runs again. */
+  function clearLoopWakeup(workspaceId, taskId) {
+    if (!wakeups.get(workspaceId, taskId)?.loop) return;
+    disarmWakeup(workspaceId, taskId);
+    wakeups.clear(workspaceId, taskId);
+  }
+  /** A loop's round that is due: sent now, held for the chat's running turn, or the loop ends (loopAction). */
+  async function runLoop(workspaceId, taskId, id) {
+    const key = wakeKey(workspaceId, taskId);
+    const loop = loops.get(workspaceId, taskId);
+    if (wakeupsDisposed || !loop || loop.id !== id || looping.has(key)) return;
+    if (loop.nextAt !== null && loop.nextAt > now()) { armLoop(workspaceId, taskId); return; }
+    // A loop stopped or replaced while this round awaited a read is left alone from then on.
+    const current = () => !wakeupsDisposed && loops.get(workspaceId, taskId)?.id === id;
+    looping.add(key);
+    try {
+      const saved = await runs({ workspaceId });
+      if (!current()) return;
+      const chatRuns = saved.runs.filter(run => run.project_id === taskId);
+      const action = loopAction(loop, {
+        active: chatRuns.length > 0 && taskLifecycle(saved, taskId).visibility === "active",
+        working: chatWorking(workspaceId, taskId, saved.runs),
+      }, now());
+      // As Claude Code's, a round waits for the chat to be free: it runs when that turn settles (loopAfterRun).
+      if (action === "wait") { loops.update(workspaceId, taskId, { due: true }); armLoop(workspaceId, taskId, WAKE_RETRY_MS); return; }
+      if (action === "drop") {
+        loops.clear(workspaceId, taskId, id);
+        clearLoopWakeup(workspaceId, taskId);
+        loopFailures.delete(id);
+        logger?.info?.("ao.loop.ended", { workspaceId, taskId, rounds: loop.round, why: now() >= loop.expiresAt ? "expired" : "chat closed" });
+        return;
+      }
+      const result = await chatSend({ workspaceId, taskId, message: loopMessage(loop, loop.wakeNote || ""), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
+      if (result?.ok === false) throw new Error(String(result.reason || "the round could not start"));
+      // Stopped while this round was sent: the round stands, but the stopped loop goes no further.
+      if (!current()) return;
+      loops.update(workspaceId, taskId, { round: loop.round + 1, lastRunId: String(result.runId || ""), due: false, note: "", wakeNote: "",
+        nextAt: loop.minutes === null ? null : now() + loop.minutes * 60_000 });
+      loopFailures.delete(id);
+      logger?.info?.("ao.loop.sent", { workspaceId, taskId, round: loop.round + 1, minutes: loop.minutes });
+      armLoop(workspaceId, taskId);
+    } catch (error) {
+      const failures = (loopFailures.get(id) ?? 0) + 1;
+      loopFailures.set(id, failures);
+      const why = publicText(error?.message || error, 200);
+      logger?.warn?.("ao.loop.failed", { workspaceId, taskId, failures, error: why });
+      if (!current()) { loopFailures.delete(id); return; }
+      if (failures >= WAKE_RETRIES) { loops.clear(workspaceId, taskId, id); loopFailures.delete(id); return; }
+      loops.update(workspaceId, taskId, { due: true, note: `The last round could not start (${why}); trying again in a minute` });
+      armLoop(workspaceId, taskId, WAKE_RETRY_MS);
+    } finally { looping.delete(key); }
+  }
+  // When a chat's turn settles: a round that came due meanwhile runs now, and a self-paced round that
+  // scheduled no next one ends its loop, as Claude Code's /loop ends when the agent does not schedule another.
+  async function loopAfterRun(workspaceId, runId) {
+    for (const loop of Object.values(loops.forWorkspace(workspaceId))) {
+      if (loop.due || (loop.nextAt !== null && loop.nextAt <= now())) { await runLoop(workspaceId, loop.taskId, loop.id); continue; }
+      if (loop.minutes !== null || loop.lastRunId !== runId || wakeups.get(workspaceId, loop.taskId)?.loop) continue;
+      loops.clear(workspaceId, loop.taskId, loop.id);
+      logger?.info?.("ao.loop.ended", { workspaceId, taskId: loop.taskId, rounds: loop.round, why: "no next round scheduled" });
+    }
+  }
+  /**
+   * chat_loop: "start" runs `prompt` in the chat now and then every `minutes`, or, with `minutes`
+   * null, whenever its agent asks (schedule_wakeup); a chat that is working gets the first round when
+   * its turn ends. A new loop replaces the chat's old one. "stop" ends it.
+   */
+  async function chatLoop({ workspaceId, taskId, action, prompt, minutes = null } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128);
+    if (action === "stop") {
+      disarmLoop(id, task);
+      if (loops.get(id, task)) clearLoopWakeup(id, task);
+      return { ok: true, stopped: loops.clear(id, task) };
+    }
+    if (action !== "start") throw new Error("Choose start or stop");
+    const saved = await runs({ workspaceId: id });
+    if (!saved.runs.some(run => run.project_id === task)) throw new Error("Send this chat a message first, then start a loop in it");
+    const previous = loops.get(id, task);
+    const loop = loops.set(id, task, { prompt, minutes });
+    if (previous) { loopFailures.delete(previous.id); clearLoopWakeup(id, task); }
+    disarmLoop(id, task);
+    await runLoop(id, task, loop.id);
+    return { ok: true, loop: loops.get(id, task) };
+  }
+  // Loops saved before a restart: an interval loop's overdue round runs shortly after the app is back,
+  // and so does a self-paced loop's round that was due (held, or waiting to retry); one waiting on its
+  // agent's wake-up is armed by restoreWakeups.
+  function restoreLoops() {
+    for (const { workspaceId, taskId, loop } of loops.all()) {
+      if (typeof workspaceId !== "string" || typeof taskId !== "string") continue;
+      if (now() >= loop.expiresAt) { loops.clear(workspaceId, taskId, loop.id); continue; }
+      if (loop.minutes !== null) armLoop(workspaceId, taskId, Math.max(WAKE_RESTORE_MS, (loop.nextAt ?? now()) - now()));
+      else if (loop.due) armLoop(workspaceId, taskId, WAKE_RESTORE_MS);
     }
   }
 
@@ -5035,6 +5181,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     wakeupsDisposed = true;
     for (const timer of wakeTimers.values()) clearTimer(timer);
     wakeTimers.clear();
+    for (const timer of loopTimers.values()) clearTimer(timer);
+    loopTimers.clear();
     autoRetryDisposed = true;
     for (const timer of autoRetryTimers) clearTimer(timer);
     autoRetryTimers.clear();
@@ -5076,11 +5224,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const saved = await runs(args);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
-          wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)) };
+          wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)) };
       }
       case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
+      case "chat_loop": return chatLoop(args);
       case "chat_auto_retry": return chatAutoRetry(args);
       case "compact_chat": return compactChat(args);
       case "chat_diff": return chatDiff(args);
@@ -5195,7 +5344,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Whether the command approver's safety rules block this request text whatever anyone answers. */
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal });
+  restoreLoops();
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

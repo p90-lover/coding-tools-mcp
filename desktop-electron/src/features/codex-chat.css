@@ -457,7 +457,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-work-head svg.is-open, .cx-step-head svg.is-open { transform: rotate(90deg); }
 .cx-work.is-stalled .cx-work-head { color: var(--ao-amber); }
 .cx-shimmer { background: linear-gradient(90deg, var(--ao-muted) 0%, var(--color-text-primary) 50%, var(--ao-muted) 100%); background-size: 200% 100%;
-  -webkit-background-clip: text; background-clip: text; color: transparent; animation: cx-shimmer 2.2s linear infinite; }
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: cx-shimmer 2.2s steps(66) infinite; }
+/* background-position cannot run on the compositor, so each step repaints the text. steps() holds it
+   to 30 updates a second instead of every refresh (165 on a 165 Hz screen); a theme that changes the
+   duration keeps 30 per second with its own step count. */
 .cx-steps { display: grid; gap: 2px; margin: 6px 0 0; padding: 0 0 0 4px; border-left: 2px solid var(--ao-line); list-style: none; }
 .cx-step-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-primary); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .cx-step-head:hover:not(:disabled) { background: var(--cx-hover); }

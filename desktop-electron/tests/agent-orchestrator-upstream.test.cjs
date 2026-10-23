@@ -71,6 +71,7 @@ function observeHarness(context) {
   return vm.runInNewContext(states + timelineBounds(source) + shared + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
     agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); },
+    logger: { info() {}, warn() {} },
     // Imported by the module (not part of the helpers sliced above).
     utf8Suffix: require("../electron/chat-agent-shell.cjs").utf8Suffix, ...context,
   });
@@ -467,11 +468,12 @@ test("every operation the renderer calls is one the AO module accepts (the chat'
   for (const file of fs.readdirSync(features).filter(name => /\.tsx?$/.test(name))) {
     for (const match of fs.readFileSync(path.join(features, file), "utf8").matchAll(/moduleCall\("([a-z_]+)"/g)) called.add(match[1]);
   }
-  for (const operation of ["chat_send", "chat_goal", "compact_chat", "chat_diff", "chat_delete_message", "runs"]) assert.ok(called.has(operation), `${operation} is called`);
+  for (const operation of ["chat_send", "chat_goal", "chat_loop", "compact_chat", "chat_diff", "chat_delete_message", "runs"]) assert.ok(called.has(operation), `${operation} is called`);
   const unknown = [...called].filter(operation => !handler.operations.includes(operation));
   assert.deepEqual(unknown, [], "an operation missing here fails in the app as \"Unknown Agent Orchestrator operation\"");
   assert.equal(handler.isReadOnly("chat_diff"), true);
   assert.equal(handler.isReadOnly("chat_goal"), false);
+  assert.equal(handler.isReadOnly("chat_loop"), false);
   assert.equal(handler.isReadOnly("compact_chat"), false);
   assert.equal(handler.isReadOnly("chat_delete_message"), false);
 });
@@ -1465,6 +1467,33 @@ test("resume waits distinguish terminal failure from timeout and transport uncer
     else await assert.rejects(upstream.continuable("owned"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED");
     assert.equal(resumes, 1);
     assert.ok(reads <= 152, "readiness polling is bounded");
+  }
+});
+
+test("a chat that cannot be continued says which session and why", async () => {
+  // Seen 2026-10-22: "ao.continuation_lost {reason: session_gone}" and a 52 s fresh start, with no
+  // way to tell which session it was or whether AO refused to restore it.
+  const cases = [
+    { name: "restore_refused", session: { id: "owned", mode: "chat", status: "exited", provisionState: "ready" },
+      resume: Object.assign(new Error("the agent's conversation cannot be restored"), { status: 409, code: "SESSION_NOT_RESTORABLE" }),
+      expect: { session: "owned", why: "restore_refused", status: "exited", provisionState: "ready", terminated: false, code: "SESSION_NOT_RESTORABLE",
+        message: "the agent's conversation cannot be restored" } },
+    { name: "invalid", session: { id: "owned", mode: "chat", status: "exited", provisionState: "failed" },
+      expect: { session: "owned", why: "invalid", status: "exited", provisionState: "failed", terminated: false } },
+    { name: "not_found", session: null, expect: { session: "owned", why: "not_found" } },
+  ];
+  for (const scenario of cases) {
+    const logged = [];
+    const upstream = observeHarness({
+      logger: { info: (event, fields) => logged.push([event, fields]), warn() {} },
+      internalApi: async (method) => {
+        if (method === "POST") throw scenario.resume;
+        if (!scenario.session) throw Object.assign(new Error("gone"), { status: 404, code: "SESSION_NOT_FOUND" });
+        return { session: scenario.session };
+      },
+    });
+    assert.equal(await upstream.continuable("owned"), false, scenario.name);
+    assert.deepEqual(JSON.parse(JSON.stringify(logged)), [["ao.continuable_refused", scenario.expect]], scenario.name);
   }
 });
 

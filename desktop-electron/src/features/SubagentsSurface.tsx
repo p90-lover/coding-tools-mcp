@@ -39,6 +39,15 @@ export function subagentId(name: string, taken: readonly string[]): string {
 export function keptDraft(draft: SubagentConfig | null, saved: SubagentConfig | null, loaded: SubagentConfig): SubagentConfig {
   return draft && saved && JSON.stringify(draft) !== JSON.stringify(saved) ? draft : structuredClone(loaded);
 }
+/**
+ * The draft once a save answers: the saved config (as the main process kept it) when nothing was
+ * edited while it was on its way, else the newer edits, which the next autosave sends.
+ */
+export function draftAfterSave(current: SubagentConfig | null, sent: SubagentConfig, kept: SubagentConfig): SubagentConfig {
+  return current && JSON.stringify(current) !== JSON.stringify(sent) ? current : structuredClone(kept);
+}
+/** Edits save themselves this long after the last one, so typing a name is one save, not one per key. */
+export const AUTOSAVE_MS = 700;
 const STATE_LABEL: Record<string, string> = { starting: "Starting", running: "Running", completed: "Done", failed: "Failed", stopped: "Stopped", timed_out: "Timed out" };
 const elapsed = (seconds: number) => seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`;
 
@@ -62,7 +71,9 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
   const [draft, setDraft] = useState<SubagentConfig | null>(null);
   const [available, setAvailable] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
+  // A save that failed: shown in the save bar, and that draft is not sent again until it changes.
+  const [saveError, setSaveError] = useState("");
+  const failedDraft = useRef("");
   const [runs, setRuns] = useState<SubagentRun[]>([]);
   const [openReport, setOpenReport] = useState<string | null>(null);
   const [harnesses, setHarnesses] = useState<AoHarness[]>([]);
@@ -123,17 +134,29 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
     id: subagentId("New subagent", current.agents.map(agent => agent.id)), name: "New subagent", enabled: true, description: "", instructions: "", route: null }] });
   const removeAgent = (index: number) => setDraft(current => current && { ...current, agents: current.agents.filter((_, at) => at !== index) });
 
-  const save = async () => {
-    if (!draft) return;
-    setBusy(true); setNotice("");
+  const save = async (sent: SubagentConfig) => {
+    setBusy(true);
     try {
-      const result = await moduleCall("subagents_save", { settings: draft.settings as unknown as JsonObject, agents: draft.agents as unknown as JsonObject[] } as unknown as JsonObject);
+      const result = await moduleCall("subagents_save", { settings: sent.settings as unknown as JsonObject, agents: sent.agents as unknown as JsonObject[] } as unknown as JsonObject);
       const config = { settings: result.settings as SubagentSettings, agents: result.agents as Subagent[] };
       savedRef.current = config;
-      setSaved(config); setDraft(structuredClone(config)); setNotice("Saved.");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+      failedDraft.current = ""; setSaveError("");
+      setSaved(config); setDraft(current => draftAfterSave(current, sent, config));
+    } catch (cause) {
+      failedDraft.current = JSON.stringify(sent);
+      setSaveError(cause instanceof Error ? cause.message : String(cause));
+    }
     finally { setBusy(false); }
   };
+  // Every change saves itself a moment after the last edit (the user's call, 2026-10-22: a change
+  // made without pressing Save was lost). One save at a time; edits made meanwhile go in the next.
+  useEffect(() => {
+    if (!draft || !dirty || busy || failedDraft.current === JSON.stringify(draft)) return undefined;
+    const sent = draft;
+    const timer = window.setTimeout(() => void save(sent), AUTOSAVE_MS);
+    return () => window.clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft, dirty, busy]);
   const stop = (id: string) => void moduleCall("subagents_stop", { subagentId: id })
     .then(() => moduleCall("subagents_runs")).then(result => setRuns(Array.isArray(result.runs) ? result.runs as SubagentRun[] : []))
     .catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
@@ -157,7 +180,6 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
           </div>
         </div>
       </header>
-      {notice ? <p className="sa-notice" role="status">{notice}</p> : null}
       {missingModel ? <p className="sa-warning" role="alert">Some subagents have no model: choose a default model below, or one for each of them.</p> : null}
 
       <section className="sa-section" aria-label="Settings">
@@ -268,11 +290,10 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
           </ul>}
       </section>
     </div>
-    {/* Save sits on the page's bottom edge while there is something to save, as Codex's settings do. */}
-    <div className={`sa-savebar${dirty ? " is-dirty" : ""}`} role="region" aria-label="Save changes">
-      <span>{dirty ? "You have unsaved changes" : "All changes saved"}</span>
-      {dirty ? <button type="button" className="sa-button" disabled={busy} onClick={() => saved && setDraft(structuredClone(saved))}>Discard</button> : null}
-      <button type="button" className="sa-button is-primary" disabled={busy || !dirty} onClick={() => void save()}>{busy ? "Saving…" : "Save"}</button>
+    {/* Changes save themselves; the bar on the page's bottom edge says where they are. */}
+    <div className={`sa-savebar${saveError ? " is-error" : dirty ? " is-dirty" : ""}`} role="status" aria-label="Save status">
+      <span>{saveError ? `Not saved: ${saveError}` : busy ? "Saving…" : dirty ? "Saving changes…" : "All changes saved"}</span>
+      {saveError ? <button type="button" className="sa-button is-primary" disabled={busy} onClick={() => { failedDraft.current = ""; void save(draft); }}>Try again</button> : null}
     </div>
   </div>;
 }
