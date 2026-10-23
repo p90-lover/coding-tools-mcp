@@ -41,6 +41,7 @@ const BACKEND_MODULES = Object.freeze([
   "chat-preview.cjs",
   "chat-sandbox.cjs",
   "subagents.cjs",
+  "chat-history.cjs",
   "cpa-quota.cjs",
   "cpa-usage.cjs",
   "cpa-model-prices.cjs",
