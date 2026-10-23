@@ -13,7 +13,7 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
-  steerReader, steerReceipts, tidyTimeline, withoutReplied, cpaRefusalNote, type ChatLiveItem, type ChatStep, type ChatTurn, type CpaRefusal,
+  steerReader, steerReceipts, tidyTimeline, withoutReplied, cpaRefusalNote, waitsForPerson, type ChatLiveItem, type ChatStep, type ChatTurn, type CpaRefusal,
   type DshActivity, type SteerReceipt,
 } from "./ao-chat";
 
@@ -257,13 +257,14 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
 }
 
 /** RunningStatus: a hairline over the whale's tail and "Deep diving for 1m 4s ···", in DeepSeek blue. */
-function DshRunning({ since, divider, heardAt, retry = "", refusal = null }: { since?: number; divider: boolean; heardAt?: number; retry?: string; refusal?: CpaRefusal | null }) {
+function DshRunning({ since, divider, heardAt, retry = "", refusal = null, asking = false }: { since?: number; divider: boolean; heardAt?: number; retry?: string; refusal?: CpaRefusal | null; asking?: boolean }) {
   const now = useNow(true);
   // A long turn can go quiet for many minutes (a slow model request): say how long, so a quiet turn
   // does not look frozen, and say plainly when it has been quiet as long as a stuck one. A turn whose
   // agent is waiting out a model error says that instead (dshRetryNote), or CPA refusing its model
-  // (a subagent's requests too, which post no retry notice).
-  const quietNote = retry || `${cpaRefusalNote(refusal, now)}${dshQuietNote(heardAt, now)}`;
+  // (a subagent's requests too, which post no retry notice). One waiting on the person's answer
+  // (`asking`) is never "may be stuck".
+  const quietNote = retry || `${cpaRefusalNote(refusal, now)}${dshQuietNote(heardAt, now, asking)}`;
   const { onRestart, restarting } = useContext(TurnRestart);
   return <div className="dsh-running" role="status" aria-live="polite">
     {divider ? <span className="dsh-running-divider" aria-hidden="true" /> : null}
@@ -330,6 +331,7 @@ export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = f
     {errorShownBelow ? null : steps.filter((step) => step.error).map((step) => <div key={`error:${step.key}`} className="dsh-turn-error">
       <span className="dsh-turn-error-title">This turn failed</span><span className="dsh-turn-error-message">{step.error}</span>
     </div>)}
-    {live ? <DshRunning since={turn.startedAtMs} divider heardAt={heardAt} retry={dshRetryNote(steps)} refusal={refusal} /> : null}
+    {live ? <DshRunning since={turn.startedAtMs} divider heardAt={heardAt} retry={dshRetryNote(steps)} refusal={refusal}
+      asking={steps.some((step) => waitsForPerson(step.working?.activity))} /> : null}
   </div>;
 }

@@ -617,6 +617,23 @@ export function chatRunOpen(status: ChatStatus | undefined): boolean {
 }
 
 /**
+ * The run an open chat shows as its own: the selected one while it is still open; once it has
+ * settled, the chat's run that is working, else its newest. The chat read its working state, its
+ * approvals and steer-or-send from the selected run alone, and kept the one it was opened on. Seen
+ * live 2026-10-23: two rounds started two seconds apart, the newer was stopped and the older retried,
+ * and the chat sat on the stopped one for an hour: no Approve or Deny for the request its agent
+ * waited on, and every message sent as a new turn and refused ("This chat is still running").
+ * A selected run not loaded yet (a send's new run) is kept.
+ */
+export function chatLiveRun(runs: ChatRun[], taskId: string, selected: string): string {
+  const mine = runs.filter((run) => run.project_id === taskId);
+  const current = mine.find((run) => run.id === selected);
+  if (!mine.length || (selected && !current) || (current && chatRunOpen(chatRunStatus(current)))) return selected;
+  const working = [...mine].reverse().find((run) => chatRunStatus(run) === "running");
+  return (working ?? mine[mine.length - 1]).id;
+}
+
+/**
  * Chats in a workspace, most recently started first. Runs arrive oldest first. Archived and
  * deleted chats (by their lifecycle, or an archived board task) are left out unless showInactive.
  */
@@ -1138,10 +1155,19 @@ export function dshDuration(ms: number): string {
  * stuck card (STALL_MS). A long model request can be silent for minutes; without this the turn
  * looked frozen.
  */
-export function dshQuietNote(heardAtMs: number | undefined, now: number): string {
+export function dshQuietNote(heardAtMs: number | undefined, now: number, waitingForYou = false): string {
   const quiet = heardAtMs ? now - heardAtMs : 0;
+  // A turn waiting on a request is quiet because it waits for the person, not stuck: "may be stuck"
+  // offered Restart, which only waited on that same request and then sent nothing (seen live
+  // 2026-10-23: 17 minutes on a PowerShell approval, then five "This chat is still running").
+  if (waitingForYou) return quiet >= 60_000 ? ` · waiting for you for ${dshDuration(quiet)}` : "";
   if (quiet >= STALL_MS) return ` · nothing new for ${dshDuration(quiet)}, may be stuck`;
   return quiet >= 60_000 ? ` · quiet for ${dshDuration(quiet)}` : "";
+}
+
+/** Whether a working card's activity is a request waiting for the person (an approval, a question, a plan). */
+export function waitsForPerson(activity: string | undefined): boolean {
+  return /^waiting for (approval|your answer|you to review)/.test(activity ?? "");
 }
 
 /**
@@ -1432,6 +1458,17 @@ export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
 /** "3" for a goal with no round limit (Claude Code's), "3 of 6" for one saved with a limit. */
 export function goalRounds(goal: Pick<ChatGoal, "round" | "rounds">): string {
   return goal.rounds > 0 ? `${goal.round} of ${goal.rounds}` : String(goal.round);
+}
+
+const GOAL_FEEDBACK = /^Stop hook feedback:\n\[([\s\S]*?)\]: ([\s\S]+)$/;
+/**
+ * A goal's later round (chat-goals goalMessage): the goal's own feedback to the agent, which Claude
+ * Code shows as its Stop hook's feedback under the turn, not as something the person typed. It
+ * showed as the person's message bubble. Null for any other message.
+ */
+export function goalFeedback(text: string): { objective: string; reason: string } | null {
+  const match = GOAL_FEEDBACK.exec(text.trim());
+  return match ? { objective: match[1], reason: match[2].trim() } : null;
 }
 /** Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's message. */
 export type QueuedChatMessage = { what: string; message: string; goal?: string };
