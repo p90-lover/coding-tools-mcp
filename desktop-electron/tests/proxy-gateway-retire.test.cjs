@@ -90,6 +90,40 @@ test("a gateway that was never used for the app keeps the app's route; a helper 
   assert.deepEqual(fs.readdirSync(providers).filter((name) => name.startsWith("proxy-gateway")), ["proxy-gateway.state.json"]);
 });
 
+test("a gateway upstream whose last check failed gives way to a working profile for the same proxy", async (t) => {
+  const { userData, store, write } = fixture(t);
+  // Seen live: the gateway relayed through an older copy of the user's proxy (407, then EACCES)
+  // while the copy the user had just re-entered and tested ("Global proxy") sat unused.
+  store.saveProxyProfile({ id: "stale-copy", name: "ProxyBridge Nova upstream", enabled: true,
+    endpoint: { protocol: "http", host: "PROXY.example", port: 10000 }, scopes: ["all"] });
+  store.saveProxyProfile({ id: "other-proxy", name: "Another proxy", enabled: true,
+    endpoint: { protocol: "http", host: "other.example", port: 10000 }, scopes: ["all"] });
+  store.recordProxyHealth("stale-copy", { reachable: false, error: "Connection failed: EACCES" });
+  store.recordProxyHealth("direct", { reachable: true, latencyMs: 47 });
+  store.recordProxyHealth("other-proxy", { reachable: true, latencyMs: 5 });
+  store.setGlobalRouting({ enabled: true, profileId: "builtin-gateway" });
+  write("proxy-gateway.json", { version: 1, useForApp: true, upstreamProfileId: "stale-copy",
+    previousGlobal: { enabled: true, profileId: "local-relay" } });
+  const logged = [];
+
+  await retireProxyGateway({ userData, store, logger: { info: (event, detail) => logged.push([event, detail]), warn() {} }, isRunning: () => false });
+
+  assert.deepEqual([store.snapshot().routing.globalEnabled, store.snapshot().routing.globalProfileId], [true, "direct"],
+    "the same exit with the credentials that work, never another proxy");
+  assert.deepEqual(logged.find(([event]) => event === "proxy_gateway.route_restored")?.[1], { profileId: "direct", enabled: true, insteadOf: "stale-copy" });
+});
+
+test("a failed upstream with no working copy of its proxy is still used: the route keeps its exit", async (t) => {
+  const { userData, store, write } = fixture(t);
+  store.recordProxyHealth("direct", { reachable: false, error: "timed out" });
+  store.setGlobalRouting({ enabled: true, profileId: "builtin-gateway" });
+  write("proxy-gateway.json", { version: 1, useForApp: true, upstreamProfileId: "direct", previousGlobal: null });
+
+  await retireProxyGateway({ userData, store, logger, isRunning: () => false });
+
+  assert.equal(store.snapshot().routing.globalProfileId, "direct");
+});
+
 test("without a usable upstream, a route on the gateway goes back to the route it replaced", async (t) => {
   const { userData, store, write } = fixture(t);
   store.setGlobalRouting({ enabled: true, profileId: "builtin-gateway" });

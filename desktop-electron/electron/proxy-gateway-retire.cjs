@@ -85,18 +85,41 @@ function usableProfile(store, profileId) {
   return typeof profileId === "string" && profileId !== GATEWAY_PROFILE_ID && Boolean(store.activeProxy(profileId));
 }
 
-// A route on the gateway goes straight to the gateway's upstream, so traffic keeps the same exit
-// without the relay. Without a usable upstream: the route that was active before "Use for this
-// app" was switched on, else direct.
-function restoreRoute(store, settings) {
+const endpointKey = (profile) => {
+  const endpoint = profile?.endpoint;
+  return endpoint ? `${endpoint.protocol}://${String(endpoint.host).toLowerCase()}:${endpoint.port}` : "";
+};
+
+// The gateway's upstream, unless its last check failed and another profile for the same proxy
+// (same protocol, host and port: the same exit) checked fine; then the newest of those. Seen live:
+// the gateway relayed through an older copy of the user's proxy whose saved credentials the proxy
+// rejected (407), while the copy the user had just re-entered and tested sat unused.
+function upstreamFor(store, profileId) {
+  const profiles = store.snapshot().proxyProfiles;
+  const upstream = usableProfile(store, profileId) ? profiles.find((profile) => profile.id === profileId) : null;
+  if (!upstream?.lastError) return upstream?.id ?? null;
+  const working = profiles
+    .filter((profile) => !profile.lastError && endpointKey(profile) === endpointKey(upstream) && usableProfile(store, profile.id))
+    .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
+  return working[0]?.id ?? upstream.id;
+}
+
+// A route on the gateway goes straight to the gateway's upstream (upstreamFor), so traffic keeps
+// the same exit without the relay. Without a usable upstream: the route that was active before
+// "Use for this app" was switched on, else direct.
+function restoreRoute(store, settings, logger) {
   const routing = store.snapshot().routing;
   if (routing.globalProfileId !== GATEWAY_PROFILE_ID) return false;
   const previous = settings?.previousGlobal;
-  store.setGlobalRouting(usableProfile(store, settings?.upstreamProfileId)
-    ? { enabled: routing.globalEnabled === true, profileId: settings.upstreamProfileId }
+  const upstream = upstreamFor(store, settings?.upstreamProfileId);
+  const route = upstream
+    ? { enabled: routing.globalEnabled === true, profileId: upstream }
     : usableProfile(store, previous?.profileId)
       ? { enabled: previous.enabled === true, profileId: previous.profileId }
-      : { enabled: false, profileId: null });
+      : { enabled: false, profileId: null };
+  store.setGlobalRouting(route);
+  logger.info("proxy_gateway.route_restored", { profileId: route.profileId, enabled: route.enabled,
+    ...(upstream && upstream !== settings?.upstreamProfileId ? { insteadOf: settings.upstreamProfileId } : {}) });
   return true;
 }
 
@@ -118,7 +141,7 @@ async function retireProxyGateway({
 
   let routeRestored = false;
   try {
-    routeRestored = restoreRoute(store, settings);
+    routeRestored = restoreRoute(store, settings, logger);
     if (hasProfile) store.removeProxyProfile(GATEWAY_PROFILE_ID);
   } catch (error) {
     logger.warn("proxy_gateway.retire_route_failed", { message: error instanceof Error ? error.message : String(error) });
