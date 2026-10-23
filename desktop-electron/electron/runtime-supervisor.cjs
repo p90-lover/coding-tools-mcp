@@ -512,8 +512,28 @@ class RuntimeSupervisor {
 
   readState() {
     if (!fs.existsSync(this.statePath)) return null;
+    // A marker a power cut tore (empty, or its size in NUL bytes) holds no ownership to protect: the
+    // processes it named died with the machine. Failing on it stopped every watchdog restart until
+    // something rewrote the file; it is set aside as if it were missing.
+    let raw = null;
+    try { raw = fs.readFileSync(this.statePath); } catch { /* readJson below reports it */ }
+    if (raw && raw.every((byte) => byte === 0 || byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d)) {
+      this.logger?.warn?.("runtime.state_torn", { bytes: raw.length });
+      this.clearState();
+      return null;
+    }
     try {
-      const state = readJson(this.statePath);
+      const bytes = fs.readFileSync(this.statePath);
+      if (bytes.length === 0 || bytes.every((byte) => byte === 0)) {
+        // No ownership can be recovered from an empty file. Keep it and use the normal missing-state checks.
+        const trash = path.join(this.coreHome, "Trash");
+        fs.mkdirSync(trash, { recursive: true, mode: 0o700 });
+        const backup = path.join(fs.mkdtempSync(path.join(trash, "runtime-ownership-")), path.basename(this.statePath));
+        fs.writeFileSync(backup, bytes, { flag: "wx", mode: 0o600 });
+        this.logger.warn("runtime.empty_ownership_state_quarantined", { backup, bytes: bytes.length });
+        return null;
+      }
+      const state = JSON.parse(bytes.toString("utf8"));
       const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
       if (!state
         || state.version !== 1
@@ -547,7 +567,7 @@ class RuntimeSupervisor {
 
   writeState(status, detail) {
     const state = this.snapshot(status, detail);
-    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
+    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true });
     return state;
   }
 
@@ -1676,19 +1696,24 @@ class RuntimeSupervisor {
   }
 
   async ownedRuntimeReady(config) {
+    return (await this.ownedRuntimeCheck(config)).ready;
+  }
+
+  // The same check, saying which part failed: the launcher watchdog logs it with each miss.
+  async ownedRuntimeCheck(config) {
+    const verdict = (failed) => ({ ready: !failed, ...(failed ? { failed } : {}) });
+    const tunnelVerdict = async () => {
+      if (!this.tunnel) return verdict("tunnel_missing");
+      return verdict(await this.tunnelHealth(config) ? null : "tunnel_health");
+    };
     if (this.launcherProfile === "development") {
-      return config.mode !== "full" || Boolean(this.tunnel && await this.tunnelHealth(config));
+      return config.mode !== "full" ? verdict(null) : tunnelVerdict();
     }
     const daemon = this.daemon;
-    if (!daemon
-      || !Number.isInteger(daemon.pid)
-      || daemon.exitCode !== null
-      || daemon.signalCode !== null
-      || !await this.proxyHealth(config, 2_000, daemon.pid, true)) {
-      return false;
-    }
-    if (config.mode !== "full") return true;
-    return Boolean(this.tunnel && await this.tunnelHealth(config));
+    if (!daemon || !Number.isInteger(daemon.pid)) return verdict("daemon_missing");
+    if (daemon.exitCode !== null || daemon.signalCode !== null) return verdict("daemon_exited");
+    if (!await this.proxyHealth(config, 2_000, daemon.pid, true)) return verdict("daemon_health");
+    return config.mode !== "full" ? verdict(null) : tunnelVerdict();
   }
 
   async control(config, action, options = {}) {

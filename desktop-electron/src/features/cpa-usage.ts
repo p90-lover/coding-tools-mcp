@@ -54,8 +54,8 @@ export function costSourceLabel(source: CpaCostSource, partial: boolean, zh: boo
     : source === "estimate" ? (zh ? "內建公開價目表估算" : "the built-in list-price table")
       : source === "mixed" ? (zh ? "CPA Helper 價目表與內建價目表" : "CPA Helper's price book and the built-in list-price table")
         : (zh ? "無價格" : "no price");
-  const rest = partial ? (zh ? "；部分模型沒有價格，未計入。" : "; some models have no price and are not counted.") : "";
-  return zh ? `估算成本（API 牌價，訂閱帳戶不按 token 計費），來源：${from}${rest}` : `Estimated API-price cost (subscription accounts are not billed per token), from ${from}${rest}`;
+  const rest = partial ? (zh ? "；部分模型沒有價格，未計入。" : " Models with no price aren't counted.") : "";
+  return zh ? `估算成本（API 牌價，訂閱帳戶不按 token 計費），來源：${from}${rest}` : `Estimated at API prices, from ${from}. Subscriptions aren't billed per token.${rest}`;
 }
 
 /** "3 min ago" / "3 分鐘前" for a past time. */
@@ -73,7 +73,7 @@ export function agoLabel(at: number | null, zh: boolean, now = Date.now()): stri
 export function clineStateLabel(state: ClineKeyState, zh: boolean): string {
   switch (state) {
     case "ok": return zh ? "正常" : "working";
-    case "limited": return zh ? "已達限額（429）" : "at its limit (429)";
+    case "limited": return zh ? "已達限額（429）" : "at limit (429)";
     case "signed-out": return zh ? "金鑰無效" : "key rejected";
     case "error": return zh ? "最後一次失敗" : "last request failed";
     case "unused": return zh ? "尚未使用" : "not used yet";

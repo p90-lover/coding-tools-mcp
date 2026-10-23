@@ -123,7 +123,7 @@ export function GptBrowserSurface({ api, active, setError }: {
               type="text"
               inputMode="url"
               aria-label="Address"
-              placeholder="Type a web address, e.g. chatgpt.com or example.com"
+              placeholder="Enter a web address, like chatgpt.com"
               value={draft ?? page?.url ?? ""}
               onFocus={(event) => { setDraft(event.target.value); event.target.select(); }}
               onBlur={() => setDraft(null)}
@@ -150,7 +150,7 @@ export function GptBrowserSurface({ api, active, setError }: {
             type="button"
             className={confirmRemove ? "button-danger" : "button-secondary"}
             onClick={remove}
-            title="Signs this account out and erases its browser data"
+            title="Sign out and erase browser data"
           >
             {confirmRemove ? "Click again to remove" : "Remove account"}
           </button>
@@ -162,12 +162,12 @@ export function GptBrowserSurface({ api, active, setError }: {
         </div>
       ) : (
         <div className="gpb-empty">
-          <strong>Use several ChatGPT accounts side by side</strong>
-          <p>Each account gets its own private browser session. Sign in once and it stays signed in; switch accounts from the picker above.</p>
+          <strong>Use several ChatGPT accounts</strong>
+          <p>Each account gets its own browser session and stays signed in. Switch accounts from the picker above.</p>
           <button type="button" className="button-primary" onClick={() => void run(() => api.addGptBrowserAccount())}>
             Add your first account
           </button>
-          <span className="gpb-muted">Pages load through Coding Tools' proxy route, the same as the Browser.</span>
+          <span className="gpb-muted">Pages load through the same proxy as the Browser.</span>
         </div>
       )}
     </section>

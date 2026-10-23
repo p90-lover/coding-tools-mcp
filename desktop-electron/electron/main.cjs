@@ -58,11 +58,8 @@ const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
   providerNetworkReady,
-  proxyGatewayDesktopRoute,
   setProviderBrowserHost,
   setProviderCpaConnection,
-  setProxyGatewayDesktopRunning,
-  setProxyGatewayKeyRotated,
   setProviderLogger,
 } = require("./provider-bootstrap.cjs");
 
@@ -94,6 +91,7 @@ const {
   scheduleFullIpcAfterPaint,
 } = require("./launcher-ready-path.cjs");
 const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
+const { createMainStallMonitor } = require("./main-stall-monitor.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
 const {
   createStateStore,
@@ -261,21 +259,8 @@ function getChatGptDesktop(logger) {
       logger,
       dataRoot: path.join(CORE_HOME, "chatgpt-desktop"),
       resolveCpaAuthDir: cpaAuthDirectory,
-      // Through the built-in gateway, ChatGPT Desktop gets its token-free port, which is open only
-      // while an instance runs; otherwise the credential-free env route as before.
-      getProxyRoute: async () => {
-        try {
-          const route = await proxyGatewayDesktopRoute();
-          if (route) return route;
-        } catch (error) {
-          logger.warn("chatgpt_desktop.gateway_route_failed", { message: error instanceof Error ? error.message : String(error) });
-        }
-        return proxyRouteFromEnvironment();
-      },
-      onChange: (status) => {
-        send("launcher:chatgpt-desktop-changed", status);
-        void setProxyGatewayDesktopRunning((status?.runningSlotIds?.length ?? 0) > 0).catch(() => {});
-      },
+      getProxyRoute: async () => proxyRouteFromEnvironment(),
+      onChange: (status) => send("launcher:chatgpt-desktop-changed", status),
     });
     chatgptDesktop.ready = chatgptDesktop.initialize().catch((error) => {
       logger.warn("chatgpt_desktop.initialize_failed", { message: error instanceof Error ? error.message : String(error) });
@@ -407,17 +392,22 @@ function startBridgeWatchdog(logger, stateStore) {
     if (!config) return;
     bridgeWatchdogBusy = true;
     try {
-      if (await runtimeSupervisor.ownedRuntimeReady(config)) {
+      const checkStarted = Date.now();
+      const check = await runtimeSupervisor.ownedRuntimeCheck(config);
+      if (check.ready) {
         bridgeWatchdogMisses = 0;
         return;
       }
       bridgeWatchdogMisses += 1;
+      // Which part failed and how long the check took: a slow daemon_health on a stalled machine
+      // reads differently from a tunnel that is down.
+      const miss = { mode: config.mode, misses: bridgeWatchdogMisses, failed: check.failed, checkMs: Date.now() - checkStarted };
       if (bridgeWatchdogMisses < BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART) {
-        logger.warn("runtime.watchdog_miss", { mode: config.mode, misses: bridgeWatchdogMisses });
+        logger.warn("runtime.watchdog_miss", miss);
         return;
       }
       bridgeWatchdogMisses = 0;
-      logger.warn("runtime.watchdog_restart", { mode: config.mode });
+      logger.warn("runtime.watchdog_restart", miss);
       const result = await runtimeSupervisor.startIfConfigured();
       logger.info("runtime.watchdog_result", { status: result?.status });
       // Point Codex back at the bridge once it is running again (a failed launch restores the old route).
@@ -784,8 +774,8 @@ const NATIVE_COPY = Object.freeze({
     remove: "Remove",
     removeTitle: "Remove Codex Web GPT",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
-    removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
-    catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details and export a safe log if it persists.",
+    removeDetail: "Your ChatGPT sign-in in the launcher stays. Restart Codex once.",
+    catalogFailure: "Codex reached the launcher, but its model catalog didn't load: HTTP {status}, {reason}. Check Activity, and export a safe log if it keeps failing.",
   }),
   "zh-CN": Object.freeze({
     openLauncher: "打开 Codex Web GPT",
@@ -991,7 +981,9 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
         message: error instanceof Error ? error.message : String(error),
       }));
     };
-    if (rendererCrashes.length >= 3) {
+    // A page that twice in a row never finished loading is no page fault: Chromium itself is stuck
+    // (seen after a Windows restart with no network service), and only a fresh process loads again.
+    if (rendererCrashes.length >= 3 || reason === "stalled-again") {
       // A restart the app refuses (a browser operation still running) leaves the window reloaded instead.
       void requestQuit({ keepBridge: true, relaunch: true }).catch(() => undefined).finally(() => setTimeout(reload, 500));
       return;
@@ -1299,7 +1291,7 @@ function registerIpc({ logger, stateStore }) {
       type: "warning",
       title: "Coding Tools",
       message: "Save workspace authentication settings?",
-      detail: `${name}\n${location}\n${input.service}: ${input.authType}\nA running listener must be restarted to apply this change.`,
+      detail: `${name}\n${location}\n${input.service}: ${input.authType}\nRestart a running listener to apply this change.`,
       buttons: ["Cancel", "Save settings"],
       defaultId: 0,
       cancelId: 0,
@@ -1362,7 +1354,7 @@ function registerIpc({ logger, stateStore }) {
         type: "warning",
         title: "Coding Tools",
         message: `${action} the ${input.service} listener?`,
-        detail: `${name}\n${location}\nThis changes the local listener only; the tunnel configuration stays as saved.`,
+        detail: `${name}\n${location}\nOnly the local listener changes. The tunnel settings stay as saved.`,
         buttons: ["Cancel", "Continue"],
         defaultId: 0,
         cancelId: 0,
@@ -1390,7 +1382,7 @@ function registerIpc({ logger, stateStore }) {
       type: "warning",
       title: "Coding Tools",
       message: "Copy this workspace credential?",
-      detail: `${name}\n${location}\n${input.key}\nIf it is missing, Coding Tools will generate it locally.`,
+      detail: `${name}\n${location}\n${input.key}\nIf it's missing, Coding Tools creates one locally.`,
       buttons: ["Cancel", "Copy credential"],
       defaultId: 0,
       cancelId: 0,
@@ -2609,15 +2601,15 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
         buttons: ["Cancel", "Quit anyway"],
         defaultId: 0,
         cancelId: 0,
-        title: "Codex route could not be restored",
-        message: "Coding Tools could not restore the previous Codex model route.",
-        detail: `${message}\n\nQuitting anyway may leave Codex pointed at an unavailable local bridge.`,
+        title: "Couldn't restore the Codex route",
+        message: "Coding Tools couldn't restore Codex's previous model route.",
+        detail: `${message}\n\nIf you quit now, Codex may point at a local bridge that isn't running.`,
       });
       if (decision.response !== 1) throw error;
       publishOperation({
         name: "launcher-quit",
         status: "warning",
-        message: `Quitting after route restoration failed: ${message}`,
+        message: `Quitting without restoring the Codex route: ${message}`,
       });
     }
     managedBootstrapController?.dispose();
@@ -2625,7 +2617,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     externalServicesController?.dispose({ keepPersistent: keepBridge });
     upstreamToolController?.dispose();
     const detached = keepBridge ? await runtimeSupervisor?.detach(relaunch ? "launcher-restart" : "launcher-quit").catch((error) => {
-      publishOperation({ name: "launcher-quit", status: "warning", message: `Codex bridge could not be kept running: ${error instanceof Error ? error.message : String(error)}` });
+      publishOperation({ name: "launcher-quit", status: "warning", message: `Couldn't keep the Codex bridge running: ${error instanceof Error ? error.message : String(error)}` });
       return null;
     }) : null;
     if (detached?.status !== "detached") await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
@@ -2882,19 +2874,6 @@ async function start() {
     publish: (value) => send("launcher:external-services-changed", value),
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
-  // After the gateway's key rotated on evidence of a squat, a running CPA restarts with the new key
-  // (the same path as Network Proxy's "Apply route to CPA"). The Codex bridge and the MCP tunnel
-  // are deliberately never restarted here: they carry in-flight work and take the key on their next
-  // start; the Proxy Gateway tab lists them as needing a restart.
-  setProxyGatewayKeyRotated(async () => {
-    const cpa = externalServicesController?.snapshot().services.find((service) => service.id === "cpa");
-    if (cpa?.status !== "ready") return;
-    try {
-      await externalServicesController.restart("cpa");
-    } catch (error) {
-      logger.warn("proxy_gateway.cpa_restart_failed", { message: error instanceof Error ? error.message : String(error) });
-    }
-  });
   managedBootstrapController = createManagedBootstrap({
     snapshot: () => externalServicesController.snapshot(),
     install: (serviceId) => externalServicesController.installManagedComponent(serviceId),
@@ -3167,7 +3146,7 @@ async function start() {
         case "install": return antigravityCli.install();
         case "terminal_open": {
           const env = antigravityProxyEnvironment();
-          if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy in Network Proxy first");
+          if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
             executable: antigravityCli.executable(), env: manualAuthEnvironment(env), workspaceId: args.workspaceId || undefined,
           });
@@ -3259,6 +3238,8 @@ async function start() {
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       // So do the wake-ups chat agents asked for (schedule_wakeup).
       wakeupsFile: path.join(app.getPath("userData"), "integrations", "chat-wakeups.json"),
+      // So do the chats' loops (/loop).
+      loopsFile: path.join(app.getPath("userData"), "integrations", "chat-loops.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
       chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
       archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),
@@ -3295,10 +3276,10 @@ async function start() {
       // reuse it under their own slug (the bridge picks the effort from the slug, not this entry).
       webModelCatalog: async ({ executable, model = "chatgpt-web/high" }) => {
         const result = await runtimeHost.run("ao-web-model-catalog", ["catalog", "ao-web", "--codex", executable], {
-          embedded: true, timeoutMs: 20_000, message: "Checking the AO WebGPT model",
-          successMessage: "AO WebGPT model checked",
+          embedded: true, timeoutMs: 20_000, message: "Checking the WebGPT model…",
+          successMessage: "WebGPT model checked",
         });
-        if (typeof aoWebCatalogForModel !== "function") throw new Error("Update the Coding Tools backend to run AO WebGPT tiers");
+        if (typeof aoWebCatalogForModel !== "function") throw new Error("Update the Coding Tools backend to use WebGPT models");
         return aoWebCatalogForModel(JSON.parse(result.stdout), model);
       },
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
@@ -3366,7 +3347,7 @@ async function start() {
       antigravityAuthBrowser?.closeAll();
       backendBundles.useBuiltin();
       startBackendFrom(backendBundles.current());
-      publishOperation({ name: "backend-update", status: "failed", message: `Backend ${backend.id} failed to start; using the installed backend` });
+      publishOperation({ name: "backend-update", status: "failed", message: `Backend ${backend.id} didn't start. Using the installed backend.` });
     }
   };
   const stopBackend = async (reason) => {
@@ -3397,7 +3378,7 @@ async function start() {
   backendBundles.watchIncoming(async (manifest) => {
     publishOperation({ name: "backend-update", status: "running", message: `Installing backend ${manifest.id}` });
     await backendControl.restart("backend-update");
-    publishOperation({ name: "backend-update", status: "completed", message: `Backend ${manifest.id} is live; the app, Codex bridge, MCP and CPA kept running` });
+    publishOperation({ name: "backend-update", status: "completed", message: `Backend ${manifest.id} is live. The app, Codex bridge, MCP and CPA kept running.` });
   });
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
@@ -3785,6 +3766,8 @@ async function start() {
   // From launch on, keep the bridge and MCP tunnel alive while the app is open; the supervisor
   // coalesces a watchdog start with any launch-time start that is still in flight.
   startBridgeWatchdog(logger, stateStore);
+  // A blocked main loop freezes every window; this is the only thing that can tell afterwards.
+  createMainStallMonitor({ logger }).start();
 
   app.on("activate", () => showMainWindow());
   app.on("will-quit", () => missionWorkflowRuntime?.dispose());

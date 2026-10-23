@@ -129,7 +129,7 @@ export function AgentOrchestratorTeam({ team, harnesses, loadModels, change, sta
     && Number.isInteger(rounds) && rounds >= 1 && rounds <= 10;
   return (
     <form className="ao-sheet ao-team-sheet" aria-label="Team settings" onSubmit={event => event.preventDefault()} onChangeCapture={event => { const target = event.target; immediateChange = target.tagName === "SELECT" || target.getAttribute("type") === "checkbox"; }}>
-      <p className="ao-hint ao-wide">Changes apply automatically. The selected mission restarts with its original input and visible progress; other missions are unchanged.</p>
+      <p className="ao-hint ao-wide">Changes apply automatically. This mission restarts with its original input. Other missions are unchanged.</p>
       {ordered.map((node) => {
         const settings = { ...emptyRoleSettings(), ...node.settings };
         const removable = node.role === "approver" || node.role === "sub_reviewer" || node.role === "retry" || (node.role === "worker" && workers.length > 1);
@@ -154,7 +154,7 @@ export function AgentOrchestratorTeam({ team, harnesses, loadModels, change, sta
               onChange={(event) => updateSettings(node, { instructions: event.target.value })} /></label>
             <label>Expected output<textarea maxLength={2048} rows={2} value={settings.expected_output}
               onChange={(event) => updateSettings(node, { expected_output: event.target.value })} /></label>
-            {node.role === "approver" ? <label className="ao-check" title="Off: the approver only recommends and you decide each tool request. On: it allows or denies on its own (unclear requests and hard-blocked commands still come to you or are denied).">
+            {node.role === "approver" ? <label className="ao-check" title="On: the approver allows or denies tool requests itself. Unclear ones still come to you. Off: it only recommends.">
               <input type="checkbox" checked={settings.auto_decide === true} disabled={false}
                 onChange={(event) => updateSettings(node, { auto_decide: event.target.checked })} /> Auto-decide tool requests</label> : null}
             {node.role === "reviewer" && subReviewers.length
@@ -182,7 +182,7 @@ export function AgentOrchestratorTeam({ team, harnesses, loadModels, change, sta
             onChange={(event) => setDraft((current) => ({ ...current, max_review_rounds: Number(event.target.value) }))} /></label>
       </div>
       <div className="ao-sheet-actions ao-wide">
-        <span role="status">{!limitsValid ? "Choose valid worker and review limits" : status || "Changes apply automatically"}</span>
+        <span role="status">{!limitsValid ? "Set valid worker and review limits" : status || "Changes apply automatically"}</span>
         <button className="button-secondary" type="button" onClick={close}>Close</button>
       </div>
     </form>

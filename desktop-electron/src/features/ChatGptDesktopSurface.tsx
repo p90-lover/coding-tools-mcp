@@ -128,7 +128,7 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
             className="button-primary"
             disabled={busy || !selected || selectedIsRunning || selectedAccount?.disabled}
             onClick={() => void run(() => api.openChatGptDesktop(selected))}
-            title="CPA accounts sign in automatically with the tokens CPA already holds"
+            title="CPA accounts sign in automatically"
           >
             {status.running ? "Switch" : "Open"}
           </button>
@@ -145,7 +145,7 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
             setLocalOpen(!localOpen);
             writeFlag(LOCAL_PANEL_KEY, !localOpen);
           }}
-          title="Show or hide the preview of the ChatGPT app you run yourself"
+          title="Show or hide your ChatGPT app preview"
         >
           {localOpen ? "Hide your ChatGPT" : "Your ChatGPT"}
         </button>
@@ -155,7 +155,7 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
             className={confirmClear ? "button-danger" : "button-secondary"}
             disabled={busy}
             onClick={clear}
-            title="Closes ChatGPT, moves this account's local session to Trash, and opens a fresh sign-in. CPA keeps its account."
+            title="Move this session to Trash and sign in again. CPA keeps the account"
           >
             {confirmClear ? "Confirm clear" : "Clear account & session"}
           </button>
@@ -171,12 +171,12 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
         {status?.running ? <div className="cgd-slot" ref={setSlot} /> : (
           <div className="cgd-empty">
             {!status ? <p>Checking the ChatGPT desktop app…</p>
-              : !status.supported ? <p>The embedded ChatGPT desktop app is available on Windows only.</p>
+              : !status.supported ? <p>ChatGPT Desktop works on Windows only.</p>
                 : !status.installed ? <p>Install the ChatGPT desktop app from the Microsoft Store, then reopen this page.</p>
                   : <>
                     <p>
-                      Runs a separate ChatGPT desktop instance inside Coding Tools, with its own profile per account.
-                      Your installed ChatGPT app is not touched.
+                      Runs a separate ChatGPT app inside Coding Tools, with one profile per account.
+                      Your installed ChatGPT app stays as is.
                     </p>
                     {activeAccount ? <p className="cgd-muted">Last account: {accountLabel(activeAccount)}</p> : null}
                     {status.accounts.every((account) => account.source !== "cpa")

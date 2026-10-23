@@ -161,7 +161,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
     .then(() => moduleCall("subagents_runs")).then(result => setRuns(Array.isArray(result.runs) ? result.runs as SubagentRun[] : []))
     .catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
 
-  if (!available) return <div className="subagents-page ao-workflow"><p className="sa-empty is-page">Subagents need the Agent Orchestrator, which is not available in this build.</p></div>;
+  if (!available) return <div className="subagents-page ao-workflow"><p className="sa-empty is-page">Subagents need the Agent Orchestrator, which this build doesn't include.</p></div>;
   if (!draft) return <div className="subagents-page ao-workflow"><p className="sa-empty is-page">Loading…</p></div>;
   const { settings, agents } = draft;
   const missingModel = agents.some(agent => agent.enabled && !agent.route) && !settings.defaultRoute;
@@ -180,7 +180,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
           </div>
         </div>
       </header>
-      {missingModel ? <p className="sa-warning" role="alert">Some subagents have no model: choose a default model below, or one for each of them.</p> : null}
+      {missingModel ? <p className="sa-warning" role="alert">Some subagents have no model. Choose a default model below, or one for each.</p> : null}
 
       <section className="sa-section" aria-label="Settings">
         <h2>General</h2>
@@ -237,7 +237,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
               <div className="sa-agent-title">
                 <input className="sa-agent-name" aria-label="Name" value={agent.name} maxLength={60} placeholder="Name"
                   onChange={event => setAgent(index, { name: event.target.value })} />
-                <code title="The id a chat agent starts it by">{agent.id}</code>
+                <code title="ID chat agents use to start it">{agent.id}</code>
               </div>
               <Switch label={`${agent.name} enabled`} checked={agent.enabled} onChange={enabled => setAgent(index, { enabled })} />
               <button type="button" className="sa-icon-button" aria-label={`Remove ${agent.name || "subagent"}`} title="Remove" onClick={() => removeAgent(index)}>

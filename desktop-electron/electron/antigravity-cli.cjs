@@ -73,7 +73,7 @@ function shimBody(executable, platform = process.platform) {
       "@echo off",
       "setlocal",
       "if not defined CODING_TOOLS_AGY_HTTPS_PROXY (",
-      "  echo Antigravity CLI runs only through the Coding Tools network proxy. Select a global proxy in Network Proxy, then restart Agent Orchestrator. 1>&2",
+      "  echo Antigravity CLI runs only through the Coding Tools network proxy. Select a global proxy on the Proxy page, then restart Agent Orchestrator. 1>&2",
       "  exit /b 1",
       ")",
       ...SHIM_PROXY_KEYS.flatMap(key => [
@@ -88,7 +88,7 @@ function shimBody(executable, platform = process.platform) {
   return [
     "#!/bin/sh",
     'if [ -z "$CODING_TOOLS_AGY_HTTPS_PROXY" ]; then',
-    "  echo 'Antigravity CLI runs only through the Coding Tools network proxy. Select a global proxy in Network Proxy, then restart Agent Orchestrator.' >&2",
+    "  echo 'Antigravity CLI runs only through the Coding Tools network proxy. Select a global proxy on the Proxy page, then restart Agent Orchestrator.' >&2",
     "  exit 1",
     "fi",
     ...SHIM_PROXY_KEYS.map(key => `[ -n "$CODING_TOOLS_AGY_${key}" ] && export ${key}="$CODING_TOOLS_AGY_${key}" ${key.toLowerCase()}="$CODING_TOOLS_AGY_${key}"`),
@@ -205,7 +205,7 @@ function createAntigravityCli({
     if (installed()) return status();
     if (!await confirm({
       message: `Install ${manifest.name} ${manifest.version}?`,
-      detail: `Source: ${asset.url}\nFile: ${asset.fileName} (${(asset.size / 1048576).toFixed(1)} MB)\nSHA-256: ${asset.sha256}\n\nIt is installed for Coding Tools only and exposed to Agent Orchestrator as "${manifest.command}". Sign-in happens in the CLI itself.`,
+      detail: `Source: ${asset.url}\nFile: ${asset.fileName} (${(asset.size / 1048576).toFixed(1)} MB)\nSHA-256: ${asset.sha256}\n\nIt's installed for Coding Tools only, and agents run it as "${manifest.command}". You sign in from the CLI.`,
     })) return { ok: false, cancelled: true };
     installing = (async () => {
       const staging = path.join(root, `.staging-${manifest.version}-${now()}`);

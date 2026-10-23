@@ -321,7 +321,7 @@ test("menu mounting never saves defaults and unavailable metadata cannot apply",
   assert.equal(apply.props.disabled, true);
   apply.props.onClick();
   assert.equal(saves, 0);
-  assert.match(apply.props.title, /Reading runtime permission capabilities/);
+  assert.match(apply.props.title, /Checking permissions/);
 });
 
 test("menu sends captured revision and cancel/full-access refusal does not save", async () => {
@@ -349,9 +349,9 @@ test("runtime policy is labelled effective only after actual acknowledgement", (
   const effective = { permission_profile: "runtime/actual", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   let tree = view.render("AgentOrchestratorPermissions", { ...props, runtimePolicies: { "chat:attempt": { policy_acknowledged: false, effective_policy: effective } } }, [true, cap, "", false]);
   const tooltip = elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props.title;
-  assert.match(tooltip, /not acknowledged/); assert.ok(!tooltip.includes("Effective native runtime: runtime/actual"));
+  assert.match(tooltip, /not confirmed/); assert.ok(!tooltip.includes("Active: runtime/actual"));
   tree = view.render("AgentOrchestratorPermissions", { ...props, runtimePolicies: { "chat:attempt": { policy_acknowledged: true, effective_policy: effective } } }, [true, cap, "", false]);
-  assert.match(elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props.title, /Effective native runtime: runtime\/actual · on-request · auto_review/);
+  assert.match(elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props.title, /Active: runtime\/actual · on-request · auto_review/);
 });
 
 test("successful permission save announces exact scope without a visible footer; errors remain visible", async () => {
@@ -442,7 +442,7 @@ test("native decision objects are forwarded unchanged and unscoped requests are 
   assert.deepEqual(plain(replies[0]), { decision });
   tree = view.render("AgentOrchestratorApproval", { approval: { ...approval, turn_id: undefined }, busy: false, approve() {} });
   assert.equal(elements(tree, item => item.type === "fieldset")[0].props.disabled, true);
-  assert.match(text(tree), /Missing live thread\/turn scope/);
+  assert.match(text(tree), /this request has no live turn/);
 });
 
 test("command location uses the exact requested outside cwd, not the workspace root", () => {
@@ -491,7 +491,7 @@ test("permissions start empty, send only selected requested entries and retain e
   assert.equal(boxes.length, 4); assert.ok(boxes.every(box => !box.props.checked));
   boxes[0].props.onChange({ target: { checked: true } });
   tree = view.render("AgentOrchestratorApproval", props);
-  elements(tree, item => item.type === "button" && text(item) === "Send selected subset")[0].props.onClick();
+  elements(tree, item => item.type === "button" && text(item) === "Allow selected")[0].props.onClick();
   assert.deepEqual(plain(replies[0]), { permissions: { filesystem: { read: ["/one"] } }, scope: "turn" });
 });
 

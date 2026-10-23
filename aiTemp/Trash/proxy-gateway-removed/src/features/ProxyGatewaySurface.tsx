@@ -132,7 +132,7 @@ export function ProxyGatewaySurface({
   const globalText = !globalRoute
     ? "—"
     : !globalRoute.enabled
-      ? localText(language, "Direct (no app-wide proxy)", "直接連線（無全應用程式代理）", "直接连接（无全应用程序代理）", "直接接続（アプリ全体のプロキシなし）")
+      ? localText(language, "Direct, no app-wide proxy", "直接連線（無全應用程式代理）", "直接连接（无全应用程序代理）", "直接接続（アプリ全体のプロキシなし）")
       : `${globalRoute.profile?.name ?? globalRoute.profileId ?? "—"} · ${endpointText(globalRoute.profile)}`;
 
   const chooseUpstream = (profileId: string) => {
@@ -170,7 +170,7 @@ export function ProxyGatewaySurface({
       () => api.setProxyGatewayRunning(next),
       next
         ? localText(language, "Gateway started.", "閘道已啟動。", "网关已启动。", "ゲートウェイを開始しました。")
-        : localText(language, "Gateway stopped; the app is back on its previous route.", "閘道已停止，應用程式已回到先前的路由。", "网关已停止，应用程序已恢复先前的路由。", "ゲートウェイを停止し、アプリは以前の経路に戻りました。"),
+        : localText(language, "Gateway stopped. The app is back on its previous route.", "閘道已停止，應用程式已回到先前的路由。", "网关已停止，应用程序已恢复先前的路由。", "ゲートウェイを停止し、アプリは以前の経路に戻りました。"),
     );
   };
 
@@ -190,7 +190,7 @@ export function ProxyGatewaySurface({
       () => api.rotateProxyGatewayKey(),
       localText(
         language,
-        "New access key saved. Restart CPA (Network Proxy → Apply route to CPA); the Codex bridge picks it up on its next start.",
+        "New access key saved. Restart CPA with Network Proxy → Apply route to CPA. The Codex bridge uses it on its next start.",
         "已儲存新存取金鑰。請重新啟動 CPA（網路代理 → 套用路由至 CPA）；Codex 橋接會在下次啟動時取用。",
         "已保存新访问密钥。请重启 CPA（网络代理 → 应用路由到 CPA）；Codex 桥接会在下次启动时取用。",
         "新しいアクセスキーを保存しました。CPA を再起動してください（ネットワークプロキシ → CPA に経路を適用）。Codex ブリッジは次回起動時に使います。",
@@ -216,7 +216,7 @@ export function ProxyGatewaySurface({
           <h1>{localText(language, "Proxy Gateway", "代理閘道", "代理网关", "プロキシゲートウェイ")}</h1>
           <p>{localText(
             language,
-            "A local proxy inside Coding Tools that relays the app's traffic through one upstream proxy profile. It listens on loopback only.",
+            "A local proxy that sends the app's traffic through one upstream proxy. It listens on loopback only.",
             "Coding Tools 內建的本機代理，經由一個上游代理設定檔轉送應用程式的流量，只在 loopback 上監聽。",
             "Coding Tools 内置的本地代理，通过一个上游代理配置转发应用程序的流量，只在 loopback 上监听。",
             "Coding Tools 内蔵のローカルプロキシです。アプリの通信を 1 つの上流プロキシ経由で中継し、ループバックでのみ待ち受けます。",
@@ -241,13 +241,13 @@ export function ProxyGatewaySurface({
                 : status.helperState === "unverified"
                   ? localText(language, "Unverified helper holds the port", "未驗證的輔助程序佔用連接埠", "未验证的辅助进程占用端口", "未確認のヘルパーがポートを使用中")
                   : status.helperState === "restarting"
-                    ? localText(language, "Restarting (backing off)", "重新啟動中（延後重試）", "重启中（退避重试）", "再起動待ち（間隔を空けて再試行）")
+                    ? localText(language, "Restarting soon", "重新啟動中（延後重試）", "重启中（退避重试）", "再起動待ち（間隔を空けて再試行）")
                     : localText(language, "Stopped", "已停止", "已停止", "停止中")}
           </span>
         </div>
         <dl className="proxy-route-list proxy-gateway-stats">
           <div><dt>{localText(language, "Listen address", "監聽位址", "监听地址", "待ち受けアドレス")}</dt><dd>{listen}</dd></div>
-          <div><dt>{localText(language, "Token-free port (ChatGPT Desktop)", "免權杖連接埠（ChatGPT Desktop）", "免令牌端口（ChatGPT Desktop）", "トークン不要のポート（ChatGPT Desktop）")}</dt><dd>{status
+          <div><dt>{localText(language, "Token-free port for ChatGPT Desktop", "免權杖連接埠（ChatGPT Desktop）", "免令牌端口（ChatGPT Desktop）", "トークン不要のポート（ChatGPT Desktop）")}</dt><dd>{status
             ? `${status.listen.host}:${status.tokenlessPort} · ${status.tokenlessOpen
               ? localText(language, "open while ChatGPT Desktop runs", "ChatGPT Desktop 執行中，已開啟", "ChatGPT Desktop 运行中，已开启", "ChatGPT Desktop 実行中のため開いています")
               : localText(language, "closed", "已關閉", "已关闭", "閉じています")}`
@@ -290,7 +290,7 @@ export function ProxyGatewaySurface({
         {status?.needsRestart.length ? (
           <p className="proxy-gateway-test is-failed" role="status">{localText(
             language,
-            "The access key was changed because something else held the gateway port. The Codex bridge and MCP still use the old key. Restart them when idle (they pick it up on their next start).",
+            "The access key changed because another program held the gateway port. The Codex bridge and MCP still use the old key. Restart them when idle.",
             "由於有其他程式佔用閘道連接埠，存取金鑰已更換。Codex 橋接與 MCP 仍使用舊金鑰，請在閒置時重新啟動（它們會在下次啟動時取用新金鑰）。",
             "由于有其他程序占用网关端口，访问密钥已更换。Codex 桥接和 MCP 仍使用旧密钥，请在空闲时重启（它们会在下次启动时取用新密钥）。",
             "別のプログラムがゲートウェイのポートを使っていたため、アクセスキーを変更しました。Codex ブリッジと MCP はまだ古いキーを使っています。手が空いたときに再起動してください（次回起動時に新しいキーを使います）。",
@@ -349,14 +349,14 @@ export function ProxyGatewaySurface({
           </div>
           <p className="proxy-secret-help">{localText(
             language,
-            "HTTP, HTTPS and SOCKS5 upstreams are supported. Credentials stay in the encrypted proxy profile store; edit them in Network Proxy. Ports 17891-17893 belong to ProxyBridge and are refused.",
+            "Supports HTTP, HTTPS and SOCKS5 upstreams. Edit credentials in Network Proxy, where they stay encrypted. Ports 17891-17893 belong to ProxyBridge and can't be used.",
             "支援 HTTP、HTTPS 與 SOCKS5 上游代理。憑證保存在加密的代理設定檔儲存中，請在「網路代理」編輯。17891-17893 連接埠屬於 ProxyBridge，不可使用。",
             "支持 HTTP、HTTPS 和 SOCKS5 上游代理。凭据保存在加密的代理配置存储中，请在“网络代理”中编辑。17891-17893 端口属于 ProxyBridge，不可使用。",
             "HTTP・HTTPS・SOCKS5 の上流に対応します。認証情報は暗号化されたプロキシ設定に保存され、ネットワークプロキシで編集します。17891〜17893 は ProxyBridge 用のため使用できません。",
           )}</p>
           <p className="proxy-secret-help">{localText(
             language,
-            "The gateway runs as a helper process that keeps running when Coding Tools restarts or updates, so the Codex bridge and CPA keep their network. The gateway port needs a local token that the app supplies; the token-free port opens only while ChatGPT Desktop runs, and while open any local program can use it.",
+            "The gateway keeps running when Coding Tools restarts or updates, so the Codex bridge and CPA stay online. The gateway port needs the app's local token. The token-free port opens only while ChatGPT Desktop runs, and any local program can use it then.",
             "閘道以輔助程序執行，Coding Tools 重新啟動或更新時仍會繼續執行，讓 Codex 橋接與 CPA 保持連線。閘道連接埠需要由應用程式提供的本機權杖；免權杖連接埠只在 ChatGPT Desktop 執行時開啟，開啟期間本機任何程式都可使用它。",
             "网关以辅助进程运行，Coding Tools 重启或更新时仍会继续运行，让 Codex 桥接和 CPA 保持联网。网关端口需要由应用程序提供的本地令牌；免令牌端口只在 ChatGPT Desktop 运行时开启，开启期间本机任何程序都可以使用它。",
             "ゲートウェイはヘルパープロセスとして動作し、Coding Tools の再起動や更新中も動き続けるため、Codex ブリッジと CPA の通信は途切れません。ゲートウェイのポートにはアプリが渡すローカルトークンが必要です。トークン不要のポートは ChatGPT Desktop の実行中だけ開き、その間はこのマシンのどのプログラムからも使えます。",
@@ -390,7 +390,7 @@ export function ProxyGatewaySurface({
           </dl>
           <p className="proxy-secret-help">{localText(
             language,
-            "Once \"Use for this app\" is on, ProxyBridge on 127.0.0.1:17891 is no longer needed for the app's own traffic. Other programs that ProxyBridge routes are not affected. CPA and other services that were already running pick up the route when they restart (Network Proxy → Apply route to CPA).",
+            "With \"Use for this app\" on, the app's own traffic no longer needs ProxyBridge on 127.0.0.1:17891. Other programs on ProxyBridge aren't affected. Running services like CPA switch after a restart with Network Proxy → Apply route to CPA.",
             "開啟「用於此應用程式」後，應用程式本身的流量不再需要 127.0.0.1:17891 上的 ProxyBridge。ProxyBridge 代理的其他程式不受影響。已在執行的 CPA 等服務會在重新啟動後套用新路由（網路代理 → 套用路由至 CPA）。",
             "开启“用于此应用程序”后，应用程序自身的流量不再需要 127.0.0.1:17891 上的 ProxyBridge。ProxyBridge 代理的其他程序不受影响。已在运行的 CPA 等服务会在重启后应用新路由（网络代理 → 应用路由到 CPA）。",
             "「このアプリで使用」をオンにすると、アプリ自身の通信に 127.0.0.1:17891 の ProxyBridge は不要になります。ProxyBridge が中継する他のプログラムには影響しません。実行中の CPA などのサービスは再起動時に新しい経路を使います（ネットワークプロキシ → CPA に経路を適用）。",
@@ -402,7 +402,7 @@ export function ProxyGatewaySurface({
           </div>
           <p className="proxy-secret-help">{localText(
             language,
-            "The access key stays the same when the gateway restarts. A new key locks out anything holding the old one: running background services must restart to pick it up (Network Proxy → Apply route to CPA; the Codex bridge picks it up on its next start).",
+            "The access key stays the same when the gateway restarts. A new key locks out anything using the old one. Restart CPA with Network Proxy → Apply route to CPA. The Codex bridge uses the new key on its next start.",
             "閘道重新啟動時存取金鑰保持不變。新金鑰會擋下仍使用舊金鑰的程式：執行中的背景服務必須重新啟動才會取用（網路代理 → 套用路由至 CPA；Codex 橋接會在下次啟動時取用）。",
             "网关重启时访问密钥保持不变。新密钥会拦下仍使用旧密钥的程序：运行中的后台服务必须重启才会取用（网络代理 → 应用路由到 CPA；Codex 桥接会在下次启动时取用）。",
             "アクセスキーはゲートウェイを再起動しても変わりません。新しいキーにすると古いキーを持つものは接続できなくなります。実行中のバックグラウンドサービスは再起動で新しいキーを使います（ネットワークプロキシ → CPA に経路を適用。Codex ブリッジは次回起動時）。",
