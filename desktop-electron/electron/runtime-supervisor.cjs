@@ -512,6 +512,16 @@ class RuntimeSupervisor {
 
   readState() {
     if (!fs.existsSync(this.statePath)) return null;
+    // A marker a power cut tore (empty, or its size in NUL bytes) holds no ownership to protect: the
+    // processes it named died with the machine. Failing on it stopped every watchdog restart until
+    // something rewrote the file; it is set aside as if it were missing.
+    let raw = null;
+    try { raw = fs.readFileSync(this.statePath); } catch { /* readJson below reports it */ }
+    if (raw && raw.every((byte) => byte === 0 || byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d)) {
+      this.logger?.warn?.("runtime.state_torn", { bytes: raw.length });
+      this.clearState();
+      return null;
+    }
     try {
       const state = readJson(this.statePath);
       const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
@@ -547,7 +557,7 @@ class RuntimeSupervisor {
 
   writeState(status, detail) {
     const state = this.snapshot(status, detail);
-    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
+    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true });
     return state;
   }
 

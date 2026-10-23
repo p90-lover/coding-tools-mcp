@@ -4155,7 +4155,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, steered: true, runId: run.id, nodeId: card.id };
   }
 
-  async function chatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
+  // A chat's turns start one at a time. Two sends at once (a goal's next round and a wakeup, or the
+  // composer's queue) both read the chat's runs before either had made its own, so both saw it free
+  // and two rounds started two seconds apart on one agent (seen live 2026-10-23): their starts
+  // collided, both were retried, and the chat followed the newer one after it was stopped. The
+  // later send now reads the runs after the earlier one has started, so it waits or is refused.
+  const chatSends = new Map(); // [workspace, task] -> the send in progress
+  async function chatSend(input = {}) {
+    if (!input || typeof input !== "object" || typeof input.taskId !== "string" || typeof input.workspaceId !== "string") return startChatSend(input);
+    const key = JSON.stringify([input.workspaceId.trim(), input.taskId.trim()]);
+    const mine = (chatSends.get(key) ?? Promise.resolve()).then(() => startChatSend(input));
+    const settled = mine.then(() => undefined, () => undefined);
+    chatSends.set(key, settled);
+    try { return await mine; } finally { if (chatSends.get(key) === settled) chatSends.delete(key); }
+  }
+
+  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -4340,6 +4355,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (result.status === "failed") goals.update(id, task, { status: "stalled" });
     } catch (error) {
       const message = String(error?.message || error);
+      // Another turn started first (a wakeup, a queued message; see chatSend): that turn is the
+      // goal's to judge once it settles (goalAfterRun), so this round is not counted or stalled.
+      if (/still running/.test(message)) { goals.update(id, task, { round: goal.round }); return; }
       goals.update(id, task, { status: "stalled", note: /chat is full/.test(message) ? "This chat is full; use /compact, then /goal resume" : message.slice(0, 300) });
     }
   }
@@ -4414,7 +4432,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const task = mission?.project_id;
       const goal = task ? goals.get(workspaceId, task) : null;
       if (!goal || goal.status !== "active" || goal.evaluatedRunId === runId) return;
-      const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+      // A newer run that was stopped (cancelled) does not stand in for this one: an older round
+      // retried after it was the chat's live turn, and its settling was never judged.
+      const latest = saved.runs.filter(run => run.project_id === task && (!run.cancelled || run.id === runId)).at(-1);
       if (latest?.id !== runId) return;
       // A round held only because the app restarted under it, or one "Retry automatically" runs
       // again, is not the person's turn: its step runs again and the goal is judged when the round

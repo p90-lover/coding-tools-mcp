@@ -1224,6 +1224,35 @@ test("a follow-up waits for the chat's run, then extends the same task and start
   assert.equal(done.updates[0].task_id, "task-1");
 });
 
+test("two sends into one chat at once start one round: the later one is refused, not run beside it", async () => {
+  // Seen live 2026-10-23: two rounds of one chat started two seconds apart on one agent (a goal's next
+  // round and a wakeup both found the chat free), and the chat then sat on the one that was stopped.
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
+  const request = async (endpoint, body, options) => {
+    const result = await world.requestHeadless(endpoint, body, options);
+    if (endpoint === "/api/v1/ao/update" && body.change.operation === "create_from_team") {
+      world.runs.push({ id: body.change.run_id, project_id: body.change.task_id, cancelled: false, revision: 1, nodes: [{ id: "lead", state: "pending" }] });
+    }
+    return result;
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: request, findCodexExecutable: () => "C:\\c.exe",
+    // The first round is still starting when the second send arrives.
+    resolveHarness: () => new Promise(() => {}) });
+  try {
+    const [goalRound, wakeup] = await Promise.allSettled([
+      workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "Stop hook feedback:\n[ship it]: not yet", deferStart: true }),
+      workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "wake up", deferStart: true }),
+    ]);
+    assert.equal(goalRound.status, "fulfilled");
+    assert.equal(goalRound.value.status, "starting");
+    assert.equal(wakeup.status, "rejected");
+    assert.match(String(wakeup.reason?.message), /still running/);
+    assert.equal(world.updates.filter((change) => change.operation === "create_from_team").length, 1, "one round, not two");
+    assert.equal(world.edits.length, 1, "only the first send's message joins the chat");
+  } finally { workflow.dispose(); }
+});
+
 test("a Team follow-up in a chat whose last turn was a single model starts the team run", async () => {
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
   const single = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
