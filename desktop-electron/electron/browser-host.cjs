@@ -3116,6 +3116,10 @@ class BrowserHost {
         headers: { accept: "application/json" }, signal: controller.signal,
       });
       if (response.status === 401) return { authenticated: false, ready: true };
+      // Electron's session.fetch leaves response.url empty (it builds the Response itself; checked on
+      // Electron 41.10.7), and a redirect under redirect: "manual" throws rather than answers. Requiring
+      // the URL failed every check: "readiness_fetch_unusable" (200, JSON, sameUrl false) every 20 s,
+      // each followed by a script run in the ChatGPT page. An empty URL is the one asked for.
       const sameUrl = sessionEndpointUrl(response.url);
       if (!response.ok || !sameUrl || !response.headers.get("content-type")?.includes("application/json")) {
         // Which check failed: a redirect elsewhere, or a page that is not the session JSON (a challenge
