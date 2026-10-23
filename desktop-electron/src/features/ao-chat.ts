@@ -1281,6 +1281,7 @@ export type ChatSlashCommand = { name: string; hint: string; args?: string; need
  */
 export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
   { name: "goal", hint: "Set a goal to keep pursuing", args: "<objective> | pause | resume | edit | clear" },
+  { name: "loop", hint: "Run a prompt or command on a recurring interval", args: "[interval] <prompt or /review, /init> | stop", needsChat: true },
   { name: "plan", hint: "Turn plan mode on or off" },
   { name: "compact", hint: "Compact this chat's context", needsChat: true },
   { name: "review", hint: "Review the current changes", args: "[what to focus on]" },
@@ -1341,6 +1342,47 @@ export function wakeupLabel(wakeup: Pick<ChatWakeup, "dueAt" | "due">, now = Dat
   return `Wakes in ${seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.ceil(seconds / 60)}m`
     : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`}`;
 }
+/**
+ * A chat's loop (/loop), as the bridge keeps it: `minutes` between rounds, or null when the agent
+ * paces itself (schedule_wakeup). `nextAt` is when an interval loop's next round is due.
+ */
+export type ChatLoop = {
+  id: string; prompt: string; minutes: number | null; round: number; startedAt: number; expiresAt: number;
+  nextAt: number | null; due?: boolean; note?: string;
+};
+const LOOP_UNIT_MINUTES: Record<string, number> = { s: 1 / 60, m: 1, h: 60, d: 1440 };
+export const LOOP_MAX_MINUTES = 1440;
+/**
+ * /loop's argument, read as Claude Code's /loop reads it: a leading interval ("5m check the deploy"),
+ * or a trailing "every" clause ("check the deploy every 2 hours"); with neither, the agent paces
+ * itself (minutes null). Seconds round up to a whole minute, the finest a loop runs at.
+ */
+export function chatLoopParse(arg: string): { prompt: string; minutes: number | null } | { error: string } {
+  const text = arg.trim();
+  const leading = /^(\d+)([smhd])\s+([\s\S]+)$/i.exec(text);
+  const trailing = /^([\s\S]+?)\s+every\s+(\d+)\s*(s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\.?$/i.exec(text);
+  if (/^\d+[smhd]$/i.test(text)) return { error: "Say what to run each time, after the interval: /loop 5m check the deploy" };
+  const [count, unit, prompt] = leading ? [leading[1], leading[2], leading[3]] : trailing ? [trailing[2], trailing[3], trailing[1]] : [null, null, text];
+  if (!prompt.trim()) return { error: "Say what to run each time: /loop 5m check the deploy" };
+  if (count === null || unit === null) return { prompt: prompt.trim(), minutes: null };
+  const minutes = Math.ceil(Number(count) * LOOP_UNIT_MINUTES[unit[0].toLowerCase()]);
+  if (minutes < 1 || minutes > LOOP_MAX_MINUTES) return { error: "The interval must be from 1 minute to 1 day" };
+  return { prompt: prompt.trim(), minutes };
+}
+/** 5 -> "5m"; 90 -> "1h 30m"; 1440 -> "1d". */
+export function loopInterval(minutes: number): string {
+  if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440}d`;
+  if (minutes < 60) return `${minutes}m`;
+  return minutes % 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes / 60}h`;
+}
+/** The loop bar's words: "Every 5m · next in 3m", "Every 5m · next after this turn", "Self-paced · round 4". */
+export function loopLabel(loop: Pick<ChatLoop, "minutes" | "round" | "nextAt" | "due">, now = Date.now()): string {
+  if (loop.minutes === null) return `Self-paced · round ${Math.max(1, loop.round)}`;
+  const seconds = Math.max(0, Math.ceil(((loop.nextAt ?? now) - now) / 1000));
+  const next = loop.due || !seconds ? "next after this turn"
+    : `next in ${seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.ceil(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`}`;
+  return `Every ${loopInterval(loop.minutes)} · ${next}`;
+}
 /** Codex's goal summary words for each state. */
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
@@ -1383,6 +1425,10 @@ export type ChatCommands = {
   cancelWakeup?: () => Promise<void>;
   /** Saves the wake-up's note and the minutes from now it fires in. */
   editWakeup?: (change: { reason: string; minutes: number }) => Promise<void>;
+  /** The chat's loop (/loop): a prompt it runs again every interval, or whenever its agent asks. */
+  loop?: ChatLoop | null;
+  startLoop?: (loop: { prompt: string; minutes: number | null }) => Promise<void>;
+  stopLoop?: () => Promise<void>;
   /** Edit goal: saves a new objective for the rounds still to come. */
   goalEdit: (objective: string) => Promise<void>;
   /** Compacts the chat's context; says what happened. */
