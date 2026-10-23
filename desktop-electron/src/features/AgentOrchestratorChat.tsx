@@ -18,10 +18,10 @@ import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop,
 } from "./ao-chat";
@@ -197,11 +197,13 @@ function TurnRunning({ turn, refusal }: { turn: ChatTurn; refusal?: CpaRefusal |
   // which post no notice); then how long nothing new has come.
   const retry = dshRetryNote(turn.steps);
   const refused = retry ? "" : cpaRefusalNote(refusal, now);
-  const note = `${retry || refused}${dshQuietNote(heardAt, now)}`;
+  // A turn waiting on the person's answer is not stuck: it says so, with no Restart to press.
+  const asking = waitsForPerson(step.working.activity);
+  const note = `${retry || refused}${dshQuietNote(heardAt, now, asking)}`;
   // A restart does not lift a rate limit or a refused sign-in: it says what does instead.
   const hint = refused && (refusal?.status === 429 || refusal?.status === 402) ? " · switch the model or wait"
     : refused && (refusal?.status === 401 || refusal?.status === 403) ? " · sign in again in CPA" : "";
-  return <p className={`cx-note cx-turn-running${step.working.stalled || refused ? " is-stalled" : ""}`} role="status" aria-live="polite">
+  return <p className={`cx-note cx-turn-running${(step.working.stalled && !asking) || refused ? " is-stalled" : ""}`} role="status" aria-live="polite">
     <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
     {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}${hint}`}
     {/* A stuck turn has a button of its own: the person looking at "may be stuck" had nothing to
@@ -1732,10 +1734,16 @@ export function AgentOrchestratorChat({
       dshReaders.set(turn.runId, readWork);
     }
     const idle = notStarted && turn.runId === latest?.id;
+    // A goal's next round is its Stop hook's feedback, shown as Claude Code shows it, not as a message the person sent.
+    const feedback = turn.user ? goalFeedback(turn.user.text) : null;
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
     return <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
-              {turn.user ? <div className="cx-user">
+              {feedback ? <div className="cx-hook-feedback" role="note">
+                <span className="cx-hook-feedback-mark" aria-hidden="true">⎿</span>
+                <span className="cx-hook-feedback-text">Stop hook feedback:{"\n"}[{feedback.objective}]: {feedback.reason}</span>
+                {turn.user?.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
+              </div> : turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
                 <MessageActions text={chatMessageReadable(turn.user.text)}>
                   {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}

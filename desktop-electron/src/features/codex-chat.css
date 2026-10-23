@@ -1096,6 +1096,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }
 .cx-goal-meta, .cx-goal-note { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A goal's later round, as Claude Code shows a Stop hook's feedback: a dim "⎿" line, not a message bubble. */
+.cx-hook-feedback { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0 0 8px; color: var(--ao-muted); font-size: 12px; }
+.cx-hook-feedback-mark { flex: 0 0 auto; }
+.cx-hook-feedback-text { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .cx-goal button, .cx-plan-chip button { display: inline-flex; align-items: center; padding: 2px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font-size: 12px; cursor: pointer; }
 .cx-goal button:hover, .cx-plan-chip button:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-plan-chip { display: inline-flex; align-items: center; gap: 2px; padding: 4px 4px 4px 10px; border-radius: 10px; background: color-mix(in srgb, var(--ao-blue) 10%, transparent); color: var(--ao-blue); font-size: 12px; font-weight: 600; }

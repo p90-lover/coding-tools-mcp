@@ -16,7 +16,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -1130,6 +1130,14 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   }, [workspaceId]);
 
   const selectedRun = missions.find((mission) => mission.id === selectedRunId);
+  // An open chat follows its live run (chatLiveRun): a round its goal, wakeup or loop started, or an
+  // older run retried after a newer one stopped. Its approvals, working state and steers come from
+  // the selected run, and the run it was opened on stayed selected after it settled.
+  useEffect(() => {
+    if (view !== "chat" || !chatTaskId) return;
+    const live = chatLiveRun(missions.filter((mission) => mission.workspace_id === workspaceId), chatTaskId, selectedRunId);
+    if (live !== selectedRunId) setSelectedRunId(live);
+  }, [view, chatTaskId, missions, workspaceId, selectedRunId]);
   const currentRun = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.runId === selectedRunId;
   const savedMissionTeam = savedTeams.find(item => item.id === selectedRun?.team?.id) ?? team;
   const missionTeam = missionTeamId ? savedTeams.find(item => item.id === missionTeamId) ?? null : team;
