@@ -21,6 +21,8 @@ function fixture(t) {
   });
   store.saveProxyProfile({ id: "direct", name: "Global proxy", enabled: true,
     endpoint: { protocol: "http", host: "proxy.example", port: 10000 }, scopes: ["all"] });
+  store.saveProxyProfile({ id: "local-relay", name: "ProxyBridge local", enabled: true,
+    endpoint: { protocol: "http", host: "127.0.0.1", port: 17891 }, scopes: ["all"] });
   store.saveProxyProfile({ id: "builtin-gateway", name: "Built-in proxy gateway", enabled: true,
     endpoint: { protocol: "http", host: "127.0.0.1", port: 17894 },
     username: "ct", password: "gateway-key", scopes: ["all"] });
@@ -49,11 +51,13 @@ async function fakeHelper(t, pid) {
   return helper;
 }
 
-test("a route left on the removed gateway goes back to the route it replaced; the gateway leaves nothing behind", async (t) => {
+test("a route left on the removed gateway goes straight to the gateway's upstream; the gateway leaves nothing behind", async (t) => {
   const { userData, providers, store, write } = fixture(t);
   store.setGlobalRouting({ enabled: true, profileId: "builtin-gateway" });
   const helper = await fakeHelper(t, 4242);
-  write("proxy-gateway.json", { version: 1, useForApp: true, previousGlobal: { enabled: true, profileId: "direct" } });
+  // Seen live: "Use for this app" was switched on over ProxyBridge; the upstream keeps the exit.
+  write("proxy-gateway.json", { version: 1, useForApp: true, upstreamProfileId: "direct",
+    previousGlobal: { enabled: true, profileId: "local-relay" } });
   write("proxy-gateway.state.json", { version: 2, pid: 4242, controlPort: helper.port, controlToken: "control-token" });
   write("proxy-gateway.log", "old helper output\n");
 
@@ -84,6 +88,18 @@ test("a gateway that was never used for the app keeps the app's route; a helper 
   assert.equal(store.snapshot().routing.globalProfileId, "direct");
   assert.equal(store.snapshot().proxyProfiles.some((profile) => profile.id === "builtin-gateway"), false);
   assert.deepEqual(fs.readdirSync(providers).filter((name) => name.startsWith("proxy-gateway")), ["proxy-gateway.state.json"]);
+});
+
+test("without a usable upstream, a route on the gateway goes back to the route it replaced", async (t) => {
+  const { userData, store, write } = fixture(t);
+  store.setGlobalRouting({ enabled: true, profileId: "builtin-gateway" });
+  store.archiveProxyProfile("direct");
+  write("proxy-gateway.json", { version: 1, useForApp: true, upstreamProfileId: "direct",
+    previousGlobal: { enabled: true, profileId: "local-relay" } });
+
+  await retireProxyGateway({ userData, store, logger, isRunning: () => false });
+
+  assert.deepEqual([store.snapshot().routing.globalEnabled, store.snapshot().routing.globalProfileId], [true, "local-relay"]);
 });
 
 test("a route on the gateway with nothing to go back to becomes direct", async (t) => {

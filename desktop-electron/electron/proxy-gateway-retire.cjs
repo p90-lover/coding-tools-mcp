@@ -81,17 +81,22 @@ async function stopHelper(state, { logger, isRunning, kill, timeoutMs }) {
   return stopped;
 }
 
-// Puts back the route that was active before "Use for this app" was switched on, else direct.
+function usableProfile(store, profileId) {
+  return typeof profileId === "string" && profileId !== GATEWAY_PROFILE_ID && Boolean(store.activeProxy(profileId));
+}
+
+// A route on the gateway goes straight to the gateway's upstream, so traffic keeps the same exit
+// without the relay. Without a usable upstream: the route that was active before "Use for this
+// app" was switched on, else direct.
 function restoreRoute(store, settings) {
   const routing = store.snapshot().routing;
   if (routing.globalProfileId !== GATEWAY_PROFILE_ID) return false;
   const previous = settings?.previousGlobal;
-  const usable = typeof previous?.profileId === "string"
-    && previous.profileId !== GATEWAY_PROFILE_ID
-    && store.activeProxy(previous.profileId);
-  store.setGlobalRouting(usable
-    ? { enabled: previous.enabled === true, profileId: previous.profileId }
-    : { enabled: false, profileId: null });
+  store.setGlobalRouting(usableProfile(store, settings?.upstreamProfileId)
+    ? { enabled: routing.globalEnabled === true, profileId: settings.upstreamProfileId }
+    : usableProfile(store, previous?.profileId)
+      ? { enabled: previous.enabled === true, profileId: previous.profileId }
+      : { enabled: false, profileId: null });
   return true;
 }
 
