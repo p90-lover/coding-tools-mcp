@@ -3237,6 +3237,45 @@ test("after a round without the goal achieved, the chat runs the next round with
   assert.equal(world.updates.length, updatesBefore + 1);
 });
 
+test("a goal round that finished while the app was not driving it goes on at the next read of the chat", async () => {
+  // Seen live: after an app restart AO finished the chat's turn on its own, nothing reported it,
+  // and the goal read "Pursuing goal" for hours under a Done chat.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const { world, workflow, checks } = await goalChat();
+  // The goal's first round, as AO keeps it (this test world does not store the runs it creates).
+  const first = (await goalOf(workflow)).lastRunId;
+  assert.ok(first);
+  world.runs.push({ id: first, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Started." } }] });
+  world.runs.push({ id: "r-unwatched", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Half done." } }] });
+  const before = world.updates.length;
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  await goalSettle(() => world.updates.length > before);
+  assert.equal(checks.length, 1, "the unwatched round was judged");
+  assert.equal(world.updates.length, before + 1, "and the next round started");
+  const goal = await goalOf(workflow);
+  assert.equal(goal.status, "active");
+  assert.equal(goal.round, 2);
+  // Reading again does not judge it twice.
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  await goalSettle();
+  assert.equal(checks.length, 1);
+});
+
+test("a goal check that fails on one model is asked of the next before the goal stalls", async () => {
+  let calls = 0;
+  // The first model CPA would check with is cooling down (a 503); the next one answers.
+  const { world, workflow, checks } = await goalChat({ evaluator: () => (calls++ === 0 ? new Error("cooling down") : { met: false, reason: "Not yet." }) });
+  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { answer: "Working on it." } }] });
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.deepEqual(checks.map((check) => check.model).slice(0, 2), ["gemini-3-flash", "gpt-6-luna"], "the small model first, then the next");
+  const goal = await goalOf(workflow);
+  assert.equal(goal.status, "active", "not stalled at \"could not be checked\"");
+  assert.equal(goal.feedback, "Not yet.");
+});
+
 test("an app restart under a goal's round does not stall the goal; the round's real outcome is judged", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
   const { world, workflow, checks } = await goalChat();

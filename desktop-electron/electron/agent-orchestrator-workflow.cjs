@@ -4298,22 +4298,58 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function checkGoal(goal, mission) {
     const { baseUrl, key } = connection();
     const catalog = (await models()).models;
-    const model = catalog.find((id) => /haiku|flash|mini|lite/i.test(id)) ?? catalog[0];
-    if (!model) throw new Error("CPA has no model to check the goal with");
+    // A small fast model first; the next ones stand in when it fails (a 503, a provider cooling
+    // down, a plugin model that takes no plain chat request): one failed request stalled the goal
+    // at "could not be checked" until /goal resume.
+    const small = catalog.filter((id) => /haiku|flash|mini|lite/i.test(id));
+    const candidates = [...small, ...catalog.filter((id) => !small.includes(id))].slice(0, GOAL_CHECK_MODELS);
+    if (!candidates.length) throw new Error("CPA has no model to check the goal with");
     const message = goalMessage(goal.objective, goal.round, goal.feedback);
     const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, closingAnswers(mission)));
-    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status}`);
-    const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
-    logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
-    return check;
+    let failure;
+    for (const model of candidates) {
+      try {
+        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status}`);
+        const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
+        logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
+        return check;
+      } catch (error) {
+        failure = error;
+        logger?.warn?.("ao.goal_check_failed", { model, message: publicText(error?.message || error, 200) });
+      }
+    }
+    throw failure;
   }
 
+  /**
+   * A goal round that settled while the app was not driving it was never judged: after an app
+   * restart AO runs the chat's turn on its own and nothing reports it settling (reportRun), so the
+   * goal read "Pursuing" for hours under a finished chat. Each read of a project's chats judges
+   * such a round, as reportRun would have. Only a run the goal started, or a later one, counts:
+   * right after a goal is set the chat's latest run may still be the turn before it.
+   */
+  function sweepGoals(workspaceId, savedRuns) {
+    for (const [task, goal] of Object.entries(goals.forWorkspace(workspaceId))) {
+      if (goal.status !== "active" || !goal.lastRunId) continue;
+      const chatRuns = savedRuns.filter((run) => run.project_id === task);
+      const latest = chatRuns.at(-1);
+      if (!latest || latest.id === goal.evaluatedRunId || !chatRuns.some((run) => run.id === goal.lastRunId)) continue;
+      if (!runSettled(latest) || chatWorking(workspaceId, task, savedRuns)) continue;
+      // A run this app drives reports its own settling; one whose agent asked to be woken is judged after it wakes.
+      if (backgroundRuns.has(runKey(workspaceId, latest.id)) || wakeups.get(workspaceId, task)?.runId === latest.id) continue;
+      const status = latest.cancelled ? "held" : (latest.nodes ?? []).some((node) => node.state === "failed") ? "failed" : "finished";
+      void goalAfterRun(workspaceId, latest.id, status, latest.cancelled ? "stopped" : null).catch(() => undefined);
+    }
+  }
+
+  // How many CPA models a goal check tries before the goal stalls (checkGoal).
+  const GOAL_CHECK_MODELS = 3;
   const goalChecks = new Set();
   // When a chat's latest run settles, its goal is achieved, stalled, limited, or goes another round.
   async function goalAfterRun(workspaceId, runId, status, attention) {
@@ -5287,6 +5323,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       case "runs": {
         const saved = await runs(args);
+        // A goal round that settled unwatched (after an app restart) is judged now (sweepGoals).
+        sweepGoals(clean(args.workspaceId, 128), saved.runs ?? []);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)) };
