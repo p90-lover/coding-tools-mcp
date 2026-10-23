@@ -1424,6 +1424,44 @@ test("a quiet running turn says how long it has been quiet, and that it may be s
   assert.equal(chat.dshQuietNote(now - chat.STALL_MS, now), ` · nothing new for ${chat.dshDuration(chat.STALL_MS)}, may be stuck`);
 });
 
+test("a turn waiting on the person's answer is never called stuck, so it offers no Restart", () => {
+  const now = 10_000_000;
+  // Seen live 2026-10-23: 17 minutes on an approval read "may be stuck", and Restart only waited on it.
+  assert.equal(chat.dshQuietNote(now - 17 * 60_000, now, true), ` · waiting for you for ${chat.dshDuration(17 * 60_000)}`);
+  assert.equal(chat.dshQuietNote(now - 30_000, now, true), "", "the first minute stays plain");
+  assert.equal(chat.waitsForPerson("waiting for approval"), true);
+  assert.equal(chat.waitsForPerson("waiting for approval: npm test"), true);
+  assert.equal(chat.waitsForPerson("waiting for your answer"), true);
+  assert.equal(chat.waitsForPerson("waiting for you to review its plan"), true);
+  assert.equal(chat.waitsForPerson("waiting for the model"), false, "a slow model can still be stuck");
+  assert.equal(chat.waitsForPerson(undefined), false);
+});
+
+test("an open chat follows its live run once the selected one has settled", () => {
+  const working = run("old", "t", [node("a", "planner", "running")]);
+  const stopped = run("new", "t", [node("a", "planner", "cancelled")], { cancelled: true, paused: true });
+  // Seen live 2026-10-23: the newer of two rounds was stopped, the older retried and worked on.
+  assert.equal(chat.chatLiveRun([working, stopped], "t", "new"), "old", "the stopped run gives way to the working one");
+  assert.equal(chat.chatLiveRun([working, stopped], "t", ""), "old", "nothing selected yet");
+  const finished = run("r1", "t", [node("a", "planner", "finished")]);
+  const round = run("r2", "t", [node("a", "planner", "pending")]);
+  assert.equal(chat.chatLiveRun([finished, round], "t", "r1"), "r2", "a round the goal or a wakeup started is followed");
+  assert.equal(chat.chatLiveRun([finished, round], "t", "r2"), "r2", "an open run stays selected");
+  assert.equal(chat.chatLiveRun([finished], "t", "r1"), "r1", "a settled chat stays on its newest run");
+  assert.equal(chat.chatLiveRun([finished], "t", "sent"), "sent", "a send's run not loaded yet is kept");
+  const held = run("h", "t", [node("a", "planner", "held")]);
+  assert.equal(chat.chatLiveRun([working, held], "t", "h"), "h", "a held run needs the person: it stays selected");
+  assert.equal(chat.chatLiveRun([working], "other", "x"), "x", "another chat's runs are not this chat's");
+});
+
+test("a goal's later round shows as its Stop hook feedback, not as the person's message", () => {
+  assert.deepEqual(plain(chat.goalFeedback("Stop hook feedback:\n[play auto play on eros]: The condition is not met yet; continue from where the last round left off.")),
+    { objective: "play auto play on eros", reason: "The condition is not met yet; continue from where the last round left off." });
+  assert.deepEqual(plain(chat.goalFeedback("Stop hook feedback:\n[fix [the] tests]: two still fail")), { objective: "fix [the] tests", reason: "two still fail" });
+  assert.equal(chat.goalFeedback("make village attack first"), null);
+  assert.equal(chat.goalFeedback("Stop hook feedback: typed by hand"), null);
+});
+
 test("a working AO card's last sign of life comes from its activity time, for last heard and the quiet note", () => {
   const card = node("w", "planner", "running", { receipt: { started_at_ms: 1_000 } });
   const quiet = chat.chatWorkingDetail(card, { activity: "running", activity_at_ms: 600_000 }, 900_000);
