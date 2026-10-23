@@ -86,7 +86,7 @@ describe("rc.2 provider and proxy foundations", () => {
     expect(electronBridgeContracts.anneal.dispatch).toBe("anneal.dispatch");
     expect(zhTW.paseoOrchestrator).toBe("Paseo 協調器");
     expect(zhTW.annealTasks).toBe("Anneal 任務");
-    expect(zhTW.networkProxy).toBe("網路代理");
+    expect(zhTW.networkProxy).toBe("代理");
     expect(zhTW.dispatchThroughPaseo).toBe("透過 Paseo 執行");
   });
 });

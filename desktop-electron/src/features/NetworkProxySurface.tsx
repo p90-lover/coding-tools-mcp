@@ -367,7 +367,7 @@ export function NetworkProxySurface({
       <header className="control-heading">
         <div>
           <span className="surface-kicker">{localText(language, "NETWORK", "網路", "网络", "ネットワーク")}</span>
-          <h1>{localText(language, "Network Proxy", "網路代理", "网络代理", "ネットワークプロキシ")}</h1>
+          <h1>{localText(language, "Proxy", "代理", "代理", "プロキシ")}</h1>
           <p>{localText(
             language,
             "Manage the browser route and CPA outbound proxy from one place. Saved provider and account rules remain available below.",

@@ -58,11 +58,8 @@ const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
   providerNetworkReady,
-  proxyGatewayDesktopRoute,
   setProviderBrowserHost,
   setProviderCpaConnection,
-  setProxyGatewayDesktopRunning,
-  setProxyGatewayKeyRotated,
   setProviderLogger,
 } = require("./provider-bootstrap.cjs");
 
@@ -268,21 +265,8 @@ function getChatGptDesktop(logger) {
       logger,
       dataRoot: path.join(CORE_HOME, "chatgpt-desktop"),
       resolveCpaAuthDir: cpaAuthDirectory,
-      // Through the built-in gateway, ChatGPT Desktop gets its token-free port, which is open only
-      // while an instance runs; otherwise the credential-free env route as before.
-      getProxyRoute: async () => {
-        try {
-          const route = await proxyGatewayDesktopRoute();
-          if (route) return route;
-        } catch (error) {
-          logger.warn("chatgpt_desktop.gateway_route_failed", { message: error instanceof Error ? error.message : String(error) });
-        }
-        return proxyRouteFromEnvironment();
-      },
-      onChange: (status) => {
-        send("launcher:chatgpt-desktop-changed", status);
-        void setProxyGatewayDesktopRunning((status?.runningSlotIds?.length ?? 0) > 0).catch(() => {});
-      },
+      getProxyRoute: async () => proxyRouteFromEnvironment(),
+      onChange: (status) => send("launcher:chatgpt-desktop-changed", status),
     });
     chatgptDesktop.ready = chatgptDesktop.initialize().catch((error) => {
       logger.warn("chatgpt_desktop.initialize_failed", { message: error instanceof Error ? error.message : String(error) });
@@ -2891,19 +2875,6 @@ async function start() {
     publish: (value) => send("launcher:external-services-changed", value),
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
-  // After the gateway's key rotated on evidence of a squat, a running CPA restarts with the new key
-  // (the same path as Network Proxy's "Apply route to CPA"). The Codex bridge and the MCP tunnel
-  // are deliberately never restarted here: they carry in-flight work and take the key on their next
-  // start; the Proxy Gateway tab lists them as needing a restart.
-  setProxyGatewayKeyRotated(async () => {
-    const cpa = externalServicesController?.snapshot().services.find((service) => service.id === "cpa");
-    if (cpa?.status !== "ready") return;
-    try {
-      await externalServicesController.restart("cpa");
-    } catch (error) {
-      logger.warn("proxy_gateway.cpa_restart_failed", { message: error instanceof Error ? error.message : String(error) });
-    }
-  });
   managedBootstrapController = createManagedBootstrap({
     snapshot: () => externalServicesController.snapshot(),
     install: (serviceId) => externalServicesController.installManagedComponent(serviceId),
@@ -3185,7 +3156,7 @@ async function start() {
         case "install": return antigravityCli.install();
         case "terminal_open": {
           const env = antigravityProxyEnvironment();
-          if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy in Network Proxy first");
+          if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
             executable: antigravityCli.executable(), env: manualAuthEnvironment(env), workspaceId: args.workspaceId || undefined,
           });
@@ -3277,6 +3248,8 @@ async function start() {
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       // So do the wake-ups chat agents asked for (schedule_wakeup).
       wakeupsFile: path.join(app.getPath("userData"), "integrations", "chat-wakeups.json"),
+      // So do the chats' loops (/loop).
+      loopsFile: path.join(app.getPath("userData"), "integrations", "chat-loops.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
       chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
       archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),

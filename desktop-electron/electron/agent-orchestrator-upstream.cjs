@@ -123,6 +123,15 @@ const WORKSPACE_MODES = new Set(["worktree", "shared", "folder"]);
 const AGENT_RECHECK_MS = 60_000;
 // How long a started AO daemon that is still running may take to answer /readyz (see start).
 const AO_READY_TIMEOUT_MS = 90_000;
+// To profile AO's CPU on a user's machine: a one-line "pprof-addr" file in AO's data folder holding
+// a loopback host:port turns on AO's pprof listener (AO_PPROF_ADDR) at its next start. Without it AO
+// starts as before; the app clears AO_* from its own environment, so this is the only switch.
+const PROFILER_FILE = "pprof-addr";
+async function profilerAddress(dataRoot) {
+  let text = "";
+  try { text = (await fs.promises.readFile(path.join(dataRoot, PROFILER_FILE), "utf8")).trim(); } catch { return ""; }
+  return /^(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}$/.test(text) ? text : "";
+}
 
 // A plain GET lists only the agents whose install check has finished, which right after the
 // daemon starts is often just one; the list was then read once and Codex, opencode and others
@@ -1689,11 +1698,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // tool runs: on Windows it carries SystemRoot, TEMP and the rest a process needs to start,
         // and a de-duplicated PATH of bounded length (forks failed with 0xC0000142 without them).
         const daemonEnvironment = windowsChildEnvironment(environment, { system: systemEnvironment() });
+        const profiler = await profilerAddress(dataRoot);
+        checkStartup();
+        if (profiler) logger.info?.("ao.profiler_enabled", { address: profiler });
           // The AO CLI build answers the daemon command and the internal commands the daemon
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
           child = spawn(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-          env: { ...daemonEnvironment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
+          env: { ...daemonEnvironment, ...(profiler ? { AO_PPROF_ADDR: profiler } : {}), AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
             // AO bounds every request at 60 s, and starting a chat agent (worktree, agent process,
             // its handshake) took longer on a busy machine: the chat failed with SPAWN_TIMEOUT
             // while the agent came up seconds later. Just under this app's own 180 s for a POST,

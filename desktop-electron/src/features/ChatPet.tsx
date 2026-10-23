@@ -51,6 +51,8 @@ const STROLL = 46;
 const SCURRY = 115;
 /** Over a button or chip it dashes, so it never sits in the way of a click. */
 const DASH = 2.8;
+/** How often a walking Bit is redrawn; it still moves by the time each frame took. */
+const WALK_FPS = 60;
 /** How near (px) the pointer must come before Bit turns its eyes to it, and before it leaps on. */
 const NOTICE = 180;
 const REACH = 70;
@@ -383,10 +385,11 @@ export function ChatPet({ mood, context, onHide }: {
       .map((element) => element.getBoundingClientRect())
       .filter((found) => found.width > 0 && found.height > 0);
   };
-  /** Whether standing at `spot` (a distance around) would cover one of `rects`. */
-  const blocked = (spot: number, rects: DOMRect[]) => {
+  /** Whether standing at `spot` (a distance around) would cover one of `rects`. `frame` is the box's
+   *  rect: a walk reads it once, since reading it right after each step moved Bit forced a layout on
+   *  every frame (1,917 layouts in 20 s while Bit strolled, seen 2026-10-23). */
+  const blocked = (spot: number, rects: DOMRect[], frame = composer.current?.getBoundingClientRect()) => {
     const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
     if (!current || !frame) return false;
     const { x, y, side } = spotAt(current, spot);
     const half = WIDTH / 2;
@@ -432,16 +435,20 @@ export function ChatPet({ mood, context, onHide }: {
   const walkTo = (target: number, speed: number, arrive?: () => void) => {
     stopWalking();
     const rects = obstacles();
+    const box = composer.current?.getBoundingClientRect();
     const direction = target >= atNow.current ? 1 : -1;
     setPose({ ...REST, walking: true, look: direction > 0 ? 1 : -1 });
     let last = performance.now();
+    let shown = 0;
     const frame = (now: number) => {
       const elapsed = Math.min(0.05, (now - last) / 1000);
       last = now;
-      const next = atNow.current + direction * speed * (blocked(atNow.current, rects) ? DASH : 1) * elapsed;
+      const next = atNow.current + direction * speed * (blocked(atNow.current, rects, box) ? DASH : 1) * elapsed;
       const arrived = direction > 0 ? next >= target : next <= target;
       atNow.current = arrived ? target : next;
-      setAt(atNow.current);
+      // Bit moves every frame but is drawn at most WALK_FPS times a second: on a 165 Hz screen each
+      // step re-rendered the pet and recalculated styles 165 times a second.
+      if (arrived || now - shown >= 1000 / WALK_FPS) { shown = now; setAt(atNow.current); }
       if (!arrived) { walkFrame.current = window.requestAnimationFrame(frame); return; }
       walkFrame.current = 0;
       setPose(REST);
