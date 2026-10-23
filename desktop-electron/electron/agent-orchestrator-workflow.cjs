@@ -4100,6 +4100,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     try { return await mine; } finally { if (chatSends.get(key) === settled) chatSends.delete(key); }
   }
 
+  /**
+   * A message the person sent (the chat's composer; a goal's round, a wakeup and a loop call chatSend
+   * themselves). Into a chat whose goal stalled it picks the goal up again, as /goal resume does: that
+   * message's turn is the goal's next round, judged when it settles. The user: "if goal stalled, i cant
+   * use chat message to retrigger the chat"; the message ran one turn and the goal stayed stalled. A
+   * goal the person paused stays paused. Refused, the goal stays as it was.
+   */
+  async function personChatSend(input = {}) {
+    const id = typeof input?.workspaceId === "string" ? input.workspaceId.trim() : "";
+    const task = typeof input?.taskId === "string" ? input.taskId.trim() : "";
+    const stalled = id && task && input.goal === undefined && goals.get(id, task)?.status === "stalled" ? goals.get(id, task) : null;
+    if (stalled) goals.update(id, task, { status: "active", note: "" });
+    try {
+      const result = await chatSend(input);
+      if (stalled && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalled.note });
+      else if (stalled && result?.runId) goals.update(id, task, { lastRunId: String(result.runId) });
+      return result;
+    } catch (error) {
+      if (stalled) goals.update(id, task, { status: "stalled", note: stalled.note });
+      throw error;
+    }
+  }
+
   async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
@@ -4293,20 +4316,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function checkGoal(goal, mission) {
     const { baseUrl, key } = connection();
     const catalog = (await models()).models;
-    const model = catalog.find((id) => /haiku|flash|mini|lite/i.test(id)) ?? catalog[0];
-    if (!model) throw new Error("CPA has no model to check the goal with");
+    // A small model first, then others: a model CPA lists can still refuse (seen live 2026-10-23: the
+    // evaluator returned HTTP 404, the goal stalled, and nothing but /goal resume woke it).
+    const candidates = [...new Set([...catalog.filter((id) => /haiku|flash|mini|lite/i.test(id)), ...catalog])].slice(0, 3);
+    if (!candidates.length) throw new Error("CPA has no model to check the goal with");
     const message = goalMessage(goal.objective, goal.round, goal.feedback);
     const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, closingAnswers(mission)));
-    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status}`);
-    const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
-    logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
-    return check;
+    let refused = "";
+    for (const model of candidates) {
+      const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!response.ok) {
+        refused = `the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`;
+        logger?.warn?.("ao.goal_check_refused", { model: publicText(model, 80), status: response.status });
+        continue;
+      }
+      const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
+      logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
+      return check;
+    }
+    throw new Error(refused);
   }
 
   const goalChecks = new Set();
@@ -5259,7 +5292,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function call(operation, args = {}) {
     switch (operation) {
-      case "chat_send": return chatSend(args);
+      case "chat_send": return personChatSend(args);
       case "chat_steer": return chatSteer(args);
       case "chat_prewarm": return chatPrewarm(args);
       case "turn_timeline": return turnTimeline(args);
