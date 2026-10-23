@@ -4383,11 +4383,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * restart AO runs the chat's turn on its own and nothing reports it settling (reportRun), so the
    * goal read "Pursuing" for hours under a finished chat. Each read of a project's chats judges
    * such a round, as reportRun would have. Only a run the goal started, or a later one, counts:
-   * right after a goal is set the chat's latest run may still be the turn before it.
+   * right after a goal is set the chat's latest run may still be the turn before it. An archived or
+   * deleted chat keeps its goal but is never judged or sent another round, as wakeups and loops.
    */
-  function sweepGoals(workspaceId, savedRuns) {
+  function sweepGoals(workspaceId, saved) {
+    const savedRuns = saved.runs ?? [];
     for (const [task, goal] of Object.entries(goals.forWorkspace(workspaceId))) {
-      if (goal.status !== "active" || !goal.lastRunId) continue;
+      if (goal.status !== "active" || !goal.lastRunId || taskLifecycle(saved, task).visibility !== "active") continue;
       const chatRuns = savedRuns.filter((run) => run.project_id === task);
       const latest = chatRuns.at(-1);
       if (!latest || latest.id === goal.evaluatedRunId || !chatRuns.some((run) => run.id === goal.lastRunId)) continue;
@@ -5431,7 +5433,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "runs": {
         const saved = await runs(args);
         // A goal round that settled unwatched (after an app restart) is judged now (sweepGoals).
-        sweepGoals(clean(args.workspaceId, 128), saved.runs ?? []);
+        sweepGoals(clean(args.workspaceId, 128), saved);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)) };

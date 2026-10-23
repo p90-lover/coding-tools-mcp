@@ -1103,7 +1103,7 @@ test("a CPA-only agent reports a CPA failure instead of falling back to its own 
 
 // A fake headless service holding one workspace's board, runs and team.
 function chatWorld({ runs = [], tasks = [] } = {}) {
-  const state = { revision: 3, tasks: tasks.map((task) => ({ ...task })), runs, updates: [], edits: [] };
+  const state = { revision: 3, tasks: tasks.map((task) => ({ ...task })), runs, updates: [], edits: [], lifecycle: [] };
   const requestHeadless = async (endpoint, body) => {
     if (endpoint === "/api/v1/tools/call") {
       const args = body.arguments;
@@ -1120,7 +1120,7 @@ function chatWorld({ runs = [], tasks = [] } = {}) {
     }
     if (endpoint === "/api/v1/ao/read") {
       const pending = body.run_id ? [{ id: body.run_id, workspace_id: "ws-1", revision: 1, nodes: [{ id: "lead", state: "pending", route: { model: "chatgpt-web/high" } }] }] : state.runs;
-      return { ok: true, runs: pending, team: { id: "team-1", revision: 7, worker_limit: 2 } };
+      return { ok: true, runs: pending, team: { id: "team-1", revision: 7, worker_limit: 2 }, task_lifecycle: state.lifecycle };
     }
     if (endpoint === "/api/v1/ao/update") {
       state.updates.push(body.change);
@@ -3307,6 +3307,15 @@ test("a goal round that finished while the app was not driving it goes on at the
   world.runs.push({ id: "r-unwatched", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
     nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Half done." } }] });
   const before = world.updates.length;
+  // An archived or deleted chat keeps its goal, but is neither judged nor sent another round.
+  for (const visibility of ["archived", "deleted"]) {
+    world.lifecycle = [{ workspace_id: "ws-1", task_id: "task-1", revision: 1, visibility, reconfigure: [], schedule: null }];
+    await workflow.call("runs", { workspaceId: "ws-1" });
+    await goalSettle();
+    assert.equal(checks.length, 0, `no check in a ${visibility} chat`);
+    assert.equal(world.updates.length, before);
+  }
+  world.lifecycle = [];
   await workflow.call("runs", { workspaceId: "ws-1" });
   await goalSettle(() => world.updates.length > before);
   assert.equal(checks.length, 1, "the unwatched round was judged");
