@@ -1103,8 +1103,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // provider in CPA's config (a Claude API key, say) has no auth file, and its models were hidden.
     // Without the account list nothing is hidden.
     const accountProviders = await providersWithAccounts(cpa);
-    const owners = accountProviders ? await modelOwners(cpa) : null;
-    const unserved = id => Boolean(owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
+    // Who serves each model, from the plain list's owned_by. The enhanced catalog names no provider,
+    // so every model was filed by its name: Antigravity's claude-sonnet-4-6 under Claude and its
+    // gemini-… under Gemini, as if Antigravity and a Claude sign-in or API key were one provider.
+    const listed = rows?.some(entry => typeof entry?.owned_by === "string");
+    const owners = listed ? new Map(rows.filter(entry => typeof entry?.id === "string" && typeof entry.owned_by === "string")
+      .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : await modelOwners(cpa);
+    const unserved = id => Boolean(accountProviders && owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
       && !accountProviders.has(owners.get(id)));
     const capabilities = Object.create(null);
     const ids = [];
@@ -1126,7 +1131,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
       // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
-      const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
+      const provider = [entry.provider, entry.owned_by, entry.ownedBy, owners?.get(id)].find(value => typeof value === "string" && value.trim());
       const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
       if (verbatim) plugins.add(id);
       const reportedLevels = verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);

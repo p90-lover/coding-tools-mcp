@@ -2774,6 +2774,39 @@ test("Claude Code is not offered Antigravity's models, Claude or Gemini, and say
   assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/not-listed" }), null);
 });
 
+test("each model is filed under the provider CPA says serves it, though CPA's full catalog names none", async () => {
+  // Seen live: the full catalog (?client_version=pi) has no owned_by, so models were filed by name:
+  // Antigravity's claude-sonnet-4-6 under Claude, its gemini-… under Gemini, and Claude Code was
+  // offered Antigravity's Claude models it cannot run. The plain list says who serves each one.
+  const full = { models: [
+    { slug: "claude-sonnet-4-6", context_window: 200000 },
+    { slug: "claude-haiku-4-5", context_window: 200000 },
+    { slug: "gemini-3.8-flash-high", context_window: 1000000 },
+    { slug: "gpt-5.5", context_window: 272000 },
+  ] };
+  const plain = { data: [
+    { id: "claude-sonnet-4-6", owned_by: "antigravity" },
+    { id: "claude-haiku-4-5", owned_by: "claude" },
+    { id: "gemini-3.8-flash-high", owned_by: "antigravity" },
+    { id: "gpt-5.5", owned_by: "openai" },
+  ] };
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => String(url).includes("client_version") ? full : plain }
+      : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [], teams: [], worker_capacity: {} } : { ok: true },
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
+    confirm: async () => true,
+  });
+  const listed = await workflow.call("models", { harness: "ao:claude-code" });
+  const provider = id => listed.capabilities[`cpa/${id}`]?.provider;
+  assert.equal(provider("gemini-3.8-flash-high"), "antigravity", "Antigravity's Gemini, not Gemini's");
+  assert.equal(provider("claude-haiku-4-5"), "claude", "a Claude sign-in's model stays Claude's");
+  assert.equal(provider("gpt-5.5"), "openai");
+  assert.ok(!listed.models.includes("cpa/claude-sonnet-4-6"), "Claude Code is not offered Antigravity's Claude model");
+  assert.match(listed.unavailable["cpa/claude-sonnet-4-6"], /Antigravity refuses Claude Code's requests/);
+});
+
 test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
   let catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }, { id: "cline-pass/deepseek-v4-flash", context_window: 1000000 }] };
   let clock = 1_000_000;
@@ -5968,7 +6001,8 @@ test("CPA's catalog is read once a minute, and a failed read is kept only for 15
   const workflow = createAgentOrchestratorWorkflow({
     now: () => clock,
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
-    fetchImpl: async () => { reads += 1; if (fail) throw new Error("CPA busy"); return { ok: true, json: async () => ({ models: [{ slug: "gpt-5.5" }] }) }; },
+    // A catalog read is the full catalog, then the plain list for who serves each model (owned_by).
+    fetchImpl: async (url) => { if (String(url).includes("client_version")) reads += 1; if (fail) throw new Error("CPA busy"); return { ok: true, json: async () => ({ models: [{ slug: "gpt-5.5" }] }) }; },
   });
   await workflow.call("models", {});
   await workflow.call("models", {});
