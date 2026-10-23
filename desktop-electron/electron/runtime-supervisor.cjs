@@ -514,25 +514,24 @@ class RuntimeSupervisor {
     if (!fs.existsSync(this.statePath)) return null;
     // A marker a power cut tore (empty, or its size in NUL bytes) holds no ownership to protect: the
     // processes it named died with the machine. Failing on it stopped every watchdog restart until
-    // something rewrote the file; it is set aside as if it were missing.
+    // something rewrote the file; it is set aside as if it were missing, its bytes first copied to
+    // Trash so what the power cut left can still be looked at.
     let raw = null;
     try { raw = fs.readFileSync(this.statePath); } catch { /* readJson below reports it */ }
     if (raw && raw.every((byte) => byte === 0 || byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d)) {
-      this.logger?.warn?.("runtime.state_torn", { bytes: raw.length });
+      let backup = null;
+      try {
+        const trash = path.join(this.coreHome, "Trash");
+        fs.mkdirSync(trash, { recursive: true, mode: 0o700 });
+        backup = path.join(fs.mkdtempSync(path.join(trash, "runtime-ownership-")), path.basename(this.statePath));
+        fs.writeFileSync(backup, raw, { flag: "wx", mode: 0o600 });
+      } catch { backup = null; /* The copy is a courtesy; setting the marker aside is what recovers. */ }
+      this.logger?.warn?.("runtime.state_torn", { bytes: raw.length, backup });
       this.clearState();
       return null;
     }
     try {
       const bytes = fs.readFileSync(this.statePath);
-      if (bytes.length === 0 || bytes.every((byte) => byte === 0)) {
-        // No ownership can be recovered from an empty file. Keep it and use the normal missing-state checks.
-        const trash = path.join(this.coreHome, "Trash");
-        fs.mkdirSync(trash, { recursive: true, mode: 0o700 });
-        const backup = path.join(fs.mkdtempSync(path.join(trash, "runtime-ownership-")), path.basename(this.statePath));
-        fs.writeFileSync(backup, bytes, { flag: "wx", mode: 0o600 });
-        this.logger.warn("runtime.empty_ownership_state_quarantined", { backup, bytes: bytes.length });
-        return null;
-      }
       const state = JSON.parse(bytes.toString("utf8"));
       const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
       if (!state
