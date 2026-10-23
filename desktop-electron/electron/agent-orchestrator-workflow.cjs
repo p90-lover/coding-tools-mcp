@@ -2118,6 +2118,8 @@ Tool: ${pending.tool}
 ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pending.path}` : `Request: ${pending.summary}`}`,
       })) return { ok: false, cancelled: true };
       await harnessService().resolveApproval(pending.thread_id, approval, decision);
+      // The person has looked at this chat's requests: the next one is the reviewer's again.
+      reviewDenials.delete(pending.thread_id);
       rememberAnswer(approval, requestText(pending), chosen ? offered.label : approving ? "Allow once" : "Deny");
       logger?.info?.("ao.approval_decided", { approval_id: approval, actor: "user", decision: approving ? "allow" : "deny" });
       return { ok: true, result: { ok: true } };
@@ -2145,6 +2147,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (result?.ok !== true || result.result?.ok !== true) {
       throw new Error("Couldn't confirm your answer was sent. Check the card before you retry.");
     }
+    if (pending.thread_id) reviewDenials.delete(pending.thread_id);
     logger?.info?.("ao.approval_decided", { approval_id: approval, actor: "user", decision: typed ? "typed_reply" : allow ? "allow" : "deny" });
     return result;
   }
@@ -2747,6 +2750,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // folder or new rules are reviewed afresh. Only a model's answer is kept, never a failure.
   const REVIEW_CACHE_MS = 10 * 60_000;
   const reviewVerdicts = new Map(); // sha256(prompt) -> { at, action, reason }
+  // An agent the reviewer keeps refusing rewords the same command (seen live 2026-10-23: six
+  // variants of one batch launch in two minutes, each denied, each a new Codex review), and a
+  // refusal is never reused (see askApprover). After REVIEW_DENIAL_STREAK denials in a row in one
+  // agent thread, its next requests skip the reviewer and wait for the person, until the person
+  // answers one, the reviewer allows one, or REVIEW_STREAK_MS passes without a denial.
+  const REVIEW_DENIAL_STREAK = 3;
+  const REVIEW_STREAK_MS = 10 * 60_000;
+  const reviewDenials = new Map(); // thread_id -> { count, at }
+  /** How many reviewer denials in a row a thread has just had, or 0 once the streak has lapsed. */
+  function denialStreak(threadId) {
+    const streak = threadId ? reviewDenials.get(threadId) : null;
+    if (!streak) return 0;
+    if (now() - streak.at < REVIEW_STREAK_MS) return streak.count;
+    reviewDenials.delete(threadId);
+    return 0;
+  }
   /**
    * The folder the agent of a request works in, or null. Without it the reviewer saw only the
    * workspace's id, so it had to guess whether an absolute path was "outside the workspace": the
@@ -2975,6 +2994,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
                 : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
                   && readOnlyInspection(approval.command, await requestFolder(approval, mission), approval.cwd)
                 ? { action: "allow", actor: "safety_rules", reason_code: "read_only_inspection", reason: "Read-only inspection inside the workspace folder" }
+                // Unresolved, so it waits for the person: a plain "ask" is answered for them after AUTO_ANSWER_MS.
+                : denialStreak(approval.thread_id) >= REVIEW_DENIAL_STREAK
+                ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
                 // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
                 // request go to the person, and its card says why.
                 : await askApprover({ approver, mission, approval }).then(verdict => ({ ...verdict, reviewed: true }),
@@ -2983,8 +3005,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // doubt), so a request it could read whole no longer waits for the person for want of a decision.
         if (advice.action === "ask" && advice.reviewed) {
           const decided = await askApprover({ approver, mission, approval, decide: true }).catch(() => null);
-          if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason };
+          if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
         }
+        if (advice.reviewed && approval.thread_id && advice.action === "deny") {
+          reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
+          if (reviewDenials.size > 500) reviewDenials.delete(reviewDenials.keys().next().value);
+        } else if (advice.reviewed && advice.action === "allow") reviewDenials.delete(approval.thread_id);
         if (advice.action === "failed") {
           const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
           const why = publicText(advice.error?.message || advice.error, 160);
