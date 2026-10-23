@@ -340,6 +340,17 @@ const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === 
   && a.input === b.input && a.output === b.output && a.receipt === b.receipt && sameFiles(a.files, b.files));
 const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
 
+/**
+ * Messages steered into the running turn that its timeline does not show yet: the same bubble the
+ * timeline gives a steer, where it will show it, checked "Sending…" until the agent has it.
+ */
+function PendingSteers({ steers }: { steers: { id: string; text: string; sent?: boolean }[] }) {
+  return <>{steers.map((entry) => <div key={entry.id} className="cx-user cx-steer" data-pending={entry.sent ? "sent" : "sending"}>
+    <SentMessage text={entry.text} />
+    <div className="cx-msg-foot"><SteerReceiptMark receipt={entry.sent ? "unread" : "sending"} /><MessageActions text={chatMessageReadable(entry.text)} /></div>
+  </div>)}</>;
+}
+
 function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
@@ -610,9 +621,12 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
   </div>;
 }
 
-/** A message in the queued-message bar: waiting to be sent ("queued"), or on its way to the agent ("pending"). */
-type QueuedBarItem = {
-  key: string; text: string; state: "queued" | "pending";
+/**
+ * A message in the queued-message bar, waiting to be sent. A steer on its way to the agent is not
+ * one: it shows in the chat from the moment it is sent (PendingSteers).
+ */
+export type QueuedBarItem = {
+  key: string; text: string; state: "queued";
   onRemove?: () => void; onEdit?: () => void; onSendNow?: () => void; sendNowBlocked?: string;
 };
 
@@ -630,40 +644,31 @@ function QueuedGlyph({ name, size = 16 }: { name: "send" | "edit" | "remove" | "
 /** A queued message on one line, as Claude Code previews it: its readable text, whitespace collapsed. */
 const queuedPreview = (text: string) => chatMessageReadable(text).replace(/\s+/g, " ").trim() || "…";
 
-/** Claude Code's pressed Send now: a busy spinner, read as "Sending…", until the agent has the message. */
-function QueuedSending() {
-  return <span className="cx-queued-sending" role="status" aria-label="Sending…"><span className="cx-queued-spinner" aria-hidden="true" /></span>;
-}
-
 /**
  * Claude Code's queued-message bar (its Code tab's QueuedMessageBar): a band right above the
  * composer, above the branch bar. One message is one row: "1 message queued", the message greyed
- * on one line, then Send now (↵), Edit in composer and Remove from queue; one on its way to the
- * agent spins instead. Two or more collapse to "N messages queued · Next: …", which opens the list:
- * each message on up to two lines with a ⋮ menu (Edit in composer, Send now, Remove from queue),
- * and Clear all. Only the first queued message can be sent now.
+ * on one line, then Send now (↵), Edit in composer and Remove from queue. Two or more collapse to
+ * "N messages queued · Next: …", which opens the list: each message on up to two lines with a ⋮
+ * menu (Edit in composer, Send now, Remove from queue), and Clear all. Only the first can be sent now.
  */
-function QueuedMessageBar({ items, onMenu, onClearAll }: {
+export function QueuedMessageBar({ items, onMenu, onClearAll }: {
   items: QueuedBarItem[]; onMenu: (owner: HTMLElement, items: ChatMenuItem[]) => void; onClearAll?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   if (!items.length) return null;
-  const head = items.findIndex((item) => item.state === "queued");
-  const sendNow = (item: QueuedBarItem, index: number) => index === head ? item.onSendNow : undefined;
+  const sendNow = (item: QueuedBarItem, index: number) => index === 0 ? item.onSendNow : undefined;
   if (items.length === 1) {
     const [item] = items;
     return <div className="cx-queued">
-      <div className="cx-queued-band" role="group" aria-label="Queued messages" data-state={item.state} aria-busy={item.state === "pending" || undefined}>
+      <div className="cx-queued-band" role="group" aria-label="Queued messages" data-state={item.state}>
         <span className="cx-queued-count">1 message queued</span>
         <span className="cx-queued-preview">{queuedPreview(item.text)}</span>
-        {item.state === "pending" ? <QueuedSending /> : <>
-          {sendNow(item, 0) ? <button type="button" className="cx-queued-icon" aria-label="Send now" data-tip={item.sendNowBlocked ?? "Send now"}
-            disabled={Boolean(item.sendNowBlocked)} onMouseDown={(event) => event.preventDefault()} onClick={item.onSendNow}><QueuedGlyph name="send" /></button> : null}
-          {item.onEdit ? <button type="button" className="cx-queued-icon" aria-label="Edit in composer" data-tip="Edit in composer"
-            onMouseDown={(event) => event.preventDefault()} onClick={item.onEdit}><QueuedGlyph name="edit" /></button> : null}
-          {item.onRemove ? <button type="button" className="cx-queued-icon" aria-label="Remove from queue" data-tip="Remove from queue"
-            onMouseDown={(event) => event.preventDefault()} onClick={item.onRemove}><QueuedGlyph name="remove" /></button> : null}
-        </>}
+        {sendNow(item, 0) ? <button type="button" className="cx-queued-icon" aria-label="Send now" data-tip={item.sendNowBlocked ?? "Send now"}
+          disabled={Boolean(item.sendNowBlocked)} onMouseDown={(event) => event.preventDefault()} onClick={item.onSendNow}><QueuedGlyph name="send" /></button> : null}
+        {item.onEdit ? <button type="button" className="cx-queued-icon" aria-label="Edit in composer" data-tip="Edit in composer"
+          onMouseDown={(event) => event.preventDefault()} onClick={item.onEdit}><QueuedGlyph name="edit" /></button> : null}
+        {item.onRemove ? <button type="button" className="cx-queued-icon" aria-label="Remove from queue" data-tip="Remove from queue"
+          onMouseDown={(event) => event.preventDefault()} onClick={item.onRemove}><QueuedGlyph name="remove" /></button> : null}
       </div>
     </div>;
   }
@@ -695,18 +700,17 @@ function QueuedMessageBar({ items, onMenu, onClearAll }: {
       </div>
       <div className="cx-queued-list" role="list" aria-label="Queued messages">
         {items.map((item, index) => {
-          const menu = item.state === "queued" ? actions(item, index) : [];
-          return <div key={item.key} role="listitem" className="cx-queued-row" data-state={item.state} aria-busy={item.state === "pending" || undefined}>
+          const menu = actions(item, index);
+          return <div key={item.key} role="listitem" className="cx-queued-row" data-state={item.state}>
             <span className="cx-queued-text">{queuedPreview(item.text)}</span>
-            {item.state === "pending" ? <span className="cx-queued-actions is-shown"><QueuedSending /></span>
-              : menu.length ? <span className="cx-queued-actions">
+            {menu.length ? <span className="cx-queued-actions">
                 <button type="button" className="cx-queued-icon is-sm" aria-label="Queued message actions" aria-haspopup="menu"
                   onClick={(event) => onMenu(event.currentTarget, menu)}><QueuedGlyph name="more" size={14} /></button>
               </span> : null}
           </div>;
         })}
       </div>
-      {onClearAll && items.some((item) => item.state === "queued" && item.onRemove)
+      {onClearAll && items.some((item) => item.onRemove)
         ? <div className="cx-queued-foot"><button type="button" className="cx-queued-clear" onMouseDown={(event) => event.preventDefault()} onClick={onClearAll}>Clear all</button></div>
         : null}
     </div>
@@ -870,8 +874,8 @@ export function AgentOrchestratorChat({
   useEffect(() => { setCpaRefusal(null); }, [selectedTaskId]);
   // Steers shown at once while they reach the agent (deliver), until the turn shows them itself.
   // `waiting`: the agent was busy with a request of its own, so the steer waits in the chat's queue
-  // and goes in once the request is answered; it stays shown meanwhile.
-  const [pendingSteers, setPendingSteers] = useState<{ id: string; taskId: string | undefined; text: string; at: number; waiting?: boolean }[]>([]);
+  // and goes in once the request is answered; it stays shown meanwhile. `sent`: the agent has it.
+  const [pendingSteers, setPendingSteers] = useState<{ id: string; taskId: string | undefined; text: string; at: number; waiting?: boolean; sent?: boolean }[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
@@ -1184,9 +1188,10 @@ export function AgentOrchestratorChat({
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
     const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments
       && composing.current.annotations === owner.annotations;
-    // A steer shows at once, as in Claude Code: the composer clears and the message waits in the
-    // queued-message bar, pulsing, while it reaches the agent, which can take seconds (it waits out
-    // an approval being answered). Until then the box held the text and the Stop button stayed.
+    // A steer shows at once, as in Claude Code: the composer clears and the message is in the chat,
+    // at the end of the running turn where the turn will show it, its check pulsing while it reaches
+    // the agent, which can take seconds (it waits out an approval being answered). It sat in the
+    // queued bar under the goal at first and then jumped up into the chat once delivered.
     const steerNow = !goal && (steering || restart) && Boolean(steer && selectedTaskId);
     // A steer sent again from the queue keeps the bubble it already has, not a second one.
     const pendingId = steerNow ? pendingSteers.find((entry) => entry.taskId === selectedTaskId && entry.text === message)?.id
@@ -1207,6 +1212,7 @@ export function AgentOrchestratorChat({
       const waits = steered === "wait" || steered === "starting";
       // Delivered: it stays shown until the turn shows it (see pendingSteers); anything else drops it.
       if (steered !== true && !waits) dropPending();
+      if (steered === true) setPendingSteers((list) => list.map((entry) => entry.id === pendingId ? { ...entry, sent: true } : entry));
       if (waits) setPendingSteers((list) => list.map((entry) => entry.id === pendingId ? { ...entry, waiting: true } : entry));
       if (steerNow && steered === false) setSending(true);
       if ((steered === "wait" || steered === "restart" || steered === "interrupt" || steered === "starting") && selectedTaskId) {
@@ -1430,12 +1436,11 @@ export function AgentOrchestratorChat({
     if (item) setQueue(selectedTaskId, queue.filter((_, at) => at !== index));
     return item;
   };
+  // A steer is in the chat from the moment it is sent (pendingShown), not in this bar. One that waits
+  // for the agent's own request is in the queue too, to go in later; it shows once, in the chat.
+  const steerWaiting = (message: string) => pendingSteers.some((entry) => entry.taskId === selectedTaskId && entry.waiting && entry.text === message);
   const queuedBar: QueuedBarItem[] = [
-    // A steer that waits for the agent's own request is in the queue too: it shows once, as queued.
-    ...pendingSteers.filter((entry) => entry.taskId === selectedTaskId
-      && !queued.some((item) => item.what === "Message" && item.message === entry.text))
-      .map((entry): QueuedBarItem => ({ key: entry.id, text: entry.text, state: "pending" })),
-    ...queued.flatMap((item, index): QueuedBarItem[] => item.what !== "Message" || item.goal ? [] : [{
+    ...queued.flatMap((item, index): QueuedBarItem[] => item.what !== "Message" || item.goal || steerWaiting(item.message) ? [] : [{
       key: `queued:${index}:${item.message.length}`, text: item.message, state: "queued", sendNowBlocked,
       onRemove: () => { takeQueued(index); },
       onEdit: () => {
@@ -1717,6 +1722,10 @@ export function AgentOrchestratorChat({
   const recovering = Boolean(latest && chat?.status === "attention");
   const failedTurn = recovering ? turns.findLast((turn) => turn.runId === latest?.id) : undefined;
   const failedStep = failedTurn ? [...failedTurn.steps, ...(failedTurn.final ? [failedTurn.final] : [])].find((step) => step.error) : undefined;
+  // This chat's steers on their way, and the turn that shows them: the running one (else the last).
+  const pendingShown = useMemo(() => pendingSteers.filter((entry) => entry.taskId === selectedTaskId), [pendingSteers, selectedTaskId]);
+  const liveIndex = turns.findLastIndex(liveTurn);
+  const steerHost = !pendingShown.length ? -1 : liveIndex >= 0 ? liveIndex : turns.length - 1;
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
     // A turn on a DeepSeek model shows as DeepSeek Harness shows one (DshTranscript); others as Claude Code.
     const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
@@ -1753,6 +1762,7 @@ export function AgentOrchestratorChat({
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
                   errorShownBelow={turn === failedTurn} refusal={!idle && liveTurn(turn) ? cpaRefusal : null} />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
+              {turnIndex === steerHost ? <PendingSteers steers={pendingShown} /> : null}
               {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
@@ -1774,7 +1784,7 @@ export function AgentOrchestratorChat({
               {turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
             </article></PartErrorBoundary>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerHost, pendingShown]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>
