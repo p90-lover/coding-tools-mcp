@@ -1758,7 +1758,8 @@ for (const [label, content] of [["empty", Buffer.alloc(0)], ["zero-filled", Buff
     fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
     fs.writeFileSync(supervisor.statePath, content);
     assert.equal(supervisor.readState(), null);
-    assert.deepEqual(fs.readFileSync(supervisor.statePath), content, "reading must not consume the marker");
+    // Set aside as missing (a power cut's torn marker), its bytes kept in Trash: checked below.
+    assert.equal(fs.existsSync(supervisor.statePath), false);
     supervisor.readConfig = () => launcherConfig(descriptor);
     supervisor.proxyHealth = async () => false;
     let starts = 0;

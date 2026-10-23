@@ -52,13 +52,13 @@ Proxy order: the auth file's `proxy_url`, then the plugin's `proxy-url`, then CP
 
 ## Build
 
-Go 1.26.8 with CGO and Zig 0.16.0 as the C compiler (portable copies under the repo's git-ignored `.tools/`, see `.tools/env.sh`):
+Go 1.26.10 or later (earlier Go trusts distrusted intermediates, CVE-2026-111943) with CGO and Zig 0.16.0 as the C compiler (portable copies under the repo's git-ignored `.tools/`, see `.tools/env.sh`):
 
 ```bash
 source .tools/env.sh
 cd desktop-electron/vendor/cpa-plugins/grok-login-provider/backend
 go test ./cmd/cpa-grok-login-provider ./internal/infra/provider/web
-go build -buildmode=c-shared -trimpath -ldflags "-s -w -X main.pluginVersion=0.1.0-codingtools.1" -o ../build/grok-login-provider-v0.1.0-codingtools.1.dll ./cmd/cpa-grok-login-provider
+go build -buildmode=c-shared -trimpath -ldflags "-s -w -X main.pluginVersion=0.1.0-codingtools.2" -o ../build/grok-login-provider-v0.1.0-codingtools.2.dll ./cmd/cpa-grok-login-provider
 ```
 
 The Windows binary is pinned by `../../bundled/cpa-plugins/BUNDLE.json` and installed by `desktop-electron/electron/cpa-managed.cjs`. An isolated CPA 8.0.2 run verified registration, the login page, untyped grok2api import, per-account IDs for multi-account files, tier-based model discovery, and executor error handling; live inference with real Grok accounts is still a cutover check.

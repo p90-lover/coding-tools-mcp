@@ -143,6 +143,13 @@ installProcessDiagnosticGuards({
 });
 
 let mainWindow = null;
+// Certificate authorities the app no longer trusts (ca-distrust.cjs: the leaked eMudhra/emSign CA
+// keys). Requiring it takes them out of this process's CA list; the Node runtimes it starts (AO's
+// agents) preload it; every Chromium session refuses a chain through them. Still at startup, before
+// any window, session or connection exists.
+const caDistrust = require("./ca-distrust.cjs");
+process.env.NODE_OPTIONS = caDistrust.childNodeOptions(path.join(launcherUserData, "runtime-preload"), process.env.NODE_OPTIONS);
+app.on("session-created", (created) => created.setCertificateVerifyProc(caDistrust.verifyCertificate));
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
@@ -1397,7 +1404,8 @@ function registerIpc({ logger, stateStore }) {
     if (credential.ok !== true || typeof credential.value !== "string" || !credential.value) {
       throw new Error("Workspace credential is unavailable");
     }
-    clipboard.writeText(credential.value);
+    // Electron 44+ writes the clipboard asynchronously; report "copied" only after it lands.
+    await clipboard.writeText(credential.value);
     return { ok: true, copied: true, key: input.key };
   });
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
@@ -2720,6 +2728,7 @@ async function start() {
   app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 
   await app.whenReady();
+  session.defaultSession.setCertificateVerifyProc(caDistrust.verifyCertificate);
   // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them.
   if (process.platform === "win32" && app.isPackaged) {
     setImmediate(() => {
@@ -3034,6 +3043,7 @@ async function start() {
         harness: () => agentOrchestratorUpstream?.harness ?? null,
         blockedRequest: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         recommendedAnswer: (approval) => missionWorkflowRuntime?.recommendedAnswer?.(approval) ?? { action: "decline" },
+        routeRefusal: (route) => missionWorkflowRuntime?.subagentRouteRefusal?.(route) ?? null,
         // A model the chat agent picks runs on Claude Code and is checked against its catalog; a
         // saved team can run as one subagent.
         models: (workspaceId) => missionWorkflowRuntime?.call("models", { harness: "ao:claude-code", workspaceId }) ?? null,
@@ -3079,6 +3089,28 @@ async function start() {
         blockedCommand: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         // The subagents a chat agent may start (Runtime > Subagents).
         subagents: subagentsService,
+        // app_processes: the app's own processes and what they started, with CPU, memory and uptime.
+        // Its own: under the install, profile or runtime folders, the app's services by name, and
+        // Electron's processes (whose types it names: main, window, GPU).
+        appProcesses: (options) => backendBundles.requireModule(backend, "app-processes.cjs").listAppProcesses({
+          ...options,
+          roots: [path.dirname(process.execPath), app.getPath("userData"), launcherUserData, installedRuntimeRoot].filter(Boolean),
+          own: [process.pid],
+          electron: app.getAppMetrics().map((metric) => ({ pid: metric.pid, type: metric.type })),
+        }),
+        // chat_list / chat_read: the app's chats as the chat list reads them (the workflow's board
+        // and runs), read-only; another project's only after the user allows it.
+        chatHistory: backendBundles.requireModule(backend, "chat-history.cjs").createChatHistory({
+          workspaces: listHeadlessWorkspaces,
+          board: (workspaceId, taskId) => {
+            if (!missionWorkflowRuntime?.call) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.call("board", { workspaceId, ...(taskId ? { taskId } : {}) });
+          },
+          runs: (workspaceId) => {
+            if (!missionWorkflowRuntime?.call) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.call("runs", { workspaceId });
+          },
+        }),
         // schedule_wakeup: the chat is sent a follow-up after the minutes its agent chose.
         wakeups: {
           schedule: (request) => {

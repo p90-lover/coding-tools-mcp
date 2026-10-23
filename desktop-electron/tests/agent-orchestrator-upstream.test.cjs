@@ -742,6 +742,48 @@ test("a turn that only retries its model request shows no new sign of life, so a
   assert.equal((await upstream.observe("s")).lastActivityAt, Date.parse(at(1.5)), "the last real step, not the retry notices after it");
 });
 
+test("a screenshot tool's row shows its picture and what it said, not the picture's base64", async () => {
+  // Seen live (preview_screenshot, 2026-10-21): AO's `output` for an image result is the provider's
+  // JSON with the PNG as base64; the row showed none of it. Its content carries the image, the file
+  // Claude Code saved it to, and the page's url and title.
+  const base64 = "iVBORw0KGgo".repeat(15000);
+  const screenshot = { id: "a1", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "mcp__coding-tools__preview_screenshot",
+    detail: { input: {}, toolKind: "other", providerToolName: "mcp__coding-tools__preview_screenshot",
+      output: JSON.stringify([{ source: { data: base64 } }]),
+      content: [
+        { type: "content", content: { type: "image", mimeType: "image/png", data: base64 } },
+        { type: "content", content: { type: "text", text: "[Image: source: C:\\Users\\me\\.claude\\projects\\p\\tool-results\\shot.png]" } },
+        { type: "content", content: { type: "text", text: "{\"url\":\"http://127.0.0.1:8000/register\",\"title\":\"frontend\"}" } },
+      ] } };
+  // A picture that came back with no saved copy is still said, rather than shown as nothing.
+  const unsaved = { ...screenshot, id: "a2", sequence: 3, detail: { ...screenshot.detail, content: [screenshot.detail.content[0]] } };
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation")
+      ? { turns: [{ id: "t", state: "running" }], messages: [], activities: [screenshot, unsaved] }
+      : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [shot, bare] = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  assert.deepEqual(shot.images, ["C:\\Users\\me\\.claude\\projects\\p\\tool-results\\shot.png"]);
+  assert.equal(shot.output, "{\"url\":\"http://127.0.0.1:8000/register\",\"title\":\"frontend\"}");
+  assert.equal(shot.input, undefined, "the tool takes no arguments");
+  assert.equal(bare.images, undefined);
+  assert.match(bare.output, /An image came back/);
+  assert.ok(!bare.output.includes("iVBOR"));
+});
+
+test("a tool's row carries its arguments and output well past a few lines", async () => {
+  const file = Array.from({ length: 300 }, (_, line) => `${line + 1}\tconst value${line} = ${line};`).join("\n");
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation")
+      ? { turns: [{ id: "t", state: "running" }], messages: [], activities: [{ id: "a1", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed",
+        summary: "Read src/app.ts", detail: { input: { file_path: "src/app.ts", limit: 300 }, toolKind: "read", output: file } }] }
+      : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [read] = (await upstream.observe("s")).timeline;
+  assert.ok(Buffer.byteLength(read.output) > 2000, "more than the old 2 KB cut");
+  assert.ok(read.output.length <= 16 * 1024);
+});
+
 test("observe says when the tool call still running began, so a steer can stop a long one", async () => {
   const at = minutes => new Date(Date.parse("2026-10-20T04:00:00Z") + minutes * 60_000).toISOString();
   const conversation = (activities) => observeHarness({

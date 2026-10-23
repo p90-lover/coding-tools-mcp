@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BUN_VERSION: '1.4.0'
+  BUN_VERSION: '1.4.3'
   NODE_VERSION: '22'
   RUST_TOOLCHAIN: '1.98.1'
   RELEASE_VERSION: '0.6.0-rc.1'
@@ -90,7 +90,7 @@ jobs:
             version: process.env.RELEASE_VERSION,
             appId: 'dev.codingtools.fullharness',
             productName: 'Coding Tools',
-            electron: '41.10.7',
+            electron: '45.0.0',
             upstreamTag: 'v5.0.6',
             upstreamCommit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
             tunnelClient: '0.0.12',

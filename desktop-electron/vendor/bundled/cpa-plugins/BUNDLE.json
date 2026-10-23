@@ -33,7 +33,7 @@
   "studio": {
     "id": "auth-commandcode",
     "provider": "commandcode",
-    "version": "0.1.0-codingtools.1",
+    "version": "0.1.0-codingtools.2",
     "source": {
       "repository": "https://github.com/UNICKCHENG/cliproxyapi-plugins",
       "commit": "7ead2c1df31472b9272910e733a94560dfa04815",
@@ -42,13 +42,14 @@
     "changes": [
       "CPA browser login callback",
       "Studio label",
-      "CPA 7.3.7 StatusCode host HTTP response"
+      "CPA 7.3.7 StatusCode host HTTP response",
+      "Rebuilt with Go 1.26.10 and updated dependencies: CVE-2026-111943 (crypto/x509 trusted distrusted intermediates, the leaked emSign CA keys)"
     ],
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/auth-commandcode-v0.1.0-codingtools.1.dll",
-        "sha256": "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc",
-        "size": 14896640
+        "path": "windows/amd64/auth-commandcode-v0.1.0-codingtools.2.dll",
+        "sha256": "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31",
+        "size": 14867968
       }
     }
   },
@@ -79,7 +80,7 @@
   "grok": {
     "id": "grok-login-provider",
     "provider": "grok",
-    "version": "0.1.0-codingtools.1",
+    "version": "0.1.0-codingtools.2",
     "source": {
       "repository": "https://github.com/chenyme/grok2api",
       "commit": "7c889a960e2638341b4dae9a5c81af0e0f38c87f",
@@ -91,18 +92,19 @@
       "xAI OAuth device login and SSO cookie login through a loopback page",
       "Grok credential import detection for untyped auth files",
       "grok2api anti-downgrade quality guard as a retryable CPA 503",
-      "SSO to Build conversion sends the consent+jwt with the accounts.x.ai Origin"
+      "SSO to Build conversion sends the consent+jwt with the accounts.x.ai Origin",
+      "Rebuilt with Go 1.26.10 and updated dependencies: CVE-2026-111943 (crypto/x509 trusted distrusted intermediates, the leaked emSign CA keys)"
     ],
     "build": {
-      "go": "1.26.8",
+      "go": "1.26.10",
       "cCompiler": "Zig 0.16.0",
       "mode": "c-shared"
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/grok-login-provider-v0.1.0-codingtools.1.dll",
-        "sha256": "57fbdce4ad770499e604a7d3654bc7b700532e0572c0980ff040818a83117cb7",
-        "size": 24915456
+        "path": "windows/amd64/grok-login-provider-v0.1.0-codingtools.2.dll",
+        "sha256": "9894157b26546b325e308b36fcb4fde6795b3ed813bc866e79ab78dfb0a39937",
+        "size": 24951296
       }
     }
   },

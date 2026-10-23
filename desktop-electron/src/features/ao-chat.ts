@@ -56,6 +56,50 @@ export function chatAgentSessions(runs: { nodes: ChatNode[] }[]): ChatAgentSessi
   });
 }
 
+/** A subagent one of the chat's agents started (subagents.cjs, `subagents_runs`). */
+export type ChatSubagent = {
+  subagent_id: string; agent: string; name: string; state: string; task: string; elapsed_seconds: number;
+  parent?: string; started_at?: number; report?: string; error?: string; stopping?: boolean;
+};
+const SUBAGENT_ACTIVE = new Set(["starting", "running"]);
+export const subagentActive = (run: Pick<ChatSubagent, "state">) => SUBAGENT_ACTIVE.has(run.state);
+
+/** The subagents the chat's own agents (`sessionIds`) started, running ones first, then newest first. */
+export function chatSubagents(runs: readonly ChatSubagent[], sessionIds: readonly string[]): ChatSubagent[] {
+  const own = new Set(sessionIds);
+  return runs.filter((run) => run.parent && own.has(run.parent))
+    .sort((a, b) => Number(subagentActive(b)) - Number(subagentActive(a)) || (b.started_at ?? 0) - (a.started_at ?? 0));
+}
+
+/**
+ * A subagent's title, as Codex names one by its job rather than its kind: the task's first line,
+ * shortened, after the subagent's name ("Explorer · Find the autoplay gate").
+ */
+export function subagentTitle(run: Pick<ChatSubagent, "name" | "task">): string {
+  const line = run.task.split("\n").map((part) => part.trim()).find(Boolean) ?? "";
+  const short = line.length > 48 ? `${line.slice(0, 47).trimEnd()}…` : line;
+  return short ? `${run.name} · ${short}` : run.name;
+}
+
+/**
+ * The chat's line for its subagents, as Codex's "Loot goal autoplay, Pet execution and Guide backend
+ * started working": who is working now, or when none is, how the last ones ended. Null with none.
+ */
+export function subagentsSummary(runs: readonly ChatSubagent[]): string | null {
+  if (!runs.length) return null;
+  const working = runs.filter(subagentActive);
+  const names = (list: readonly ChatSubagent[]) => {
+    const shown = list.slice(0, 3).map((run) => run.name);
+    const rest = list.length - shown.length;
+    if (rest > 0) return `${shown.join(", ")} and ${rest} more`;
+    return shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}` : shown[0];
+  };
+  if (working.length) return `${working.length === 1 ? "1 subagent" : `${working.length} subagents`} working: ${names(working)}`;
+  const done = runs.filter((run) => run.state === "completed").length;
+  const other = runs.length - done;
+  return `${runs.length === 1 ? "1 subagent" : `${runs.length} subagents`} finished${other ? ` (${other} did not complete)` : ""}`;
+}
+
 /** What a working card is doing now (the workflow's "activity" operation). */
 export type ChatActivity = {
   activity?: string;
@@ -77,6 +121,8 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
+  /** Images a tool call returned (a screenshot, a picture it read), as the files Claude Code saved them to. */
+  images?: string[];
   /** For kind "edit": the files it changed (Claude Code's "Edited <file> +12 −3"). */
   files?: ChatEditedFile[];
   /**
@@ -658,6 +704,20 @@ export function chatRunOpen(status: ChatStatus | undefined): boolean {
 }
 
 /**
+ * A run the person has just stopped, as it shows while the stop goes through (the saved
+ * cancellation, each agent's interrupt, the board reload): stopped at once, the way Claude Code's
+ * Esc ends the spinner the moment it is pressed. Stop used to change nothing for seconds. The next
+ * read of the run replaces this.
+ */
+export function chatRunStopping<T extends ChatRun>(run: T): T {
+  // A card still working or about to start ends its shimmer; a finished, failed or held one keeps
+  // its state, and every card keeps its receipt, so its "Worked" stays openable (hasWork).
+  const stopping = new Set(["running", "reserved", "pending"]);
+  return { ...run, cancelled: true,
+    nodes: run.nodes.map((node) => stopping.has(node.state) ? { ...node, state: "cancelled" } : node) };
+}
+
+/**
  * The run an open chat shows as its own: the selected one while it is still open; once it has
  * settled, the chat's run that is working, else its newest. The chat read its working state, its
  * approvals and steer-or-send from the selected run alone, and kept the one it was opened on. Seen
@@ -990,7 +1050,10 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     // A request nobody has answered yet holds the card: it said "working" or its last tool meanwhile.
     const newest = timeline.at(-1);
     const asking = newest?.kind === "approval" && /pending|waiting/i.test(newest.status);
-    step.working = { ...working, ...(asking ? { activity: "waiting for approval" } : live?.activity ? { activity: textOf(live.activity) } : {}),
+    // A request "Approve for me" is reviewing says so ("the reviewer is checking: …"): it is not the
+    // person's to answer, and "waiting for approval" with no request shown read as stuck on them.
+    const reviewing = /^the reviewer is checking/i.test(textOf(live?.activity));
+    step.working = { ...working, ...(asking && !reviewing ? { activity: "waiting for approval" } : live?.activity ? { activity: textOf(live.activity) } : {}),
       ...(timeline.length ? { timeline } : {}) };
     // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
     const earlier = copiesEarlier ? latestHistoryAnswer(node) : undefined;
@@ -1441,7 +1504,17 @@ export function chatSlashParse(draft: string): { name: string; arg: string } | n
 export type ChatGoal = {
   objective: string; status: "active" | "paused" | "achieved" | "stalled" | "limited";
   round: number; rounds: number; startedAt: number; updatedAt: number; note?: string;
+  /** The evaluator's last "not met yet" reason: what the running round was told to do. */
+  feedback?: string;
 };
+/**
+ * The line the goal bar shows under its state: the state's own note (why it stalled, what was
+ * achieved), else, while it is pursued, why the last check said it is not met yet.
+ */
+export function goalDetail(goal: Pick<ChatGoal, "status" | "note" | "feedback">): string {
+  if (goal.note) return goal.note;
+  return goal.status === "active" && goal.feedback ? `Not met yet: ${goal.feedback}` : "";
+}
 /** A chat's pending wake-up (its agent's schedule_wakeup), as the bridge keeps it. */
 export type ChatWakeup = { id: string; minutes: number; reason: string; scheduledAt: number; dueAt: number; due?: boolean };
 /** 42_000 -> "Wakes in 42s"; 185_000 -> "Wakes in 3m"; 10_680_000 -> "Wakes in 2h 58m"; a due one waits for its turn to end. */
@@ -1496,7 +1569,7 @@ export function loopLabel(loop: Pick<ChatLoop, "minutes" | "round" | "nextAt" | 
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
 };
-/** "3" for a goal with no round limit (Claude Code's), "3 of 6" for one saved with a limit. */
+/** "3 of 30" for a goal with a round limit (Single 30, team 10), "3" for one without. */
 export function goalRounds(goal: Pick<ChatGoal, "round" | "rounds">): string {
   return goal.rounds > 0 ? `${goal.round} of ${goal.rounds}` : String(goal.round);
 }
