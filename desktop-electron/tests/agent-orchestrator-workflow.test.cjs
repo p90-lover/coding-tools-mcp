@@ -1224,6 +1224,29 @@ test("a follow-up waits for the chat's run, then extends the same task and start
   assert.equal(done.updates[0].task_id, "task-1");
 });
 
+test("a follow-up whose run was not made leaves the chat; one whose run was made after all stays", async () => {
+  // Seen live 2026-10-23: "keep going" was saved, then the send timed out ("Headless request timed
+  // out") with no run, and every later reply in the chat sat under the message before its own.
+  for (const madeAnyway of [false, true]) {
+    const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+    const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
+    const request = async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/update" && body.change.operation === "create_from_team") {
+        if (madeAnyway) world.runs.push({ id: body.change.run_id, project_id: "task-1", cancelled: false, nodes: [{ state: "pending" }] });
+        throw new Error("Headless request timed out");
+      }
+      return world.requestHeadless(endpoint, body, options);
+    };
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless: request, findCodexExecutable: () => "C:\\c.exe", resolveHarness: async () => ({}) });
+    try {
+      await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" }), /timed out/);
+      assert.equal(world.tasks[0].description, madeAnyway ? world.edits[0].description : "first ask",
+        madeAnyway ? "a run that was made keeps its message" : "the message no run answers is taken back out");
+      assert.equal(world.edits.length, madeAnyway ? 1 : 2);
+    } finally { workflow.dispose(); }
+  }
+});
+
 test("two sends into one chat at once start one round: the later one is refused, not run beside it", async () => {
   // Seen live 2026-10-23: two rounds of one chat started two seconds apart on one agent (a goal's next
   // round and a wakeup both found the chat free), and the chat then sat on the one that was stopped.
