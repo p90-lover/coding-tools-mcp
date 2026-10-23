@@ -187,8 +187,12 @@ export function ChatMenu({ menu, onClose }: { menu: ChatMenuState; onClose: () =
   </>;
 }
 
-/** Palette variables the menu's CSS reads; defined on .ao-workflow for the dark and light themes. */
-const THEME_VARIABLES = ["--color-bg-primary", "--color-text-primary", "--ao-line", "--ao-muted", "--ao-red", "--ao-blue", "--ao-green", "--ao-amber", "--cx-hover", "--cx-active"] as const;
+/**
+ * Palette variables the menu's CSS reads; defined on .ao-workflow for the dark and light themes.
+ * One missing here falls back to <body>'s dark-theme value: --color-text-secondary did, and the chat
+ * details panel's labels, branch and setup lines were white on its light background.
+ */
+const THEME_VARIABLES = ["--color-bg-primary", "--color-text-primary", "--color-text-secondary", "--ao-line", "--ao-muted", "--ao-red", "--ao-blue", "--ao-green", "--ao-amber", "--cx-hover", "--cx-active"] as const;
 
 /**
  * A position:fixed layer (e.g. a hover card) rendered on <body> with the chat surface's palette,

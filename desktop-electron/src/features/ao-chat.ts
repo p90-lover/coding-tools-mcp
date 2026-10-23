@@ -423,6 +423,46 @@ export function chatApprovalMode(route?: { approval_policy?: string; approvals_r
   return route.approvals_reviewer === "auto_review" ? "Approve for me" : "Ask me";
 }
 
+/**
+ * Something the chat's agents made or used, as Codex's task panel lists it: an output (a file it
+ * wrote, an image, a page it served on this machine) or a source (a web page it read, an MCP server
+ * it called).
+ */
+export type ChatDetailLink = { key: string; kind: "file" | "image" | "page" | "link" | "tool"; label: string; title: string };
+const DETAIL_IMAGE = /\.(?:png|jpe?g|gif|webp|svg)$/i;
+const DETAIL_URL = /\bhttps?:\/\/[^\s"'`<>()[\]{}]+/gi;
+// host (port and all), then the path without its query: what the row shows.
+const DETAIL_URL_PARTS = /^https?:\/\/([^/?#]+)([^?#]*)/i;
+const DETAIL_LOCAL_HOST = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?$/i;
+/** The details panel's Outputs and Sources from the agents' timelines, newest first and each once. */
+export function chatDetailLinks(items: ChatLiveItem[]): { outputs: ChatDetailLink[]; sources: ChatDetailLink[] } {
+  const outputs = new Map<string, ChatDetailLink>(), sources = new Map<string, ChatDetailLink>();
+  const add = (into: Map<string, ChatDetailLink>, link: ChatDetailLink) => { into.delete(link.key); into.set(link.key, link); };
+  for (const item of items) {
+    for (const file of item.files ?? []) {
+      add(outputs, { key: `file:${file.path}`, kind: DETAIL_IMAGE.test(file.path) ? "image" : "file",
+        label: file.path.split(/[\\/]/).pop() || file.path, title: file.path });
+    }
+    if (item.kind !== "tool" && item.kind !== "command") continue;
+    // claude-agent-acp's own tools are mcp__acp__*; a real MCP server's tool is mcp__<server>__<tool>.
+    const server = /\bmcp__([\w-]+?)__/.exec(item.text)?.[1];
+    if (server && server !== "acp") add(sources, { key: `tool:${server}`, kind: "tool", label: server, title: `MCP server ${server}` });
+    // A page is a source when the agent asked for it, an output when it serves on this machine
+    // (a dev server prints its address in the command's output).
+    for (const [text, external] of [[`${item.text}\n${item.input ?? ""}`, true], [item.kind === "command" ? item.output ?? "" : "", false]] as const) {
+      for (const raw of text.match(DETAIL_URL) ?? []) {
+        const href = raw.replace(/[.,;:!?]+$/, "");
+        const [, host = "", path = ""] = DETAIL_URL_PARTS.exec(href) ?? [];
+        const local = DETAIL_LOCAL_HOST.test(host);
+        if (!host || (!local && !external)) continue;
+        add(local ? outputs : sources, { key: `${local ? "page" : "link"}:${href}`, kind: local ? "page" : "link",
+          label: `${host.toLowerCase()}${path === "/" ? "" : path}`, title: href });
+      }
+    }
+  }
+  return { outputs: [...outputs.values()].reverse(), sources: [...sources.values()].reverse() };
+}
+
 /** One line of an edit's diff as the chat draws it: old and new line numbers, the change and its text. */
 export type ChatDiffLine = { kind: "add" | "del" | "ctx" | "hunk"; text: string; old?: number; new?: number };
 /**
