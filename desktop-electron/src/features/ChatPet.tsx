@@ -15,11 +15,11 @@ import { createPortal } from "react-dom";
 //
 // Clawd itself (Clawd.tsx) is Claude Code's: the CLI's glyphs, poses and animations, frame for frame.
 //
-// In split view there is one Clawd for all the panes (chat-pet-stage.ts). It lives on one pane's box
-// and leaps across to the others: to visit, to follow you to the pane you click into, to deliver its
-// file box to another working chat, and when another chat asks for you, finishes or fails. Its house
-// stands under the chat list; it leaps there to sleep, and out again to the pane you are in. Drop it
-// over another pane's box and it lands there.
+// In split view there is one Clawd for all the panes (chat-pet-stage.ts). It lives on one pane's box,
+// walking only its top edge (a pane's edge would cut it off on the sides and underneath), and leaps
+// across to the others only to follow you to the pane you click into, and when another chat asks for
+// you, finishes or fails. Its house stands under the chat list; it leaps there to sleep, and out
+// again to the pane you are in. Drop it over another pane's box and it lands there.
 
 import type { PetMood } from "./ao-chat";
 import { petCall, petStage, type PetArrival } from "./chat-pet-stage";
@@ -110,7 +110,6 @@ const LINES: Record<PetMood, string> = {
 const PETTED = ["Hehe", "More pets, please", "I like you", "*purr*"];
 const MUSINGS = ["Hmm…", "*looks around*", "What are we building?", "♪", "Nice code"];
 const RIDING = ["Wheee!", "Take me somewhere", "Faster!", "Hold on tight"];
-const VISITING = ["Knock knock", "What's going on here?", "Just visiting", "Hi, neighbour"];
 const FOLLOWING = ["Wait for me!", "Coming along", "Right behind you"];
 
 // Props and the house, in Clawd's pixels.
@@ -341,6 +340,17 @@ const housePlace = (loop: Loop) => loop.beside
   : { left: houseLeft(loop), top: -HOUSE_H };
 /** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
 const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
+/**
+ * `spot` moved onto the box's top edge, clear of its ends, on the nearest lap: off a side to that
+ * side's top corner, from underneath to the nearer one. In split view the box fills its pane but for
+ * a few px, so on the sides and underneath the pane's edge cut Clawd off (seen 2026-10-24: sideways,
+ * half gone at a pane's left edge); there it only walks the top edge.
+ */
+export function onTop(loop: Loop, spot: number): number {
+  const { x, side } = spotAt(loop, spot);
+  const along = side === 0 ? x : side === 1 ? loop.width : side === 3 ? 0 : x < loop.width / 2 ? 0 : loop.width;
+  return nearLap(loop, Math.max(WIDTH / 2, Math.min(loop.width - WIDTH / 2, along)), spot);
+}
 
 type PetProps = {
   mood: PetMood;
@@ -511,7 +521,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     if (arrival) { land(arrival); return; }
     let saved = Number.NaN;
     try { saved = Number(localStorage.getItem(POSITION_KEY) ?? Number.NaN); } catch { /* first visit */ }
-    setAt(saved >= 0 && saved < 1 ? saved * loop.length : Math.max(WIDTH / 2, loop.width - 2 * WIDTH));
+    const start = saved >= 0 && saved < 1 ? saved * loop.length : Math.max(WIDTH / 2, loop.width - 2 * WIDTH);
+    setAt(split ? onTop(loop, start) : start);
     if (!entrancePlayed && !still) { entrancePlayed = true; play(pickOne(ENTRANCES)); }
   }, [loop]);
   /** Landed on this pane's box from another pane: a hop, a word, and on with what it came to do. */
@@ -525,13 +536,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     remember();
     poke();
     cancelPlans();
-    if (moodNow.current === "ask") { runToSend(); wander(); return; }
-    if (arrival.carry && !still) {
-      // The file box it brought: carried a little way along and set down here.
-      setJob("carry");
-      walkTo(nextSpot(true), SCURRY * 0.8, () => { setJob("none"); play("jump"); float("📦"); wander(); });
-      return;
-    }
+    if (moodNow.current === "ask") runToSend();
     wander();
   };
   const remember = () => {
@@ -593,7 +598,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     const rects = obstacles();
     if (!current || !blocked(spot, rects)) return spot;
     for (let offset = 8; offset < current.length / 2; offset += 8) {
-      const free = [spot + offset, spot - offset].find((candidate) => !blocked(candidate, rects));
+      const free = [spot + offset, spot - offset].map((candidate) => split ? onTop(current, candidate) : candidate)
+        .find((candidate) => !blocked(candidate, rects));
       if (free !== undefined) return free;
     }
     return spot;
@@ -629,7 +635,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     walkFrame.current = window.requestAnimationFrame(frame);
   };
 
-  /** A spot to walk to: mostly a short way along, sometimes a long way round, never on a button. */
+  /** A spot to walk to: mostly a short way along, sometimes a long way round, never on a button. In
+   *  split view it keeps to the top edge (onTop), where a long way is anywhere along it. */
   const nextSpot = (working: boolean) => {
     const current = loopNow.current;
     if (!current) return atNow.current;
@@ -637,8 +644,10 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     for (let attempt = 0; attempt < 12; attempt += 1) {
       const far = Math.random() < (working ? 0.4 : 0.25);
       const span = far ? current.length * (0.5 + Math.random() * 0.7) : 60 + Math.random() * 200;
-      const target = atNow.current + (Math.random() < 0.5 ? -1 : 1) * span;
-      if (!blocked(target, rects) && !inHouse(target)) return target;
+      const target = split && far ? nearLap(current, WIDTH / 2 + Math.random() * Math.max(0, current.width - WIDTH), atNow.current)
+        : atNow.current + (Math.random() < 0.5 ? -1 : 1) * span;
+      const spot = split ? onTop(current, target) : target;
+      if (!blocked(spot, rects) && !inHouse(spot)) return spot;
     }
     return atNow.current;
   };
@@ -646,27 +655,18 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   /** One thing to do on arriving somewhere, so a stroll never looks like sliding. */
   const act = () => {
     if (busyElsewhere()) return;
-    const others = otherPanes();
+    // It stays with its own chat: it leaps to another pane only when that chat calls it or you click
+    // into it (the split-view effect below). Leaping off on a whim to visit or carry a box over, it
+    // was rarely quiet for NAP_MS, so it hardly ever went home to its house (the user, 2026-10-24).
     if (moodNow.current === "working") {
-      // At work: settle at a tool for a while; carrying walks on to drop the box somewhere. In split
-      // view a box is sometimes for another working chat: it carries it over and leaps across with it.
+      // At work: settle at a tool for a while; carrying walks on to drop the box somewhere.
       const next = pick(WORK);
-      const working = others.filter((pane) => petStage.seats().get(pane)?.mood === "working");
-      if (next === "carry" && working.length && Math.random() < 0.5) {
-        setJob("carry");
-        walkTo(nextSpot(true), SCURRY * 0.8, () => { if (!hop(pick(working), "Delivery!", true)) { setJob("none"); play("jump"); } });
-        return;
-      }
       if (next === "carry") { setJob("carry"); walkTo(nextSpot(true), SCURRY * 0.8, () => { setJob("none"); play("jump"); }); return; }
       setJob(next);
       later(5000 + Math.random() * 4000, () => setJob("none"));
       return;
     }
-    // In split view, now and then it leaps over to visit another pane.
-    const choices: ("play" | "sit" | "muse" | "coffee" | "read" | "rest" | "visit")[] = ["play", "play", "play", "sit", "muse", "coffee", "read", "rest"];
-    if (others.length) choices.push("visit", "visit");
-    const choice = pick(choices);
-    if (choice === "visit") { hop(pick(others), pick(VISITING)); return; }
+    const choice = pick(["play", "play", "play", "sit", "muse", "coffee", "read", "rest"] as const);
     if (choice === "play") play(pickOne(CLICKABLE));
     else if (choice === "sit") { setPose({ ...REST, sit: true }); later(2600, () => setPose(REST)); }
     else if (choice === "coffee" || choice === "read") { setJob(choice); later(3500 + Math.random() * 2500, () => setJob("none")); }
@@ -717,21 +717,20 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   };
   /**
    * Over to another pane's box (split view): it leaps onto that box's top edge, and the pet there
-   * carries on (with the file box, when it brought one). False when it cannot go there now.
+   * carries on. False when it cannot go there now.
    */
-  const hop = (pane: HTMLElement, line: string, carry = false) => {
+  const hop = (pane: HTMLElement, line: string) => {
     const seat = petStage.seats().get(pane);
     if (!split || !seat || pane === split.pane || !seat.composer.isConnected || seat.composer.offsetWidth < 2 * WIDTH) return false;
     cancelPlans();
     window.clearTimeout(doorTimer.current);
-    setJob(carry ? "carry" : "none");
+    setJob("none");
     const from = screenAt(atNow.current);
     const frame = seat.composer.getBoundingClientRect();
     const to = topEdge(seat.composer, from.x - frame.left);
     leapTo(from, to, () => {
-      if (petStage.handoff(pane, { x: to.along, carry, line })) return;
+      if (petStage.handoff(pane, { x: to.along, carry: false, line })) return;
       // That pane closed mid-leap: it is back where it took off.
-      setJob("none");
       wander();
     });
     return true;
