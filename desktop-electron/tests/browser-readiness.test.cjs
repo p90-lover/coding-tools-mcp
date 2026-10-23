@@ -29,6 +29,17 @@ test("browser readiness freshly checks idle session without navigation or cached
   assert.equal(world.calls[0].options.redirect, "manual");
   assert.equal((await fixture({}).host.authenticationReadiness()).authenticated, false);
 });
+test("Electron's empty response URL is the session asked for, not a redirect", async () => {
+  // session.fetch answers with url "" (seen on Electron 41.10.7): every check read as unusable and
+  // fell back to a script in the ChatGPT page, logging "browser.readiness_fetch_unusable" every 20 s.
+  const warnings = [];
+  const world = fixture({ user: { id: "x" }, expires: new Date(Date.now() + 60_000).toISOString() }, { url: "" });
+  world.host.logger = { warn: (event) => warnings.push(event), info() {} };
+  world.host.view.webContents.executeJavaScript = async () => { throw new Error("the page must not be asked"); };
+  assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: true, ready: true });
+  assert.deepEqual(warnings, []);
+});
+
 test("invalid or expired sessions never become authenticated", async () => {
   for (const payload of [{user:{}},{user:[]},{user:{id:"x"},error:"expired"},
     {user:{id:"x"},expires:"invalid"},{user:{id:"x"},expires:"2000-01-01T00:00:00Z"}]) {
