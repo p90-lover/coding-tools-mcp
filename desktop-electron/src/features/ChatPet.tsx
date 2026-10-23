@@ -49,12 +49,16 @@ const PIXEL_W = CELL_W / 2;
 const PIXEL_H = CELL_H / 2;
 const WIDTH = COLS * CELL_W;
 const HEIGHT = ROWS * CELL_H;
-/** Clawd's house, 34×13 pixels, standing beside the box's right side (not on top of it, where it
- *  covered the box's top edge), its floor level with the box's bottom, this far out from it. */
-const HOUSE_COLS = 34;
-const HOUSE_ROWS = 13;
+/** Clawd's house, 40×20 pixels (two storeys under the roof), standing beside the box's right side
+ *  (not on top of it, where it covered the box's top edge), its floor level with the box's bottom,
+ *  this far out from it. */
+const HOUSE_COLS = 40;
+const HOUSE_ROWS = 20;
 const HOUSE_W = HOUSE_COLS * PIXEL_W;
 const HOUSE_H = HOUSE_ROWS * PIXEL_H;
+/** Clawd's spot at home, px from the house's left: the ground floor's middle (columns 12-29),
+ *  between the bed and the kitchen. */
+const HOME_X = 21 * PIXEL_W;
 /** On the top edge (no room beside the box), this far in from its right end. */
 const HOUSE_INSET = 18;
 /** The entrance plays once per window, as the CLI plays one once per version. */
@@ -101,7 +105,10 @@ const P = { frame: "#3d3d3a", screen: "#1f2a33", glow: "#7fd1ff", key: "#b4b2a7"
   glass: "#3d5a73", lit: "#f5c451", frameLight: "#faf9f5",
   // The room: walls a shade darker than the house's outside, so the furniture stands out against them.
   inside: "#cfb586", insideEdge: "#a8895a", floor: "#8a5a3c", plank: "#74482e", rug: "#4f7fb3", rugEdge: "#c0563f",
-  shelf: "#5a3a26", sky: "#9fd3f0", leaf: "#5f9a4c", leafDark: "#3f7a34" };
+  shelf: "#5a3a26", sky: "#9fd3f0", leaf: "#5f9a4c", leafDark: "#3f7a34",
+  // The washroom's tiles and porcelain, the bed's linen, and the kitchen's fridge and flame.
+  tile: "#cfe3ea", tileEdge: "#a9c6d1", porcelain: "#f4f3ee", porcelainEdge: "#c9c7bd", water: "#6fb3dc",
+  blanket: "#6a9bcc", pillow: "#faf9f5", fridge: "#e8ebe6", flame: "#e8743b" };
 
 /** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. */
 type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read";
@@ -141,31 +148,59 @@ const houseSvg = (parts: ReactElement[]) =>
 
 /**
  * Clawd's house is a doll's house with its front swung open, so you can see in: its rooms are drawn
- * behind Clawd (HouseInside) and its roof and side walls in front (House). Clawd stands in the
- * middle of the room (columns 8-25 of its 3-30), on a rug, in front of a framed landscape, with a
- * bookshelf and a plant on it to its left and a window over a cabinet to its right; its walls (rows
- * 6-12) are a row taller than Clawd. Each piece is a few pixels across, in colours that stand out
- * from the walls (the user: at a pixel each, the room read as having no furniture).
+ * behind Clawd (HouseInside) and its roof and side walls in front (House). Two storeys, each a row
+ * taller than Clawd:
+ * - downstairs (rows 13-19), Clawd stands in the middle (columns 12-29 of its 3-36), on a rug, in
+ *   front of a framed landscape, with its bed to its left and the kitchen to its right: a stove
+ *   with a pot (its flame and steam on while Clawd is home awake) and a fridge;
+ * - upstairs (rows 6-12), a tiled washroom (a tub, a toilet, a mirror and a towel) and a study
+ *   (the bookshelf with its plant, a desk with a laptop, a window over a cabinet).
+ * Nothing stands behind Clawd's own spot but the picture, which it hides while home. Each piece is a
+ * few pixels across, in colours that stand out from the walls (the user: at a pixel each, the room
+ * read as having no furniture).
  */
 function HouseInside({ home, asleep }: { home: boolean; asleep: boolean }) {
   const r = rect;
   const lit = home && !asleep;
   return houseSvg([
-    // Back wall with a skirting board, a planked floor and the rug Clawd stands on.
-    r(3, 6, 28, 6, P.inside, "back"), r(3, 11, 28, 1, P.insideEdge, "skirting"), r(3, 12, 28, 1, P.floor, "floor"),
-    ...[5, 9, 22, 28].map((x) => r(x, 12, 1, 1, P.plank, `plank${x}`)),
-    r(9, 12, 16, 1, P.rug, "rug"), r(9, 12, 1, 1, P.rugEdge, "rug-l"), r(24, 12, 1, 1, P.rugEdge, "rug-r"),
+    // Upstairs: back wall with a skirting board, and its planked floor, the ground floor's ceiling.
+    r(3, 6, 34, 6, P.inside, "up-back"), r(3, 11, 34, 1, P.insideEdge, "up-skirting"), r(3, 12, 34, 1, P.floor, "up-floor"),
+    ...[6, 17, 26, 33].map((x) => r(x, 12, 1, 1, P.plank, `up-plank${x}`)),
+    // The washroom (columns 3-13), tiled, behind a partition: a tub of water on its feet with a mirror
+    // over it, a towel on its rail, and a toilet.
+    r(3, 6, 11, 6, P.tile, "bath-tiles"), ...[5, 8, 11].map((x) => r(x, 7, 1, 1, P.tileEdge, `bath-grout${x}`)),
+    r(14, 6, 1, 6, P.wallEdge, "bath-partition"),
+    r(4, 6, 3, 2, P.frameLight, "mirror-frame"), r(5, 7, 1, 1, P.lens, "mirror"),
+    r(3, 9, 7, 2, P.porcelain, "tub"), r(4, 9, 5, 1, P.water, "tub-water"), r(3, 10, 7, 1, P.porcelainEdge, "tub-side"),
+    r(4, 11, 1, 1, P.metal, "tub-foot-l"), r(8, 11, 1, 1, P.metal, "tub-foot-r"), r(3, 8, 1, 1, P.metal, "tub-tap"),
+    r(9, 7, 1, 2, P.rugEdge, "towel"), r(11, 8, 2, 2, P.porcelain, "toilet-tank"), r(11, 10, 3, 1, P.porcelain, "toilet-bowl"),
+    r(12, 11, 1, 1, P.porcelainEdge, "toilet-foot"),
+    // The study: the bookshelf with a plant on top, a desk with a laptop (its screen on with the
+    // window), and the window over a cabinet.
+    r(15, 7, 5, 5, P.shelf, "shelf"),
+    r(16, 8, 1, 1, P.cover, "book-1"), r(17, 8, 1, 1, P.roof, "book-2"), r(18, 8, 1, 1, P.knob, "book-3"),
+    r(16, 10, 1, 1, P.leaf, "book-4"), r(17, 10, 1, 1, P.page, "book-5"), r(18, 10, 1, 1, P.cover, "book-6"),
+    r(16, 6, 3, 1, P.leaf, "plant"), r(17, 6, 1, 1, P.leafDark, "plant-middle"),
+    r(22, 9, 7, 1, P.wood, "desk"), r(22, 10, 1, 2, P.wood, "desk-leg-l"), r(28, 10, 1, 2, P.wood, "desk-leg-r"),
+    r(24, 8, 3, 1, P.frame, "laptop"), r(24, 7, 3, 1, lit ? P.glow : P.screen, "laptop-screen"),
+    r(31, 6, 4, 3, P.frameLight, "window-frame"), r(32, 7, 2, 1, lit ? P.lit : P.sky, "window"), r(31, 9, 4, 1, P.wood, "window-sill"),
+    r(31, 10, 4, 2, P.shelf, "cabinet"), r(33, 10, 1, 1, P.knob, "cabinet-knob"),
+    // Downstairs: back wall with a skirting board, a planked floor and the rug Clawd stands on.
+    r(3, 13, 34, 6, P.inside, "back"), r(3, 18, 34, 1, P.insideEdge, "skirting"), r(3, 19, 34, 1, P.floor, "floor"),
+    ...[5, 9, 31, 35].map((x) => r(x, 19, 1, 1, P.plank, `plank${x}`)),
+    r(13, 19, 16, 1, P.rug, "rug"), r(13, 19, 1, 1, P.rugEdge, "rug-l"), r(28, 19, 1, 1, P.rugEdge, "rug-r"),
     // Middle: a framed landscape over where Clawd stands, so the room is not bare while it is out.
-    r(13, 7, 8, 4, P.wood, "picture"), r(14, 8, 6, 2, P.sky, "picture-sky"), r(14, 9, 6, 1, P.leaf, "picture-hill"),
-    r(17, 8, 2, 1, P.leaf, "picture-hilltop"),
-    // Left: a bookshelf, two shelves of books, a plant on top.
-    r(3, 7, 5, 5, P.shelf, "shelf"),
-    r(4, 8, 1, 1, P.cover, "book-1"), r(5, 8, 1, 1, P.roof, "book-2"), r(6, 8, 1, 1, P.knob, "book-3"),
-    r(4, 10, 1, 1, P.leaf, "book-4"), r(5, 10, 1, 1, P.page, "book-5"), r(6, 10, 1, 1, P.cover, "book-6"),
-    r(4, 6, 3, 1, P.leaf, "plant"), r(5, 6, 1, 1, P.leafDark, "plant-middle"),
-    // Right: a window (lit while Clawd is home awake) on its sill, over a cabinet.
-    r(26, 6, 4, 3, P.frameLight, "window-frame"), r(27, 7, 2, 1, lit ? P.lit : P.sky, "window"), r(26, 9, 4, 1, P.wood, "window-sill"),
-    r(26, 10, 4, 2, P.shelf, "cabinet"), r(28, 10, 1, 1, P.knob, "cabinet-knob"),
+    r(17, 14, 8, 4, P.wood, "picture"), r(18, 15, 6, 2, P.sky, "picture-sky"), r(18, 16, 6, 1, P.leaf, "picture-hill"),
+    r(21, 15, 2, 1, P.leaf, "picture-hilltop"),
+    // Left: the bed, head to the wall, a pillow and a blanket, with a lamp over it (on with the window).
+    r(3, 15, 1, 4, P.shelf, "bed-head"), r(11, 17, 1, 2, P.shelf, "bed-foot"), r(4, 18, 7, 1, P.wood, "bed-frame"),
+    r(4, 17, 2, 1, P.pillow, "pillow"), r(6, 17, 5, 1, P.blanket, "blanket"), r(6, 16, 4, 1, P.blanket, "blanket-fold"),
+    r(5, 14, 1, 1, lit ? P.lit : P.porcelainEdge, "bed-lamp"),
+    // Right: the cooking station, a stove with a pot on it (its flame and steam on while Clawd is home
+    // awake) and an oven door, beside a tall fridge.
+    r(30, 16, 4, 3, P.metal, "stove"), r(31, 17, 2, 1, P.glass, "oven-door"), r(30, 15, 4, 1, P.frame, "hob"),
+    r(31, 14, 2, 1, P.metal, "pot"), ...(lit ? [r(31, 15, 2, 1, P.flame, "flame"), r(32, 13, 1, 1, P.steam, "pot-steam")] : []),
+    r(35, 13, 2, 6, P.fridge, "fridge"), r(35, 15, 2, 1, P.porcelainEdge, "fridge-door"), r(35, 14, 1, 1, P.metal, "fridge-handle"),
   ]);
 }
 
@@ -176,15 +211,15 @@ function HouseInside({ home, asleep }: { home: boolean; asleep: boolean }) {
  */
 function House({ home, asleep, onKnock }: { home: boolean; asleep: boolean; onKnock: () => void }) {
   const r = rect;
-  const parts: ReactElement[] = [r(25, 0, 2, 3, P.roofEdge, "chimney")];
+  const parts: ReactElement[] = [r(30, 0, 2, 3, P.roofEdge, "chimney")];
   // The roof, three pixels wider each side each row down, with an eave line under it.
-  [[14, 6], [11, 12], [8, 18], [5, 24], [2, 30]].forEach(([x, w], row) => parts.push(r(x!, row, w!, 1, P.roof, `roof${row}`)));
-  parts.push(r(1, 5, 32, 1, P.roofEdge, "eave"));
-  // The side walls, edged darker outside; between them the room is open.
-  parts.push(r(2, 6, 1, 7, P.wall, "wall-l"), r(1, 6, 1, 7, P.wallEdge, "wall-l-edge"),
-    r(31, 6, 1, 7, P.wall, "wall-r"), r(32, 6, 1, 7, P.wallEdge, "wall-r-edge"));
+  [[14, 12], [11, 18], [8, 24], [5, 30], [2, 36]].forEach(([x, w], row) => parts.push(r(x!, row, w!, 1, P.roof, `roof${row}`)));
+  parts.push(r(1, 5, 38, 1, P.roofEdge, "eave"));
+  // The side walls, edged darker outside, up both storeys; between them the rooms are open.
+  parts.push(r(2, 6, 1, 14, P.wall, "wall-l"), r(1, 6, 1, 14, P.wallEdge, "wall-l-edge"),
+    r(37, 6, 1, 14, P.wall, "wall-r"), r(38, 6, 1, 14, P.wallEdge, "wall-r-edge"));
   // The front wall, swung open on its left hinge so its edge shows, with the door's knob on it.
-  parts.push(r(0, 6, 1, 7, P.wall, "front"), r(0, 9, 1, 1, P.knob, "front-knob"));
+  parts.push(r(0, 6, 1, 14, P.wall, "front"), r(0, 16, 1, 1, P.knob, "front-knob"));
   return <button type="button" className={`cx-pet-house${home ? " is-home" : ""}${asleep ? " is-asleep" : ""}`}
     title={home ? (asleep ? "Clawd is napping. Click to wake it" : "Clawd is home") : "Clawd's house. Click to call Clawd home"}
     aria-label={home ? (asleep ? "Clawd's house: Clawd is napping inside" : "Clawd's house: Clawd is home") : "Clawd's house"}
@@ -461,13 +496,13 @@ export function ChatPet({ mood, context, onHide }: {
     return rects.some((found) => found.left < frame.left + right && found.right > frame.left + left
       && found.top < frame.top + bottom && found.bottom > frame.top + top);
   };
-  /** Where Clawd walks to go in: behind the house's middle on the top edge, or, with the house beside
+  /** Where Clawd walks to go in: behind its spot in the house on the top edge, or, with the house beside
    *  the box, the foot of the box's right side, from where it steps down into the yard and walks in
    *  through the open front (it used to vanish into the room from the top edge's right end). */
   const homeSpot = () => {
     const current = loopNow.current;
     if (!current) return atNow.current;
-    return nearLap(current, current.beside ? current.width + current.height - WIDTH / 2 : houseLeft(current) + HOUSE_W / 2, atNow.current);
+    return nearLap(current, current.beside ? current.width + current.height - WIDTH / 2 : houseLeft(current) + HOME_X, atNow.current);
   };
   /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in.
    *  Beside the box that is the right side next to the house, and the top edge's right end when the
@@ -608,7 +643,7 @@ export function ChatPet({ mood, context, onHide }: {
       if (!walkOut || still || !loopNow.current) return;
       // Back the way it came, clear of the house: up the right side and along the top, or back along the top.
       const { y, side } = spotAt(loopNow.current, atNow.current);
-      walkTo(freeNear(atNow.current - (side === 1 ? y + 1.5 * WIDTH : HOUSE_W / 2 + WIDTH)), STROLL, () => { play("jump"); remember(); wander(); });
+      walkTo(freeNear(atNow.current - (side === 1 ? y + 1.5 * WIDTH : HOME_X + WIDTH)), STROLL, () => { play("jump"); remember(); wander(); });
     };
     // From the room beside the box it walks out through the open front to its doorstep first;
     // lifted out (a drag), it is just gone from the house.
@@ -952,7 +987,7 @@ export function ChatPet({ mood, context, onHide }: {
   // On the box: feet on the outline, body outward, so upright on top, sideways on the sides and
   // upside down under it. On the pointer or held: upright, above everything.
   const placement: CSSProperties = inRoom
-    ? { left: inRoom.left + HOUSE_W / 2 - WIDTH / 2, top: inRoom.top + HOUSE_H - HEIGHT, ...upright, ...doorWalk }
+    ? { left: inRoom.left + HOME_X - WIDTH / 2, top: inRoom.top + HOUSE_H - HEIGHT, ...upright, ...doorWalk }
     : atDoor
     ? { ...atDoor, ...upright, ...doorWalk }
     : ride

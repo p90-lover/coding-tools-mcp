@@ -1222,14 +1222,14 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* Clawd's house, standing beside the box's right side (on its top edge near the right end when the
    window leaves no room there): a doll's house with its front
    open. Its room is drawn behind Clawd and its roof and side walls in front, so Clawd shows inside. */
-.cx-pet-house-spot { position: absolute; z-index: 3; width: 136px; height: 104px; pointer-events: none; }
+.cx-pet-house-spot { position: absolute; z-index: 3; width: 160px; height: 160px; pointer-events: none; }
 .cx-pet-house-spot.is-inside { z-index: 1; }
 .cx-pet-house-spot.is-inside svg { display: block; }
-.cx-pet-house { position: relative; display: block; width: 136px; height: 104px; padding: 0; border: 0; background: transparent;
+.cx-pet-house { position: relative; display: block; width: 160px; height: 160px; padding: 0; border: 0; background: transparent;
   cursor: pointer; pointer-events: auto; }
 .cx-pet-house svg { display: block; }
 .cx-pet-house:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }
-.cx-pet-house-z { position: absolute; top: -6px; right: 14px; display: flex; gap: 3px; color: var(--ao-muted, #8a8986); font-size: 12px; font-weight: 700; }
+.cx-pet-house-z { position: absolute; top: -6px; right: 18px; display: flex; gap: 3px; color: var(--ao-muted, #8a8986); font-size: 12px; font-weight: 700; }
 .cx-pet-house-z span { animation: cx-pet-z 2.4s ease-in-out infinite; opacity: 0; }
 .cx-pet-house-z span:nth-child(2) { animation-delay: .8s; }
 .cx-pet-house-z span:nth-child(3) { animation-delay: 1.6s; font-size: 14px; }
