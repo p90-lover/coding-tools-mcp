@@ -508,22 +508,16 @@ function environmentFromTurnContext(
     throw new Error("Codex rollout cwd is invalid");
   }
   const cwd = resolve(payload.cwd);
-  const sandbox = record(payload.sandbox_policy);
   const declaredRoots = payload.workspace_roots === undefined
     ? []
     : absolutePaths(payload.workspace_roots, "workspace_roots");
-  // Native rollouts can omit workspace_roots while retaining extra sandbox write roots.
-  const roots = declaredRoots.length > 0 ? declaredRoots : [
-    cwd,
-    ...(sandbox?.type === "workspace-write"
-      ? absolutePaths(sandbox.writable_roots ?? [], "writable_roots")
-      : []),
-  ];
+  const roots = declaredRoots.length > 0 ? declaredRoots : [cwd];
   if (!roots.some(root => contains(root, cwd))) {
     throw new Error("Codex rollout cwd is outside its workspace roots");
   }
 
   const permissionProfile = record(payload.permission_profile);
+  const sandbox = record(payload.sandbox_policy);
   if (!permissionProfile || !sandbox) {
     throw new Error("Codex rollout is missing its authoritative permission profile");
   }

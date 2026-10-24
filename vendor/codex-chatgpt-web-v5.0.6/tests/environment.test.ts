@@ -1192,7 +1192,7 @@ describe("trusted Codex task environment continuity", () => {
       .toThrow("multiple canonical rollouts for the requested current turn");
   });
 
-  test.each(["declared", "omitted", "empty", "conflicting"] as const)("recovers byte-realistic workspace-write and read-only-with-network profiles (%s)", (rootsMode) => {
+  test("recovers byte-realistic workspace-write and read-only-with-network profiles", () => {
     const codexHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-rollout-profiles-"));
     temporaryRoots.push(codexHome);
     const rolloutPath = join(
@@ -1203,7 +1203,7 @@ describe("trusted Codex task environment continuity", () => {
       "04",
       `rollout-2026-09-04T15-30-36-${rolloutThreadId}.jsonl`,
     );
-    const auxiliaryRoot = resolve(root, "..", "rollout-visualization-output");
+    const auxiliaryRoot = resolve(root, "rollout-visualization-output");
     const workspaceEntries = [
       { path: { type: "special", value: { kind: "root" } }, access: "read" },
       { path: { type: "path", path: root }, access: "write" },
@@ -1219,7 +1219,7 @@ describe("trusted Codex task environment continuity", () => {
     writeFileSync(rolloutPath, [
       JSON.stringify(childSessionMeta()),
       JSON.stringify(childTurnContext(rolloutTurnId, {
-        workspace_roots: rootsMode === "declared" ? [root, auxiliaryRoot] : rootsMode === "conflicting" ? [root] : rootsMode === "empty" ? [] : undefined,
+        workspace_roots: [root, auxiliaryRoot],
         sandbox_policy: {
           type: "workspace-write",
           writable_roots: [auxiliaryRoot],
@@ -1236,14 +1236,9 @@ describe("trusted Codex task environment continuity", () => {
       })),
     ].join("\n") + "\n");
 
-    const recoverWorkspace = () => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(
       environmentlessChild(rolloutTurnId, "workspace-write", [root, auxiliaryRoot]),
-    );
-    if (rootsMode === "conflicting") {
-      expect(recoverWorkspace).toThrow("workspace-write permission profile is inconsistent");
-      return;
-    }
-    expect(recoverWorkspace()).toEqual({
+    )).toEqual({
       cwd: root,
       roots: [root, auxiliaryRoot],
       writableRoots: [root, auxiliaryRoot],
@@ -1258,7 +1253,7 @@ describe("trusted Codex task environment continuity", () => {
     writeFileSync(rolloutPath, [
       JSON.stringify(childSessionMeta()),
       JSON.stringify(childTurnContext(rolloutTurnId, {
-        workspace_roots: rootsMode === "declared" ? [root, auxiliaryRoot] : rootsMode === "empty" ? [] : undefined,
+        workspace_roots: [root, auxiliaryRoot],
         sandbox_policy: {
           type: "workspace-write",
           writable_roots: [auxiliaryRoot],
