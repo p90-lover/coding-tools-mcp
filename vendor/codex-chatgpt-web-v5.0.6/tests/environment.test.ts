@@ -1258,7 +1258,7 @@ describe("trusted Codex task environment continuity", () => {
     writeFileSync(rolloutPath, [
       JSON.stringify(childSessionMeta()),
       JSON.stringify(childTurnContext(rolloutTurnId, {
-        workspace_roots: rootsMode === "declared" ? [root, auxiliaryRoot] : rootsMode === "conflicting" ? [root] : rootsMode === "empty" ? [] : undefined,
+        workspace_roots: rootsMode === "declared" ? [root, auxiliaryRoot] : rootsMode === "empty" ? [] : undefined,
         sandbox_policy: {
           type: "workspace-write",
           writable_roots: [auxiliaryRoot],
