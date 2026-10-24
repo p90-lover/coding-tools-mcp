@@ -25,6 +25,7 @@ export function estimateTokens(text: string, modelId?: string): number {
   if (!text) return 0;
 
   const encoding = chatGptTokenizer();
+  const chunkTokenCounts = new Map<string, number>();
   let count = 0;
   for (let start = 0; start < text.length;) {
     let end = Math.min(start + TOKENIZER_CHUNK_CHARS, text.length);
@@ -35,7 +36,13 @@ export function estimateTokens(text: string, modelId?: string): number {
         end -= 1;
       }
     }
-    count += encoding.encode_ordinary(text.slice(start, end)).length;
+    const chunk = text.slice(start, end);
+    let tokens = chunkTokenCounts.get(chunk);
+    if (tokens === undefined) {
+      tokens = encoding.encode_ordinary(chunk).length;
+      chunkTokenCounts.set(chunk, tokens);
+    }
+    count += tokens;
     start = end;
   }
   return count;

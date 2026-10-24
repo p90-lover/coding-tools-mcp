@@ -786,7 +786,10 @@ export function extractChatGptThreadSpawnLineage(
 /** Root tasks have no spawn edge; their canonical session and current turn must prove authority. */
 export function extractChatGptRootThreadMetadata(parsed: CodexParsedRequest): ChatGptRootThreadMetadata | undefined {
   const metadata = clientTurnMetadata(parsed);
-  if (!metadata || !isEnvironmentRequest(metadata, parsed)
+  // Some native root-session follow-ups omit request_kind. This metadata only selects a
+  // candidate native rollout: the current turn, thread, sandbox and workspace are still
+  // authenticated against that rollout before it can provide filesystem authority.
+  if (!metadata || (metadata.request_kind != null && !isEnvironmentRequest(metadata, parsed))
     || metadata.parent_thread_id != null || metadata.subagent_kind != null
     || (metadata.agent_name != null && metadata.agent_name !== "/root")) return undefined;
   const threadId = typeof metadata.thread_id === "string" ? metadata.thread_id.trim() : "";
