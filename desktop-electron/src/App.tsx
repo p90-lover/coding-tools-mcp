@@ -40,6 +40,8 @@ import type {
   Language,
   LauncherSnapshot,
   LauncherState,
+  McpServerEntry,
+  McpServerInput,
   OperationState,
   RefreshPart,
   RtkGain,
@@ -777,6 +779,7 @@ function LauncherShell({
                     navigateSurface("mcp");
                   }}
                 />
+                <SidebarItem active={surface === "plugins"} icon="mcp" label="Plugins" onClick={() => navigateSurface("plugins")} />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
@@ -961,6 +964,9 @@ function LauncherShell({
             {keepAlive("subagents", () => (
               <SubagentsSurface active={surface === "subagents"} setError={setError} />
             ))}
+            {keepAlive("plugins", () => (
+              <PluginsSurface active={surface === "plugins"} copy={copy} setError={setError} snapshot={snapshot} updateState={updateState} />
+            ))}
             {keepAlive("rtk", () => (
               <RtkSurface active={surface === "rtk"} enabled={snapshot.state.rtkEnabled !== false} setError={setError} updateState={updateState} />
             ))}
@@ -998,6 +1004,7 @@ function LauncherShell({
                 copy={copy}
                 devProfile={devProfile}
                 language={language}
+                openPlugins={() => navigateSurface("plugins")}
                 operation={operation}
                 setError={setError}
                 snapshot={snapshot}
@@ -2058,6 +2065,7 @@ function SettingsSurface({
   copy,
   devProfile,
   language,
+  openPlugins,
   operation,
   setError,
   snapshot,
@@ -2067,6 +2075,8 @@ function SettingsSurface({
   copy: Copy;
   devProfile: boolean;
   language: Language;
+  /** Opens Plugins > MCPs, where the person adds their own MCP servers. */
+  openPlugins: () => void;
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
@@ -2304,6 +2314,9 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        <SettingRow body="Give chat agents more tools: add your own STDIO or Streamable HTTP MCP servers under Plugins > MCPs." label="MCP servers">
+          <SecondaryButton onClick={openPlugins}>Open Plugins</SecondaryButton>
+        </SettingRow>
         <SettingRow body={copy.confirmAgentToolRequestsBody} label={copy.confirmAgentToolRequests}>
           <Switch
             checked={snapshot.state.confirmAgentToolRequests !== false}
@@ -2472,6 +2485,149 @@ function RtkSurface({ active, enabled, setError, updateState }: {
       <SectionHeading label="Savings" />
       {gain?.available && gain.text ? <pre className="rtk-gain">{gain.text}</pre>
         : <p className="surface-empty-note">{status?.installed ? "No savings yet. rtk reports them after agents run commands through it." : "rtk shows its savings here once it's installed."}</p>}
+    </ContentSurface>
+  );
+}
+
+/** One line per entry, "KEY=value" (env) or "Name: value" (headers); blank lines are skipped. */
+function parsePairs(text: string, separator: "=" | ":", label: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [index, raw] of text.split(/\r?\n/).entries()) {
+    if (!raw.trim()) continue;
+    const at = raw.indexOf(separator);
+    if (at <= 0) throw new Error(`${label} line ${index + 1} needs ${separator === "=" ? "NAME=value" : "Name: value"}`);
+    out[raw.slice(0, at).trim()] = raw.slice(at + 1).trim();
+  }
+  return out;
+}
+const pairsText = (pairs: Record<string, string> | undefined, separator: "=" | ": ") =>
+  Object.entries(pairs ?? {}).map(([key, value]) => `${key}${separator}${value}`).join("\n");
+
+type McpDraft = { id?: string; enabled: boolean; name: string; type: "stdio" | "http"; command: string; args: string; env: string; url: string; headers: string };
+const emptyMcpDraft = (): McpDraft => ({ enabled: true, name: "", type: "stdio", command: "", args: "", env: "", url: "", headers: "" });
+const mcpDraftOf = (server: McpServerEntry): McpDraft => ({ id: server.id, enabled: server.enabled, name: server.name, type: server.type,
+  command: server.command ?? "", args: (server.args ?? []).join("\n"), env: pairsText(server.env, "="), url: server.url ?? "", headers: pairsText(server.headers, ": ") });
+type AppToolKey = "chatAgentTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "chatAgentDesktopTools";
+
+/**
+ * Plugins, laid out like Codex's: tabs for the kinds of tools chat agents get. Apps are the app's
+ * own tool groups (the same switches as Settings); MCPs are the app's coding-tools server and the
+ * person's own servers, which every new chat, and every chat resumed after a restart, gets too.
+ */
+function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
+  active: boolean;
+  copy: Copy;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+  updateState: (state: LauncherState) => void;
+}) {
+  const [tab, setTab] = useState<"apps" | "mcps">("apps");
+  const [servers, setServers] = useState<McpServerEntry[] | null>(null);
+  const [draft, setDraft] = useState<McpDraft | null>(null);
+  const [formError, setFormError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  useEffect(() => {
+    if (!active || !api?.mcpServers) return;
+    void api.mcpServers().then(setServers, (cause) => setError(messageOf(cause)));
+  }, [active, setError]);
+  const toolsOn = snapshot.state.chatAgentTools !== false;
+  const apps: Array<{ key: AppToolKey; label: string; body: string; checked: boolean }> = [
+    { key: "chatAgentTools", label: copy.chatAgentTools, body: copy.chatAgentToolsBody, checked: toolsOn },
+    { key: "chatAgentTerminalTools", label: copy.chatAgentTerminalTools, body: copy.chatAgentTerminalToolsBody,
+      checked: toolsOn && (snapshot.state.chatAgentTerminalTools === true || (snapshot.state.chatAgentTerminalTools !== false && snapshot.chatAgentSandbox === true)) },
+    { key: "chatAgentPreviewTools", label: copy.chatAgentPreviewTools, body: copy.chatAgentPreviewToolsBody, checked: toolsOn && snapshot.state.chatAgentPreviewTools !== false },
+    { key: "chatAgentDesktopTools", label: copy.chatAgentDesktopTools, body: copy.chatAgentDesktopToolsBody, checked: toolsOn && snapshot.state.chatAgentDesktopTools === true },
+  ];
+  const setPreference = (key: AppToolKey, checked: boolean) =>
+    void api!.setPreference(key, checked).then(updateState).catch((cause) => setError(messageOf(cause)));
+  const run = async (call: () => Promise<McpServerEntry[]>) => {
+    try { setServers(await call()); } catch (cause) { setError(messageOf(cause)); }
+  };
+  const save = async () => {
+    if (!draft) return;
+    setSaving(true);
+    setFormError("");
+    try {
+      const base = { ...(draft.id ? { id: draft.id } : {}), enabled: draft.enabled, name: draft.name.trim(), type: draft.type };
+      const input: McpServerInput = draft.type === "stdio"
+        ? { ...base, command: draft.command.trim(), args: draft.args.split(/\r?\n/).filter((line) => line.trim()), env: parsePairs(draft.env, "=", "Environment variable") }
+        : { ...base, url: draft.url.trim(), headers: parsePairs(draft.headers, ":", "Header") };
+      setServers(await api!.saveMcpServer(input));
+      setDraft(null);
+    } catch (cause) {
+      // Electron prefixes a main-process error with the IPC channel; the form shows the reason only.
+      setFormError(messageOf(cause).replace(/^Error invoking remote method '[^']+': (Error: )?/, ""));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const field = (key: "name" | "command" | "args" | "env" | "url" | "headers") => ({
+    value: draft?.[key] ?? "",
+    onChange: (event: { target: { value: string } }) => setDraft((current) => current && { ...current, [key]: event.target.value }),
+  });
+  const startDraft = (next: McpDraft) => { setAddOpen(false); setTab("mcps"); setFormError(""); setDraft(next); };
+  return (
+    <ContentSurface narrow title="Plugins" subtitle="Tools chat agents can use: the app's own, and MCP servers you add.">
+      <div className="plugins-bar">
+        <div className="plugins-tabs" role="tablist" aria-label="Plugin kinds">
+          <button type="button" role="tab" aria-selected={tab === "apps"} onClick={() => setTab("apps")}>Apps <span>{apps.length}</span></button>
+          <button type="button" role="tab" aria-selected={tab === "mcps"} onClick={() => setTab("mcps")}>MCPs <span>{1 + (servers?.length ?? 0)}</span></button>
+        </div>
+        <div className="plugins-add">
+          <button type="button" className="button-secondary" aria-haspopup="menu" aria-expanded={addOpen} onClick={() => setAddOpen((open) => !open)}>
+            <Icon name="plus" /><span>Add</span>
+          </button>
+          {addOpen ? <div className="refresh-menu-list" role="menu">
+            <button type="button" role="menuitem" onClick={() => startDraft(emptyMcpDraft())}>Add MCP server</button>
+          </div> : null}
+        </div>
+      </div>
+      {tab === "apps" ? <div className="settings-list">
+        {apps.map((item) => <SettingRow body={item.body} key={item.key} label={item.label}>
+          <Switch checked={item.checked} disabled={item.key !== "chatAgentTools" && !toolsOn} onChange={(checked) => setPreference(item.key, checked)} />
+        </SettingRow>)}
+      </div> : null}
+      {tab === "mcps" ? <>
+        {draft ? <div className="mcp-server-form mcp-live-fields">
+          <h2>{draft.id ? `Edit ${draft.name}` : "Add MCP server"}</h2>
+          <label className="field-row"><span>Name</span><input {...field("name")} maxLength={64} placeholder="my-server" autoFocus /></label>
+          <div className="field-row"><span>Type</span>
+            <div className="plugins-tabs is-compact" role="radiogroup" aria-label="Transport">
+              <button type="button" role="radio" aria-checked={draft.type === "stdio"} onClick={() => setDraft({ ...draft, type: "stdio" })}>STDIO</button>
+              <button type="button" role="radio" aria-checked={draft.type === "http"} onClick={() => setDraft({ ...draft, type: "http" })}>Streamable HTTP</button>
+            </div>
+          </div>
+          {draft.type === "stdio" ? <>
+            <label className="field-row"><span>Command to launch</span><input {...field("command")} placeholder="npx" /></label>
+            <label className="field-row is-stacked"><span>Arguments, one per line</span><textarea {...field("args")} rows={3} placeholder={"-y\n@modelcontextprotocol/server-everything"} /></label>
+            <label className="field-row is-stacked"><span>Environment variables, NAME=value per line</span><textarea {...field("env")} rows={2} placeholder="API_KEY=…" /></label>
+          </> : <>
+            <label className="field-row"><span>URL</span><input {...field("url")} placeholder="https://example.com/mcp" /></label>
+            <label className="field-row is-stacked"><span>Headers, Name: value per line</span><textarea {...field("headers")} rows={2} placeholder="Authorization: Bearer …" /></label>
+          </>}
+          {formError ? <p className="mcp-server-error" role="alert">{formError}</p> : null}
+          <div className="inline-actions">
+            <PrimaryButton disabled={saving} onClick={() => void save()}>{saving ? "Saving…" : "Save"}</PrimaryButton>
+            <SecondaryButton disabled={saving} onClick={() => setDraft(null)}>Cancel</SecondaryButton>
+          </div>
+        </div> : null}
+        <div className="settings-list">
+          <SettingRow body="The app's own tools (files, search, git, terminal, previews), built in. Turned on and off under Apps." label="coding-tools">
+            <span className="rtk-chip">{toolsOn ? "built in" : "off"}</span>
+          </SettingRow>
+          {(servers ?? []).map((server) => <SettingRow key={server.id} label={server.name}
+            body={server.type === "stdio" ? `STDIO · ${[server.command, ...(server.args ?? [])].join(" ")}` : `Streamable HTTP · ${server.url}`}>
+            <div className="mcp-server-actions">
+              <SecondaryButton onClick={() => startDraft(mcpDraftOf(server))}>Edit</SecondaryButton>
+              <SecondaryButton onClick={() => void run(() => api!.removeMcpServer(server.id))}>Remove</SecondaryButton>
+              <Switch checked={server.enabled} onChange={(checked) => void run(() => api!.setMcpServerEnabled(server.id, checked))} />
+            </div>
+          </SettingRow>)}
+        </div>
+        <p className="surface-empty-note">{servers && !servers.length ? "No MCP servers of your own yet. Choose Add, then Add MCP server. " : ""}
+          New chats get every server that is on; a chat already open gets it when its agent restarts. Streamable HTTP servers go to Claude Code, Codex and opencode chats, STDIO servers to every chat agent.</p>
+      </> : null}
     </ContentSurface>
   );
 }

@@ -70,7 +70,7 @@ function observeHarness(context) {
   // for the app's real window (tailFreshMs).
   const shared = helpers.replace(/const TAIL_FRESH_MS = \d+;/, `const TAIL_FRESH_MS = ${Number(context.tailFreshMs ?? 0)};`);
   return vm.runInNewContext(states + timelineBounds(source) + shared + identity + "({" + method + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null,
     agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); },
     logger: { info() {}, warn() {} },
     // Imported by the module (not part of the helpers sliced above).
@@ -112,7 +112,7 @@ test("a fresh read of a session's newest 100 items serves the Terminal pane's as
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const endpoints = [];
   const { conversationTail } = vm.runInNewContext(`${timelineBounds(source)}${helpers}${identity}({ conversationTail })`, {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), agentTools: null,
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, agentTools: null,
     internalApi: async (_method, endpoint) => { endpoints.push(endpoint); return { messages: [], activities: [] }; },
   });
   await conversationTail("s");
@@ -132,7 +132,7 @@ test("a slow tail read is shared while in flight and stays fresh three times as 
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   let reads = 0, delay = 400;
   const { conversationTail } = vm.runInNewContext(`${timelineBounds(source)}${helpers}${identity}({ conversationTail })`, {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), agentTools: null,
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, agentTools: null,
     internalApi: async () => { reads += 1; await new Promise(resolve => setTimeout(resolve, delay)); return { messages: [], activities: [] }; },
   });
   const first = conversationTail("slow");
@@ -868,7 +868,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   let resumeOk = true, exitOk = true;
   let status = "exited";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, agentTools: null,
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise, agentTools: null,
     exitedReleased: new Set(), logger: null,
     internalApi: async (method, endpoint) => {
       calls.push([method, endpoint]);
@@ -921,7 +921,7 @@ test("stale sessions are this project's live, unpinned, idle ones with no messag
     { id: "no-times", projectId: "proj", status: "exited" },
   ];
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, Set, agentTools: null,
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise, Set, agentTools: null,
     exitedReleased: new Set(),
     projectFor: async workspaceId => { if (workspaceId === "ws") return "proj"; throw new Error("not a git repository"); },
     internalApi: async (method, endpoint) => {
@@ -947,7 +947,7 @@ test("a resumed chat gets the app's tools again, and an AO that refuses them sti
   let status = "exited";
   const servers = [{ name: "coding-tools", type: "http", url: "http://127.0.0.1:1/mcp/ws/k", headers: { Authorization: "Bearer fixture" } }];
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise,
     agentTools: { renew: async id => id === "chat-1" ? { servers } : null },
     internalApi: async (method, endpoint, body) => {
       if (endpoint.endsWith("/resume-agent")) {
@@ -969,6 +969,39 @@ test("a resumed chat gets the app's tools again, and an AO that refuses them sti
   assert.deepEqual(bodies, [{}], "a session that never had the app's tools resumes as before");
 });
 
+test("a resumed chat gets the person's own MCP servers after the app's, for its own agent", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  const bodies = [], asked = [];
+  let status = "exited", broken = false;
+  const app = { name: "coding-tools", type: "http", url: "http://127.0.0.1:1/mcp/ws/k", headers: { Authorization: "Bearer fixture" } };
+  const mine = { name: "notes", type: "stdio", command: "notes-mcp" };
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, logger: { warn() {}, info() {} },
+    agentTools: { renew: async id => id === "chat-1" ? { servers: [app] } : null },
+    userMcpServers: { forSession: (agent, taken) => { asked.push([agent, JSON.parse(JSON.stringify(taken.map(server => server.name)))]); if (broken) throw new Error("unreadable"); return [mine]; } },
+    internalApi: async (method, endpoint, body) => {
+      if (endpoint.endsWith("/resume-agent")) { bodies.push(JSON.parse(JSON.stringify(body))); status = "idle"; return { ok: true }; }
+      return { session: { id: endpoint.split("/")[4], mode: "chat", harness: "opencode", status } };
+    },
+  });
+  assert.equal(await upstream.continuable("chat-1"), true);
+  assert.deepEqual(bodies, [{ mcpServers: [app, mine] }]);
+  assert.deepEqual(asked, [["opencode", ["coding-tools"]]], "asked for the session's own agent, after the app's server");
+  status = "exited"; bodies.length = 0;
+  assert.equal(await upstream.continuable("chat-2"), true);
+  assert.deepEqual(bodies, [{ mcpServers: [mine] }], "a chat without the app's tools still gets them");
+  status = "exited"; bodies.length = 0; broken = true;
+  assert.equal(await upstream.continuable("chat-2"), true, "an unreadable list never fails the resume");
+  assert.deepEqual(bodies, [{}]);
+});
+
 test("reopening a released chat and sending at once resumes its agent once, and the send continues it", async () => {
   // The chat's pre-warm (600 ms after it opens) and its send both ask continuable() while the
   // agent released while idle comes back. The second asked mid-resume: AO refused a second resume,
@@ -983,7 +1016,7 @@ test("reopening a released chat and sending at once resumes its agent once, and 
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
   let status = "exited", resuming = false, resumes = 0, renewals = 0;
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise,
     agentTools: { renew: async () => { renewals += 1; return null; } },
     internalApi: async (method, endpoint) => {
       if (endpoint.endsWith("/resume-agent")) {
@@ -1715,7 +1748,7 @@ test("an exited chat whose agent may live on is exited again once, so AO stops i
   const turns = { leftover: [{ state: "failed", completedAt: ago(360) }], "fresh-exit": [{ state: "completed", completedAt: ago(5) }], gone: [{ state: "failed", completedAt: ago(360) }] };
   const exits = [];
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, agentTools: null,
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise, agentTools: null,
     exitedReleased: new Set(),
     internalApi: async (method, endpoint) => {
       if (endpoint === "/api/v1/sessions") return { sessions };

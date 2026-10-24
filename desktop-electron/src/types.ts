@@ -2,7 +2,22 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+
+/** Plugins > MCPs (chat-mcp-servers.cjs): one of the person's own MCP servers for chat agents. */
+export interface McpServerEntry {
+  id: string;
+  name: string;
+  type: "stdio" | "http";
+  enabled: boolean;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
+/** A server as the Add/Edit form saves it: no id adds a new one. */
+export type McpServerInput = Omit<McpServerEntry, "id"> & { id?: string };
 
 /** Runtime > RTK (rtk.cjs): the installed rtk, if any, and whether agents' commands use it. */
 export interface RtkStatus {
@@ -832,6 +847,10 @@ export interface LauncherApi {
   rtkStatus(): Promise<RtkStatus>;
   rtkGain(): Promise<RtkGain>;
   rtkInstall(): Promise<{ code: number | null; output: string; status: RtkStatus }>;
+  mcpServers(): Promise<McpServerEntry[]>;
+  saveMcpServer(server: McpServerInput): Promise<McpServerEntry[]>;
+  removeMcpServer(id: string): Promise<McpServerEntry[]>;
+  setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerEntry[]>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   externalServicesSnapshot(): Promise<ExternalServicesSnapshot>;
   managedComponentsSnapshot(): Promise<ManagedComponentsSnapshot>;

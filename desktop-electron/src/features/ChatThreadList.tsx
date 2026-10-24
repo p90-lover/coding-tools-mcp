@@ -778,18 +778,18 @@ export function ChatThreadList(props: ThreadListProps) {
               const current = item.id === workspaceId;
               const open = current ? !collapsed.has(item.id) : openOthers.has(item.id);
               const git = projectGitLabel(item.path ? gits[item.path] : null);
-              // Collapsed, Claude Code's folder header shows the most urgent state of its sessions as a dot.
+              // Collapsed, the project shows the most urgent state of its chats: a dot, or Codex's spinner while one runs.
               const members = current ? chats : otherChats[item.id] ?? [];
               const badge = open ? null : members.some((chat) => chat.status === "attention") ? "attention"
                 : members.some((chat) => chat.status === "running" || chat.status === "queued") ? "running"
                 : members.some((chat) => unread.includes(chat.taskId)) ? "unread" : null;
               return <li key={item.id} {...dragRow(item.id, projectsDrag)} className={`cx-project-item${isDragged(item.id, projectsDrag) ? " is-dragging" : ""}`}>
                 <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
-                  {/* Claude Code's folder group header: the folder's name and a caret, no folder icon. */}
+                  {/* Codex's project row: an open folder when its chats show, a closed one when not, then the name. */}
                   <button type="button" className="cx-project" aria-expanded={open}
                     onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
+                    <span className="cx-project-folder"><ChatGlyph name={open ? "folderOpen" : "folder"} size={16} /></span>
                     <span className="cx-thread-title">{item.name}</span>
-                    <Icon name="chevron" width="12" height="12" className={`cx-caret${open ? " is-open" : ""}`} />
                     {badge ? <span className={`cx-project-badge is-${badge}`} aria-label={badge === "attention" ? "A chat in this project is waiting on you"
                       : badge === "running" ? "Running" : "Unread response"} /> : null}
                     {git?.warn ? <span className="cx-project-tag is-warn" title={git.line}>{git.tag}</span> : null}
