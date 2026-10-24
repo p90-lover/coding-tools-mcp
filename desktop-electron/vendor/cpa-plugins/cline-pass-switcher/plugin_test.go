@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -134,6 +135,72 @@ func TestDeepSeekEffortCatalogAndTransport(t *testing.T) {
 	result(t, reply)
 	if sent["reasoning_effort"] != "minimal" {
 		t.Fatalf("none was not fitted to the model's levels: %v", sent)
+	}
+}
+
+// Seen live 2026-10-24: a reply that never started held a chat "quiet" for the switcher's whole
+// 120 s budget, and asked again it answered in 11 s. A stream that has not started is asked for
+// once more; two that never start fail fast as a retryable timeout.
+func TestAStreamThatNeverStartsIsAskedForOnceMore(t *testing.T) {
+	var calls, hangs atomic.Int32
+	hangs.Store(1)
+	switcher := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Read first: the server notices a client hanging up only once the body is consumed.
+		_, _ = io.Copy(io.Discard, r.Body)
+		if calls.Add(1) <= hangs.Load() {
+			// Never starts; gone once the plugin stops waiting.
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer switcher.Close()
+	previous, previousClient, previousHost := active, streamClient, hostCall
+	active = &service{base: switcher.URL, key: "fixture", ctx: context.Background(), cfg: pluginConfig{DataDir: t.TempDir()}}
+	streamClient = newStreamClient(200 * time.Millisecond)
+	closed := make(chan struct{}, 4)
+	hostCall = func(method string, _ any) (json.RawMessage, error) {
+		if method == "host.stream.close" {
+			closed <- struct{}{}
+		}
+		return json.RawMessage("{}"), nil
+	}
+	t.Cleanup(func() { active, streamClient, hostCall = previous, previousClient, previousHost })
+	req, _ := json.Marshal(map[string]any{"Model": "cline-pass/fixture", "stream_id": "fixture-stream",
+		"Payload": []byte(`{"messages":[{"role":"user","content":"OK"}]}`)})
+	reply, err := execute(req, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result(t, reply)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("asked %d times, want 2", got)
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second ask's stream did not run")
+	}
+	// Neither ask starts: a retryable 504 after two short waits, not the switcher's two minutes.
+	calls.Store(0)
+	hangs.Store(2)
+	started := time.Now()
+	if reply, err = execute(req, true); err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	if err := json.Unmarshal(reply, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error == nil || env.Error.HTTPStatus != 504 || !env.Error.Retryable || calls.Load() != 2 {
+		t.Fatalf("envelope = %+v after %d asks, want a retryable 504 after 2", env.Error, calls.Load())
+	}
+	if waited := time.Since(started); waited > 3*time.Second {
+		t.Fatalf("waited %s", waited)
 	}
 }
 
