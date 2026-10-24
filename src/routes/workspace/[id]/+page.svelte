@@ -3,7 +3,7 @@
   import { translated as t } from "$lib/control-center/model";
   import ComputerControl from "$lib/components/ComputerControl.svelte";
   import { goto } from "$app/navigation";
-  import { page } from "$app/stores";
+  import { page } from "$app/state";
   import ActionsAuthForm from "$lib/components/ActionsAuthForm.svelte";
   import ActionsPolicyForm, {
     type ActionsPolicyDraft,
@@ -96,7 +96,7 @@
     { value: "health", label: "健康" },
   ];
 
-  const workspaceId = $derived($page.params.id);
+  const workspaceId = $derived(page.params.id);
   const actions = $derived(profile ? actionsConfig(profile) : null);
 
   const mcpTunnelForm = $derived<TunnelFormConfig>({

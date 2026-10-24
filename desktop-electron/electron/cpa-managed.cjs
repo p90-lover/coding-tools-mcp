@@ -134,13 +134,18 @@ function yamlString(value) {
 // Every Go plugin is built with Go 1.26.10/1.27.3 or later: before them, crypto/x509 trusted chains
 // through distrusted intermediates (CVE-2026-111943, the leaked emSign CA keys).
 const COMMANDCODE_PLUGINS = [
-  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.7.dll", sha256: "55ae02ccdad336f0e1418fd15f42cb4273e30ad9416dc566f4ddb2fb10d8bc9e" },
+  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.8.dll", sha256: "b52872c6fa08b46ae71034b6a83ae346fb14cee4d9e910d3f71c86293d098139" },
   { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.3.dll", sha256: "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.2.dll", sha256: "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
   { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
   // Grok Build/Web/Console provider built from chenyme/grok2api (vendor/cpa-plugins/grok-login-provider).
   { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.2.dll", sha256: "9894157b26546b325e308b36fcb4fde6795b3ed813bc866e79ab78dfb0a39937" },
+  // CPA Auto Review (p90-lover/cpa_auto_review): serves codex-auto-review on a chosen Codex account and
+  // falls back to other accounts and models when that one is out of quota. It was installed by hand
+  // (0.1.0, one account, no fallback), so an update never brought the fallback version; an older copy
+  // under the same id is moved to Trash like the others.
+  { id: "codex-review-account-selector", file: "codex-review-account-selector-v0.2.0-codingtools.1.dll", sha256: "6db11afab12333a1977d997182115a44a2c11d3b11f7a73f072d25d53cdc7cfa" },
 ];
 
 function installBundledCommandCodePlugin(state) {
@@ -246,6 +251,10 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     ...(outboundProxyUrl ? [`      proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
     "    grok-login-provider:",
     "      enabled: true",
+    // Its selection (account and fallback chain) lives in this private folder, never in config.
+    "    codex-review-account-selector:",
+    "      enabled: true",
+    `      data-dir: ${yamlString(path.join(state, "codex-review-account-selector-data"))}`,
     // Ask OpenAI's Responses models for a reasoning summary. Claude Code never sends the
     // `thinking.display` that would make CPA request one, so its chats showed no reasoning; CPA
     // turns the summary into thinking blocks, which the agent then reports as reasoning. A default
