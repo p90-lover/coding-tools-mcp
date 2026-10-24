@@ -5003,7 +5003,9 @@ test("a run waiting on input reports it steadily, not on and off with each obser
     nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1" } }] };
   const reported = [];
   let done = false;
+  let clock = Date.now();
   const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
     findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
@@ -5011,7 +5013,9 @@ test("a run waiting on input reports it steadily, not on and off with each obser
     onRunState: update => { if (!done && update.runId === "run" && update.status === "running") reported.push(update.attention ?? null); },
   });
   await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
-  await new Promise(resolve => setTimeout(resolve, 1600));
+  await new Promise(resolve => setTimeout(resolve, 300));
+  clock += 11_000; // past the settle time: a wait with no request in sight is the person's
+  await new Promise(resolve => setTimeout(resolve, 1300));
   done = true; // a finished card rightly clears its attention
   mission.nodes[0].state = "finished";
   for (let tries = 0; tries < 100; tries++) {
@@ -5021,6 +5025,45 @@ test("a run waiting on input reports it steadily, not on and off with each obser
   const first = reported.indexOf("needs_input");
   assert.ok(first >= 0, "the wait was reported: " + JSON.stringify(reported));
   assert.deepEqual([...new Set(reported.slice(first))], ["needs_input"], "never flips back to no attention while it still waits: " + JSON.stringify(reported));
+});
+
+test("needs_input read just before AO lists the request is not reported as a wait for the person", async () => {
+  // Sampled live: AO marks the session needs_input about 2 s before the permission request itself
+  // shows; each routine request the reviewer allowed opened a "needs input" incident for one pass.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1" } }] };
+  const request = { approval_id: "acp-request:1", source: "ao", kind: "command", tool: "PowerShell", command: "Get-ChildItem" };
+  let clock = Date.now();
+  let phase = "early"; // needs_input with no request yet, then the request, then working again
+  const attention = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: { observe: () => new Promise(resolve => setTimeout(() => resolve(phase === "working"
+      ? { status: "working", needsInput: false, turnId: "t", turnState: "running", approvals: [] }
+      : { status: "needs_input", needsInput: true, turnId: "t", turnState: "running", approvals: phase === "listed" ? [request] : [] }), 20)) },
+    onRunState: update => { if (update.runId === "run" && update.status === "running") attention.push(update.attention ?? null); },
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  clock += 2_000;
+  phase = "listed";
+  await new Promise(resolve => setTimeout(resolve, 300));
+  phase = "working";
+  clock += 20_000; // a later wait starts its own settle time, not the one before the request
+  await new Promise(resolve => setTimeout(resolve, 300));
+  phase = "early";
+  await new Promise(resolve => setTimeout(resolve, 300));
+  mission.nodes[0].state = "finished";
+  for (let tries = 0; tries < 100; tries++) {
+    if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(attention.length > 3, "the loop reported several passes: " + JSON.stringify(attention));
+  assert.ok(!attention.includes("needs_input"), "never reported as waiting for the person: " + JSON.stringify(attention));
 });
 
 test("a follow-up after a permission change starts a fresh session; a refused send falls back to one", async () => {

@@ -1412,6 +1412,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return true;
   }
 
+  // AO marks a session needs_input as a permission request comes in, about 2 s before the request
+  // itself shows in the conversation (sampled live 2026-10-24). Read in that gap, a routine request
+  // the reviewer then allowed reported the run as "needs input" for one pass: 160 approvals in 40
+  // minutes opened MCP incidents past their rate limit. A wait with no request in sight is the
+  // person's only once it has lasted INPUT_SETTLE_MS.
+  const INPUT_SETTLE_MS = 10_000;
+  const inputSince = new Map(); // session -> when it first read needs_input with no request
+  function waitsForInput(session, observed, pending) {
+    if (!observed.needsInput || pending.length) { inputSince.delete(session); return false; }
+    if (!inputSince.has(session)) {
+      inputSince.set(session, now());
+      if (inputSince.size > 200) inputSince.delete(inputSince.keys().next().value);
+    }
+    return now() - inputSince.get(session) >= INPUT_SETTLE_MS;
+  }
+
   async function observeExternal(workspaceId, runId, node, mission = null) {
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
@@ -1430,7 +1446,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
-      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: observed.needsInput && !pending.length, session_id: session };
+      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
     }
     const completed = observed.turnState === "completed";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
