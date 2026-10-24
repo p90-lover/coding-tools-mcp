@@ -387,18 +387,20 @@ function startBridgeWatchdog(logger, stateStore) {
   if (IS_DEV_PROFILE || bridgeWatchdogTimer) return;
   bridgeWatchdogTimer = setInterval(async () => {
     if (quitting || shutdownInProgress || bridgeWatchdogBusy || !runtimeSupervisor || !runtimeHost) return;
-    // A config file mid-write or unreadable is skipped this minute, not thrown from the timer.
-    let config;
-    try {
-      if (!runtimeHost.runtimeConfigSnapshot().configured || runtimeHost.currentOperation()) return;
-      config = runtimeSupervisor.readConfig();
-    } catch (error) {
-      logger.warn("runtime.watchdog_config_unreadable", { message: error instanceof Error ? error.message : String(error) });
-      return;
-    }
-    if (!config) return;
+    if (runtimeHost.currentOperation()) return;
     bridgeWatchdogBusy = true;
     try {
+      // Read without blocking the main process (readConfigJsonAsync); no config.json means the
+      // bridge is not set up. A config file mid-write or unreadable is skipped this minute, not
+      // thrown from the timer.
+      let config;
+      try {
+        config = await runtimeSupervisor.readConfigAsync();
+      } catch (error) {
+        logger.warn("runtime.watchdog_config_unreadable", { message: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+      if (!config || runtimeHost.currentOperation()) return;
       const checkStarted = Date.now();
       const check = await runtimeSupervisor.ownedRuntimeCheck(config);
       if (check.ready) {
@@ -527,16 +529,18 @@ function stopCatalogVerificationMonitor() {
   catalogVerificationTimer = null;
 }
 
-async function autoConnectExistingMcpIfReady({ logger, stateStore, health }) {
+async function autoConnectExistingMcpIfReady({ logger, stateStore, health, config: knownConfig }) {
   const state = stateStore.read();
   if (IS_DEV_PROFILE || quitting || shutdownInProgress || !state.autoConnectExistingMcp
-    || state.browserInteractionMode !== "automatic" || !runtimeHost?.mcpCredentialsConfigured()) return false;
-  const config = runtimeSupervisor?.readConfig();
-  if (config?.mode !== "full") return false;
+    || state.browserInteractionMode !== "automatic") return false;
+  // What is in memory comes first. This waits for as long as the browser is in use (asked every
+  // 15 s), and the checks after the idle browser read files synchronously: on the app's busy hard
+  // disk one such read froze every window for 3 s (a main-process profile, 2026-10-24). The
+  // catalog monitor hands over the config it read asynchronously.
+  if (knownConfig !== undefined && knownConfig?.mode !== "full") return false;
   if (!health || health.service !== "codex-chatgpt-web" || health.status !== "ok"
-    || health.mode !== "full" || health.version !== config.releaseVersion || health.accepting_turns !== true
-    || !Number.isInteger(health.pid) || health.pid !== runtimeSupervisor.readState()?.daemonPid
-    || !(health.successful_model_catalog_requests > 0)) return true;
+    || health.mode !== "full" || health.accepting_turns !== true
+    || !Number.isInteger(health.pid) || !(health.successful_model_catalog_requests > 0)) return true;
   if (automaticMcpAttemptPid === health.pid) return false;
   const browser = browserHost?.snapshot();
   if (!verifyMcpConnection || browser?.authenticated !== true || browser.surfaceActive
@@ -544,6 +548,10 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health }) {
     || browserHost.activeTraceId || browserHost.currentOperation() || runtimeHost.currentOperation()) return true;
   const contents = browserHost.view?.webContents;
   if (!contents || contents.isDestroyed()) return true;
+  if (!runtimeHost?.mcpCredentialsConfigured()) return false;
+  const config = knownConfig !== undefined ? knownConfig : runtimeSupervisor?.readConfig();
+  if (config?.mode !== "full") return false;
+  if (health.version !== config.releaseVersion || health.pid !== runtimeSupervisor.readState()?.daemonPid) return true;
   const hasDraft = await contents.executeJavaScript(`(() => {
     const composer = document.querySelector('#prompt-textarea');
     return !composer || Boolean((composer.innerText || composer.value || '').trim())
@@ -575,7 +583,8 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
     if (catalogVerificationInFlight || !runtimeSupervisor) return;
     catalogVerificationInFlight = true;
     try {
-      const config = runtimeSupervisor.readConfig();
+      // Asynchronously: a timer that runs for as long as the browser is in use (see readConfigJsonAsync).
+      const config = await runtimeSupervisor.readConfigAsync();
       const health = await runtimeSupervisor.proxyHealthPayload(config);
       if (!Number.isInteger(health?.successful_model_catalog_requests)
         || health.successful_model_catalog_requests < 1) {
@@ -618,7 +627,7 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         publishOperation({ name: "catalog-verification", status: "completed", message: "Codex model catalog loaded" });
       }
       }
-      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) {
+      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health, config })) {
         nextCheckAt = Date.now() + 15_000;
         return;
       }

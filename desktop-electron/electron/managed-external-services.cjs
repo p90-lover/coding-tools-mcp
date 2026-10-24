@@ -362,8 +362,11 @@ function createManagedExternalServicesController({
   // synchronous calls. A chat's timeline asked for the connection once per text field it redacts,
   // about 2,000 times for a long chat, which held the main process for 3.8 s on the hard disk
   // whenever a project was opened (every IPC, the window's included, waited). The answer changes
-  // only when CPA is installed or repaired or its keys rotate, so it is kept for a moment.
-  const CPA_CONNECTION_TTL_MS = 2_000;
+  // only when CPA is installed or repaired or its keys rotate, and each of those forgets it
+  // (forgettingCpaConnection below), so the timeout is only a backstop. At 2 s it still re-read
+  // CPA's install state (8-10 synchronous calls) every other second while the CPA panel or a chat
+  // was busy, on a disk answering reads in 0.6 s on average (seen live 2026-10-24).
+  const CPA_CONNECTION_TTL_MS = 60_000;
   let cpaConnectionCache = null;
   function cpaConnection() {
     const now = Date.now();

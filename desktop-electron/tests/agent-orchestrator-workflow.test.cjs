@@ -2343,7 +2343,7 @@ test("AO typed native replies preserve exact payload and thread/turn scope after
   }
 });
 
-test("the reviewer sees the local script a command runs, never a file outside its folder", () => {
+test("the reviewer sees the local script a command runs, never a file outside its folder", async () => {
   // Seen live: "Command approver suggests ask: Please confirm what start-nova.ps1 does" because the
   // reviewer only had the command line.
   const os = require("node:os");
@@ -2355,22 +2355,46 @@ test("the reviewer sees the local script a command runs, never a file outside it
   fs.writeFileSync(path.join(base, "outside.ps1"), "SECRET\n");
   try {
     const request = (cmd) => ({ kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: JSON.stringify({ cmd, workdir: folder }) });
-    const found = reviewScriptExcerpts(request("powershell.exe -NoProfile -ExecutionPolicy Bypass -File start-nova.ps1"));
+    const found = await reviewScriptExcerpts(request("powershell.exe -NoProfile -ExecutionPolicy Bypass -File start-nova.ps1"));
     assert.deepEqual(found.map((script) => script.file), ["start-nova.ps1"]);
     assert.match(found[0].text, /Start-Process node/);
-    const big = reviewScriptExcerpts(request("python tools/big.py"))[0];
+    const big = (await reviewScriptExcerpts(request("python tools/big.py")))[0];
     assert.equal(big.truncated, true);
     assert.equal(big.text.length, 4000);
-    assert.deepEqual(reviewScriptExcerpts(request("powershell -File ..\\outside.ps1")), [], "outside the working folder");
-    assert.deepEqual(reviewScriptExcerpts(request(`powershell -File ${path.join(base, "outside.ps1")}`)), [], "an absolute path outside it");
-    assert.deepEqual(reviewScriptExcerpts(request("node missing.js")), [], "a file that does not exist");
-    assert.deepEqual(reviewScriptExcerpts({ command: "bash run.sh" }), [], "no working folder, nothing read");
+    assert.deepEqual(await reviewScriptExcerpts(request("powershell -File ..\\outside.ps1")), [], "outside the working folder");
+    assert.deepEqual(await reviewScriptExcerpts(request(`powershell -File ${path.join(base, "outside.ps1")}`)), [], "an absolute path outside it");
+    assert.deepEqual(await reviewScriptExcerpts(request("node missing.js")), [], "a file that does not exist");
+    assert.deepEqual(await reviewScriptExcerpts(request("powershell -File tools")), [], "a folder is not a script");
+    assert.deepEqual(await reviewScriptExcerpts({ command: "bash run.sh" }), [], "no working folder, nothing read");
     // A request that names no folder runs in the agent's session folder, so its script is read there.
     const bare = { kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: JSON.stringify({ cmd: "powershell -File start-nova.ps1" }) };
-    assert.deepEqual(reviewScriptExcerpts(bare, folder).map((script) => script.file), ["start-nova.ps1"]);
+    assert.deepEqual((await reviewScriptExcerpts(bare, folder)).map((script) => script.file), ["start-nova.ps1"]);
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("the reviewer's script lookups never block the main process, and a slow disk does not hold the review up", async () => {
+  // Seen live 2026-10-24: these ran synchronously for every review, on a hard disk answering a read
+  // in 0.6 s on average and up to 7 s; every window froze meanwhile (a 34.7 s main-process stall).
+  const looked = [];
+  const stuck = { realpath: async (file) => { looked.push(file); return new Promise(() => {}); } };
+  const request = { kind: "permission", toolInput: JSON.stringify({ cmd: "bash run.sh", workdir: path.resolve("/project") }) };
+  const started = Date.now();
+  let ticks = 0;
+  const ticker = setInterval(() => { ticks += 1; }, 5);
+  const found = await reviewScriptExcerpts(request, null, { files: stuck, budgetMs: 100 });
+  clearInterval(ticker);
+  assert.deepEqual(found, [], "nothing read by the deadline, so the review goes on without it");
+  assert.ok(Date.now() - started < 1_000, "the deadline, not the disk, ends the wait");
+  assert.ok(ticks >= 5, "the event loop kept running while the disk did not answer");
+
+  // A command naming many files (a grep over a dozen sources) looks up only the first few.
+  const names = Array.from({ length: 12 }, (_, index) => `src/file${index}.ts`).join(" ");
+  const missing = { realpath: async (file) => { looked.push(file); if (file === path.resolve("/project")) return file; throw new Error("ENOENT"); } };
+  looked.length = 0;
+  await reviewScriptExcerpts({ kind: "permission", toolInput: JSON.stringify({ cmd: `rtk grep -n x ${names}`, workdir: path.resolve("/project") }) }, null, { files: missing });
+  assert.equal(looked.length, 1 + 6, "the folder, then six names");
 });
 
 test("a request the reviewer answers is marked as being reviewed, not shown to the person", async () => {
