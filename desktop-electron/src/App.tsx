@@ -998,6 +998,7 @@ function LauncherShell({
                 copy={copy}
                 devProfile={devProfile}
                 language={language}
+                operation={operation}
                 setError={setError}
                 snapshot={snapshot}
                 updateState={updateState}
@@ -2057,6 +2058,7 @@ function SettingsSurface({
   copy,
   devProfile,
   language,
+  operation,
   setError,
   snapshot,
   updateState,
@@ -2065,12 +2067,17 @@ function SettingsSurface({
   copy: Copy;
   devProfile: boolean;
   language: Language;
+  operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
   const [busy, setBusy] = useState(false);
+  // Bigger Context applied: the switch shows the asked-for position while the bridge waits for
+  // running WebGPT turns and restarts (up to minutes). It sat at the old position the whole time,
+  // which read as refused and not saved (the user, 2026-10-24).
+  const [biggerPending, setBiggerPending] = useState<boolean | null>(null);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
   // What switching Codex's route just did: restart Codex to apply it, or run Setup first.
@@ -2120,15 +2127,20 @@ function SettingsSurface({
   };
   const setBiggerContext = async (enabled: boolean) => {
     setBusy(true);
+    setBiggerPending(enabled);
     setError(null);
     try {
       updateState(await api!.setBiggerContext(enabled));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
+      setBiggerPending(null);
       setBusy(false);
     }
   };
+  // What applying it is doing now ("Waiting for 2 active browser turn(s) to finish…").
+  const biggerProgress = biggerPending !== null && operation?.name === "bigger-context" && operation.status === "running"
+    ? operation.message : "";
   const setUseSavedChats = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -2312,11 +2324,11 @@ function SettingsSurface({
         <SettingRow
           body={snapshot.state.browserInteractionMode === "manual"
             ? copy.manualBiggerContextUnavailable
-            : copy.biggerContextBody}
+            : biggerProgress || copy.biggerContextBody}
           label={copy.biggerContext}
         >
           <Switch
-            checked={snapshot.state.experimentalBiggerContext}
+            checked={biggerPending ?? snapshot.state.experimentalBiggerContext}
             disabled={busy
               || snapshot.state.browserInteractionMode === "manual"
               || snapshot.state.coreSetupComplete !== true}
