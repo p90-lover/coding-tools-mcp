@@ -79,6 +79,10 @@ jobs:
         run: |
           bun install --cwd runtime-web --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { throw 'runtime dependency install failed' }
+          # Runtime's third-party notices include launcher packages, so install its own lockfile too.
+          bun install --cwd runtime-web/launcher --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw 'launcher dependency install failed' }
+          if (-not (Test-Path 'runtime-web/launcher/node_modules/motion/package.json')) { throw 'launcher motion dependency missing' }
           bun install --cwd desktop-electron --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { throw 'desktop dependency install failed' }
 
