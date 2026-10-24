@@ -3247,10 +3247,10 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
  * The goal evaluator (a CPA model) is a stand-in: met when the round's answer says "ALL DONE".
  */
 async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
-  ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." }, refuse = () => 0 } = {}) {
+  ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." }, refuse = () => 0, goalsFile = null } = {}) {
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
   const checks = [];
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe", goalsFile,
     resolveHarness: async () => { throw new Error("stop before the background loop"); },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     fetchImpl: async (url, init) => {
@@ -3263,7 +3263,8 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
       if (verdict instanceof Error) return { ok: false, status: 503, json: async () => ({}) };
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
     } });
-  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "build green", goal: "build green" });
+  // With a goals file, the goal is the one saved there (as after an app restart).
+  if (!goalsFile) await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "build green", goal: "build green" });
   return { world, workflow, checks };
 }
 const goalOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
@@ -3423,6 +3424,64 @@ test("an app restart under a goal's round does not stall the goal; the round's r
   goal = await goalOf(workflow);
   assert.equal(goal.status, "stalled");
   assert.match(goal.note, /needs you/);
+});
+
+test("a goal round held on the person and then finished is judged, and the goal goes on to its next round", async () => {
+  // Seen live 2026-10-24: a round waited on an approval, which stalled the goal and marked the round
+  // judged. The person answered and resumed while it ran on; when it finished, its finish was skipped
+  // as judged, and the goal read "Pursuing goal, Round 1" under a Done chat for 18 hours.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const { world, workflow, checks } = await goalChat();
+  const round = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { thread_id: "sess-1", error: "needs approval" } }] };
+  world.runs.push(round);
+  await workflow.goalAfterRun("ws-1", "r1", "held", null);
+  assert.equal((await goalOf(workflow)).status, "stalled");
+  // Answered, the round runs on; resumed meanwhile, the goal waits for the round to settle.
+  round.nodes[0] = { ...round.nodes[0], state: "running", receipt: { thread_id: "sess-1" } };
+  const before = world.updates.length;
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  await goalSettle();
+  assert.equal(world.updates.length, before, "no round while this one runs");
+  round.nodes[0] = { ...round.nodes[0], state: "finished", receipt: { thread_id: "sess-1", answer: "More to do." } };
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.equal(checks.length, 1, "its finish is judged");
+  assert.equal(world.updates.length, before + 1, "and the next round started");
+  const goal = await goalOf(workflow);
+  assert.equal(goal.status, "active");
+  assert.equal(goal.round, 2);
+  // The same round held again is still judged only once.
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.equal(checks.length, 1);
+});
+
+test("a goal judged not met whose next round never started goes on at the next read of the chat", async () => {
+  // The app closed between the check and the next round's start: after the restart the goal was
+  // active, its last round judged, nothing running, and nothing ever started another round. A goal
+  // saved stuck by the bug above (its round marked judged by the stall alone, no check time) is
+  // judged now instead.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "goal-stuck-"));
+  try {
+    for (const [saved, judgedNow] of [[{ evaluatedAs: "checked", checkedAt: 1, feedback: "Two tests still fail." }, 0], [{}, 1]]) {
+      const goalsFile = path.join(dir, `goals-${judgedNow}.json`);
+      fs.writeFileSync(goalsFile, JSON.stringify({ "ws-1:task-1": { objective: "build green", status: "active", round: 1, rounds: 0, startedAt: 1, updatedAt: 1,
+        lastRunId: "r1", evaluatedRunId: "r1", note: "", feedback: "", ...saved } }));
+      const { world, workflow, checks } = await goalChat({ goalsFile });
+      world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+        nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Half done." } }] });
+      const before = world.updates.length;
+      await workflow.call("runs", { workspaceId: "ws-1" });
+      await goalSettle(() => world.updates.length > before);
+      assert.equal(checks.length, judgedNow, judgedNow ? "a round marked judged by a stall alone is judged" : "a verdict is not asked again");
+      assert.equal(world.updates.length, before + 1, "the next round started");
+      assert.equal((await goalOf(workflow)).round, 2);
+      // The round it started is not among the runs yet (this test world keeps none it creates): no second one.
+      await workflow.call("runs", { workspaceId: "ws-1" });
+      await goalSettle();
+      assert.equal(world.updates.length, before + 1);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and there is no round limit", async () => {

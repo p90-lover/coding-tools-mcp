@@ -4476,6 +4476,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   const goalChecks = new Set();
   /**
+   * Whether the goal already has its verdict on `runId` as it ended (`outcome`). A round held on the
+   * person, or failed, is marked when it stalls the goal, but it can still finish: the person answers
+   * it, or Retry runs it again. That finish was skipped as already judged, and the goal read
+   * "Pursuing goal" under a Done chat with nothing running and no next round (seen live 2026-10-24
+   * in two chats). Only the evaluator's verdict, or the same stall again, counts. A goal saved before
+   * `evaluatedAs` was kept: a check time shows a verdict.
+   */
+  const judged = (goal, runId, outcome) => goal.evaluatedRunId === runId
+    && (outcome !== "finished" || (goal.evaluatedAs ?? (goal.checkedAt ? "checked" : "stalled")) === "checked");
+  /**
    * When a chat's latest round has settled, its goal is achieved, stalled, limited, paused, or goes
    * another round. `outcome` is how the round ended: "finished", "failed", "held" (it ended needing
    * the person: no card is ready, or the run grant ran out) or "stopped" (the person pressed Stop).
@@ -4494,7 +4504,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const mission = saved.runs.find(run => run.id === runId && run.workspace_id === workspaceId);
       const task = mission?.project_id;
       const goal = task ? goals.get(workspaceId, task) : null;
-      if (!goal || goal.status !== "active" || goal.evaluatedRunId === runId) return;
+      if (!goal || goal.status !== "active" || judged(goal, runId, outcome)) return;
       // A newer run that was stopped (cancelled) does not stand in for this one: an older round
       // retried after it was the chat's live turn, and its settling was never judged.
       const latest = saved.runs.filter(run => run.project_id === task && (!run.cancelled || run.id === runId)).at(-1);
@@ -4506,8 +4516,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (outcome === "held" && (mission.nodes.some(node => node.state === "held" && restartInterrupted(node)) || autoRetryAllowed(mission))) return;
       // Stopped by the person: the goal waits for them, and the round is judged on resume.
       if (outcome === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped; /goal resume picks it up again" }); return; }
-      if (outcome === "failed") { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, note: "The last round failed; retry it, then /goal resume" }); return; }
-      if (outcome === "held") { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, note: "The last round needs you; answer it, then /goal resume" }); return; }
+      if (outcome === "failed") { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", note: "The last round failed; retry it, then /goal resume" }); return; }
+      if (outcome === "held") { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", note: "The last round needs you; answer it, then /goal resume" }); return; }
       // The agent asked to be woken later (schedule_wakeup): as Claude Code defers its check while
       // background work runs, the goal is judged when the agent has woken and finished, not now.
       if (wakeups.get(workspaceId, task)?.runId === runId) return;
@@ -4528,7 +4538,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return;
       }
       if (!still()) return;
-      goals.update(workspaceId, task, { evaluatedRunId: runId, checkedAt: now() });
+      goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "checked", checkedAt: now() });
       if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
       goals.update(workspaceId, task, { feedback: check.reason });
       if (goal.rounds > 0 && goal.round >= goal.rounds) {
@@ -4557,12 +4567,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const active = Object.entries(goals.forWorkspace(workspaceId))
       .filter(([task, goal]) => goal.status === "active" && taskLifecycle(saved, task).visibility === "active");
     for (const [task, goal] of active) {
-      const latest = runsOfWorkspace.filter(run => run.project_id === task).at(-1);
-      if (!latest || latest.id === goal.evaluatedRunId || !runSettled(latest) || chatWorking(workspaceId, task, runsOfWorkspace)) continue;
+      const chatRuns = runsOfWorkspace.filter(run => run.project_id === task);
+      const latest = chatRuns.at(-1);
+      if (!latest || !runSettled(latest) || chatWorking(workspaceId, task, runsOfWorkspace)) continue;
       // A run this session still drives reports its own settle; only an orphaned one is swept.
       const live = backgroundRuns.get(runKey(workspaceId, latest.id));
       if (live && (live.starting || live.driving)) continue;
-      void goalAfterRun(workspaceId, latest.id, settledOutcome(latest)).catch(() => undefined);
+      if (!judged(goal, latest.id, settledOutcome(latest))) {
+        void goalAfterRun(workspaceId, latest.id, settledOutcome(latest)).catch(() => undefined);
+        continue;
+      }
+      // Judged and not met (a met goal is no longer active), yet no next round: the app closed between
+      // the check and the round's start, or the start gave way to a turn that never came. It goes on,
+      // as Codex's goal does after every turn. Not while a wake-up is due (the agent is waiting on
+      // something), nor while the round it last started is still being set up (not among the runs yet).
+      if (wakeups.get(workspaceId, task) || (goal.lastRunId && !chatRuns.some(run => run.id === goal.lastRunId))) continue;
+      void continueGoal(workspaceId, task, goal, latest).catch(() => undefined);
     }
   }
 
@@ -4605,7 +4625,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A round nobody judged yet (it ran while paused, was stopped part-way, or its check failed) is
       // judged first: it may already have met the goal. One already judged, or one that failed (the
       // person resumes to have the agent carry on past it), goes straight to the next round.
-      if (latest && runSettled(latest) && latest.id !== goal.evaluatedRunId && settledOutcome(latest) !== "failed") {
+      if (latest && runSettled(latest) && !judged(goal, latest.id, settledOutcome(latest)) && settledOutcome(latest) !== "failed") {
         await goalAfterRun(id, latest.id, "finished");
         return;
       }
