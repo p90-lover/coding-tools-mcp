@@ -66,6 +66,7 @@ const SPECS = Object.freeze({
   chat_wakeup: { readOnly: false, description: "Edit (its note, the minutes from now) or cancel the wake-up a chat's agent scheduled to resume itself later." },
   chat_loop: { readOnly: false, description: "Start or stop a chat's loop (/loop): a prompt it runs now and again every interval, or whenever its agent schedules the next round." },
   chat_auto_retry: { readOnly: false, description: "Read or set \"Retry automatically\": a failed single-model step runs again by itself, up to three times." },
+  chat_model_judges: { readOnly: false, description: "Read or set \"Let the model judge\": requests the command reviewer would hand to you, and goal rounds that end needing you or failed, are judged by the model, which may also end the goal." },
   compact_chat: { readOnly: false, description: "Replace a settled chat's context with a handoff summary (/compact)." },
   chat_delete_message: { readOnly: false, description: "Delete one message of a settled chat with its reply: the message leaves the task, its run is hidden from the chat, and the next turn starts a fresh agent session." },
   chat_diff: { readOnly: true, description: "Read the project's uncommitted git changes (/diff)." },

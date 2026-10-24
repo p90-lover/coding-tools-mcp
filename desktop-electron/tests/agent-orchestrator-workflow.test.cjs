@@ -3199,9 +3199,9 @@ test("a goal round says what Claude Code's /goal says: the condition first, then
   assert.match(prompt, /Answer with JSON only: \{"met": true\|false, "reason"/);
   assert.ok(prompt.endsWith(transcript));
   // The evaluator's verdict.
-  assert.deepEqual(parseGoalCheck('{"met": true, "reason": "All 40 tests pass, shown in the output."}'), { met: true, reason: "All 40 tests pass, shown in the output." });
-  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "reason": "Two tests   fail."}\n```'), { met: false, reason: "Two tests fail." });
-  assert.deepEqual(parseGoalCheck('{"met": false}'), { met: false, reason: "The condition is not met yet." });
+  assert.deepEqual(parseGoalCheck('{"met": true, "reason": "All 40 tests pass, shown in the output."}'), { met: true, stop: false, reason: "All 40 tests pass, shown in the output." });
+  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "reason": "Two tests   fail."}\n```'), { met: false, stop: false, reason: "Two tests fail." });
+  assert.deepEqual(parseGoalCheck('{"met": false}'), { met: false, stop: false, reason: "The condition is not met yet." });
   assert.throws(() => parseGoalCheck("I think it is done."), /no verdict/);
   assert.throws(() => parseGoalCheck('{"met": "yes"}'), /no verdict/);
 });
@@ -3453,6 +3453,57 @@ test("a goal round held on the person and then finished is judged, and the goal 
   // The same round held again is still judged only once.
   await workflow.goalAfterRun("ws-1", "r1", "finished", null);
   assert.equal(checks.length, 1);
+});
+
+test("with \"Let the model judge\" on, a goal round that needs the person or failed is judged, and the judge can end the goal", async () => {
+  // The user: "until end and it can safety kill the goal".
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  let verdict = { met: false, stop: false, reason: "Nobody will answer: pick the safest option yourself and train on." };
+  const { world, workflow, checks } = await goalChat({ evaluator: () => verdict });
+  await workflow.call("chat_model_judges", { enabled: true });
+  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { thread_id: "sess-1", error: "Which account first?" } }] });
+  const before = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "r1", "held", null);
+  assert.equal(checks.length, 1, "judged, not left waiting for the person");
+  const prompt = checks[0].messages[0].content;
+  assert.match(prompt, /How the turn ended: It stopped waiting for the user: Which account first\?/);
+  assert.match(prompt, /"stop": true\|false/);
+  // The held round is stopped (its question goes unanswered), then the next round starts.
+  assert.deepEqual(world.updates.slice(before).map((update) => [update.operation, update.run_id === "r1"]), [["cancel", true], ["create_from_team", false]]);
+  let goal = await goalOf(workflow);
+  assert.equal(goal.status, "active");
+  assert.equal(goal.round, 2);
+  assert.equal(goal.feedback, verdict.reason, "the judge's reason is the agent's next instruction");
+  // A failed round the judge says must end: the goal stops, with its reason, and nothing more runs.
+  verdict = { met: false, stop: true, reason: "The same login error repeated three rounds; going on cannot help." };
+  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "failed", route, history: [], receipt: { thread_id: "sess-1", error: "login refused" } }] });
+  const sent = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "r2", "failed", null);
+  assert.match(checks[1].messages[0].content, /How the turn ended: It failed: login refused/);
+  goal = await goalOf(workflow);
+  assert.equal(goal.status, "stalled");
+  assert.equal(goal.note, `Ended by the goal checker: ${verdict.reason}`);
+  assert.equal(world.updates.length, sent, "no further round");
+  // Off again, a round that needs the person waits for them, as before.
+  await workflow.call("chat_model_judges", { enabled: false });
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  await goalSettle();
+  world.runs.push({ id: "r3", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { thread_id: "sess-1", error: "needs approval" } }] });
+  const asked = checks.length;
+  await workflow.goalAfterRun("ws-1", "r3", "held", null);
+  assert.equal(checks.length, asked);
+  assert.match((await goalOf(workflow)).note, /needs you/);
+});
+
+test("Claude Code chat agents run without Claude Code's own scheduler, so they wait with the app's wake-up", () => {
+  // 2026-10-24: a goal agent set CronCreate "*/10 * * * *" to carry on and said it would check again
+  // in 10 minutes; that cron lived in its claude process and never fired once the turn ended.
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const extra = main.slice(main.indexOf("extraEnv: async () => {"), main.indexOf("missionCall:"));
+  assert.match(extra, /CLAUDE_CODE_DISABLE_CRON: "1"/);
 });
 
 test("a goal judged not met whose next round never started goes on at the next read of the chat", async () => {
@@ -4440,6 +4491,44 @@ test("Approve for me asks a reviewer that failed again before involving the pers
   assert.deepEqual(resolved, ["yes"], "answered by the reviewer, never by the person");
   assert.equal(asked[0], "codex-auto-review", "a reviewer that failed lately is still tried, first in its order");
   mission.nodes[0].state = "finished";
+});
+
+test("with \"Let the model judge\" on, a request too long to review whole is judged by the reviewer, not left to the person", async () => {
+  // The user: "if its waiting me to judge, add a setting that allow the model to judge it".
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const request = { approval_id: "cut", source: "ao", kind: "command", tool: "PowerShell", since: "2000-01-01T00:00:00Z", decisions,
+    command: "python train.py --epochs 50", reviewTruncated: true };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
+  const resolved = [], prompts = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      prompts.push(JSON.parse(init.body).messages[0].content);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"outcome":"allow","rationale":"trains a local model"}' } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  assert.deepEqual(await workflow.call("chat_model_judges", {}), { ok: true, modelJudges: false }, "off unless the person turns it on");
+  assert.deepEqual(await workflow.call("chat_model_judges", { enabled: true }), { ok: true, modelJudges: true });
+  await assert.rejects(workflow.call("chat_model_judges", { enabled: "yes" }), /on or off/);
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved, [["cut", "yes"]], "the reviewer answered it");
+    assert.match(prompts[0], /cut short/, "told it sees only part of the request");
+    assert.match(prompts[0], /outcome must be allow or deny/);
+  } finally { mission.nodes[0].state = "finished"; }
 });
 
 test("Approve for me reviews complete scripts and leaves incomplete or failed reviews pending after 20 seconds", async () => {

@@ -27,7 +27,8 @@ const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown
 const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const clawd = load("Clawd.tsx");
 const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts") });
-const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
+const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
+const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
@@ -311,7 +312,7 @@ test("an answer's Markdown is parsed once per text, not on every chat re-render"
 });
 
 test("an AO agent's question and tool request show as Codex's cards: numbered options; a tool request's answer is one click", () => {
-  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown });
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
   const question = { nodeId: "one", approval_id: "ask", source: "ao", kind: "question", message: "Please answer the following questions.",
     fields: [
       { key: "question_0", type: "choice", title: "Lockfile", description: "Rewrite the lockfile hosts or regenerate it?", customKey: "question_0_custom",

@@ -251,14 +251,16 @@ function delayToMilliseconds(value, unit) {
   return ms;
 }
 /**
- * The chat's own preferences that outlive a restart: today only autoRetry (a failed single-model
- * step is retried by itself, chatAutoRetry). Kept in memory when no file is given (tests).
+ * The chat's own preferences that outlive a restart: autoRetry (a failed single-model step is
+ * retried by itself, chatAutoRetry) and modelJudges (what would wait for the person, a request the
+ * reviewer would hand on or a goal round that ended needing them, is judged by the model instead,
+ * chatModelJudges). Kept in memory when no file is given (tests).
  */
 function createChatPreferences(file) {
   let saved = {};
   try { if (file) saved = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch { saved = {}; }
   return {
-    get: () => ({ autoRetry: saved.autoRetry === true }),
+    get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true }),
     set(change) {
       saved = { ...saved, ...change };
       if (!file) return;
@@ -2883,8 +2885,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return kept.join("\n");
   }
-  /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. */
-  async function askApprover({ approver, mission, approval, decide = false }) {
+  /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. `partial`: the
+   *  request was too long to show whole, and "Let the model judge" has the reviewer judge it anyway. */
+  async function askApprover({ approver, mission, approval, decide = false, partial = false }) {
     const { baseUrl, key } = connection();
     const catalog = await models();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? []);
@@ -2924,6 +2927,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       'Answer with JSON only: {"risk_level":"low"|"medium"|"high"|"critical","user_authorization":"high"|"medium"|"low"|"unknown","outcome":"allow"|"deny","rationale":"<one sentence for the user>"}.',
       // Asked again after an "ask" (an older reviewer's answer, or a card's own model): this time it decides.
       decide ? "Nobody else will look at this request: the outcome must be allow or deny." : "",
+      partial ? "The request above is cut short: it was too long to show whole. Judge from what is shown; deny unless what is shown is enough to tell it is safe." : "",
     ].filter(Boolean).join("\n");
     // The evidence goes last, so the rules above stay first, and it is marked as data: a tool's
     // output is whatever the tool returned, never an instruction to the reviewer.
@@ -3045,12 +3049,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           || JSON.stringify(approval.permissions ?? {}).length > 800;
         // An app agent tool's safety comes from its endpoint (worktree confinement, protected paths), not
         // from reading its arguments, so a long patch is no reason to ask.
+        // "Let the model judge": what the reviewer would hand to the person (a request too long to
+        // read whole, a chat whose requests it kept denying) it decides itself, allow or deny.
+        const judges = chatPreferences.get().modelJudges;
         let advice = routineAppTool(approval.tool)
           ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
           : attachedFileRead(approval)
           ? { action: "allow", actor: "safety_rules", reason_code: "attached_file_read", reason: attachedFileRead(approval) }
           : !incomplete && routineAppCommand(approval)
           ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
+          : incomplete && !blocked && judges
+          ? await askApprover({ approver, mission, approval, decide: true, partial: true }).then(verdict => ({ ...verdict, reviewed: true }),
+            (error) => ({ action: "failed", error }))
           : incomplete && !blocked
           ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
           : blocked
@@ -3063,7 +3073,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
                   && readOnlyInspection(approval.command, await requestFolder(approval, mission), approval.cwd)
                 ? { action: "allow", actor: "safety_rules", reason_code: "read_only_inspection", reason: "Read-only inspection inside the workspace folder" }
                 // Unresolved, so it waits for the person: a plain "ask" is answered for them after AUTO_ANSWER_MS.
-                : denialStreak(approval.thread_id) >= REVIEW_DENIAL_STREAK
+                : !judges && denialStreak(approval.thread_id) >= REVIEW_DENIAL_STREAK
                 ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
                 // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
                 // request go to the person, and its card says why.
@@ -3072,7 +3082,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
         // doubt), so a request it could read whole no longer waits for the person for want of a decision.
         if (advice.action === "ask" && advice.reviewed) {
-          const decided = await askApprover({ approver, mission, approval, decide: true }).catch(() => null);
+          const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete }).catch(() => null);
           if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
         }
         if (advice.reviewed && approval.thread_id && advice.action === "deny") {
@@ -3366,6 +3376,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       chatPreferences.set({ autoRetry: enabled });
     }
     return { ok: true, autoRetry: chatPreferences.get().autoRetry };
+  }
+  /**
+   * chat_model_judges: reads "Let the model judge", or sets it with `enabled`. The user: "if its
+   * waiting me to judge, add a setting that allow the model to judge it … until end and it can
+   * safety kill the goal". Off by default: on 2026-10-20 they wanted unjudged requests to wait.
+   */
+  function chatModelJudges({ enabled } = {}) {
+    if (enabled !== undefined) {
+      if (typeof enabled !== "boolean") throw new Error("Choose on or off");
+      chatPreferences.set({ modelJudges: enabled });
+      // Turned on beside a request already waiting for the person: the reviewer's "ask" is dropped,
+      // so the next screening pass judges it. An answer that could not be sent stays the person's.
+      if (enabled) for (const [id, advice] of approverAdvice) if (advice.action === "ask" && !advice.unsent) approverAdvice.delete(id);
+    }
+    return { ok: true, modelJudges: chatPreferences.get().modelJudges };
   }
 
   async function recoverHeld(workspaceId, mission, state = {}) {
@@ -4442,14 +4467,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const order = [...new Set([...quick, ...free, ...review])];
     return [...order.filter(up), ...order.filter(model => !up(model))].slice(0, 3);
   }
-  async function checkGoal(goal, mission) {
+  /** `judge`: "Let the model judge" is on, and `ended` says how the round ended when it did not finish. */
+  async function checkGoal(goal, mission, { judge = false, ended = "" } = {}) {
     const { baseUrl, key } = connection();
     const catalog = await models();
     const candidates = goalCheckModels(catalog.models ?? [], catalog.hidden ?? []);
     if (!candidates.length) throw new Error("CPA has no model to check the goal with");
     // Judged from what the round was actually sent: after an edit the objective differs.
     const message = goal.lastMessage || goalMessage(goal.objective, goal.round, goal.feedback);
-    const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, roundAnswers(mission)));
+    const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, roundAnswers(mission)), { judge, ended });
     let failure = null;
     for (const model of candidates) {
       try {
@@ -4505,6 +4531,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const task = mission?.project_id;
       const goal = task ? goals.get(workspaceId, task) : null;
       if (!goal || goal.status !== "active" || judged(goal, runId, outcome)) return;
+      // The goal's next round is being started: the run it retires (a held round it stops first) is
+      // not a turn of the person's, and read as "stopped" it paused the goal under its new round.
+      if (goalStarts.has(JSON.stringify([workspaceId, task]))) return;
       // A newer run that was stopped (cancelled) does not stand in for this one: an older round
       // retried after it was the chat's live turn, and its settling was never judged.
       const latest = saved.runs.filter(run => run.project_id === task && (!run.cancelled || run.id === runId)).at(-1);
@@ -4516,8 +4545,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (outcome === "held" && (mission.nodes.some(node => node.state === "held" && restartInterrupted(node)) || autoRetryAllowed(mission))) return;
       // Stopped by the person: the goal waits for them, and the round is judged on resume.
       if (outcome === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped; /goal resume picks it up again" }); return; }
-      if (outcome === "failed") { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", note: "The last round failed; retry it, then /goal resume" }); return; }
-      if (outcome === "held") { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", note: "The last round needs you; answer it, then /goal resume" }); return; }
+      // "Let the model judge": a round that failed or waits on the person does not wait for them. The
+      // evaluator hears how it ended and goes on (the agent told to decide for itself) or ends the goal.
+      const judge = chatPreferences.get().modelJudges;
+      const why = (state) => {
+        const error = mission.nodes.find(node => node.state === state && node.receipt?.error)?.receipt?.error;
+        return error ? `: ${publicText(error, 300)}` : "";
+      };
+      const ended = !judge ? "" : outcome === "held" ? `It stopped waiting for the user${why("held")}.` : outcome === "failed" ? `It failed${why("failed")}.` : "";
+      if (outcome === "failed" && !judge) { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", note: "The last round failed; retry it, then /goal resume" }); return; }
+      if (outcome === "held" && !judge) { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", note: "The last round needs you; answer it, then /goal resume" }); return; }
       // The agent asked to be woken later (schedule_wakeup): as Claude Code defers its check while
       // background work runs, the goal is judged when the agent has woken and finished, not now.
       if (wakeups.get(workspaceId, task)?.runId === runId) return;
@@ -4529,7 +4566,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // and the next message woke it again.
       const still = () => goals.get(workspaceId, task)?.status === "active";
       try {
-        check = await checkGoal(goal, mission);
+        check = await checkGoal(goal, mission, { judge, ended });
       } catch (error) {
         if (!still()) return;
         // Not marked judged: resume (or the next sweep after the person resumes) checks it again.
@@ -4540,6 +4577,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!still()) return;
       goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "checked", checkedAt: now() });
       if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
+      // Ended by the evaluator ("Let the model judge"): going on was unsafe or pointless. Stalled, as
+      // Codex's blocked: nothing more runs, and the person can still resume it.
+      if (check.stop) { goals.update(workspaceId, task, { status: "stalled", note: `Ended by the goal checker: ${check.reason}`, feedback: "" }); return; }
       goals.update(workspaceId, task, { feedback: check.reason });
       if (goal.rounds > 0 && goal.round >= goal.rounds) {
         goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.round} rounds; resume allows ${goal.rounds} more` });
@@ -4569,6 +4609,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (const [task, goal] of active) {
       const chatRuns = runsOfWorkspace.filter(run => run.project_id === task);
       const latest = chatRuns.at(-1);
+      // A round being started: the held round it stops first reads as stopped until the new one exists.
+      if (goalStarts.has(JSON.stringify([workspaceId, task]))) continue;
       if (!latest || !runSettled(latest) || chatWorking(workspaceId, task, runsOfWorkspace)) continue;
       // A run this session still drives reports its own settle; only an orphaned one is swept.
       const live = backgroundRuns.get(runKey(workspaceId, latest.id));
@@ -5605,6 +5647,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_wakeup": return chatWakeup(args);
       case "chat_loop": return chatLoop(args);
       case "chat_auto_retry": return chatAutoRetry(args);
+      case "chat_model_judges": return chatModelJudges(args);
       case "compact_chat": return compactChat(args);
       case "chat_diff": return chatDiff(args);
       case "update_run": return updateRun(args);
