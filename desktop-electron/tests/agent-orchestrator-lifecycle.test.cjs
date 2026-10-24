@@ -361,6 +361,36 @@ test("a daemon still starting after 30 s is waited for, not killed and started a
   assert.ok(harness.warnings[0][1].waitedMs >= 30_000);
 });
 
+test("a start after one that timed out gets longer, and a ready start resets the limit", async (context) => {
+  // Seen 2026-10-24 after a reboot: AO's first cleanup read a cold HDD for over a minute, every
+  // start was killed at 90 s, and each new one began that work again, so AO stayed down.
+  let clock = Date.now();
+  let readyAfterMs = Infinity;
+  let startedAt = clock;
+  class SlowClock extends Date { static now() { return clock; } }
+  const harness = createHarness({
+    Date: SlowClock,
+    readyFetch: () => { clock += 30_000; if (clock - startedAt < readyAfterMs) throw new Error("connect ECONNREFUSED"); },
+  });
+  const { controller } = harness;
+  context.after(async () => { await controller.stop(); });
+  const attempt = async () => { startedAt = clock; try { await controller.start(); return { ready: true, ms: clock - startedAt }; } catch { return { ready: false, ms: clock - startedAt }; } };
+
+  const first = await attempt();
+  assert.equal(first.ready, false);
+  assert.ok(first.ms >= 90_000 && first.ms < 180_000, `first start gave up at ${first.ms} ms`);
+  const second = await attempt();
+  assert.equal(second.ready, false);
+  assert.ok(second.ms >= 180_000 && second.ms < 270_000, `second start waited twice as long: ${second.ms} ms`);
+  readyAfterMs = 300_000; // a start that needs 5 minutes now gets them
+  const third = await attempt();
+  assert.equal(third.ready, true, `third start waited up to four times the limit: ${third.ms} ms`);
+  await controller.stop();
+  readyAfterMs = Infinity;
+  const afterReady = await attempt();
+  assert.ok(afterReady.ms < 180_000, `a ready start resets the limit: ${afterReady.ms} ms`);
+});
+
 test("concurrent stops share cleanup and a new start waits for the old gateway", async (context) => {
   const closing = deferred();
   const release = deferred();
