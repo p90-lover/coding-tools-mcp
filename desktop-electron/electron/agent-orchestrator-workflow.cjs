@@ -2813,7 +2813,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // enough that reviews fell back to a paid model.
   const REVIEW_BUDGET_MS = 45_000;
   const REVIEWER_DOWN_MS = 10 * 60_000;
+  // A 404 is a model CPA lists that nothing serves (Cline's "model not found"), not an outage: seen
+  // live 2026-10-24, cline-pass/deepseek-v4-flash refused every goal check, each time first, and so
+  // took one of the three places a check has while the other two were down (502), stalling the goal.
+  const MODEL_GONE_MS = 6 * 3_600_000;
   const reviewerDown = new Map(); // model -> until
+  const reviewerFailed = (model, error) => reviewerDown.set(model, now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
   // request goes to the person: one 502 from the card's model put a routine command in front of
   // them while the very next review answered.
@@ -2967,7 +2972,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }),
           signal: AbortSignal.timeout(left),
         });
-        if (!response.ok) throw new Error(`Command approver ${model} returned HTTP ${response.status}`);
+        if (!response.ok) throw Object.assign(new Error(`Command approver ${model} returned HTTP ${response.status}`), { status: response.status });
         const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
@@ -2983,7 +2988,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return { action: decision.action, reason };
       } catch (error) {
         failure = error;
-        reviewerDown.set(model, now() + REVIEWER_DOWN_MS);
+        reviewerFailed(model, error);
       }
     }
     throw failure;
@@ -4473,7 +4478,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * The models a goal check tries, in order: a quick one first (Claude Code checks with a fast
    * model), then any other, then Codex's own review model. None is billed to the person's Codex
    * quota (codexQuotaModel): a check runs after every round, and picking by name alone ("mini")
-   * chose a ChatGPT-account model. A model that just failed waits REVIEWER_DOWN_MS, as for reviews.
+   * chose a ChatGPT-account model. A model that just failed waits REVIEWER_DOWN_MS, as for reviews,
+   * or MODEL_GONE_MS when it is not served at all (404).
    */
   function goalCheckModels(catalog, hidden = []) {
     const free = catalog.filter(model => !codexQuotaModel(model) && model !== AUTO_REVIEW_MODEL);
@@ -4502,13 +4508,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         });
         // A model CPA lists can still refuse (seen live 2026-10-23: HTTP 404, and the goal stalled);
         // the note names it.
-        if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
+        if (!response.ok) throw Object.assign(new Error(`the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`), { status: response.status });
         const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
         logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
         return { ...check, model };
       } catch (error) {
         failure = error;
-        reviewerDown.set(model, now() + REVIEWER_DOWN_MS);
+        reviewerFailed(model, error);
         logger?.warn?.("ao.goal_check_failed", { model, message: publicText(error?.message || error, 200) });
       }
     }

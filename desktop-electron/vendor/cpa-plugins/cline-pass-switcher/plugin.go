@@ -316,6 +316,8 @@ var apiRoutes = []struct{ Method, Path string }{
 	{"POST", "/api/accounts/test"}, {"GET", "/api/security"}, {"POST", "/api/security"},
 	{"POST", "/api/probe"}, {"POST", "/api/test"}, {"POST", "/api/validate-upstreams"},
 	{"POST", "/api/fetch-official-models"}, {"GET", "/api/history"}, {"GET", "/api/config"}, {"POST", "/api/config"},
+	// Each ClinePass key's usage windows, shown on CPA's quota page (server.js).
+	{"GET", "/api/usage-limits"},
 }
 
 func managementRegistration() any {

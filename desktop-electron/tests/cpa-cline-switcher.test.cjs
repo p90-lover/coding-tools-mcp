@@ -29,6 +29,31 @@ test("the full switcher and MIT notice are pinned, and its native CPA binary mat
   }
 });
 
+test("CPA Auto Review ships with its fallback chain and replaces a hand-installed older copy", (t) => {
+  const bundle = JSON.parse(fs.readFileSync(path.join(root, "desktop-electron/vendor/bundled/cpa-plugins/BUNDLE.json")));
+  assert.equal(bundle.autoReview.id, "codex-review-account-selector");
+  assert.equal(bundle.autoReview.source.commit, "52239a513eb14d995d1530ce79e0b30ed6e687ea");
+  const asset = bundle.autoReview.platforms["win32/x64"];
+  const dll = fs.readFileSync(path.join(root, "desktop-electron/vendor/bundled/cpa-plugins", asset.path));
+  assert.equal(dll.length, asset.size);
+  assert.equal(createHash("sha256").update(dll).digest("hex"), asset.sha256);
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "auto-review-plugin-install-"));
+  t.after(() => fs.rmSync(state, { recursive: true, force: true }));
+  const config = runtimeConfiguration(state, "management-fixture".repeat(3), "proxy-fixture".repeat(4));
+  assert.match(config, /codex-review-account-selector:\n      enabled: true/);
+  assert.ok(config.includes(JSON.stringify(path.join(state, "codex-review-account-selector-data"))), "its selection stays in its own folder");
+  if (process.platform === "win32" && process.arch === "x64") {
+    const directory = path.join(state, "plugins", "windows", "amd64");
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "codex-review-account-selector-v0.1.0-codingtools.5.dll"), "hand-installed 0.1.0");
+    const installed = installBundledCommandCodePlugin(state).find(file => path.basename(file) === path.basename(asset.path));
+    assert.ok(installed, "the managed loader installs CPA Auto Review");
+    assert.equal(createHash("sha256").update(fs.readFileSync(installed)).digest("hex"), asset.sha256);
+    assert.deepEqual(fs.readdirSync(directory).filter(name => name.startsWith("codex-review-account-selector")), [path.basename(asset.path)],
+      "the one-account 0.1.0 copy is moved aside, so CPA loads only the fallback version");
+  }
+});
+
 test("managed console boots with CPA's marker and maps only its own API requests", async () => {
   const vm = require("node:vm");
   const go = fs.readFileSync(path.join(source, "plugin.go"), "utf8");
