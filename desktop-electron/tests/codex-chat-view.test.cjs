@@ -619,6 +619,9 @@ test("a steer the agent has not read stays in the turn it was sent in when the n
   assert.equal(steersIn(articles[0]).length, 1, "still where it was sent");
   assert.match(steersIn(articles[0])[0], /use the other API/);
   assert.deepEqual(steersIn(articles[1]), [], "not moved down into the new mission");
+  // Its cleanup reads the open chat's turns only: another chat's "continue" never drops it.
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  assert.match(source, /const shown = \(entry: PendingSteer\) => entry\.taskId === selectedTaskId && \(seen\.has/);
 });
 
 test("after an app restart a running AO card is still steered, though the page isn't driving its run", async () => {

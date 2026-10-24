@@ -1020,11 +1020,14 @@ export function AgentOrchestratorChat({
       const at = steerTurnIndex(turns, entry);
       return at >= 0 && turns.slice(at + 1).some((turn) => turn.user?.text.trim() === entry.text.trim());
     };
-    const keep = pendingSteers.filter((entry) => !seen.has(entry.text.trim()) && !sentAsTurn(entry) && fresh(entry));
+    // `turns` are the open chat's: another chat's steer is never matched against them (a "continue"
+    // here dropped one still on its way there), only aged out.
+    const shown = (entry: PendingSteer) => entry.taskId === selectedTaskId && (seen.has(entry.text.trim()) || sentAsTurn(entry));
+    const keep = pendingSteers.filter((entry) => !shown(entry) && fresh(entry));
     if (keep.length !== pendingSteers.length) setPendingSteers(keep);
     const timer = window.setTimeout(() => setPendingSteers((list) => list.filter(fresh)), 60_000);
     return () => window.clearTimeout(timer);
-  }, [turns, pendingSteers]);
+  }, [turns, pendingSteers, selectedTaskId]);
   // The stats line counts the latest turn and the unfinished attempts before it (chatStatsSpan).
   const statsSpan = useMemo(() => chatStatsSpan(turns, chatRuns), [turns, chatRuns]);
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
