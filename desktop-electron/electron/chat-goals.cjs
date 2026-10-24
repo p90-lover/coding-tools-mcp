@@ -8,7 +8,7 @@
 // evaluator judges it from the round's message and the closing cards' answers.
 
 const fs = require("node:fs");
-const path = require("node:path");
+const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 const OBJECTIVE_LIMIT = 2000;
 const STATUSES = new Set(["active", "paused", "achieved", "stalled", "limited"]);
@@ -125,18 +125,24 @@ function cleanObjective(value) {
 function createGoalStore({ file = null, now = Date.now } = {}) {
   let goals = {};
   if (file) {
+    let text = null;
+    try { text = fs.readFileSync(file, "utf8"); } catch { /* No goals saved yet. */ }
     try {
-      const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+      const saved = text === null ? null : JSON.parse(text);
       if (saved && typeof saved === "object" && !Array.isArray(saved)) goals = saved;
-    } catch { /* No goals saved yet. */ }
+    } catch {
+      // A file a crash tore (its size in NUL bytes, seen 2026-10-23 on another state file) read as
+      // "no goals", and the next save wrote over it: every goal was gone after the restart. It is
+      // kept beside the new file instead.
+      try { fs.renameSync(file, `${file}.unreadable-${now()}`); } catch { /* the next save replaces it */ }
+    }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
+  // Flushed to disk before it replaces the old file (durable), so a power cut leaves the old goals
+  // or the new ones: a goal carries on after a restart only if its file survives it.
   const persist = () => {
     if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(goals, null, 2));
-    fs.renameSync(temporary, file);
+    writePrivateFileAtomic(file, JSON.stringify(goals, null, 2), { durable: true, protectDirectory: false });
   };
   return {
     get: (workspaceId, taskId) => goals[key(workspaceId, taskId)] ?? null,
