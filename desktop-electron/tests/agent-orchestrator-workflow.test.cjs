@@ -3247,10 +3247,10 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
  * The goal evaluator (a CPA model) is a stand-in: met when the round's answer says "ALL DONE".
  */
 async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
-  ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." }, refuse = () => 0 } = {}) {
+  ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." }, refuse = () => 0, now = Date.now } = {}) {
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
   const checks = [];
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
+  const workflow = createAgentOrchestratorWorkflow({ now, requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
     resolveHarness: async () => { throw new Error("stop before the background loop"); },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     fetchImpl: async (url, init) => {
@@ -3314,6 +3314,26 @@ test("a goal check a model refuses is asked of the next model; only all refusing
   const goal = await goalOf(workflow);
   assert.equal(goal.status, "stalled");
   assert.match(goal.note, /HTTP 404 for deepseek-v4/, "the note names the model that refused");
+});
+
+test("a model that answers 404 is passed over for hours, not retried first at every goal check", async () => {
+  // Seen live 2026-10-24: Cline Pass's deepseek-v4-flash ("model not found") was the first try of
+  // every goal check, 20 to 30 minutes apart, since a 10-minute bench had always run out.
+  const route = { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" };
+  const round = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "not yet" } }] });
+  let clock = Date.parse("2026-10-24T03:00:00Z");
+  const { world, workflow, checks } = await goalChat({ now: () => clock, refuse: (model) => model === "gemini-3-flash" ? 404 : 0 });
+  world.runs.push(round("r1"));
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.deepEqual(checks.map((check) => check.model), ["gemini-3-flash", "deepseek-v4"]);
+  // Half an hour later the gone model is not asked first again.
+  // The next round to judge (this test world does not run the rounds it starts): a resume judges it.
+  clock += 30 * 60_000;
+  world.runs.push(round("r2"));
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  await goalSettle(() => checks.length > 2);
+  assert.deepEqual(checks.slice(2).map((check) => check.model), ["deepseek-v4"], "straight to the model that answers");
 });
 
 test("a message the person sends into a chat whose goal stalled picks the goal up again", async () => {

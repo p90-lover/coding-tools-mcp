@@ -2824,6 +2824,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const REVIEW_BUDGET_MS = 45_000;
   const REVIEWER_DOWN_MS = 10 * 60_000;
   const reviewerDown = new Map(); // model -> until
+  // A model CPA lists whose provider no longer has it answers 404 ("model not found") every time:
+  // Cline Pass's deepseek-v4-flash took the first try of every goal check on 2026-10-24, each one a
+  // wasted request, since a 10-minute bench had always run out by the next check. It is passed over
+  // for hours; a benched model is still tried last when nothing else answers.
+  const MODEL_GONE_MS = 6 * 60 * 60_000;
+  const benchModel = (model, error) => reviewerDown.set(model,
+    now() + (/\bHTTP 404\b/.test(String(error?.message ?? error)) ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
   // request goes to the person: one 502 from the card's model put a routine command in front of
   // them while the very next review answered.
@@ -2993,7 +3000,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return { action: decision.action, reason };
       } catch (error) {
         failure = error;
-        reviewerDown.set(model, now() + REVIEWER_DOWN_MS);
+        benchModel(model, error);
       }
     }
     throw failure;
@@ -4493,7 +4500,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return { ...check, model };
       } catch (error) {
         failure = error;
-        reviewerDown.set(model, now() + REVIEWER_DOWN_MS);
+        benchModel(model, error);
         logger?.warn?.("ao.goal_check_failed", { model, message: publicText(error?.message || error, 200) });
       }
     }
