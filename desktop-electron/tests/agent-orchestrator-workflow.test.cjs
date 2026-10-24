@@ -4799,8 +4799,10 @@ test("Approve for me reviews complete scripts and leaves incomplete or failed re
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
-  const command = (`python -c "\n${"print(1)\n".repeat(27)}#`).padEnd(1490, "x") + '"';
-  assert.equal(command.length, 1491);
+  const command = (`python -c "\n${"print(1)\n".repeat(27)}#`).padEnd(2100, "x") + '"';
+  // Longer than the reviewer once read (1500): a 2000-character Add-Type script waited for the
+  // person (2026-10-24) though the request carried it whole.
+  assert.equal(command.length, 2101);
   assert.equal(command.split("\n").length, 29);
   const requests = [
     { approval_id: "complete", command },
