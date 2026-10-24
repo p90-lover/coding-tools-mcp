@@ -36,7 +36,8 @@ function tempTree() {
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
-  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null } = {}) {
+  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
+  chatTitles = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
@@ -45,7 +46,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
-    ...(rewriteCommand ? { rewriteCommand } : {}),
+    ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -1043,6 +1044,35 @@ test("the goal tools are Codex's, take the chat's own session, and are offered o
     const other = await session(plain.tools, { id: "no-goal" });
     assert.equal((await listed(other.url, other.auth)).includes("create_goal"), false);
     assert.equal((await callTool(other.url, other.auth, "get_goal", {})).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
+test("rename_chat names the agent's own chat, is in its instructions, and is offered only with a rename service", async () => {
+  // The user: a tool "that allow the model change its chat task name to its task title", used "when starting a new task".
+  const asked = [];
+  const chatTitles = { rename: async (request) => {
+    asked.push(request);
+    return { ok: true, taskId: "task-1", title: request.title, renamed: true };
+  } };
+  const { tools } = fixture({ chatTitles });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "rename-owner" });
+    assert.ok((await listed(client.url, client.auth)).includes("rename_chat"));
+    const init = await post(client.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, client.auth);
+    assert.match(init.body.result.instructions, /when you start a new task .*call rename_chat/);
+    const renamed = await callTool(client.url, client.auth, "rename_chat", { title: "Fix the login redirect" });
+    assert.equal(renamed.isError, undefined);
+    assert.equal(JSON.parse(renamed.content[0].text).title, "Fix the login redirect");
+    assert.deepEqual(asked, [{ workspaceId: "ws1", session: "rename-owner", title: "Fix the login redirect" }],
+      "the session is the server's own, never one the agent names");
+    assert.equal((await callTool(client.url, client.auth, "rename_chat", { title: "   " })).isError, true, "a title is required");
+    assert.equal(asked.length, 1);
+    const other = await session(plain.tools, { id: "no-rename" });
+    assert.equal((await listed(other.url, other.auth)).includes("rename_chat"), false);
+    const otherInit = await post(other.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, other.auth);
+    assert.doesNotMatch(otherInit.body.result.instructions, /rename_chat/);
+    assert.equal((await callTool(other.url, other.auth, "rename_chat", { title: "x" })).isError, true);
   } finally { await tools.close(); await plain.tools.close(); }
 });
 

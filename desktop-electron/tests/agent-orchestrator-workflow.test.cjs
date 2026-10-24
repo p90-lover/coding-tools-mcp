@@ -4006,6 +4006,37 @@ test("the agent's goal tools work as Codex's: it creates, completes, blocks, pau
   await assert.rejects(workflow.goalTool({ workspaceId: "ws-1", session: "someone-else", action: "get" }), /not one of this project's chats/);
 });
 
+test("rename_chat names the agent's own chat after its task, and a team chat only once its open cards have started", async () => {
+  // The user: the model should "change the chat name when starting a new task".
+  const { world, workflow, advance } = wakeChat();
+  const rename = (title, session = "sess-1") => workflow.chatTitleTool({ workspaceId: "ws-1", session, title });
+  const renamed = await rename("Fix the login redirect");
+  assert.equal(renamed.renamed, true);
+  assert.equal(renamed.taskId, "task-1");
+  const task = () => world.tasks.find((entry) => entry.id === "task-1");
+  assert.equal(task().title, renamed.title);
+  assert.equal(task().description, "watch CI", "the chat's messages (its description) are kept");
+  const edits = world.edits.length;
+  assert.equal((await rename(renamed.title)).renamed, false, "the same name again writes nothing");
+  assert.equal(world.edits.length, edits);
+  await assert.rejects(rename("Anything", "someone-else"), /not one of this project's chats/);
+  assert.equal(workflow.routineAppTool("mcp__coding-tools__rename_chat"), "Names this chat after the task it works on; it runs nothing");
+
+  // A team round with cards still to reserve: an edit now would void its grant, so the name waits.
+  const team = { id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+    { id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: "sess-2" } },
+    { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+  world.runs.push(team);
+  const waiting = await rename("Ship the release notes", "sess-2");
+  assert.equal(waiting.renamed, false);
+  assert.match(waiting.note, /open cards have started/);
+  assert.equal(world.edits.length, edits, "not while a card is still pending");
+  team.nodes[1].state = "running";
+  await advance(20_000);
+  await goalSettle(() => world.edits.length > edits);
+  assert.equal(task().title, waiting.title, "renamed once nothing is left to reserve");
+});
+
 test("a wake-up sends the chat the agent's note after its minutes, on the same Single model", async () => {
   const { world, workflow, route, advance } = wakeChat();
   const scheduled = await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 10, reason: "see whether CI run 42 passed" });
