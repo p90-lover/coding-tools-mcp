@@ -3098,6 +3098,18 @@ async function start() {
           own: [process.pid],
           electron: app.getAppMetrics().map((metric) => ({ pid: metric.pid, type: metric.type })),
         }),
+        // view_app: the app's own window as the user sees it, from its page (never the screen). A JPEG
+        // scaled to maxWidth keeps a 4K window's image small enough for a model's context.
+        captureApp: async ({ maxWidth }) => {
+          const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+          if (!window || window.isMinimized()) return null;
+          let image = await window.webContents.capturePage();
+          if (image.isEmpty()) return null;
+          const size = image.getSize();
+          if (size.width > maxWidth) image = image.resize({ width: maxWidth, quality: "good" });
+          const { width, height } = image.getSize();
+          return { base64: image.toJPEG(85).toString("base64"), mimeType: "image/jpeg", width, height };
+        },
         // chat_list / chat_read: the app's chats as the chat list reads them (the workflow's board
         // and runs), read-only; another project's only after the user allows it.
         chatHistory: backendBundles.requireModule(backend, "chat-history.cjs").createChatHistory({

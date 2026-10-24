@@ -2696,6 +2696,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
+    if (short === "view_app") return "An image of the Coding Tools window you see; nothing else on the screen";
     if (group === "terminal") return "Reads or stops a command in the chat's own terminal; it starts nothing and types nothing";
     if (group === "desktop") return "Reports on or stops the app's computer control; it sees and touches nothing on the screen";
     if (group !== "agent") return "One of the app's own chat tools that the app never confirms: not a command, typed input or the screen";
