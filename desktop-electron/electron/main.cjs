@@ -195,6 +195,13 @@ let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
 /** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
 let chatAgentTools = null;
+// Plugins > MCPs: the person's own MCP servers, handed to every chat session next to the app's tools.
+let chatMcpServers = null;
+function userMcpServers(logger = null) {
+  chatMcpServers ??= require("./chat-mcp-servers.cjs").createChatMcpServers({
+    filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger });
+  return chatMcpServers;
+}
 // Runtime > Subagents (subagents.cjs): created once, like the chat agents' tools it serves.
 let subagentsService = null;
 let antigravityReauth = null;
@@ -2512,6 +2519,22 @@ function registerIpc({ logger, stateStore }) {
     if (!rtkService) throw new Error("RTK is unavailable in this build");
     return rtk.install();
   });
+  // Plugins > MCPs: the person's own MCP servers for chat agents. Adding, changing or turning one on
+  // runs its command (or reaches its address) in every new chat, so it is their own click in the
+  // visible app; errors name the field, never a value (env and headers carry tokens).
+  handle("mcp-servers:list", () => userMcpServers(logger).list());
+  handle("mcp-servers:save", (event, server) => {
+    assertFocusedMainWindow(event, true);
+    return userMcpServers(logger).save(server);
+  });
+  handle("mcp-servers:remove", (event, id) => {
+    assertFocusedMainWindow(event, true);
+    return userMcpServers(logger).remove(String(id));
+  });
+  handle("mcp-servers:set-enabled", (event, id, enabled) => {
+    if (enabled === true) assertFocusedMainWindow(event, true);
+    return userMcpServers(logger).setEnabled(String(id), enabled === true);
+  });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
       || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools"
@@ -3252,6 +3275,9 @@ async function start() {
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       openAuth: (url) => antigravityAuthBrowser(url),
       agentTools: chatAgentTools,
+      // Plugins > MCPs: an HTTP server only for agents whose AO driver takes one (the app's own rule).
+      userMcpServers: { forSession: (agent, taken) => userMcpServers(logger).forSession(agent, taken,
+        backendBundles.requireModule(backend, "chat-agent-tools.cjs").MCP_HTTP_AGENTS) },
       // The context meter's plan usage limits for chats on CPA's Codex accounts (CPA Helper).
       cpaQuota,
       // Each CPA account's token use and estimated cost; Codex accounts carry those limits too.

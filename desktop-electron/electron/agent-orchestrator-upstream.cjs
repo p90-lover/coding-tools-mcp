@@ -198,7 +198,7 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console,
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, cpaQuota = null, cpaUsage = null, logger = console,
   readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS }) {
   let child = null;
   let gateway = null;
@@ -911,6 +911,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return bytes.toString("utf8", 0, cut);
   }
 
+  /**
+   * The person's own MCP servers (Plugins > MCPs) for one chat session, after the `taken` ones the
+   * app adds itself. Never fails a launch or a resume: without them the agent starts without them.
+   */
+  function userServers(agent, taken = []) {
+    if (!userMcpServers || typeof agent !== "string") return [];
+    try { return userMcpServers.forSession(agent, taken); } catch (cause) {
+      logger.warn?.("ao.user_mcp_servers_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
+      return [];
+    }
+  }
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
   async function internalApi(method, endpoint, body, options) {
     // A write may change what a session read in flight is about to return (sharedObserveRead).
@@ -1067,7 +1078,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true) : null;
         let created;
         try {
-          created = await launchSession(mode, tools?.servers ?? []);
+          const servers = tools?.servers ?? [];
+          created = await launchSession(mode, mode === "chat" ? [...servers, ...userServers(agent, servers)] : []);
         } catch (error) {
           tools?.release();
           throw error;
@@ -1266,7 +1278,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // Startup may already own restoration. A conflict is not readiness: wait for this
           // exact session's observable live state, without issuing a second resume or new launch.
           const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key)).catch(() => null);
-          let body = renewed?.servers?.length ? { mcpServers: renewed.servers } : {};
+          // AO keeps a session's servers only while its daemon runs, so the person's own go in again too.
+          const servers = [...(renewed?.servers ?? [])];
+          servers.push(...userServers(session.harness, servers));
+          let body = servers.length ? { mcpServers: servers } : {};
           try {
             let resumed;
             try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body); }
