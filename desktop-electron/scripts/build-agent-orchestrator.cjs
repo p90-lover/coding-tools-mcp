@@ -99,10 +99,10 @@ async function main() {
     dependencies[name] = entry.version;
   }
   fs.writeFileSync(path.join(frontendRoot, "package.json"), `${JSON.stringify({ name: "coding-tools-ao-renderer", private: true, type: "module", dependencies }, null, 2)}\n`);
-  const dependencyDigest = crypto.createHash("sha256").update(JSON.stringify(dependencies)).digest("hex");
+  const dependencyDigest = crypto.createHash("sha256").update(JSON.stringify({ installer: "bun@1", dependencies })).digest("hex");
   const marker = path.join(frontendRoot, ".dependencies-ready");
   if (!fs.existsSync(marker) || fs.readFileSync(marker, "utf8") !== dependencyDigest) {
-    run(process.platform === "win32" ? "npm.cmd" : "npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], frontendRoot);
+    run(process.platform === "win32" ? "bun.exe" : "bun", ["install", "--ignore-scripts", "--no-save"], frontendRoot);
     fs.writeFileSync(marker, dependencyDigest);
   }
   run(process.execPath, ["node_modules/vite/bin/vite.js", "build", "--config", "vite.renderer.config.ts", "--outDir", path.join(outputRoot, "renderer")], frontendRoot, {
