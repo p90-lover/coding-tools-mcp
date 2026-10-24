@@ -822,6 +822,16 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         // this window.
         const resume = still && !resumedRuns.current.has(key) ? restartResume(still, Date.now(), { autoRetry }) : null;
         if (mounted.current && selection.current.workspaceId === workspaceId && resume) {
+          // Starting a run is refused unless the window is focused, and after a restart it often
+          // opens behind other windows: five chats' resumes were refused that way (2026-10-24 06:47)
+          // and never tried again. The resume waits for the person to come back to the window, then
+          // checks nothing else (a goal's round, a retry) picked the chat up meanwhile.
+          if (!document.hasFocus()) {
+            await new Promise<void>((resolve) => window.addEventListener("focus", () => resolve(), { once: true }));
+            if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
+            const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
+            if (now.driven !== false || ["starting", "running"].includes(String(now.status)) || resumedRuns.current.has(key)) return;
+          }
           resumedRuns.current.add(key);
           if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
           await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });

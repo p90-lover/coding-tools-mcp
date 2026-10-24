@@ -1108,6 +1108,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }
 .cx-goal-meta, .cx-goal-note { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The goal check's verdict: a box of its own on the last row, under the goal bar and anything beside it. */
+.cx-goal-verdict { flex: 1 0 100%; order: 1; box-sizing: border-box; min-width: 0; padding: 5px 10px; border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-primary); color: var(--ao-muted); font-size: 12px; line-height: 1.45; }
+/* Three lines at most (the whole verdict is its tooltip); clamped inside the padding, not through it. */
+.cx-goal-verdict > span { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 /* A goal's later round, as Claude Code shows a Stop hook's feedback: a dim "⎿" line, not a message bubble. */
 .cx-hook-feedback { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0 0 8px; color: var(--ao-muted); font-size: 12px; }
 .cx-hook-feedback-mark { flex: 0 0 auto; }

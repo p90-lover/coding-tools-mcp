@@ -15,10 +15,10 @@ import {
   extractCodexTurnIdentityFromBody,
   extractChatGptCompactionSourceRevision,
 } from "./adapters/chatgpt-web/environment";
-import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
+import { configureCompactionContinuationStorage, rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
-import { providerConfig } from "./config";
+import { getConfigDir, providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
@@ -853,6 +853,7 @@ export function startServer(
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
+  configureCompactionContinuationStorage(getConfigDir());
   const startedAt = Date.now();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {

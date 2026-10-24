@@ -254,7 +254,15 @@ export class ChatGptThreadEnvironmentStore {
     if (this.loaded) return;
     this.loaded = true;
     if (!this.path || !existsSync(this.path)) return;
-    const parsed = JSON.parse(readFileSync(this.path, "utf8")) as Partial<StoredThreadEnvironmentFile>;
+    const serialized = readFileSync(this.path, "utf8");
+    let parsed: Partial<StoredThreadEnvironmentFile>;
+    try {
+      parsed = JSON.parse(serialized) as Partial<StoredThreadEnvironmentFile>;
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      // A broken cache has no authority; a validated current environment can replace it.
+      return;
+    }
     const rawThreads = record(parsed.threads);
     if (parsed.version !== 1 || !rawThreads) {
       throw new Error(`Invalid ChatGPT thread environment store: ${this.path}`);

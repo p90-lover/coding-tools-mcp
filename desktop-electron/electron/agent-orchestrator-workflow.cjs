@@ -2822,7 +2822,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? { ...advised, awaiting_review: true } : advised;
     })
     : approvals;
-  const REVIEW_REQUEST_LIMIT = 1500;
+  // As much as the upstream request carries whole (agent-orchestrator-upstream: a command up to
+  // 4000 bytes, its input 1500, path 1000, description 500), with room for the labels. At 1500 a
+  // 2000-character PowerShell Add-Type script (2026-10-24) "can't be reviewed safely" and waited
+  // for the person in an "Approve for me" chat, though nothing of it was cut.
+  const REVIEW_REQUEST_LIMIT = 8000;
   // A native shell command already contains its operation; display labels must not consume its review budget.
   const describeRequest = (approval) => approval.command && !approval.path && !approval.cwd && !approval.toolInput
     ? String(approval.command).slice(0, REVIEW_REQUEST_LIMIT + 1) : [approval.kind, approval.tool, approval.command, approval.path, approval.toolInput && `input ${approval.toolInput}`,

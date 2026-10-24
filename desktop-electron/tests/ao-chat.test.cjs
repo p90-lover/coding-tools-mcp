@@ -1179,7 +1179,7 @@ test("opening a project resumes a team whose loop died with the app, once per se
   const calls = [];
   const context = {
     workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
-    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}),
+    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}), document: { hasFocus: () => true },
     moduleCall: async (operation, args) => {
       calls.push(operation);
       if (operation === "run_status") return { driven: false, status: "idle" };
@@ -1203,6 +1203,36 @@ test("opening a project resumes a team whose loop died with the app, once per se
   assert.deepEqual(calls.filter((call) => call.startsWith("fresh:")), ["fresh:run_status"]);
 });
 
+test("a restart's resume waits for the window's focus, then starts only a chat nothing else picked up", async () => {
+  // Activity log 2026-10-24 06:47: five resumes' start_run refused with "Click into the Coding Tools
+  // window" (the app had opened behind other windows), and none was tried again.
+  const mission = { id: "r", workspace_id: "a", execution_mode: "team", cancelled: false, nodes: [
+    { id: "p", role: "planner", state: "finished" }, { id: "w", role: "worker", state: "finished" }, { id: "v", role: "reviewer", state: "pending" }] };
+  for (const [picked, expected] of [[false, ["run_status", "runs", "run_status", "start_run"]], [true, ["run_status", "runs", "run_status"]]]) {
+    const calls = [], focus = [];
+    let statuses = 0;
+    const context = {
+      workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
+      selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}),
+      document: { hasFocus: () => false }, window: { addEventListener: (name, listener) => { if (name === "focus") focus.push(listener); } },
+      moduleCall: async (operation) => {
+        calls.push(operation);
+        if (operation === "run_status") return (statuses += 1) > 1 && picked ? { driven: true, status: "running" } : { driven: false, status: "idle" };
+        if (operation === "runs") return { runs: [mission] };
+        return { ok: true };
+      },
+      loadMissions: async () => {}, setTimeout,
+    };
+    rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", context)();
+    for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
+    assert.deepEqual(calls, ["run_status", "runs"], "nothing is started while the window is not focused");
+    assert.equal(focus.length, 1);
+    focus[0]();
+    for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
+    assert.deepEqual(calls, expected, picked ? "a chat picked up meanwhile is left alone" : "resumed once the person is back");
+  }
+});
+
 test("with Retry automatically on, opening a project retries a single chat's failed step that no loop is driving", async () => {
   // Seen live: "Launch failed: The operation was aborted due to timeout", held for hours, driven: false.
   const mission = { id: "r", workspace_id: "a", execution_mode: "single", cancelled: false, nodes: [
@@ -1211,7 +1241,7 @@ test("with Retry automatically on, opening a project retries a single chat's fai
     const calls = [];
     const context = {
       workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
-      selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}),
+      selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}), document: { hasFocus: () => true },
       moduleCall: async (operation, args) => {
         calls.push(operation);
         if (operation === "run_status") return { driven: false, status: "held" };
@@ -1230,7 +1260,7 @@ test("with Retry automatically on, opening a project retries a single chat's fai
   const settledRuns = { current: new Set() };
   rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", {
     workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns, resumedRuns: { current: new Set() },
-    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}),
+    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}), document: { hasFocus: () => true },
     moduleCall: async () => ({ driven: true, status: "held" }), loadMissions: async () => {}, setTimeout,
   })();
   for (let i = 0; i < 3; i += 1) await new Promise(setImmediate);
