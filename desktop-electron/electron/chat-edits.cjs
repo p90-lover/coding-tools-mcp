@@ -37,6 +37,28 @@ function chatDescriptionWithout(description, index) {
   return head + followUps.filter((_, at) => at !== dropped).map(block).join("");
 }
 
+/** How many user messages the description holds (the head when it has text, then each follow-up). */
+function chatMessageCount(description) {
+  const parts = String(description ?? "").split(FOLLOW_UP);
+  return (parts.length - 1) / 2 + (parts[0].trim() ? 1 : 0);
+}
+
+/**
+ * The description with a steer line added to message number `messages` (1-based), the one whose
+ * turn it was sent in. A team run's note waits for the run to settle, and the next message could
+ * be saved first: appended at the end, the steer then sat under that newer message, and the chat
+ * moved it from where it was sent down into the new turn. Unknown or the last message: the end.
+ */
+function chatDescriptionWithSteer(description, messages, steer) {
+  const text = String(description ?? "");
+  const hasHead = Boolean(text.split(FOLLOW_UP)[0].trim());
+  const followUps = [...text.matchAll(new RegExp(FOLLOW_UP.source, "g"))];
+  // The follow-up that starts the message after it: the steer goes in just before that one.
+  const next = followUps[Number.isSafeInteger(messages) && messages >= 1 ? messages - (hasHead ? 1 : 0) : -1];
+  if (!next) return `${text}\n\n${steer}`.trim();
+  return `${text.slice(0, next.index)}\n\n${steer}${text.slice(next.index)}`;
+}
+
 /**
  * Per chat ("<workspace>:<task>"): the runs of deleted messages, hidden from the chat; whether the
  * next follow-up must start a fresh agent session; and which runs restart an earlier one (Restart
@@ -114,4 +136,4 @@ function createChatEditStore({ file = null } = {}) {
   };
 }
 
-module.exports = { chatDescriptionWithout, createChatEditStore };
+module.exports = { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore };
