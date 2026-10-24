@@ -348,6 +348,15 @@ test("project instructions a session already received come back once as text, th
   assert.equal(toolResult("read_file", {}, withInstructions("r1")).structuredContent.project_instructions.instructions, "Use pnpm.");
 });
 
+test("compare_images' diff picture reaches the agent as an image; a plain comparison stays text", () => {
+  const plain = toolResult("compare_images", { before_path: "a.png", after_path: "b.png" }, { ok: true, equal: false, changed_regions: [] });
+  assert.deepEqual(plain.content.map((part) => part.type), ["text"]);
+  const diff = toolResult("compare_images", { diff_image: true }, { ok: true, equal: false, base64: "iVBORw0K", mime_type: "image/png" });
+  assert.deepEqual(diff.content.map((part) => part.type), ["image", "text"]);
+  assert.equal(diff.content[0].data, "iVBORw0K");
+  assert.equal(Object.hasOwn(diff.structuredContent, "base64"), false, "the pixels are sent once, as the image");
+});
+
 test("Claude Code is not offered the file, git and plan tools its own harness has, but can still call them", async () => {
   // Every request repeats the tool list: a new chat sent 53,000-66,000 tokens before the user's message.
   const tree = tempTree();

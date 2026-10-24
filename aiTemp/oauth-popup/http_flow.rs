@@ -299,7 +299,7 @@ async fn run_flow(root: PathBuf) {
             .json()
             .await
             .unwrap();
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 71);
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 73);
 
         // Trust changes come from the same persisted desktop data path as tunnels,
         // not Host headers. The listener and OAuth runtime are not restarted.
