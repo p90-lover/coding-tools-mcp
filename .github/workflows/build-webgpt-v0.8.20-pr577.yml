@@ -75,6 +75,26 @@ jobs:
             Move-Item -LiteralPath $oldRenderer -Destination (Join-Path $base 'Trash/desktop-renderer-from-source') -ErrorAction Stop
           }
 
+      - name: Download and verify official tunnel-client v0.0.12 Windows archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveName = 'tunnel-client-v0.0.12-windows-amd64.zip'
+          $archiveDirectory = Join-Path $env:GITHUB_WORKSPACE 'aiTemp/input'
+          New-Item -ItemType Directory -Force -Path $archiveDirectory | Out-Null
+          $archivePath = Join-Path $archiveDirectory $archiveName
+          $url = "https://github.com/openai/tunnel-client/releases/download/v0.0.12/$archiveName"
+          $expectedSha256 = '2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356'
+          if (-not (Test-Path -LiteralPath $archivePath)) {
+            Invoke-WebRequest -Uri $url -OutFile $archivePath -ErrorAction Stop
+          }
+          $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "Official tunnel-client archive hash mismatch: $actualSha256"
+          }
+          if ((Get-Item -LiteralPath $archivePath).Length -ne 26603136) {
+            throw 'Official tunnel-client archive size mismatch'
+          }
+
       - name: Install pinned runtime and desktop dependencies
         run: |
           bun install --cwd runtime-web --frozen-lockfile
