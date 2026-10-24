@@ -293,7 +293,7 @@
 .ao-workflow .cx-chat .cx-send.is-stop span { background: var(--claude-bg); }
 .ao-workflow .cx-chat .cx-attachment { border-color: var(--claude-line); border-radius: 8px; background: var(--claude-surface); }
 .ao-workflow .cx-chat .cx-slash, .ao-workflow .cx-chat .cx-command-card { border-color: var(--claude-line); background: var(--claude-raised); box-shadow: var(--claude-shadow); }
-.ao-workflow .cx-chat .cx-goal { border-color: var(--claude-line); background: var(--claude-raised); }
+.ao-workflow .cx-chat .cx-goal, .ao-workflow .cx-chat .cx-goal-verdict { border-color: var(--claude-line); background: var(--claude-raised); }
 .ao-workflow .cx-chat .cx-plan-chip { background: var(--claude-accent-soft); color: var(--claude-accent-hover); }
 .ao-workflow .cx-chat .cx-to-bottom { border-color: var(--claude-line); background: var(--claude-raised); color: var(--claude-text); box-shadow: var(--claude-shadow); }
 

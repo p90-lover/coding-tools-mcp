@@ -2100,7 +2100,6 @@ export function AgentOrchestratorChat({
             <GoalGlyph name="target" />
             <span className="cx-goal-state" title={commands.goal.note || `Round ${goalRounds(commands.goal)}`}>{GOAL_SUMMARY[commands.goal.status]}</span>
             <span className="cx-goal-objective" title={commands.goal.objective}>{commands.goal.objective}</span>
-            {goalDetail(commands.goal) ? <span className="cx-goal-note" title={goalDetail(commands.goal)}>{goalDetail(commands.goal)}</span> : null}
             <span className="cx-goal-meta" title={`Round ${goalRounds(commands.goal)}`}>
               {/* Which round it is on, then how long it has run, to the second as Codex shows it. */}
               <span className="cx-goal-round">Round {goalRounds(commands.goal)} · </span>
@@ -2113,6 +2112,9 @@ export function AgentOrchestratorChat({
               : commands.goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" disabled={goalBusy} onClick={() => void runCommand("goal", "resume", false)}><GoalGlyph name="play" /></button> : null}
             <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => void runCommand("goal", "edit", false)}><GoalGlyph name="expand" /></button>
           </div> : null}
+          {/* What the last check said (or why the goal waits), in its own box that always sits under the
+              goal bar: in the bar it was cut to a few words beside the objective. */}
+          {commands?.goal && goalDetail(commands.goal) ? <div className="cx-goal-verdict" role="note" title={goalDetail(commands.goal)}><span>{goalDetail(commands.goal)}</span></div> : null}
           {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
             <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
         </div> : null}
