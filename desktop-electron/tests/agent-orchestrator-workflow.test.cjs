@@ -1309,20 +1309,33 @@ async function until(check) {
 }
 
 test("once its run starts, a 'New task' chat is renamed after what was asked", async () => {
-  const world = startableChatWorld();
-  const workflow = createAgentOrchestratorWorkflow({
-    requestHeadless: world.requestHeadless,
-    findCodexExecutable: () => "C:/Codex/codex.exe",
-    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
-    fetchImpl: async (url) => ({ ok: true, json: async () => (String(url).endsWith("/v1/models")
-      ? { data: [{ id: "gpt-6-luna" }] }
-      : { choices: [{ message: { content: "\"Fix unread email dots\"\n" } }] }) }),
-    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }),
-  });
-  const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "the unread dots in email are wrong" });
-  assert.equal(sent.status, "running");
-  await until(() => world.edits.length > 0);
-  assert.deepEqual(world.edits.map((edit) => [edit.title, edit.description]), [["Fix unread email dots", "the unread dots in email are wrong"]]);
+  const named = async (catalog) => {
+    const world = startableChatWorld();
+    const asked = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: world.requestHeadless,
+      findCodexExecutable: () => "C:/Codex/codex.exe",
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+      fetchImpl: async (url, init) => {
+        if (!String(url).endsWith("/v1/models")) asked.push(JSON.parse(init.body).model);
+        return { ok: true, json: async () => (String(url).endsWith("/v1/models")
+          ? { data: catalog.map((id) => ({ id })) }
+          : { choices: [{ message: { content: "\"Fix unread email dots\"\n" } }] }) };
+      },
+      resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }),
+    });
+    const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "the unread dots in email are wrong" });
+    assert.equal(sent.status, "running");
+    await until(() => world.edits.length > 0);
+    return { edits: world.edits.map((edit) => [edit.title, edit.description]), asked };
+  };
+  const named1 = await named(["gpt-6-luna", "gemini-3-flash"]);
+  assert.deepEqual(named1.edits, [["Fix unread email dots", "the unread dots in email are wrong"]]);
+  assert.deepEqual(named1.asked, ["gemini-3-flash"], "a name never costs the person's Codex quota (gpt-6-luna, listed first)");
+  // Only Codex-quota models: the message names the chat, and no model is asked.
+  const named2 = await named(["gpt-6-luna"]);
+  assert.deepEqual(named2.edits, [["the unread dots in email are wrong", "the unread dots in email are wrong"]]);
+  assert.deepEqual(named2.asked, []);
 });
 
 test("a chat the user named keeps its name, and without CPA the message names it", async () => {
@@ -1384,7 +1397,9 @@ test("a held card is handed to the recovery helper, which retries it and restart
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }] }) };
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }, { id: "gemini-3-flash" }] }) };
+      // Never the person's Codex quota (gpt-6-luna, listed first).
+      assert.equal(JSON.parse(init.body).model, "gemini-3-flash");
       asked.push(JSON.parse(init.body).messages[0].content);
       return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"retry","reason":"The send timed out"}' } }] }) };
     },
@@ -4091,7 +4106,7 @@ test("/compact replaces a long chat's context with Codex's handoff summary; /dif
   const requests = [];
   const fetchImpl = async (url, options = {}) => {
     requests.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
-    if (String(url).includes("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-5.5" }] }) };
+    if (String(url).includes("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-5.5" }, { id: "deepseek-v4" }, { id: "gemini-3-flash" }] }) };
     return { ok: true, json: async () => ({ choices: [{ message: { content: "Progress: login fixed. Next: add tests." } }] }) };
   };
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, fetchImpl, findCodexExecutable: () => "C:/codex.exe",
@@ -4101,6 +4116,9 @@ test("/compact replaces a long chat's context with Codex's handoff summary; /dif
   assert.ok(compacted.after < compacted.before);
   assert.match(world.tasks[0].description, /^Summary of the earlier conversation \(compacted [0-9-]+ [0-9:]+ UTC\):\nProgress: login fixed\. Next: add tests\.$/);
   const completion = requests.find(entry => entry.url.endsWith("/v1/chat/completions"));
+  // The summary reads the whole chat: never on the person's Codex quota (gpt-5.5, listed first), a
+  // quick model instead. The user: "avoid using my codex quota".
+  assert.equal(completion.body.model, "gemini-3-flash");
   assert.match(completion.body.messages[0].content, /^You are performing a CONTEXT CHECKPOINT COMPACTION/);
   assert.equal(completion.body.messages[1].content, long);
   // A short chat has nothing to compact.

@@ -3243,9 +3243,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function askRecoveryHelper({ mission, node, task }) {
     const { baseUrl, key } = connection();
-    const catalog = (await models()).models;
+    const { models: catalog = [], hidden = [] } = await models();
     const preferred = mission.nodes.find((entry) => entry.route?.provider_id === "cliproxyapi-antigravity")?.route.model;
-    const model = catalog.includes(preferred) ? preferred : catalog[0];
+    // Never the first model CPA lists, which may be billed to the person's Codex quota (freeModels).
+    const model = catalog.includes(preferred) && !codexQuotaModel(preferred) ? preferred : freeModels(catalog, hidden)[0];
     if (!model) throw new Error("CPA has no model for the recovery helper");
     const role = node.settings?.name || node.role;
     const prompt = [
@@ -3923,7 +3924,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let name = "";
     try {
       const { baseUrl, key } = connection();
-      const model = (await models()).models[0];
+      const catalog = await models();
+      // A name is not worth the person's Codex quota (freeModels); with no other model, the message names it.
+      const model = freeModels(catalog.models ?? [], catalog.hidden ?? [])[0];
+      if (!model) throw new Error("No model outside the Codex quota");
       const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -4433,12 +4437,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * holds, with its reason. The reason is what the agent is told next when it does not.
    */
   /**
-   * The models a goal check tries, in order: a quick one first (Claude Code checks with a fast
-   * model), then any other, then Codex's own review model. None is billed to the person's Codex
-   * quota (codexQuotaModel): a check runs after every round, and picking by name alone ("mini")
-   * chose a ChatGPT-account model. A model that just failed waits REVIEWER_DOWN_MS, as for reviews.
+   * The models the app's own calls try, in order (goal checks, chat names, handoff summaries, the
+   * recovery helper): a quick one first (Claude Code checks with a fast model), then any other,
+   * then Codex's own review model. None is billed to the person's Codex quota (codexQuotaModel):
+   * these run unasked, and picking by name alone ("mini") chose a ChatGPT-account model. A model
+   * that just failed waits REVIEWER_DOWN_MS, as for reviews.
    */
-  function goalCheckModels(catalog, hidden = []) {
+  function freeModels(catalog, hidden = []) {
     const free = catalog.filter(model => !codexQuotaModel(model) && model !== AUTO_REVIEW_MODEL);
     const quick = free.filter(model => /haiku|flash|mini|lite|fast/i.test(model));
     const review = catalog.includes(AUTO_REVIEW_MODEL) || hidden.includes(AUTO_REVIEW_MODEL) ? [AUTO_REVIEW_MODEL] : [];
@@ -4449,7 +4454,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function checkGoal(goal, mission) {
     const { baseUrl, key } = connection();
     const catalog = await models();
-    const candidates = goalCheckModels(catalog.models ?? [], catalog.hidden ?? []);
+    const candidates = freeModels(catalog.models ?? [], catalog.hidden ?? []);
     if (!candidates.length) throw new Error("CPA has no model to check the goal with");
     // Judged from what the round was actually sent: after an edit the objective differs.
     const message = goal.lastMessage || goalMessage(goal.objective, goal.round, goal.feedback);
@@ -5028,7 +5033,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** A CPA model's handoff summary of a conversation (COMPACT_PROMPT); throws when none answers. */
   async function handoffSummary(text) {
     const { baseUrl, key } = connection();
-    const model = (await models()).models[0];
+    const catalog = await models();
+    // A summary reads a whole conversation: never on the person's Codex quota (freeModels).
+    const model = freeModels(catalog.models ?? [], catalog.hidden ?? [])[0];
+    if (!model) throw new Error("CPA has no model outside the Codex quota for a summary");
     const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
