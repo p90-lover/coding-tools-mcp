@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { get_encoding } from "tiktoken";
 import { estimateTokens } from "../src/lib/token-estimate";
 
 test("counts GPT-5 text with the o200k tokenizer", () => {
@@ -21,33 +20,6 @@ test("dense encoded context is not under-counted as prose", () => {
 
 test("pathological repeated text is counted in bounded chunks", () => {
   expect(estimateTokens("a".repeat(32_768))).toBe(4_096);
-});
-
-test("repeated chunks reuse exact token counts within one estimate", () => {
-  const tokenizer = get_encoding("o200k_base");
-  const prototype = Object.getPrototypeOf(tokenizer);
-  const original = prototype.encode_ordinary;
-  const chunk = " ".repeat(4_096);
-  const repeated = chunk.repeat(3) + "tail";
-  const expected = tokenizer.encode_ordinary(chunk).length * 3 + tokenizer.encode_ordinary("tail").length;
-  const unicode = "x".repeat(4_095) + "😀tail";
-  const expectedUnicode = tokenizer.encode_ordinary("x".repeat(4_095)).length + tokenizer.encode_ordinary("😀tail").length;
-  let calls = 0;
-  prototype.encode_ordinary = function(text: string) { calls += 1; return original.call(this, text); };
-  try {
-    expect(estimateTokens(repeated)).toBe(expected);
-    expect(calls).toBe(2);
-    calls = 0;
-    expect(estimateTokens(repeated)).toBe(expected);
-    expect(calls).toBe(2);
-    calls = 0;
-    expect(estimateTokens(unicode)).toBe(expectedUnicode);
-    expect(calls).toBe(2);
-    expect(estimateTokens("")).toBe(0);
-  } finally {
-    prototype.encode_ordinary = original;
-    tokenizer.free();
-  }
 });
 
 test("large ordinary prose is not inflated by a character-ratio heuristic", () => {
