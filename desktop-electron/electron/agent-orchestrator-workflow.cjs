@@ -1279,15 +1279,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // "if cant reconnect to chat agent can it just create a new agent chat with current context").
         // It is stopped (its session, worktree and conversation stay), so it cannot come back beside
         // the new agent, which starts with the chat so far (the handoff below).
-        let unconfirmed = false;
+        let unconfirmed = null;
         const usable = Boolean(continued) && await continuableSession(continued.session).catch((error) => {
           if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
-          unconfirmed = true;
+          unconfirmed = error;
           return false;
         });
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
-          await Promise.resolve().then(() => harnessService().exitAgent?.(continued.session)).catch(() => undefined);
+          const stopped = await harnessService().exitAgent?.(continued.session);
+          if (stopped?.ok !== true) throw unconfirmed;
         }
         if (usable) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
