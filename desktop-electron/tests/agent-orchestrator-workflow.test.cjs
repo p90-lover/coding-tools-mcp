@@ -4035,6 +4035,33 @@ test("rename_chat names the agent's own chat after its task, and a team chat onl
   await advance(20_000);
   await goalSettle(() => world.edits.length > edits);
   assert.equal(task().title, waiting.title, "renamed once nothing is left to reserve");
+
+  // Codex review of #575: a waiting rename applied late over a newer one, from the agent or the person.
+  const round = (runId, thread) => {
+    const run = { id: runId, workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+      { id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: thread } },
+      { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+    world.runs.push(run);
+    return run;
+  };
+  const third = round("r3", "sess-3");
+  assert.equal((await rename("Draft the changelog", "sess-3")).renamed, false);
+  // Its first look found the card pending, so it waits for the 20 s poll.
+  await goalSettle();
+  third.nodes[1].state = "running";
+  // The cards started before the poll: the agent's newer name applies at once and stands.
+  assert.equal((await rename("Publish the changelog", "sess-3")).renamed, true);
+  await advance(20_000);
+  await goalSettle();
+  assert.equal(task().title, "Publish the changelog", "the older waiting name does not come back");
+  const fourth = round("r4", "sess-4");
+  assert.equal((await rename("Agent's choice", "sess-4")).renamed, false);
+  await goalSettle();
+  await workflow.call("task_rename", { workspaceId: "ws-1", taskId: "task-1", title: "The person's name" });
+  fourth.nodes[1].state = "running";
+  await advance(20_000);
+  await goalSettle();
+  assert.equal(task().title, "The person's name", "the person's Rename wins over a waiting one");
 });
 
 test("a wake-up sends the chat the agent's note after its minutes, on the same Single model", async () => {

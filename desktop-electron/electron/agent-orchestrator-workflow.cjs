@@ -4953,18 +4953,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * rename_chat from a chat agent (chat-agent-tools.cjs): the chat whose run holds its AO `session`
    * is named `title`, as the person's Rename does. A team run with cards still to reserve would
    * refuse them after the edit (grantAtRisk), so the name waits for them, as the chat's first name does.
+   * A newer rename (the agent's, or the person's Rename) retires a waiting one: it applied late over
+   * the newer name (Codex review of #575).
    */
+  const waitingTitles = new Map();
+  const titleKey = (workspaceId, taskId) => JSON.stringify([workspaceId, taskId]);
   async function chatTitleTool({ workspaceId, session, title } = {}) {
     const id = clean(workspaceId, 128);
     const { latest } = await sessionChat(id, clean(session, 256), "rename its chat");
     const task = latest.project_id;
+    const turn = {};
+    waitingTitles.set(titleKey(id, task), turn);
     const detail = await board({ workspaceId: id, taskId: task });
     if (!detail.task || detail.task.id !== task) throw new Error("This chat's task no longer exists");
     const name = agentChatTitle(detail.task.title, title);
     if (name === null) return { ok: true, taskId: task, title: detail.task.title, renamed: false };
     const saved = await runs({ workspaceId: id });
     if (saved.runs.some(run => run.project_id === task && grantAtRisk(run))) {
-      whenTaskIdle(id, task, () => taskRename({ workspaceId: id, taskId: task, title: name }));
+      whenTaskIdle(id, task, () => {
+        if (waitingTitles.get(titleKey(id, task)) !== turn) return;
+        waitingTitles.delete(titleKey(id, task));
+        return taskRename({ workspaceId: id, taskId: task, title: name });
+      });
       return { ok: true, taskId: task, title: name, renamed: false, note: "Renamed once the team's open cards have started" };
     }
     await taskRename({ workspaceId: id, taskId: task, title: name });
@@ -5869,7 +5879,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "codex_executable": return { ok: true, executable: findCodexExecutable() };
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };
       case "board": return board(args);
-      case "task_rename": return taskRename(args);
+      // The person's name wins over an agent's rename_chat still waiting on a team round.
+      case "task_rename": waitingTitles.delete(titleKey(String(args?.workspaceId ?? "").trim(), String(args?.taskId ?? "").trim())); return taskRename(args);
       case "models": return models(args);
       case "harnesses": return harnesses();
       // Runtime > Subagents (subagents.cjs): its settings and subagents, and the ones running now.
