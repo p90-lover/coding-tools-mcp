@@ -8,7 +8,7 @@ const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
 const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirname, "..")] }));
-const { chatDescriptionWithout, createChatEditStore } = require("../electron/chat-edits.cjs");
+const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("../electron/chat-edits.cjs");
 
 // The renderer's own parser, so the rewritten description is checked the way the chat reads it.
 const chat = (() => {
@@ -45,6 +45,22 @@ test("deleting the last message drops just its block", () => {
   const after = chatDescriptionWithout(description, 2);
   assert.ok(description.startsWith(after));
   assert.deepEqual(said(after), said(description).slice(0, 2));
+});
+
+test("a steer is noted under the message whose turn it was sent in, even after a newer message", () => {
+  const steer = "↳ Steer (2026-10-10 10:30 UTC): keep the old API";
+  assert.equal(chatMessageCount(description), 3);
+  assert.equal(chatMessageCount(""), 0);
+  assert.equal(chatMessageCount("only\n\n↳ Steer (2026-10-10 09:05 UTC): x"), 1, "steers are not messages");
+  // The second message's turn took it; the third was saved before the note was written.
+  const after = chatDescriptionWithSteer(description, 2, steer);
+  const [first, second, third] = said(description);
+  assert.deepEqual(said(after), [first, { ...second, steers: [...second.steers, { stamp: "2026-10-10 10:30", text: "keep the old API" }] }, third]);
+  assert.deepEqual(said(chatDescriptionWithSteer(description, 1, steer))[0].steers.at(-1), { stamp: "2026-10-10 10:30", text: "keep the old API" });
+  // The newest message, or a count that was not read: at the end, as before.
+  for (const messages of [3, 9, undefined, 0]) {
+    assert.equal(chatDescriptionWithSteer(description, messages, steer), `${description}\n\n${steer}`);
+  }
 });
 
 test("the only message, or one that is not there, is refused", () => {

@@ -601,6 +601,26 @@ test("a steer is in the chat from the moment it is sent: Sending…, then Unread
   assert.match(source, /<SteerReceiptMark receipt=\{turn\.status === "done" \? "read"/, "and its read receipt: a finished turn read it");
 });
 
+test("a steer the agent has not read stays in the turn it was sent in when the next mission starts", async () => {
+  // It showed in whichever turn was live, so it jumped from where it was sent to the new mission's turn.
+  const route = { harness_id: "ao:claude-code", model: "cpa/m" };
+  const { props } = base({ selectedTaskId: "t-steer", working: false,
+    runs: [run("r1", "t-steer", [node("w", "planner", "running", { route })], { execution_mode: "single" })],
+    steer: async () => true });
+  const view = mount(props);
+  const all = (next) => walk(view.render(next));
+  all().find((element) => element.type === "textarea").props.onChange({ target: { value: "use the other API" } });
+  await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  const next = { runs: [run("r1", "t-steer", [node("w", "planner", "finished", { route, output: { text: "done" } })], { execution_mode: "single" }),
+    run("r2", "t-steer", [node("w2", "planner", "running", { route })], { execution_mode: "single" })] };
+  const articles = all(next).filter((element) => element.type === "article");
+  assert.equal(articles.length, 2, "the new mission has a turn of its own");
+  const steersIn = (article) => walk(article).filter((element) => element.props?.className === "cx-user cx-steer").map(text);
+  assert.equal(steersIn(articles[0]).length, 1, "still where it was sent");
+  assert.match(steersIn(articles[0])[0], /use the other API/);
+  assert.deepEqual(steersIn(articles[1]), [], "not moved down into the new mission");
+});
+
 test("after an app restart a running AO card is still steered, though the page isn't driving its run", async () => {
   const steered = [];
   // working is false: the page's run loop isn't attached to this chat's run, which goes on in AO.
