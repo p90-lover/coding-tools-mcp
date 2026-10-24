@@ -70,6 +70,35 @@ test("a fresh read is cached; a stale or unchecked account is refreshed once per
   assert.equal(calls.filter((call) => call.method === "POST").length, 3, "after STALE_MS both enabled accounts are stale");
 });
 
+test("working accounts come first, so many signed-out ones cannot hide them past the cap", async () => {
+  // Seen live 2026-10-24: nine signed-out and three unchecked accounts filled the first 12, and the
+  // one working Plus account, at 100% of its 5-hour window, was never shown.
+  const signedOut = Array.from({ length: 12 }, (_, at) => item({ auth_index: `out${at}`, email: `out${at}@example.com`,
+    quota: { error: "HTTP 401: Encountered invalidated oauth token", checked_ms: NOW - 2 * STALE_MS } }));
+  const unchecked = item({ auth_index: "new", email: "new@example.com", quota: null });
+  const disabled = item({ auth_index: "off", email: "off@example.com", disabled: true });
+  const plus = item({ auth_index: "plus", email: "plus@example.com", priority: -1,
+    quota: { plan: "plus", checked_ms: NOW - 60_000, primary: { used_percent: 100 }, secondary: { used_percent: 16 } } });
+  const { quota, calls, advance } = fixture({ items: [...signedOut, disabled, unchecked, plus] });
+  const { accounts } = await quota.read();
+  assert.equal(accounts.length, 12);
+  assert.deepEqual(accounts.slice(0, 3).map((account) => account.id), ["plus", "new", "off"], "working, unchecked, disabled, then errors");
+  assert.equal(accounts[0].session.usedPercent, 100, "an exhausted account is still shown first: it is the one to watch");
+  assert.deepEqual(accounts.slice(3).map((account) => account.id), signedOut.slice(0, 9).map((entry) => entry.auth_index), "CPA's order within a rank");
+  // Accounts past the cap are still re-checked (one signed in again must not stay hidden), the
+  // unchecked one first, within the per-read refresh budget.
+  const refreshed = () => calls.filter((call) => call.method === "POST").map((call) => call.body.auth_index);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(refreshed(), ["new", "out0", "out1", "out2"], "the unchecked one first, four per read");
+  for (let read = 0; read < 3; read += 1) {
+    advance(30_000);
+    await quota.read();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(refreshed().includes("out11"), "an account past the cap is re-checked too");
+  assert.ok(!refreshed().includes("plus") && !refreshed().includes("off"), "not a fresh one, nor a disabled one");
+});
+
 test("an account at its limit, a disabled one and one with an error are told apart", () => {
   assert.equal(accountOf(item({ priority: -1 })).paused, true);
   assert.equal(accountOf(item({ disabled: true })).disabled, true);

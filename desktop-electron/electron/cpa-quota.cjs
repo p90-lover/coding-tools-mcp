@@ -52,6 +52,19 @@ function accountOf(item) {
   };
 }
 
+/**
+ * Accounts that serve requests first: CPA Helper lists them in file order, and the cap kept the
+ * first MAX_ACCOUNTS. Seen live 2026-10-24: nine signed-out and three unchecked accounts filled
+ * it, and the one working Plus account (at 100% of its 5-hour window) was never shown. Working
+ * accounts (an exhausted one included: it is the one to watch), then unchecked, then disabled,
+ * then those with an error; CPA's order within each.
+ */
+function rank(account) {
+  if (account.error) return 3;
+  if (account.disabled) return 2;
+  return account.checkedAt ? 0 : 1;
+}
+
 function createCpaQuota({ getConnection, fetchImpl = fetch, now = Date.now, logger = console } = {}) {
   let cached = null; // { at, value }
   let pending = null;
@@ -99,9 +112,12 @@ function createCpaQuota({ getConnection, fetchImpl = fetch, now = Date.now, logg
     if (!response.ok) return { ok: true, available: false, reason: `CPA answered HTTP ${response.status}` };
     const payload = await response.json().catch(() => null);
     const items = Array.isArray(payload?.items) ? payload.items : [];
-    const accounts = items.slice(0, MAX_ACCOUNTS).map(accountOf);
-    refreshStale(target, accounts);
-    return { ok: true, available: true, accounts };
+    const ranked = items.map(accountOf).map((account, index) => ({ account, index }))
+      .sort((a, b) => rank(a.account) - rank(b.account) || a.index - b.index).map(({ account }) => account);
+    // Every account stays re-checked, not only the ones shown: one signed in again past the cap
+    // would otherwise keep its old error, and stay hidden.
+    refreshStale(target, ranked);
+    return { ok: true, available: true, accounts: ranked.slice(0, MAX_ACCOUNTS) };
   }
 
   /** The accounts' limits, cached CACHE_MS; concurrent reads share one request. */
