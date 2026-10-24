@@ -822,6 +822,16 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         // this window.
         const resume = still && !resumedRuns.current.has(key) ? restartResume(still, Date.now(), { autoRetry }) : null;
         if (mounted.current && selection.current.workspaceId === workspaceId && resume) {
+          // Starting a run is refused unless the window is focused, and after a restart it often
+          // opens behind other windows: five chats' resumes were refused that way (2026-10-24 06:47)
+          // and never tried again. The resume waits for the person to come back to the window, then
+          // checks nothing else (a goal's round, a retry) picked the chat up meanwhile.
+          if (!document.hasFocus()) {
+            await new Promise<void>((resolve) => window.addEventListener("focus", () => resolve(), { once: true }));
+            if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
+            const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
+            if (now.driven !== false || ["starting", "running"].includes(String(now.status)) || resumedRuns.current.has(key)) return;
+          }
           resumedRuns.current.add(key);
           if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
           await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });
@@ -1698,8 +1708,14 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     lastPrewarm.current = Date.now();
     void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
   }, [prewarmKey, composerMode, singleRoute, savedTeams, composerTeamId, workspaceId, chatTaskId]);
-  const retryChatStart = (runId: string) => void run("start-run", async () => {
+  // Guarded per chat (chatRun), like the chat list's actions: run() skipped Retry without a word
+  // while anything else was in flight (another chat's start awaiting consent, a team save), and the
+  // failed-step card's button sat disabled, so "Retry step" did nothing.
+  const retryChatStart = (runId: string) => {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
+    void chatRun(taskId || runId, () => retryRun(runId, taskId)).catch(() => undefined);
+  };
+  const retryRun = async (runId: string, taskId: string) => {
     try {
       const mission = missions.find(item => item.id === runId);
       // Retry ran the run's saved route again: a model that had gone failed the same way however
@@ -1727,7 +1743,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       if (currentRun()) setChatNotices((current) => ({ ...current, [taskId]: cause instanceof Error ? cause.message : String(cause) }));
     }
     await loadMissions(workspaceId);
-  });
+  };
   // Team opens this chat's own mission graph (never another task's shared template); its role
   // inspector edits that mission's captured draft live. No writes happen on open.
   const openTeam = () => {
@@ -2595,7 +2611,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                   loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies} />}
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}
-                retryStart={retryChatStart}
+                retryStart={retryChatStart} retrying={Boolean(chatTaskId && chatBusy.includes(chatTaskId))}
                 describeNode={describeChatNode} activity={chatActivity} modelName={chatModelName}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
               </ChatSplit>

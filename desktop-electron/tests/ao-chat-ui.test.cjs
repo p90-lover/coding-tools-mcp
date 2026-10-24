@@ -27,7 +27,8 @@ const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown
 const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const clawd = load("Clawd.tsx");
 const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts") });
-const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
+const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
+const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
@@ -311,7 +312,7 @@ test("an answer's Markdown is parsed once per text, not on every chat re-render"
 });
 
 test("an AO agent's question and tool request show as Codex's cards: numbered options; a tool request's answer is one click", () => {
-  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown });
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
   const question = { nodeId: "one", approval_id: "ask", source: "ao", kind: "question", message: "Please answer the following questions.",
     fields: [
       { key: "question_0", type: "choice", title: "Lockfile", description: "Rewrite the lockfile hosts or regenerate it?", customKey: "question_0_custom",
@@ -550,6 +551,23 @@ test("the pet stays where it stands while the chat box grows and shrinks a line 
   assert.equal(pet.reanchor(short, tall, 2 * 740 + 87 + 20), 2 * 740 + 159 + 20);
   // Shrinking back puts it where it was.
   assert.equal(pet.reanchor(tall, short, grown), right);
+});
+
+test("in split view the pet keeps to its box's top edge and leaps to another pane only when called", () => {
+  // Seen 2026-10-24: in a pane the box's sides and bottom are a few px from the pane's edge, and
+  // Clawd walked there sideways, half cut off; it also leapt off to visit so often it never napped.
+  const box = { width: 500, height: 60, length: 1120, beside: false };
+  assert.equal(pet.onTop(box, 200), 200, "on the top edge it stays put");
+  assert.equal(pet.onTop(box, 10), 36, "clear of the left end (half its 72 px width)");
+  assert.equal(pet.onTop(box, 495), 464, "clear of the right end");
+  assert.equal(pet.onTop(box, 520), 464, "off the right side: up to its top corner");
+  assert.equal(pet.onTop(box, 500 + 60 + 100), 464, "underneath, right half: the right corner");
+  assert.equal(pet.onTop(box, 2 * 500 + 60 + 30), 1120 + 36, "off the left side: on to the next lap's left end");
+  assert.equal(pet.onTop(box, -1120 + 200), -920, "on the lap it is on, so it never spins round");
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  const act = source.slice(source.indexOf("const act = () =>"), source.indexOf("const wander = () =>"));
+  assert.doesNotMatch(act, /hop\(/, "no leap to another pane on a whim");
+  assert.match(source, /const spot = split \? onTop\(current, target\) : target;/, "its strolls stay on the top edge");
 });
 
 test("a walking pet reads no layout per frame and is redrawn at most 60 times a second", () => {

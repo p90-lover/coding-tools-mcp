@@ -33,7 +33,7 @@ function mount(Component, props, { effects = false } = {}) {
   };
   const jsx = (type, props) => ({ type, props: props || {} });
   const module = compile(Component, (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", FloatingLayer: "FloatingLayer" } : {});
+    : name === "./ao-chat" ? chat : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", FloatingLayer: "FloatingLayer", ChatGlyph: "ChatGlyph" } : {});
   const render = (next = {}) => { cursor = 0; refCursor = 0; return module.ChatThreadList({ ...props, ...next }); };
   return { render, states };
 }
@@ -83,6 +83,19 @@ test("each chat row is Claude Code's: its title, a status dot, and one hover \"M
 });
 
 const projectButton = (view, name) => walk(view).find((element) => element.type === "button" && element.props.className === "cx-project" && text(element).includes(name));
+
+test("a collapsed project with a running chat spins until it is opened again", () => {
+  const { props } = fixture();
+  const list = mount("ChatThreadList.tsx", props);
+  const badge = () => walk(projectButton(list.render(), "Alpha")).find((element) => /cx-project-badge/.test(String(element.props?.className)));
+  assert.equal(badge(), undefined, "open, its chats show their own spinners");
+  projectButton(list.render(), "Alpha").props.onClick();
+  assert.equal(badge().props.className, "cx-project-badge is-running");
+  assert.equal(badge().props["aria-label"], "Running");
+  assert.equal(walk(projectButton(list.render(), "Alpha")).find((element) => element.type === "ChatGlyph").props.name, "folder");
+  projectButton(list.render(), "Alpha").props.onClick();
+  assert.equal(badge(), undefined, "opened again (the collapsed choice is stored, so later tests see it open)");
+});
 
 test("clicking the open project collapses it; clicking another project opens its chats in place, as in Codex", () => {
   const { props, calls } = fixture();
@@ -447,15 +460,17 @@ test("a long project shows 5 chats and Show more, like Codex; the count is a lis
   assert.equal(JSON.parse(stored["coding-tools:ao:chat-list-settings"]).visible, 3);
 });
 
-test("a project is Claude Code's folder group: its name and a caret, no folder icon, \"+\" on hover; its menu is on right-click", () => {
+test("a project is Codex's row: an open folder while its chats show, a closed one when not, \"+\" on hover; its menu is on right-click", () => {
   const { props, calls } = fixture();
   const list = mount("ChatThreadList.tsx", props);
   const button = (label) => walk(list.render()).find((element) => element.type === "button" && element.props["aria-label"] === label);
   assert.ok(button("New chat in Alpha") && button("New chat in Beta"));
   assert.equal(button("Alpha actions"), undefined, "one hover action, as Claude Code's");
   const header = projectButton(list.render(), "Alpha");
-  assert.ok(!walk(header).some((element) => element.type === "Glyph"), "no folder icon");
-  assert.ok(walk(header).some((element) => element.type === "Icon" && element.props.name === "chevron" && /cx-caret/.test(element.props.className)), "a caret after the name");
+  const folder = (name) => walk(projectButton(list.render(), name)).find((element) => element.type === "ChatGlyph")?.props.name;
+  assert.equal(folder("Alpha"), "folderOpen", "the open project shows an open folder");
+  assert.equal(folder("Beta"), "folder", "a closed one shows a closed folder");
+  assert.ok(!walk(header).some((element) => element.type === "Icon" && element.props.name === "chevron"), "no caret: the folder says open or closed");
   button("New chat in Beta").props.onClick();
   header.props.onContextMenu({ preventDefault() {}, clientX: 5, clientY: 9 });
   const menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;

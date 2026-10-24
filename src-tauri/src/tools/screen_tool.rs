@@ -1,7 +1,7 @@
 //! User-enabled native capture; no persistent files, background recording, or model API.
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use image::DynamicImage;
+use image::{DynamicImage, RgbaImage};
 use serde_json::{json, Value};
 use xcap::{Monitor, Window};
 
@@ -9,6 +9,7 @@ use crate::tools::context::ToolContext;
 use crate::tools::image_tool::{
     self, boolean, integer, validate_dimensions, vision_error, Rect, ViewOptions,
 };
+use crate::tools::ocr;
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 
 // Only these reviewed native backends capture into memory. In particular,
@@ -69,12 +70,13 @@ pub fn status(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
         "screen_capture_enabled": ctx.policy.allow_screen_capture,
         "memory_only_backend_supported": memory_only_backend_supported(),
         "os_permission": "checked_by_native_backend_on_capture",
-        "tools": ["view_image", "image_info", "compare_images", "list_displays", "list_windows", "capture_screenshot", "capture_window"],
+        "tools": ["view_image", "image_info", "compare_images", "ocr_image", "list_displays", "list_windows", "capture_screenshot", "capture_window", "ocr_screen"],
+        "ocr": ocr::status(),
         "formats": ["image/png", "image/jpeg", "image/webp", "image/gif"],
         "max_source_bytes": image_tool::MAX_SOURCE_BYTES, "max_pixels": image_tool::MAX_PIXELS,
         "capture_storage": "memory_only", "disk_cache": false, "background_recording": false,
         "inference_performed": false, "codex_invoked": false,
-        "semantic_analysis": "The calling vision-capable model interprets returned MCP image content. No separate model or OCR service is called.",
+        "semantic_analysis": "The calling vision-capable model interprets returned MCP image content. ocr_image and ocr_screen read text with the on-device Windows OCR engine; no separate model or OCR service is called.",
         "limitations": ["Headless/locked desktops, protected content, minimized windows, and OS permissions may prevent capture. This release disables native capture outside Windows/macOS to prevent file-backed fallbacks."]
     })))
 }
@@ -146,11 +148,32 @@ fn capture_metadata(source: &str, width: u32, height: u32) -> Value {
 pub fn capture_screenshot(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     require_capture(ctx)?;
     let options = capture_options(args)?;
+    let _permit = image_tool::vision_guard()?;
+    let (pixels, metadata, crop) = grab_display(args)?;
+    let mut render_args = args.clone();
+    if crop.is_some() {
+        // The region was captured already; render_image must not crop it again.
+        render_args
+            .as_object_mut()
+            .expect("validated object")
+            .remove("crop");
+    }
+    image_tool::render_image(
+        DynamicImage::ImageRgba8(pixels),
+        &render_args,
+        options,
+        metadata,
+    )
+}
+
+/// The selected display's pixels, or only its `crop` region when one is given (a region capture
+/// never allocates the whole display). Also returns the capture metadata and the region taken.
+/// The caller holds the vision permit.
+fn grab_display(args: &Value) -> Result<(RgbaImage, Value, Option<Rect>), WorkspaceError> {
     let selected_id = args
         .get("monitor_id")
         .map(|_| integer(args, "monitor_id", 0, 0, u64::from(u32::MAX)))
         .transpose()?;
-    let _permit = image_tool::vision_guard()?;
     let monitor = Monitor::all()
         .map_err(native_error)?
         .into_iter()
@@ -172,34 +195,31 @@ pub fn capture_screenshot(ctx: &ToolContext, args: &Value) -> Result<Value, Work
     metadata["desktop_origin"] =
         json!({"x": monitor.x().map_err(native_error)?, "y": monitor.y().map_err(native_error)?});
     metadata["scale_factor"] = json!(monitor.scale_factor().map_err(native_error)?);
-    let mut render_args = args.clone();
-    let pixels = if let Some(crop) = args.get("crop") {
-        let region = Rect::parse(crop, width, height)?;
-        validate_dimensions(region.width, region.height)?;
-        metadata["crop"] = region.value();
-        // Region capture prevents allocating an entire oversized display.
-        render_args
-            .as_object_mut()
-            .expect("validated object")
-            .remove("crop");
-        monitor
-            .capture_region(region.x, region.y, region.width, region.height)
-            .map_err(native_error)?
-    } else {
+    let Some(crop) = args.get("crop") else {
         validate_dimensions(width, height)?;
-        monitor.capture_image().map_err(native_error)?
+        let pixels = monitor.capture_image().map_err(native_error)?;
+        return Ok((pixels, metadata, None));
     };
-    image_tool::render_image(
-        DynamicImage::ImageRgba8(pixels),
-        &render_args,
-        options,
-        metadata,
-    )
+    let region = Rect::parse(crop, width, height)?;
+    validate_dimensions(region.width, region.height)?;
+    metadata["crop"] = region.value();
+    let pixels = monitor
+        .capture_region(region.x, region.y, region.width, region.height)
+        .map_err(native_error)?;
+    Ok((pixels, metadata, Some(region)))
 }
 
 pub fn capture_window(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     require_capture(ctx)?;
     let options = capture_options(args)?;
+    let _permit = image_tool::vision_guard()?;
+    let (pixels, metadata) = grab_window(args)?;
+    image_tool::render_image(DynamicImage::ImageRgba8(pixels), args, options, metadata)
+}
+
+/// The whole selected window, checked against `expected_pid` before and after the capture.
+/// The caller holds the vision permit.
+fn grab_window(args: &Value) -> Result<(RgbaImage, Value), WorkspaceError> {
     if args.get("window_id").is_none() || args.get("expected_pid").is_none() {
         return Err(WorkspaceError::invalid_argument(
             "window_id and expected_pid from list_windows are required",
@@ -207,7 +227,6 @@ pub fn capture_window(ctx: &ToolContext, args: &Value) -> Result<Value, Workspac
     }
     let id = integer(args, "window_id", 0, 0, u64::from(u32::MAX))? as u32;
     let pid = integer(args, "expected_pid", 0, 1, u64::from(u32::MAX))? as u32;
-    let _permit = image_tool::vision_guard()?;
     let window = Window::all()
         .map_err(native_error)?
         .into_iter()
@@ -241,7 +260,28 @@ pub fn capture_window(ctx: &ToolContext, args: &Value) -> Result<Value, Workspac
             "Capture target changed; captured pixels were discarded",
         ));
     }
-    image_tool::render_image(DynamicImage::ImageRgba8(pixels), args, options, metadata)
+    Ok((pixels, metadata))
+}
+
+/// Reads the text on a display (or a `crop` of it) or in one window, on the device. Only the
+/// recognized lines leave this call; the captured pixels are dropped.
+pub fn ocr_screen(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+    require_capture(ctx)?;
+    let options = ocr::OcrOptions::parse(args, &["monitor_id", "window_id", "expected_pid"])?;
+    let window = args.get("window_id").is_some() || args.get("expected_pid").is_some();
+    if window && args.get("monitor_id").is_some() {
+        return Err(WorkspaceError::invalid_argument(
+            "Pass monitor_id for a display or window_id with expected_pid for a window, not both",
+        ));
+    }
+    let _permit = image_tool::vision_guard()?;
+    if window {
+        let (pixels, metadata) = grab_window(args)?;
+        return ocr::recognize_region(pixels, args, &options, metadata);
+    }
+    let (pixels, metadata, crop) = grab_display(args)?;
+    let origin = crop.map_or((0, 0), |region| (region.x, region.y));
+    ocr::recognize(&pixels, origin, &options, metadata)
 }
 
 #[cfg(test)]
@@ -276,6 +316,10 @@ mod vision_tests {
             .message()
             .contains("Enable screen capture"));
         assert!(capture_window(&ctx, &json!({})).is_err());
+        assert!(ocr_screen(&ctx, &json!({}))
+            .expect_err("disabled")
+            .message()
+            .contains("Enable screen capture"));
         assert!(list_displays(&ctx).is_err());
         assert!(list_windows(&ctx, &json!({})).is_err());
         assert_eq!(
@@ -309,6 +353,7 @@ mod vision_tests {
         // Existing fixture is embedded at compile time; no screenshots or
         // fixture copies are written. This tests the capture rendering path,
         // not an interactive desktop or OS screen-recording consent.
+        let _serial = image_tool::serial_vision_test();
         let _permit = image_tool::vision_guard().expect("exclusive image renderer");
         let image = image::load_from_memory(include_bytes!("../../icons/32x32.png"))
             .expect("embedded fixture");

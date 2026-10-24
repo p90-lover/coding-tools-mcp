@@ -198,7 +198,7 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console,
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, cpaQuota = null, cpaUsage = null, logger = console,
   readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS }) {
   let child = null;
   let gateway = null;
@@ -911,6 +911,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return bytes.toString("utf8", 0, cut);
   }
 
+  /**
+   * The person's own MCP servers (Plugins > MCPs) for one chat session, after the `taken` ones the
+   * app adds itself. Never fails a launch or a resume: without them the agent starts without them.
+   */
+  function userServers(agent, taken = []) {
+    if (!userMcpServers || typeof agent !== "string") return [];
+    try { return userMcpServers.forSession(agent, taken); } catch (cause) {
+      logger.warn?.("ao.user_mcp_servers_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
+      return [];
+    }
+  }
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
   async function internalApi(method, endpoint, body, options) {
     // A write may change what a session read in flight is about to return (sharedObserveRead).
@@ -1067,7 +1078,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true) : null;
         let created;
         try {
-          created = await launchSession(mode, tools?.servers ?? []);
+          const servers = tools?.servers ?? [];
+          created = await launchSession(mode, mode === "chat" ? [...servers, ...userServers(agent, servers)] : []);
         } catch (error) {
           tools?.release();
           throw error;
@@ -1261,11 +1273,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         let session = await read();
         if (invalid(session)) return refuse(session ? "invalid" : "not_found", session);
         if (session.id !== key) throw uncertain();
-        if (session.status === "exited") {
+        if (session.status !== "exited") return (await chatHostGone(key)) ? refuse("host_gone", session) : true;
+        const restore = async () => {
           // Startup may already own restoration. A conflict is not readiness: wait for this
           // exact session's observable live state, without issuing a second resume or new launch.
           const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key)).catch(() => null);
-          let body = renewed?.servers?.length ? { mcpServers: renewed.servers } : {};
+          // AO keeps a session's servers only while its daemon runs, so the person's own go in again too.
+          const servers = [...(renewed?.servers ?? [])];
+          servers.push(...userServers(session.harness, servers));
+          let body = servers.length ? { mcpServers: servers } : {};
           try {
             let resumed;
             try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body); }
@@ -1296,8 +1312,28 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             await new Promise(resolve => setTimeout(resolve, 200));
           }
           throw uncertain();
+        };
+        // An agent that cannot be confirmed back is stopped, not left half-restored: the chat used
+        // to fail with "Couldn't confirm the agent was restored" while the agent stayed wherever it
+        // got to (seen live 2026-10-24, several chats stuck "Starting"). Stopped, it is resumed once
+        // more from a clean exit, keeping the conversation; if that cannot be confirmed either, it
+        // is stopped again and the message starts a fresh agent instead of failing.
+        for (let attempt = 1; ; attempt++) {
+          try { return await restore(); }
+          catch (error) {
+            if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
+            const stopped = await this.exitAgent(key).then(() => true, () => false);
+            logger?.info?.("ao.restore_unconfirmed", { session: key, attempt, stopped,
+              cause: String(error.cause?.message ?? "").slice(0, 200) });
+            // One that could not be stopped may still come back: a second agent beside it would
+            // split the chat, so the message fails as before.
+            if (!stopped) throw error;
+            if (attempt >= 2) return refuse("restore_unconfirmed_stopped", null, { attempts: attempt });
+            session = await read();
+            if (invalid(session)) return refuse(session ? "invalid_after_stop" : "not_found_after_stop", session);
+            if (session.id !== key || session.status !== "exited") throw uncertain();
+          }
         }
-        return (await chatHostGone(key)) ? refuse("host_gone", session) : true;
       })().finally(() => continuing.delete(key)));
       return continuing.get(key);
     },

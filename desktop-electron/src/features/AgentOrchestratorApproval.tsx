@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ModelJudgesToggle } from "./ModelJudgesToggle";
 
 // The agent's questions and tool requests as the Codex desktop app asks them (its approval card and
 // request_user_input card, from the app's own markup and words, with "ChatGPT" read as the card's
@@ -218,6 +219,8 @@ function AoAsk({ approval, busy, approve, actor }: {
       </div> : null}
       {reason ? <div className="cdx-row"><span>Reason</span><p>{reason}</p></div> : null}
       {approval.recommendation?.reason ? <div className="cdx-row"><span>Reviewer</span><p>{approval.recommendation.reason}</p></div> : null}
+      {/* The reviewer left it to you: the model can judge this and every later one instead. */}
+      {approval.recommendation?.reason ? <div className="cdx-row"><span /><ModelJudgesToggle /></div> : null}
       {approval.dependencyNote ? <p className={`cdx-reason ao-dependency-note is-${approval.dependencyNote.tone}`}
         role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
       <CdxOptions name={title} options={options} picked={sent ? [sent] : []} onPick={send} disabled={busy || Boolean(sent)} />

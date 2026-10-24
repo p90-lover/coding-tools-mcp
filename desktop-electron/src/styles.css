@@ -3007,6 +3007,26 @@ code {
   background: var(--surface-2, rgba(31, 30, 29, .03)); font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre; }
 .surface-empty-note { color: var(--muted, #6b6a66); font-size: 13px; }
 
+/* Plugins (App.tsx PluginsSurface): Codex's tab row with counts, and "Add" at its end. */
+.plugins-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 14px; }
+.plugins-tabs { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--color-border); border-radius: 9px; background: var(--color-background-control); }
+.plugins-tabs button { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 11px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--color-text-secondary); font: inherit; font-size: var(--text-sm); cursor: pointer; }
+.plugins-tabs button span { color: var(--color-text-disabled); font-variant-numeric: tabular-nums; }
+.plugins-tabs button:hover { color: var(--color-text-primary); }
+.plugins-tabs button[aria-selected="true"], .plugins-tabs button[aria-checked="true"] { background: var(--color-background-button-secondary-hover); color: var(--color-text-primary); }
+.plugins-tabs.is-compact { justify-self: start; }
+.plugins-add { position: relative; }
+.plugins-add .button-secondary { height: 30px; }
+.plugins-add .button-secondary svg { width: 14px; height: 14px; }
+.plugins-add .refresh-menu-list { right: 0; left: auto; min-width: 180px; }
+.mcp-server-form { margin: 0 0 16px; padding: 4px 16px 16px; border: 1px solid var(--color-border); border-radius: 10px; }
+.mcp-server-form h2 { margin: 12px 0 4px; font-size: var(--text-sm); font-weight: 600; }
+.mcp-server-form .inline-actions { margin: 14px 0 0; }
+.mcp-server-error { margin: 10px 0 0; color: var(--color-text-error); font-size: 13px; }
+.mcp-server-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.mcp-server-actions .button-secondary { height: 26px; }
+
 /* PartErrorBoundary: one tab or chat message that failed to render, in its own place. */
 .part-error {
   display: flex;

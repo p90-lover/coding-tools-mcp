@@ -349,11 +349,13 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     ),
     ("vision_status", "Vision capabilities", "Return local vision capabilities and capture permission status without capturing the screen.", true, false, false),
     ("image_info", "Inspect image metadata", "Read bounded workspace image dimensions, format, byte size and SHA-256 without returning pixels.", true, false, false),
-    ("compare_images", "Compare images", "Compare two workspace images deterministically; return changed pixel ratio and bounds, not semantic interpretation.", true, false, false),
+    ("compare_images", "Compare images", "Compare two workspace images deterministically: changed pixel ratio, overall bounds and up to 16 separate changed regions. diff_image=true also returns a picture of the after image with changed pixels in red. Pixel difference, not semantic interpretation.", true, false, false),
+    ("ocr_image", "Read text in an image", "Read the text in a workspace image (screenshot, scan, diagram) with the on-device Windows OCR engine. Returns lines with [x, y, width, height] boxes in image pixels: far fewer tokens than viewing the image. Optional crop, language and per-word boxes. No model call; nothing is saved.", true, false, false),
     ("list_displays", "List displays", "List displays after desktop-app screen-capture opt-in; no images are captured.", true, false, true),
     ("list_windows", "List windows", "List bounded window IDs, process IDs and titles after local capture opt-in. Titles are untrusted data.", true, false, true),
     ("capture_screenshot", "Capture screenshot", "Capture a selected display or crop as native MCP image content. Requires local screen-capture opt-in. In-memory only, no model call.", true, false, true),
     ("capture_window", "Capture window", "Capture one selected non-minimized window using window_id and expected_pid. Requires local opt-in. Never captures another window on failure.", true, false, true),
+    ("ocr_screen", "Read text on screen", "Read the text on a display (monitor_id, optional crop) or in one window (window_id + expected_pid from list_windows) with on-device Windows OCR. Returns lines with boxes in display or window pixels instead of an image. Requires local screen-capture opt-in. Memory-only, no model call.", true, false, true),
 ];
 
 /// old Python 版本默认提供的核心工具集。默认 MCP 只暴露这一组，保持 Agent 的工具面稳定。
@@ -412,10 +414,12 @@ pub const CORE_TOOLS: &[&str] = &[
     "vision_status",
     "image_info",
     "compare_images",
+    "ocr_image",
     "list_displays",
     "list_windows",
     "capture_screenshot",
     "capture_window",
+    "ocr_screen",
 ];
 
 pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
@@ -457,10 +461,12 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
     "vision_status",
     "image_info",
     "compare_images",
+    "ocr_image",
     "list_displays",
     "list_windows",
     "capture_screenshot",
     "capture_window",
+    "ocr_screen",
 ];
 
 pub const ALLOWED_TOOLS: &[&str] = &[
@@ -532,10 +538,12 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "vision_status",
     "image_info",
     "compare_images",
+    "ocr_image",
     "list_displays",
     "list_windows",
     "capture_screenshot",
     "capture_window",
+    "ocr_screen",
 ];
 
 pub const MUTATING_TOOLS: &[&str] = &[
@@ -605,10 +613,12 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "vision_status",
     "image_info",
     "compare_images",
+    "ocr_image",
     "list_displays",
     "list_windows",
     "capture_screenshot",
     "capture_window",
+    "ocr_screen",
     "patch_check",
     "project_state",
     "task_context",
@@ -661,8 +671,8 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
                         "title": title,
                         "readOnlyHint": read_only,
                         "destructiveHint": destructive,
-                        "idempotentHint": read_only && !matches!(name, "capture_screenshot" | "capture_window" | "computer_snapshot"),
-                        "openWorldHint": open_world || matches!(name, "list_displays" | "list_windows" | "capture_screenshot" | "capture_window")
+                        "idempotentHint": read_only && !matches!(name, "capture_screenshot" | "capture_window" | "ocr_screen" | "computer_snapshot"),
+                        "openWorldHint": open_world || matches!(name, "list_displays" | "list_windows" | "capture_screenshot" | "capture_window" | "ocr_screen")
                     }
                 });
                 if let Some(schema) = crate::tools::recovered_output_schema::for_tool(name) {
@@ -1116,9 +1126,14 @@ fn base_input_schema(name: &str) -> Value {
             "type": "object", "properties": {
                 "before_path": {"type": "string", "minLength": 1},
                 "after_path": {"type": "string", "minLength": 1},
-                "threshold": {"type": "integer", "minimum": 0, "maximum": 255, "default": 0}
+                "threshold": {"type": "integer", "minimum": 0, "maximum": 255, "default": 0},
+                "diff_image": {"type": "boolean", "default": false, "description": "Also return the after image faded to gray with changed pixels in red, as image content."},
+                "max_width": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000, "description": "diff_image only."},
+                "max_height": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000, "description": "diff_image only."},
+                "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 5242880, "default": 163840, "description": "diff_image only: encoded picture budget."}
             }, "required": ["before_path", "after_path"], "additionalProperties": false
         }),
+        "ocr_image" | "ocr_screen" => ocr_schema(name),
         "list_windows" => json!({
             "type": "object", "properties": {
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
@@ -1133,11 +1148,36 @@ fn base_input_schema(name: &str) -> Value {
     }
 }
 
-fn vision_schema(name: &str) -> Value {
-    let region = json!({"type": "object", "properties": {
+fn region_schema() -> Value {
+    json!({"type": "object", "properties": {
         "x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0},
         "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}
-    }, "required": ["x", "y", "width", "height"], "additionalProperties": false});
+    }, "required": ["x", "y", "width", "height"], "additionalProperties": false})
+}
+
+fn ocr_schema(name: &str) -> Value {
+    let mut properties = json!({
+        "crop": region_schema(),
+        "language": {"type": "string", "minLength": 2, "maxLength": 35,
+            "description": "BCP-47 tag of an installed Windows OCR language, such as en-US, zh-Hans or ja. Default: the user's display languages. vision_status lists the installed ones."},
+        "include_words": {"type": "boolean", "default": false, "description": "Also return every word with its box (a larger result)."},
+        "max_lines": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 400}
+    });
+    let id = json!({"type": "integer", "minimum": 0, "maximum": 4294967295u64});
+    if name == "ocr_image" {
+        properties["path"] = json!({"type": "string", "minLength": 1});
+        return json!({"type": "object", "properties": properties, "required": ["path"], "additionalProperties": false});
+    }
+    properties["monitor_id"] = json!({"type": "integer", "minimum": 0, "maximum": 4294967295u64,
+        "description": "Display ID from list_displays; omitted reads the primary display. crop is in that display's pixels."});
+    properties["window_id"] = id;
+    properties["expected_pid"] = json!({"type": "integer", "minimum": 1, "maximum": 4294967295u64,
+        "description": "Required with window_id; both come from list_windows."});
+    json!({"type": "object", "properties": properties, "additionalProperties": false})
+}
+
+fn vision_schema(name: &str) -> Value {
+    let region = region_schema();
     let mut properties = json!({
         "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 5242880, "default": 163840, "description": "Encoded image budget; the image is resized/re-encoded to fit. Default 160 KiB (80 KiB with output=data_url) so results stay under the 256 KiB tool-result limit."},
         "max_width": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000},
@@ -1207,7 +1247,7 @@ mod tests {
 
         assert_eq!(
             tools.len(),
-            35 + crate::tools::computer::schema::NAMES.len()
+            37 + crate::tools::computer::schema::NAMES.len()
                 + crate::tools::native_sandbox::NAMES.len()
                 + crate::tools::local_tools::NAMES.len()
                 + crate::tools::codex_runtime::NAMES.len()
@@ -1254,6 +1294,8 @@ mod tests {
         }
         assert!(names.contains(&"capture_screenshot"));
         assert!(names.contains(&"capture_window"));
+        assert!(names.contains(&"ocr_image"));
+        assert!(names.contains(&"ocr_screen"));
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"history_session_bootstrap"));
         assert!(names.contains(&"history_session_checkpoint"));

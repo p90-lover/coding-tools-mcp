@@ -25,6 +25,17 @@ function windowOf(value) {
   return { usedPercent: Math.max(0, Math.min(100, used)), resetsAt: finite(value.reset_at_ms), windowSeconds: finite(value.window_seconds) };
 }
 
+/**
+ * An account's credits from CPA Helper 0.1.1+ (null before): they pay for every request once a
+ * window is full. The balance stays the exact decimal string chatgpt.com sent.
+ */
+function creditsOf(value) {
+  if (!value || typeof value !== "object") return null;
+  const balance = text(value.balance, 40);
+  return { balance: /^-?\d+(\.\d+)?$/.test(balance) ? balance : null, hasCredits: value.has_credits === true,
+    unlimited: value.unlimited === true, overageReached: value.overage_limit_reached === true };
+}
+
 /** A quota check's error in words: a sign-in CPA can no longer use reads as such. */
 function errorText(value) {
   const message = text(value, 200);
@@ -47,9 +58,23 @@ function accountOf(item) {
     paused: Number(item?.priority) === -1,
     session: windowOf(quota.primary),
     week: windowOf(quota.secondary),
+    credits: creditsOf(quota.credits),
     checkedAt: finite(quota.checked_ms) || null,
     error: errorText(quota.error) || (item?.unavailable ? errorText(item?.status_message) || "Unavailable" : null),
   };
+}
+
+/**
+ * Accounts that serve requests first: CPA Helper lists them in file order, and the cap kept the
+ * first MAX_ACCOUNTS. Seen live 2026-10-24: nine signed-out and three unchecked accounts filled
+ * it, and the one working Plus account (at 100% of its 5-hour window) was never shown. Working
+ * accounts (an exhausted one included: it is the one to watch), then unchecked, then disabled,
+ * then those with an error; CPA's order within each.
+ */
+function rank(account) {
+  if (account.error) return 3;
+  if (account.disabled) return 2;
+  return account.checkedAt ? 0 : 1;
 }
 
 function createCpaQuota({ getConnection, fetchImpl = fetch, now = Date.now, logger = console } = {}) {
@@ -99,9 +124,12 @@ function createCpaQuota({ getConnection, fetchImpl = fetch, now = Date.now, logg
     if (!response.ok) return { ok: true, available: false, reason: `CPA answered HTTP ${response.status}` };
     const payload = await response.json().catch(() => null);
     const items = Array.isArray(payload?.items) ? payload.items : [];
-    const accounts = items.slice(0, MAX_ACCOUNTS).map(accountOf);
-    refreshStale(target, accounts);
-    return { ok: true, available: true, accounts };
+    const ranked = items.map(accountOf).map((account, index) => ({ account, index }))
+      .sort((a, b) => rank(a.account) - rank(b.account) || a.index - b.index).map(({ account }) => account);
+    // Every account stays re-checked, not only the ones shown: one signed in again past the cap
+    // would otherwise keep its old error, and stay hidden.
+    refreshStale(target, ranked);
+    return { ok: true, available: true, accounts: ranked.slice(0, MAX_ACCOUNTS) };
   }
 
   /** The accounts' limits, cached CACHE_MS; concurrent reads share one request. */

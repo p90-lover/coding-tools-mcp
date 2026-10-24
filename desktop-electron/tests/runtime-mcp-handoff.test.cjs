@@ -26,6 +26,24 @@ test('MCP handoff waits for native requests without draining or cancelling them'
   assert.match(messages[0], /2 active HTTP/);
 });
 
+test('a Bigger Context switch waiting for running turns says so, not "connecting MCP"', async () => {
+  // 2026-10-24: the switch sat at its old position while setup waited, which read as refused.
+  const messages = [];
+  const supervisor = new RuntimeSupervisor({
+    app: {}, logger, coreHome, publishOperation: value => messages.push(value.message),
+  });
+  supervisor.daemon = { pid: 42 };
+  supervisor.readConfig = () => config;
+  const counts = [1, 0];
+  supervisor.proxyHealthPayload = async () => ({
+    service: 'codex-chatgpt-web', status: 'ok', mode: 'browser-only', version: '5.0.6',
+    pid: 42, accepting_turns: true, active_http_turns: 0, active_browser_turns: counts.shift(),
+  });
+  await supervisor.waitForIdleForSetup('bigger-context', 1000, 1);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /1 active browser turn\(s\) to finish before applying Bigger Context/);
+});
+
 test('MCP handoff timeout leaves the running bridge untouched', async () => {
   const supervisor = new RuntimeSupervisor({ app: {}, logger, coreHome });
   supervisor.daemon = { pid: 42 };

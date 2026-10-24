@@ -134,11 +134,11 @@ function yamlString(value) {
 // Every Go plugin is built with Go 1.26.10/1.27.3 or later: before them, crypto/x509 trusted chains
 // through distrusted intermediates (CVE-2026-111943, the leaked emSign CA keys).
 const COMMANDCODE_PLUGINS = [
-  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.8.dll", sha256: "b52872c6fa08b46ae71034b6a83ae346fb14cee4d9e910d3f71c86293d098139" },
+  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.9.dll", sha256: "6940a739a4d4250341ac9a4374b0d7e7cace4076e216d4169744d933982e19a0" },
   { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.3.dll", sha256: "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.2.dll", sha256: "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
-  { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
+  { id: "cpa-helper", file: "cpa-helper-v0.1.1.dll", sha256: "7ea766d0b569f0f6c402f02918d1d52137071425e4544c791ff773af6fbba6ce" },
   // Grok Build/Web/Console provider built from chenyme/grok2api (vendor/cpa-plugins/grok-login-provider).
   { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.2.dll", sha256: "9894157b26546b325e308b36fcb4fde6795b3ed813bc866e79ab78dfb0a39937" },
   // CPA Auto Review (p90-lover/cpa_auto_review): serves codex-auto-review on a chosen Codex account and

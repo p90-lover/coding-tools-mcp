@@ -8,8 +8,10 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -102,6 +104,35 @@ var runtimeMu sync.Mutex
 var active *service
 var loopbackClient = &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 15 * time.Minute,
 	CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+
+// A streamed reply that has not started within this long is asked for once more. The switcher
+// sends its response headers only once the upstream stream has begun, so waiting for headers is
+// waiting for the model's first word. Seen live 2026-10-24: a MiMo request got no response for
+// 120 s (the switcher's whole attempt budget) and the chat sat "quiet" for two minutes; asked
+// again, it answered in 11 s. Replies normally start within seconds (median whole reply 10 s).
+var streamClient = newStreamClient(60 * time.Second)
+
+func newStreamClient(start time.Duration) *http.Client {
+	return &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: start}, Timeout: 15 * time.Minute,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
+var errStreamNotStarted = errors.New("Cline did not start its reply in time, twice")
+
+// startStream asks the switcher for a streamed reply, and once more if the first never starts:
+// nothing has reached the caller then, so asking again repeats nothing.
+func startStream(body []byte) (*http.Response, error) {
+	for try := 1; ; try++ {
+		r, e := localRequestWith(streamClient, "POST", "/v1/chat/completions", body)
+		var timeout net.Error
+		if e == nil || !errors.As(e, &timeout) || !timeout.Timeout() {
+			return r, e
+		}
+		if try == 2 {
+			return nil, errStreamNotStarted
+		}
+	}
+}
 
 func configure(raw []byte) error {
 	var req struct {
@@ -266,6 +297,9 @@ func stopRuntime() {
 }
 func quiesce() { runtimeMu.Lock(); defer runtimeMu.Unlock(); stopRuntime() }
 func localRequest(method, path string, body []byte) (*http.Response, error) {
+	return localRequestWith(loopbackClient, method, path, body)
+}
+func localRequestWith(client *http.Client, method, path string, body []byte) (*http.Response, error) {
 	runtimeMu.Lock()
 	s := active
 	runtimeMu.Unlock()
@@ -287,7 +321,7 @@ func localRequest(method, path string, body []byte) (*http.Response, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	return loopbackClient.Do(req)
+	return client.Do(req)
 }
 func readLocal(method, path string, body []byte) (int, http.Header, []byte, error) {
 	r, e := localRequest(method, path, body)
@@ -519,7 +553,15 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
-	r, e := localRequest("POST", "/v1/chat/completions", b)
+	var r *http.Response
+	if stream {
+		r, e = startStream(b)
+	} else {
+		r, e = localRequest("POST", "/v1/chat/completions", b)
+	}
+	if errors.Is(e, errStreamNotStarted) {
+		return upstreamErrorEnvelope("cline_timeout", e.Error(), 504, true), nil
+	}
 	if e != nil {
 		return nil, e
 	}

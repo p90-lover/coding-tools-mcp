@@ -9,7 +9,10 @@ import {
   formatChatGptWebMultipartStage,
 } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
-import { biggerContextPartCount } from "../src/adapters/chatgpt-web/usage";
+import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
+import { biggerContextPartCount, resolveBiggerContextMultipartParts } from "../src/adapters/chatgpt-web/usage";
+import { buildCompactV1Output, encodeCompactionSummary, OPAQUE_COMPACTION_NOTE } from "../src/responses/compaction";
+import { parseRequest } from "../src/responses/parser";
 import type { CodexParsedRequest } from "../src/types";
 
 function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexParsedRequest {
@@ -614,6 +617,53 @@ test("plain prompts send the person's own words and one turn-token line when Cha
   // Off unless asked, and never for a read-only effort, which has no token.
   expect(compileChatGptWebPrompt(first, capabilities, token).text).toContain("<codex_context_json>");
 });
+
+for (const format of ["v1", "v2", "opaque"] as const) test.each([false, true])(
+  `${format} post-compaction prompts restore current instructions in a fresh conversation (Bigger Context=%s)`,
+  experimentalBiggerContext => {
+    const token = "turn_12345678901234567890123456789012";
+    const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true, experimentalBiggerContext };
+    const system = "Current system instruction: verify the result.";
+    const developer = "Current developer instruction: preserve unrelated edits.";
+    const agents = "# AGENTS.md instructions for G:\\repo\n\nUse the existing tests.";
+    const environment = "<environment_context>\n<cwd>G:\\repo</cwd>\n</environment_context>";
+    const summary = "Checkpoint: the previous implementation is complete; validation remains.";
+    const checkpoint = format === "opaque" ? OPAQUE_COMPACTION_NOTE : summary;
+    const source = { type: "message", role: "user", content: [{ type: "input_text", text: "Finish the existing task." }] };
+    const context = [
+      { type: "message", role: "developer", content: [{ type: "input_text", text: developer }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: agents }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environment }] },
+    ];
+    const body = {
+      model: CHATGPT_WEB_MODEL_ID,
+      instructions: system,
+      reasoning: { effort: "high" },
+      client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_compacted_prompt", turn_id: "turn_compacted_prompt" }) },
+    };
+    const before = parseRequest({ ...body, input: [...context, source] });
+    const replacement = format === "v1"
+      ? buildCompactV1Output([source], summary)
+      : [source, { type: "compaction", encrypted_content: format === "opaque" ? "gAAAAABnative-opaque-checkpoint" : encodeCompactionSummary(summary) }];
+    const parsed = parseRequest({ ...body, input: [...context, ...replacement] });
+    expect(chatGptConversationKey(parsed, "provider")).not.toBe(chatGptConversationKey(before, "provider"));
+
+    const parts = experimentalBiggerContext ? resolveBiggerContextMultipartParts(parsed, capabilities) : undefined;
+    expect(parts).toBeUndefined();
+    const compiled = compileChatGptWebPrompt(parsed, capabilities, token, { plainPrompt: true, experimentalMultipartParts: parts });
+    const encoded = compiled.text.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)?.[1];
+    expect(encoded).toBeDefined();
+    const envelope = JSON.parse(encoded!) as { system: string[]; messages: Array<{ role: string; content: string }> };
+    expect(envelope.system).toEqual([system]);
+    for (const [role, content] of [["developer", developer], ["user", agents], ["user", environment]]) {
+      expect(envelope.messages).toContainEqual({ role, content });
+    }
+    expect(compiled.text).toContain(checkpoint);
+    expect(compiled.text).toContain("Finish the existing task.");
+    expect(compiled.text).toContain(token);
+    expect(compiled.text).toContain("use the attached Codex Native tools directly");
+  },
+);
 
 test("a /goal continuation sends Codex's goal instruction as the prompt and says where update_goal is", () => {
   const token = "turn_12345678901234567890123456789012";

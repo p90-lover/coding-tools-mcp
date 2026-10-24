@@ -1180,7 +1180,8 @@ pub fn wrap_tool_result(structured: Value) -> Value {
 
 pub fn wrap_mcp_tool_result(tool_name: &str, args: &Value, mut structured: Value) -> Value {
     let is_error = structured.get("ok").and_then(Value::as_bool) == Some(false);
-    let computer_image = tool_name.starts_with("computer_")
+    // computer_* observations and compare_images' optional diff picture carry an image only sometimes.
+    let computer_image = (tool_name.starts_with("computer_") || tool_name == "compare_images")
         && structured.get("base64").and_then(Value::as_str).is_some();
     let image_result = computer_image
         || (matches!(

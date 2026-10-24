@@ -270,10 +270,18 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the releaseRound \d+( of \d+)? · 5m \d+s$/, "Codex's goal bar: state, objective, round, running time");
-  // While pursued, the bar says why the last check found the goal not met yet.
-  const told = walk(teamChat.render({ commands: { ...commands(), goal: { ...commands().goal, feedback: "Two tests still fail." } } }))
-    .find((element) => String(element.props?.className).startsWith("cx-goal "));
-  assert.match(text(told), /Not met yet: Two tests still fail\./);
+  // While pursued, why the last check found the goal not met yet shows in a box of its own under
+  // the bar (user: "separate ... as 2 box ... the model not yet box should always below goal box").
+  const toldModes = walk(teamChat.render({ commands: { ...commands(), goal: { ...commands().goal, feedback: "Two tests still fail." } } }))
+    .find((element) => element.props?.className === "cx-composer-modes");
+  const toldBar = walk(toldModes).find((element) => String(element.props?.className).startsWith("cx-goal "));
+  const verdict = walk(toldModes).find((element) => element.props?.className === "cx-goal-verdict");
+  assert.equal(text(verdict), "Not met yet: Two tests still fail.");
+  assert.doesNotMatch(text(toldBar), /Not met yet/, "the goal bar keeps only the goal");
+  const modeKids = [toldModes.props.children].flat(Infinity).filter(Boolean);
+  assert.ok(modeKids.indexOf(verdict) > modeKids.indexOf(toldBar), "the verdict comes after the goal bar");
+  assert.match(fs.readFileSync(path.join(__dirname, "../src/features/codex-chat.css"), "utf8"), /\.cx-goal-verdict \{[^}]*flex: 1 0 100%; order: 1;/,
+    "and wraps to the last row, under the bar and the plan chip");
   assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
   // The bar's icons are buttons, not typed commands: what is typed in the box stays.
   type(teamChat, "half a message");
@@ -618,6 +626,22 @@ test("a failed step's card names the step and its error, and its turn leaves the
     "the failed turn is told, and its memo sees the change");
   assert.ok(dsh.includes("{errorShownBelow ? null : steps.filter((step) => step.error)"), "the DeepSeek turn drops its own copy of the error");
   assert.ok(source.includes("<input type=\"checkbox\" role=\"switch\""), "automatic retry is a switch");
+});
+
+test("Retry waits only on its own chat, and goal actions leave no card in the chat", () => {
+  // The user: "retry still not working". Retry ran through the surface-wide run(), which returns
+  // at once while anything else is in flight, and the card's button was disabled by that same busy.
+  const chat = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const surface = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  assert.ok(chat.includes("<FailedStepCard step={failedStep} notice={notice} busy={retrying}"), "the card's Retry is disabled only by this chat's retry");
+  assert.ok(!chat.includes("disabled={busy} onClick={() => retryStart("), "nor is the Start/Retry button");
+  const retry = surface.slice(surface.indexOf("const retryChatStart"), surface.indexOf("const retryRun"));
+  assert.ok(retry.includes("chatRun(") && !retry.includes("run(\"start-run\""), "Retry is guarded per chat, not by run()");
+  assert.ok(surface.includes("retrying={Boolean(chatTaskId && chatBusy.includes(chatTaskId))}"));
+  // The user: "remove all goal box like goal resumed info", "keep the chat clean". The goal bar shows the state.
+  for (const notice of ["Goal resumed.", "Goal cleared.", "Goal paused.", "The queued goal was dropped."]) {
+    assert.ok(!chat.includes(notice), `no "${notice}" card`);
+  }
 });
 
 test("each chat has its own queue: queuing in another chat never replaces one, and the view closing keeps them", () => {

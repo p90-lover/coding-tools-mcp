@@ -1,4 +1,5 @@
-//! Bounded, local-only image processing. No model calls, OCR, or image uploads.
+//! Bounded, local-only image processing. No model calls or image uploads (OCR, in ocr.rs, also
+//! runs on the device).
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::sync::{Mutex, MutexGuard};
@@ -28,6 +29,16 @@ pub(super) fn vision_guard() -> Result<MutexGuard<'static, ()>, WorkspaceError> 
         category: "capacity",
         retryable: true,
     })
+}
+
+/// Tests that take the vision permit run one at a time: the real gate answers VISION_BUSY rather
+/// than waiting, so parallel tests would fail each other.
+#[cfg(test)]
+pub(super) fn serial_vision_test() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub(super) fn vision_error(code: &'static str, message: &str) -> WorkspaceError {
@@ -207,7 +218,7 @@ impl ViewOptions {
     }
 }
 
-fn read_source(ws: &Workspace, path: &str) -> Result<(Vec<u8>, String), WorkspaceError> {
+pub(super) fn read_source(ws: &Workspace, path: &str) -> Result<(Vec<u8>, String), WorkspaceError> {
     let resolved = ws.resolve_read_path(path)?;
     let metadata = std::fs::metadata(&resolved.path)
         .map_err(|_| vision_error("IO_ERROR", "Unable to inspect image file"))?;
@@ -276,7 +287,7 @@ fn image_header(data: &[u8]) -> Result<(ImageFormat, u32, u32), WorkspaceError> 
     Ok((format, width, height))
 }
 
-fn decode(data: &[u8]) -> Result<DynamicImage, WorkspaceError> {
+pub(super) fn decode(data: &[u8]) -> Result<DynamicImage, WorkspaceError> {
     image_header(data)?;
     let image = reader(data)?.decode().map_err(|_| {
         vision_error(
@@ -416,9 +427,79 @@ pub(super) fn render_image(
     Ok(tool_ok(metadata))
 }
 
+/// compare_images groups changed pixels on a grid of this many pixels; touching cells form one region.
+const DIFF_CELL: u32 = 16;
+const MAX_DIFF_REGIONS: usize = 16;
+const DIFF_MARK: Rgba<u8> = Rgba([230, 20, 60, 255]);
+
+/// Separate changed areas, largest first, from per-cell changed-pixel counts. Cells that touch,
+/// diagonally included, merge, so one edited widget is one region and two distant edits are two.
+fn changed_regions(cells: &[u32], columns: u32, width: u32, height: u32) -> (Vec<Value>, bool) {
+    let rows = cells.len() as u32 / columns;
+    let mut seen = vec![false; cells.len()];
+    let mut regions = Vec::new();
+    for start in 0..cells.len() {
+        if cells[start] == 0 || seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![start];
+        let (mut left, mut top, mut right, mut bottom, mut pixels) =
+            (u32::MAX, u32::MAX, 0, 0, 0u64);
+        while let Some(cell) = stack.pop() {
+            let (cx, cy) = (cell as u32 % columns, cell as u32 / columns);
+            (left, top, right, bottom) = (left.min(cx), top.min(cy), right.max(cx), bottom.max(cy));
+            pixels += u64::from(cells[cell]);
+            for ny in cy.saturating_sub(1)..=(cy + 1).min(rows - 1) {
+                for nx in cx.saturating_sub(1)..=(cx + 1).min(columns - 1) {
+                    let next = (ny * columns + nx) as usize;
+                    if cells[next] > 0 && !seen[next] {
+                        seen[next] = true;
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+        let (x, y) = (left * DIFF_CELL, top * DIFF_CELL);
+        regions.push((
+            pixels,
+            json!({"x": x, "y": y,
+            "width": ((right + 1) * DIFF_CELL).min(width) - x,
+            "height": ((bottom + 1) * DIFF_CELL).min(height) - y, "changed_pixels": pixels}),
+        ));
+    }
+    regions.sort_by_key(|region| std::cmp::Reverse(region.0));
+    let truncated = regions.len() > MAX_DIFF_REGIONS;
+    let regions = regions
+        .into_iter()
+        .take(MAX_DIFF_REGIONS)
+        .map(|(_, region)| region)
+        .collect();
+    (regions, truncated)
+}
+
+/// The after image faded to light gray, with every changed pixel painted DIFF_MARK.
+fn faded(pixel: &Rgba<u8>) -> Rgba<u8> {
+    let [r, g, b, _] = pixel.0.map(u32::from);
+    let luma = (299 * r + 587 * g + 114 * b) / 1000;
+    let light = (255 - (255 - luma) / 4) as u8;
+    Rgba([light, light, light, 255])
+}
+
 pub fn compare_images(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let _permit = vision_guard()?;
     let threshold = integer(args, "threshold", 0, 0, 255)? as u8;
+    // Only the size budget of the diff picture is configurable; it is never cropped or saved.
+    let diff_args = json!(args
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| matches!(key.as_str(), "max_bytes" | "max_width" | "max_height"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>());
+    let diff_options = boolean(args, "diff_image", false)?
+        .then(|| ViewOptions::parse(&diff_args))
+        .transpose()?;
     let (before_bytes, before_path) = read_source(ws, path_arg(args, "before_path")?)?;
     let before = decode(&before_bytes)?.into_rgba8();
     let (after_bytes, after_path) = read_source(ws, path_arg(args, "after_path")?)?;
@@ -431,17 +512,26 @@ pub fn compare_images(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceEr
         ));
     }
     let (width, height) = before.dimensions();
+    let columns = width.div_ceil(DIFF_CELL);
+    let mut cells = vec![0u32; (columns * height.div_ceil(DIFF_CELL)) as usize];
+    let mut diff = diff_options
+        .as_ref()
+        .map(|_| image::RgbaImage::new(width, height));
     let mut changed = 0u64;
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (width, height, 0, 0);
     for (index, (a, b)) in before.pixels().zip(after.pixels()).enumerate() {
-        if a.0
-            .iter()
-            .zip(&b.0)
-            .any(|(a, b)| a.abs_diff(*b) > threshold)
-        {
-            let x = index as u32 % width;
-            let y = index as u32 / width;
+        let x = index as u32 % width;
+        let y = index as u32 / width;
+        let differs =
+            a.0.iter()
+                .zip(&b.0)
+                .any(|(a, b)| a.abs_diff(*b) > threshold);
+        if let Some(diff) = diff.as_mut() {
+            diff.put_pixel(x, y, if differs { DIFF_MARK } else { faded(b) });
+        }
+        if differs {
             changed += 1;
+            cells[((y / DIFF_CELL) * columns + x / DIFF_CELL) as usize] += 1;
             min_x = min_x.min(x);
             min_y = min_y.min(y);
             max_x = max_x.max(x);
@@ -453,12 +543,30 @@ pub fn compare_images(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceEr
     } else {
         json!({"x": min_x, "y": min_y, "width": max_x-min_x+1, "height": max_y-min_y+1})
     };
-    Ok(tool_ok(
-        json!({"before_path": before_path, "after_path": after_path, "same_dimensions": true,
+    let (regions, regions_truncated) = changed_regions(&cells, columns, width, height);
+    let result = json!({"before_path": before_path, "after_path": after_path, "same_dimensions": true,
         "width": width, "height": height, "equal": changed == 0, "changed_pixels": changed,
         "changed_ratio": changed as f64 / (u64::from(width) * u64::from(height)) as f64,
-        "changed_bounds": bounds, "threshold": threshold, "comparison": "pixel_difference_not_semantic", "inference_performed": false}),
-    ))
+        "changed_bounds": bounds, "changed_regions": regions, "regions_truncated": regions_truncated,
+        "region_grid": DIFF_CELL, "threshold": threshold,
+        "comparison": "pixel_difference_not_semantic", "inference_performed": false});
+    let mut result = tool_ok(result);
+    if let (Some(diff), Some(options)) = (diff, diff_options) {
+        // Keep the comparison's own fields; the picture's size goes under diff_image, and its
+        // pixels in base64/mime_type, which the MCP wrapper turns into image content.
+        let picture = render_image(
+            DynamicImage::ImageRgba8(diff),
+            &diff_args,
+            options,
+            json!({}),
+        )?;
+        result["base64"] = picture["base64"].clone();
+        result["mime_type"] = picture["mime_type"].clone();
+        result["diff_image"] = json!({"width": picture["width"], "height": picture["height"],
+            "bytes": picture["bytes"], "scale": picture["scale"],
+            "legend": "the after image faded to gray, with changed pixels in red"});
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -521,6 +629,7 @@ mod vision_tests {
 
     #[test]
     fn vision_real_fixture_roundtrip_compare_and_mcp_envelope() {
+        let _serial = serial_vision_test();
         let ws =
             Workspace::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("fixture workspace");
         let args = json!({"path": "icons/32x32.png", "crop": {"x": 0, "y": 0, "width": 16, "height": 16},
@@ -548,6 +657,53 @@ mod vision_tests {
         .expect("comparison");
         assert_eq!(compared["changed_pixels"], 0);
         assert_eq!(compared["equal"], true);
+        assert_eq!(compared["changed_regions"], json!([]));
+        assert!(compared.get("base64").is_none());
         assert!(view_image(&ws, &json!({"path": "../outside.png"})).is_err());
+    }
+
+    #[test]
+    fn distant_changes_are_separate_regions_and_touching_cells_merge() {
+        // 100x40 image, 7x3 cells of 16 px. Two edits far apart, one spanning a cell border.
+        let (width, height): (u32, u32) = (100, 40);
+        let columns = width.div_ceil(DIFF_CELL);
+        let mut cells = vec![0u32; (columns * height.div_ceil(DIFF_CELL)) as usize];
+        let mut mark =
+            |x: u32, y: u32| cells[((y / DIFF_CELL) * columns + x / DIFF_CELL) as usize] += 1;
+        for (x, y) in [(2, 2), (3, 3), (15, 15), (16, 16)] {
+            mark(x, y);
+        }
+        mark(98, 38);
+        let (regions, truncated) = changed_regions(&cells, columns, width, height);
+        assert!(!truncated);
+        assert_eq!(
+            regions,
+            [
+                json!({"x": 0, "y": 0, "width": 32, "height": 32, "changed_pixels": 4}),
+                json!({"x": 96, "y": 32, "width": 4, "height": 8, "changed_pixels": 1}),
+            ]
+        );
+    }
+
+    #[test]
+    fn compare_images_diff_image_is_inline_mcp_image_content() {
+        let _serial = serial_vision_test();
+        let ws =
+            Workspace::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("fixture workspace");
+        let args = json!({"before_path": "icons/32x32.png", "after_path": "icons/32x32.png",
+            "diff_image": true, "max_width": 16, "max_height": 16});
+        let result = compare_images(&ws, &args).expect("comparison");
+        assert_eq!(result["width"], 32, "the comparison keeps its own size");
+        assert_eq!(result["diff_image"]["width"], 16);
+        let wrapped =
+            crate::tools::workspace::wrap_mcp_tool_result("compare_images", &args, result);
+        assert_eq!(wrapped["content"][0]["type"], "image");
+        assert!(wrapped["structuredContent"].get("base64").is_none());
+        assert!(compare_images(
+            &ws,
+            &json!({"before_path": "icons/32x32.png",
+            "after_path": "icons/32x32.png", "diff_image": true, "max_width": 0})
+        )
+        .is_err());
     }
 }

@@ -444,6 +444,12 @@ test("Bigger Context stays in Settings without opening a startup recommendation"
   );
   assert.match(appSource, /label=\{copy\.biggerContext\}[\s\S]*?onChange=\{\(checked\) => void setBiggerContext\(checked\)\}/);
   assert.match(appSource, /updateState\(await api!\.setBiggerContext\(enabled\)\)/);
+  // While it applies (waiting for WebGPT turns, then a bridge restart), the switch shows the asked-for
+  // position and the row says what it waits on; it sat at the old position and read as refused.
+  assert.match(appSource, /checked=\{biggerPending \?\? snapshot\.state\.experimentalBiggerContext\}/);
+  assert.match(appSource, /setBiggerPending\(enabled\);[\s\S]*?finally \{\s*setBiggerPending\(null\);/);
+  assert.match(appSource, /operation\?\.name === "bigger-context" && operation\.status === "running"/);
+  assert.match(appSource, /: biggerProgress \|\| copy\.biggerContextBody\}/);
   assert.match(
     appSource,
     /<BiggerContextRecommendation[\s\S]*?checked=\{snapshot\.state\.experimentalBiggerContext\}[\s\S]*?onClose=\{\(\) => setBiggerContextRecommendationOpen\(false\)\}/,

@@ -306,6 +306,10 @@ test("upstream spawn preserves context and the effort on Chat/TUI fallback, the 
     // spawn records each session's launch window for the context meter (chat_context launchedWindow).
     rememberLaunchWindow: () => {},
     chatTools: async () => null,
+
+    // The person's own MCP servers (Plugins > MCPs): none here.
+
+    userServers: () => [],
     internalApi: async (verb, endpoint, body) => {
       if (verb === "GET") return { chatHarnesses: ["codex"] };
       bodies.push(body);
@@ -395,6 +399,10 @@ test("a chat host that was only slow to start is retried as chat, not turned int
       TUI_RESULT_INSTRUCTION: "Write fixture result", TRANSIENT_CHAT_START: vm.runInNewContext(transient), CHAT_RETRY_PAUSE_MS: 0, setTimeout,
       rememberLaunchWindow: () => {},
       chatTools: async () => null,
+
+      // The person's own MCP servers (Plugins > MCPs): none here.
+
+      userServers: () => [],
       internalApi: async (verb, _endpoint, body) => {
         if (verb === "GET") return { chatHarnesses: ["claude-code"] };
         modes.push(body.mode);

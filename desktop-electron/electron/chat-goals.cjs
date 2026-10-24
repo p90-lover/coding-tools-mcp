@@ -8,7 +8,7 @@
 // evaluator judges it from the round's message and the closing cards' answers.
 
 const fs = require("node:fs");
-const path = require("node:path");
+const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 const OBJECTIVE_LIMIT = 2000;
 const STATUSES = new Set(["active", "paused", "achieved", "stalled", "limited"]);
@@ -45,27 +45,40 @@ function roundTranscript(message, answers) {
   return text.length > TRANSCRIPT_LIMIT ? `…${text.slice(-TRANSCRIPT_LIMIT)}` : text;
 }
 
-/** The evaluator's instructions: judge the condition from the transcript alone, as JSON. */
-function goalCheckPrompt(objective, transcript) {
+/**
+ * The evaluator's instructions: judge the condition from the transcript alone, as JSON. With
+ * `judge` (the person's "Let the model judge" setting) nobody else will look at the goal: the
+ * evaluator also hears how the round ended (`ended`: it waited on the person, or failed), and may end
+ * the goal itself ("stop") where going on is unsafe or pointless, so the goal never waits on the
+ * person and never runs on regardless.
+ */
+function goalCheckPrompt(objective, transcript, { judge = false, ended = "" } = {}) {
   return [
     "You evaluate whether a stop condition set for an AI coding agent is satisfied, judging only from the transcript of its latest turn below.",
     "",
     `Condition: ${objective}`,
+    ...(ended ? ["", `How the turn ended: ${ended}`] : []),
     "",
     "Rules:",
     "- The condition is satisfied only when the transcript shows evidence that it holds now: the work done, checked, and its result reported.",
     "- Claims without evidence, plans, partial progress, waiting on someone or something, or work left for later are not satisfied.",
     "- A condition that describes an ongoing aim rather than an end state is not satisfied by progress alone.",
     "- If the transcript does not show enough to decide, it is not satisfied.",
+    ...(judge ? [
+      "- The user is away and has asked you to judge for them: nobody will answer the agent's questions or approvals. When not met, write the reason as the agent's next instruction; if the turn waited on the user, tell the agent to choose the safest reasonable option itself and carry on.",
+      "- Set \"stop\" to true to end the goal instead when going on would be unsafe or destructive, the condition cannot be reached, or the same blocker has repeated across turns with no progress. Do not stop merely because the work is hard, slow or unfinished.",
+    ] : []),
     "",
-    'Answer with JSON only: {"met": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met>"}',
+    judge
+      ? 'Answer with JSON only: {"met": true|false, "stop": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met, or why the goal must end when stopping>"}'
+      : 'Answer with JSON only: {"met": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met>"}',
     "",
     "Transcript:",
     transcript,
   ].join("\n");
 }
 
-/** The evaluator's answer as { met, reason }; anything unreadable throws. */
+/** The evaluator's answer as { met, stop, reason }; anything unreadable throws. A met goal is never stopped. */
 function parseGoalCheck(text) {
   const raw = String(text ?? "");
   const start = raw.indexOf("{"), end = raw.lastIndexOf("}");
@@ -73,7 +86,8 @@ function parseGoalCheck(text) {
   const parsed = JSON.parse(raw.slice(start, end + 1));
   if (typeof parsed?.met !== "boolean") throw new Error("The goal evaluator gave no verdict");
   const reason = String(parsed.reason ?? "").replace(/\s+/g, " ").trim().slice(0, REASON_LIMIT);
-  return { met: parsed.met, reason: reason || (parsed.met ? "The condition is met." : "The condition is not met yet.") };
+  const stop = !parsed.met && parsed.stop === true;
+  return { met: parsed.met, stop, reason: reason || (parsed.met ? "The condition is met." : stop ? "The goal cannot go on." : "The condition is not met yet.") };
 }
 
 /**
@@ -125,18 +139,24 @@ function cleanObjective(value) {
 function createGoalStore({ file = null, now = Date.now } = {}) {
   let goals = {};
   if (file) {
+    let text = null;
+    try { text = fs.readFileSync(file, "utf8"); } catch { /* No goals saved yet. */ }
     try {
-      const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+      const saved = text === null ? null : JSON.parse(text);
       if (saved && typeof saved === "object" && !Array.isArray(saved)) goals = saved;
-    } catch { /* No goals saved yet. */ }
+    } catch {
+      // A file a crash tore (its size in NUL bytes, seen 2026-10-23 on another state file) read as
+      // "no goals", and the next save wrote over it: every goal was gone after the restart. It is
+      // kept beside the new file instead.
+      try { fs.renameSync(file, `${file}.unreadable-${now()}`); } catch { /* the next save replaces it */ }
+    }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
+  // Flushed to disk before it replaces the old file (durable), so a power cut leaves the old goals
+  // or the new ones: a goal carries on after a restart only if its file survives it.
   const persist = () => {
     if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(goals, null, 2));
-    fs.renameSync(temporary, file);
+    writePrivateFileAtomic(file, JSON.stringify(goals, null, 2), { durable: true, protectDirectory: false });
   };
   return {
     get: (workspaceId, taskId) => goals[key(workspaceId, taskId)] ?? null,

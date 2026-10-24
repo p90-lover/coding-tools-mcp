@@ -1,6 +1,7 @@
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
+import { ModelJudgesToggle } from "./ModelJudgesToggle";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
@@ -754,7 +755,7 @@ function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
-  approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
+  approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork, onClosePane,
 }: {
@@ -801,6 +802,8 @@ export function AgentOrchestratorChat({
   /** Why this chat's latest run could not start, if it could not. */
   notice?: string;
   retryStart: (runId: string) => void;
+  /** This chat's own Retry is on its way; Retry waits on nothing else (not the app-wide `busy`). */
+  retrying?: boolean;
   /** The project's name, for the empty chat. */
   projectName?: string;
   stop?: (runId: string) => void;
@@ -1561,16 +1564,18 @@ export function AgentOrchestratorChat({
             else { setDraft("/goal "); input.current?.focus(); }
             break;
           }
+          // Done quietly: the goal bar shows the new state (paused, pursuing, gone), and a card saying so
+          // under the chat only cluttered it (the user: "keep the chat clean").
           if (["pause", "resume", "clear"].includes(action)) {
+            setCard(null);
             if (action === "clear" && queued.some((item) => item.goal)) {
-              setQueue(selectedTaskId, queued.filter((item) => !item.goal)); say("Goal", "The queued goal was dropped."); break;
+              setQueue(selectedTaskId, queued.filter((item) => !item.goal)); break;
             }
             if (!commands) break;
             if (!goal) { say("Goal", "No goal set."); break; }
             // The bar's icons wait while it is applied, so a second click can't stack another action.
             setGoalBusy(true);
             try { await commands.goalAction(action as "pause" | "resume" | "clear"); } finally { setGoalBusy(false); }
-            say("Goal", action === "clear" ? "Goal cleared." : action === "pause" ? "Goal paused. The current round finishes first." : "Goal resumed.");
             break;
           }
           if (action === "edit") {
@@ -1969,10 +1974,10 @@ export function AgentOrchestratorChat({
               <div className="cx-card tone-error">
                 <strong>{notice ? "Couldn't start the run" : "This run hasn't started"}</strong>
                 <p>{notice || "It stopped before any agent ran. Start it again."}</p>
-                <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>{notice ? "Retry" : "Start"}</button></div>
+                <div className="cx-card-actions"><button className="button-primary" type="button" disabled={retrying} onClick={() => retryStart(latest.id)}>{notice ? "Retry" : "Start"}</button></div>
               </div>
             ) : null}
-            {recovering && latest ? <FailedStepCard step={failedStep} notice={notice} busy={busy} onRetry={() => retryStart(latest.id)} /> : null}
+            {recovering && latest ? <FailedStepCard step={failedStep} notice={notice} busy={retrying} onRetry={() => retryStart(latest.id)} /> : null}
           </div>
           {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
@@ -2021,6 +2026,13 @@ export function AgentOrchestratorChat({
           <button type="button" className="cx-picker-action" disabled title="Chats need a project">
             <span aria-hidden="true">✕</span>Don't work in a project</button>
         </FloatingLayer> : null}
+        {/* Queued messages always come first, above every other bar (a command's card, the goal, a
+            loop or wake-up, notes, the subagents' line) and the branch picker, as Claude Code keeps its
+            queued bar on top: under the goal bar it read as part of the goal (the user's ask). */}
+        <QueuedMessageBar items={queuedBar}
+          onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
+          // Queued commands and goals show in the bar too now, so Clear all clears all of them.
+          onClearAll={() => setQueue(selectedTaskId, [])} />
         {card ? <section className="cx-command-card" role="status" aria-label={card.title}>
           <header><strong>{card.title}</strong>
             <button type="button" className="cx-icon-button" aria-label="Close" onClick={() => setCard(null)}><Icon name="close" width="12" height="12" /></button></header>
@@ -2088,18 +2100,21 @@ export function AgentOrchestratorChat({
             <GoalGlyph name="target" />
             <span className="cx-goal-state" title={commands.goal.note || `Round ${goalRounds(commands.goal)}`}>{GOAL_SUMMARY[commands.goal.status]}</span>
             <span className="cx-goal-objective" title={commands.goal.objective}>{commands.goal.objective}</span>
-            {goalDetail(commands.goal) ? <span className="cx-goal-note" title={goalDetail(commands.goal)}>{goalDetail(commands.goal)}</span> : null}
             <span className="cx-goal-meta" title={`Round ${goalRounds(commands.goal)}`}>
               {/* Which round it is on, then how long it has run, to the second as Codex shows it. */}
               <span className="cx-goal-round">Round {goalRounds(commands.goal)} · </span>
               <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
                 format={(ms) => goalElapsed(0, ms)} /></span>
+            <ModelJudgesToggle compact />
             <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" disabled={goalBusy} onClick={() => void runCommand("goal", "clear", false)}><GoalGlyph name="trash" /></button>
             {commands.goal.status === "active"
               ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" disabled={goalBusy} onClick={() => void runCommand("goal", "pause", false)}><GoalGlyph name="pause" /></button>
               : commands.goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" disabled={goalBusy} onClick={() => void runCommand("goal", "resume", false)}><GoalGlyph name="play" /></button> : null}
             <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => void runCommand("goal", "edit", false)}><GoalGlyph name="expand" /></button>
           </div> : null}
+          {/* What the last check said (or why the goal waits), in its own box that always sits under the
+              goal bar: in the bar it was cut to a few words beside the objective. */}
+          {commands?.goal && goalDetail(commands.goal) ? <div className="cx-goal-verdict" role="note" title={goalDetail(commands.goal)}><span>{goalDetail(commands.goal)}</span></div> : null}
           {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
             <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
         </div> : null}
@@ -2127,12 +2142,6 @@ export function AgentOrchestratorChat({
           <span className="cx-subagent-dots" aria-hidden="true">{subagents.filter(subagentActive).slice(0, 3).map((run) => <i key={run.subagent_id} />)}</span>
           <span className="cx-shimmer">{subagentLine}</span>
         </button> : null}
-        {/* Queued and steering messages wait above the branch picker, as Claude Code's queued bar sits
-            above its branch (PR) bar: under it, a steer sat between "main" and the box. */}
-        <QueuedMessageBar items={queuedBar}
-          onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
-          // Queued commands and goals show in the bar too now, so Clear all clears all of them.
-          onClearAll={() => setQueue(selectedTaskId, [])} />
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
             Harness shows its approval panel: in the thread it took the thread's own margins and sat

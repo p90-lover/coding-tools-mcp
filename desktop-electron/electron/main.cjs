@@ -195,6 +195,13 @@ let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
 /** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
 let chatAgentTools = null;
+// Plugins > MCPs: the person's own MCP servers, handed to every chat session next to the app's tools.
+let chatMcpServers = null;
+function userMcpServers(logger = null) {
+  chatMcpServers ??= require("./chat-mcp-servers.cjs").createChatMcpServers({
+    filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger });
+  return chatMcpServers;
+}
 // Runtime > Subagents (subagents.cjs): created once, like the chat agents' tools it serves.
 let subagentsService = null;
 let antigravityReauth = null;
@@ -1873,7 +1880,7 @@ function registerIpc({ logger, stateStore }) {
     // the agent pre-warm and the Retry automatically switch unset. They still need a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "archived_chats", "chat_prewarm"].includes(input.operation)
-        || (input.operation === "chat_auto_retry" && input.arguments?.enabled === undefined));
+        || (["chat_auto_retry", "chat_model_judges"].includes(input.operation) && input.arguments?.enabled === undefined));
     assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
     // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
     if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
@@ -2521,6 +2528,22 @@ function registerIpc({ logger, stateStore }) {
     if (!rtkService) throw new Error("RTK is unavailable in this build");
     return rtk.install();
   });
+  // Plugins > MCPs: the person's own MCP servers for chat agents. Adding, changing or turning one on
+  // runs its command (or reaches its address) in every new chat, so it is their own click in the
+  // visible app; errors name the field, never a value (env and headers carry tokens).
+  handle("mcp-servers:list", () => userMcpServers(logger).list());
+  handle("mcp-servers:save", (event, server) => {
+    assertFocusedMainWindow(event, true);
+    return userMcpServers(logger).save(server);
+  });
+  handle("mcp-servers:remove", (event, id) => {
+    assertFocusedMainWindow(event, true);
+    return userMcpServers(logger).remove(String(id));
+  });
+  handle("mcp-servers:set-enabled", (event, id, enabled) => {
+    if (enabled === true) assertFocusedMainWindow(event, true);
+    return userMcpServers(logger).setEnabled(String(id), enabled === true);
+  });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
       || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools"
@@ -3107,6 +3130,18 @@ async function start() {
           own: [process.pid],
           electron: app.getAppMetrics().map((metric) => ({ pid: metric.pid, type: metric.type })),
         }),
+        // view_app: the app's own window as the user sees it, from its page (never the screen). A JPEG
+        // scaled to maxWidth keeps a 4K window's image small enough for a model's context.
+        captureApp: async ({ maxWidth }) => {
+          const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+          if (!window || window.isMinimized()) return null;
+          let image = await window.webContents.capturePage();
+          if (image.isEmpty()) return null;
+          const size = image.getSize();
+          if (size.width > maxWidth) image = image.resize({ width: maxWidth, quality: "good" });
+          const { width, height } = image.getSize();
+          return { base64: image.toJPEG(85).toString("base64"), mimeType: "image/jpeg", width, height };
+        },
         // chat_list / chat_read: the app's chats as the chat list reads them (the workflow's board
         // and runs), read-only; another project's only after the user allows it.
         chatHistory: backendBundles.requireModule(backend, "chat-history.cjs").createChatHistory({
@@ -3236,6 +3271,11 @@ async function start() {
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
         // RTK's Claude Code hook, which AO puts in each Claude session's own settings (empty: off).
         try { env = { ...env, ...rtk.daemonEnvironment() }; } catch { /* runs without RTK */ }
+        // AO hands this environment to every Claude Code chat agent. Claude Code's own scheduler
+        // (CronCreate, /loop) lives in one claude process and never fires once its turn ends: a goal
+        // agent set "*/10 * * * *" to carry on, said it would check again in 10 minutes, and nothing
+        // ever ran (2026-10-24). Without it the agent waits with the app's schedule_wakeup instead.
+        env = { ...env, CLAUDE_CODE_DISABLE_CRON: "1" };
         // Lets AO run any session's model through CPA; the daemon blanks it for the agents themselves.
         let cpaKey = null;
         try { cpaKey = externalServicesController?.cpaConnection()?.proxyApiKey; } catch { /* CPA not running */ }
@@ -3244,6 +3284,9 @@ async function start() {
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       openAuth: (url) => antigravityAuthBrowser(url),
       agentTools: chatAgentTools,
+      // Plugins > MCPs: an HTTP server only for agents whose AO driver takes one (the app's own rule).
+      userMcpServers: { forSession: (agent, taken) => userMcpServers(logger).forSession(agent, taken,
+        backendBundles.requireModule(backend, "chat-agent-tools.cjs").MCP_HTTP_AGENTS) },
       // The context meter's plan usage limits for chats on CPA's Codex accounts (CPA Helper).
       cpaQuota,
       // Each CPA account's token use and estimated cost; Codex accounts carry those limits too.

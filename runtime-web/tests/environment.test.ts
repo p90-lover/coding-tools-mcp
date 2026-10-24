@@ -564,6 +564,76 @@ describe("permission_profile sandbox detection (Codex CLI 0.146+)", () => {
 });
 
 describe("trusted Codex task environment continuity", () => {
+  test.each([
+    ["zero-filled", "\0".repeat(128)],
+    ["truncated", '{"version":1,"threads":'],
+    ["malformed", "{invalid}"],
+  ] as const)("recovers a malformed serialized thread cache only from current authority (%s)", (_kind, serialized) => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-chatgpt-thread-corruption-"));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    writeFileSync(statePath, serialized);
+    const current = currentWire({
+      sandbox: "workspace-write",
+      environmentXml: filesystemEnvironmentXml(workspaceWriteProfileXml),
+    });
+
+    const recovered = new ChatGptThreadEnvironmentStore(statePath, Date.now, stateRoot).resolve(current);
+    expect(recovered).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "workspaceWrite", writableRoots: [root], networkAccess: false },
+      tools: [],
+    });
+    expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
+      version: 1,
+      threads: { thread_current: {
+        cwd: root,
+        roots: [root],
+        writableRoots: [root],
+        sandboxPolicy: recovered.sandboxPolicy,
+      } },
+    });
+
+    writeFileSync(statePath, serialized);
+    const noProof = currentWire();
+    noProof._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_current", turn_id: "turn_next" }),
+      },
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Continue" }] }],
+    };
+    expect(() => new ChatGptThreadEnvironmentStore(statePath, Date.now, stateRoot).resolve(noProof))
+      .toThrow("missing cwd");
+    const forged = currentWire({
+      workspace: resolve(root, "forged-authority"),
+      sandbox: "workspace-write",
+      environmentXml: filesystemEnvironmentXml(workspaceWriteProfileXml),
+    });
+    expect(() => new ChatGptThreadEnvironmentStore(statePath, Date.now, stateRoot).resolve(forged))
+      .toThrow("missing cwd");
+    expect(readFileSync(statePath, "utf8")).toBe(serialized);
+  });
+
+  test("does not recover well-formed invalid serialized thread cache authority", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-chatgpt-thread-invalid-cache-"));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    for (const [serialized, message] of [
+      [JSON.stringify({ version: 2, threads: {} }), "Invalid ChatGPT thread environment store"],
+      [JSON.stringify({ version: 1, threads: { thread_current: {
+        cwd: root, roots: [root], writableRoots: [root], updatedAt: Date.now(),
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      } } }), "Invalid persisted ChatGPT read-only policy"],
+    ] as const) {
+      writeFileSync(statePath, serialized);
+      expect(() => new ChatGptThreadEnvironmentStore(statePath, Date.now, stateRoot).resolve(currentWire()))
+        .toThrow(message);
+      expect(readFileSync(statePath, "utf8")).toBe(serialized);
+    }
+  });
+
   test("persists the trusted first-turn authority and refreshes tools from every follow-up", () => {
     const stateRoot = mkdtempSync(join(tmpdir(), "codex-chatgpt-thread-environment-"));
     temporaryRoots.push(stateRoot);
@@ -1263,7 +1333,7 @@ describe("trusted Codex task environment continuity", () => {
       .toThrow("multiple canonical rollouts for the requested current turn");
   });
 
-  test("recovers byte-realistic workspace-write and read-only-with-network profiles", () => {
+  test.each(["declared", "omitted", "empty", "conflicting"] as const)("recovers byte-realistic workspace-write and read-only-with-network profiles (%s)", (rootsMode) => {
     const codexHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-rollout-profiles-"));
     temporaryRoots.push(codexHome);
     const rolloutPath = join(
@@ -1274,7 +1344,7 @@ describe("trusted Codex task environment continuity", () => {
       "04",
       `rollout-2026-09-04T15-30-36-${rolloutThreadId}.jsonl`,
     );
-    const auxiliaryRoot = resolve(root, "rollout-visualization-output");
+    const auxiliaryRoot = resolve(root, "..", "rollout-visualization-output");
     const workspaceEntries = [
       { path: { type: "special", value: { kind: "root" } }, access: "read" },
       { path: { type: "path", path: root }, access: "write" },
@@ -1290,7 +1360,7 @@ describe("trusted Codex task environment continuity", () => {
     writeFileSync(rolloutPath, [
       JSON.stringify(childSessionMeta()),
       JSON.stringify(childTurnContext(rolloutTurnId, {
-        workspace_roots: [root, auxiliaryRoot],
+        workspace_roots: rootsMode === "declared" ? [root, auxiliaryRoot] : rootsMode === "conflicting" ? [root] : rootsMode === "empty" ? [] : undefined,
         sandbox_policy: {
           type: "workspace-write",
           writable_roots: [auxiliaryRoot],
@@ -1307,9 +1377,14 @@ describe("trusted Codex task environment continuity", () => {
       })),
     ].join("\n") + "\n");
 
-    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(
+    const recoverWorkspace = () => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(
       environmentlessChild(rolloutTurnId, "workspace-write", [root, auxiliaryRoot]),
-    )).toEqual({
+    );
+    if (rootsMode === "conflicting") {
+      expect(recoverWorkspace).toThrow("workspace-write permission profile is inconsistent");
+      return;
+    }
+    expect(recoverWorkspace()).toEqual({
       cwd: root,
       roots: [root, auxiliaryRoot],
       writableRoots: [root, auxiliaryRoot],
@@ -1324,7 +1399,7 @@ describe("trusted Codex task environment continuity", () => {
     writeFileSync(rolloutPath, [
       JSON.stringify(childSessionMeta()),
       JSON.stringify(childTurnContext(rolloutTurnId, {
-        workspace_roots: [root, auxiliaryRoot],
+        workspace_roots: rootsMode === "declared" ? [root, auxiliaryRoot] : rootsMode === "empty" ? [] : undefined,
         sandbox_policy: {
           type: "workspace-write",
           writable_roots: [auxiliaryRoot],

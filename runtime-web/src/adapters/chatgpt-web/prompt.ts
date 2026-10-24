@@ -8,7 +8,7 @@ import {
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
-import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
+import { isOnePixelPngDataUrl, isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { withTrimmedOldToolResults } from "./prompt-budget";
 import {
@@ -76,6 +76,8 @@ export function compilePlainChatGptWebPrompt(
     if (message.role !== "user") continue;
     const parts: CodexContentPart[] = typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
     const text = parts.flatMap(part => part.type === "text" ? [part.text] : []).join("\n").trim();
+    // Compaction starts a fresh conversation that needs the current instructions in full.
+    if (isReadableCompactionSummaryText(text) || text === OPAQUE_COMPACTION_NOTE) return undefined;
     const goalTurn = GOAL_TURN.test(text);
     if (CODEX_USER_BLOCK.test(text) && !goalTurn) continue;
     goal ||= goalTurn;
