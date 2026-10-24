@@ -1272,7 +1272,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // A session that is gone, or refuses the message, falls back to a fresh start.
         let sent = null, sendError = null;
         if (continued) stage("reconnecting to the chat's agent");
-        const usable = Boolean(continued) && await continuableSession(continued.session);
+        // An agent AO could not confirm was back within its wait failed the message ("Couldn't confirm
+        // the agent was restored"), so the chat sat on "reconnecting" and then a failed step (the user:
+        // "if cant reconnect to chat agent can it just create a new agent chat with current context").
+        // It is stopped (its session, worktree and conversation stay), so it cannot come back beside
+        // the new agent, which starts with the chat so far (the handoff below).
+        let unconfirmed = false;
+        const usable = Boolean(continued) && await continuableSession(continued.session).catch((error) => {
+          if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
+          unconfirmed = true;
+          return false;
+        });
+        if (unconfirmed) {
+          stage("stopping the chat's agent, which did not come back");
+          await Promise.resolve().then(() => harnessService().exitAgent?.(continued.session)).catch(() => undefined);
+        }
         if (usable) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
@@ -1285,7 +1299,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // session that could not be continued (ao.continuable_refused says why) and a failed send.
         if (continued && !sent?.turnId) {
           logger?.warn?.("ao.continuation_lost", { session: continued.session,
-            reason: !usable ? "not_continuable" : sendError ? "send_failed" : "send_refused", ...(sendError ? { message: sendError } : {}) });
+            reason: unconfirmed ? "restore_unconfirmed" : !usable ? "not_continuable" : sendError ? "send_failed" : "send_refused",
+            ...(sendError ? { message: sendError } : {}) });
         }
         // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
         // with what the earlier agents replied; the first card to start takes it.
@@ -1299,7 +1314,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         continuations.delete(runId);
         if (!sent?.turnId) stage("looking for an agent started in advance");
-        const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);
+        // A warm agent AO cannot confirm is back is none to take: the message still gets a new agent.
+        const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain).catch((error) => {
+          if (error?.code === "AO_SESSION_RESTORE_UNCONFIRMED") return null;
+          throw error;
+        });
         let first = null;
         if (warmed) {
           stage("sending your message to the agent");
@@ -2332,6 +2351,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (typeof session === "string" && session && !continuations.has(run)) {
         continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
         if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+        // A session that cannot be continued starts a fresh agent: it begins with the chat so far, as
+        // a follow-up's does, not with the step's first prompt alone.
+        if (result.run.project_id && !handoffs.has(run)) {
+          handoffs.set(run, { workspaceId: id, taskId: result.run.project_id });
+          if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+        }
       }
     }
     if (action === "stop") {
@@ -2712,6 +2737,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
+    if (short === "view_app") return "An image of the Coding Tools window you see; nothing else on the screen";
     if (group === "terminal") return "Reads or stops a command in the chat's own terminal; it starts nothing and types nothing";
     if (group === "desktop") return "Reports on or stops the app's computer control; it sees and touches nothing on the screen";
     if (group !== "agent") return "One of the app's own chat tools that the app never confirms: not a command, typed input or the screen";

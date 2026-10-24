@@ -36,12 +36,12 @@ function tempTree() {
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
-  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null } = {}) {
+  wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory, appProcesses,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory, appProcesses, captureApp,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
@@ -968,6 +968,37 @@ test("app_processes lists the app's processes through the app's reader, read-onl
     const other = await session(plain.tools, { id: "no-reader" });
     assert.equal((await listed(other.url, other.auth)).includes("app_processes"), false);
     assert.equal((await callTool(other.url, other.auth, "app_processes", {})).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
+test("view_app shows the model the Coding Tools window as an image, and is offered only with a capture", async () => {
+  // The user: "some model got vision, but the chat doesnt have the tools to help it".
+  const asked = [];
+  let shot = { base64: Buffer.from("jpeg").toString("base64"), mimeType: "image/jpeg", width: 1600, height: 900 };
+  const captureApp = async (options) => { asked.push(options); if (shot instanceof Error) throw shot; return shot; };
+  const { tools } = fixture({ captureApp });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "looker" });
+    assert.ok((await listed(client.url, client.auth)).includes("view_app"), "listed with the agent's own tools, no opt-in");
+    const result = await callTool(client.url, client.auth, "view_app", { max_width: 99999 });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(result.content[0], { type: "image", data: shot.base64, mimeType: "image/jpeg" }, "the image itself goes to the model");
+    assert.deepEqual(JSON.parse(result.content[1].text), { width: 1600, height: 900 });
+    assert.deepEqual(asked, [{ maxWidth: 4096 }], "the width is capped");
+    await callTool(client.url, client.auth, "view_app", {});
+    assert.deepEqual(asked.at(-1), { maxWidth: 1600 }, "a readable default");
+    // A minimized window has nothing to show; a failed capture says why.
+    shot = null;
+    assert.match((await callTool(client.url, client.auth, "view_app", {})).content[0].text, /nothing to show/);
+    shot = new Error("the window is gone");
+    const failed = await callTool(client.url, client.auth, "view_app", {});
+    assert.equal(failed.isError, true);
+    assert.match(failed.content[0].text, /could not be captured: the window is gone/);
+    // Without a capture the tool is not offered at all.
+    const other = await session(plain.tools, { id: "no-capture" });
+    assert.equal((await listed(other.url, other.auth)).includes("view_app"), false);
+    assert.equal((await callTool(other.url, other.auth, "view_app", {})).isError, true);
   } finally { await tools.close(); await plain.tools.close(); }
 });
 

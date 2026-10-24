@@ -7067,17 +7067,19 @@ function workflowInternals(options) {
   return fixture.exports.createAgentOrchestratorWorkflow(options);
 }
 
-test("restoration uncertainty reaches all three continuation callers without launching a replacement", async () => {
+test("restoration uncertainty: a sent message stops the old agent and starts a new one; warm starts never replace it", async () => {
+  // The user: "if cant reconnect to chat agent can it just create a new agent chat with current context window".
   const route = { harness_id: "ao:claude-code", model: "fixture" };
   const previous = { id: "old", workspace_id: "ws", project_id: "task", execution_mode: "single",
     nodes: [{ id: "one", role: "planner", state: "finished", route, receipt: { thread_id: "existing" } }] };
   for (const caller of ["warm", "prewarm", "dispatch"]) {
     const uncertainty = Object.assign(new Error("restore pending"), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
-    let spawned = 0;
+    const order = [];
     const workflow = workflowInternals({
       requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [previous] }
         : endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "follow-up" } : { ok: true, run: previous },
-      aoHarness: { continuable: async () => { throw uncertainty; }, spawn: async () => { spawned++; return "replacement"; } },
+      aoHarness: { continuable: async () => { throw uncertainty; }, exitAgent: async (id) => { order.push(`exit ${id}`); },
+        spawn: async () => { order.push("spawn"); return "replacement"; } },
     });
     try {
       workflow.warm.set(workflow.warmKey("ws", route, true), { session: "existing", route, promise: Promise.resolve("existing"), started: 0 });
@@ -7085,9 +7087,14 @@ test("restoration uncertainty reaches all three continuation callers without lau
       const result = caller === "warm" ? workflow.takeWarm("ws", route, true)
         : caller === "prewarm" ? workflow.chatPrewarm({ workspaceId: "ws", taskId: "task", executionMode: "single", singleRoute: route })
         : workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true);
-      await assert.rejects(result, error => error.code === uncertainty.code, caller);
-      assert.equal(spawned, 0, caller + " never starts a replacement under uncertainty");
-      if (caller === "dispatch") assert.equal(workflow.continuations.get("new")?.session, "existing", "retry retains the captured conversation");
+      if (caller === "dispatch") {
+        await result;
+        assert.deepEqual(order, ["exit existing", "spawn"], "the old agent is stopped before the new one starts, so only one runs");
+        assert.equal(workflow.continuations.has("new"), false, "the new agent's session is the chat's from now on");
+      } else {
+        await assert.rejects(result, error => error.code === uncertainty.code, caller);
+        assert.deepEqual(order, [], caller + " never starts a replacement under uncertainty");
+      }
     } finally { workflow.dispose(); }
   }
 });
