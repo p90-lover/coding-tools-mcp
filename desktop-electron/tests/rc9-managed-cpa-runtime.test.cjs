@@ -36,7 +36,8 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
       oauth: { "auth-dir": "/old/oauth", providers: { custom: { enabled: true } } },
       plugins: { enabled: false, dir: "/old/plugins", configs: {
         "cline-pass-switcher": { enabled: false, "data-dir": "/old/cline" },
-        "codex-review-account-selector": { enabled: true, strategy: "saved-user-setting" },
+        "codex-review-account-selector": { enabled: false, "data-dir": "/old/review" },
+        "user-own-plugin": { enabled: true, strategy: "saved-user-setting" },
       } },
     }));
     const output = runtimeConfiguration(state, "m".repeat(36), "p".repeat(36));
@@ -52,7 +53,10 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
     assert.equal(config.plugins.dir, path.join(state, "plugins"));
     assert.equal(config.plugins.configs["cline-pass-switcher"].enabled, true);
     assert.equal(config.plugins.configs["cline-pass-switcher"]["data-dir"], path.join(state, "cline-pass-switcher-data"));
-    assert.deepEqual(config.plugins.configs["codex-review-account-selector"], { enabled: true, strategy: "saved-user-setting" });
+    // CPA Auto Review is bundled now: its entry is owned, and its fallback chain stays in its own folder.
+    assert.deepEqual(config.plugins.configs["codex-review-account-selector"],
+      { enabled: true, "data-dir": path.join(state, "codex-review-account-selector-data") });
+    assert.deepEqual(config.plugins.configs["user-own-plugin"], { enabled: true, strategy: "saved-user-setting" });
     assert.equal(config["disable-cooling"], true);
     assert.equal(config["request-retry"], 8);
     assert.equal(config.debug, true);

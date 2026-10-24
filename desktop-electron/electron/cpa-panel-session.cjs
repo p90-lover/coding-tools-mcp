@@ -189,8 +189,22 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
     }
   }
 
+  // The quota page loads nothing until "Refresh all credentials" is pressed, and Cline Pass is not one
+  // of its providers. Once the panel is seeded, a page script presses it and adds a Cline Pass card.
+  async function watchQuotaPage(_event, isMainFrame, processId, routingId) {
+    if (isMainFrame) return;
+    const frame = webFrameMain.fromId(processId, routingId);
+    if (!isManagedPanel(frame)) return;
+    try {
+      await frame.executeJavaScript(quotaPageScript(sessionMarker));
+    } catch {
+      logger?.warn?.("cpa.quota_page_script_failed", { retry: "reopen-cpa-panel" });
+    }
+  }
+
   webContents.on("did-frame-finish-load", seedPanelSession);
   webContents.on("did-frame-finish-load", signInAutoReview);
+  webContents.on("did-frame-finish-load", watchQuotaPage);
   webContents.once("destroyed", () => {
     browserSession.webRequest.onBeforeSendHeaders({ urls: [`${origin}/v0/management/*`] }, null);
   });
@@ -232,4 +246,128 @@ function autoReviewSignInScript(marker) {
   })()`;
 }
 
-module.exports = { installCpaPanelSession, panelStorageEntries, autoReviewSignInScript, CPA_HELPER_KEY_STORE };
+/**
+ * The panel page script for CPA's quota page (#/quota), run once per page load of a seeded panel:
+ * - It presses "Refresh all credentials" when the page shows nothing loaded on this visit, and again
+ *   every 5 minutes while the page stays open and shown. A press by the user resets that clock.
+ * - It adds a Cline Pass card under the page header with each key's 5-hour, weekly and monthly
+ *   windows, read from the Cline switcher with the marker (the header hook swaps in the key).
+ * "running" when the page already has it, "unseeded" before the panel session is seeded.
+ */
+function quotaPageScript(marker) {
+  return `(() => {
+    const marker = ${JSON.stringify(marker)};
+    if (sessionStorage.getItem('coding-tools-cpa-session') !== marker) return 'unseeded';
+    if (window.__codingToolsQuota) return 'running';
+    window.__codingToolsQuota = true;
+    const STALE_MS = 5 * 60e3;
+    const REFRESHED = 'coding-tools-quota-refreshed';
+    const LABELS = { five_hour: '5-hour', weekly: 'Weekly', monthly: 'Monthly' };
+    const MONO = 'ui-monospace,SF Mono,Cascadia Mono,JetBrains Mono,Menlo,Consolas,monospace';
+    let refreshedThisVisit = false;
+    let usage = null;
+    let usageAt = 0;
+    let renderedAt = 0;
+    let loading = false;
+    let card = null;
+    const onQuotaPage = () => location.hash.split('?')[0] === '#/quota';
+    const shown = () => document.visibilityState === 'visible' && innerWidth > 0;
+    const header = () => document.querySelector('[class*="QuotaHeader-module__header"]');
+    const refreshButton = () => document.querySelector('[class*="QuotaHeader-module__primaryAction"]');
+    const el = (tag, css, text) => {
+      const node = document.createElement(tag);
+      if (css) node.style.cssText = css;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
+    const until = (iso) => {
+      const minutes = Math.round((Date.parse(iso) - Date.now()) / 60e3);
+      if (!(minutes > 0)) return 'resets now';
+      const d = Math.floor(minutes / 1440), h = Math.floor((minutes % 1440) / 60), m = minutes % 60;
+      return 'resets in ' + (d ? d + 'd ' + h + 'h' : h ? h + 'h ' + m + 'm' : m + 'm');
+    };
+    function windowRow(limit) {
+      const left = limit.percentUsed === null ? null : Math.round(100 - limit.percentUsed);
+      const row = el('div', 'display:flex;flex-direction:column;gap:5px');
+      const line = el('div', 'display:flex;justify-content:space-between;gap:8px;font-size:11.5px');
+      line.append(el('span', 'color:var(--text-secondary)', LABELS[limit.type] || limit.type),
+        el('span', 'color:var(--text-tertiary)', (left === null ? 'unknown' : left + '% left') + (limit.resetsAt ? ' · ' + until(limit.resetsAt) : '')));
+      const bar = el('div', 'height:6px;border-radius:9999px;overflow:hidden;background:color-mix(in srgb, var(--text-primary) 8%, transparent)');
+      const color = left === null ? 'var(--text-quaternary)' : left >= 50 ? 'var(--viz-success)' : left >= 20 ? 'var(--quota-medium-color, var(--amber-color))' : 'var(--viz-failure)';
+      bar.append(el('div', 'height:100%;border-radius:9999px;width:' + (left === null ? 0 : Math.max(0, Math.min(100, left))) + '%;background:' + color));
+      row.append(line, bar);
+      return row;
+    }
+    function render() {
+      renderedAt = Date.now();
+      const accounts = (usage && Array.isArray(usage.accounts) ? usage.accounts : []).filter((a) => a.enabled);
+      if (!accounts.length) { card?.remove(); card = null; return; }
+      card = card || el('section', 'margin:12px 0;padding:15px 16px;border:1px solid var(--border-color);border-radius:14px;display:flex;flex-direction:column;gap:11px;background:color-mix(in srgb, var(--bg-primary) 82%, transparent)');
+      card.dataset.codingTools = 'cline-quota';
+      const head = el('div', 'display:flex;align-items:baseline;justify-content:space-between;gap:8px');
+      head.append(el('strong', 'color:var(--text-primary);font-size:14px', 'Cline Pass'),
+        el('span', 'color:var(--text-tertiary);font-size:11.5px', accounts.length + (accounts.length === 1 ? ' key' : ' keys')));
+      const keys = accounts.map((account) => {
+        const box = el('div', 'display:flex;flex-direction:column;gap:9px;padding:10px 11px;border-radius:10px;border:1px solid color-mix(in srgb, var(--border-color) 70%, transparent);background:color-mix(in srgb, var(--bg-secondary) 55%, transparent)');
+        box.append(el('div', 'color:var(--text-primary);font:600 12.5px ' + MONO + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap', account.name));
+        if (account.error) box.append(el('div', 'color:var(--viz-failure);font-size:11.5px', account.error));
+        else if (!account.limits.length) box.append(el('div', 'color:var(--text-tertiary);font-size:11.5px', 'No usage windows on this key'));
+        else box.append(...account.limits.map(windowRow));
+        return box;
+      });
+      const grid = el('div', 'display:grid;gap:10px;grid-template-columns:repeat(auto-fill, minmax(260px, 1fr))');
+      grid.append(...keys);
+      card.replaceChildren(head, grid);
+      place();
+    }
+    // React re-renders the page and drops nodes it does not own, so the card is put back each tick.
+    function place() {
+      const top = onQuotaPage() && header();
+      if (!card) return;
+      if (!top) { card.remove(); return; }
+      if (top.nextElementSibling !== card) top.after(card);
+    }
+    async function loadUsage(fresh) {
+      if (loading) return;
+      loading = true;
+      try {
+        const response = await fetch('/v0/management/cline-pass-switcher/api/usage-limits' + (fresh ? '?fresh=1' : ''),
+          { headers: { Authorization: 'Bearer ' + marker }, cache: 'no-store' });
+        usage = response.ok ? await response.json() : null;
+      } catch {
+        usage = null;
+      } finally {
+        loading = false;
+        usageAt = Date.now();
+        render();
+      }
+    }
+    function tick() {
+      if (!onQuotaPage()) { refreshedThisVisit = false; place(); return; }
+      if (!shown()) return;
+      const button = refreshButton();
+      const nothingLoaded = !document.querySelector('[class*="QuotaHeader-module__metaLoaded"]');
+      const stale = Date.now() - (Number(sessionStorage.getItem(REFRESHED)) || 0) > STALE_MS;
+      if (button && !button.disabled && !button.querySelector('[class*="spinning"]') && (stale || (nothingLoaded && !refreshedThisVisit))) {
+        refreshedThisVisit = true;
+        sessionStorage.setItem(REFRESHED, String(Date.now()));
+        button.click();
+      }
+      if (Date.now() - usageAt > STALE_MS) loadUsage(false);
+      else if (Date.now() - renderedAt > 60e3) render();
+      else place();
+    }
+    // The user's own press: the 5-minute clock restarts and the Cline card skips the switcher's cache.
+    document.addEventListener('click', (event) => {
+      if (!event.isTrusted || !event.target?.closest?.('[class*="QuotaHeader-module__primaryAction"]')) return;
+      sessionStorage.setItem(REFRESHED, String(Date.now()));
+      loadUsage(true);
+    }, true);
+    addEventListener('hashchange', tick);
+    setInterval(tick, 1500);
+    tick();
+    return 'started';
+  })()`;
+}
+
+module.exports = { installCpaPanelSession, panelStorageEntries, autoReviewSignInScript, quotaPageScript, CPA_HELPER_KEY_STORE };
