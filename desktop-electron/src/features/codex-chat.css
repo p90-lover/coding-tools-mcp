@@ -17,10 +17,15 @@
   --cc-muted: #898781;
   --cc-hover: #f0efec;
   --cc-hover-selected: #edece8;
+  --cc-open: #e1e1e1;
   --cc-border: rgb(11 11 11 / 10%);
   --cc-accent: #2a78d6;
   --cc-warning: #fab219;
   --cc-side-font: "anthropic-sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.ao-workflow[data-theme="dark"] {
+  --cc-open: var(--cx-active);
 }
 
 /* ---------- Thread list ---------- */
@@ -68,6 +73,9 @@
   border-radius: 6px; background: transparent; color: var(--cc-text-2); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }
 .cx-thread-select[aria-current="true"] { background: var(--cc-hover); color: var(--cc-text); }
 .cx-thread-row:hover .cx-thread-select[aria-current="true"] { background: var(--cc-hover-selected); }
+.cx-thread-select[data-open="true"], .cx-thread-row:hover .cx-thread-select[data-open="true"] {
+  background: var(--cc-open); color: var(--color-text-primary, var(--cc-text));
+}
 /* Titles fade out over their last 24 px instead of an ellipsis (dframe-fade-label). */
 .cx-thread-title { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap;
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
