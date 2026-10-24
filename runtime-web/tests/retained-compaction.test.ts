@@ -138,6 +138,24 @@ test("one browser conversation spans native turns and rotates only at compaction
   expect(retainedConversationResumeRequest(before)?.context.messages).toEqual([
     { role: "user", content: "Continue with the next step", timestamp: 3 },
   ]);
+  const steering = structuredClone(before);
+  steering.context.messages.push(
+    { role: "toolResult", content: "Build is still running", timestamp: 4, toolCallId: "build-1", toolName: "exec_command", isError: false },
+    { role: "user", content: "How long until it finishes?", timestamp: 5 },
+  );
+  expect(chatGptConversationKey(steering, "provider")).toBe(chatGptConversationKey(before, "provider"));
+  expect(retainedConversationResumeRequest(steering)?.context.messages).toEqual([
+    { role: "toolResult", content: "Build is still running", timestamp: 4, toolCallId: "build-1", toolName: "exec_command", isError: false },
+    { role: "user", content: "How long until it finishes?", timestamp: 5 },
+  ]);
+  const beforeFirstReply = structuredClone(before);
+  beforeFirstReply.context.messages = [
+    { role: "user", content: "Build version 1", timestamp: 1 },
+    { role: "user", content: "And show its progress", timestamp: 2 },
+  ];
+  expect(retainedConversationResumeRequest(beforeFirstReply)?.context.messages).toEqual([
+    { role: "user", content: "And show its progress", timestamp: 2 },
+  ]);
 
   const v1Compact = structuredClone(before);
   (v1Compact._rawBody as { input: unknown[] }).input.unshift({

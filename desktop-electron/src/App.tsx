@@ -1309,8 +1309,9 @@ function BrowserSurface({
             aria-selected={tab.active}
           >
             <BrandMark small />
-            <span title={tab.traceId ? `${tab.title} · ${tab.traceId}` : tab.title}>
+            <span title={[tab.title, tab.threadId && `Codex task: ${tab.threadId}`, tab.conversationUrl && `ChatGPT: ${tab.conversationUrl}`, tab.traceId && `Turn: ${tab.traceId}`].filter(Boolean).join("\n")}>
               {browserTabTitleFromTitle(tab.title, copy)}
+              {tab.threadId ? ` · ${tab.threadId.slice(0, 8)}` : ""}
             </span>
             {tab.loading ? <i className="tab-spinner" /> : <StateDot state={browserTabTone(tab.status)} />}
             {tab.closable ? (

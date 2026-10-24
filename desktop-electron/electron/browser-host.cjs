@@ -705,6 +705,8 @@ class BrowserHost {
     const snapshot = {
       id: tab.id,
       traceId: tab.traceId,
+      ...(tab.nativeThreadId ? { threadId: tab.nativeThreadId } : {}),
+      ...(tab.url?.startsWith(CHATGPT_ORIGIN) ? { conversationUrl: tab.url } : {}),
       title: tab.label,
       status: tab.status,
       loading: tab.loading === true,
@@ -731,7 +733,7 @@ class BrowserHost {
     return this.userTabs?.get(this.selectedTabId) || null;
   }
 
-  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity) {
+  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId) {
     if (this.turnTabs.size + (this.userTabs?.size ?? 0) >= MAX_BROWSER_TABS
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
@@ -758,6 +760,7 @@ class BrowserHost {
       id,
       surfaceId,
       traceId,
+      nativeThreadId,
       conversationKey,
       connectorIdentity,
       connectorBound: false,
@@ -2694,6 +2697,7 @@ class BrowserHost {
     // The start request this call answers (the control server's): the tab records the latest one
     // it was handed to, so an abandoned start releases the tab only if no later start took it.
     startRequest = null,
+    nativeThreadId,
   ) {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
@@ -2706,7 +2710,8 @@ class BrowserHost {
       throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
     }
     if (sameTrace && (sameTrace.conversationKey !== conversationKey
-      || sameTrace.connectorIdentity !== connectorIdentity)) {
+      || sameTrace.connectorIdentity !== connectorIdentity
+      || (nativeThreadId && sameTrace.nativeThreadId && sameTrace.nativeThreadId !== nativeThreadId))) {
       throw new Error(`ChatGPT browser turn ${traceId} conversation metadata does not match its owned tab`);
     }
     // A start whose request gave up while its tab was still loading (a busy machine) is repeated by
@@ -2724,6 +2729,7 @@ class BrowserHost {
       tab.interactionMode === "automatic"
       && tab.status === "ready"
       && tab.conversationKey === conversationKey
+      && (!nativeThreadId || !tab.nativeThreadId || tab.nativeThreadId === nativeThreadId)
       && tab.connectorIdentity === connectorIdentity
       && (!connectorIdentity || tab.connectorBound === true)
     )) : [];
@@ -2761,6 +2767,7 @@ class BrowserHost {
         });
       }
       existing.helperPid = helperPid;
+      if (nativeThreadId) existing.nativeThreadId = nativeThreadId;
       existing.traceId = traceId;
       existing.status = "running";
       existing.loading = true;
@@ -2792,7 +2799,7 @@ class BrowserHost {
       error.code = "retained_conversation_unavailable";
       throw error;
     }
-    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity);
+    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId);
     tab.startRequest = startRequest;
     this.selectedTabId = tab.id;
     if (reveal) this.show();
@@ -2834,15 +2841,16 @@ class BrowserHost {
       );
     }
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
-    tab.status = status === "completed" ? "ready" : status === "aborted" ? "aborted" : "error";
+    tab.status = status === "completed" || status === "superseded" ? "ready" : status === "aborted" ? "aborted" : "error";
     this.syncPowerSaveBlocker();
-    tab.message = status === "completed" ? "Task completed" : message || `ChatGPT turn ${status}`;
+    tab.message = status === "completed" ? "Task completed"
+      : status === "superseded" ? "Continuing this Codex task" : message || `ChatGPT turn ${status}`;
     tab.loading = false;
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
-    const retainedLocation = status === "completed" && retain && !tab.view.webContents.isDestroyed()
+    const retainedLocation = (status === "completed" || status === "superseded") && retain && !tab.view.webContents.isDestroyed()
       ? retainedConversationLocation(tab.view.webContents.getURL(), useSavedChatsFor(this))
       : null;
     // The saved chat this turn wrote in, recorded now while the bridge still drives the tab, so its
@@ -2851,10 +2859,10 @@ class BrowserHost {
       tab.ownedConversation = ownedSavedConversationId(tab.view.webContents.getURL(), useSavedChatsFor(this))
         ?? tab.ownedConversation ?? null;
     }
-    if (status === "completed" && retain && !retainedLocation) {
+    if ((status === "completed" || status === "superseded") && retain && !retainedLocation) {
       this.logger.warn("browser.tab_retention_refused", { tabId: tab.id, traceId, reason: "no owned conversation page" });
     }
-    if (status === "completed"
+    if ((status === "completed" || status === "superseded")
       && retain
       && retainedLocation
       && tab.conversationKey

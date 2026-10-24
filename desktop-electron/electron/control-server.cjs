@@ -318,6 +318,11 @@ class BrowserControlServer {
       if (body.conversationKey !== undefined && !/^[a-f0-9]{64}$/.test(body.conversationKey)) {
         throw new Error("conversationKey is invalid");
       }
+      if (body.nativeThreadId !== undefined
+        && (typeof body.nativeThreadId !== "string"
+          || !/^[A-Za-z0-9_-]{6,128}$/.test(body.nativeThreadId))) {
+        throw new Error("nativeThreadId is invalid");
+      }
       if (body.connectorIdentity !== undefined
         && (typeof body.connectorIdentity !== "string"
           || !body.connectorIdentity.trim()
@@ -466,6 +471,7 @@ class BrowserControlServer {
           body.connectorIdentity,
           body.requireRetainedConversation === true,
           startRequest,
+          body.nativeThreadId,
         );
         if (abandoned) {
           const owned = host.ownsTurnStart?.(body.traceId, startRequest) === true;
@@ -487,7 +493,7 @@ class BrowserControlServer {
         writeJson(response, 200, { ok: true });
         return;
       } else {
-        if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");
+        if (!['completed', 'failed', 'aborted', 'superseded'].includes(body.status)) throw new Error("turn status is invalid");
         this.reportTurnEvent({
           type: "end", traceId: body.traceId, status: body.status, conversationKey: body.conversationKey,
           message: typeof body.message === "string" ? body.message : undefined, manual: false,

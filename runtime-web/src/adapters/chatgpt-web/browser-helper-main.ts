@@ -24,6 +24,7 @@ interface RunMessage {
   };
   turn: {
     traceId: string;
+    nativeThreadId?: string;
     modelId: string;
     reasoning?: string;
     capabilities: ChatGptWebCapabilities;
@@ -70,7 +71,7 @@ type InputMessage = RunMessage
   | { type: "completion_fence_begin_ack"; id: string; requestId: number; revision: number | null }
   | { type: "completion_fence_commit_ack"; id: string; requestId: number; committed: boolean }
   | { type: "progress"; id: string; snapshot: ChatGptExternalTurnProgressSnapshot }
-  | { type: "abort"; id: string; reason?: "compaction_handoff_accepted" }
+  | { type: "abort"; id: string; reason?: "compaction_handoff_accepted" | "steering_superseded" }
   | { type: "shutdown" };
 
 let outputFailure: Error | undefined;
@@ -216,6 +217,7 @@ async function run(message: RunMessage): Promise<void> {
   const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
   const turn: BrowserTurn = {
     traceId: message.turn.traceId,
+    ...(message.turn.nativeThreadId ? { nativeThreadId: message.turn.nativeThreadId } : {}),
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
     capabilities: message.turn.capabilities,
@@ -478,7 +480,9 @@ input.on("line", line => {
   } else if (message.type === "abort") {
     abortControllers.get(message.id)?.abort(message.reason === "compaction_handoff_accepted"
       ? new ChatGptCompactionHandoffAccepted()
-      : undefined);
+      : message.reason === "steering_superseded"
+        ? new DOMException("A newer Codex instruction superseded this turn", "SteeringSuperseded")
+        : undefined);
     preparedSelections.get(message.id)?.cancel();
     const waiter = sendActivationWaiters.get(message.id);
     sendActivationWaiters.delete(message.id);

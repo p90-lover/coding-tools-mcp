@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, waitForLauncherBrowserHostDescriptor, type LauncherBrowserHostDescriptor } from "../../launcher-browser-host";
-import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptCompactionHandoffAccepted, ChatGptTurnSupersededError, ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
 import {
@@ -264,6 +264,8 @@ export class LauncherBrowserHelperClient {
               id: turn.traceId,
               ...(turn.abortSignal?.reason instanceof ChatGptCompactionHandoffAccepted
                 ? { reason: "compaction_handoff_accepted" }
+                : turn.abortSignal?.reason instanceof ChatGptTurnSupersededError
+                  ? { reason: "steering_superseded" }
                 : {}),
             }).catch(error => {
               this.finishWithError(
@@ -298,6 +300,7 @@ export class LauncherBrowserHelperClient {
           turn: {
             traceId: turn.traceId,
             modelId: turn.modelId,
+            ...(turn.nativeThreadId ? { nativeThreadId: turn.nativeThreadId } : {}),
             reasoning: turn.reasoning,
             capabilities: turn.capabilities,
             ...(turn.nativeConnector ? { nativeConnector: true } : {}),

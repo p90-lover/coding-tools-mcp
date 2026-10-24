@@ -2568,6 +2568,44 @@ for (const [useSavedChats, endedAt, expected] of [
   assert.deepEqual(removed, expected ? [] : ["ending"]);
 });
 
+test("steering retains only the owned task tab and the next turn reuses it", async () => {
+  const key = "a".repeat(64);
+  const calls = [];
+  const conversationUrl = `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`;
+  const tab = {
+    id: "task-a", surfaceId: "surface-a", traceId: "trace-a", conversationKey: key,
+    nativeThreadId: "thread-task-a", url: conversationUrl,
+    connectorIdentity: "Codex Native2", connectorBound: false,
+    interactionMode: "automatic", helperPid: 101, status: "running", loading: true,
+    view: { webContents: { isDestroyed: () => false, getURL: () => conversationUrl, setBackgroundThrottling: (value) => calls.push(["throttle-a", value]) } },
+  };
+  const other = { id: "task-b", traceId: "trace-b", status: "running", helperPid: 202, interactionMode: "automatic" };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[tab.id, tab], [other.id, other]]),
+    userCancelledTurnOwners: new Map(), closedTurnOwners: new Map(),
+    getUseSavedChats: () => true,
+    selectedTabId: other.id,
+    syncPowerSaveBlocker() {}, syncViewVisibility() {},
+    publishState() {}, writeDescriptor() {}, snapshot: () => ({ tabs: [] }),
+    logger: { info(event) { calls.push(event); } },
+  });
+  await BrowserHost.prototype.endTurn.call(fixture, "trace-a", 101, "superseded", false, undefined, true, true);
+  assert.equal(tab.status, "ready");
+  assert.equal(tab.message, "Continuing this Codex task");
+  assert.equal(fixture.turnTabs.get(other.id), other);
+  assert.equal(other.status, "running");
+  assert.equal(BrowserHost.prototype.tabSnapshot.call(fixture, tab).threadId, "thread-task-a");
+  assert.equal(BrowserHost.prototype.tabSnapshot.call(fixture, tab).conversationUrl, conversationUrl);
+  const lease = await BrowserHost.prototype.beginTurn.call(fixture, "steered-a", false, 303, key, "Codex Native2", false, null, "thread-task-a");
+  assert.equal(lease.reused, true);
+  assert.equal(lease.tabId, "task-a");
+  assert.equal(tab.traceId, "steered-a");
+  assert.equal(other.traceId, "trace-b");
+  assert.equal(fixture.turnTabs.size, 2);
+  assert.deepEqual(calls.filter(item => Array.isArray(item)), [["throttle-a", true], ["throttle-a", false]]);
+});
+
 test("a retained conversation is not reused for a different connector identity", async () => {
   const conversationKey = "b".repeat(64);
   const retained = {

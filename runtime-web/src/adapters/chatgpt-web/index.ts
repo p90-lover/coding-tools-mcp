@@ -757,6 +757,7 @@ export function createChatGptWebAdapter(
     const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(worker.run({
       traceId,
       modelId: parsed.modelId,
+      ...(identity.threadId ? { nativeThreadId: identity.threadId } : {}),
       reasoning: parsed.options.reasoning,
       capabilities: turnCapabilities,
       prepare: () => prepareWith(checkpointInput.parsed),
