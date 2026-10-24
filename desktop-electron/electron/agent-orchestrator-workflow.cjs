@@ -1412,6 +1412,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return true;
   }
 
+  // AO marks a session needs_input as a permission request comes in, about 2 s before the request
+  // itself shows in the conversation (sampled live 2026-10-24). Read in that gap, a routine request
+  // the reviewer then allowed reported the run as "needs input" for one pass: 160 approvals in 40
+  // minutes opened MCP incidents past their rate limit. A wait with no request in sight is the
+  // person's only once it has lasted INPUT_SETTLE_MS.
+  const INPUT_SETTLE_MS = 10_000;
+  const inputSince = new Map(); // session -> when it first read needs_input with no request
+  function waitsForInput(session, observed, pending) {
+    if (!observed.needsInput || pending.length) { inputSince.delete(session); return false; }
+    if (!inputSince.has(session)) {
+      inputSince.set(session, now());
+      if (inputSince.size > 200) inputSince.delete(inputSince.keys().next().value);
+    }
+    return now() - inputSince.get(session) >= INPUT_SETTLE_MS;
+  }
+
   async function observeExternal(workspaceId, runId, node, mission = null) {
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
@@ -1430,7 +1446,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
-      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: observed.needsInput && !pending.length, session_id: session };
+      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
     }
     const completed = observed.turnState === "completed";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
@@ -2799,7 +2815,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // enough that reviews fell back to a paid model.
   const REVIEW_BUDGET_MS = 45_000;
   const REVIEWER_DOWN_MS = 10 * 60_000;
+  // A 404 is a model CPA lists that nothing serves (Cline's "model not found"), not an outage: seen
+  // live 2026-10-24, cline-pass/deepseek-v4-flash refused every goal check, each time first, and so
+  // took one of the three places a check has while the other two were down (502), stalling the goal.
+  const MODEL_GONE_MS = 6 * 3_600_000;
   const reviewerDown = new Map(); // model -> until
+  const reviewerFailed = (model, error) => reviewerDown.set(model, now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
   // request goes to the person: one 502 from the card's model put a routine command in front of
   // them while the very next review answered.
@@ -2953,7 +2974,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }),
           signal: AbortSignal.timeout(left),
         });
-        if (!response.ok) throw new Error(`Command approver ${model} returned HTTP ${response.status}`);
+        if (!response.ok) throw Object.assign(new Error(`Command approver ${model} returned HTTP ${response.status}`), { status: response.status });
         const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
@@ -2969,7 +2990,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return { action: decision.action, reason };
       } catch (error) {
         failure = error;
-        reviewerDown.set(model, now() + REVIEWER_DOWN_MS);
+        reviewerFailed(model, error);
       }
     }
     throw failure;
@@ -4239,6 +4260,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
+  /**
+   * A follow-up whose run could not be made leaves the chat: a message no run answers stayed in it
+   * (seen 2026-10-23: "Headless request timed out" after the message was written), and every later
+   * reply showed under the message before its own. A run that was made after all (the request
+   * timed out, then went through) keeps the message, and so does a chat changed since.
+   */
+  async function withdrawFollowUp(id, task, known, { before: description, description: written }) {
+    if ((await runs({ workspaceId: id })).runs.some(run => run.project_id === task && !known.has(run.id))) return;
+    const detail = await board({ workspaceId: id, taskId: task });
+    if (!detail.task || String(detail.task.description || "") !== written) return;
+    await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+  }
+
   async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
@@ -4253,6 +4287,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
+    // The runs before this send, to tell whether its own run was made (withdrawFollowUp).
+    const runsBefore = new Set(saved.runs.map(run => run.id));
     if (executionMode !== undefined && !["single", "team"].includes(executionMode)) throw new Error("Choose single or team execution");
     if (deferStart !== undefined && typeof deferStart !== "boolean") throw new Error("Choose a valid deferred startup option");
     let team = saved.team;
@@ -4293,6 +4329,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // gave, or a single chat's name taken from its message, kept nameChat's model call for nothing.
     let defaultTitled = false;
     let continuation = null;
+    // The follow-up as written to the chat, and the chat as it was before (withdrawFollowUp).
+    let followUp = null;
     if (taskId) {
       task = clean(taskId, 128);
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
@@ -4324,8 +4362,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         description = extended();
         if (!compacted.compacted || utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full. Start a new chat to continue.");
       }
+      const saidBefore = String(detail.task.description || "");
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
+      followUp = { before: saidBefore, description };
     } else {
       const before = await board({ workspaceId: id });
       const known = new Set(before.tasks.map((entry) => entry.id));
@@ -4339,7 +4379,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       task = added[0].id;
     }
 
-    const { runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true);
+    let runId, createdRun;
+    try {
+      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true));
+    } catch (error) {
+      if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
+      throw error;
+    }
     // After a deleted message this run started without the old session; later follow-ups continue its own.
     if (taskId) chatEdits.clearFresh(id, task);
     if (continuation) {
@@ -4441,7 +4487,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * recovery helper): a quick one first (Claude Code checks with a fast model), then any other,
    * then Codex's own review model. None is billed to the person's Codex quota (codexQuotaModel):
    * these run unasked, and picking by name alone ("mini") chose a ChatGPT-account model. A model
-   * that just failed waits REVIEWER_DOWN_MS, as for reviews.
+   * that just failed waits REVIEWER_DOWN_MS, as for reviews, or MODEL_GONE_MS when it is not
+   * served at all (404).
    */
   function freeModels(catalog, hidden = []) {
     const free = catalog.filter(model => !codexQuotaModel(model) && model !== AUTO_REVIEW_MODEL);
@@ -4470,13 +4517,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         });
         // A model CPA lists can still refuse (seen live 2026-10-23: HTTP 404, and the goal stalled);
         // the note names it.
-        if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
+        if (!response.ok) throw Object.assign(new Error(`the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`), { status: response.status });
         const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
         logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
         return { ...check, model };
       } catch (error) {
         failure = error;
-        reviewerDown.set(model, now() + REVIEWER_DOWN_MS);
+        reviewerFailed(model, error);
         logger?.warn?.("ao.goal_check_failed", { model, message: publicText(error?.message || error, 200) });
       }
     }

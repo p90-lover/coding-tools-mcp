@@ -412,6 +412,21 @@ func TestFullNativeProviderConsoleAndLifecycle(t *testing.T) {
 	if reject.Error == nil || reject.Error.HTTPStatus != 404 {
 		t.Fatal("management route escape was allowed")
 	}
+	usageReq, _ := json.Marshal(map[string]any{"Method": "GET", "Path": apiPrefix + "/api/usage-limits"})
+	usage, e := management(usageReq)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var limits struct {
+		StatusCode int
+		Body       []byte
+	}
+	if e := json.Unmarshal(result(t, usage), &limits); e != nil {
+		t.Fatal(e)
+	}
+	if limits.StatusCode != 200 || !bytes.Contains(limits.Body, []byte(`"name":"Fixture"`)) || bytes.Contains(limits.Body, []byte("fixture-cline-key")) {
+		t.Fatalf("quota page cannot read the keys' usage windows: %d %s", limits.StatusCode, limits.Body)
+	}
 	payload := []byte(`{"model":"cline-pass/fixture","messages":[{"role":"user","content":"Say OK"}],"max_tokens":4}`)
 	execReq, _ := json.Marshal(map[string]any{"Payload": payload, "Model": "cline-pass/fixture"})
 	output, e := execute(execReq, false)

@@ -1847,7 +1847,8 @@ export function AgentOrchestratorChat({
               </div> : null}
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
-              {turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
+              {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p>
+                : turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
             </article></PartErrorBoundary>;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerHost, pendingShown]);

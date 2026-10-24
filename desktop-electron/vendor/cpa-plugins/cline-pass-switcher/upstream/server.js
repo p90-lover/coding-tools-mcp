@@ -751,6 +751,8 @@ async function handleChat(req, res) {
 }
 
 // ---------- HTTP 服务 ----------
+let USAGE_LIMITS = { at: 0, body: null };
+
 function sendJSON(res, status, obj) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
   res.end(JSON.stringify(obj));
@@ -824,6 +826,35 @@ const server = http.createServer(async (req, res) => {
         canonicalSlug: r.canonicalSlug, fallbacks: r.fallbacks, content: (r.content || '').slice(0, 120),
         account: chain.acc?.name || null, trace,
       });
+    }
+    // Coding Tools: each key's ClinePass usage windows (5-hour, weekly, monthly) for CPA's quota page.
+    // Cline answers GET /users/me/plan/usage-limits for a ClinePass key; the keys never leave here.
+    // One minute of cache, so reopening the page does not ask Cline again; ?fresh=1 skips it.
+    if (req.method === 'GET' && p === '/api/usage-limits') {
+      if (url.searchParams.get('fresh') !== '1' && USAGE_LIMITS.body && Date.now() - USAGE_LIMITS.at < 60e3) {
+        return sendJSON(res, 200, USAGE_LIMITS.body);
+      }
+      const accounts = await Promise.all((config.accounts || []).slice(0, 20).map(async (a, i) => {
+        const name = String(a.name || `账号${i + 1}`).slice(0, 50);
+        if (!a.key || a.enabled === false) return { name, enabled: false, limits: [] };
+        try {
+          const { status, json } = await fetchJSON(`${config.upstreamBase}/users/me/plan/usage-limits`,
+            { headers: { Authorization: `Bearer ${a.key}` } }, 15000);
+          if (status !== 200 || json?.success !== true) return { name, enabled: true, limits: [], error: `Cline answered HTTP ${status}` };
+          const limits = (Array.isArray(json.data?.limits) ? json.data.limits : [])
+            .filter((l) => l && typeof l.type === 'string').slice(0, 6)
+            .map((l) => ({
+              type: l.type.slice(0, 30),
+              percentUsed: Number.isFinite(l.percentUsed) ? Math.max(0, Math.min(100, l.percentUsed)) : null,
+              resetsAt: typeof l.resetsAt === 'string' && Number.isFinite(Date.parse(l.resetsAt)) ? new Date(l.resetsAt).toISOString() : null,
+            }));
+          return { name, enabled: true, limits };
+        } catch (e) {
+          return { name, enabled: true, limits: [], error: e?.name === 'AbortError' ? 'Cline did not answer in time' : 'Cline is unreachable' };
+        }
+      }));
+      USAGE_LIMITS = { at: Date.now(), body: { checkedAt: new Date().toISOString(), accounts } };
+      return sendJSON(res, 200, USAGE_LIMITS.body);
     }
     if (req.method === 'GET' && p === '/api/accounts') {
       return sendJSON(res, 200, {

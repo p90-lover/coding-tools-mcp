@@ -216,6 +216,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let error = null;
   let logTail = "";
   let databaseCompacted = false;
+  // Starts in a row that ran out of time getting ready. Each next start waits twice as long (up to
+  // four times the limit): on 2026-10-24, after a reboot, AO's first database cleanup read a cold
+  // HDD for over a minute while it started. Every start was killed at 90 s, which threw that work
+  // away, and the next start began it again, so AO stayed down (five starts in eight minutes).
+  let readyTimeouts = 0;
   /**
    * AO's recent meaningful output (no debug lines or quick polls, see ao-daemon-log.cjs), in memory
    * only. AO's output never goes to disk: logs/ao-daemon.log took about 65 MB a day, nearly all of
@@ -1771,8 +1776,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // update were not reattached. Earlier that day AO stayed down 12 minutes (16 such starts).
         // ao.start_slow records how long a slow start really takes, to tell whether the limit fits.
         const startedAt = Date.now();
+        const limitMs = readyLimitMs * 2 ** Math.min(readyTimeouts, 2);
         let slowLogged = false;
-        while (Date.now() - startedAt < readyLimitMs) {
+        while (Date.now() - startedAt < limitMs) {
           checkStartup();
           if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
             slowLogged = true;
@@ -1783,11 +1789,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             checkStartup();
             const ready = await response.json();
             checkStartup();
-            if (response.ok && ready.pid === currentChild.pid && ready.status === "ready") { state = "ready"; return snapshot(); }
+            if (response.ok && ready.pid === currentChild.pid && ready.status === "ready") { state = "ready"; readyTimeouts = 0; return snapshot(); }
           } catch { checkStartup(); }
           await new Promise((resolve) => setTimeout(resolve, 200));
           checkStartup();
         }
+        readyTimeouts += 1;
         // "timed out" keeps TRANSIENT_CHAT_START treating it as a start to retry, not a failure.
         throw new Error(`Agent Orchestrator timed out getting ready. ${logTail.slice(-1500)}`);
       } catch (cause) {

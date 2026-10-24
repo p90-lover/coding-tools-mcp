@@ -112,7 +112,7 @@
   "cline": {
     "id": "cline-pass-switcher",
     "provider": "cline",
-    "version": "0.1.0-codingtools.8",
+    "version": "0.1.0-codingtools.9",
     "source": {
       "repository": "https://github.com/munmunjaklin458-afk/cline-pass-switcher",
       "commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
@@ -131,6 +131,7 @@
       "A tool call a model writes as text (Qwen XML <tool_call><function=…><parameter=…>, or JSON in <tool_call>) to a tool the request offered becomes a real tool_calls entry, streamed or whole, so Claude Code runs it",
       "A request's reasoning effort (body reasoning_effort, or a model(level) suffix, which wins) runs at the model's nearest level, a tie going up; auto or an unknown word sends none. A level the model lacked was a 400, retried by Claude Code until the launch looked stuck",
       "A model Cline lists but no longer serves (its 502 \"model not found\") is a non-retryable 404: Claude Code retried the 502 for about four minutes before the chat failed",
+      "GET /api/usage-limits returns each enabled key's ClinePass usage windows (5-hour, weekly, monthly: percent used and reset time) from Cline's /users/me/plan/usage-limits, cached for a minute, for CPA's quota page; keys never leave the switcher",
       "A streamed reply that has not started within 60 s is asked for once more, and two that never start are a retryable 504: one that never started took the switcher's whole 120 s attempt budget, and the chat sat quiet for two minutes after a tool call"
     ],
     "build": {
@@ -140,9 +141,36 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.8.dll",
-        "sha256": "bd411dab79886ad4b68bae1b712637044d8ddad87101a4e40c735007fdb914e8",
-        "size": 7893504
+        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.9.dll",
+        "sha256": "6940a739a4d4250341ac9a4374b0d7e7cace4076e216d4169744d933982e19a0",
+        "size": 7895552
+      }
+    }
+  },
+  "autoReview": {
+    "id": "codex-review-account-selector",
+    "name": "CPA Auto Review",
+    "version": "0.2.0-codingtools.1",
+    "source": {
+      "repository": "https://github.com/p90-lover/cpa_auto_review",
+      "commit": "52239a513eb14d995d1530ce79e0b30ed6e687ea",
+      "license": "MIT"
+    },
+    "changes": [
+      "Serves codex-auto-review (Codex's \"Approve for me\" reviewer and Coding Tools' command reviewer) on a chosen Codex account through CPA's native executor",
+      "Falls back, in order, to up to 8 accounts and models from any CPA provider when the chosen account is missing, disabled or unavailable, or its request fails or returns a non-2xx status (a 429 quota error, a 5xx); a streamed review falls back only before its first chunk",
+      "The settings page edits the fallback chain (account and model per row, reorder, remove, add); an earlier {\"selectedAuthId\"} selection still loads"
+    ],
+    "build": {
+      "go": "1.27.3",
+      "cCompiler": "Zig 0.16.0",
+      "mode": "c-shared"
+    },
+    "platforms": {
+      "win32/x64": {
+        "path": "windows/amd64/codex-review-account-selector-v0.2.0-codingtools.1.dll",
+        "sha256": "6db11afab12333a1977d997182115a44a2c11d3b11f7a73f072d25d53cdc7cfa",
+        "size": 3346944
       }
     }
   }

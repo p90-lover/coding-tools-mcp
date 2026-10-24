@@ -6,7 +6,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const {
-  installCpaPanelSession, panelStorageEntries, CPA_HELPER_KEY_STORE,
+  installCpaPanelSession, panelStorageEntries, quotaPageScript, CPA_HELPER_KEY_STORE,
 } = require("../electron/cpa-panel-session.cjs");
 
 const ORIGIN = "http://127.0.0.1:8317";
@@ -335,4 +335,153 @@ test("the installed plugin's own name gets the same sign-in, and neither name re
   const lookalike = { ...frame, url: `${ORIGIN}/v0/resource/plugins/codex-review-account-selector-x/index.html` };
   assert.deepEqual(await f.request({ frame: lookalike, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }),
     { requestHeaders }, "a look-alike plugin page");
+});
+
+// Just enough DOM for the quota page script: class lookups, insertion after the header, text.
+class FakeNode {
+  constructor(tag, className = "") {
+    Object.assign(this, { tag, className, children: [], parent: null, style: {}, dataset: {}, text: "", disabled: false, clicks: 0 });
+  }
+  get textContent() { return [this.text, ...this.children.map((child) => child.textContent)].join(" "); }
+  set textContent(value) { this.text = String(value); this.children = []; }
+  append(...nodes) { for (const node of nodes) { node.remove(); node.parent = this; this.children.push(node); } }
+  replaceChildren(...nodes) { this.children.forEach((child) => { child.parent = null; }); this.children = []; this.append(...nodes); }
+  remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; }
+  after(node) { node.remove(); this.parent.children.splice(this.parent.children.indexOf(this) + 1, 0, node); node.parent = this.parent; }
+  get nextElementSibling() { return this.parent?.children[this.parent.children.indexOf(this) + 1] ?? null; }
+  descendants() { return this.children.flatMap((child) => [child, ...child.descendants()]); }
+  querySelector(selector) {
+    const name = selector.match(/^\[class\*="(.+)"\]$/)[1];
+    return this.descendants().find((node) => node.className.includes(name)) ?? null;
+  }
+  click() { this.clicks += 1; }
+}
+
+function quotaPage({ hash = "#/quota", loaded = false, usage } = {}) {
+  const marker = `coding-tools-${"c".repeat(48)}`;
+  const sessionStorage = storage();
+  sessionStorage.setItem("coding-tools-cpa-session", marker);
+  const page = new FakeNode("main");
+  const header = new FakeNode("header", "QuotaHeader-module__header___FQh-X");
+  const button = new FakeNode("button", "QuotaHeader-module__primaryAction___wLlcP");
+  header.append(button);
+  if (loaded) header.append(new FakeNode("span", "QuotaHeader-module__metaLoaded___5XtFO"));
+  page.append(header, new FakeNode("section", "Quota-module__providers"));
+  const clock = { now: Date.parse("2026-10-24T08:00:00Z") };
+  const fetches = [];
+  const ticks = [];
+  const document = Object.assign(page, {
+    visibilityState: "visible",
+    createElement: (tag) => new FakeNode(tag),
+    addEventListener: () => {},
+  });
+  const context = vm.createContext({
+    window: {}, document, sessionStorage, innerWidth: 900,
+    location: { hash },
+    Date: { now: () => clock.now, parse: Date.parse },
+    setInterval: (fn) => ticks.push(fn),
+    addEventListener: () => {},
+    fetch: async (url, options) => {
+      fetches.push({ url, authorization: options.headers.Authorization });
+      return { ok: true, json: async () => usage };
+    },
+  });
+  return {
+    marker, header, button, clock, fetches, sessionStorage, context,
+    run: () => vm.runInContext(quotaPageScript(marker), context),
+    settle: () => new Promise((resolve) => setImmediate(resolve)),
+    tick: () => ticks[0](),
+  };
+}
+
+const USAGE = {
+  checkedAt: "2026-10-24T08:00:00.000Z",
+  accounts: [
+    { name: "main key", enabled: true, limits: [
+      { type: "five_hour", percentUsed: 42, resetsAt: "2026-10-24T10:30:00.000Z" },
+      { type: "weekly", percentUsed: 90, resetsAt: "2026-10-27T08:00:00.000Z" },
+    ] },
+    { name: "spare key", enabled: true, limits: [], error: "Cline answered HTTP 401" },
+    { name: "switched off", enabled: false, limits: [] },
+  ],
+};
+
+test("the quota page loads every provider's quota on open, once, and again after five minutes", () => {
+  const q = quotaPage({ usage: USAGE });
+  assert.equal(q.run(), "started");
+  assert.equal(q.run(), "running", "one script per page load");
+  assert.equal(q.button.clicks, 1, "nothing was loaded, so it presses Refresh all credentials");
+  q.tick();
+  q.tick();
+  assert.equal(q.button.clicks, 1, "not again on this visit while it is fresh");
+  q.clock.now += 5 * 60e3 + 1;
+  q.tick();
+  assert.equal(q.button.clicks, 2, "five minutes on, the open page refreshes again");
+  q.button.disabled = true;
+  q.clock.now += 5 * 60e3 + 1;
+  q.tick();
+  assert.equal(q.button.clicks, 2, "never while the page has no credentials or is loading");
+});
+
+test("a reopened quota page that still shows loaded quota is not refreshed early, nor while hidden", () => {
+  const q = quotaPage({ loaded: true, usage: USAGE });
+  q.sessionStorage.setItem("coding-tools-quota-refreshed", String(q.clock.now - 60e3));
+  q.run();
+  assert.equal(q.button.clicks, 0);
+  q.context.location.hash = "#/auth-files";
+  q.tick();
+  q.context.document.visibilityState = "hidden";
+  q.context.location.hash = "#/quota";
+  q.clock.now += 5 * 60e3;
+  q.tick();
+  assert.equal(q.button.clicks, 0, "a hidden panel sends no quota requests");
+});
+
+test("the quota page shows each Cline Pass key's usage windows under its header", async () => {
+  const q = quotaPage({ usage: USAGE });
+  q.run();
+  await q.settle();
+  assert.deepEqual(q.fetches, [{ url: "/v0/management/cline-pass-switcher/api/usage-limits", authorization: `Bearer ${q.marker}` }]);
+  const card = q.header.nextElementSibling;
+  assert.equal(card.dataset.codingTools, "cline-quota");
+  const text = card.textContent;
+  assert.match(text, /Cline Pass/);
+  assert.match(text, /2 keys/, "the switched-off key is left out");
+  assert.match(text, /main key[\s\S]*5-hour[\s\S]*58% left · resets in 2h 30m[\s\S]*Weekly[\s\S]*10% left · resets in 3d 0h/);
+  assert.match(text, /spare key[\s\S]*Cline answered HTTP 401/);
+  assert.doesNotMatch(text, /switched off/);
+
+  // React drops the card on a re-render; the next tick puts it back under the header.
+  card.remove();
+  q.tick();
+  assert.equal(q.header.nextElementSibling, card);
+  // Leaving the page takes it away.
+  q.context.location.hash = "#/config";
+  q.tick();
+  assert.equal(card.parent, null);
+});
+
+test("no Cline Pass card without enabled keys, and the script waits for a seeded panel", async () => {
+  const q = quotaPage({ usage: { accounts: [{ name: "off", enabled: false, limits: [] }] } });
+  q.run();
+  await q.settle();
+  assert.equal(q.header.nextElementSibling.className, "Quota-module__providers");
+  const unseeded = quotaPage({ usage: USAGE });
+  unseeded.sessionStorage.setItem("coding-tools-cpa-session", "something-else");
+  assert.equal(unseeded.run(), "unseeded");
+  assert.equal(unseeded.button.clicks, 0);
+});
+
+test("the quota script runs only in the managed panel frame", async () => {
+  const f = fixture();
+  f.install();
+  const watch = f.webContents.listeners("did-frame-finish-load")[2];
+  await watch({}, false, 5, 9);
+  assert.match(f.frame.scripts.at(-1), /QuotaHeader-module__primaryAction/);
+  const scripts = f.frame.scripts.length;
+  f.frame.url = `${ORIGIN}/v0/resource/plugins/cpa-helper/index.html`;
+  await watch({}, false, 5, 9);
+  await watch({}, true, 5, 9);
+  assert.equal(f.frame.scripts.length, scripts);
+  assert.equal(f.frame.scripts.join("").includes(SECRET), false);
 });

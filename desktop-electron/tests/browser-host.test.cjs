@@ -712,6 +712,47 @@ test("new turn tabs defer device emulation until their renderer finishes loading
   assert.equal(tab.deviceEmulationDirty, true);
 });
 
+test("a hidden automatic turn tab holds its animations still and gets them back when shown", async () => {
+  const css = [], removed = [], listeners = {};
+  let keys = 0;
+  const contents = {
+    isDestroyed: () => false,
+    insertCSS: async (text, options) => { css.push([text, options?.cssOrigin]); return `key-${++keys}`; },
+    removeInsertedCSS: async key => { removed.push(key); },
+    on: (event, listener) => { listeners[event] = listener; },
+    enableDeviceEmulation: () => {}, disableDeviceEmulation: () => {},
+  };
+  const tab = { id: "tab-still", status: "running", rendererReady: false, view: { setBounds: () => {}, setVisible: () => {}, webContents: contents } };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    window: { getContentSize: () => [800, 600], isMinimized: () => false, isVisible: () => true },
+  });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+
+  fixture.presentTurnView(tab, false);
+  fixture.presentTurnView(tab, false);
+  assert.equal(css.length, 1, "held once, not on every sync");
+  assert.match(css[0][0], /animation-duration: 0s !important/);
+  assert.doesNotMatch(css[0][0], /animation:\s*none|opacity/, "animations end in their end state; the turn reads final opacity");
+  assert.equal(css[0][1], "user");
+
+  listeners["dom-ready"]();
+  assert.equal(css.length, 2, "a new document is held again");
+
+  fixture.presentTurnView(tab, true);
+  await settle();
+  assert.deepEqual(removed, ["key-2"], "shown to the person: its animations run again");
+  listeners["dom-ready"]();
+  assert.equal(css.length, 2, "a shown tab's next document is not held");
+
+  const manualCss = [];
+  const manual = { interactionMode: "manual", status: "running", view: { setBounds: () => {}, setVisible: () => {},
+    webContents: { ...contents, insertCSS: async text => { manualCss.push(text); return "k"; } } } };
+  fixture.hiddenTurnBounds = () => ({ x: 900, y: 700, width: 800, height: 600 });
+  fixture.presentTurnView(manual, false);
+  assert.deepEqual(manualCss, [], "a manual tab gets no DOM hooks");
+});
+
 test("visible turn tabs establish native bounds before clearing background emulation", () => {
   const events = [];
   const tab = {
