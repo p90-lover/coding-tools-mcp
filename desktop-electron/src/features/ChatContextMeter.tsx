@@ -59,10 +59,24 @@ export function currentContext(sessions: Record<string, ChatContextSnapshot> | u
 
 /** One quota window of a CPA Codex account (cpa-quota.cjs): percent used and when it resets (ms). */
 type QuotaWindow = { usedPercent: number; resetsAt: number | null; windowSeconds: number | null };
+/** The account's credits, which pay for every request once a window is full (balance as sent). */
+type QuotaCredits = { balance: string | null; hasCredits: boolean; unlimited: boolean; overageReached: boolean };
 export type CpaQuotaAccount = {
   id: string; label: string; plan: string | null; disabled: boolean; paused: boolean;
-  session: QuotaWindow | null; week: QuotaWindow | null; checkedAt: number | null; error: string | null;
+  session: QuotaWindow | null; week: QuotaWindow | null; credits?: QuotaCredits | null; checkedAt: number | null; error: string | null;
 };
+
+/** "Credits 51,187.97", and whether requests are drawing on them now (a window is full). */
+function CreditsLine({ account }: { account: CpaQuotaAccount }) {
+  const credits = account.credits;
+  if (!credits) return null;
+  const full = [account.session, account.week].some((window) => (window?.usedPercent ?? 0) >= 100);
+  const amount = credits.unlimited ? "unlimited" : credits.balance === null ? "unknown"
+    : Number(credits.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const state = credits.overageReached ? "overage limit reached" : !credits.unlimited && !credits.hasCredits ? "none left"
+    : full ? "in use: limit reached" : "";
+  return <p className="cx-ctx-meta" title={credits.balance ?? undefined}>Credits {amount}{state ? ` · ${state}` : ""}</p>;
+}
 type CpaQuota = { available: boolean; reason?: string; accounts?: CpaQuotaAccount[] };
 
 const POLL_MS = 4_000;
@@ -381,6 +395,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
             {account.session ? <LimitRow name="5 hours" used={account.session.usedPercent} resetsAt={account.session.resetsAt} /> : null}
             {account.week ? <LimitRow name="Week" used={account.week.usedPercent} resetsAt={account.week.resetsAt} /> : null}
             {!account.session && !account.week ? <p className="cx-ctx-meta">{account.error || "Not checked yet"}</p> : null}
+            <CreditsLine account={account} />
             <UsageLine account={usageById.get(account.id)} />
           </div>)}
         </section> : onCpaCodex && !limitRows.length && quota && !quota.available ? <section className="cx-ctx-section">

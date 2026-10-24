@@ -25,6 +25,17 @@ function windowOf(value) {
   return { usedPercent: Math.max(0, Math.min(100, used)), resetsAt: finite(value.reset_at_ms), windowSeconds: finite(value.window_seconds) };
 }
 
+/**
+ * An account's credits from CPA Helper 0.1.1+ (null before): they pay for every request once a
+ * window is full. The balance stays the exact decimal string chatgpt.com sent.
+ */
+function creditsOf(value) {
+  if (!value || typeof value !== "object") return null;
+  const balance = text(value.balance, 40);
+  return { balance: /^-?\d+(\.\d+)?$/.test(balance) ? balance : null, hasCredits: value.has_credits === true,
+    unlimited: value.unlimited === true, overageReached: value.overage_limit_reached === true };
+}
+
 /** A quota check's error in words: a sign-in CPA can no longer use reads as such. */
 function errorText(value) {
   const message = text(value, 200);
@@ -47,6 +58,7 @@ function accountOf(item) {
     paused: Number(item?.priority) === -1,
     session: windowOf(quota.primary),
     week: windowOf(quota.secondary),
+    credits: creditsOf(quota.credits),
     checkedAt: finite(quota.checked_ms) || null,
     error: errorText(quota.error) || (item?.unavailable ? errorText(item?.status_message) || "Unavailable" : null),
   };

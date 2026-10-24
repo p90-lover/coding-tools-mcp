@@ -138,7 +138,7 @@ const COMMANDCODE_PLUGINS = [
   { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.3.dll", sha256: "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.2.dll", sha256: "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
-  { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
+  { id: "cpa-helper", file: "cpa-helper-v0.1.1.dll", sha256: "7ea766d0b569f0f6c402f02918d1d52137071425e4544c791ff773af6fbba6ce" },
   // Grok Build/Web/Console provider built from chenyme/grok2api (vendor/cpa-plugins/grok-login-provider).
   { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.2.dll", sha256: "9894157b26546b325e308b36fcb4fde6795b3ed813bc866e79ab78dfb0a39937" },
 ];

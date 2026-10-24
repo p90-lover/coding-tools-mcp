@@ -55,15 +55,16 @@
   },
   "helper": {
     "id": "cpa-helper",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "source": {
       "repository": "https://github.com/p90-lover/cpa-helper-plugin",
-      "commit": "1a0724b",
+      "commit": "bb2287a",
       "license": "MIT",
       "upstream": "https://github.com/walkingddd/CPA-Helper"
     },
     "changes": [
-      "Rewritten in std-only Rust as a CPA cdylib plugin (no Go/Python runtime)"
+      "Rewritten in std-only Rust as a CPA cdylib plugin (no Go/Python runtime)",
+      "Each Codex account's credit balance (exact, as chatgpt.com sends it) in /codex/accounts and the console's Credits column; credits pay for every request once a limit is reached"
     ],
     "build": {
       "rust": "stable",
@@ -71,9 +72,9 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cpa-helper-v0.1.0.dll",
-        "sha256": "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c",
-        "size": 810496
+        "path": "windows/amd64/cpa-helper-v0.1.1.dll",
+        "sha256": "7ea766d0b569f0f6c402f02918d1d52137071425e4544c791ff773af6fbba6ce",
+        "size": 813568
       }
     }
   },

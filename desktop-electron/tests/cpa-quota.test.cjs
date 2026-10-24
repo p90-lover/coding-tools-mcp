@@ -41,7 +41,7 @@ test("reads CPA Helper's Codex accounts with the management key and returns only
     id: "a1", label: "me@example.com", plan: "plus", disabled: false, paused: false,
     session: { usedPercent: 42.4, resetsAt: NOW + 3_600_000, windowSeconds: 18_000 },
     week: { usedPercent: 97.5, resetsAt: NOW + 86_400_000, windowSeconds: 604_800 },
-    checkedAt: NOW - 60_000, error: null,
+    credits: null, checkedAt: NOW - 60_000, error: null,
   }]);
   const text = JSON.stringify(result);
   assert.ok(!text.includes(KEY) && !text.includes("should-not-pass"), "no key or token reaches the renderer");
@@ -97,6 +97,15 @@ test("working accounts come first, so many signed-out ones cannot hide them past
   }
   assert.ok(refreshed().includes("out11"), "an account past the cap is re-checked too");
   assert.ok(!refreshed().includes("plus") && !refreshed().includes("off"), "not a fresh one, nor a disabled one");
+});
+
+test("an account's credits (CPA Helper 0.1.1) reach the meter exactly as chatgpt.com sent them", () => {
+  // Past a full window every request is paid from them: 7 credits a minute, seen 2026-10-24.
+  const credits = { balance: "51249.6137980000", has_credits: true, unlimited: false, overage_limit_reached: false };
+  assert.deepEqual(accountOf(item({ quota: { ...item().quota, credits } })).credits,
+    { balance: "51249.6137980000", hasCredits: true, unlimited: false, overageReached: false });
+  assert.equal(accountOf(item({ quota: { ...item().quota, credits: { balance: "lots", unlimited: true } } })).credits.balance, null, "only a number is shown");
+  assert.equal(accountOf(item()).credits, null, "an older CPA Helper reports none");
 });
 
 test("an account at its limit, a disabled one and one with an error are told apart", () => {
