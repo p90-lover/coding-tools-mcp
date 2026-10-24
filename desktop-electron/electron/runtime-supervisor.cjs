@@ -19,6 +19,12 @@ const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
 const MAX_CONTROL_OUTPUT_BYTES = 1024 * 1024;
 const DRAIN_IDLE_TIMEOUT_MS = 15_000;
 const DRAIN_POLL_INTERVAL_MS = 100;
+// What a setup that waits for running turns is about to apply (RuntimeHost operation names).
+const SETUP_WAIT_LABELS = {
+  "bigger-context": "applying Bigger Context",
+  "use-saved-chats": "changing saved chats",
+  "browser-interaction-mode": "changing browser interaction",
+};
 const TUNNEL_START_TIMEOUT_MS = 120_000;
 const TUNNEL_HEALTH_POLL_INTERVAL_MS = 1_000;
 const TUNNEL_MONITOR_INTERVAL_MS = 10_000;
@@ -2178,7 +2184,10 @@ class RuntimeSupervisor {
       if (Date.now() >= deadline) {
         throw new Error(`Still waiting for ${activity}. Finish the active Codex turns, then retry setup; the bridge is still running.`);
       }
-      const message = `Waiting for ${activity} to finish before connecting MCP. Existing requests can continue.`;
+      // Named by what is being applied: a Bigger Context or saved-chats switch waiting here said
+      // "before connecting MCP", and nothing said the switch itself was waiting (2026-10-24).
+      const applying = SETUP_WAIT_LABELS[operationName] || "connecting MCP";
+      const message = `Waiting for ${activity} to finish before ${applying}. Existing requests can continue.`;
       if (message !== previousMessage) {
         this.publishOperation?.({ name: operationName, status: "running", message });
         previousMessage = message;

@@ -1864,7 +1864,7 @@ function registerIpc({ logger, stateStore }) {
     // the agent pre-warm and the Retry automatically switch unset. They still need a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "archived_chats", "chat_prewarm"].includes(input.operation)
-        || (input.operation === "chat_auto_retry" && input.arguments?.enabled === undefined));
+        || (["chat_auto_retry", "chat_model_judges"].includes(input.operation) && input.arguments?.enabled === undefined));
     assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
     // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
     if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
@@ -3239,6 +3239,11 @@ async function start() {
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
         // RTK's Claude Code hook, which AO puts in each Claude session's own settings (empty: off).
         try { env = { ...env, ...rtk.daemonEnvironment() }; } catch { /* runs without RTK */ }
+        // AO hands this environment to every Claude Code chat agent. Claude Code's own scheduler
+        // (CronCreate, /loop) lives in one claude process and never fires once its turn ends: a goal
+        // agent set "*/10 * * * *" to carry on, said it would check again in 10 minutes, and nothing
+        // ever ran (2026-10-24). Without it the agent waits with the app's schedule_wakeup instead.
+        env = { ...env, CLAUDE_CODE_DISABLE_CRON: "1" };
         // Lets AO run any session's model through CPA; the daemon blanks it for the agents themselves.
         let cpaKey = null;
         try { cpaKey = externalServicesController?.cpaConnection()?.proxyApiKey; } catch { /* CPA not running */ }

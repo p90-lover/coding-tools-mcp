@@ -701,6 +701,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-auto-retry input:checked + .cx-switch::after { transform: translateX(12px); }
 .cx-auto-retry input:focus-visible + .cx-switch { outline: 2px solid var(--ao-blue); outline-offset: 2px; }
 .cx-auto-retry input:disabled + .cx-switch { opacity: .5; }
+/* "Let the model judge" in the goal bar: one line beside its icons, never squeezed. */
+.cx-model-judges.is-compact { flex: none; gap: 6px; font-size: 11px; white-space: nowrap; }
 .cx-auto-retry:has(input:disabled) { cursor: default; }
 @media (prefers-reduced-motion: reduce) { .cx-switch, .cx-switch::after { transition: none; } }
 .cx-to-bottom { position: sticky; bottom: 12px; left: 50%; display: grid; place-items: center; width: 32px; height: 32px; margin: -44px auto 12px; border: 1px solid var(--ao-line);

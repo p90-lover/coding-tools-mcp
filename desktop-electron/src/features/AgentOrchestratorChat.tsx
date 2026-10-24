@@ -1,6 +1,7 @@
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
+import { ModelJudgesToggle } from "./ModelJudgesToggle";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
@@ -2105,6 +2106,7 @@ export function AgentOrchestratorChat({
               <span className="cx-goal-round">Round {goalRounds(commands.goal)} · </span>
               <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
                 format={(ms) => goalElapsed(0, ms)} /></span>
+            <ModelJudgesToggle compact />
             <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" disabled={goalBusy} onClick={() => void runCommand("goal", "clear", false)}><GoalGlyph name="trash" /></button>
             {commands.goal.status === "active"
               ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" disabled={goalBusy} onClick={() => void runCommand("goal", "pause", false)}><GoalGlyph name="pause" /></button>
