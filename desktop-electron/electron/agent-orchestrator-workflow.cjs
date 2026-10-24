@@ -3853,7 +3853,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         throw new Error("AO run has an active or unresolved card; inspect it before starting");
       }
       if (missionSettled(mission)) throw new Error("This task is already finished");
-      const resuming = mission.nodes.some((node) => node.state === "running")
+      let resuming = mission.nodes.some((node) => node.state === "running")
         || Boolean(mission.grant && !grantSpent(mission.grant) && mission.nodes.some(node => ["held", "failed"].includes(node.state)));
       const readyWebRole = mission.nodes.find(node => node.state === "pending"
         && node.route?.provider_id === "chatgpt-web"
@@ -3863,6 +3863,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         executable: selectedExecutable, model: mission.nodes[0].route.model });
       if (!/^[a-f0-9]{64}$/.test(selected?.expected_sha256 || "") || !path.isAbsolute(selected.executable)) {
         throw new Error("AO executable identity changed; select the current executable");
+      }
+      // A grant for another build of the agent's program (Claude Code updates itself; an app update
+      // replaces the harnesses) can start nothing: a held or failed card waiting on it is retried on a
+      // fresh grant, as one whose grant is spent is. Retry refused "no matching background grant"
+      // (2026-10-24 08:31). A card still running on the old program keeps the refusal.
+      if (resuming && mission.grant?.executable_sha256 !== selected.expected_sha256
+        && !mission.nodes.some((node) => ["running", "reserved"].includes(node.state))) {
+        await controlRun({ workspaceId: id, runId: run, action: "retry" });
+        const again = await runs({ workspaceId: id, runId: run });
+        mission = again.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+        if (!mission || mission.cancelled || mission.nodes.some((node) => ["running", "reserved", "held"].includes(node.state))) {
+          throw new Error("AO run changed while it was reset for a fresh grant; inspect it before starting");
+        }
+        resuming = false;
       }
       if (resuming && mission.grant?.executable_sha256 !== selected.expected_sha256) {
         throw new Error("AO running turn has no matching background grant");
