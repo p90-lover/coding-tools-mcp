@@ -131,6 +131,23 @@ function findInstalledCodexExecutable(env = process.env) {
 
 const CHAT_TASK_TITLE = "New task";
 
+/**
+ * The name rename_chat writes for a chat now titled `current` when its agent asks for `proposed`
+ * (the model's own text, up to 200 characters), or null to leave the chat's name as it is.
+ */
+function agentChatTitle(current, proposed) {
+  // One line without markdown or wrapping quotes, as nameChat cleans a model's name; an apostrophe
+  // inside a word stays ("user's"). Control characters would fail the board's clean().
+  let name = String(proposed ?? "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/[*#`]/g, "").replace(/\s+/g, " ").trim()
+    .replace(/^["'“”‘’]+|["'“”‘’.]+$/g, "").trim();
+  // A long one is cut at a word, not mid-word.
+  if (name.length > 80) name = /\s/.test(name.slice(0, 81)) ? name.slice(0, 81).replace(/\s+\S*$/, "") : name.slice(0, 80);
+  // Nothing left, the placeholder, or the name it already has (case and spacing aside): nothing to write.
+  const same = (text) => String(text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!name || same(name) === same(CHAT_TASK_TITLE) || same(name) === same(current)) return null;
+  return name;
+}
+
 // The WebGPT tiers the bridge serves; it runs a tier the account lacks at the nearest lower one.
 const WEB_TIERS = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro"];
 const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
@@ -2739,6 +2756,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (group === "chats") return "Reads the app's chats, read-only; other projects' chats only after you allow them";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
+    if (short === "rename_chat") return "Names this chat after the task it works on; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
     if (short === "view_app") return "An image of the Coding Tools window you see; nothing else on the screen";
@@ -4931,6 +4949,38 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return codexGoal(goals.update(id, task, change));
   }
 
+  /**
+   * rename_chat from a chat agent (chat-agent-tools.cjs): the chat whose run holds its AO `session`
+   * is named `title`, as the person's Rename does. A team run with cards still to reserve would
+   * refuse them after the edit (grantAtRisk), so the name waits for them, as the chat's first name does.
+   * A newer rename (the agent's, or the person's Rename) retires a waiting one: it applied late over
+   * the newer name (Codex review of #575).
+   */
+  const waitingTitles = new Map();
+  const titleKey = (workspaceId, taskId) => JSON.stringify([workspaceId, taskId]);
+  async function chatTitleTool({ workspaceId, session, title } = {}) {
+    const id = clean(workspaceId, 128);
+    const { latest } = await sessionChat(id, clean(session, 256), "rename its chat");
+    const task = latest.project_id;
+    const turn = {};
+    waitingTitles.set(titleKey(id, task), turn);
+    const detail = await board({ workspaceId: id, taskId: task });
+    if (!detail.task || detail.task.id !== task) throw new Error("This chat's task no longer exists");
+    const name = agentChatTitle(detail.task.title, title);
+    if (name === null) return { ok: true, taskId: task, title: detail.task.title, renamed: false };
+    const saved = await runs({ workspaceId: id });
+    if (saved.runs.some(run => run.project_id === task && grantAtRisk(run))) {
+      whenTaskIdle(id, task, () => {
+        if (waitingTitles.get(titleKey(id, task)) !== turn) return;
+        waitingTitles.delete(titleKey(id, task));
+        return taskRename({ workspaceId: id, taskId: task, title: name });
+      });
+      return { ok: true, taskId: task, title: name, renamed: false, note: "Renamed once the team's open cards have started" };
+    }
+    await taskRename({ workspaceId: id, taskId: task, title: name });
+    return { ok: true, taskId: task, title: name, renamed: true };
+  }
+
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
 
   // A wake-up that could not fire (AO not ready yet after a restart) is tried again a while later.
@@ -5829,7 +5879,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "codex_executable": return { ok: true, executable: findCodexExecutable() };
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };
       case "board": return board(args);
-      case "task_rename": return taskRename(args);
+      // The person's name wins over an agent's rename_chat still waiting on a team round.
+      case "task_rename": waitingTitles.delete(titleKey(String(args?.workspaceId ?? "").trim(), String(args?.taskId ?? "").trim())); return taskRename(args);
       case "models": return models(args);
       case "harnesses": return harnesses();
       // Runtime > Subagents (subagents.cjs): its settings and subagents, and the ones running now.
@@ -5972,7 +6023,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
