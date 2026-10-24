@@ -2024,6 +2024,13 @@ export function AgentOrchestratorChat({
           <button type="button" className="cx-picker-action" disabled title="Chats need a project">
             <span aria-hidden="true">✕</span>Don't work in a project</button>
         </FloatingLayer> : null}
+        {/* Queued messages always come first, above every other bar (a command's card, the goal, a
+            loop or wake-up, notes, the subagents' line) and the branch picker, as Claude Code keeps its
+            queued bar on top: under the goal bar it read as part of the goal (the user's ask). */}
+        <QueuedMessageBar items={queuedBar}
+          onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
+          // Queued commands and goals show in the bar too now, so Clear all clears all of them.
+          onClearAll={() => setQueue(selectedTaskId, [])} />
         {card ? <section className="cx-command-card" role="status" aria-label={card.title}>
           <header><strong>{card.title}</strong>
             <button type="button" className="cx-icon-button" aria-label="Close" onClick={() => setCard(null)}><Icon name="close" width="12" height="12" /></button></header>
@@ -2130,12 +2137,6 @@ export function AgentOrchestratorChat({
           <span className="cx-subagent-dots" aria-hidden="true">{subagents.filter(subagentActive).slice(0, 3).map((run) => <i key={run.subagent_id} />)}</span>
           <span className="cx-shimmer">{subagentLine}</span>
         </button> : null}
-        {/* Queued and steering messages wait above the branch picker, as Claude Code's queued bar sits
-            above its branch (PR) bar: under it, a steer sat between "main" and the box. */}
-        <QueuedMessageBar items={queuedBar}
-          onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
-          // Queued commands and goals show in the bar too now, so Clear all clears all of them.
-          onClearAll={() => setQueue(selectedTaskId, [])} />
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
             Harness shows its approval panel: in the thread it took the thread's own margins and sat
