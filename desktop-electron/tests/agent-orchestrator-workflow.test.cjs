@@ -7857,3 +7857,40 @@ test("with Retry automatically on, a turn silent past its limit is stopped so it
   await look();
   assert.deepEqual(interrupts, ["sess-1", "sess-1"], "a command long past its stated timeout is stopped too");
 });
+
+test("a held worker whose unspent grant names another build of the agent's program is started on a fresh grant", async () => {
+  // Activity log 2026-10-24 08:31: start_run refused "AO running turn has no matching background
+  // grant": Claude Code (or the app) had updated since the grant, so nothing could start on it.
+  const old = "a".repeat(64), current = "b".repeat(64);
+  for (const state of ["held", "running"]) {
+    const world = { controls: [], grants: 0, state };
+    const requestHeadless = async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, team: null, worker_capacity: { r1: 1 }, runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1",
+        revision: 2, cancelled: false, execution_mode: "team",
+        grant: { executable_sha256: old, max_turns: 3, turns_started: 1, granted_at_ms: Date.now(), expires_at_ms: Date.now() + 3_600_000 },
+        nodes: [{ id: "lead", role: "planner", state: "finished", route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" }, history: [], receipt: { answer: "plan" } },
+          { id: "w1", role: "worker", state: world.state, parents: ["lead"], route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" },
+            history: [], receipt: world.state === "held" ? { error: "Launch failed" } : null },
+          { id: "rev", role: "reviewer", state: "pending", parents: ["w1"], route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" }, history: [], receipt: null }] }] };
+      if (endpoint === "/api/v1/ao/control") { world.controls.push(body.action); world.state = "pending"; return { ok: true, run: { id: "r1", workspace_id: "ws-1", nodes: [] } }; }
+      if (endpoint === "/api/v1/ao/grant") { world.grants += 1; return { ok: true, run: { id: "r1", workspace_id: "ws-1" }, grant: { executable_sha256: current } }; }
+      if (endpoint === "/api/v1/tools/call") return { operation: { state: "completed", result: { ok: true, revision: 1, workspace_id: "ws-1", steps: [], task: { id: "task-1", title: "T", description: "d" } } } };
+      throw new Error(`stop at ${endpoint}`);
+    };
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+      fetchImpl: async () => { throw new Error("no helper"); },
+      webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+      resolveHarness: async () => ({ expected_sha256: current, executable: path.resolve("codex.exe") }) });
+    try {
+      if (state === "held") {
+        await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+        assert.deepEqual(world.controls, ["retry"], "the held card is reset");
+        assert.equal(world.grants, 1, "and started on a grant for the current build");
+      } else {
+        // A card still running on the old program cannot be granted again.
+        await assert.rejects(workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" }), /no matching background grant/);
+        assert.deepEqual(world.controls, []);
+      }
+    } finally { workflow.dispose(); }
+  }
+});
