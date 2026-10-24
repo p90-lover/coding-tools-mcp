@@ -1463,6 +1463,23 @@ test("a running turn with no agent process behind it is over: interrupted, with 
   assert.equal(coming.agentGone, undefined);
 });
 
+test("a request left pending by an agent that is gone shows no card, since nothing can take the answer", async () => {
+  // Seen live 2026-10-23: Allow on such a card failed twice with "the agent controller for this
+  // session is not running (CHAT_CONTROLLER_NOT_READY)".
+  const approval = { id: "a1", turnId: "t", sequence: 2, activityKind: "approval", status: "pending", requestId: "req-1",
+    summary: "Bash", detail: { toolName: "Bash", input: { command: "git status" }, decisions: [{ id: "allow", kind: "allow_once", label: "Allow" }] } };
+  const read = (controller) => observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation?limit=100&includePending=1")
+      ? { controller, turns: [{ id: "t", state: "completed" }], messages: [], activities: [approval] }
+      : { session: { id: "s", mode: "chat", status: "working", provisionState: "ready" } },
+  }).observe("s");
+  const gone = await read("stopped");
+  assert.equal(gone.agentGone, true);
+  assert.equal(gone.approvals.length, 0);
+  const live = await read("running");
+  assert.equal(live.approvals.map(item => item.approval_id).join(","), "req-1", "a live agent's request still shows");
+});
+
 test("a send binds its workspace in AO once, not for every catalog read and the launch", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");

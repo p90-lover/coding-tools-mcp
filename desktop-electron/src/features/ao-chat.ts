@@ -16,7 +16,7 @@ export type ChatNode = {
   /** `thread_id` is the card's AO session id when its harness is an AO agent ("ao:…"). */
   receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; thread_id?: string };
   /** Earlier attempts' receipts, oldest first (a retry moves the last receipt here). */
-  history?: { answer?: string; verdict?: string; error?: string }[];
+  history?: { answer?: string; verdict?: string; error?: string; started_at_ms?: number }[];
 };
 
 /** One AO agent session of a chat, for its Preview and Terminal panes. */
@@ -682,6 +682,22 @@ function withSteers(raw: string): { text: string; steers?: ChatSteer[] } {
   return { text: parts[0].trim(), ...(steers.length ? { steers } : {}) };
 }
 
+/** A saved message stamp ("YYYY-MM-DD HH:MM", UTC) as Unix ms; undefined in any other form. */
+function stampMs(stamp: string | undefined): number | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(stamp?.trim() ?? "");
+  if (!match) return undefined;
+  const [, year, month, day, hour, minute] = match.map(Number);
+  const at = Date.UTC(year, month - 1, day, hour, minute);
+  return Number.isNaN(at) ? undefined : at;
+}
+
+/** When a run first started: the earliest start of its cards, earlier attempts included. */
+function runStartedMs(run: ChatRun): number | undefined {
+  const starts = run.nodes.flatMap((node) => [node.receipt?.started_at_ms, ...(node.history ?? []).map((entry) => entry?.started_at_ms)])
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+  return starts.length ? Math.min(...starts) : undefined;
+}
+
 /** The user's messages in a chat, oldest first: the task description plus each follow-up. */
 export function chatMessagesFromDescription(description: string | undefined): { text: string; stamp?: string; steers?: ChatSteer[] }[] {
   const parts = (description ?? "").split(FOLLOW_UP);
@@ -944,6 +960,8 @@ export type ChatTurn = {
   solo: boolean;
   /** When the earliest card of this run started (Unix ms). */
   startedAtMs?: number;
+  /** A saved message no run ever answered: its send failed after the message was written. */
+  unsent?: boolean;
 };
 
 /** The error the main process gives a card whose turn ended only because the app restarted. */
@@ -1397,9 +1415,34 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
   const now = options.now ?? Date.now();
   // Each run answers the next message, except a restart or a reconfigured replacement: that one
   // answers its earlier run's message again, so it shows as a turn of its own without a message.
+  // A message whose send failed after it was saved (seen 2026-10-23: "Headless request timed out")
+  // has no run. Paired by place alone, every later run then showed under the message before its
+  // own, and the newest message read "Starting…" for good. A run that started once the message after
+  // the next one had been sent answers that one, and the message it skips shows as not sent. Stamps
+  // are to the minute (the first message has none), so a skip needs it beyond doubt: the next
+  // message's whole minute ended before the run started, or the run started in that minute and the
+  // skipped message is two minutes older or more. A reply that started at 10:11:01 to a message
+  // saved at 10:10:59 is not given to one sent at 10:11:15. Only while the chat has more messages
+  // than runs.
+  const MINUTE = 60_000;
   let messageIndex = 0;
-  const turns: ChatTurn[] = runs.map((run) => {
-    const index = run.restarts_run_id || run.replaces_run_id ? -1 : messageIndex++;
+  let spare = said.length - runs.filter((run) => !run.restarts_run_id && !run.replaces_run_id).length;
+  const turns: ChatTurn[] = [];
+  for (const run of runs) {
+    let index = -1;
+    if (!run.restarts_run_id && !run.replaces_run_id) {
+      const started = runStartedMs(run);
+      while (started !== undefined && spare > 0 && messageIndex + 1 < said.length) {
+        const next = stampMs(said[messageIndex + 1].stamp);
+        const own = stampMs(said[messageIndex].stamp);
+        if (next === undefined || own === undefined || next > started) break;
+        if (next + MINUTE > started && own + 2 * MINUTE > next) break;
+        spare -= 1;
+        turns.push({ key: `unsent:${messageIndex}`, runId: "", user: said[messageIndex], messageIndex, steps: [], status: "stopped", solo: false, unsent: true });
+        messageIndex += 1;
+      }
+      index = messageIndex++;
+    }
     const steps = chatNodeOrder(run.nodes)
       // A pending card shows once it has done something: a receipt, or an earlier round's answer.
       .filter((node) => node.state !== "pending" || node.receipt || earlierRounds(node).length)
@@ -1409,15 +1452,15 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
       ? steps.find((step) => step.role === "planner" && step.state === "finished" && step.text)
       : [...steps].reverse().find((step) => step.role === "reviewer" && step.state === "finished" && step.text);
     const starts = steps.map((step) => step.startedAtMs).filter((value): value is number => Boolean(value));
-    return {
+    turns.push({
       key: run.id, runId: run.id,
       ...(said[index] ? { user: said[index], messageIndex: index } : {}),
       steps: closing ? steps.filter((step) => step !== closing) : steps,
       ...(closing ? { final: closing } : {}),
       status: chatRunStatus(run), solo: Boolean(run.solo),
       ...(starts.length ? { startedAtMs: Math.min(...starts) } : {}),
-    };
-  });
+    });
+  }
   for (let index = messageIndex; index < said.length; index += 1) {
     turns.push({ key: `pending:${index}`, runId: "", user: said[index], messageIndex: index, steps: [], status: "queued", solo: false });
   }

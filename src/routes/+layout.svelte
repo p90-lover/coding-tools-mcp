@@ -3,7 +3,7 @@
   import { onMount } from "svelte";
   import { createWorkspaceRefresh } from "$lib/workspace-refresh";
   import { goto } from "$app/navigation";
-  import { page } from "$app/stores";
+  import { page } from "$app/state";
   import { open } from "@tauri-apps/plugin-dialog";
   import AppShell from "$lib/components/AppShell.svelte";
   import ToastHost from "$lib/components/ToastHost.svelte";
@@ -104,7 +104,7 @@
   }
 
   onMount(() => {
-    if ($page.url.pathname === "/control") return;
+    if (page.url.pathname === "/control") return;
     const registry=createWorkspaceRefresh(async()=>{
       const items=await listWorkspaces();
       const linked=await Promise.all(items.map(async item=>[item.id,await listLinkedProjects(item.id)] as const));
@@ -135,35 +135,35 @@
   });
 </script>
 
-{#if $page.url.pathname === "/control"}
+{#if page.url.pathname === "/control"}
   {@render children()}
 {:else}
 <AppShell onAddWorkspace={addWorkspace}>
   {#snippet settingsNav()}
     <button
       type="button"
-      class="tx-settings-link {$page.url.pathname === '/settings/general' ? 'active' : ''}"
+      class="tx-settings-link {page.url.pathname === '/settings/general' ? 'active' : ''}"
       onclick={openGeneralSettings}
     >
       一般設定
     </button>
     <button
       type="button"
-      class="tx-settings-link {$page.url.pathname === '/settings/keys' ? 'active' : ''}"
+      class="tx-settings-link {page.url.pathname === '/settings/keys' ? 'active' : ''}"
       onclick={openKeysSettings}
     >
       共用金鑰
     </button>
     <button
       type="button"
-      class="tx-settings-link {$page.url.pathname === '/settings/frp' ? 'active' : ''}"
+      class="tx-settings-link {page.url.pathname === '/settings/frp' ? 'active' : ''}"
       onclick={openFrpSettings}
     >
       FRP 設定
     </button>
     <button
       type="button"
-      class="tx-settings-link {$page.url.pathname === '/settings/software' ? 'active' : ''}"
+      class="tx-settings-link {page.url.pathname === '/settings/software' ? 'active' : ''}"
       onclick={openSoftwareSettings}
     >
       軟體管理
@@ -174,7 +174,7 @@
       {#each $workspaces as workspace (workspace.id)}
         <WorkspaceNavItem
           workspace={workspace}
-          active={$page.url.pathname === `/workspace/${workspace.id}`}
+          active={page.url.pathname === `/workspace/${workspace.id}`}
           mcpState={$mcpRuntimeStates[workspace.id] ?? "stopped"}
           actionsState={$actionsRuntimeStates[workspace.id] ?? "stopped"}
           linkedProjects={$linkedProjectsByWorkspace[workspace.id] ?? []}

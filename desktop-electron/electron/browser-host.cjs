@@ -111,6 +111,15 @@ const COMPOSER_SELECTOR = [
 // the window instead of taking clicks. An embedded page never owns the window frame.
 const PAGE_NO_DRAG_CSS = "*, *::before, *::after { -webkit-app-region: no-drag !important; }";
 
+// A running turn's tab is unthrottled so its stream never slows, and Chromium then updates the page
+// at the display's frame rate while nobody sees it. ChatGPT fades in each streamed segment; in a
+// view that presents no frames those animations never start, and 50-65 of them sat pending per tab,
+// keeping it at 160+ updates a second (about 18-25% of a core per tab, measured 2026-10-24). Zero
+// durations end every animation at once in its end state, so what the turn reads (an element's
+// final opacity) is unchanged. The tab gets its animations back when the person looks at it.
+const HIDDEN_TURN_STILL_CSS = "*, *::before, *::after { animation-duration: 0s !important; animation-delay: 0s !important;"
+  + " transition-duration: 0s !important; transition-delay: 0s !important; }";
+
 function keepPageOutOfWindowFrame(contents) {
   contents.on("dom-ready", () => {
     if (!contents.isDestroyed()) void contents.insertCSS(PAGE_NO_DRAG_CSS, { cssOrigin: "user" }).catch(() => {});
@@ -1810,6 +1819,26 @@ class BrowserHost {
     });
   }
 
+  /** Holds a hidden automatic turn tab's animations still (HIDDEN_TURN_STILL_CSS), or lets them run. */
+  holdTurnAnimations(tab, hold) {
+    const contents = tab.view.webContents;
+    if (typeof contents?.insertCSS !== "function" || contents.isDestroyed() || Boolean(tab.animationsHeld) === hold) return;
+    tab.animationsHeld = hold;
+    const insert = () => contents.insertCSS(HIDDEN_TURN_STILL_CSS, { cssOrigin: "user" }).catch(() => null);
+    if (!tab.animationsHoldBound) {
+      tab.animationsHoldBound = true;
+      // A new document drops inserted CSS: a held tab is held again.
+      contents.on("dom-ready", () => { if (tab.animationsHeld && !contents.isDestroyed()) tab.stillCssKey = insert(); });
+    }
+    if (hold) {
+      tab.stillCssKey = insert();
+      return;
+    }
+    const key = tab.stillCssKey;
+    tab.stillCssKey = null;
+    void key?.then(value => { if (value && !contents.isDestroyed()) return contents.removeInsertedCSS(value); }).catch(() => {});
+  }
+
   presentTurnView(tab, visible) {
     if (tab.interactionMode === "manual") {
       tab.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
@@ -1839,6 +1868,7 @@ class BrowserHost {
       }
       tab.view.setBounds(bounds);
     }
+    this.holdTurnAnimations(tab, !visible);
     tab.view.setVisible(visible || tab.status === "running");
   }
 

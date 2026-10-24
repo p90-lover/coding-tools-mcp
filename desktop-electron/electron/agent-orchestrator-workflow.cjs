@@ -1412,6 +1412,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return true;
   }
 
+  // AO marks a session needs_input as a permission request comes in, about 2 s before the request
+  // itself shows in the conversation (sampled live 2026-10-24). Read in that gap, a routine request
+  // the reviewer then allowed reported the run as "needs input" for one pass: 160 approvals in 40
+  // minutes opened MCP incidents past their rate limit. A wait with no request in sight is the
+  // person's only once it has lasted INPUT_SETTLE_MS.
+  const INPUT_SETTLE_MS = 10_000;
+  const inputSince = new Map(); // session -> when it first read needs_input with no request
+  function waitsForInput(session, observed, pending) {
+    if (!observed.needsInput || pending.length) { inputSince.delete(session); return false; }
+    if (!inputSince.has(session)) {
+      inputSince.set(session, now());
+      if (inputSince.size > 200) inputSince.delete(inputSince.keys().next().value);
+    }
+    return now() - inputSince.get(session) >= INPUT_SETTLE_MS;
+  }
+
   async function observeExternal(workspaceId, runId, node, mission = null) {
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
@@ -1430,7 +1446,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
-      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: observed.needsInput && !pending.length, session_id: session };
+      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
     }
     const completed = observed.turnState === "completed";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
@@ -4231,6 +4247,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
+  /**
+   * A follow-up whose run could not be made leaves the chat: a message no run answers stayed in it
+   * (seen 2026-10-23: "Headless request timed out" after the message was written), and every later
+   * reply showed under the message before its own. A run that was made after all (the request
+   * timed out, then went through) keeps the message, and so does a chat changed since.
+   */
+  async function withdrawFollowUp(id, task, known, { before: description, description: written }) {
+    if ((await runs({ workspaceId: id })).runs.some(run => run.project_id === task && !known.has(run.id))) return;
+    const detail = await board({ workspaceId: id, taskId: task });
+    if (!detail.task || String(detail.task.description || "") !== written) return;
+    await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+  }
+
   async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
@@ -4245,6 +4274,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
+    // The runs before this send, to tell whether its own run was made (withdrawFollowUp).
+    const runsBefore = new Set(saved.runs.map(run => run.id));
     if (executionMode !== undefined && !["single", "team"].includes(executionMode)) throw new Error("Choose single or team execution");
     if (deferStart !== undefined && typeof deferStart !== "boolean") throw new Error("Choose a valid deferred startup option");
     let team = saved.team;
@@ -4285,6 +4316,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // gave, or a single chat's name taken from its message, kept nameChat's model call for nothing.
     let defaultTitled = false;
     let continuation = null;
+    // The follow-up as written to the chat, and the chat as it was before (withdrawFollowUp).
+    let followUp = null;
     if (taskId) {
       task = clean(taskId, 128);
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
@@ -4316,8 +4349,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         description = extended();
         if (!compacted.compacted || utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full. Start a new chat to continue.");
       }
+      const saidBefore = String(detail.task.description || "");
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
+      followUp = { before: saidBefore, description };
     } else {
       const before = await board({ workspaceId: id });
       const known = new Set(before.tasks.map((entry) => entry.id));
@@ -4331,7 +4366,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       task = added[0].id;
     }
 
-    const { runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true);
+    let runId, createdRun;
+    try {
+      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true));
+    } catch (error) {
+      if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
+      throw error;
+    }
     // After a deleted message this run started without the old session; later follow-ups continue its own.
     if (taskId) chatEdits.clearFresh(id, task);
     if (continuation) {
