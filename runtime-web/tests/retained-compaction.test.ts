@@ -27,7 +27,8 @@ import {
   chatGptWebExecutionNamespace,
   createChatGptWebAdapter,
 } from "../src/adapters/chatgpt-web/index";
-import { SUMMARY_PREFIX } from "../src/responses/compaction";
+import { encodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
+import { parseRequest } from "../src/responses/parser";
 import {
   ChatGptTextFeed,
   ChatGptTraceFeed,
@@ -144,6 +145,68 @@ test("one browser conversation spans native turns and rotates only at compaction
     content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\ncheckpoint` }],
   });
   expect(chatGptConversationKey(v1Compact, "provider")).not.toBe(chatGptConversationKey(before, "provider"));
+});
+
+test("adapter restores compacted instructions before retaining plain follow-ups", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-compacted-prompt-"));
+  const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: `browser://${root}`, chatgptWeb: {
+    browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"), brokerSocketPath: defaultBrokerEndpoint(root),
+    localToolsEnabled: true, solAvailable: true, proAvailable: true,
+  } };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const system = "Current system: verify the result.";
+  const developer = "Current developer: preserve unrelated edits.";
+  const agents = "# AGENTS.md instructions\nUse the existing tests.";
+  const environment = `<environment_context><cwd>${root}</cwd><sandbox_mode>danger-full-access</sandbox_mode></environment_context>`;
+  const source = request()._rawBody as { input: unknown[]; client_metadata: Record<string, unknown> };
+  const environmentMessage = { type: "message", role: "user", content: [{ type: "input_text", text: environment }],
+    internal_chat_message_metadata_passthrough: { turn_id: "turn_source" } };
+  const body = { ...source, model: "gpt-5.6-sol", instructions: system, input: [
+    { type: "message", role: "developer", content: [{ type: "input_text", text: developer }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: agents }] },
+    environmentMessage, ...source.input,
+  ] };
+  const summary = "Checkpoint: implementation completed; verification remains.";
+  const compactedInput = [...body.input, { type: "compaction", encrypted_content: encodeCompactionSummary(summary) }];
+  const fresh = parseRequest({ ...body, input: compactedInput });
+  const followUp = "Continue without repeating completed tools.";
+  const retained = parseRequest({ ...body, input: [...compactedInput,
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Adapter answer" }] },
+    environmentMessage, { type: "message", role: "user", content: [{ type: "input_text", text: followUp }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_source" } },
+  ] });
+  const prompts: string[] = [], keys: string[] = [];
+  worker.run = async turn => {
+    const prepared = prompts.length === 0 ? await turn.prepare() : await turn.prepareResume!();
+    prompts.push(prepared.text); keys.push(turn.conversationKey!); prepared.release();
+    turn.onTextDelta("Adapter answer");
+    return "Adapter answer";
+  };
+  try {
+    const adapter = createChatGptWebAdapter(provider);
+    for (const parsed of [fresh, retained]) {
+      const events: AdapterEvent[] = [];
+      await adapter.runTurn!(parsed, { headers: new Headers() }, event => events.push(event));
+      expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
+    }
+    const envelope = JSON.parse(prompts[0]!.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)![1]!);
+    expect(envelope.system).toEqual([system]);
+    for (const [role, content] of [["developer", developer], ["user", agents], ["user", environment]]) {
+      expect(envelope.messages).toContainEqual({ role, content });
+    }
+    expect(prompts[0]).toContain(summary);
+    const tokens = prompts.map(prompt => prompt.match(/turn_token (turn_[A-Za-z0-9_-]+)/)![1]!);
+    expect(tokens[1]).not.toBe(tokens[0]);
+    expect(prompts[1]).toBe(`${followUp}\n\n(turn_token ${tokens[1]} — pass it to Codex tools)`);
+    expect(keys[0]).not.toBe(chatGptConversationKey(parseRequest(body), chatGptWebExecutionNamespace(provider)));
+    expect(keys[1]).toBe(keys[0]);
+  } finally {
+    worker.run = originalRun;
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("compaction capability is one-shot and structurally bound to its handoff id", async () => {
