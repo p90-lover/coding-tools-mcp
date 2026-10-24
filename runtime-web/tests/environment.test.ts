@@ -891,6 +891,30 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  test("recovers a second root chat without request_kind only from its own current native rollout", () => {
+    const { codexHome, request } = resumedRootFixture();
+    const body = request._rawBody as { client_metadata: Record<string, string> };
+    const metadata = JSON.parse(body.client_metadata["x-codex-turn-metadata"]!);
+    delete metadata.request_kind;
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    store.resolve(currentWire());
+    expect(store.resolve(request).cwd).toBe(root);
+
+    for (const [override, message] of [
+      [{ request_kind: "tool" }, "missing cwd"],
+      [{ thread_id: "01a06c66-0000-7ae1-9108-69b5f70e0671" }, "missing cwd"],
+      [{ turn_id: "01a06c66-ffff-75c6-a0df-318f890ef6de" }, "current turn"],
+      [{ sandbox_mode: "read-only" }, "sandbox metadata conflicts"],
+      [{ workspaces: { [resolve(root, "other-workspace")]: {} } }, "workspace metadata does not contain"],
+    ] as const) {
+      body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({ ...metadata, ...override });
+      const unrelatedStore = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+      unrelatedStore.resolve(currentWire());
+      expect(() => unrelatedStore.resolve(request)).toThrow(message);
+    }
+  });
+
   // Seen live: an old Codex task switched to a Web model compacted before its "keep going". The
   // replacement history put this turn's environment, a kept older message and the compaction
   // ahead of Codex Desktop's time/page context and the instruction, so nothing was adjacent.
