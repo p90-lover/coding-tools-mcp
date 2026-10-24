@@ -1,4 +1,4 @@
-name: Build merged WebGPT fix - Coding Tools v0.8.20
+name: Build merged WebGPT and AO fixes - Coding Tools v0.8.20
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
       - name: Checkout exact merged main commit (no working-tree cleanup)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 8311fc5bdd1f04ea887e1008bb0ee2d8c4aa868a
+          ref: 4d22d694f72d4d833a5a3894161eef925dec79a9
           fetch-depth: 0
           submodules: recursive
           clean: false
@@ -73,7 +73,7 @@ jobs:
 
       - name: Verify exact merged source and selected runtime regression
         run: |
-          if ((git rev-parse HEAD).Trim() -ne '8311fc5bdd1f04ea887e1008bb0ee2d8c4aa868a') { throw 'Unexpected source revision' }
+          if ((git rev-parse HEAD).Trim() -ne '4d22d694f72d4d833a5a3894161eef925dec79a9') { throw 'Unexpected source revision' }
           $version = (Get-Content desktop-electron/package.json -Raw | ConvertFrom-Json).version
           if ($version -ne '0.8.20') { throw "Unexpected desktop version: $version" }
           bun test --cwd runtime-web tests/environment.test.ts
@@ -101,7 +101,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: Coding-Tools-v0.8.20-windows-merged-pr577
+          name: Coding-Tools-v0.8.20-windows-merged-pr579
           path: |
             desktop-electron/artifacts/*
             aiTemp/build-evidence/*
