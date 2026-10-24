@@ -12,6 +12,8 @@ A request's reasoning effort (the body's `reasoning_effort`, or a `model(level)`
 
 A model Cline lists but no longer serves answers 502 `{"error":"model not found"}`; that becomes a non-retryable 404 (`upstreamStatus`). As a 5xx, Claude Code retried it for about four minutes, so the chat looked stuck launching.
 
+A streamed reply that has not started within 60 s is asked for once more (`startStream`); two that never start are a retryable 504. The switcher sends its response headers only once the upstream stream has begun, so the wait for headers is the wait for the model's first word. Before, one that never started took the switcher's whole 120 s attempt budget, and the chat sat "quiet" for two minutes after a tool call.
+
 A model that writes a tool call as text (Qwen XML `<tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>`, or JSON inside `<tool_call>`), as MiMo V2.6 Pro does, gets it turned into a real `tool_calls` entry for a tool the request offered, streamed or whole (`texttools.go`); anything else stays text.
 
 Build with the repository's portable Go/Zig toolchain (`CGO_ENABLED=1`, `CC="zig cc -target x86_64-windows-gnu"`), using `go build -buildmode=c-shared -trimpath -ldflags "-s -w"`. The ABI glue is adapted from the existing MIT CommandCode plugin. Tests cover native lifecycle/routes/models/inference and SSE framing; Node tests cover the pinned binary and scoped panel credential exchange.

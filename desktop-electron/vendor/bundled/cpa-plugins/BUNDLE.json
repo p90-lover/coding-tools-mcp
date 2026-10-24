@@ -55,15 +55,16 @@
   },
   "helper": {
     "id": "cpa-helper",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "source": {
       "repository": "https://github.com/p90-lover/cpa-helper-plugin",
-      "commit": "1a0724b",
+      "commit": "bb2287a",
       "license": "MIT",
       "upstream": "https://github.com/walkingddd/CPA-Helper"
     },
     "changes": [
-      "Rewritten in std-only Rust as a CPA cdylib plugin (no Go/Python runtime)"
+      "Rewritten in std-only Rust as a CPA cdylib plugin (no Go/Python runtime)",
+      "Each Codex account's credit balance (exact, as chatgpt.com sends it) in /codex/accounts and the console's Credits column; credits pay for every request once a limit is reached"
     ],
     "build": {
       "rust": "stable",
@@ -71,9 +72,9 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cpa-helper-v0.1.0.dll",
-        "sha256": "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c",
-        "size": 810496
+        "path": "windows/amd64/cpa-helper-v0.1.1.dll",
+        "sha256": "7ea766d0b569f0f6c402f02918d1d52137071425e4544c791ff773af6fbba6ce",
+        "size": 813568
       }
     }
   },
@@ -111,7 +112,7 @@
   "cline": {
     "id": "cline-pass-switcher",
     "provider": "cline",
-    "version": "0.1.0-codingtools.8",
+    "version": "0.1.0-codingtools.9",
     "source": {
       "repository": "https://github.com/munmunjaklin458-afk/cline-pass-switcher",
       "commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
@@ -130,7 +131,8 @@
       "A tool call a model writes as text (Qwen XML <tool_call><function=…><parameter=…>, or JSON in <tool_call>) to a tool the request offered becomes a real tool_calls entry, streamed or whole, so Claude Code runs it",
       "A request's reasoning effort (body reasoning_effort, or a model(level) suffix, which wins) runs at the model's nearest level, a tie going up; auto or an unknown word sends none. A level the model lacked was a 400, retried by Claude Code until the launch looked stuck",
       "A model Cline lists but no longer serves (its 502 \"model not found\") is a non-retryable 404: Claude Code retried the 502 for about four minutes before the chat failed",
-      "GET /api/usage-limits returns each enabled key's ClinePass usage windows (5-hour, weekly, monthly: percent used and reset time) from Cline's /users/me/plan/usage-limits, cached for a minute, for CPA's quota page; keys never leave the switcher"
+      "GET /api/usage-limits returns each enabled key's ClinePass usage windows (5-hour, weekly, monthly: percent used and reset time) from Cline's /users/me/plan/usage-limits, cached for a minute, for CPA's quota page; keys never leave the switcher",
+      "A streamed reply that has not started within 60 s is asked for once more, and two that never start are a retryable 504: one that never started took the switcher's whole 120 s attempt budget, and the chat sat quiet for two minutes after a tool call"
     ],
     "build": {
       "go": "1.27.3",
@@ -139,9 +141,9 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.8.dll",
-        "sha256": "b52872c6fa08b46ae71034b6a83ae346fb14cee4d9e910d3f71c86293d098139",
-        "size": 7870976
+        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.9.dll",
+        "sha256": "6940a739a4d4250341ac9a4374b0d7e7cace4076e216d4169744d933982e19a0",
+        "size": 7895552
       }
     }
   },

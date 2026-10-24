@@ -865,17 +865,20 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   const turns = { old: [{ state: "completed", completedAt: ago(90) }], recent: [{ state: "completed", completedAt: ago(10) }],
     typed: [{ state: "completed", completedAt: ago(90) }], warm: [] };
   const calls = [];
-  let resumeOk = true;
+  let resumeOk = true, exitOk = true;
   let status = "exited";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, agentTools: null,
-    exitedReleased: new Set(),
+    exitedReleased: new Set(), logger: null,
     internalApi: async (method, endpoint) => {
       calls.push([method, endpoint]);
       if (endpoint === "/api/v1/sessions") return { sessions };
       const id = endpoint.split("/")[4];
       if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
-      if (endpoint.endsWith("/exit-agent")) return { ok: true, session: { id, status: "exited" } };
+      if (endpoint.endsWith("/exit-agent")) {
+        if (!exitOk) throw new Error("exit failed");
+        return { ok: true, session: { id, status: "exited" } };
+      }
       if (endpoint.endsWith("/resume-agent")) { if (!resumeOk) throw new Error("resume failed"); status = "idle"; return { ok: true }; }
       return { session: { id, mode: "chat", status } };
     },
@@ -886,8 +889,14 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   assert.deepEqual(calls.at(-1), ["POST", "/api/v1/sessions/old/exit-agent"]);
   assert.equal(await upstream.continuable("old"), true, "a released agent is resumed for the next message");
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
-  status = "exited"; resumeOk = false;
-  await assert.rejects(upstream.continuable("old"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED", "an uncertain resume cannot replace the retained conversation");
+  status = "exited"; resumeOk = false; calls.length = 0;
+  assert.equal(await upstream.continuable("old"), false,
+    "an agent that cannot be confirmed back is stopped, tried once more, then the message starts a fresh agent");
+  const posts = calls.filter(([method]) => method === "POST").map(([, endpoint]) => endpoint.split("/").at(-1));
+  assert.deepEqual(posts, ["resume-agent", "exit-agent", "resume-agent", "exit-agent"]);
+  exitOk = false;
+  await assert.rejects(upstream.continuable("old"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED",
+    "one that cannot be stopped either may still come back, so no second agent is started beside it");
 });
 
 test("stale sessions are this project's live, unpinned, idle ones with no message (or creation) within the limit", async () => {
@@ -1580,9 +1589,10 @@ test("resume waits distinguish terminal failure from timeout and transport uncer
     const upstream = observeHarness({
       Date: { now: () => clock },
       setTimeout: callback => { clock += 1000; setImmediate(callback); },
-      internalApi: async method => {
+      internalApi: async (method, endpoint) => {
         if (method === "POST") {
-          resumes++;
+          // A stop while startup owns the resume is refused the same way: no second agent starts.
+          if (endpoint.endsWith("/resume-agent")) resumes++;
           throw Object.assign(new Error("restoring"), { status: 409, code: "AGENT_RESUME_IN_PROGRESS" });
         }
         reads++;

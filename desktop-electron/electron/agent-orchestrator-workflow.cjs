@@ -1274,7 +1274,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // A session that is gone, or refuses the message, falls back to a fresh start.
         let sent = null, sendError = null;
         if (continued) stage("reconnecting to the chat's agent");
-        const usable = Boolean(continued) && await continuableSession(continued.session);
+        // An agent AO could not confirm was back within its wait failed the message ("Couldn't confirm
+        // the agent was restored"), so the chat sat on "reconnecting" and then a failed step (the user:
+        // "if cant reconnect to chat agent can it just create a new agent chat with current context").
+        // It is stopped (its session, worktree and conversation stay), so it cannot come back beside
+        // the new agent, which starts with the chat so far (the handoff below).
+        let unconfirmed = false;
+        const usable = Boolean(continued) && await continuableSession(continued.session).catch((error) => {
+          if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
+          unconfirmed = true;
+          return false;
+        });
+        if (unconfirmed) {
+          stage("stopping the chat's agent, which did not come back");
+          await Promise.resolve().then(() => harnessService().exitAgent?.(continued.session)).catch(() => undefined);
+        }
         if (usable) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
@@ -1287,7 +1301,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // session that could not be continued (ao.continuable_refused says why) and a failed send.
         if (continued && !sent?.turnId) {
           logger?.warn?.("ao.continuation_lost", { session: continued.session,
-            reason: !usable ? "not_continuable" : sendError ? "send_failed" : "send_refused", ...(sendError ? { message: sendError } : {}) });
+            reason: unconfirmed ? "restore_unconfirmed" : !usable ? "not_continuable" : sendError ? "send_failed" : "send_refused",
+            ...(sendError ? { message: sendError } : {}) });
         }
         // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
         // with what the earlier agents replied; the first card to start takes it.
@@ -1301,7 +1316,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         continuations.delete(runId);
         if (!sent?.turnId) stage("looking for an agent started in advance");
-        const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);
+        // A warm agent AO cannot confirm is back is none to take: the message still gets a new agent.
+        const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain).catch((error) => {
+          if (error?.code === "AO_SESSION_RESTORE_UNCONFIRMED") return null;
+          throw error;
+        });
         let first = null;
         if (warmed) {
           stage("sending your message to the agent");
@@ -2328,12 +2347,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // conversation and what it read and ran: launching a fresh one began the task again from
     // nothing. The retry moved the card's receipt into its history; a session that is gone or
     // refuses the message still falls back to a fresh start (dispatchExternal).
+    // The run is running again: a round its goal judged before is judged again when it settles.
+    if (["retry", "retry_auto", "resume"].includes(action) && result.run) reopenGoalRound(id, result.run);
     if ((action === "retry" || action === "retry_auto") && result.run?.execution_mode === "single") {
       const card = result.run.nodes?.[0];
       const session = card?.state === "pending" && externalAgent(card) ? card.history?.at(-1)?.thread_id : null;
       if (typeof session === "string" && session && !continuations.has(run)) {
         continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
         if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+        // A session that cannot be continued starts a fresh agent: it begins with the chat so far, as
+        // a follow-up's does, not with the step's first prompt alone.
+        if (result.run.project_id && !handoffs.has(run)) {
+          handoffs.set(run, { workspaceId: id, taskId: result.run.project_id });
+          if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+        }
       }
     }
     if (action === "stop") {
@@ -2714,6 +2741,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
+    if (short === "view_app") return "An image of the Coding Tools window you see; nothing else on the screen";
     if (group === "terminal") return "Reads or stops a command in the chat's own terminal; it starts nothing and types nothing";
     if (group === "desktop") return "Reports on or stops the app's computer control; it sees and touches nothing on the screen";
     if (group !== "agent") return "One of the app's own chat tools that the app never confirms: not a command, typed input or the screen";
@@ -3272,9 +3300,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function askRecoveryHelper({ mission, node, task }) {
     const { baseUrl, key } = connection();
-    const catalog = (await models()).models;
+    const { models: catalog = [], hidden = [] } = await models();
     const preferred = mission.nodes.find((entry) => entry.route?.provider_id === "cliproxyapi-antigravity")?.route.model;
-    const model = catalog.includes(preferred) ? preferred : catalog[0];
+    // Never the first model CPA lists, which may be billed to the person's Codex quota (freeModels).
+    const model = catalog.includes(preferred) && !codexQuotaModel(preferred) ? preferred : freeModels(catalog, hidden)[0];
     if (!model) throw new Error("CPA has no model for the recovery helper");
     const role = node.settings?.name || node.role;
     const prompt = [
@@ -3967,7 +3996,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let name = "";
     try {
       const { baseUrl, key } = connection();
-      const model = (await models()).models[0];
+      const catalog = await models();
+      // A name is not worth the person's Codex quota (freeModels); with no other model, the message names it.
+      const model = freeModels(catalog.models ?? [], catalog.hidden ?? [])[0];
+      if (!model) throw new Error("No model outside the Codex quota");
       const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -4265,11 +4297,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const id = typeof input?.workspaceId === "string" ? input.workspaceId.trim() : "";
     const task = typeof input?.taskId === "string" ? input.taskId.trim() : "";
     const stalled = id && task && input.goal === undefined && goals.get(id, task)?.status === "stalled" ? goals.get(id, task) : null;
-    if (stalled) goals.update(id, task, { status: "active", note: "" });
+    if (stalled) goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0 });
     try {
       const result = await chatSend(input);
       if (stalled && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalled.note });
       else if (stalled && result?.runId) goals.update(id, task, { lastRunId: String(result.runId) });
+      // Sent while the goal waited out a pause (a failed round or check): this turn is its next round.
+      if (result?.runId && id && task && goals.get(id, task)?.retry) dropGoalRetry(id, task);
       return result;
     } catch (error) {
       if (stalled) goals.update(id, task, { status: "stalled", note: stalled.note });
@@ -4500,13 +4534,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * holds, with its reason. The reason is what the agent is told next when it does not.
    */
   /**
-   * The models a goal check tries, in order: a quick one first (Claude Code checks with a fast
-   * model), then any other, then Codex's own review model. None is billed to the person's Codex
-   * quota (codexQuotaModel): a check runs after every round, and picking by name alone ("mini")
-   * chose a ChatGPT-account model. A model that just failed waits REVIEWER_DOWN_MS, as for reviews,
-   * or MODEL_GONE_MS when it is not served at all (404).
+   * The models the app's own calls try, in order (goal checks, chat names, handoff summaries, the
+   * recovery helper): a quick one first (Claude Code checks with a fast model), then any other,
+   * then Codex's own review model. None is billed to the person's Codex quota (codexQuotaModel):
+   * these run unasked, and picking by name alone ("mini") chose a ChatGPT-account model. A model
+   * that just failed waits REVIEWER_DOWN_MS, as for reviews, or MODEL_GONE_MS when it is not
+   * served at all (404).
    */
-  function goalCheckModels(catalog, hidden = []) {
+  function freeModels(catalog, hidden = []) {
     const free = catalog.filter(model => !codexQuotaModel(model) && model !== AUTO_REVIEW_MODEL);
     const quick = free.filter(model => /haiku|flash|mini|lite|fast/i.test(model));
     const review = catalog.includes(AUTO_REVIEW_MODEL) || hidden.includes(AUTO_REVIEW_MODEL) ? [AUTO_REVIEW_MODEL] : [];
@@ -4518,7 +4553,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function checkGoal(goal, mission, { judge = false, ended = "" } = {}) {
     const { baseUrl, key } = connection();
     const catalog = await models();
-    const candidates = goalCheckModels(catalog.models ?? [], catalog.hidden ?? []);
+    const candidates = freeModels(catalog.models ?? [], catalog.hidden ?? []);
     if (!candidates.length) throw new Error("CPA has no model to check the goal with");
     // Judged from what the round was actually sent: after an edit the objective differs.
     const message = goal.lastMessage || goalMessage(goal.objective, goal.round, goal.feedback);
@@ -4548,6 +4583,80 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   const goalChecks = new Set();
+  // How many failed rounds (or failed checks) in a row a goal carries on through before it stalls,
+  // and the pauses between: a round that failed waits 30 s, then 60 s; a check waits 2 minutes.
+  const GOAL_FAILED_ROUNDS = 3;
+  const GOAL_RETRY_DELAY_MS = 30_000;
+  const GOAL_CHECK_RETRY_MS = 2 * 60_000;
+  const goalTimers = new Map();
+  let goalsDisposed = false;
+  const goalTimerKey = (workspaceId, task) => JSON.stringify([workspaceId, task]);
+  /**
+   * Carries a goal on after a pause: judges run `runId` again (`check`: its check failed), else
+   * starts the next round after it. The pause is saved with the goal (`retry`), so an app closed
+   * meanwhile carries on when it next reads the chat (sweepGoals arms it again), and until it is
+   * due the sweep leaves that round alone: a read judged it again at once, and two reads used up
+   * the goal's three checks.
+   */
+  function goalLater(workspaceId, task, delay, runId, check = false) {
+    goals.update(workspaceId, task, { retry: { at: now() + delay, runId, check } });
+    armGoalRetry(workspaceId, task);
+  }
+  /**
+   * One timer per chat. Nothing happens if the goal was paused, edited to another state or cleared
+   * meanwhile, its pause was replaced, the chat is working by then, or the app is shutting down
+   * (the saved pause is armed again by the next app).
+   */
+  function armGoalRetry(workspaceId, task) {
+    const retry = goals.get(workspaceId, task)?.retry;
+    if (!retry || goalsDisposed) return;
+    const key = goalTimerKey(workspaceId, task);
+    if (goalTimers.has(key)) clearTimer(goalTimers.get(key));
+    const timer = setTimer(() => {
+      goalTimers.delete(key);
+      if (goalsDisposed) return;
+      const goal = goals.get(workspaceId, task);
+      if (goal?.status !== "active" || goal.retry?.at !== retry.at) return;
+      goals.update(workspaceId, task, { retry: null });
+      const next = retry.check
+        ? goalAfterRun(workspaceId, retry.runId, "finished")
+        : runs({ workspaceId }).then(saved => continueGoal(workspaceId, task, goals.get(workspaceId, task),
+          saved.runs.find(run => run.id === retry.runId && run.project_id === task)));
+      void next.catch((error) => { logger?.warn?.("ao.goal_retry_failed", { message: publicText(error?.message || error, 200) }); });
+    }, Math.max(0, retry.at - now()));
+    timer?.unref?.();
+    goalTimers.set(key, timer);
+  }
+  /** A pause made moot (resume, or its round runs again): its timer and its saved deadline go. */
+  function dropGoalRetry(workspaceId, task) {
+    const key = goalTimerKey(workspaceId, task);
+    if (goalTimers.has(key)) { clearTimer(goalTimers.get(key)); goalTimers.delete(key); }
+    if (goals.get(workspaceId, task)?.retry) goals.update(workspaceId, task, { retry: null });
+  }
+  /**
+   * A round the goal already judged that runs again: the app restarted under it and its step was
+   * run again, Retry (or automatic retry) ran it again, or a steer restarted it. Its next settle is
+   * the one to judge, and it was skipped as judged: the goal showed "Pursuing" with nothing to drive
+   * it, after every app restart. A goal stalled by that very round (it failed or needed you) carries
+   * on with it, as the stall's note asked; one the person paused stays paused.
+   */
+  function reopenGoalRound(workspaceId, run) {
+    const task = run?.project_id;
+    const goal = task ? goals.get(workspaceId, task) : null;
+    // Running again means a step of it runs or can start: a round held on the person is still the
+    // one the goal judged (it stalled on it), not one that runs again. A pending step counts only
+    // when every card it waits on finished: a team's workers stay pending under a parent card that
+    // needs approval, and counting them woke a goal stalled on that very approval.
+    const nodes = run.nodes ?? [];
+    const ready = node => (node.parents ?? []).every(parent => nodes.some(entry => entry.id === parent && entry.state === "finished"));
+    const again = !run.cancelled && nodes.some(node => ["reserved", "running"].includes(node.state) || (node.state === "pending" && ready(node)));
+    if (!goal || !run.id || goal.evaluatedRunId !== run.id || !again) return;
+    const wake = goal.status === "stalled";
+    // A next round waiting after this one failed is moot: this round's own settle is judged.
+    dropGoalRetry(workspaceId, task);
+    goals.update(workspaceId, task, { evaluatedRunId: "", ...(wake ? { status: "active", note: "" } : {}) });
+    logger?.info?.("ao.goal_round_reopened", { woke: wake });
+  }
   /**
    * Whether the goal already has its verdict on `runId` as it ended (`outcome`). A round held on the
    * person, or failed, is marked when it stalls the goal, but it can still finish: the person answers
@@ -4600,7 +4709,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return error ? `: ${publicText(error, 300)}` : "";
       };
       const ended = !judge ? "" : outcome === "held" ? `It stopped waiting for the user${why("held")}.` : outcome === "failed" ? `It failed${why("failed")}.` : "";
-      if (outcome === "failed" && !judge) { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", note: "The last round failed; retry it, then /goal resume" }); return; }
+      // A round that failed (out of its own retries) is not the end of the goal: the next round
+      // starts after a pause and is told why, as Codex's /goal carries on (or the evaluator judges it).
+      // Only GOAL_FAILED_ROUNDS failures in a row stall it, judged or not, so a model that is gone
+      // does not loop. It stalled on the first.
+      if (outcome === "failed") {
+        const failures = (goal.failedRounds ?? 0) + 1;
+        if (failures >= GOAL_FAILED_ROUNDS) {
+          goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", failedRounds: failures,
+            note: `${failures} rounds in a row failed; retry the last one, or /goal resume` });
+          return;
+        }
+        if (!judge) {
+          const error = mission.nodes.map(node => node.receipt?.error).find(Boolean);
+          goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "stalled", failedRounds: failures,
+            note: `Round ${goal.round} failed; the next round starts shortly (${failures} of ${GOAL_FAILED_ROUNDS} failures in a row)`,
+            feedback: `The last round failed${error ? ` (${publicText(error, 300)})` : ""}. Carry on from where it stopped.` });
+          goalLater(workspaceId, task, failures * GOAL_RETRY_DELAY_MS, runId);
+          return;
+        }
+      }
       if (outcome === "held" && !judge) { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", note: "The last round needs you; answer it, then /goal resume" }); return; }
       // The agent asked to be woken later (schedule_wakeup): as Claude Code defers its check while
       // background work runs, the goal is judged when the agent has woken and finished, not now.
@@ -4616,13 +4744,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         check = await checkGoal(goal, mission, { judge, ended });
       } catch (error) {
         if (!still()) return;
-        // Not marked judged: resume (or the next sweep after the person resumes) checks it again.
-        goals.update(workspaceId, task, { status: "stalled",
-          note: `The goal could not be checked (${publicText(error?.message || error, 200)}); resume tries again` });
+        // Not marked judged: the check runs again later (every evaluator was down, or CPA was
+        // restarting), and only after GOAL_FAILED_ROUNDS failed checks does the goal stall; resume
+        // (or the next sweep after it) checks it again then. It stalled on the first failed check.
+        const failures = (goal.checkFailures ?? 0) + 1;
+        const reason = publicText(error?.message || error, 200);
+        if (failures >= GOAL_FAILED_ROUNDS) {
+          goals.update(workspaceId, task, { status: "stalled", checkFailures: 0, note: `The goal could not be checked (${reason}); resume tries again` });
+          return;
+        }
+        goals.update(workspaceId, task, { checkFailures: failures, note: `The goal could not be checked (${reason}); checking again shortly` });
+        goalLater(workspaceId, task, GOAL_CHECK_RETRY_MS, runId, true);
         return;
       }
       if (!still()) return;
-      goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "checked", checkedAt: now() });
+      goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "checked", checkedAt: now(), checkFailures: 0,
+        failedRounds: outcome === "failed" ? (goal.failedRounds ?? 0) + 1 : 0, note: "", retry: null });
       if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
       // Ended by the evaluator ("Let the model judge"): going on was unsafe or pointless. Stalled, as
       // Codex's blocked: nothing more runs, and the person can still resume it.
@@ -4651,9 +4788,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   function sweepGoals(workspaceId, saved) {
     const runsOfWorkspace = saved.runs ?? [];
+    // A judged round running again (reopened by any path, controlRun's own included) is judged
+    // again when it settles.
+    for (const [task, goal] of Object.entries(goals.forWorkspace(workspaceId))) {
+      if (!goal.evaluatedRunId || !["active", "stalled"].includes(goal.status)) continue;
+      const judged = runsOfWorkspace.find(run => run.id === goal.evaluatedRunId && run.project_id === task);
+      if (judged) reopenGoalRound(workspaceId, judged);
+    }
     const active = Object.entries(goals.forWorkspace(workspaceId))
       .filter(([task, goal]) => goal.status === "active" && taskLifecycle(saved, task).visibility === "active");
     for (const [task, goal] of active) {
+      // A goal waiting out a pause (a failed round or check) carries on when it is due; after an app
+      // restart nothing was counting it down, so it is armed again here.
+      if (goal.retry) {
+        if (!goalTimers.has(goalTimerKey(workspaceId, task))) armGoalRetry(workspaceId, task);
+        continue;
+      }
       const chatRuns = runsOfWorkspace.filter(run => run.project_id === task);
       const latest = chatRuns.at(-1);
       // A round being started: the held round it stops first reads as stopped until the new one exists.
@@ -4702,7 +4852,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (action !== "resume") throw new Error("Choose clear, pause, resume, edit or route");
     // A goal that used up its rounds (limited, or limited and then edited) gets as many more again.
     const rounds = goal.rounds > 0 && goal.round >= goal.rounds ? goal.round + goal.rounds : goal.rounds;
-    goals.update(id, task, { status: "active", rounds, note: "" });
+    // Resuming carries on now: a pause still waiting is dropped.
+    dropGoalRetry(id, task);
+    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0 });
     // The next round starts in the background: setting it up (board writes, a compaction when the
     // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
     // that long. A round that can't start marks the goal stalled (startGoalRound).
@@ -5020,7 +5172,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** A CPA model's handoff summary of a conversation (COMPACT_PROMPT); throws when none answers. */
   async function handoffSummary(text) {
     const { baseUrl, key } = connection();
-    const model = (await models()).models[0];
+    const catalog = await models();
+    // A summary reads a whole conversation: never on the person's Codex quota (freeModels).
+    const model = freeModels(catalog.models ?? [], catalog.hidden ?? [])[0];
+    if (!model) throw new Error("CPA has no model outside the Codex quota for a summary");
     const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -5643,6 +5798,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     wakeTimers.clear();
     for (const timer of loopTimers.values()) clearTimer(timer);
     loopTimers.clear();
+    // Saved goal pauses (retry) stay on disk too; the next app arms them when it reads the chat.
+    goalsDisposed = true;
+    for (const timer of goalTimers.values()) clearTimer(timer);
+    goalTimers.clear();
     autoRetryDisposed = true;
     for (const timer of autoRetryTimers) clearTimer(timer);
     autoRetryTimers.clear();

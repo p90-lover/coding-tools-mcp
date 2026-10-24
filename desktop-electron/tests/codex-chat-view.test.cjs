@@ -620,6 +620,22 @@ test("a failed step's card names the step and its error, and its turn leaves the
   assert.ok(source.includes("<input type=\"checkbox\" role=\"switch\""), "automatic retry is a switch");
 });
 
+test("Retry waits only on its own chat, and goal actions leave no card in the chat", () => {
+  // The user: "retry still not working". Retry ran through the surface-wide run(), which returns
+  // at once while anything else is in flight, and the card's button was disabled by that same busy.
+  const chat = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const surface = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  assert.ok(chat.includes("<FailedStepCard step={failedStep} notice={notice} busy={retrying}"), "the card's Retry is disabled only by this chat's retry");
+  assert.ok(!chat.includes("disabled={busy} onClick={() => retryStart("), "nor is the Start/Retry button");
+  const retry = surface.slice(surface.indexOf("const retryChatStart"), surface.indexOf("const retryRun"));
+  assert.ok(retry.includes("chatRun(") && !retry.includes("run(\"start-run\""), "Retry is guarded per chat, not by run()");
+  assert.ok(surface.includes("retrying={Boolean(chatTaskId && chatBusy.includes(chatTaskId))}"));
+  // The user: "remove all goal box like goal resumed info", "keep the chat clean". The goal bar shows the state.
+  for (const notice of ["Goal resumed.", "Goal cleared.", "Goal paused.", "The queued goal was dropped."]) {
+    assert.ok(!chat.includes(notice), `no "${notice}" card`);
+  }
+});
+
 test("each chat has its own queue: queuing in another chat never replaces one, and the view closing keeps them", () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   // The store lives at module level, outside the component, keyed by the chat's task id.

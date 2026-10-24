@@ -437,7 +437,7 @@ fn core_profile_keeps_the_default_capabilities_and_adds_history_tools() {
         .copied()
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(names, expected);
-    assert_eq!(names.len(), 58);
+    assert_eq!(names.len(), 60);
     assert_eq!(tools.len(), names.len(), "catalogue names must be unique");
     assert!(names.contains("grep_text"));
     assert!(names.contains("kill_command"));

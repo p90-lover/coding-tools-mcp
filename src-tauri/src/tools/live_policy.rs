@@ -149,8 +149,10 @@ pub fn fence_entire_call(name: &str) -> bool {
                 | "write_stdin"
                 | "capture_screenshot"
                 | "capture_window"
+                | "ocr_screen"
                 | "view_image"
                 | "compare_images"
+                | "ocr_image"
         )
 }
 

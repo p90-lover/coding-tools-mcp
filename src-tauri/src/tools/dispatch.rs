@@ -6,7 +6,7 @@ use crate::tools::context::ToolContext;
 use crate::tools::policy::{validate_tool_arguments_for_workspace, PolicyError};
 use crate::tools::workspace::{tool_err, tool_err_code, tool_ok, WorkspaceError};
 use crate::tools::{
-    exec, file, git, history, image_tool, patch, project_context, screen_tool, session,
+    exec, file, git, history, image_tool, ocr, patch, project_context, screen_tool, session,
 };
 
 fn policy_tool_err(err: PolicyError) -> Value {
@@ -118,7 +118,11 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
     if (name.starts_with("computer_")
         || matches!(
             name,
-            "capture_screenshot" | "capture_window" | "list_windows" | "list_displays"
+            "capture_screenshot"
+                | "capture_window"
+                | "ocr_screen"
+                | "list_windows"
+                | "list_displays"
         ))
         && ctx.current_policy_revision().ok() != Some(ctx.policy_revision)
     {
@@ -364,6 +368,7 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "view_image" => image_tool::view_image(ws, &effective_args),
         "image_info" => image_tool::image_info(ws, &effective_args),
         "compare_images" => image_tool::compare_images(ws, &effective_args),
+        "ocr_image" => ocr::ocr_image(ws, &effective_args),
         name if crate::tools::native_sandbox::NAMES.contains(&name) => {
             crate::tools::native_sandbox::call(ctx, name, &effective_args)
         }
@@ -375,6 +380,7 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "list_windows" => screen_tool::list_windows(ctx, &effective_args),
         "capture_screenshot" => screen_tool::capture_screenshot(ctx, &effective_args),
         "capture_window" => screen_tool::capture_window(ctx, &effective_args),
+        "ocr_screen" => screen_tool::ocr_screen(ctx, &effective_args),
         "request_permissions" => {
             let request_id = effective_args
                 .get("request_id")
@@ -496,7 +502,7 @@ fn apply_default_cwd(ctx: &ToolContext, name: &str, args: &Value) -> Value {
             effective["path"] = Value::String(prefix_relative_path(&base, path));
         }
         "read_file" | "search_text" | "grep_text" | "grep" | "git_blame" | "view_image"
-        | "image_info" => {
+        | "image_info" | "ocr_image" => {
             if let Some(path) = effective.get("path").and_then(Value::as_str) {
                 effective["path"] = Value::String(prefix_relative_path(&base, path));
             }
