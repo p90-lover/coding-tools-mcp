@@ -2696,11 +2696,13 @@ describe("ChatGPT outer-native harness v4", () => {
       await client.connect(transport);
       const listed = await client.listTools();
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
+        "codex_app_call",
         "codex_apply_patch",
         "codex_chat_sessions",
         "codex_exec",
         "codex_tool_call",
         "codex_tool_inventory",
+        "codex_tool_status",
         "codex_view_image",
         "codex_write_stdin",
         "coding_tools_agent_orchestrator",
@@ -2719,7 +2721,7 @@ describe("ChatGPT outer-native harness v4", () => {
       // ChatGPT caches the complete tools/list contract under a connector identity.
       // An intentional hash change therefore requires an explicit connector refresh or identity migration.
       expect(createHash("sha256").update(canonicalJson(publicConnectorAbi)).digest("hex"))
-        .toBe("4912226d6dbfe351ceae176642832059980956d7fbcbe0db8007b8d2b451dc09");
+        .toBe("53e3691d4d1144a9d86517c094cedaeabfbda8d00d54c173f4aa646ffff63303");
       for (const tool of listed.tools.filter(tool => tool.name.startsWith("codex_"))) {
         const properties = tool.inputSchema.properties as Record<string, unknown>;
         expect(properties.turn_token).toEqual({ type: "string", minLength: 20, maxLength: 256 });
@@ -2852,6 +2854,8 @@ describe("ChatGPT outer-native harness v4", () => {
         tools: [],
         total: 0,
         next_offset: null,
+        availability: "advertised_in_current_turn; native permissions still apply; execution unverified",
+        discovery_tools: [],
       });
 
       const rawGatewayInventory = await inventoryThroughGateway(

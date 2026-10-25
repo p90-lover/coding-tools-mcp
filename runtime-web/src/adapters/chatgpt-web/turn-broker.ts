@@ -34,6 +34,22 @@ interface PendingInvocation {
   reject: (error: Error) => void;
 }
 
+interface InvocationReceipt {
+  callId: string;
+  requestKey?: string;
+  fingerprint: string;
+  promise: Promise<BrokerToolResult>;
+  result?: BrokerToolResult;
+  error?: string;
+}
+
+export interface BrokerInvocationStatus {
+  call_id: string;
+  state: "queued" | "dispatched" | "completed" | "failed";
+  result?: BrokerToolResult;
+  error?: string;
+}
+
 interface ToolWaiter {
   resolve: (requests: BrokerToolRequest[]) => void;
   reject: (error: Error) => void;
@@ -69,6 +85,7 @@ interface TurnChannel {
   queuedCallIds: string[];
   deliveredCallIds: Set<string>;
   invocations: Map<string, PendingInvocation>;
+  receipts: Map<string, InvocationReceipt>;
   waiters: Set<ToolWaiter>;
   compactionRequested: boolean;
   compactionResult?: BrokerToolResult;
@@ -93,6 +110,8 @@ interface BrokerRequest {
     | "resolve"
     | "release"
     | "invoke"
+    | "invoke_start"
+    | "invoke_poll"
     | "owner_status"
     | "owner_register"
     | "owner_register_safe"
@@ -114,6 +133,8 @@ interface BrokerRequest {
     | "submit_compaction_handoff";
   token?: string;
   bindingId?: string;
+  requestKey?: string;
+  waitMs?: number;
   wireName?: string;
   freeform?: boolean;
   arguments?: Record<string, unknown>;
@@ -299,6 +320,7 @@ export class TurnBroker implements TurnBrokerOwner {
       queuedCallIds: [],
       deliveredCallIds: new Set(),
       invocations: new Map(),
+      receipts: new Map(),
       waiters: new Set(),
       compactionRequested: false,
       compactionDeliveryCount: 0,
@@ -878,7 +900,9 @@ export class TurnBroker implements TurnBrokerOwner {
       throw new Error("turn broker request id is invalid");
     }
     if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
-      throw new Error("turn broker method is invalid");
+      if (request.method !== "invoke_start" && request.method !== "invoke_poll") {
+        throw new Error("turn broker method is invalid");
+      }
     }
   }
 
@@ -1102,6 +1126,26 @@ export class TurnBroker implements TurnBrokerOwner {
     }
     if (request.method === "resolve") return { environment: binding.channel.environment };
     this.assertSafeHarnessRunning(binding.channel);
+    if (request.method === "invoke_poll") {
+      const receipt = binding.channel.receipts.get(request.callId ?? "");
+      if (!receipt) throw new Error("Invocation receipt is unavailable in this turn");
+      const waitMs = request.waitMs ?? 0;
+      if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 30_000) throw new Error("Invalid receipt polling interval");
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        if (!receipt.result && !receipt.error && waitMs > 0) {
+          await Promise.race([
+            receipt.promise.catch(() => {}),
+            new Promise<void>(resolveWait => { timer = setTimeout(resolveWait, waitMs); }),
+          ]);
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      // Polling cannot revive a revoked or replaced turn, even if its old promise settled.
+      if (!this.bindings.has(bindingId)) throw new Error("Invocation turn was retired");
+      return this.receiptStatus(binding.channel, receipt);
+    }
     if (binding.channel.compactionRequested) {
       const result = binding.channel.compactionResult;
       if (!result) throw new Error("Codex context compaction control result is unavailable");
@@ -1109,11 +1153,32 @@ export class TurnBroker implements TurnBrokerOwner {
       console.info(
         `[chatgpt-web] broker trace=${binding.channel.traceId} intercepted a post-compaction MCP call`,
       );
-      return structuredClone(result);
+      return request.method === "invoke_start"
+        ? { call_id: "", state: "completed", result: structuredClone(result) }
+        : structuredClone(result);
     }
 
     const wireName = request.wireName?.trim();
     if (!wireName) throw new Error("wire tool name is required");
+    const requestKey = request.requestKey;
+    if (requestKey !== undefined && (typeof requestKey !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(requestKey))) {
+      throw new Error("Invalid invocation request ID");
+    }
+    const fingerprint = createHash("sha256").update(JSON.stringify({
+      wireName, freeform: request.freeform === true,
+      ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
+    }, (_key, value) => value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)).digest("hex");
+    if (request.method === "invoke_start") {
+      const existing = requestKey === undefined ? undefined
+        : [...binding.channel.receipts.values()].find(receipt => receipt.requestKey === requestKey);
+      if (existing) {
+        if (existing.fingerprint !== fingerprint) throw new Error("Invocation request ID conflicts with its original arguments");
+        return this.receiptStatus(binding.channel, existing);
+      }
+      // Never evict a key and then accidentally execute a replay as a new mutation.
+      if (binding.channel.receipts.size >= 512) throw new Error("This turn's invocation receipt capacity is full; no tool was dispatched");
+    }
     const callId = opaqueId("call");
     const toolRequest: BrokerToolRequest = {
       callId,
@@ -1121,7 +1186,7 @@ export class TurnBroker implements TurnBrokerOwner {
       freeform: request.freeform === true,
       ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
     };
-    return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
+    const promise = new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
       binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
       binding.channel.queuedCallIds.push(callId);
       console.info(
@@ -1129,6 +1194,20 @@ export class TurnBroker implements TurnBrokerOwner {
       );
       this.scheduleToolWaiters(binding.channel);
     });
+    if (request.method !== "invoke_start") return promise;
+    const receipt: InvocationReceipt = { callId, requestKey, fingerprint, promise };
+    binding.channel.receipts.set(callId, receipt);
+    void promise.then(
+      result => { receipt.result = result; },
+      error => { receipt.error = error instanceof Error ? error.message : String(error); },
+    );
+    return this.receiptStatus(binding.channel, receipt);
+  }
+
+  private receiptStatus(channel: TurnChannel, receipt: InvocationReceipt): BrokerInvocationStatus {
+    if (receipt.result) return { call_id: receipt.callId, state: "completed", result: receipt.result };
+    if (receipt.error) return { call_id: receipt.callId, state: "failed", error: receipt.error };
+    return { call_id: receipt.callId, state: channel.deliveredCallIds.has(receipt.callId) ? "dispatched" : "queued" };
   }
 
   private takeQueued(channel: TurnChannel): BrokerToolRequest[] {
