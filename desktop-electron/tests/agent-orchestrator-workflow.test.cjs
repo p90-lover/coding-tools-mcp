@@ -5,9 +5,17 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createAgentOrchestratorWorkflow, resolveAoNativeConnection } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow: createProductionWorkflow, resolveAoNativeConnection } = require("../electron/agent-orchestrator-workflow.cjs");
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
+
+// Unit tests use a synthetic Codex installation so CI does not depend on what
+// CLI or desktop builds happen to be installed on the host running Node.
+const createAgentOrchestratorWorkflow = (options) => createProductionWorkflow({
+  findCodexExecutable: () => "C:\\test-codex.exe",
+  exists: () => true,
+  ...options,
+});
 
 test("team settings use their local UI operation and cannot be changed through mission graph tools", async () => {
   const requests = [];
