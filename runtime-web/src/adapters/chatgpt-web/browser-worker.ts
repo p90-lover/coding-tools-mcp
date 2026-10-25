@@ -4145,11 +4145,11 @@ export class ChatGptBrowserWorker {
         // These are embedded renderers, not Markdown answer text. Their loading labels, controls
         // and plot axes change independently of generation (including after a later paragraph).
         // Keep their UI out of both the emitted HTML and the text consistency fingerprint.
-        // Also remove the controls/media already excluded by chatGptHtmlToMarkdown, so their
-        // accessibility labels cannot become consistency fingerprints for untransmitted text.
+        // Retain answer images and their alternative text so Codex can show image/logo references.
+        // Remove only interactive controls and nonportable embedded renderers.
         // Ordinary code blocks, surrounding prose and the original observed DOM remain intact.
         for (const widget of Array.from(content.querySelectorAll(
-          ".chart-widget-container, [data-code-block-preview-pane], button, script, style, svg, img, picture, source",
+          ".chart-widget-container, [data-code-block-preview-pane], button, script, style, svg, source",
         ))) widget.remove();
         return content;
       };
@@ -4183,6 +4183,10 @@ export class ChatGptBrowserWorker {
           const block = blockMarkdownTags.has(tag);
           if (block) blockBoundary();
           if (tag === "br") parts.push("\n");
+          if (tag === "img") {
+            parts.push(`[Image: ${node.getAttribute("alt")?.trim() || node.getAttribute("title")?.trim() || "Image"}]`);
+            return;
+          }
           node.childNodes.forEach(visit);
           if (block) blockBoundary();
         };
