@@ -48,6 +48,16 @@ jobs:
           bun install --frozen-lockfile --cwd runtime-web
           bun install --frozen-lockfile --cwd runtime-web/launcher
           bun install --frozen-lockfile --cwd desktop-electron
+      - name: Check desktop types
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/rc32-build/typecheck.log
+      - name: Verify live goal re-steering
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd module/agent-orchestrator/backend && GOWORK=off GOTOOLCHAIN=local go test ./internal/adapters/chatdriver/codexappserver -run 'TestEditedGoal|TestGoalAccounting' -count=1) 2>&1 | tee aiTemp/rc32-build/goal-steering-tests.log
       - name: Test mission recovery and package the installer
         shell: bash
         run: |
