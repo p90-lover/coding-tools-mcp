@@ -73,6 +73,7 @@ function observeHarness(context) {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null,
     agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); },
     logger: { info() {}, warn() {} },
+    MAX_RESPONSE_BYTES: require("../electron/ipc-schema.cjs").MAX_RESPONSE_BYTES,
     // Imported by the module (not part of the helpers sliced above).
     utf8Suffix: require("../electron/chat-agent-shell.cjs").utf8Suffix, ...context,
   });
@@ -628,7 +629,7 @@ test("a request AO holds outside a turn has no turn_id key, so the status read p
 // Seen live: AO's ACP approval for the app's exec_command had no toolName (subjectKind "mcp_tool",
 // toolKind "other"); the name was only the summary. The input was dropped, so "Approve for me"'s
 // reviewer saw no command, answered "ask", and the chat waited on the person for a bare `cd`.
-test("approval input bounds explicitly identify truncation without expanding reviewer payloads", async () => {
+test("approval commands and JSON stay whole for display while retaining the reviewer bounds", async () => {
   const inputs = [
     { command: "python -c \"" + "x".repeat(1491) + "\"" },
     { command: "x".repeat(4001) },
@@ -646,10 +647,91 @@ test("approval input bounds explicitly identify truncation without expanding rev
   const approvals = (await upstream.observe("s")).approvals;
   assert.equal(approvals[0].command, inputs[0].command, "a complete native script keeps every character");
   assert.equal(approvals[0].reviewTruncated, undefined);
-  assert.equal(approvals[1].command.length, 4000);
-  assert.equal(approvals[2].toolInput.length, 1500);
+  assert.equal(approvals[1].command, inputs[1].command);
+  assert.equal(approvals[2].toolInput, JSON.stringify(inputs[2]));
   assert.equal(approvals[3].path.length, 1000);
   assert.ok(approvals.slice(1).every(approval => approval.reviewTruncated === true));
+});
+
+test("a server-trimmed approval reads only its exact raw activity and keeps a Unicode command beyond 64 KiB", async () => {
+  const command = "python - <<'PY'\r\n" + "print('界😀')\r\n".repeat(6000) + "# FINAL_APPROVAL_SENTINEL\r\nPY";
+  assert.ok(Buffer.byteLength(command, "utf8") > 64 * 1024);
+  const activity = { id: "a", turnId: "t", sequence: 41, activityKind: "approval", status: "pending", requestId: "req-long", summary: "Bash",
+    detail: { input: { command }, decisions: [{ id: "allow", kind: "allow_once" }] } };
+  const clipped = { ...activity, detail: { ...activity.detail, input: { command: command.slice(0, 2000) + "\n… [90000 bytes omitted] …\n" + command.slice(-16000) } } };
+  const requests = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint, _body, options) => {
+      requests.push([endpoint, options]);
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1")) {
+        return { turns: [{ id: "t", state: "running" }], messages: [], activities: [clipped] };
+      }
+      if (endpoint.endsWith("/conversation?limit=1&beforeSequence=42")) {
+        assert.equal(options.maxBytes, 32 * 1024 * 1024);
+        assert.equal(options.preserveInlineBlobs, true);
+        // Even if an older daemon ignores pagination, no unrelated raw data reaches the window.
+        return { messages: [{ text: "UNRELATED_RAW_HISTORY".repeat(100000) }], activities: [activity,
+          { id: "other", activityKind: "command", detail: { output: "UNRELATED_RAW_OUTPUT".repeat(100000) } }] };
+      }
+      return { session: { id: "s", mode: "chat", status: "working" } };
+    },
+  });
+  const observed = await upstream.observe("s");
+  assert.equal(observed.approvals[0].command, command);
+  assert.equal(observed.approvals[0].reviewTruncated, true, "the old reviewer limit still requires manual review");
+  assert.equal(observed.approvals[0].command.endsWith("# FINAL_APPROVAL_SENTINEL\r\nPY"), true);
+  assert.doesNotMatch(JSON.stringify(observed), /UNRELATED_RAW_/);
+  assert.equal(requests.filter(([endpoint]) => endpoint.includes("beforeSequence=")).length, 1);
+});
+
+test("a pending approval fails closed when its original raw input cannot be verified", async () => {
+  const activity = { id: "a", turnId: "t", sequence: 41, activityKind: "approval", status: "pending", requestId: "req-long", summary: "Bash",
+    detail: { input: { command: "head\n… [90000 bytes omitted] …\ntail" }, decisions: [{ id: "allow", kind: "allow_once" }] } };
+  const mismatches = [
+    { id: "other" }, { requestId: "other" }, { turnId: "other" }, { sequence: 42 }, { status: "resolved" },
+  ];
+  for (const mismatch of [...mismatches, null]) {
+    const upstream = observeHarness({
+      internalApi: async (_method, endpoint) => {
+        if (endpoint.includes("trimLargeFields=1")) return { turns: [{ id: "t", state: "running" }], messages: [], activities: [activity] };
+        if (endpoint.includes("beforeSequence=")) {
+          if (!mismatch) throw new Error("Raw conversation read failed");
+          return { activities: [{ ...activity, ...mismatch, detail: { ...activity.detail, input: { command: "different command" } } }] };
+        }
+        return { session: { id: "s", mode: "chat", status: "working" } };
+      },
+    });
+    await assert.rejects(upstream.observe("s"), /full approval input is unavailable/);
+  }
+});
+
+test("a full pending approval exceeding the existing IPC limit fails instead of being clipped", async () => {
+  const activity = { id: "a", turnId: "t", sequence: 41, activityKind: "approval", status: "pending", requestId: "req-long", summary: "Bash",
+    detail: { input: { command: "head\n… [90000 bytes omitted] …\ntail" }, decisions: [{ id: "allow", kind: "allow_once" }] } };
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      if (endpoint.includes("trimLargeFields=1")) return { turns: [{ id: "t", state: "running" }], messages: [], activities: [activity] };
+      if (endpoint.includes("beforeSequence=")) return { activities: [{ ...activity, detail: { ...activity.detail, input: { command: "😀".repeat(300000) } } }] };
+      return { session: { id: "s", mode: "chat", status: "working" } };
+    },
+  });
+  await assert.rejects(upstream.observe("s"), /full approval input exceeds the app's response limit/);
+});
+
+test("only the targeted raw approval read preserves inline-looking input", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const method = source.slice(source.indexOf("  async function requestApi"), source.indexOf("  // AO's error envelope"));
+  const command = "A".repeat(70000);
+  const requestApi = require("node:vm").runInNewContext(method + "requestApi", {
+    Buffer, AbortSignal, state: "ready", daemonPort: 1, AO_RESPONSE_MAX_BYTES: 16 * 1024 * 1024,
+    dropInlineBlobs: require("../electron/agent-orchestrator-upstream.cjs").dropInlineBlobs,
+    fetch: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ activities: [{ detail: { input: { command } } }] }) }),
+  });
+  const normal = await requestApi("GET", "/api/v1/sessions/s/conversation?limit=100&trimLargeFields=1");
+  assert.match(normal.data.activities[0].detail.input.command, /inline binary data not shown/);
+  const raw = await requestApi("GET", "/api/v1/sessions/s/conversation?limit=1&beforeSequence=42", undefined,
+    { maxBytes: 32 * 1024 * 1024, preserveInlineBlobs: true });
+  assert.equal(raw.data.activities[0].detail.input.command, command);
 });
 
 test("an MCP tool approval named only by its summary keeps its input for the reviewer", async () => {
@@ -667,7 +749,34 @@ test("an MCP tool approval named only by its summary keeps its input for the rev
   assert.equal(approval.toolInput, '{"cmd":"cd"}');
 });
 
-test("a harness tool's own short arguments reach the reviewer; a command, file or long input is shown as before", async () => {
+test("native Edit and Write approvals retain the complete code beside their file path", async () => {
+  const oldText = "const before = '界😀';\r\n".repeat(100) + "// ORIGINAL_SOURCE_SENTINEL";
+  const newText = "const after = '界😀';\r\n".repeat(100) + "// CHANGED_SOURCE_SENTINEL";
+  const requests = [
+    { tool: "Edit", input: { file_path: "src/existing.ts", old_string: oldText, new_string: newText } },
+    { tool: "Write", input: { file_path: "src/created.ts", content: newText } },
+  ];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: requests.map(({ tool, input }, index) => ({ id: "edit-" + index, turnId: "t", sequence: index + 1,
+        activityKind: "approval", status: "pending", requestId: "req-" + index, summary: tool,
+        detail: { toolName: tool, input, decisions: [{ id: "allow", kind: "allow_once" }] } })),
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const approvals = (await upstream.observe("s")).approvals;
+  for (const [index, approval] of approvals.entries()) {
+    assert.equal(approval.path, requests[index].input.file_path);
+    assert.equal(approval.toolInput, JSON.stringify(requests[index].input));
+    assert.equal(approval.reviewTruncated, true);
+  }
+  const edit = JSON.parse(approvals[0].toolInput);
+  assert.equal(edit.old_string, oldText);
+  assert.equal(edit.new_string, newText);
+  assert.equal(JSON.parse(approvals[1].toolInput).content, newText);
+});
+
+test("a harness tool's own arguments stay whole; a command or file keeps its existing display", async () => {
   // The user: "when new chat harness tools came out ... it keeps asking for permission". Claude Code's
   // newer tools (Monitor, WebFetch) reached the reviewer as a bare name, so it judged them blind.
   const inputs = [
@@ -689,10 +798,10 @@ test("a harness tool's own short arguments reach the reviewer; a command, file o
   assert.equal(approvals[0].kind, "permission");
   assert.equal(approvals[1].toolInput, undefined, "a command is shown as the command");
   assert.equal(approvals[1].command, "npm test");
-  assert.equal(approvals[2].toolInput, undefined, "a file is shown as its path");
+  assert.equal(approvals[2].toolInput, JSON.stringify(inputs[2].input), "the file arguments remain inspectable beside the path");
   assert.equal(approvals[2].path, "C:/repo/a.txt");
-  assert.equal(approvals[3].toolInput, undefined, "too long: left out, never cut");
-  assert.equal(approvals[3].reviewTruncated, undefined, "and no reason to ask the person");
+  assert.equal(approvals[3].toolInput, JSON.stringify(inputs[3].input), "the person can inspect the whole input");
+  assert.equal(approvals[3].reviewTruncated, true, "a long input still waits for manual review");
   assert.equal(approvals[4].toolInput, undefined, "no arguments, nothing to show");
 });
 
