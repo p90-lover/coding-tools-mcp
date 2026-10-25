@@ -1295,6 +1295,7 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
 
 export interface BrowserTurn {
   traceId: string;
+  nativeThreadId?: string;
   modelId: string;
   reasoning?: string;
   capabilities: ChatGptWebCapabilities;
@@ -4535,6 +4536,7 @@ export class ChatGptBrowserWorker {
       phase: "start",
       traceId: turn.traceId,
       helperPid: process.pid,
+      ...(turn.nativeThreadId ? { nativeThreadId: turn.nativeThreadId } : {}),
       ...(turn.conversationKey ? { conversationKey: turn.conversationKey } : {}),
       ...((turn.conversationKey
         && (turn.nativeConnector || turn.capabilities.localToolsEnabled || turn.requireRetainedConversation))
@@ -4550,7 +4552,8 @@ export class ChatGptBrowserWorker {
     });
     const surfaceId = lease.surfaceId;
     const reused = lease.reused === true;
-    let terminal: "completed" | "failed" | "aborted" = "completed";
+    let terminal: "completed" | "failed" | "aborted" | "superseded" = "completed";
+    let submitted = false;
     let terminalMessage: string | undefined;
     let originalError: unknown;
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -4585,10 +4588,17 @@ export class ChatGptBrowserWorker {
       await turn.onPreparedSelected?.(reused);
       heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref?.();
-      return await this.runBrowserTurn(turn, surfaceId, undefined, reused);
+      return await this.runBrowserTurn({
+        ...turn,
+        onSubmitted: () => { submitted = true; turn.onSubmitted?.(); },
+      }, surfaceId, undefined, reused);
     } catch (error) {
       originalError = error;
-      terminal = error instanceof ChatGptCompactionHandoffAccepted
+      terminal = turn.abortSignal?.reason instanceof DOMException
+        && turn.abortSignal.reason.name === "SteeringSuperseded"
+        && submitted && turn.retainConversation
+        ? "superseded"
+        : error instanceof ChatGptCompactionHandoffAccepted
         ? "completed"
         : (error instanceof DOMException && error.name === "AbortError")
         || (error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")
@@ -4605,8 +4615,8 @@ export class ChatGptBrowserWorker {
           helperPid: process.pid,
           status: terminal,
           ...(terminalMessage ? { message: terminalMessage } : {}),
-          ...(terminal === "completed" && turn.retainConversation ? { retain: true } : {}),
-          ...(terminal === "completed" && (turn.nativeConnector || turn.capabilities.localToolsEnabled)
+          ...((terminal === "completed" || terminal === "superseded") && turn.retainConversation ? { retain: true } : {}),
+          ...((terminal === "completed" || terminal === "superseded") && (turn.nativeConnector || turn.capabilities.localToolsEnabled)
             ? { connectorBound: true }
             : {}),
         });
@@ -4883,6 +4893,17 @@ export class ChatGptBrowserWorker {
         // turn starts again on a new Chat-mode chat.
         await diagnostics.capture(page, "retained-conversation-work-mode");
         throw chatGptRetainedConversationUnavailableError();
+      }
+      if (reuseConversation) {
+        // The previous response may still be generating after steering cancels its observer.
+        // Stop it on this exact retained task page before submitting the newer instruction.
+        const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+        if (await stop.isVisible().catch(() => false)) {
+          await this.runStage(turn.traceId, "steered_response_stop", browserStageTimeouts.send, async () => {
+            await stop.press("Enter", { timeout: 10_000 });
+            await stop.waitFor({ state: "hidden", timeout: 10_000 });
+          });
+        }
       }
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.

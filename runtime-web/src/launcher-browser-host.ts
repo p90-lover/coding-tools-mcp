@@ -474,6 +474,7 @@ export type LauncherTurnActivity =
       phase: "start";
       traceId: string;
       helperPid: number;
+      nativeThreadId?: string;
       conversationKey?: string;
       connectorIdentity?: string;
       requireRetainedConversation?: boolean;
@@ -489,7 +490,7 @@ export type LauncherTurnActivity =
       phase: "end";
       traceId: string;
       helperPid: number;
-      status: "completed" | "failed" | "aborted";
+      status: "completed" | "failed" | "aborted" | "superseded";
       message?: string;
       retain?: boolean;
       connectorBound?: boolean;

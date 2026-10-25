@@ -52,14 +52,21 @@ export function chatGptConversationKey(
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,
 ): CodexParsedRequest | undefined {
-  const lastAssistant = parsed.context.messages.findLastIndex(message => message.role === "assistant");
-  if (lastAssistant < 0 || lastAssistant === parsed.context.messages.length - 1) return undefined;
+  const messages = parsed.context.messages;
+  const lastAssistant = messages.findLastIndex(message => message.role === "assistant");
+  // Steering can append a second user instruction while the first answer is still streaming.
+  // That earlier user prompt is already in the retained ChatGPT tab. Include only the new
+  // instruction and any tool results since it; never post the previous prompt twice.
+  const latestUser = messages.findLastIndex(message => message.role === "user");
+  const previousUser = messages.findLastIndex((message, index) => index < latestUser && message.role === "user");
+  const from = previousUser > lastAssistant ? previousUser + 1 : lastAssistant + 1;
+  if (from <= 0 || from >= messages.length) return undefined;
   const { systemPrompt: _sentWithTheFirstTurn, ...context } = parsed.context;
   return {
     ...parsed,
     context: {
       ...context,
-      messages: parsed.context.messages.slice(lastAssistant + 1),
+      messages: messages.slice(from),
     },
   };
 }
