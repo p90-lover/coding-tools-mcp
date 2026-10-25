@@ -691,6 +691,11 @@ test("structured compaction rejects incomplete native interruption identities", 
 });
 
 test("active compaction settles canonical tool results before the separate retained handoff", async () => {
+  const canonical = {
+    content: [{ type: "resource_link", uri: "https://example.test/report.csv", name: "Report" }],
+    structuredContent: { rows: 3 },
+    _meta: { componentState: "private-compaction-fixture" },
+  };
   const completed: Array<{ callId: string; result: BrokerToolResult }> = [];
   const compactionTokens: string[] = [];
   let finishBrowser!: (answer: string) => void;
@@ -724,7 +729,7 @@ test("active compaction settles canonical tool results before the separate retai
   ]);
   const parsed = request(true);
   parsed.context.messages.push(
-    { role: "toolResult", toolCallId: "call_one", toolName: "exec_command", content: "one", isError: false, timestamp: 4 },
+    { role: "toolResult", toolCallId: "call_one", toolName: "exec_command", content: "one", mcpResult: canonical, isError: false, timestamp: 4 },
     { role: "toolResult", toolCallId: "call_two", toolName: "exec_command", content: "two", isError: false, timestamp: 5 },
   );
 
@@ -734,6 +739,7 @@ test("active compaction settles canonical tool results before the separate retai
   });
   expect(compactionTokens).toEqual(["turn_active"]);
   expect(completed.map(entry => entry.callId)).toEqual(["call_one", "call_two"]);
+  expect(completed[0]!.result).toEqual(canonical);
   expect(JSON.stringify(completed[0])).not.toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);
   expect(JSON.stringify(completed[1])).not.toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);
   expect(JSON.stringify(completed[1])).not.toContain("codex.control.compaction_handoff");

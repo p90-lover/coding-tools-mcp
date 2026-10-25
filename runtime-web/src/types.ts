@@ -73,8 +73,18 @@ export interface CodexToolResultMessage {
   toolNamespace?: string;
   /** Text, or content parts when a tool (e.g. Codex view_image) returns an image in its output. */
   content: string | CodexContentPart[];
+  /** Original supplied MCP envelope. Component-only metadata must never enter model-facing text. */
+  mcpResult?: CanonicalToolResult;
   isError: boolean;
   timestamp: number;
+}
+
+export interface CanonicalToolResult {
+  content: unknown[];
+  structuredContent?: unknown;
+  isError?: boolean;
+  /** Component-only state retained for the MCP host, separately from the public projection. */
+  _meta?: unknown;
 }
 
 export interface CodexTextContent {
@@ -125,6 +135,10 @@ export interface CodexTool {
   freeform?: boolean;
   /** Client-executed tool discovery (tool_search): the model's call must be relayed as a tool_search_call. */
   toolSearch?: boolean;
+  /** Supplied native descriptor fields; retaining them does not register a UI resource server. */
+  outputSchema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
 }
 
 /**
