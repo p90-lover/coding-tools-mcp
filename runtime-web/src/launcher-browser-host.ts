@@ -743,6 +743,7 @@ export async function notifyLauncherTurn(
   reused?: boolean;
   connectorBound?: boolean;
   cancelledByUser?: boolean;
+  conversationUrl?: string;
 }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
@@ -776,6 +777,10 @@ export async function notifyLauncherTurn(
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    // Only return canonical ChatGPT conversation links to the Codex context.
+    const conversationUrl = typeof body.conversationUrl === "string"
+      && /^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]{8,}$/.test(body.conversationUrl)
+      ? body.conversationUrl : undefined;
     if (activity.phase === "start") {
       if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
         throw new Error("Launcher browser control channel returned an invalid turn surface id");
@@ -790,13 +795,14 @@ export async function notifyLauncherTurn(
         surfaceId: body.surfaceId,
         reused: body.reused,
         connectorBound: body.connectorBound,
+        ...(conversationUrl ? { conversationUrl } : {}),
       };
     }
     if (activity.phase === "end") {
       if (typeof body.cancelledByUser !== "boolean") {
         throw new Error("Launcher browser control channel returned an invalid turn release result");
       }
-      return { cancelledByUser: body.cancelledByUser };
+      return { cancelledByUser: body.cancelledByUser, ...(conversationUrl ? { conversationUrl } : {}) };
     }
     return {};
   } catch (error) {
