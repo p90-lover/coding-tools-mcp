@@ -1603,7 +1603,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     await loadMissions(workspaceId);
   });
 
-  const sendChat = (input: { taskId?: string; title?: string; message: string; goal?: string }) => new Promise<void>((resolve, reject) => {
+  const sendChat = (input: { taskId?: string; title?: string; message: string; goal?: string; rewind?: { index: number; description: string } }) => new Promise<void>((resolve, reject) => {
     // run() skips its action while another one is in flight; never leave the chat waiting on it.
     if (busy) { reject(new Error("Another action is still running")); return; }
     const owner = selection.current;
@@ -1625,7 +1625,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         // status says why (run_status detail), as the chat's notice.
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
-          ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}), deferStart: true });
+          ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}), ...(input.rewind ? { rewind: input.rewind } : {}), deferStart: true });
         if (result.cancelled) throw new Error("Message not sent. The start was cancelled.");
         if (!current()) { resolve(); return; }
         // The route is not kept here: picks are kept as they are made, and a follow-up in an older
@@ -1634,6 +1634,10 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         // reads, then the same two again) held the sent message for seconds on a busy disk. The new
         // run and the new chat's task are set from the answer meanwhile.
         const taskId = String(result.taskId);
+        if (input.rewind) {
+          await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
+          if (!current()) { resolve(); return; }
+        }
         if (result.run) {
           const created = result.run as AoMission;
           setMissions(previous => [...previous.filter(mission => mission.id !== created.id), created]);
@@ -1650,7 +1654,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
         setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
-        void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+        if (!input.rewind) void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
       } catch (cause) {
         if (current() && !input.taskId) setPendingChat(null);
         reject(cause);
@@ -1937,18 +1941,12 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setChatTaskId("");
     await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
   });
-  // Rewind (Codex's backtrack): a new chat whose composer holds just the chosen message, to edit and
-  // send; the messages before it go along as context (shown as a chip that can be dropped). Nothing
-  // is sent and this chat stays as it is (files are not reverted).
-  const rewindChat = (taskId: string, upTo: number) => void (async () => {
-    const messages = chatMessagesFromDescription(await loadDescription(taskId));
-    if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) return;
-    // Earlier messages keep the steers sent during their turns; the chosen one is just what was typed.
-    const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]).map(chatMessageReadable);
-    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text: chatMessageReadable(messages[upTo].text),
-      ...(earlier.length ? { context: earlier } : {}) });
-    setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
-    setChatTaskId(""); setView("chat");
+  // Rewind the conversation and run the selected message again; workspace files stay unchanged.
+  const rewindChat = (taskId: string, upTo: number) => (async () => {
+    const description = await loadDescription(taskId);
+    const messages = chatMessagesFromDescription(description);
+    if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) throw new Error("That message is no longer in this chat; reload it");
+    await sendChat({ taskId, message: messages[upTo].text, rewind: { index: upTo, description } });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Fork: a new chat starting from this chat's messages (all, the first, or up to one of them).
   const forkChat = (taskId: string, upTo?: number | "first") => void (async () => {

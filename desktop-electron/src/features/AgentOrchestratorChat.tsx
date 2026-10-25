@@ -151,7 +151,7 @@ export type ChatThreadActions = {
   archive: () => void;
   /** Fork from here: a new chat with the messages up to this one (its index in the chat's messages). */
   fork: (messageIndex?: number) => void;
-  /** Rewind: a new chat with the messages before this one, this message ready to edit. */
+  /** Rewind this chat to the selected message and immediately run it again. Files are unchanged. */
   rewind?: (messageIndex: number) => void;
   /**
    * Delete a message and its reply from the chat (asked to confirm first). `runIds` are the runs
@@ -616,9 +616,9 @@ function SentMessage({ text }: { text: string }) {
 
 function MessageActions({ text, children }: { text: string; children?: ReactNode }) {
   const [copied, setCopied] = useState(false);
-  return <div className="cx-msg-actions">
+  return <div className="cx-msg-actions" style={{ userSelect: "none" }}>
     <button type="button" title="Copy" aria-label="Copy message" onClick={() => void navigator.clipboard.writeText(text).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1500); })}>
-      {copied ? <Icon name="check" width="14" height="14" /> : "⧉"}</button>
+      {copied ? <Icon name="check" width="14" height="14" /> : <ChatGlyph name="copy" />}</button>
     {children}
   </div>;
 }
@@ -1174,7 +1174,7 @@ export function AgentOrchestratorChat({
   // Messages a rewound chat carries as context ahead of its first message; the composer holds only
   // the chosen message. Dropped with the chip's ×, or sent once with that first message.
   const [carried, setCarried] = useState<string[] | null>(null);
-  // Continue in project / Rewind: the new chat opens with the seeded message, ready to review and send.
+  // Continue in project: the new chat opens with the seeded message, ready to review and send.
   useEffect(() => {
     if (!seed || selectedTaskId) return;
     setDraft(seed.text); setTitle(seed.title); setCarried(seed.context?.length ? seed.context : null);
@@ -1678,7 +1678,7 @@ export function AgentOrchestratorChat({
             break;
           }
           setCard({ title: "Rewind",
-            text: "Pick a message to go back to. A new chat opens with it ready to edit. This chat and your files don't change.",
+            text: "Pick a message to rewind and resend in this chat. Later replies leave the conversation; your files don't change. Stop any running task first.",
             items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
               run: () => { setCard(null); thread.rewind?.(point.messageIndex); } })).reverse() });
           break;
@@ -1847,10 +1847,10 @@ export function AgentOrchestratorChat({
               </div> : turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
                 <MessageActions text={chatMessageReadable(turn.user.text)}>
-                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}
-                  {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}>↶</button> : null}
+                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
+                  {thread?.rewind ? <button type="button" title="Rewind and resend this message (files are unchanged)" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
                   {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
-                    disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}>🗑</button> : null}
+                    disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}><ChatGlyph name="delete" /></button> : null}
                 </MessageActions>
                 {turn.user.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
               </div> : null}
@@ -1882,7 +1882,7 @@ export function AgentOrchestratorChat({
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
                 <ChatMarkdown text={turn.final.text ?? ""} />
                 <MessageActions text={turn.final.text ?? ""}>
-                  {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}>↻</button> : null}
+                  {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}><Icon name="reload" width="14" height="14" /></button> : null}
                 </MessageActions>
               </div> : null}
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)

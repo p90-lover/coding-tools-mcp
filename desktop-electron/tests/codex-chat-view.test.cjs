@@ -684,13 +684,25 @@ test("each chat has its own queue: queuing in another chat never replaces one, a
   assert.ok(source.includes("setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message,"), "commands queue in their own chat too");
 });
 
-test("rewind puts only the chosen message in the composer, with the earlier ones as a droppable context chip; drafts stay with their chat", () => {
+test("rewind resends the selected message into the same chat without filling or switching the composer", async () => {
   const read = (name) => fs.readFileSync(path.resolve(__dirname, "../src/features", name), "utf8");
   const surface = read("AgentOrchestratorSurface.tsx");
   const rewind = surface.slice(surface.indexOf("const rewindChat = "), surface.indexOf("// Fork: a new chat starting"));
-  // Just the chosen message, as the person reads it (annotations as quotes, not the agent's block).
-  assert.ok(rewind.includes("text: chatMessageReadable(messages[upTo].text)"), "the composer holds just the chosen message");
-  assert.ok(rewind.includes("context: earlier"), "the messages before it go along as context");
+  const calls = [], errors = [];
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask";
+  const exported = {};
+  vm.runInNewContext(ts.transpileModule(`${rewind}\nexports.rewind = rewindChat;`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText, { exports: exported, loadDescription: async () => description,
+    chatMessagesFromDescription: transpile("ao-chat.ts", () => ({})).chatMessagesFromDescription,
+    sendChat: async input => calls.push(JSON.parse(JSON.stringify(input))), setError: error => errors.push(error) });
+  await exported.rewind("t", 1);
+  assert.deepEqual(calls, [{ taskId: "t", message: "second ask", rewind: { index: 1, description } }]);
+  assert.deepEqual(errors, []);
+  assert.doesNotMatch(rewind, /setChatSeed|setChatTaskId|setDraft\(/, "rewind keeps the selected chat and the unsent draft");
+  await exported.rewind("t", 5);
+  assert.equal(calls.length, 1, "an invalid point never sends");
+  assert.equal(errors.length, 1, "a stale point is reported");
   const chat = read("AgentOrchestratorChat.tsx");
   assert.ok(chat.includes("setCarried(seed.context?.length ? seed.context : null)"));
   assert.ok(chat.includes("[...carried, message].join"), "the first message of the rewound chat carries them ahead of it");
@@ -698,6 +710,24 @@ test("rewind puts only the chosen message in the composer, with the earlier ones
   // Opening another chat no longer carries this chat's draft along.
   assert.ok(chat.includes("const CHAT_DRAFTS = new Map<string, string>();"));
   assert.ok(chat.includes("setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? \"\")"));
+});
+
+test("message action icons have no selectable glyph text when copying multiple messages", () => {
+  const done = (id) => run(id, "t", [node("p", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" });
+  const { props } = base({ selectedTaskId: "t", runs: [done("r1"), done("r2")],
+    pendingMessage: "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask",
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind() {}, deleteMessage: async () => {},
+      copyConversation() {}, togglePin() {}, pinned: false } });
+  const view = mount(props).render();
+  const actions = walk(view).filter(element => element.props?.className === "cx-msg-actions");
+  assert.ok(actions.length >= 2);
+  for (const action of actions) {
+    assert.equal(text(action), "", "Copy, Fork, Rewind and Delete are drawn, not text in the selected transcript");
+    assert.equal(action.props.style?.userSelect, "none");
+    assert.ok(walk(action).some(element => element.props?.["aria-label"] === "Copy message"), "keyboard and screen-reader controls remain available");
+  }
+  const bubbles = walk(view).filter(element => element.props?.className === "cx-bubble");
+  assert.deepEqual(bubbles.map(text), ["first ask", "second ask"], "message text remains selectable and unmodified");
 });
 
 test("Delete on a message asks in the chat first, then removes it with its reply; a working chat or its only message can't", async () => {
