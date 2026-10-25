@@ -42,6 +42,31 @@ export interface CompileChatGptWebPromptOptions {
   manualControl?: true;
 }
 
+// Native Codex sends /goal edits as user-role internal context, not ordinary
+// human messages. The latest goal revision must cause the model to reconsider
+// its current plan at the next model-request boundary instead of blindly
+// continuing steps planned under the previous objective.
+function hasCurrentNativeGoalRevision(parsed: CodexParsedRequest): boolean {
+  const raw = parsed._rawBody;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const input = (raw as { input?: unknown }).input;
+  if (!Array.isArray(input)) return false;
+  const lastUser = [...input].reverse().find((item): item is Record<string, unknown> =>
+    Boolean(item && typeof item === "object" && !Array.isArray(item)
+      && (item as Record<string, unknown>).type === "message"
+      && (item as Record<string, unknown>).role === "user"));
+  if (!lastUser) return false;
+  const metadata = lastUser.internal_chat_message_metadata_passthrough;
+  const kinds = lastUser.content_item_kinds
+    ?? (metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as { content_item_kinds?: unknown }).content_item_kinds : undefined);
+  return Array.isArray(kinds) && kinds.includes("goal.internal_context")
+    && Array.isArray(lastUser.content) && lastUser.content.some(block =>
+      Boolean(block && typeof block === "object" && !Array.isArray(block)
+        && typeof (block as { text?: unknown }).text === "string"
+        && /^<codex_internal_context source="goal">[\s\S]*<\/codex_internal_context>$/.test((block as { text: string }).text.trim())));
+}
+
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
 export type ChatGptWebMultipartPartCount = 2 | typeof CHATGPT_BIGGER_CONTEXT_PARTS;
 export type ChatGptWebMultipartParts =
@@ -550,6 +575,9 @@ export function compileChatGptWebPrompt(
       "</codex_zero_risk_request_json>",
     ]
     : [];
+  const goalRevisionContract = !parsed._compactionRequest && hasCurrentNativeGoalRevision(parsed)
+    ? ["The latest native Codex /goal instruction is a live change of objective. Before further tool calls or steps, re-evaluate your existing plan against this latest goal; stop obsolete work, preserve compatible progress, and continue from the revised objective rather than finishing the superseded plan."]
+    : [];
   const transportResume = parsed._compactionRequest
     ? manualControl
       ? [
@@ -612,6 +640,7 @@ export function compileChatGptWebPrompt(
           ...manualControlContract,
           ...checkpointContract,
           answerContract,
+          ...goalRevisionContract,
           ...transportResume,
         ].join("\n"),
       };
@@ -651,6 +680,7 @@ export function compileChatGptWebPrompt(
       "<codex_context_json>",
       envelopeJson,
       "</codex_context_json>",
+      ...goalRevisionContract,
       ...transportResume,
     ].join("\n");
     return { text, images };
