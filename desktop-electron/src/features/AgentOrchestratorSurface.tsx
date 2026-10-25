@@ -6,11 +6,11 @@ import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat, ChatListPane } from "./AgentOrchestratorChat";
-import { AgentOrchestratorTeam } from "./AgentOrchestratorTeam";
+import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
 import { chatList, type ChatActivity, type ChatNode } from "./ao-chat";
 import {
   AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
-  cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
+  cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import { pageHidden } from "./page-visibility";
@@ -24,7 +24,7 @@ type PlanTask = {
 type Board = { revision: number; steps: string[]; tasks: PlanTask[]; task?: PlanTask };
 export type AoReceipt = { status: string; answer?: string; error?: string; verdict?: string; thread_id?: string; turn_id?: string; request_key?: string; settings?: RoleSettings; route?: { model: string }; started_at_ms?: number };
 export type AoNode = {
-  id: string; task_id: string; role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer";
+  id: string; task_id: string; role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer" | "retry";
   parents: string[]; x: number; y: number; positioned?: boolean; state: string;
   clause_id?: string; request_key?: string; template_role_id?: string;
   settings?: RoleSettings;
@@ -219,7 +219,7 @@ function FloatingSheet({ stage, title, onClose, children, anchor, className = ""
   </div>;
 }
 
-async function moduleCall(operation: string, args: JsonObject = {}) {
+export async function moduleCall(operation: string, args: JsonObject = {}) {
   const outer = await getCodingToolsClient().apps.call({
     moduleId: "agent-orchestrator", operation, arguments: args,
   });
@@ -235,7 +235,7 @@ async function moduleCall(operation: string, args: JsonObject = {}) {
   return result;
 }
 
-async function listAllWorkspaces(): Promise<WorkspaceSummary[]> {
+export async function listAllWorkspaces(): Promise<WorkspaceSummary[]> {
   const items: WorkspaceSummary[] = [];
   let cursor: number | null = 0;
   while (cursor !== null) {
@@ -316,7 +316,8 @@ export function aoPreviewText(run: Pick<AoMission, "cancelled" | "nodes">, tasks
 
 const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", runnable: true, installed: true };
 
-export function AgentOrchestratorSurface({ language, setError }: {
+export function AgentOrchestratorSurface({ active = true, language, setError }: {
+  active?: boolean;
   language: Language;
   setError: (error: string | null) => void;
 }) {
@@ -344,6 +345,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [showInactive, setShowInactive] = useState(false);
   const [inspectedId, setInspectedId] = useState("");
   const [team, setTeam] = useState<AoTeam | null>(null);
+  const [teams, setTeams] = useState<AoTeam[]>([]);
+  const [missionTeamId, setMissionTeamId] = useState("");
   const [draftTeam, setDraftTeam] = useState<AoTeam | null>(null);
   const [limits, setLimits] = useState({ revision: 0, max_workers: 3 });
   const [globalLimit, setGlobalLimit] = useState(3);
@@ -368,14 +371,18 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [busy, setBusy] = useState("");
   const [missionTitle, setMissionTitle] = useState("");
   const [missionPrompt, setMissionPrompt] = useState("");
+  const [pendingChat, setPendingChat] = useState<{ title: string; message: string; taskId?: string } | null>(null);
 
-  const modelCache = useRef(new Map<string, Promise<string[]>>());
-  const loadModels = useCallback((harness: string) => {
+  const modelCache = useRef(new Map<string, ReturnType<AoModelLoader>>());
+  const loadModels = useCallback<AoModelLoader>((harness: string) => {
     const key = JSON.stringify([workspaceId, harness]);
     let pending = modelCache.current.get(key);
     if (!pending) {
-      // Native Codex lists WebGPT plus every CPA model; AO harnesses list their own catalog.
-      pending = moduleCall("models", { harness, workspaceId }).then(result => (Array.isArray(result.models) ? result.models as string[] : []));
+      // Native Codex keeps its model array; AO also carries verified model capabilities.
+      pending = moduleCall("models", { harness, workspaceId }).then(result => {
+        const models = Array.isArray(result.models) ? result.models as string[] : [];
+        return harness.startsWith("ao:") ? { models, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : models;
+      });
       pending.catch(() => modelCache.current.delete(key));
       modelCache.current.set(key, pending);
     }
@@ -402,6 +409,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const runs = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
     setMissions(runs);
     setTeam(current.team as AoTeam | null ?? null);
+    setTeams(Array.isArray(current.teams) ? current.teams as AoTeam[] : current.team ? [current.team as AoTeam] : []);
     if (current.limits) { setLimits(current.limits as typeof limits); setGlobalLimit((current.limits as typeof limits).max_workers); }
     setSelectedRunId((selected) => runs.some((run) => run.id === selected) ? selected : runs[0]?.id ?? "");
   };
@@ -436,7 +444,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setBoard(null);
     setMissions([]);
     setSelectedRunId("");
-    setTeam(null); setDraftTeam(null); setInspectedId("");
+    setTeam(null); setTeams([]); setMissionTeamId(""); setDraftTeam(null); setInspectedId("");
     void (async () => {
       try {
         const current = await moduleCall("board", { workspaceId }) as unknown as Board;
@@ -450,6 +458,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           const runs = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
           setMissions(runs);
           setTeam(current.team as AoTeam | null ?? null);
+    setTeams(Array.isArray(current.teams) ? current.teams as AoTeam[] : current.team ? [current.team as AoTeam] : []);
           if (current.limits) { setLimits(current.limits as typeof limits); setGlobalLimit((current.limits as typeof limits).max_workers); }
           setSelectedRunId(runs[0]?.id ?? "");
         }
@@ -489,17 +498,37 @@ export function AgentOrchestratorSurface({ language, setError }: {
   }, [chatTaskId, missions, board]);
   // Keep the shared project tree and newly created runs current in either view.
   useEffect(() => {
-    if (!workspaceId) return;
+    if (!workspaceId || !active) return;
     let live = true;
-    const timer = setInterval(() => {
-      if (pageHidden()) return;
+    let reading = false;
+    const refresh = () => {
+      if (reading || pageHidden()) return;
+      reading = true;
       void moduleCall("runs", { workspaceId }).then((current) => {
-        if (live && Array.isArray(current.runs)) setMissions(current.runs as AoMission[]);
-      }).catch(() => {});
-    }, 5000);
+        if (live && Array.isArray(current.runs)) {
+          setMissions(previous => (current.runs as AoMission[]).map(fresh => {
+            const existing = previous.find(run => run.id === fresh.id);
+            return existing && existing.revision > fresh.revision ? existing : fresh;
+          }));
+          setTeam(current.team as AoTeam | null ?? null);
+          setTeams(Array.isArray(current.teams) ? current.teams as AoTeam[] : current.team ? [current.team as AoTeam] : []);
+        }
+      }).catch(() => {}).finally(() => { reading = false; });
+    };
+    const timer = setInterval(refresh, 8000);
+    refresh(); // Catch up immediately after this keep-alive pane becomes visible again.
     return () => { live = false; clearInterval(timer); };
-  }, [workspaceId]);
+  }, [workspaceId, active]);
+  useEffect(() => {
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<{ workspaceId: string }>).detail?.workspaceId !== workspaceId) return;
+      void loadMissions(workspaceId).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+    };
+    window.addEventListener("coding-tools:ao:teams-changed", changed);
+    return () => window.removeEventListener("coding-tools:ao:teams-changed", changed);
+  }, [workspaceId, setError]);
   const selectChat = (taskId: string, next: "chat" | "overview" = "chat") => {
+    if (pendingChat?.taskId !== taskId) setPendingChat(null);
     setSheet(""); setInspectedId(""); setView(next);
     setChatTaskId(taskId);
     const latest = chatList(missions, board?.tasks ?? []).find((entry) => entry.taskId === taskId);
@@ -511,6 +540,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   }, [workspaceId]);
 
   const selectedRun = missions.find((mission) => mission.id === selectedRunId);
+  const savedMissionTeam = teams.find(item => item.id === selectedRun?.team?.id) ?? team;
+  const missionTeam = missionTeamId ? teams.find(item => item.id === missionTeamId) ?? null : team;
   const inspectedNode = selectedRun?.nodes.find(node => node.id === inspectedId);
   useEffect(() => { setInspectedId(""); setDraftTeam(null); setMissionLimit(selectedRun?.worker_limit || 3); }, [selectedRunId]);
   const inspectRole = (id: string) => {
@@ -518,12 +549,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const card = graphRef.current?.querySelector<HTMLElement>(`[data-ao-node="${CSS.escape(id)}"]`)?.getBoundingClientRect();
     setRoleAnchor(area && card ? { left: card.left - area.left, right: card.right - area.left, top: card.top - area.top } : undefined);
     setInspectedId(id);
-    if (selectedRun && !draftTeam) setDraftTeam(teamForMission(selectedRun, team));
+    if (selectedRun && !draftTeam) setDraftTeam(teamForMission(selectedRun, savedMissionTeam));
   };
   const applyTeam = () => void run("team", async () => {
     if (!draftTeam || !selectedRun) return;
     const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: draftTeam.revision, team: draftTeam as unknown as JsonObject } });
-    const next = saved.team as AoTeam; setTeam(next); setDraftTeam(structuredClone(next));
+    const next = saved.team as AoTeam; setDraftTeam(structuredClone(next));
     try {
       const latest = await moduleCall("runs", { workspaceId, runId: selectedRun.id });
       const mission = (latest.runs as AoMission[]).find(item => item.id === selectedRun.id)!;
@@ -540,21 +571,23 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadMissions(workspaceId);
   });
   useEffect(() => {
-    if (view !== "overview" || !workspaceId) return;
+    if (!active || view !== "overview" || !workspaceId) return;
     let disposed = false;
     let reading = false;
+    let failures = 0;
+    let retryAfter = 0;
     const pollSelection = async () => {
-      if (reading || pageHidden()) return;
+      if (reading || pageHidden() || Date.now() < retryAfter) return;
       reading = true;
-      let accepted = false;
+      let submitted = false;
+      let requestId = "";
       try {
         const status = await moduleCall("upstream_status");
         const selection = status.missionSelection as { id: string; workspaceId: string; runId: string; intent: string } | null;
         if (disposed || !selection || selection.workspaceId !== workspaceId
           || sessionStorage.getItem("coding-tools:ao:selection") === selection.id) return;
-        // Consume the UI request before any start. Reloading must never replay it.
-        sessionStorage.setItem("coding-tools:ao:selection", selection.id);
-        accepted = true;
+        requestId = selection.id;
+        // Verify runtime readiness before any mutating start/restart operation.
         const current = await moduleCall("runs", { workspaceId });
         if (disposed) return;
         const currentRuns = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
@@ -564,21 +597,57 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (selected) setChatTaskId(selected.project_id);
         if (selection.intent === "restart") {
           // A fresh run of the same task; the board's old run stays in history.
-          const result = await moduleCall("restart_run", { workspaceId, runId: selection.runId, ...executableArg() });
+          let result;
+          try {
+            submitted = true;
+            result = await moduleCall("restart_run", { workspaceId, runId: selection.runId, ...executableArg() });
+          } catch (error) {
+            // A lost response may follow successful creation. Resolve the saved
+            // run before considering another restart, which would duplicate it.
+            const latest = await moduleCall("runs", { workspaceId });
+            const fresh = (Array.isArray(latest.runs) ? latest.runs as AoMission[] : [])
+              .find(run => run.project_id === selected?.project_id && run.id !== selection.runId
+                && !currentRuns.some(previous => previous.id === run.id));
+            if (!fresh) throw error;
+            result = { runId: fresh.id, status: "held", detail: "Mission was created; check its saved execution state." };
+          }
           if (typeof result.runId === "string") setSelectedRunId(result.runId);
           if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);
           if (!disposed) { setAutoStatus(String(result.status || "running")); await loadMissions(workspaceId); }
         } else if (["start", "resume"].includes(selection.intent)) {
-          const result = await moduleCall(selection.intent === "resume" ? "control_run" : "start_run", { workspaceId, runId: selection.runId, ...executableArg(), ...(selection.intent === "resume" ? { action: "resume" } : {}) });
+          // An accepted start is durable, including if its response was lost.
+          const alreadyStarted = selected?.nodes.some(node => ["reserved", "running", "finished"].includes(node.state));
+          submitted = !alreadyStarted;
+          const result = alreadyStarted && selection.intent === "start"
+            ? { status: "running" }
+            : await moduleCall(selection.intent === "resume" ? "control_run" : "start_run", { workspaceId, runId: selection.runId, ...executableArg(), ...(selection.intent === "resume" ? { action: "resume" } : {}) });
           if (!disposed) { setAutoStatus(String(result.status || "running")); await loadMissions(workspaceId); }
         }
-      } catch (cause) { if (!disposed || accepted) setError(cause instanceof Error ? cause.message : String(cause)); }
+        // Acknowledge only after the operation's durable outcome is known.
+        if (!disposed) sessionStorage.setItem("coding-tools:ao:selection", selection.id);
+        failures = 0;
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (!disposed) setError(message);
+        // Readiness failures may be retried safely. Unknown write outcomes need
+        // user inspection rather than silently replaying the same mutation.
+        if (submitted) {
+          if (requestId && !disposed) sessionStorage.setItem("coding-tools:ao:selection", requestId);
+          retryAfter = Number.POSITIVE_INFINITY;
+        } else if (/local execution service is stopping|runtime is unavailable|econnrefused/i.test(message) && failures < 5) {
+          retryAfter = Date.now() + Math.min(1000 * 2 ** failures++, 8000);
+        } else {
+          retryAfter = Date.now() + 30_000;
+        }
+      }
       finally { reading = false; }
     };
     const timer = setInterval(() => void pollSelection(), 750);
+    void pollSelection();
     return () => { disposed = true; clearInterval(timer); };
-  }, [view, workspaceId, executable, setError]);
+  }, [active, view, workspaceId, executable, setError]);
   useEffect(() => {
+    if (!active) return;
     if (!workspaceId || !selectedRunId) { setAutoStatus("idle"); return; }
     let live = true;
     let reading = false;
@@ -586,17 +655,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
       if (reading || pageHidden()) return;
       reading = true;
       try {
-        const status = await moduleCall("run_status", { workspaceId, runId: selectedRunId });
+        const status = await moduleCall("run_status", { workspaceId, runId: selectedRunId, includeRun: true });
         if (!live) return;
         const nextStatus = typeof status.status === "string" ? status.status : "idle";
         setAutoStatus(nextStatus);
         setAdvanceNotice(typeof status.detail === "string" ? status.detail : "");
-        if (nextStatus !== "idle") {
-          const current = await moduleCall("runs", { workspaceId, runId: selectedRunId });
-          if (live && Array.isArray(current.runs)) {
-            setMissions((previous) => previous.map((run) =>
-              (current.runs as AoMission[]).find((fresh) => fresh.id === run.id) ?? run));
-          }
+        const fresh = status.run as AoMission | undefined;
+        if (fresh?.id === selectedRunId && fresh.workspace_id === workspaceId) {
+          setMissions(previous => previous.map(run => run.id === fresh.id && run.revision <= fresh.revision ? fresh : run));
         }
       } catch (cause) { if (live) setError(cause instanceof Error ? cause.message : String(cause)); }
       finally { reading = false; }
@@ -604,9 +670,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const timer = setInterval(() => void refresh(), 3000);
     void refresh();
     return () => { live = false; clearInterval(timer); };
-  }, [workspaceId, selectedRunId, setError]);
+  }, [active, workspaceId, selectedRunId, setError]);
   const activeNodeIds = JSON.stringify(selectedRun?.nodes.filter(node => ["reserved", "running"].includes(node.state)).map(node => node.id) ?? []);
   useEffect(() => {
+    if (!active) return;
     const ids = JSON.parse(activeNodeIds) as string[];
     if (!workspaceId || !selectedRunId || !ids.length) { setPendingApprovals([]); return; }
     let live = true;
@@ -615,10 +682,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
       if (reading || pageHidden()) return;
       reading = true;
       try {
-        const results = await Promise.all(ids.map(async nodeId => ({
+        const settled = await Promise.allSettled(ids.map(async nodeId => ({
           nodeId, result: await moduleCall(["running", "paused"].includes(autoStatus) ? "harness_status" : "observe", { workspaceId, runId: selectedRunId, nodeId }),
         })));
         if (!live) return;
+        const results = settled.filter((entry): entry is PromiseFulfilledResult<{ nodeId: string; result: Record<string, unknown> }> => entry.status === "fulfilled")
+          .map(entry => entry.value);
         const approvals: AoApproval[] = [];
         let newest: AoMission | undefined;
         for (const { nodeId, result } of results) {
@@ -630,7 +699,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           const updated = result.run as AoMission | undefined;
           if (updated?.id === selectedRunId && updated.workspace_id === workspaceId && (!newest || updated.revision > newest.revision)) newest = updated;
         }
-        setPendingApprovals(approvals);
+        if (results.length) setPendingApprovals(approvals);
         if (newest) { const updated = newest; setMissions(current => current.map(mission => mission.id === updated.id && mission.revision <= updated.revision ? updated : mission)); }
       } catch (cause) { if (live) setError(cause instanceof Error ? cause.message : String(cause)); }
       finally { reading = false; }
@@ -638,7 +707,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const timer = setInterval(() => void refresh(), 3000);
     void refresh();
     return () => { live = false; clearInterval(timer); };
-  }, [workspaceId, selectedRunId, activeNodeIds, autoStatus, setError]);
+  }, [active, workspaceId, selectedRunId, activeNodeIds, autoStatus, setError]);
 
   const taskName = (id: string) => board?.tasks.find((task) => task.id === id)?.title ?? id;
   const describeNode = (node: CanvasNode) => node.route.model.startsWith("chatgpt-web/") ? modelLabel(node.route.model)
@@ -699,7 +768,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const openSheet = (next: Sheet) => {
     if (next === sheet) { setSheet(""); return; }
     if (next === "mission") {
-      setRunTaskId(""); setMissionLimit(team?.worker_limit || 3);
+      setRunTaskId(""); setMissionLimit(team?.worker_limit || 3); setMissionTeamId(team?.id ?? "");
       const saved = team?.nodes.find(node => node.role === "worker")?.route;
       setWorkerRouteDraft(saved ? { ...saved } : workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL));
     }
@@ -726,14 +795,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
       setRunTaskId(taskId);
     }
     const id = crypto.randomUUID();
-    let chosenTeam = team;
+    let chosenTeam = missionTeam;
+    if (missionTeamId && !chosenTeam) throw new Error("Selected team changed; refresh before creating a mission");
     if (!chosenTeam) {
       const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: 0,
         team: defaultTeam(workspaceId, workerRouteDraft) as unknown as JsonObject } });
       chosenTeam = saved.team as AoTeam; setTeam(chosenTeam);
     }
     const result = await moduleCall("update_run", { workspaceId, change: { operation: "create_from_team", run_id: id, task_id: taskId,
-      expected_board_revision: missionBoard.revision, team_revision: chosenTeam.revision, worker_limit: missionLimit } });
+      expected_board_revision: missionBoard.revision, team_revision: chosenTeam.revision, team_id: chosenTeam.id, worker_limit: missionLimit } });
     if (result.cancelled) return;
     setSheet("");
     setMissionTitle(""); setMissionPrompt("");
@@ -790,27 +860,47 @@ export function AgentOrchestratorSurface({ language, setError }: {
     void run("chat", async () => {
       try {
         if (!workspaceId) throw new Error("Add a workspace first");
+        if (!input.taskId) {
+          setPendingChat({ title: input.title || "New task", message: input.message });
+          setChatTaskId(""); setSelectedRunId(""); setView("chat");
+        }
         if (!team) {
           const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: 0,
             team: defaultTeam(workspaceId, workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL)) as unknown as JsonObject } });
           setTeam(saved.team as AoTeam);
         }
-        const result = await moduleCall("chat_send", { workspaceId, message: input.message,
+        const result = await moduleCall("chat_send", { workspaceId, message: input.message, deferStart: true,
+          ...(!input.taskId && (missionTeamId || team?.id) ? { teamId: missionTeamId || team?.id || "", teamRevision: missionTeam?.revision ?? team?.revision ?? 0 } : {}),
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
           ...executableArg() });
-        await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
         const taskId = String(result.taskId);
+        if (result.run) {
+          const created = result.run as AoMission;
+          setMissions(previous => [...previous.filter(mission => mission.id !== created.id), created]);
+        }
+        if (!input.taskId) {
+          setPendingChat({ title: input.title || "New task", message: input.message, taskId });
+          setBoard(current => current ? { ...current, tasks: [...current.tasks.filter(task => task.id !== taskId), {
+            id: taskId, title: input.title || "New task", description: input.message, state: "pending", step: 0,
+            lane: "", displayStatus: "Starting", clauses: [], clauseProgress: { done: 0, total: 0 },
+          }] } : current);
+        }
         setChatTaskId(taskId);
         setSelectedRunId(String(result.runId));
         setChatNotices((current) => ({ ...current, [taskId]: result.status === "failed" ? String(result.detail || "The run could not start") : "" }));
         setAutoStatus(result.status === "failed" ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
-      } catch (cause) { reject(cause); throw cause; }
+        void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+      } catch (cause) { if (!input.taskId) setPendingChat(null); reject(cause); throw cause; }
     });
   });
   const retryChatStart = (runId: string) => void run("start-run", async () => {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
     try {
+      const mission = missions.find(item => item.id === runId);
+      if (mission?.nodes.some(node => ["held", "failed"].includes(node.state))) {
+        await moduleCall("control_run", { workspaceId, runId, action: "retry", ...executableArg() });
+      }
       const result = await moduleCall("start_run", { workspaceId, runId, ...executableArg() });
       setChatNotices((current) => ({ ...current, [taskId]: "" }));
       setAutoStatus(typeof result.status === "string" ? result.status : "running");
@@ -828,9 +918,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setSheet("team");
   });
   const saveTeam = (next: AoTeam) => void run("team", async () => {
-    const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: team?.revision ?? 0,
-      team: next as unknown as JsonObject } });
+    const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: next.revision,
+      team: prepareTeamGraph(next, team ?? next) as unknown as JsonObject } });
     setTeam(saved.team as AoTeam);
+    await loadMissions(workspaceId);
     setSheet("");
   });
   const stopChatRun = (runId: string) => void run("stop", async () => {
@@ -845,8 +936,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (!result.cancelled) setPendingApprovals((current) => current.filter((item) => item.approval_id !== approval.approval_id));
   });
 
-  const finished = !selectedRun || selectedRun.nodes.every(node => node.state === "finished");
-  const canStart = Boolean(selectedRun) && !selectedRun!.cancelled && !finished && autoStatus !== "running" && !busy;
+  const finished = !selectedRun || selectedRun.nodes.every(node => node.state === "finished" || (node.role === "retry" && node.state === "pending"));
+  const canStart = Boolean(selectedRun) && !selectedRun!.cancelled && !finished && !["starting", "running"].includes(autoStatus) && !busy;
   const statusText = selectedRun?.cancelled ? "stopped" : autoStatus;
   const visibleNodes = aoVisibleNodes(selectedRun?.nodes ?? [], showInactive);
   const showingHistory = !showInactive && visibleNodes.length > 0 && visibleNodes.every(node => ["cancelled", "archived"].includes(node.state));
@@ -863,30 +954,34 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // Every message names how its card runs; working cards also show runtime and current step.
   const describeChatNode = useCallback((node: ChatNode) => node.route ? cardMeta(node as unknown as AoNode, harnesses) : "", [harnesses]);
   const [chatActivity, setChatActivity] = useState<Record<string, ChatActivity>>({});
-  const workingRunIds = missions.filter((mission) => mission.project_id === chatTaskId
-    && mission.nodes.some((node) => node.state === "running" || node.state === "reserved")).map((mission) => mission.id).join(",");
+  const workingRunIds = (view === "overview" && inspectedId && selectedRun ? [selectedRun] : missions.filter(mission => mission.project_id === chatTaskId))
+    .filter(mission => mission.nodes.some(node => ["running", "reserved"].includes(node.state))).map(mission => mission.id).join(",");
   useEffect(() => {
-    if (!workspaceId || !workingRunIds) return;
+    if (!active || !workspaceId || !workingRunIds) return;
     let live = true;
+    let reading = false;
     const poll = async () => {
-      const found: Record<string, ChatActivity> = {};
-      for (const runId of workingRunIds.split(",")) {
-        try {
-          const result = await moduleCall("activity", { workspaceId, runId }) as { nodes?: Record<string, ChatActivity> };
-          for (const [nodeId, value] of Object.entries(result.nodes ?? {})) found[`${runId}:${nodeId}`] = value;
-        } catch { /* the run may have just settled */ }
-      }
-      if (live) setChatActivity(found);
+      if (reading || pageHidden()) return;
+      reading = true;
+      try {
+        const frames = await Promise.all(workingRunIds.split(",").map(async runId => {
+          try {
+            const result = await moduleCall("activity", { workspaceId, runId }) as { nodes?: Record<string, ChatActivity> };
+            return Object.entries(result.nodes ?? {}).map(([nodeId, value]) => [`${runId}:${nodeId}`, value] as const);
+          } catch { return []; }
+        }));
+        if (live) setChatActivity(Object.fromEntries(frames.flat()));
+      } finally { reading = false; }
     };
     void poll();
-    const timer = window.setInterval(() => void poll(), 10_000);
+    const timer = window.setInterval(() => void poll(), 2000);
     return () => { live = false; window.clearInterval(timer); };
-  }, [workspaceId, workingRunIds]);
+  }, [active, workspaceId, workingRunIds]);
 
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
       <ChatListPane chats={chatList(missions, board?.tasks ?? [])} selectedTaskId={chatTaskId ?? ""}
-        onSelect={selectChat} onNew={() => { setChatTaskId(""); setView("chat"); setSheet(""); }} tree={chatTree} />
+        onSelect={selectChat} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined} onNew={() => { setPendingChat(null); setChatTaskId(""); setView("chat"); setSheet(""); setMissionTeamId(team?.id ?? ""); }} tree={chatTree} />
       <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
       <header className="ao-workspace-head">
@@ -909,7 +1004,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         </div> : null}
         <div className="ao-head-tools" aria-label="Project controls">
           <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission" || (view === "chat" && chatTaskId === "")}
-            onClick={() => { if (view === "chat") { setSheet(""); setChatTaskId(""); } else openSheet("mission"); }} />
+            onClick={() => { if (view === "chat") { setSheet(""); setChatTaskId(""); setMissionTeamId(team?.id ?? ""); } else openSheet("mission"); }} />
           <button type="button" className="button-secondary" disabled={Boolean(busy) || !workspaceId} onClick={openTeam}>Team</button>
           <ToolButton icon="refresh" label={copy.refresh} disabled={!workspaceId || Boolean(busy)} onClick={() => void run("refresh", async () => { modelCache.current.clear(); await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]); })} />
           <ToolButton icon="gear" label={copy.settings} pressed={sheet === "settings"} onClick={() => openSheet("settings")} />
@@ -926,8 +1021,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
             <label>Name<input aria-label="Mission name" placeholder="Optional" maxLength={240} value={missionTitle} onChange={(event) => setMissionTitle(event.target.value)} /></label>
             <label className="ao-wide">Brief<textarea aria-label="Mission task description" placeholder="What should this mission do?" maxLength={8192} value={missionPrompt} onChange={(event) => setMissionPrompt(event.target.value)} /></label>
           </> : null}
-          {team ? <p className="ao-chip-line ao-wide" title="Edit roles by clicking cards on the canvas">
-            {team.nodes.map(node => <span key={node.id} className="ao-chip">{node.settings?.name || node.role}{node.role === "worker" ? ` · ${harnessLabel(node.route.harness_id, harnesses)}` : ""}</span>)}
+          {teams.length ? <label>Team<select aria-label="Mission team" value={missionTeamId || team?.id || ""} disabled={Boolean(busy)} onChange={event => {
+            setMissionTeamId(event.target.value); setMissionLimit(teams.find(item => item.id === event.target.value)?.worker_limit || 3);
+          }}>{teams.map(item => <option key={item.id} value={item.id}>{item.name}{item.id === team?.id ? " · Default" : ""}</option>)}</select></label> : null}
+          {missionTeam ? <p className="ao-chip-line ao-wide" title="Edit roles in Runtime → Orchestrator Team">
+            {missionTeam.nodes.map(node => <span key={node.id} className="ao-chip">{node.settings?.name || node.role}{node.role === "worker" ? ` · ${harnessLabel(node.route.harness_id, harnesses)}` : ""}</span>)}
           </p> : <div className="ao-field-row ao-wide">
             <HarnessPicker route={workerRouteDraft} harnesses={harnesses} loadModels={loadModels} onChange={setWorkerRouteDraft} />
           </div>}
@@ -1002,17 +1100,25 @@ export function AgentOrchestratorSurface({ language, setError }: {
           </div>
         </FloatingSheet> : null}
 
+        {view === "chat" && chatTaskId === "" && teams.length ? <div className="ao-new-chat-team">
+          <label>Team<select aria-label="New chat team" disabled={Boolean(busy)} value={missionTeamId || team?.id || ""}
+            onChange={event => setMissionTeamId(event.target.value)}>
+            {teams.map(item => <option key={item.id} value={item.id}>{item.name}{item.id === team?.id ? " · Default" : ""}</option>)}
+          </select></label><span className="ao-hint">Uses these role blocks for this chat</span>
+        </div> : null}
         {view === "chat" ? (
           !workspaceId && workspaceReady
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : <AgentOrchestratorChat
                 runs={missions} tasks={board?.tasks ?? []} selectedTaskId={chatTaskId ?? ""}
                 busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat}
-                working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && autoStatus === "running")}
+                pendingMessage={pendingChat && (!pendingChat.taskId || pendingChat.taskId === chatTaskId) ? pendingChat.message : undefined}
+                pendingTitle={pendingChat?.title} pendingCreation={Boolean(pendingChat && !pendingChat.taskId)}
+                working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && ["starting", "running"].includes(autoStatus))}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? pendingApprovals : []}
                 approve={approve}
-                notice={chatTaskId ? chatNotices[chatTaskId] || undefined : undefined}
+                notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}
                 retryStart={retryChatStart}
                 describeNode={describeChatNode} activity={chatActivity}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
@@ -1050,13 +1156,13 @@ export function AgentOrchestratorSurface({ language, setError }: {
             title={`${inspectedNode.settings?.name || inspectedNode.role} · ${inspectedNode.state}`} anchor={roleAnchor}
             className="ao-role-popup" closeLabel="Close role inspector" onClose={() => setInspectedId("")}>
             <AgentOrchestratorRoleEditor node={inspectedNode} mission={selectedRun} draft={draftTeam} harnesses={harnesses} loadModels={loadModels} busy={Boolean(busy)}
-              change={setDraftTeam} apply={applyTeam} discard={() => setDraftTeam(teamForMission(selectedRun, team))} taskName={taskName} />
+              change={setDraftTeam} apply={applyTeam} activity={chatActivity} discard={() => setDraftTeam(teamForMission(selectedRun, savedMissionTeam))} taskName={taskName} />
           </FloatingSheet> : null}
           </div>
           {/* Collapse native bounds during a drag without unmounting and reopening the board. */}
           <div className="ao-workspace-board" style={{ display: overviewResizing ? "none" : undefined }}>
             {view === "overview" && workspaceReady && workspaceId && !sheet
-              ? <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("overview")} />
+              ? <AgentOrchestratorOriginalSurface active={active} projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("overview")} />
               : sheet ? <div className="ao-empty-state">Mission board resumes when this dialog closes.</div> : null}
           </div>
         </OverviewSplit>

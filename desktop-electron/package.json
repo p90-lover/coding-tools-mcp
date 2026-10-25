@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-full-harness-desktop",
-  "version": "0.7.0-rc.14",
+  "version": "0.7.0-rc.32",
   "private": true,
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
@@ -11,7 +11,7 @@
     "audit": "bun audit",
     "typecheck": "tsc --noEmit",
     "build:preload": "node scripts/build-preload.cjs",
-    "build:renderer": "vite build",
+    "build:renderer": "vite build --configLoader runner",
     "build": "bun run build:preload && bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
     "build:five-stack-runtime": "node scripts/prepare-five-stack-runtime.cjs",

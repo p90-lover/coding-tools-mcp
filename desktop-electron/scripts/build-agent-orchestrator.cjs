@@ -7,7 +7,11 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const projectRoot = path.resolve(__dirname, "../..");
-const sourceRoot = path.join(projectRoot, "module", "agent-orchestrator");
+// Release builds can use an isolated checkout of the recorded gitlink while
+// leaving a developer's newer/dirty submodule working tree untouched.
+const sourceRoot = process.env.CODING_TOOLS_AO_BUILD_SOURCE
+  ? path.resolve(process.env.CODING_TOOLS_AO_BUILD_SOURCE)
+  : path.join(projectRoot, "module", "agent-orchestrator");
 // Upstream base. The superproject pins a fork commit carrying the Coding Tools integration on top.
 const upstreamCommit = "73473d45f0c18f3a81f66f150868459e3098ca35";
 const stageRoot = path.join(projectRoot, "aiTemp", "ao-source-build");
