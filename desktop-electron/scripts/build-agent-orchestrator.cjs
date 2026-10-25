@@ -86,7 +86,7 @@ async function main() {
   const dependencyDigest = crypto.createHash("sha256").update(JSON.stringify(dependencies)).digest("hex");
   const marker = path.join(frontendRoot, ".dependencies-ready");
   if (!fs.existsSync(marker) || fs.readFileSync(marker, "utf8") !== dependencyDigest) {
-    run(process.platform === "win32" ? "npm.cmd" : "npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], frontendRoot);
+    run("bun", ["install", "--ignore-scripts", "--no-save", "--cache-dir", path.join(projectRoot, "aiTemp", "bun-cache")], frontendRoot);
     fs.writeFileSync(marker, dependencyDigest);
   }
   run(process.execPath, ["node_modules/vite/bin/vite.js", "build", "--config", "vite.renderer.config.ts", "--outDir", path.join(outputRoot, "renderer")], frontendRoot, {
