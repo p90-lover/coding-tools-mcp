@@ -1,0 +1,34 @@
+# One-time dispatcher for the update-button hotfix release.
+# After this change reaches main, request the existing checksum-verified publisher.
+name: Dispatch Coding Tools v0.8.23 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/dispatch-desktop-v0.8.23.yml'
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  publish-v0823:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate version and fix, then dispatch official publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(gh api "repos/$GITHUB_REPOSITORY/contents/desktop-electron/package.json" -H "Accept: application/vnd.github.raw+json" | jq -r '.version')"
+          test "$version" = "0.8.23"
+          gh api "repos/$GITHUB_REPOSITORY/contents/desktop-electron/src/App.tsx" -H "Accept: application/vnd.github.raw+json" |
+            grep -Fq 'Update queued (click to cancel)'
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.8.23" >/dev/null 2>&1; then
+            echo "Release v0.8.23 exists; skip duplicate dispatch"
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/electron-windows-release.yml/dispatches" -f ref=main -F 'inputs[publish]=true'
+          echo "Official Windows v0.8.23 publication dispatched"
