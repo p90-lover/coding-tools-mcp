@@ -336,13 +336,56 @@ test("an AO agent's question and tool request show as Codex's cards: numbered op
   const ask = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: request, busy: false, approve() {}, actor: "DeepSeek V4.1 Flash" }));
   assert.match(ask, /class="cdx-kind">Terminal</);
   assert.match(ask, /Allow DeepSeek V4\.1 Flash to run this command\?/);
-  assert.match(ask, /<pre>\$env:PYTHONUTF8=&#x27;1&#x27;/);
+  assert.match(ask, /<pre[^>]*>\$env:PYTHONUTF8=&#x27;1&#x27;/);
   assert.match(ask, /<span>Reason<\/span><p>Parse recent refresh and recovery task results/);
   assert.match(ask, /<span>Reviewer<\/span><p>Inspect the complete native command yourself/);
   assert.deepEqual([...ask.matchAll(/class="cdx-option-label">([^<]+)</g)].map((match) => match[1]), ["Allow once", "Allow this conversation", "Deny"], "Codex's words");
   // Clicking an option answers at once, as Claude Code's prompt does: no Submit or Deny button.
   assert.doesNotMatch(ask, />Submit </);
   assert.doesNotMatch(ask, /cdx-foot/);
+});
+
+test("AO and native approval commands keep their full text in a scrollable viewer with copy and full-view controls", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  const command = [...Array.from({ length: 30 }, (_, index) => `echo command-line-${index}`), "echo FULL_COMMAND_TAIL"].join("\n");
+  const base = { nodeId: "one", approval_id: "req", kind: "command" };
+  const cases = [
+    { ...base, source: "ao", tool: "Bash", command },
+    { ...base, command },
+    { ...base, method: "item/commandExecution/requestApproval", thread_id: "thread", turn_id: "turn", request: { command } },
+  ];
+  for (const approval of cases) {
+    const html = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval, busy: false, approve() {} }));
+    assert.match(html, /<pre[^>]*tabindex="0"[^>]*aria-label="Command"[^>]*>/, "the command can receive keyboard scrolling focus");
+    assert.ok(html.includes(command), "the entire multiline command, including its tail, is rendered");
+    assert.match(html, />Copy<\/button>/);
+    assert.match(html, />Open full command<\/button>/);
+    assert.match(html, /<dialog[^>]*aria-label="Full command"/);
+    assert.doesNotMatch(html, /is-collapsed|>Expand<|>Collapse</, "complete command access has no length threshold");
+  }
+  const short = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
+    approval: { ...base, source: "ao", command: "pwd" }, busy: false, approve() {},
+  }));
+  assert.match(short, />Copy<\/button>/);
+  assert.match(short, />Open full command<\/button>/, "short commands have the same controls");
+});
+
+test("approval tool input uses the complete original text in the same viewer", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  const toolInput = '{  "path": "src/example.ts",\n "content": "FULL_TOOL_INPUT_TAIL" }';
+  for (const source of ["ao", undefined]) {
+    const html = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
+      approval: { nodeId: "one", approval_id: "req", source, tool: "read_file", toolInput }, busy: false, approve() {},
+    }));
+    assert.match(html, /<pre[^>]*aria-label="Tool input"/);
+    assert.ok(html.includes(toolInput.replaceAll('"', "&quot;")), "JSON spacing and every field are preserved");
+    assert.match(html, />Open full tool input<\/button>/);
+    assert.doesNotMatch(html, /is-collapsed/);
+  }
+  const edit = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
+    approval: { nodeId: "one", approval_id: "edit", source: "ao", tool: "Edit", path: "src/example.ts", toolInput }, busy: false, approve() {},
+  }));
+  assert.match(edit, /FULL_TOOL_INPUT_TAIL/, "an edit's file path must not hide its requested content");
 });
 
 test("a question the person answered shows as Claude Code shows one: the question, then the answer", () => {

@@ -173,11 +173,59 @@ const DECISION_WORDS: Record<string, string> = {
 };
 const EDIT_TOOL = /^(?:Edit|MultiEdit|Write|NotebookEdit|str_replace_based_edit_tool|apply_patch)$/i;
 const SHELL_TOOL = /(?:^|__)(?:Bash|PowerShell|exec_command|shell|run_terminal_cmd)$/i;
-const prettyInput = (text: string) => { try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; } };
+
+/** The exact request stays readable without changing the approval or its keyboard shortcuts. */
+function ApprovalCode({ text, label }: { text: string; label: string }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const open = useRef<HTMLButtonElement>(null);
+  const [copyStatus, setCopyStatus] = useState("");
+  useEffect(() => setCopyStatus(""), [text]);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyStatus("Copied");
+    } catch {
+      setCopyStatus("Couldn't copy. Select the text and copy it manually.");
+    }
+  };
+  const lowerLabel = label.toLowerCase();
+  return <div className="cdx-command" onKeyDown={(event) => event.stopPropagation()}>
+    <pre tabIndex={0} role="region" aria-label={label}>{text}</pre>
+    <div className="cdx-command-actions">
+      <button type="button" className="cx-modal-button" onClick={() => void copy()}>Copy</button>
+      <button ref={open} type="button" className="cx-modal-button" aria-haspopup="dialog" onClick={() => dialog.current?.showModal()}>Open full {lowerLabel}</button>
+      <span className="cdx-copy-status" role="status">{copyStatus}</span>
+    </div>
+    <dialog ref={dialog} className="cx-modal cdx-command-dialog" aria-label={`Full ${lowerLabel}`} aria-modal="true"
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key !== "Tab") return;
+        const controls = event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex="0"]');
+        const first = controls[0], last = controls[controls.length - 1];
+        if (first && ((event.shiftKey && event.target === first) || (!event.shiftKey && event.target === last))) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        }
+      }}
+      onCancel={(event) => { event.preventDefault(); dialog.current?.close(); }}
+      onClose={() => open.current?.focus({ preventScroll: true })}>
+      <header className="cx-modal-head">
+        <h2>Full {lowerLabel}</h2>
+        <button type="button" className="cx-modal-close" aria-label="Close full view" onClick={() => dialog.current?.close()}>×</button>
+      </header>
+      <div className="cx-modal-body"><pre tabIndex={0} autoFocus role="region" aria-label={`Full ${lowerLabel} text`}>{text}</pre></div>
+      <footer className="cx-modal-foot">
+        <span className="cdx-copy-status cx-modal-spacer" role="status">{copyStatus}</span>
+        <button type="button" className="cx-modal-button" onClick={() => void copy()}>Copy</button>
+        <button type="button" className="cx-modal-button" onClick={() => dialog.current?.close()}>Close</button>
+      </footer>
+    </dialog>
+  </div>;
+}
 
 /**
  * A tool request from an AO agent as Codex's approval card asks it: "Terminal" / "Edit files" /
- * "Ask permission", "Allow {agent} to run this command?", the command in a box that expands, the
+ * "Ask permission", "Allow {agent} to run this command?", the complete command in a scrollable box, the
  * reason (and the reviewer's, when it left it to you), then the answers the agent offered as
  * numbered options. As in Claude Code's permission prompt, clicking one (or pressing its number)
  * answers at once: no Submit or Deny button. Escape answers Deny.
@@ -190,10 +238,8 @@ function AoAsk({ approval, busy, approve, actor }: {
   const edit = !shell && (EDIT_TOOL.test(tool) || approval.kind === "file_change");
   const kindLine = shell ? "Terminal" : edit ? "Edit files" : "Ask permission";
   const title = shell ? `Allow ${actor} to run this command?` : edit ? `Allow ${actor} to edit the following file?` : `Allow ${actor} to use ${tool || "this tool"}?`;
-  const shellInput = (() => { try { const input = JSON.parse(approval.toolInput ?? ""); return typeof input?.cmd === "string" ? input.cmd : typeof input?.command === "string" ? input.command : ""; } catch { return ""; } })();
-  const body = approval.command || shellInput || (edit ? approval.path : "") || (approval.toolInput ? prettyInput(approval.toolInput) : approval.path) || "";
-  const long = body.split("\n").length > 8 || body.length > 600;
-  const [expanded, setExpanded] = useState(false);
+  const shellInput = shell ? (() => { try { const input = JSON.parse(approval.toolInput ?? ""); return typeof input?.cmd === "string" ? input.cmd : typeof input?.command === "string" ? input.command : ""; } catch { return ""; } })() : "";
+  const body = approval.command || shellInput || approval.toolInput || approval.path || "";
   const offered = (approval.decisions ?? []).length ? approval.decisions!
     : [{ id: "allow", kind: "allow_once", label: "Allow once" }, { id: "deny", kind: "reject_once", label: "Deny" }];
   const options = offered.map((decision) => ({ value: decision.id, label: DECISION_WORDS[decision.kind] ?? decision.label }));
@@ -213,10 +259,7 @@ function AoAsk({ approval, busy, approve, actor }: {
     <div className="cdx-body">
       <span className="cdx-kind">{kindLine}</span>
       <span className="cdx-title">{title}</span>
-      {body ? <div className={`cdx-command${long && !expanded ? " is-collapsed" : ""}`}>
-        <pre>{body}</pre>
-        {long ? <button type="button" className="cdx-expand" onClick={() => setExpanded(!expanded)}>{expanded ? "Collapse" : "Expand"}</button> : null}
-      </div> : null}
+      {body ? <ApprovalCode text={body} label={shell ? "Command" : "Tool input"} /> : null}
       {reason ? <div className="cdx-row"><span>Reason</span><p>{reason}</p></div> : null}
       {approval.recommendation?.reason ? <div className="cdx-row"><span>Reviewer</span><p>{approval.recommendation.reason}</p></div> : null}
       {/* The reviewer left it to you: the model can judge this and every later one instead. */}
@@ -250,6 +293,7 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
   const [scope, setScope] = useState("turn");
   const [granted, setGranted] = useState<Record<string, boolean>>({});
   const request = approval.request ?? {};
+  const command = approval.command || (typeof request.command === "string" ? request.command : "");
   const kind = approval.kind;
   // Where it applies: a path or working folder. An AO request has neither for most tools, and its
   // card id is not a place, so nothing is shown then.
@@ -309,7 +353,7 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
     <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</span>
     <p>{approval.reason || approval.summary || String(request.message || "Tool request")}{location ? ` · ${location}` : ""}</p>
     {typed ? <p className="ao-hint">{approval.method} · Thread {approval.thread_id || "unknown"} · Turn {approval.turn_id || "unknown"}{approval.item_id ? " · Item " + approval.item_id : ""}</p> : null}
-    {approval.command ? <pre>{approval.command}</pre> : approval.toolInput ? <pre aria-label="Tool input">{approval.toolInput}</pre> : null}
+    {command ? <ApprovalCode text={command} label="Command" /> : approval.toolInput ? <ApprovalCode text={approval.toolInput} label="Tool input" /> : null}
     {approval.dependencyNote ? <p className={`ao-hint ao-dependency-note is-${approval.dependencyNote.tone}`}
       role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
     {approval.recommendation ? <p className="ao-hint">Command approver suggests {approval.recommendation.action}: {approval.recommendation.reason}</p> : null}

@@ -7,6 +7,7 @@ const path = require("node:path");
 const { execFile, spawn } = require("node:child_process");
 const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway.cjs");
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
+const { MAX_RESPONSE_BYTES } = require("./ipc-schema.cjs");
 const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
@@ -346,7 +347,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  async function requestApi(method, endpoint, body, { maxBytes, timeoutMs } = {}) {
+  async function requestApi(method, endpoint, body, { maxBytes, timeoutMs, preserveInlineBlobs = false } = {}) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const waitMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : method === "GET" ? 30000 : 180000;
@@ -363,7 +364,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (text) {
       try { data = JSON.parse(text); } catch { data = response.ok ? {} : { error: { message: text.slice(0, 300) } }; }
     }
-    if (conversation) dropInlineBlobs(data);
+    if (conversation && !preserveInlineBlobs) dropInlineBlobs(data);
     return { ok: response.ok, status: response.status, data };
   }
 
@@ -775,12 +776,30 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * by AO). Each keeps AO's request id and the provider's own offered decisions, so an answer is
    * always one of those; a Bash call is a "command", other tools a "permission".
    */
-  function pendingApprovals(conversation) {
-    return (Array.isArray(conversation?.activities) ? conversation.activities : [])
+  async function pendingApprovals(id, conversation) {
+    return (await Promise.all((Array.isArray(conversation?.activities) ? conversation.activities : [])
       .filter(activity => activity.activityKind === "approval" && activity.status === "pending" && typeof activity.requestId === "string")
-      .map(activity => {
+      .map(async activity => {
         const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
-        const input = detail.input && typeof detail.input === "object" ? detail.input : {};
+        let input = detail.input && typeof detail.input === "object" ? detail.input : {};
+        // Polls keep tool history small. A permission prompt needs the exact input, including the
+        // middle AO omitted or inline data the shared read replaced. Read only this one activity,
+        // never an untrimmed chat tail, and never offer an approval based on a partial request.
+        if (/(?:… \[\d+ (?:bytes|characters) omitted\]|\[\d+ KB of inline binary data not shown\])/.test(JSON.stringify(input))) {
+          try {
+            if (!Number.isSafeInteger(activity.sequence) || activity.sequence < 1 || !Number.isSafeInteger(activity.sequence + 1)
+              || typeof activity.id !== "string") throw new Error("The approval has no exact activity cursor");
+            const raw = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=1&beforeSequence=${activity.sequence + 1}`,
+              undefined, { maxBytes: CONVERSATION_COMPACT_READ_BYTES, preserveInlineBlobs: true });
+            const original = (Array.isArray(raw?.activities) ? raw.activities : []).find(item => item.id === activity.id
+              && item.requestId === activity.requestId && item.sequence === activity.sequence && item.turnId === activity.turnId
+              && item.activityKind === "approval" && item.status === "pending");
+            if (!original?.detail?.input || typeof original.detail.input !== "object") throw new Error("The exact pending approval was not returned");
+            input = original.detail.input;
+          } catch (cause) {
+            throw new Error("The full approval input is unavailable. Refresh the chat before reviewing this request.", { cause });
+          }
+        }
         const decisions = (Array.isArray(detail.decisions) ? detail.decisions : [])
           .filter(decision => typeof decision?.id === "string" && typeof decision?.kind === "string")
           .map(decision => ({ id: decision.id.slice(0, 200), kind: decision.kind.slice(0, 40), label: String(decision.label || decision.kind).slice(0, 120) }));
@@ -799,19 +818,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const rawToolInput = /^mcp__/.test(toolName) ? arguments_ : "";
         // The harness's own tools (Claude Code's Monitor, WebFetch, Skill, and each one it adds later)
         // reached the reviewer as a bare name with nothing to judge, so a new one was answered blind.
-        // Their arguments now go along when short. One with a command, a file or a plan is still shown
-        // by that, and a long one is left out rather than cut (it never made a request incomplete).
-        const nativeInput = !rawToolInput && !command && !path && !plan && Buffer.byteLength(arguments_, "utf8") <= 1500 ? arguments_ : "";
-        const toolInput = utf8Prefix(rawToolInput, 1500) || nativeInput;
+        // Their arguments go along whole, including an edit's source beside its file path. A command
+        // or plan is still shown by that; the old reviewer bounds remain below, independently of
+        // the full text the person can inspect.
+        const nativeInput = !rawToolInput && !command && !plan ? arguments_ : "";
+        const toolInput = rawToolInput || nativeInput;
         const reviewTruncated = Buffer.byteLength(command, "utf8") > 4000 || Buffer.byteLength(rawToolInput, "utf8") > 1500
+          || Buffer.byteLength(nativeInput, "utf8") > 1500
           || Buffer.byteLength(path, "utf8") > 1000 || Buffer.byteLength(String(input.description ?? ""), "utf8") > 500;
-        return {
+        const approval = {
           approval_id: activity.requestId.slice(0, 200), source: "ao", kind: plan ? "plan" : command ? "command" : "permission",
           ...(plan ? { plan } : {}),
           ...(toolInput ? { toolInput } : {}),
           ...(reviewTruncated ? { reviewTruncated: true } : {}),
           ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
-          ...(command ? { command: utf8Prefix(command, 4000) } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
+          ...(command ? { command } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
           ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
           // The tool's own name when AO has it; otherwise its summary ("PowerShell") rather than ACP's "other".
           tool: String(detail.toolName || (detail.toolKind && detail.toolKind !== "other" ? detail.toolKind : activity.summary) || "tool").slice(0, 80),
@@ -821,7 +842,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           summary: utf8Prefix(String(activity.summary || ""), 500), ...(typeof activity.turnId === "string" ? { turn_id: activity.turnId } : {}),
           decisions,
         };
-      })
+        if (Buffer.byteLength(JSON.stringify(approval), "utf8") > MAX_RESPONSE_BYTES) {
+          throw new Error("The full approval input exceeds the app's response limit and cannot be reviewed here.");
+        }
+        return approval;
+      })))
       .filter(approval => approval.decisions.length);
   }
   /**
@@ -1238,7 +1263,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // With no agent behind the session nothing can take an answer: AO may still list its last
         // request as pending (seen live 2026-10-23: Allow failed twice with "the agent controller
         // for this session is not running"), so no card is shown for it.
-        approvals: agentGone ? [] : [...pendingApprovals(conversation), ...pendingInputs(conversation)],
+        approvals: agentGone ? [] : [...await pendingApprovals(id, conversation), ...pendingInputs(conversation)],
       };
     },
     /**

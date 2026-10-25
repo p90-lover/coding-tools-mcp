@@ -538,12 +538,18 @@
 .cdx-message { color: var(--cdx-secondary); }
 .cdx-reason { margin: 0; color: var(--cdx-secondary); font-size: 13px; }
 .cdx-link { color: var(--ao-blue, #2f6fdd); overflow-wrap: anywhere; }
-.cdx-command { position: relative; }
-.cdx-command pre { max-height: 320px; margin: 0; padding: 8px 10px; overflow: auto; border-radius: 6px; background: var(--cdx-code); color: var(--cdx-tertiary);
+.cdx-command { position: relative; min-width: 0; }
+.cdx-command pre { max-height: 320px; margin: 0; padding: 8px 10px; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
+  border-radius: 6px; background: var(--cdx-code, color-mix(in srgb, var(--color-text-primary) 6%, var(--color-bg-primary))); color: var(--color-text-primary);
   font: 500 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.cdx-command.is-collapsed pre { max-height: 96px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
-.cdx-expand { margin-top: 4px; padding: 0; border: 0; background: transparent; color: var(--cdx-secondary); font-size: 12px; cursor: pointer; }
-.cdx-expand:hover { color: var(--cdx-text); }
+.cdx-command pre:focus-visible { outline: 2px solid var(--ao-blue, #2f6fdd); outline-offset: -2px; }
+.cdx-command-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.cdx-copy-status { color: var(--ao-muted); font-size: 12px; }
+.cx-modal.cdx-command-dialog { width: min(960px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; }
+.cdx-command-dialog:not([open]) { display: none; }
+.cdx-command-dialog::backdrop { background: rgb(0 0 0 / 32%); }
+.cdx-command-dialog .cx-modal-body { display: flex; min-height: 0; padding: 12px 16px; overflow: hidden; }
+.cdx-command-dialog .cx-modal-body pre { flex: 1; min-width: 0; max-height: 70vh; white-space: pre; overflow-wrap: normal; }
 .cdx-row { display: grid; grid-template-columns: 56px 1fr; gap: 8px; font-size: 12px; line-height: 16px; }
 .cdx-row > span { color: var(--cdx-tertiary); }
 .cdx-row > p { margin: 0; color: var(--cdx-secondary); overflow-wrap: anywhere; }
