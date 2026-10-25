@@ -23,6 +23,7 @@ import { createPortal } from "react-dom";
 
 import type { PetMood } from "./ao-chat";
 import { petCall, petStage, type PetArrival } from "./chat-pet-stage";
+import { advancePetWalk } from "./chat-pet-motion";
 import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, ROWS, pickOne, useClawdPlayer,
   type AnimationName, type Arms as ClawdArms, type Eyes, type Feet, type Frame } from "./Clawd";
 
@@ -413,6 +414,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const bubbleTimer = useRef<number | undefined>(undefined);
   const napTimer = useRef<number | undefined>(undefined);
   const walkFrame = useRef(0);
+  // The two paint frames that start a leap, pointer ride, or drop must not outlive that motion.
+  const transitionFrame = useRef(0);
   // Where the walk under way ends (a distance around), moved with the box when it resizes.
   const walkTarget = useRef(0);
   // Every scheduled behaviour (the next stroll, an arrival, an action's frames), cleared together.
@@ -450,6 +453,19 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
 
   const later = (ms: number, run: () => void) => { plans.current.push(window.setTimeout(run, ms)); };
   const stopWalking = () => { if (walkFrame.current) window.cancelAnimationFrame(walkFrame.current); walkFrame.current = 0; };
+  const cancelTransitionFrame = () => {
+    if (transitionFrame.current) window.cancelAnimationFrame(transitionFrame.current);
+    transitionFrame.current = 0;
+  };
+  const afterTwoFrames = (run: () => void) => {
+    cancelTransitionFrame();
+    transitionFrame.current = window.requestAnimationFrame(() => {
+      transitionFrame.current = window.requestAnimationFrame(() => {
+        transitionFrame.current = 0;
+        run();
+      });
+    });
+  };
   const cancelPlans = () => { plans.current.forEach((timer) => window.clearTimeout(timer)); plans.current = []; stopWalking(); };
   const say = (text: string, ms = 1800) => {
     setBubble(text);
@@ -610,7 +626,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     stopWalking();
     const rects = obstacles();
     const box = composer.current?.getBoundingClientRect();
-    const direction = target >= atNow.current ? 1 : -1;
+    let direction = target >= atNow.current ? 1 : -1;
     walkTarget.current = target;
     setPose({ ...REST, walking: true, look: direction > 0 ? 1 : -1 });
     let last = performance.now();
@@ -620,9 +636,13 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       last = now;
       // Where it is headed: the box resizing (reanchor) can move the spot while it walks.
       const end = walkTarget.current;
-      const next = atNow.current + direction * speed * (blocked(atNow.current, rects, box) ? DASH : 1) * elapsed;
-      const arrived = direction > 0 ? next >= end : next <= end;
-      atNow.current = arrived ? end : next;
+      const step = advancePetWalk(atNow.current, end, speed * (blocked(atNow.current, rects, box) ? DASH : 1) * elapsed);
+      if (step.direction && step.direction !== direction) {
+        direction = step.direction;
+        setPose({ ...REST, walking: true, look: direction > 0 ? 1 : -1 });
+      }
+      const { arrived } = step;
+      atNow.current = step.position;
       // Bit moves every frame but is drawn at most WALK_FPS times a second: on a 165 Hz screen each
       // step re-rendered the pet and recalculated styles 165 times a second.
       if (arrived || now - shown >= 1000 / WALK_FPS) { shown = now; setAt(atNow.current); }
@@ -707,7 +727,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     setLeap(leapNow.current);
     setPose({ ...REST, arms: "both", walking: true, look: to.x < from.x ? -1 : 1 });
     // Two frames later, so the leap starts from where it stood.
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() => setLeap((current) => current && { ...to, ms })));
+    afterTwoFrames(() => setLeap((current) => current && { ...to, ms }));
     leapTimer.current = window.setTimeout(() => {
       leapNow.current = null;
       setLeap(null);
@@ -850,6 +870,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   };
   /** It jumps off the pointer, back onto the box's top edge below it (never onto a button). */
   const leave = () => {
+    cancelTransitionFrame();
     window.clearTimeout(rideTimer.current);
     if (rideNow.current?.mode === "leaving") return;
     const current = loopNow.current;
@@ -879,8 +900,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     setRide({ ...screenAt(atNow.current), mode: "boarding", look: 0 });
     setPose({ ...REST, arms: "both" });
     // Two frames later, so the leap starts from where it stood.
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() =>
-      setRide((current) => current && { ...current, ...pointer.current, mode: "boarding" })));
+    afterTwoFrames(() => setRide((current) => current && { ...current, ...pointer.current, mode: "boarding" }));
     later(420, () => {
       setRide((current) => current && { ...current, ...pointer.current, mode: "riding" });
       // Aboard, its feet dangle and it looks the way it is carried (see the ride frame below).
@@ -1058,6 +1078,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   }, [riding]);
 
   useEffect(() => () => {
+    cancelTransitionFrame();
     window.clearTimeout(rideTimer.current); window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current);
     window.clearTimeout(napTimer.current); window.clearTimeout(fallTimer.current); window.clearTimeout(doorTimer.current); window.clearTimeout(leapTimer.current);
     dragEnd.current?.(); cancelPlans();
@@ -1120,7 +1141,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     // The shadow is drawn on this box's top edge; over another pane's box it has none.
     setDropX(across ? null : x);
     // Two frames later, so the fall starts from where it was let go.
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() => setHeld({ ...to, fall: fallMs })));
+    afterTwoFrames(() => setHeld({ ...to, fall: fallMs }));
     // Its own timer: a mood change clears the wander plans, and must not leave it in the air.
     window.clearTimeout(fallTimer.current);
     fallTimer.current = window.setTimeout(() => {

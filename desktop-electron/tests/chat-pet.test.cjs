@@ -26,6 +26,32 @@ const stage = {};
 vm.runInNewContext(ts.transpileModule(stageSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText,
   { exports: stage, Date });
 
+const motionSource = fs.readFileSync(path.resolve(__dirname, "../src/features/chat-pet-motion.ts"), "utf8");
+const motion = {};
+vm.runInNewContext(ts.transpileModule(motionSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText,
+  { exports: motion, Number, Math });
+
+test("Clawd reverses toward a destination moved behind it when the chat box resizes", () => {
+  const first = motion.advancePetWalk(100, 180, 12);
+  assert.equal(first.position, 112);
+  assert.equal(first.direction, 1);
+  assert.equal(first.arrived, false);
+  const resized = motion.advancePetWalk(first.position, 90, 12);
+  assert.equal(resized.position, 100);
+  assert.equal(resized.direction, -1);
+  assert.equal(resized.arrived, false);
+  const final = motion.advancePetWalk(resized.position, 90, 20);
+  assert.equal(final.position, 90, "the walk stops exactly on its destination, without overshooting");
+  assert.equal(final.arrived, true);
+});
+
+test("Clawd finishes a zero-distance walk instead of scheduling endless frames", () => {
+  const result = motion.advancePetWalk(42, 42, 10);
+  assert.equal(result.position, 42);
+  assert.equal(result.direction, 0);
+  assert.equal(result.arrived, true);
+});
+
 test("split view has one pet: it stays in its pane while that stays open, else goes to the focused pane", () => {
   assert.equal(stage.petHost(null, [], null), null);
   assert.equal(stage.petHost(null, ["a", "b"], null), "a");
