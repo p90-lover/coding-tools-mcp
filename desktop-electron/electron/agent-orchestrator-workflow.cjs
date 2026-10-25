@@ -6,7 +6,7 @@ const path = require("node:path");
 const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
-const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
+const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
@@ -4293,9 +4293,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The goal is judged when the steered run settles (goalAfterRun), like a goal sent as a new turn.
     if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: run.id }); }
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
-    const note = async () => {
+    // `messages`: how many messages the chat had when the steer went in; it belongs under the last.
+    const note = async (messages) => {
       const detail = await board({ workspaceId: id, taskId: task });
-      const description = `${detail.task?.description || ""}\n\n↳ Steer (${stamp} UTC): ${text}`.trim();
+      const description = chatDescriptionWithSteer(detail.task?.description || "", messages, `↳ Steer (${stamp} UTC): ${text}`);
       if (detail.task && utf8Bytes(description) <= BOARD_TEXT_BYTES) {
         await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
       }
@@ -4303,8 +4304,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The steer itself was delivered; the transcript note is best-effort, and a team's waits for
     // its run to settle (see whenTaskIdle). It is written after replying: waiting for its board
     // read and write held the chat's composer for seconds after the agent already had the message.
+    // A team's note can be written after the next message started a new mission, so the message
+    // the steer was sent under is counted now, not when the note is written.
     if (!grantAtRisk(run)) void note().catch(() => undefined);
-    else whenTaskIdle(id, task, note);
+    else {
+      const messages = board({ workspaceId: id, taskId: task }).then((detail) => chatMessageCount(detail.task?.description)).catch(() => undefined);
+      whenTaskIdle(id, task, async () => note(await messages));
+    }
     return { ok: true, steered: true, runId: run.id, nodeId: card.id };
   }
 

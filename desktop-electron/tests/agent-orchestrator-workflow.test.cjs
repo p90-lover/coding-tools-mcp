@@ -5751,6 +5751,30 @@ test("steering a team chat reaches its orchestrator, not a worker", async () => 
   assert.deepEqual(steered, [["lead-session", "focus on the UI"]]);
 });
 
+test("a team steer noted after the next mission started stays under the message it was sent in", async () => {
+  // The note waits for the team run to settle; the next message was saved first, and the steer was
+  // appended under it, so the chat moved it from its turn down into the new mission.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const run = { id: "r1", project_id: "task-1", execution_mode: "team", cancelled: false, nodes: [
+    { id: "lead", role: "planner", state: "running", route, receipt: { thread_id: "lead-session" } },
+    { id: "w1", role: "worker", state: "pending", route }] };
+  const world = chatWorld({ tasks: [task], runs: [run] });
+  const timers = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    setTimer: (callback) => { timers.push(callback); return { unref() {} }; },
+    aoHarness: { steer: async () => ({ steered: true }) } });
+  assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "focus on the UI" })).steered, true);
+  for (let tick = 0; tick < 100 && !timers.length; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(world.edits.length, 0, "the team run is still reserving its cards");
+  // The run settles and the next mission's message is saved before the note's next look.
+  for (const node of run.nodes) node.state = "finished";
+  world.tasks[0].description += "\n\nFollow-up (2026-10-24 09:00 UTC):\nnow the API";
+  timers.shift()();
+  for (let tick = 0; tick < 100 && !world.edits.length; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.match(world.edits[0].description, /^first ask\n\n↳ Steer \([^)]+ UTC\): focus on the UI\n\nFollow-up \(2026-10-24 09:00 UTC\):\nnow the API$/);
+});
+
 test("a follow-up that would overflow a long chat compacts it first instead of refusing", async () => {
   const task = { id: "task-1", title: "Long job", description: "x".repeat(8180), state: "in_progress", clauses: [] };
   const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
