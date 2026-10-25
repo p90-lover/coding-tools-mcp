@@ -15,7 +15,16 @@ pub const LEGACY_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18"];
 pub const SUPPORTED_PROTOCOLS: &[&str] = &[MODERN_PROTOCOL, "2025-11-25", "2025-06-18"];
 
 fn server_info() -> Value {
-    json!({"name":"coding-tools-mcp","title":"Coding Tools MCP","version":env!("CARGO_PKG_VERSION")})
+    json!({
+        "name": "coding-tools-mcp",
+        "title": "Coding Tools MCP",
+        "version": env!("CARGO_PKG_VERSION"),
+        "icons": [{
+            "src": "https://raw.githubusercontent.com/p90-lover/coding-tools-mcp/main/desktop-electron/assets/icon.png",
+            "mimeType": "image/png",
+            "sizes": ["1024x1024"]
+        }]
+    })
 }
 fn instructions() -> &'static str {
     "After an HTTP timeout, use mcp_operation_status with the returned operation_id (include_result=true), the original request_id, or no selector for recent records. Never rerun the original operation just to inspect it. Receipts/results are runtime-local and bounded; missing records are unknown, not proof of nonexecution. Completed means RPC dispatch returned; inspect any returned command/task handle separately. Use these tools only for local coding operations inside the configured workspace. When the client supplies _meta.openai/session, the server automatically creates or resumes the matching bounded history session before the first non-history tool call and reports the stable target under history_session. The same conversation identifier resumes the same Markdown archive after a server restart. history_session_bootstrap remains available for clients without session metadata and whenever verbatim initial_user_input must be captured. Use history_session_search followed by history_session_read only when exact earlier context is needed; follow next_cursor with the returned content hash until the relevant archive page is complete. Preserve session_key and current_path, then pass them unchanged as session_key and expected_path to history_session_checkpoint. After completing each user-requested task, call history_session_checkpoint before the final response and pass that user's verbatim request as raw_user_input. Only state that progress was saved after checkpoint returns ok=true with the same target. The server cannot access ChatGPT transcript text that was not provided as a tool argument, so per-turn checkpoint text remains model-mediated rather than automatic background persistence. Every tool result also includes the bounded project_instructions selected from the addressed workspace or linked-project path. When an MCP event (coding_tools.*) wakes you, call server_info and check mcp_events.open_incidents before acting; an incident missing from that list has already recovered. Follow the event's next_step: tool approvals and mission resume require the local user in Coding Tools, so ask them rather than retrying."
@@ -327,6 +336,23 @@ mod tests {
     use crate::tools::ToolContext;
 
     use super::{discover_result, handle_request, initialize_result, tool_arguments};
+    #[test]
+    fn initialize_advertises_brand_icon_for_mcp_clients() {
+        let initialized = initialize_result(&json!({"protocolVersion": "2025-11-25"}));
+        assert_eq!(initialized["serverInfo"]["name"], "coding-tools-mcp");
+        assert_eq!(
+            initialized["serverInfo"]["icons"][0]["mimeType"],
+            "image/png"
+        );
+        assert_eq!(
+            initialized["serverInfo"]["icons"][0]["sizes"][0],
+            "1024x1024"
+        );
+        assert_eq!(
+            initialized["serverInfo"]["icons"][0]["src"],
+            "https://raw.githubusercontent.com/p90-lover/coding-tools-mcp/main/desktop-electron/assets/icon.png"
+        );
+    }
 
     #[test]
     fn initialize_instructions_define_the_history_persistence_workflow() {
