@@ -24,8 +24,8 @@ jobs:
           set -euo pipefail
           version="$(gh api "repos/$GITHUB_REPOSITORY/contents/desktop-electron/package.json" -H "Accept: application/vnd.github.raw+json" | jq -r '.version')"
           test "$version" = "0.8.23"
-          gh api "repos/$GITHUB_REPOSITORY/contents/desktop-electron/src/App.tsx" -H "Accept: application/vnd.github.raw+json" |
-            grep -Fq 'Update queued (click to cancel)'
+          renderer="$(gh api "repos/$GITHUB_REPOSITORY/contents/desktop-electron/src/App.tsx" -H "Accept: application/vnd.github.raw+json")"
+          [[ "$renderer" == *'Update queued (click to cancel)'* ]]
           if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.8.23" >/dev/null 2>&1; then
             echo "Release v0.8.23 exists; skip duplicate dispatch"
             exit 0
