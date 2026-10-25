@@ -130,7 +130,8 @@ process.env.CODEX_CHATGPT_WEB_HOME = CORE_HOME;
 process.env.CODEX_HOME = LAUNCHER_PROFILE.codexHome;
 app.setName(LAUNCHER_PROFILE.displayName);
 if (process.platform === "win32") {
-  app.setAppUserModelId(IS_DEV_PROFILE ? "dev.codexwebgpt.launcher.dev" : "dev.codexwebgpt.launcher");
+  // Match the packaged appId so Windows associates taskbar entries with Coding Tools.
+  app.setAppUserModelId(IS_DEV_PROFILE ? "dev.codingtools.fullharness.dev" : "dev.codingtools.fullharness");
 }
 fs.mkdirSync(LAUNCHER_PROFILE.userData, { recursive: true, mode: 0o700 });
 // Native child processes must use the physical profile path across Windows junctions.
@@ -781,45 +782,45 @@ function trayImage() {
 
 const NATIVE_COPY = Object.freeze({
   en: Object.freeze({
-    openLauncher: "Open Codex Web GPT",
+    openLauncher: "Open Coding Tools",
     quit: "Quit",
     exportDiagnostics: "Export privacy-safe diagnostics",
     cancel: "Cancel",
     remove: "Remove",
-    removeTitle: "Remove Codex Web GPT",
+    removeTitle: "Remove Coding Tools",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
     removeDetail: "Your ChatGPT sign-in in the launcher stays. Restart Codex once.",
     catalogFailure: "Codex reached the launcher, but its model catalog didn't load: HTTP {status}, {reason}. Check Activity, and export a safe log if it keeps failing.",
   }),
   "zh-CN": Object.freeze({
-    openLauncher: "打开 Codex Web GPT",
+    openLauncher: "打开 Coding Tools",
     quit: "退出",
     exportDiagnostics: "导出隐私安全诊断",
     cancel: "取消",
     remove: "移除",
-    removeTitle: "移除 Codex Web GPT",
+    removeTitle: "移除 Coding Tools",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
     catalogFailure: "Codex 已连接到启动器，但模型列表加载失败（HTTP {status}；{reason}）。请查看“活动”了解详情；若问题持续，请导出安全日志。",
   }),
   "zh-TW": Object.freeze({
-    openLauncher: "開啟 Codex Web GPT",
+    openLauncher: "開啟 Coding Tools",
     quit: "結束",
     exportDiagnostics: "匯出已保護私隱的診斷資料",
     cancel: "取消",
     remove: "移除",
-    removeTitle: "移除 Codex Web GPT",
+    removeTitle: "移除 Coding Tools",
     removeMessage: "從 Codex 移除 ChatGPT Web 模型並還原先前的模型路由？",
     removeDetail: "啟動器中的 ChatGPT 登入 profile 會保留。Codex 需要重新啟動一次。",
     catalogFailure: "Codex 已連線到啟動器，但模型清單載入失敗（HTTP {status}；{reason}）。請查看「活動」了解詳情；若問題持續，請匯出安全日誌。",
   }),
   ja: Object.freeze({
-    openLauncher: "Codex Web GPT を開く",
+    openLauncher: "Coding Tools を開く",
     quit: "終了",
     exportDiagnostics: "プライバシー保護済みの診断情報をエクスポート",
     cancel: "キャンセル",
     remove: "削除",
-    removeTitle: "Codex Web GPT を削除",
+    removeTitle: "Coding Tools を削除",
     removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
     removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
     catalogFailure: "Codex はランチャーに接続しましたが、モデル一覧を読み込めませんでした（HTTP {status}、{reason}）。「アクティビティ」で詳細を確認し、問題が続く場合は安全なログをエクスポートしてください。",
@@ -2614,13 +2615,13 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
   try {
     const browserOperation = browserHost?.currentOperation();
     if (browserOperation) {
-      throw new Error(`Wait for ${browserOperation} to finish before quitting Codex Web GPT`);
+      throw new Error(`Wait for ${browserOperation} to finish before quitting Coding Tools`);
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
     const runtimeOperation = runtimeHost?.currentOperation();
     if (runtimeOperation) {
-      throw new Error(`Wait for ${runtimeOperation} to finish before quitting Codex Web GPT`);
+      throw new Error(`Wait for ${runtimeOperation} to finish before quitting Coding Tools`);
     }
     try {
       // A keep-bridge restart leaves Codex pointed at the bridge, which stays running.
@@ -3826,7 +3827,7 @@ async function start() {
     if (runtime.status === "external" || runtime.status === "needs-setup") {
       const detail = runtime.detail || (
         runtime.status === "external"
-          ? "Another process owns the configured Codex Web GPT runtime"
+          ? "Another process owns the configured Coding Tools runtime"
           : "The installed runtime configuration must be repaired from Setup"
       );
       publishOperation({
@@ -3876,7 +3877,7 @@ void start().catch((error) => {
   } catch {}
   try {
     if (!LAUNCHER_SMOKE_TEST) {
-      dialog.showErrorBox("Codex Web GPT could not start", message);
+      dialog.showErrorBox("Coding Tools could not start", message);
     }
   } catch {}
   app.exit(1);
