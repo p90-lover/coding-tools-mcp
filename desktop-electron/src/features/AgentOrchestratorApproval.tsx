@@ -171,56 +171,16 @@ function AoQuestion({ approval, busy, approve }: { approval: AoApproval; busy: b
 const DECISION_WORDS: Record<string, string> = {
   allow_once: "Allow once", allow_always: "Allow this conversation", reject_once: "Deny", reject_always: "Always deny",
 };
+const NATIVE_DECISION_WORDS: Record<string, string> = {
+  accept: "Allow once", acceptForSession: "Allow this conversation", decline: "Deny", cancel: "Cancel",
+};
 const EDIT_TOOL = /^(?:Edit|MultiEdit|Write|NotebookEdit|str_replace_based_edit_tool|apply_patch)$/i;
 const SHELL_TOOL = /(?:^|__)(?:Bash|PowerShell|exec_command|shell|run_terminal_cmd)$/i;
 
 /** The exact request stays readable without changing the approval or its keyboard shortcuts. */
 function ApprovalCode({ text, label }: { text: string; label: string }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  const open = useRef<HTMLButtonElement>(null);
-  const [copyStatus, setCopyStatus] = useState("");
-  useEffect(() => setCopyStatus(""), [text]);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopyStatus("Copied");
-    } catch {
-      setCopyStatus("Couldn't copy. Select the text and copy it manually.");
-    }
-  };
-  const lowerLabel = label.toLowerCase();
-  return <div className="cdx-command" onKeyDown={(event) => event.stopPropagation()}>
-    <pre tabIndex={0} role="region" aria-label={label}>{text}</pre>
-    <div className="cdx-command-actions">
-      <button type="button" className="cx-modal-button" onClick={() => void copy()}>Copy</button>
-      <button ref={open} type="button" className="cx-modal-button" aria-haspopup="dialog" onClick={() => dialog.current?.showModal()}>Open full {lowerLabel}</button>
-      <span className="cdx-copy-status" role="status">{copyStatus}</span>
-    </div>
-    <dialog ref={dialog} className="cx-modal cdx-command-dialog" aria-label={`Full ${lowerLabel}`} aria-modal="true"
-      onKeyDown={(event) => {
-        event.stopPropagation();
-        if (event.key !== "Tab") return;
-        const controls = event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex="0"]');
-        const first = controls[0], last = controls[controls.length - 1];
-        if (first && ((event.shiftKey && event.target === first) || (!event.shiftKey && event.target === last))) {
-          event.preventDefault();
-          (event.shiftKey ? last : first).focus();
-        }
-      }}
-      onCancel={(event) => { event.preventDefault(); dialog.current?.close(); }}
-      onClose={() => open.current?.focus({ preventScroll: true })}>
-      <header className="cx-modal-head">
-        <h2>Full {lowerLabel}</h2>
-        <button type="button" className="cx-modal-close" aria-label="Close full view" onClick={() => dialog.current?.close()}>×</button>
-      </header>
-      <div className="cx-modal-body"><pre tabIndex={0} autoFocus role="region" aria-label={`Full ${lowerLabel} text`}>{text}</pre></div>
-      <footer className="cx-modal-foot">
-        <span className="cdx-copy-status cx-modal-spacer" role="status">{copyStatus}</span>
-        <button type="button" className="cx-modal-button" onClick={() => void copy()}>Copy</button>
-        <button type="button" className="cx-modal-button" onClick={() => dialog.current?.close()}>Close</button>
-      </footer>
-    </dialog>
-  </div>;
+  return <pre className="cdx-command" tabIndex={0} role="region" aria-label={label}
+    onKeyDown={(event) => event.stopPropagation()}>{text}</pre>;
 }
 
 /**
@@ -332,6 +292,7 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
   const supported = !typed || ["command", "file_change", "permissions", "questions", "mcp_form", "mcp_url"].includes(kind || "");
+  const nativeCommand = kind === "command";
   if (approval.source === "ao" && approval.kind === "question") return <AoQuestion approval={approval} busy={busy} approve={approve} />;
   // Claude Code finished planning: show the plan and every way it offered to go on.
   if (approval.source === "ao" && approval.plan) {
@@ -349,21 +310,30 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
   }
   // An AO agent's tool request: Codex's approval card.
   if (approval.source === "ao") return <AoAsk approval={approval} busy={busy} approve={approve} actor={actor} />;
-  return <div className="ao-msg ao-msg-approval">
-    <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</span>
-    <p>{approval.reason || approval.summary || String(request.message || "Tool request")}{location ? ` · ${location}` : ""}</p>
+  const nativeBody = <>
+    <span className={nativeCommand ? "cdx-kind" : "ao-msg-meta"}>{nativeCommand ? "Terminal" : <>{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</>}</span>
+    {nativeCommand ? <span className="cdx-title">Allow {actor} to run this command?</span> : null}
+    <p className={nativeCommand ? "cdx-reason" : undefined}>{approval.reason || approval.summary || String(request.message || "Tool request")}{location ? ` · ${location}` : ""}</p>
     {typed ? <p className="ao-hint">{approval.method} · Thread {approval.thread_id || "unknown"} · Turn {approval.turn_id || "unknown"}{approval.item_id ? " · Item " + approval.item_id : ""}</p> : null}
     {command ? <ApprovalCode text={command} label="Command" /> : approval.toolInput ? <ApprovalCode text={approval.toolInput} label="Tool input" /> : null}
     {approval.dependencyNote ? <p className={`ao-hint ao-dependency-note is-${approval.dependencyNote.tone}`}
       role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
     {approval.recommendation ? <p className="ao-hint">Command approver suggests {approval.recommendation.action}: {approval.recommendation.reason}</p> : null}
-    {typed ? <details><summary>Raw request</summary><pre>{JSON.stringify(request, null, 2)}</pre></details> : null}
+    {typed ? <details><summary>Raw request</summary>{nativeCommand ? <ApprovalCode text={JSON.stringify(request, null, 2)} label="Raw request" /> : <pre>{JSON.stringify(request, null, 2)}</pre>}</details> : null}
     {typed && !scoped ? <p role="alert">Can't answer: this request has no live turn. Refresh it or reconnect this agent.</p> : null}
     {!supported ? <p role="alert">This request type isn't supported. Update the bridge or stop this agent. Nothing was approved.</p> : null}
     <fieldset disabled={busy || (typed && !scoped) || !supported}>
-      {!typed ? <div className="ao-msg-actions"><button type="button" className="button-primary" onClick={() => approve(approval, true)}>Allow once</button><button type="button" className="button-secondary" onClick={() => approve(approval, false)}>Deny</button></div> : null}
-      {typed && (kind === "command" || kind === "file_change") ? <div className="ao-msg-actions">{decisions.map((decision, index) =>
-        <button key={index} type="button" className="button-secondary" onClick={() => approve(approval, { decision })}>{typeof decision === "string" ? decision : JSON.stringify(decision)}</button>)}</div> : null}
+      {!typed ? <div className={nativeCommand ? "cdx-options" : "ao-msg-actions"}>
+        <button type="button" className={nativeCommand ? "cdx-option" : "button-primary"} onClick={() => approve(approval, true)}>
+          {nativeCommand ? <><span className="cdx-option-mark" aria-hidden="true">1</span><span className="cdx-option-label">Allow once</span></> : "Allow once"}</button>
+        <button type="button" className={nativeCommand ? "cdx-option" : "button-secondary"} onClick={() => approve(approval, false)}>
+          {nativeCommand ? <><span className="cdx-option-mark" aria-hidden="true">2</span><span className="cdx-option-label">Deny</span></> : "Deny"}</button>
+      </div> : null}
+      {typed && (kind === "command" || kind === "file_change") ? <div className={nativeCommand ? "cdx-options" : "ao-msg-actions"}>{decisions.map((decision, index) => {
+        const label = typeof decision === "string" ? (nativeCommand ? NATIVE_DECISION_WORDS[decision] ?? decision : decision) : JSON.stringify(decision);
+        return <button key={index} type="button" className={nativeCommand ? "cdx-option" : "button-secondary"} onClick={() => approve(approval, { decision })}>
+          {nativeCommand ? <><span className="cdx-option-mark" aria-hidden="true">{index + 1}</span><span className="cdx-option-label">{label}</span></> : label}</button>;
+      })}</div> : null}
       {typed && kind === "permissions" ? <>
         <p>Pick the permissions to allow. None are picked yet.</p>
         {permissionChoices.map(item => <label key={item.key}><input type="checkbox" checked={Boolean(granted[item.key])} onChange={event => setGranted(current => ({ ...current, [item.key]: event.target.checked }))} />{item.domain}{item.group ? " / " + item.group : ""}: {JSON.stringify(item.entry)}</label>)}
@@ -392,5 +362,7 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
       </> : null}
     </fieldset>
     {error ? <p role="alert">{error}</p> : null}
-  </div>;
+  </>;
+  return nativeCommand ? <div className="cdx-card"><div className="cdx-body">{nativeBody}</div></div>
+    : <div className="ao-msg ao-msg-approval">{nativeBody}</div>;
 }

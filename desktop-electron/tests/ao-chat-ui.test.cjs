@@ -345,7 +345,7 @@ test("an AO agent's question and tool request show as Codex's cards: numbered op
   assert.doesNotMatch(ask, /cdx-foot/);
 });
 
-test("AO and native approval commands keep their full text in a scrollable viewer with copy and full-view controls", () => {
+test("AO and native approval commands share directly scrollable cards without extra viewer controls", () => {
   const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
   const command = [...Array.from({ length: 30 }, (_, index) => `echo command-line-${index}`), "echo FULL_COMMAND_TAIL"].join("\n");
   const base = { nodeId: "one", approval_id: "req", kind: "command" };
@@ -356,18 +356,24 @@ test("AO and native approval commands keep their full text in a scrollable viewe
   ];
   for (const approval of cases) {
     const html = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval, busy: false, approve() {} }));
+    assert.match(html, /class="cdx-card"[^>]*><div class="cdx-body">/, "native and AO commands share the same card and body structure");
+    assert.doesNotMatch(html, /ao-msg-approval|cdx-native-command/, "legacy native command styling cannot override the shared card");
+    assert.match(html, /class="cdx-kind">Terminal</);
+    assert.match(html, /Allow the agent to run this command\?/);
     assert.match(html, /<pre[^>]*tabindex="0"[^>]*aria-label="Command"[^>]*>/, "the command can receive keyboard scrolling focus");
     assert.ok(html.includes(command), "the entire multiline command, including its tail, is rendered");
-    assert.match(html, />Copy<\/button>/);
-    assert.match(html, />Open full command<\/button>/);
-    assert.match(html, /<dialog[^>]*aria-label="Full command"/);
-    assert.doesNotMatch(html, /is-collapsed|>Expand<|>Collapse</, "complete command access has no length threshold");
+    assert.doesNotMatch(html, /<dialog|>Copy<|>Open full |is-collapsed|>Expand<|>Collapse</, "the complete command is available directly");
   }
   const short = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
     approval: { ...base, source: "ao", command: "pwd" }, busy: false, approve() {},
   }));
-  assert.match(short, />Copy<\/button>/);
-  assert.match(short, />Open full command<\/button>/, "short commands have the same controls");
+  assert.match(short, /<pre[^>]*aria-label="Command"[^>]*>pwd<\/pre>/);
+  assert.doesNotMatch(short, /<dialog|>Copy<|>Open full /, "short commands have no extra viewer controls either");
+  const permissions = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
+    approval: { ...base, kind: "permissions", method: "item/permissions/requestApproval", thread_id: "thread", turn_id: "turn", request: { permissions: {} } }, busy: false, approve() {},
+  }));
+  assert.match(permissions, /class="ao-msg ao-msg-approval"/);
+  assert.doesNotMatch(permissions, /cdx-card/, "other native request types keep their existing layout");
 });
 
 test("approval tool input uses the complete original text in the same viewer", () => {
@@ -379,8 +385,7 @@ test("approval tool input uses the complete original text in the same viewer", (
     }));
     assert.match(html, /<pre[^>]*aria-label="Tool input"/);
     assert.ok(html.includes(toolInput.replaceAll('"', "&quot;")), "JSON spacing and every field are preserved");
-    assert.match(html, />Open full tool input<\/button>/);
-    assert.doesNotMatch(html, /is-collapsed/);
+    assert.doesNotMatch(html, /<dialog|>Copy<|>Open full |is-collapsed/);
   }
   const edit = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
     approval: { nodeId: "one", approval_id: "edit", source: "ao", tool: "Edit", path: "src/example.ts", toolInput }, busy: false, approve() {},
