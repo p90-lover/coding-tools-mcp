@@ -20,8 +20,8 @@ const STATE_LABEL: Record<string, string> = { ready: "Connected", starting: "Sta
  */
 export type AoTerminalView = { handle: string; generation: string; title: string };
 
-export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = false, workspaceId, hostbar = true, terminal }: {
-  openMissions: () => void; projectBoard?: boolean; workspaceId?: string; hostbar?: boolean;
+export function AgentOrchestratorOriginalSurface({ active = true, openMissions, projectBoard = false, workspaceId, hostbar = true, terminal }: {
+  active?: boolean; openMissions: () => void; projectBoard?: boolean; workspaceId?: string; hostbar?: boolean;
   /** Show one AO terminal (e.g. the Antigravity CLI) instead of the AO app. */
   terminal?: AoTerminalView;
 }) {
@@ -31,6 +31,9 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
   const [generation, setGeneration] = useState(0);
 
   useEffect(() => {
+    // A visited tab stays mounted for continuity. Its native view and polling,
+    // however, must stop while another tab is on top.
+    if (!active) return;
     let disposed = false;
     let ready = false;
     let animation = 0;
@@ -68,7 +71,7 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
       observer.disconnect(); window.removeEventListener("resize", resize);
       void callUpstream("upstream_hide").catch(() => undefined);
     };
-  }, [generation, projectBoard, workspaceId, terminal?.handle, terminal?.generation, terminal?.title]);
+  }, [active, generation, projectBoard, workspaceId, terminal?.handle, terminal?.generation, terminal?.title]);
 
   const reconnect = () => setGeneration((value) => value + 1);
   return (
