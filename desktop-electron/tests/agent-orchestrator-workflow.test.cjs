@@ -7450,7 +7450,7 @@ test("restoration uncertainty: a sent message stops the old agent and starts a n
     const workflow = workflowInternals({
       requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [previous] }
         : endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "follow-up" } : { ok: true, run: previous },
-      aoHarness: { continuable: async () => { throw uncertainty; }, exitAgent: async (id) => { order.push(`exit ${id}`); },
+      aoHarness: { continuable: async () => { throw uncertainty; }, exitAgent: async (id) => { order.push(`exit ${id}`); return { ok: true }; },
         spawn: async () => { order.push("spawn"); return "replacement"; } },
     });
     try {
@@ -7469,6 +7469,76 @@ test("restoration uncertainty: a sent message stops the old agent and starts a n
       }
     } finally { workflow.dispose(); }
   }
+});
+
+test("restoration uncertainty: a replacement requires confirmed shutdown", async t => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const shutdownFailure = new Error("host shutdown failed");
+  for (const scenario of [
+    { name: "rejected shutdown", exitAgent: async () => { throw shutdownFailure; }, failure: shutdownFailure },
+    { name: "negative acknowledgement", exitAgent: async () => ({ ok: false }) },
+    { name: "missing acknowledgement", exitAgent: async () => undefined },
+    { name: "missing shutdown method" },
+  ]) await t.test(scenario.name, async () => {
+    const uncertainty = Object.assign(new Error("restore pending"), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
+    const calls = [], submitted = [];
+    const continuation = { session: "existing", text: "follow-up" };
+    const workflow = workflowInternals({
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/reserve")) return { ok: true, request_key: "k", prompt: "follow-up" };
+        if (endpoint.endsWith("/submitted")) submitted.push(body);
+        return { ok: true, run: {} };
+      },
+      aoHarness: { continuable: async () => { throw uncertainty; },
+        ...(scenario.exitAgent ? { exitAgent: scenario.exitAgent } : {}),
+        send: async () => { calls.push("send"); return { turnId: "next" }; },
+        spawn: async () => { calls.push("spawn"); return "replacement"; } },
+    });
+    try {
+      workflow.continuations.set("new", continuation);
+      const expected = scenario.failure ?? uncertainty;
+      await assert.rejects(workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true),
+        error => error === expected);
+      assert.deepEqual(calls, [], "neither an old nor a replacement agent receives the message");
+      assert.deepEqual(submitted, [{ workspace_id: "ws", run_id: "new", node_id: "next", request_key: "k", error: expected.message }],
+        "the launch failure is saved without claiming a session");
+      assert.equal(workflow.continuations.get("new"), continuation, "the same session remains available for a later retry");
+    } finally { workflow.dispose(); }
+  });
+});
+
+test("restoration uncertainty: a replacement waits for shutdown acknowledgement", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const uncertainty = Object.assign(new Error("restore pending"), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
+  let finishExit, exitStarted;
+  const stopping = new Promise(resolve => { exitStarted = resolve; });
+  const exitGate = new Promise(resolve => { finishExit = resolve; });
+  const calls = [], submitted = [];
+  const continuation = { session: "existing", text: "follow-up" };
+  const workflow = workflowInternals({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/reserve")) return { ok: true, request_key: "k", prompt: "follow-up" };
+      if (endpoint.endsWith("/submitted")) submitted.push(body);
+      return { ok: true, run: {} };
+    },
+    aoHarness: { continuable: async () => { throw uncertainty; },
+      exitAgent: async id => { calls.push(`exit ${id}`); exitStarted(); await exitGate; return { ok: true }; },
+      send: async () => { calls.push("send"); return { turnId: "next" }; },
+      spawn: async () => { calls.push("spawn"); return "replacement"; } },
+  });
+  try {
+    workflow.continuations.set("new", continuation);
+    const pending = workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true);
+    await stopping;
+    assert.deepEqual(calls, ["exit existing"], "no new agent starts while shutdown is pending");
+    assert.deepEqual(submitted, [], "no session is recorded while shutdown is pending");
+    assert.equal(workflow.continuations.get("new"), continuation);
+    finishExit();
+    const result = await pending;
+    assert.equal(result.session_id, "replacement");
+    assert.deepEqual(calls, ["exit existing", "spawn"]);
+    assert.equal(workflow.continuations.has("new"), false);
+  } finally { finishExit(); workflow.dispose(); }
 });
 
 test("concurrent host-release upgrades recheck the in-flight stop after its first settlement", async () => {
