@@ -1,0 +1,82 @@
+name: Coding Tools rc.32 Windows candidate
+
+on:
+  push:
+    branches:
+      - codex/mission-recovery-rc32-20261026
+    paths:
+      - .github/workflows/coding-tools-rc32-windows.yml
+      - desktop-electron/**
+      - module/agent-orchestrator
+      - runtime-web/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coding-tools-rc32-windows
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    name: Build and verify Windows candidate
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          submodules: true
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.0'
+      - name: Restore pinned dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc32-build aiTemp/rc32-output aiTemp/npm-cache
+          export npm_config_cache="$PWD/aiTemp/npm-cache"
+          bun install --frozen-lockfile --cwd runtime-web
+          bun install --frozen-lockfile --cwd runtime-web/launcher
+          bun install --frozen-lockfile --cwd desktop-electron
+      - name: Test mission recovery and package the installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc32-build aiTemp/rc32-output
+          export npm_config_cache="$PWD/aiTemp/npm-cache"
+          node --test desktop-electron/tests/agent-orchestrator-workflow.test.cjs 2>&1 | tee aiTemp/rc32-build/mission-tests.log
+          bun run --cwd desktop-electron package:win 2>&1 | tee aiTemp/rc32-build/package.log
+          shopt -s nullglob
+          installers=(desktop-electron/release/*.exe)
+          if [ "${#installers[@]}" -eq 0 ]; then
+            echo 'Installer is missing after package:win' >&2
+            exit 1
+          fi
+          cp "${installers[@]}" aiTemp/rc32-output/
+          sha256sum aiTemp/rc32-output/*.exe | tee aiTemp/rc32-build/SHA256SUMS.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: success()
+        with:
+          name: Coding.Tools-0.7.0-rc.32-windows-candidate
+          path: aiTemp/rc32-output/*.exe
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: coding-tools-rc32-windows-build-evidence
+          path: |
+            aiTemp/rc32-build/*.log
+            aiTemp/rc32-build/SHA256SUMS.txt
+          if-no-files-found: warn
+          retention-days: 14
