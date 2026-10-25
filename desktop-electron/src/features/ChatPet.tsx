@@ -23,7 +23,7 @@ import { createPortal } from "react-dom";
 
 import type { PetMood } from "./ao-chat";
 import { petCall, petStage, type PetArrival } from "./chat-pet-stage";
-import { advancePetWalk } from "./chat-pet-motion";
+import { advancePetWalk, petToolSide } from "./chat-pet-motion";
 import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, ROWS, pickOne, useClawdPlayer,
   type AnimationName, type Arms as ClawdArms, type Eyes, type Feet, type Frame } from "./Clawd";
 
@@ -140,11 +140,16 @@ const rect = (x: number, y: number, w: number, h: number, color: string, key: st
  * looks (closed asleep or blinking), feet stepping left and right as it walks (the CLI's waddle),
  * arms up to ask or carry, one arm working its tool or typing, and a one-row crouch to sit.
  */
-function restFrame({ mood, asleep, step, pose, blink, job }: { mood: PetMood; asleep: boolean; step: boolean; pose: Pose; blink: boolean; job: Job }): Frame {
+function restFrame({ mood, asleep, step, pose, blink, job, toolSide }: { mood: PetMood; asleep: boolean; step: boolean; pose: Pose; blink: boolean; job: Job; toolSide: "left" | "right" }): Frame {
   const working = mood === "working" && !asleep;
   const typing = working && !pose.walking && pose.arms === "down" && job === "none";
+  // The CLI has genuine side-facing Clawd glyphs. Use one for typing rather than a
+  // front-facing face that appears to ignore the computer beside it.
+  if (job === "laptop" && !pose.walking && !asleep) {
+    return { pose: { facing: toolSide === "left" ? "left-12" : "right-12" }, offset: pose.sit ? 1 : 0 };
+  }
   const eyes: Eyes = asleep || blink ? "closed"
-    : job === "laptop" || job === "read" || job === "coffee" ? "right"
+    : job !== "none" && job !== "carry" ? toolSide
     : pose.look < 0 ? "left" : pose.look > 0 ? "right" : "open";
   let arms: ClawdArms = "down";
   if (!asleep) {
@@ -258,9 +263,10 @@ function Prop({ job, step, tick }: { job: Job; step: boolean; tick: number }) {
   const r = rect;
   const parts: ReactElement[] = [];
   if (job === "laptop") {
-    // A laptop facing Clawd: its screen's lines scroll as it types.
+    // A laptop turned toward Clawd, with a paw tapping the keyboard each beat.
     parts.push(r(1, 3, 6, 3, P.frame, "lid"), r(2, 3, 4, 2, P.screen, "screen"), r(0, 6, 8, 1, P.key, "keys"));
     for (let line = 0; line < 2; line += 1) parts.push(r(2, 3 + line, 1 + ((tick + line * 3) % 4), 1, P.glow, `line${line}`));
+    parts.push(r(0, step ? 5 : 6, 1, 1, "#d77757", "typing-paw"));
   } else if (job === "search") {
     // A magnifier held up, bobbing as it scans.
     const y = step ? 2 : 3;
@@ -666,7 +672,9 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       const span = far ? current.length * (0.5 + Math.random() * 0.7) : 60 + Math.random() * 200;
       const target = split && far ? nearLap(current, WIDTH / 2 + Math.random() * Math.max(0, current.width - WIDTH), atNow.current)
         : atNow.current + (Math.random() < 0.5 ? -1 : 1) * span;
-      const spot = split ? onTop(current, target) : target;
+      // A work scene needs Clawd upright next to its tool, never upside-down on
+      // the underside of the composer. Idle walks can still circle every edge.
+      const spot = split || working ? onTop(current, target) : target;
       if (!blocked(spot, rects) && !inHouse(spot)) return spot;
     }
     return atNow.current;
@@ -931,7 +939,14 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       return () => { window.clearTimeout(timer); cancelPlans(); };
     }
     setCheering(false);
-    if (mood === "working" && !still) later(400, () => setJob("laptop"));
+    if (mood === "working" && !still) later(400, () => {
+      const current = loopNow.current;
+      if (current && Number.isFinite(atNow.current) && spotAt(current, atNow.current).side !== 0) {
+        walkTo(onTop(current, atNow.current), SCURRY, () => {
+          if (moodNow.current === "working") setJob("laptop");
+        });
+      } else setJob("laptop");
+    });
     if (mood === "error") { play("look"); say("Uh oh", 1600); }
     if (mood === "ask") { say(LINES.ask, 2600); runToSend(); }
     wander();
@@ -975,6 +990,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   }, [walking, pose.walking, job]);
   // A spark flies on each hammer blow.
   useEffect(() => { if (job === "build" && step && !still) float("✦", 48); }, [job, step]);
+  // Light code bubbles make the typing motion recognizable without replacing Clawd's original pixels.
+  useEffect(() => { if (job === "laptop" && step && tick % 4 === 0 && !still) float("{}", 20); }, [job, step, tick, still]);
   // While the agent works, Claude Code's spinner turns over its head.
   const busy = mood === "working" && !asleep && job !== "carry" && !ride;
   useEffect(() => {
@@ -1206,6 +1223,9 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const upright: CSSProperties = { transform: `rotate(${loop && !Number.isNaN(at) ? Math.floor(at / loop.length) * 360 : 0}deg)`,
     transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
   const side = loop && !Number.isNaN(at) && !ride && !held && !leap && !inRoom && !atDoor ? spotAt(loop, at).side : 0;
+  // Keep tools on the inward side of the composer so a computer cannot disappear
+  // through its right edge. Clawd turns toward whichever side holds the tool.
+  const toolSide = loop && !Number.isNaN(at) ? petToolSide(spotAt(loop, at).x, loop.width) : "left";
   // On the box: feet on the outline, body outward, so upright on top, sideways on the sides and
   // upside down under it. On the pointer or held: upright, above everything.
   const placement: CSSProperties = inRoom
@@ -1233,7 +1253,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     {landing !== null ? <><span className="cx-pet-dust is-left" aria-hidden="true" /><span className="cx-pet-dust is-right" aria-hidden="true" /></> : null}
     {busy ? <span className="cx-pet-spinner" aria-hidden="true">{SPINNER[spin]}</span> : null}
     {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
-    <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job}` : ""}${landing !== null ? " is-landing" : ""}`}
+    <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job} is-tool-${toolSide}` : ""}${landing !== null ? " is-landing" : ""}`}
       // The squash ends itself, so no cancelled plan can leave it squashed.
       onAnimationEnd={(event) => { if (event.animationName === "cx-pet-land") setLanding(null); }}
       aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
@@ -1261,7 +1281,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       }}
       onContextMenu={(event) => { event.preventDefault(); onHide(); }}>
       {!asleep && job === "carry" ? <CarriedBox /> : null}
-      <ClawdFrame frame={clawd.frame ?? restFrame({ mood: shown, asleep, step, blink, job,
+      <ClawdFrame frame={clawd.frame ?? restFrame({ mood: shown, asleep, step, blink, job, toolSide,
         pose: ride ? { ...pose, walking: ride.mode === "riding", look: ride.look } : pose })} />
       <Prop job={asleep || ride ? "none" : job} step={step} tick={tick} />
     </button>

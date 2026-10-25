@@ -12,3 +12,8 @@ export function advancePetWalk(position: number, target: number, distance: numbe
     arrived: traveled >= Math.abs(delta),
   };
 }
+
+/** Place work props on the inside of the chat box instead of clipping them at its edge. */
+export function petToolSide(x: number, width: number): "left" | "right" {
+  return Number.isFinite(x) && Number.isFinite(width) && x < width / 2 ? "right" : "left";
+}

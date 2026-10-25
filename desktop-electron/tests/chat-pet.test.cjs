@@ -52,6 +52,12 @@ test("Clawd finishes a zero-distance walk instead of scheduling endless frames",
   assert.equal(result.arrived, true);
 });
 
+test("Clawd keeps the laptop and other work props inward on both sides of the composer", () => {
+  assert.equal(motion.petToolSide(50, 600), "right", "a pet near the left edge needs its laptop on the right");
+  assert.equal(motion.petToolSide(550, 600), "left", "a pet near the right edge needs its laptop on the left");
+  assert.equal(motion.petToolSide(300, 600), "left");
+});
+
 test("split view has one pet: it stays in its pane while that stays open, else goes to the focused pane", () => {
   assert.equal(stage.petHost(null, [], null), null);
   assert.equal(stage.petHost(null, ["a", "b"], null), "a");
