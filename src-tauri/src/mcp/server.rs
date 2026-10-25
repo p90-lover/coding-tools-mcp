@@ -354,7 +354,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn initialize_instructions_define_the_history_persistence_workflow() {
         let initialized = initialize_result(&json!({"protocolVersion":"2025-11-25"}));
