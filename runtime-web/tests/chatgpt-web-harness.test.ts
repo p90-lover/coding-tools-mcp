@@ -474,6 +474,63 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  test("read-only steering retains the original conversation despite refreshed Codex instructions", async () => {
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://read-only-steering-${Date.now()}`,
+      chatgptWeb: {
+        browserHost: "launcher",
+        browserHostDescriptorPath: join(tempRoot, "read-only-steering-launcher.json"),
+        localToolsEnabled: false,
+        solAvailable: true,
+        proAvailable: true,
+      },
+    };
+    const first = rawWireRequest(environmentXml);
+    const second = structuredClone(first);
+    second.context.systemPrompt = ["Updated Codex environment / same task"];
+    second.context.messages = [
+      { role: "user", content: "Inspect this", timestamp: 2 },
+      { role: "assistant", content: [{ type: "text", text: "Initial answer" }], timestamp: 3 },
+      { role: "user", content: "Change the plan", timestamp: 4 },
+    ];
+    const raw = second._rawBody as { input: unknown[]; client_metadata: Record<string, unknown> };
+    raw.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: "thread_test_123", turn_id: "turn_steering_second",
+    });
+    raw.input.push(
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Initial answer" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Change the plan" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_steering_second" } },
+    );
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    const seen: Array<{ key?: string; thread?: string; resume: boolean; text: string }> = [];
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      const prepared = seen.length ? await turn.prepareResume!() : await turn.prepare();
+      seen.push({ key: turn.conversationKey, thread: turn.nativeThreadId,
+        resume: !!turn.prepareResume, text: prepared.text });
+      prepared.release();
+      turn.onTextDelta(seen.length === 1 ? "Initial answer" : "Updated answer");
+      return seen.length === 1 ? "Initial answer" : "Updated answer";
+    };
+    try {
+      const adapter = createChatGptWebAdapter(provider);
+      await adapter.runTurn!(first, { headers: new Headers() }, () => {});
+      await adapter.runTurn!(second, { headers: new Headers() }, () => {});
+      expect(seen).toHaveLength(2);
+      expect(seen[0]!.key).toBeString();
+      expect(seen[1]!.key).toBe(seen[0]!.key);
+      expect(seen[1]!.thread).toBe(seen[0]!.thread);
+      expect(seen[1]!.resume).toBe(true);
+      expect(seen[1]!.text).toContain("Change the plan");
+      expect(seen[1]!.text).not.toContain("Inspect this");
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      chatGptTurnSessions.clear();
+    }
+  });
+
   test("closing a browser trace terminates the active adapter turn and blocks tab resurrection", async () => {
     const socketPath = brokerTestEndpoint(`cgw-close-trace-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {

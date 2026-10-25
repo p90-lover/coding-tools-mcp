@@ -39,15 +39,16 @@ export function chatGptConversationKey(
     modelId: parsed.modelId,
     reasoning: parsed.options.reasoning,
     compaction: compactionEpoch(raw?.input),
-    // Changed Codex instructions start a new conversation, which receives them in full.
-    instructions: createHash("sha256").update(JSON.stringify(parsed.context.systemPrompt ?? [])).digest("hex"),
+    // An active Codex thread may refresh its system/environment instructions while steering.
+    // Those revisions do not change the owner of its existing ChatGPT page. Keep the key
+    // scoped to the provider, thread, model, effort and compaction epoch instead.
   })).digest("hex");
 }
 
 /**
  * Full history remains canonical; a retained epoch receives only the suffix after its last
- * assistant reply. The retained ChatGPT conversation already holds the Codex instructions from
- * its first turn, and the conversation key changes if they change, so they are not re-sent.
+ * assistant reply. The retained ChatGPT page already holds the task's initial instructions;
+ * steering preserves its page ownership even if later requests refresh instruction metadata.
  */
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,

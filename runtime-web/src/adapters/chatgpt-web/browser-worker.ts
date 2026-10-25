@@ -4585,6 +4585,9 @@ export class ChatGptBrowserWorker {
       if (reused && !turn.prepareResume) {
         throw new Error("Launcher reused a ChatGPT conversation without a continuation prompt");
       }
+      if (reused && lease.conversationUrl) {
+        turn.onCommentary?.(`Continuing the original ChatGPT conversation: ${lease.conversationUrl}`);
+      }
       await turn.onPreparedSelected?.(reused);
       heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref?.();
@@ -4620,6 +4623,9 @@ export class ChatGptBrowserWorker {
             ? { connectorBound: true }
             : {}),
         });
+        if (terminal === "completed" && release.conversationUrl) {
+          turn.onCommentary?.(`ChatGPT conversation retained for this Codex task: ${release.conversationUrl}`);
+        }
         if (release.cancelledByUser) throw chatGptBrowserTabClosedError();
       } catch (controlError) {
         if (controlError instanceof ChatGptWebAdapterError && controlError.code === "client_cancelled") {

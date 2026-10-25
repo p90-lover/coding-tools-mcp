@@ -2474,6 +2474,7 @@ test("a later provider round reuses only its exact connector-bound conversation"
     tabId: "tab-reused",
     reused: true,
     connectorBound: true,
+    conversationUrl: `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`,
   });
   assert.equal(tab.traceId, "trace_next");
   assert.equal(tab.helperPid, 222);
@@ -2590,7 +2591,8 @@ test("steering retains only the owned task tab and the next turn reuses it", asy
     publishState() {}, writeDescriptor() {}, snapshot: () => ({ tabs: [] }),
     logger: { info(event) { calls.push(event); } },
   });
-  await BrowserHost.prototype.endTurn.call(fixture, "trace-a", 101, "superseded", false, undefined, true, true);
+  const release = await BrowserHost.prototype.endTurn.call(fixture, "trace-a", 101, "superseded", false, undefined, true, true);
+  assert.equal(release.conversationUrl, conversationUrl);
   assert.equal(tab.status, "ready");
   assert.equal(tab.message, "Continuing this Codex task");
   assert.equal(fixture.turnTabs.get(other.id), other);
@@ -2600,6 +2602,7 @@ test("steering retains only the owned task tab and the next turn reuses it", asy
   const lease = await BrowserHost.prototype.beginTurn.call(fixture, "steered-a", false, 303, key, "Codex Native2", false, null, "thread-task-a");
   assert.equal(lease.reused, true);
   assert.equal(lease.tabId, "task-a");
+  assert.equal(lease.conversationUrl, conversationUrl);
   assert.equal(tab.traceId, "steered-a");
   assert.equal(other.traceId, "trace-b");
   assert.equal(fixture.turnTabs.size, 2);

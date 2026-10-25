@@ -179,9 +179,9 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
     };
     response.writeHead(200, { "content-type": "application/json" });
     response.end(request.url === "/v1/turn/start"
-      ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB","reused":true,"connectorBound":true}\n'
+      ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB","reused":true,"connectorBound":true,"conversationUrl":"https://chatgpt.com/c/0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c"}\n'
       : request.url === "/v1/turn/end"
-        ? '{"ok":true,"cancelledByUser":false}\n'
+        ? '{"ok":true,"cancelledByUser":false,"conversationUrl":"https://chatgpt.com/c/0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c"}\n'
         : '{"ok":true}\n');
   });
   await new Promise<void>((resolve, reject) => {
@@ -192,17 +192,19 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server has no port");
     const path = descriptorFile(`http://127.0.0.1:${address.port}`);
-    await expect(notifyLauncherTurn(path, {
+    const initialLease = await notifyLauncherTurn(path, {
       phase: "start",
       traceId: "abc123def456",
       helperPid: process.pid,
       conversationKey: "a".repeat(64),
       connectorIdentity: "Codex Native2",
       requireRetainedConversation: true,
-    })).resolves.toEqual({
+    });
+    expect(initialLease).toEqual({
       surfaceId: "launcher_surface_id_0123456789AB",
       reused: true,
       connectorBound: true,
+      conversationUrl: "https://chatgpt.com/c/0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c",
     });
     expect(received.authorization).toBe("Bearer launcher-control-token-0123456789abcdefghijklmnop");
     expect(received.body).toEqual({
@@ -232,7 +234,10 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       status: "completed",
       retain: true,
       connectorBound: true,
-    })).resolves.toEqual({ cancelledByUser: false });
+    })).resolves.toEqual({
+      cancelledByUser: false,
+      conversationUrl: "https://chatgpt.com/c/0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c",
+    });
     expect(received.body).toEqual({
       phase: "end",
       traceId: "abc123def456",

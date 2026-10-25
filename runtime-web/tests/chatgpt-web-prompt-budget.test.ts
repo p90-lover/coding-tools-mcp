@@ -50,7 +50,7 @@ function parsedRequest(systemPrompt: string[], messages: CodexMessage[]): CodexP
   } as unknown as CodexParsedRequest;
 }
 
-test("a retained follow-up omits the Codex instructions, and changed instructions start a new conversation", () => {
+test("a retained follow-up omits instructions and steering preserves the original thread despite system prompt updates", () => {
   const history: CodexMessage[] = [
     { role: "user", content: "first", timestamp: 0 },
     { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 1 },
@@ -62,5 +62,5 @@ test("a retained follow-up omits the Codex instructions, and changed instruction
   const key = (instructions: string[]) => chatGptConversationKey(parsedRequest(instructions, history), "ns");
   expect(key(["same"])).toBeString();
   expect(key(["same"])).toBe(key(["same"]));
-  expect(key(["changed"])).not.toBe(key(["same"]));
+  expect(key(["changed"])).toBe(key(["same"]));
 });
