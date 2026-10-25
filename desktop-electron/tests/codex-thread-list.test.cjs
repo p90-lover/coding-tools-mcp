@@ -138,6 +138,68 @@ test("another open project lists its chats; opening one switches to its project 
   delete stored["coding-tools:ao:open-projects"];
 });
 
+test("split-pane chat rows stay open across focus changes and clear their marker on close", async () => {
+  const saved = { ...stored };
+  for (const key of Object.keys(stored)) delete stored[key];
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  try {
+    const { props } = fixture();
+    const list = mount("ChatThreadList.tsx", { ...props, pinned: ["t1"], openTaskIds: ["t1", "t2", "b1"],
+      chats: [...props.chats, { ...props.chats[1], taskId: "closed", title: "Closed chat" }],
+      loadProjectChats: async () => [{ ...props.chats[1], taskId: "b1", title: "Beta chat" }] }, { effects: true });
+    list.render();
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const selectedTaskId of ["t1", "t2", "b1"]) {
+      const view = list.render({ selectedTaskId });
+      for (const [id, title] of [["t1", "Fix app"], ["t2", "Older"], ["b1", "Beta chat"]]) {
+        const button = walk(view).find((element) => element.type === "button" && element.props.className === "cx-thread-select" && text(element) === title);
+        assert.ok(button, `${title} is listed`);
+        assert.equal(String(button.props["data-open"]), "true", `${title} stays highlighted while ${selectedTaskId} is focused`);
+        assert.equal(button.props["aria-current"], id === selectedTaskId, "only the focused pane is current");
+      }
+      const closed = walk(view).find((element) => element.props?.className === "cx-thread-select" && text(element) === "Closed chat");
+      assert.equal(closed.props["data-open"], undefined, "a chat outside the split view is not highlighted");
+    }
+    const afterClose = list.render({ selectedTaskId: "t2", openTaskIds: ["t2", "b1"] });
+    const closedPane = walk(afterClose).find((element) => element.props?.className === "cx-thread-select" && text(element) === "Fix app");
+    assert.equal(closedPane.props["data-open"], undefined, "closing a pane clears its highlight");
+    const fallback = list.render({ selectedTaskId: "t2", openTaskIds: undefined });
+    const selected = walk(fallback).find((element) => element.props?.className === "cx-thread-select" && text(element) === "Older");
+    assert.equal(String(selected.props["data-open"]), "true", "without split membership the selected chat remains highlighted");
+  } finally {
+    for (const key of Object.keys(stored)) delete stored[key];
+    Object.assign(stored, saved);
+  }
+});
+
+test("split-pane chat rows stay listed beyond each project's Show more cutoff", async () => {
+  const saved = { ...stored };
+  for (const key of Object.keys(stored)) delete stored[key];
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  stored["coding-tools:ao:chat-list-settings"] = JSON.stringify({ visible: 1, keepActiveOnTop: false });
+  try {
+    const { props } = fixture();
+    const list = mount("ChatThreadList.tsx", { ...props, selectedTaskId: "t1", openTaskIds: ["t1", "t2", "b2"],
+      chats: [...props.chats, { ...props.chats[1], taskId: "closed", title: "Hidden closed chat" }],
+      loadProjectChats: async () => [
+        { ...props.chats[1], taskId: "b1", title: "Beta first" },
+        { ...props.chats[1], taskId: "b2", title: "Beta open" },
+        { ...props.chats[1], taskId: "b3", title: "Hidden Beta chat" }] }, { effects: true });
+    list.render();
+    await new Promise((resolve) => setImmediate(resolve));
+    const view = list.render();
+    for (const title of ["Fix app", "Older", "Beta first", "Beta open"]) {
+      assert.ok(walk(view).some((element) => element.props?.className === "cx-thread-select" && text(element) === title), `${title} stays listed`);
+    }
+    for (const title of ["Hidden closed chat", "Hidden Beta chat"]) {
+      assert.ok(!walk(view).some((element) => element.props?.className === "cx-thread-select" && text(element) === title), `${title} still follows the cutoff`);
+    }
+  } finally {
+    for (const key of Object.keys(stored)) delete stored[key];
+    Object.assign(stored, saved);
+  }
+});
+
 test("right after switching to a project, its list loads instead of saying No chats yet, and a chat's hover card closes", async () => {
   const { props } = fixture();
   stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);

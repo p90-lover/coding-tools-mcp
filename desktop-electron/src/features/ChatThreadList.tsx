@@ -266,6 +266,7 @@ type DragList = { list: string; order: string[]; save: (next: string[], moved: s
  */
 export function ChatThreadList(props: ThreadListProps) {
   const { workspaces, workspaceId, chats, archived, selectedTaskId, now, pinned, unread, actions, busyTaskIds } = props;
+  const openTaskIds = new Set(props.openTaskIds ?? [selectedTaskId]);
   const chatBusy = (taskId: string) => busyTaskIds.includes(taskId);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     try { return new Set(JSON.parse(localStorage.getItem("coding-tools:ao:collapsed-projects") || "[]")); } catch { return new Set(); }
@@ -672,7 +673,7 @@ export function ChatThreadList(props: ThreadListProps) {
         hoverTimer.current = window.setTimeout(() => setHover({ chat, top: box.top, left: box.right + 8 }), 600);
       }}
       onMouseLeave={() => { window.clearTimeout(hoverTimer.current); setHover(null); }}>
-      <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId}
+      <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId} data-open={openTaskIds.has(chat.taskId) || undefined}
         // Ctrl-click opens it in split view, as in Claude Code.
         onClick={(event) => event?.ctrlKey && actions.openSplit ? actions.openSplit(workspaceId, chat.taskId) : actions.select(chat.taskId)}>
         <span className="cx-thread-title">{chat.title || "Untitled"}</span>
@@ -697,9 +698,9 @@ export function ChatThreadList(props: ThreadListProps) {
   const shownOrder = projectChats.map((chat) => chat.taskId);
   const projectDrag: DragList = { list: `project:${workspaceId}`, order: shownOrder,
     save: (next, moved) => { place(workspaceId, moved); saveOrder(next); } };
-  // Like Codex, a long project shows its first chats and "Show more"; the open chat always shows.
+  // Open split-pane chats stay visible even when the rest of their project is collapsed.
   const showAll = expanded.has(workspaceId);
-  const visibleChats = showAll ? projectChats : projectChats.filter((chat, index) => index < settings.visible || chat.taskId === selectedTaskId);
+  const visibleChats = showAll ? projectChats : projectChats.filter((chat, index) => index < settings.visible || openTaskIds.has(chat.taskId));
   const toggleShowAll = (id = workspaceId) => setExpanded((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   // Another open project's chats: Codex's rows; opening one switches to its project first.
   const otherRows = (projectId: string) => {
@@ -712,9 +713,9 @@ export function ChatThreadList(props: ThreadListProps) {
       save: (next, moved) => { place(projectId, moved); saveListOrder(orderKey(projectId), next); } };
     const all = expanded.has(projectId);
     return <>
-      {(all ? ordered : ordered.slice(0, settings.visible)).map((chat) => <li key={chat.taskId} {...dragRow(chat.taskId, drag, projectId)}
+      {(all ? ordered : ordered.filter((chat, index) => index < settings.visible || openTaskIds.has(chat.taskId))).map((chat) => <li key={chat.taskId} {...dragRow(chat.taskId, drag, projectId)}
         className={`cx-thread-row${unread.includes(chat.taskId) ? " is-unread" : ""}${isDragged(chat.taskId, drag) ? " is-dragging" : ""}`}>
-        <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId}
+        <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId} data-open={openTaskIds.has(chat.taskId) || undefined}
           onClick={(event) => event?.ctrlKey && actions.openSplit ? actions.openSplit(projectId, chat.taskId)
             : actions.selectIn ? actions.selectIn(projectId, chat.taskId) : props.onWorkspace(projectId)}>
           <span className="cx-thread-title">{chat.title}</span>
