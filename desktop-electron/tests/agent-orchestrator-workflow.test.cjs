@@ -4006,6 +4006,64 @@ test("the agent's goal tools work as Codex's: it creates, completes, blocks, pau
   await assert.rejects(workflow.goalTool({ workspaceId: "ws-1", session: "someone-else", action: "get" }), /not one of this project's chats/);
 });
 
+test("rename_chat names the agent's own chat after its task, and a team chat only once its open cards have started", async () => {
+  // The user: the model should "change the chat name when starting a new task".
+  const { world, workflow, advance } = wakeChat();
+  const rename = (title, session = "sess-1") => workflow.chatTitleTool({ workspaceId: "ws-1", session, title });
+  const renamed = await rename("Fix the login redirect");
+  assert.equal(renamed.renamed, true);
+  assert.equal(renamed.taskId, "task-1");
+  const task = () => world.tasks.find((entry) => entry.id === "task-1");
+  assert.equal(task().title, renamed.title);
+  assert.equal(task().description, "watch CI", "the chat's messages (its description) are kept");
+  const edits = world.edits.length;
+  assert.equal((await rename(renamed.title)).renamed, false, "the same name again writes nothing");
+  assert.equal(world.edits.length, edits);
+  await assert.rejects(rename("Anything", "someone-else"), /not one of this project's chats/);
+  assert.equal(workflow.routineAppTool("mcp__coding-tools__rename_chat"), "Names this chat after the task it works on; it runs nothing");
+
+  // A team round with cards still to reserve: an edit now would void its grant, so the name waits.
+  const team = { id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+    { id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: "sess-2" } },
+    { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+  world.runs.push(team);
+  const waiting = await rename("Ship the release notes", "sess-2");
+  assert.equal(waiting.renamed, false);
+  assert.match(waiting.note, /open cards have started/);
+  assert.equal(world.edits.length, edits, "not while a card is still pending");
+  team.nodes[1].state = "running";
+  await advance(20_000);
+  await goalSettle(() => world.edits.length > edits);
+  assert.equal(task().title, waiting.title, "renamed once nothing is left to reserve");
+
+  // Codex review of #575: a waiting rename applied late over a newer one, from the agent or the person.
+  const round = (runId, thread) => {
+    const run = { id: runId, workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+      { id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: thread } },
+      { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+    world.runs.push(run);
+    return run;
+  };
+  const third = round("r3", "sess-3");
+  assert.equal((await rename("Draft the changelog", "sess-3")).renamed, false);
+  // Its first look found the card pending, so it waits for the 20 s poll.
+  await goalSettle();
+  third.nodes[1].state = "running";
+  // The cards started before the poll: the agent's newer name applies at once and stands.
+  assert.equal((await rename("Publish the changelog", "sess-3")).renamed, true);
+  await advance(20_000);
+  await goalSettle();
+  assert.equal(task().title, "Publish the changelog", "the older waiting name does not come back");
+  const fourth = round("r4", "sess-4");
+  assert.equal((await rename("Agent's choice", "sess-4")).renamed, false);
+  await goalSettle();
+  await workflow.call("task_rename", { workspaceId: "ws-1", taskId: "task-1", title: "The person's name" });
+  fourth.nodes[1].state = "running";
+  await advance(20_000);
+  await goalSettle();
+  assert.equal(task().title, "The person's name", "the person's Rename wins over a waiting one");
+});
+
 test("a wake-up sends the chat the agent's note after its minutes, on the same Single model", async () => {
   const { world, workflow, route, advance } = wakeChat();
   const scheduled = await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 10, reason: "see whether CI run 42 passed" });

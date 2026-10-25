@@ -3160,6 +3160,13 @@ async function start() {
             return missionWorkflowRuntime.goalTool(request);
           },
         },
+        // rename_chat: the agent names its chat after the task it starts.
+        chatTitles: {
+          rename: (request) => {
+            if (!missionWorkflowRuntime?.chatTitleTool) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.chatTitleTool(request);
+          },
+        },
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
         previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,
