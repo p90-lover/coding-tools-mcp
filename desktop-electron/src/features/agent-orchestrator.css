@@ -480,7 +480,7 @@
 @media (prefers-reduced-motion: reduce) {
   .ao-workflow .ao-harness-popup, .ao-workflow .ao-harness-list .ao-picker-option, .ao-workflow .ao-harness-list .ao-picker-option > svg,
   .ao-workflow .ao-harness-signin { animation: none !important; }
-  .ao-workflow .ao-harness-list *, .ao-workflow .ao-harness-popup .ao-popover-close { transition: none; }
+  .ao-workflow .ao-harness-list *, .ao-workflow .ao-harness-popup .ao-popover-close { transition: none !important; }
   .ao-workflow .ao-harness-list .ao-picker-option:hover:not(:disabled), .ao-workflow .ao-harness-list .ao-picker-option:hover .ao-harness-logo,
   .ao-workflow .ao-harness-popup .ao-popover-close:hover { transform: none; }
 }
