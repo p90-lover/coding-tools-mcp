@@ -91,6 +91,9 @@ jobs:
             exit 1
           fi
           cp "${installers[@]}" aiTemp/rc32-output/
+          # Install this exact NSIS build on the disposable Windows runner and
+          # verify that its launcher boots and provisions the bundled runtime.
+          node desktop-electron/scripts/smoke-package.cjs 2>&1 | tee aiTemp/rc32-build/launcher-smoke.log
           sha256sum aiTemp/rc32-output/*.exe | tee aiTemp/rc32-build/SHA256SUMS.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: success()
