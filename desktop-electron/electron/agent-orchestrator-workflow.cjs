@@ -963,6 +963,29 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return capabilities;
   }
 
+  /**
+   * WebGPT's window is the Codex bridge's: its catalog row's max_context_window (111 193 tokens on
+   * 2026-10-26), which Codex already takes from the card's models.json. The chip offered 4K–2M and a
+   * chat picked 200K, more than ChatGPT holds. Asking the runtime takes seconds, so the answer is
+   * kept 10 minutes (a failure 1); unknown, the chip keeps its range.
+   */
+  const WEB_WINDOW_FRESH_MS = 10 * 60_000;
+  let webWindowCache = null;
+  function webWindow() {
+    if (!webModelCatalog) return Promise.resolve(null);
+    if (webWindowCache && now() - webWindowCache.at < (webWindowCache.failed ? 60_000 : WEB_WINDOW_FRESH_MS)) return webWindowCache.value;
+    const at = now();
+    const value = Promise.resolve().then(async () => {
+      const row = (await webModelCatalog({ executable: findCodexExecutable(), model: WEB_TIERS[2] }))?.models?.[0];
+      const tokens = row?.max_context_window ?? row?.context_window;
+      if (!Number.isSafeInteger(tokens) || tokens < 4096) throw new Error("The WebGPT catalog reports no window");
+      return { efforts: [], contextLimit: tokens, contextWindow: { min: tokens, max: tokens, kind: "context", fixed: true },
+        contextReason: `WebGPT's window is the Codex bridge's: ${tokens.toLocaleString("en-US")} tokens` };
+    }).catch(() => { webWindowCache = { at, failed: true, value: Promise.resolve(null) }; return null; });
+    webWindowCache = { at, value };
+    return value;
+  }
+
   async function models({ harness, workspaceId } = {}) {
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const agent = harness.slice(3);
@@ -1007,11 +1030,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       let pool = { models: [], capabilities: {} };
       try { pool = await models(); } catch {}
       const cpa = pool.models.filter(id => !id.startsWith("chatgpt-web/"));
+      const web = await webWindow();
       // Only ChatGPT's own effort tiers are offered. Luna and Think exist only on Free/Go accounts
       // without the effort picker, and there the bridge already runs these tiers as Luna (Instant,
       // Medium) or Think (High and up). A saved Luna or Think route still runs (webModel).
       return { ok: true, harness, models: [...WEB_TIERS, ...cpa],
-        capabilities: Object.fromEntries(cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)),
+        capabilities: Object.fromEntries([...(web ? WEB_TIERS.map(id => [id, web]) : []),
+          ...cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)]),
         ...(pool.held ? { held: pool.held } : {}), ...(pool.stale ? { stale: true } : {}) };
     }
     return cachedCpaCatalog();

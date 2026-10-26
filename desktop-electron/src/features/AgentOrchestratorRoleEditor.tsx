@@ -10,7 +10,8 @@ export type AoModelCapabilities = {
   efforts?: string[];
   /** The upstream CPA serves this model through, as CPA reports it (e.g. "antigravity"). */
   provider?: string;
-  contextWindow?: { min: number; max?: number; kind?: "context" | "compaction" };
+  /** `fixed`: the window is set for the model (WebGPT's, by the Codex bridge), not picked. */
+  contextWindow?: { min: number; max?: number; kind?: "context" | "compaction"; fixed?: boolean };
   contextLimit?: number; effortReason?: string; contextReason?: string;
 };
 /** `unavailable`: models CPA lists but cannot serve now, with why (e.g. their plugin's account is disabled in CPA). */
@@ -223,10 +224,12 @@ export function routeTuning(route: AoRoute, capability: AoModelCapabilities | un
   const efforts: readonly string[] | undefined = !native ? capability?.efforts
     : isWebModel(route.model) ? (capability?.efforts?.length ? capability.efforts : [...NATIVE_DEFAULT_EFFORTS]) : capability?.efforts ?? [];
   const nativeMax = Math.min(2000000, capability?.contextLimit ?? 2000000);
-  const context = native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
-  const fullLimit = !native && context && capability?.contextLimit ? Math.min(capability.contextLimit, context.max ?? capability.contextLimit) : null;
-  const presets = context ? CONTEXT_PRESETS.filter(tokens => tokens >= context.min && (context.max === undefined || tokens <= context.max)) : [];
-  return { native, efforts, nativeMax, context, fullLimit, presets };
+  // WebGPT's window is the Codex bridge's own (agent-orchestrator-workflow webWindow): one size, not a choice.
+  const fixed = native && isWebModel(route.model) && capability?.contextWindow?.fixed === true ? capability.contextWindow.max ?? null : null;
+  const context = fixed ? { min: fixed, max: fixed } : native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
+  const fullLimit = fixed ?? (!native && context && capability?.contextLimit ? Math.min(capability.contextLimit, context.max ?? capability.contextLimit) : null);
+  const presets = fixed ? [] : context ? CONTEXT_PRESETS.filter(tokens => tokens >= context.min && (context.max === undefined || tokens <= context.max)) : [];
+  return { native, efforts, nativeMax, context, fullLimit, presets, fixed };
 }
 
 /** Listed models serving the same model as `model` under another provider: a card saved on
@@ -437,7 +440,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   // A saved model the harness no longer lists: nothing about it can be verified, so say why
   // instead of offering only a disabled "unverified" effort.
   const missing = !native && models !== null && models.length > 0 && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !models.includes(route.model);
-  const { efforts, nativeMax, context, fullLimit, presets } = routeTuning(route, capability);
+  const { efforts, nativeMax, context, fullLimit, presets, fixed } = routeTuning(route, capability);
   // Only WebGPT has Native Codex's own efforts; a CPA model there shows what CPA advertised, as on an agent.
   const webEffort = native && isWebModel(route.model);
   // The catalog a new model is picked from, so the carried window fits it (withTuning).
@@ -497,10 +500,10 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         {!webEffort && route.effort && !efforts?.includes(route.effort) ? <option value={route.effort} disabled>{route.effort} (saved, unverified or unsupported)</option> : null}
         {(efforts ?? []).map(effort => <option key={effort} value={effort}>{effort}</option>)}
       </select></label>
-    <label title={native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "This agent can't set a context window")}>Context window
+    <label title={fixed ? capability?.contextReason || "WebGPT's window is the Codex bridge's" : native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "This agent can't set a context window")}>Context window
       {/* Typed freely: 272000, 272,000, 272k or 1m; the list offers sizes the model takes. */}
-      <input type="text" inputMode="numeric" list={presets.length ? presetsId : undefined} disabled={disabled || !context}
-        placeholder={!context ? "No verified override" : native ? "Model default"
+      <input type="text" inputMode="numeric" list={presets.length ? presetsId : undefined} disabled={disabled || !context || Boolean(fixed)}
+        placeholder={fixed ? `Codex bridge · ${contextText(fixed)}` : !context ? "No verified override" : native ? "Model default"
           : fullLimit ? `Full model limit · ${contextText(fullLimit)}` : `Agent default${context.max ? ` · up to ${contextText(context.max)}${capability?.contextLimit ? "" : " (limit not reported)"}` : ""}`}
         value={contextDraft ?? (route.context_window !== undefined ? contextText(route.context_window) : "")}
         aria-invalid={contextDraft !== null && contextDraft.trim() !== "" && !inRange(parseTokens(contextDraft) ?? Number.NaN)
@@ -517,7 +520,9 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     {missing ? <p className="ao-hint ao-wide" role="status">{modelLabel(route.model)} is no longer listed for this agent. A task with its effort or context window set won't start.
       {sameModelElsewhere(route.model, models ?? []).map(other => <button key={other} type="button" className="button-secondary" disabled={disabled}
         onClick={() => onChange(withTuning(workerRoute(route.harness_id, other, nativePermission(route)), route, listed))}>Use {modelLabel(other)}</button>)}</p> : null}
-    {compact ? null : <p className="ao-hint ao-wide">{native
+    {compact ? null : <p className="ao-hint ao-wide">{fixed
+      ? `Context window: ${fixed.toLocaleString("en-US")} tokens, the Codex bridge's (ChatGPT's own limit).`
+      : native
       ? `${!webEffort && !efforts?.length ? `${capability?.effortReason || "This model has no effort setting."} ` : ""}Context window: 4,096–${nativeMax.toLocaleString("en-US")} tokens${capability?.contextLimit ? ", this model's limit" : ""}. Blank uses the model default.`
       : [capability?.effortReason || (!efforts ? "Effort support is unknown." : !efforts.length ? "This model has no effort setting." : ""),
           capability?.contextReason || (!context ? "This agent can't set a context window." : context.kind === "compaction"
