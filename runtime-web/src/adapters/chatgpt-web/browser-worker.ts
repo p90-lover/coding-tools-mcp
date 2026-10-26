@@ -143,6 +143,33 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  * editor has taken the previous one. This is headroom for that, not a readiness check.
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
+/**
+ * A reply read is a dozen Playwright round trips through the app's main process; at one every
+ * 250 ms, four busy chats cost it ~400 DevTools messages a second while ChatGPT only thought.
+ * After this many unchanged reads with ChatGPT still running, the next read waits for the page
+ * or the turn's tool progress to change, for at most CHATGPT_REPLY_QUIET_WAIT_MS more.
+ */
+export const CHATGPT_REPLY_QUIET_READS = 4;
+export const CHATGPT_REPLY_QUIET_WAIT_MS = 1_000;
+
+export interface ChatGptReplyRead {
+  running: boolean;
+  text: string;
+  rich: unknown;
+  action: boolean;
+  progress: number | undefined;
+}
+
+/**
+ * How many reads in a row saw nothing change while ChatGPT ran. Only a running reply counts: once
+ * ChatGPT stops, completion needs the reply to hold still for CHATGPT_COMPLETION_SETTLE_MS, and
+ * that keeps the 250 ms reads.
+ */
+export function chatGptQuietReads(quietReads: number, previous: ChatGptReplyRead | undefined, read: ChatGptReplyRead): number {
+  return read.running && previous
+    && previous.running && read.text === previous.text && read.rich === previous.rich
+    && read.action === previous.action && read.progress === previous.progress ? quietReads + 1 : 0;
+}
 export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
@@ -946,6 +973,68 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   );
 }
 
+/** How long a failed send's alert stays up before each press of ChatGPT's own Retry. */
+export const CHATGPT_SEND_RETRY_AFTER_MS = [3_000, 10_000] as const;
+/** After the last press, how long the alert may be back before the turn fails for the caller to retry. */
+export const CHATGPT_SEND_RETRY_GIVE_UP_MS = 10_000;
+
+/**
+ * A message ChatGPT could not send. Seen live 2026-10-26 on a WebGPT turn: "Failed to fetch" in an
+ * alert under the user's message, with a Retry button, no reply turn and no stop button. Neither
+ * error check above matches it (no regenerate-thread-error-button, no "Something went wrong"), so
+ * the turn waited without end. This presses ChatGPT's Retry, which sends the same message again,
+ * a few seconds after the alert shows and once more if it comes back; if it still fails, the turn
+ * fails as retryable, so the chat's own retry starts it over instead of it hanging.
+ */
+export class ChatGptFailedSendRetrier {
+  private presses = 0;
+  private since: number | undefined;
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly retryAfterMs: readonly number[] = CHATGPT_SEND_RETRY_AFTER_MS,
+    private readonly giveUpMs = CHATGPT_SEND_RETRY_GIVE_UP_MS,
+  ) {}
+
+  get retries(): number { return this.presses; }
+
+  /** True while a failed send is showing (the caller observes again later); false when there is none. */
+  async handle(page: Page, onRetry?: (attempt: number) => Promise<void> | void): Promise<boolean> {
+    const alert = page.locator('main aside[role="alert"]').last();
+    // The button is looked up only once an alert shows, so an ordinary observation costs one probe.
+    const retry = await alert.isVisible().catch(() => false)
+      ? alert.getByRole("button", { name: /^\s*(Retry|Try again)\s*$/i }).last()
+      : undefined;
+    if (!retry || !await retry.isVisible().catch(() => false)) {
+      this.since = undefined;
+      return false;
+    }
+    const at = this.now();
+    this.since ??= at;
+    const wait = this.retryAfterMs[this.presses];
+    if (wait === undefined) {
+      if (at - this.since < this.giveUpMs) return true;
+      throw new ChatGptWebAdapterError(
+        `ChatGPT could not send the message ("${(await alert.innerText().catch(() => "")).replace(/\s*Retry\s*$/i, "").trim().slice(0, 120) || "send failed"}"), and its Retry failed ${this.presses} time(s). Retry the turn.`,
+        { status: 502, errorType: "server_error", code: "chatgpt_send_failed", retryable: true },
+      );
+    }
+    if (at - this.since < wait) return true;
+    await retry.click();
+    this.presses += 1;
+    this.since = undefined;
+    await onRetry?.(this.presses);
+    return true;
+  }
+}
+
+/** Only error/status UI inside the accepted response may trigger connection recovery. */
+export async function chatGptConnectionInterruptedAlertVisible(scope: Pick<Locator, "locator">): Promise<boolean> {
+  return scope.locator('[role="alert"], [role="status"]')
+    .filter({ hasText: /^\s*Connection interrupted\.?\s*Waiting for the complete answer\.?\s*$/i })
+    .last().isVisible().catch(() => false);
+}
+
 export async function resolveChatGptToolConfirmation(
   page: Page,
   appName: string,
@@ -1667,6 +1756,7 @@ export class ChatGptCompletionTracker {
 }
 
 export class ChatGptTurnDomHealthTracker {
+  private connectionInterruption?: { text: string; since: number };
   private sawResponse = false;
   private missingResponseSince?: number;
   private emptyCompletionSince?: number;
@@ -1687,6 +1777,23 @@ export class ChatGptTurnDomHealthTracker {
    */
   clearMissingResponse(): void {
     this.missingResponseSince = undefined;
+  }
+
+  connectionInterruptionReady(state: {
+    visible: boolean;
+    currentText: string;
+    externalProgressLive: boolean;
+    externalToolCallsInFlight: boolean;
+  }, now = Date.now()): boolean {
+    if (!state.visible || state.externalProgressLive || state.externalToolCallsInFlight) {
+      this.connectionInterruption = undefined;
+      return false;
+    }
+    if (this.connectionInterruption?.text !== state.currentText) {
+      this.connectionInterruption = { text: state.currentText, since: now };
+      return false;
+    }
+    return now - this.connectionInterruption.since >= this.missingCompletionActionMs;
   }
 
   update(state: {
@@ -2858,8 +2965,9 @@ export class ChatGptBrowserWorker {
     afterProgressRevision: number,
     externalProgress?: ChatGptTurnProgressReader,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<void> {
-    const domMutation = this.waitForTurnDomMutation(page);
+    const domMutation = this.waitForTurnDomMutation(page, timeoutMs);
     if (!externalProgress) {
       await withBrowserTurnAbort(domMutation, signal);
       return;
@@ -3757,6 +3865,7 @@ export class ChatGptBrowserWorker {
       CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
     );
     const responseDomCache: ChatGptResponseDomCache = {};
+    const failedSend = new ChatGptFailedSendRetrier();
     let responseTurn = initialResponseTurn;
     for (;;) {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
@@ -3770,6 +3879,10 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+      if (await failedSend.handle(page)) {
+        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        continue;
+      }
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
         const rebound = await this.reconcileAssistantTurnBinding(
@@ -5326,6 +5439,11 @@ export class ChatGptBrowserWorker {
       let internalObservationFaults = 0;
       let observedThisIteration = false;
       let completionFenceRevision: number | undefined;
+      const failedSend = new ChatGptFailedSendRetrier();
+      let interruptionFenceRevision: number | undefined;
+      // What the last read saw, and how many reads in a row saw the same while ChatGPT ran.
+      let lastRead: ChatGptReplyRead | undefined;
+      let quietReads = 0;
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -5347,9 +5465,15 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
-        await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+        const connectionInterruptedVisible = await chatGptConnectionInterruptedAlertVisible(responseTurn.locator);
+        if (!connectionInterruptedVisible) await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
         // ChatGPT's offer to move the chat to Work applies itself unless declined in time.
         await throwIfChatGptWorkMode(page);
+        if (await failedSend.handle(page, attempt => diagnostics.capture(page, `send-retry-${attempt}`))) {
+          internalObservationFaults = 0;
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          continue;
+        }
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
           page,
@@ -5433,6 +5557,41 @@ export class ChatGptBrowserWorker {
           Date.now(),
         );
         const externalToolCallsInFlight = chatGptExternalToolCallsAreInFlight(externalProgressSnapshot);
+        const interruptionReady = domHealthTracker.connectionInterruptionReady({
+          visible: connectionInterruptedVisible && snapshot.responsePresent,
+          currentText: snapshot.visibleText,
+          externalProgressLive,
+          externalToolCallsInFlight,
+        });
+        if (!interruptionReady) interruptionFenceRevision = undefined;
+        if (connectionInterruptedVisible) {
+          if (interruptionReady) {
+            if (turn.completionFence) {
+              if (interruptionFenceRevision === undefined) {
+                interruptionFenceRevision = await turn.completionFence.begin();
+                responseDomCache.key = undefined;
+                responseDomCache.snapshot = undefined;
+                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                continue;
+              }
+              if (!await turn.completionFence.commit(interruptionFenceRevision)) {
+                interruptionFenceRevision = undefined;
+                responseDomCache.key = undefined;
+                responseDomCache.snapshot = undefined;
+                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                continue;
+              }
+            } else if (mode.localTools) {
+              throw new Error("ChatGPT connection interruption could not prove that MCP activity settled");
+            }
+            throw new ChatGptWebAdapterError("ChatGPT's connection was interrupted and the complete answer did not resume.", {
+              status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+            });
+          }
+          completionFenceRevision = undefined;
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          continue;
+        }
         if (!snapshot.responsePresent && externalProgressLive) {
           // Current-turn MCP activity proves that ChatGPT is still executing even if its renderer
           // temporarily cannot expose the response subtree. DOM remains authoritative for text and
@@ -5560,7 +5719,32 @@ export class ChatGptBrowserWorker {
           });
           if (domError) throw new Error(domError);
         }
+        const read: ChatGptReplyRead = {
+          running,
+          text: snapshot.visibleText,
+          rich: snapshot.richContentKey,
+          action: snapshot.completionActionVisible,
+          progress: externalProgressSnapshot?.revision,
+        };
+        quietReads = chatGptQuietReads(quietReads, lastRead, read);
+        lastRead = read;
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        if (quietReads >= CHATGPT_REPLY_QUIET_READS && !page.isClosed()) {
+          // Wakes on a page mutation or tool progress. Never fails the turn: the next read
+          // handles a closed page or an abort, and the timer bounds a renderer that stops answering.
+          let quietTimer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            this.waitForTurnDomOrExternalProgress(
+              page,
+              read.progress ?? 0,
+              turn.externalProgress,
+              turn.abortSignal,
+              CHATGPT_REPLY_QUIET_WAIT_MS,
+            ).catch(() => undefined),
+            new Promise(resolveQuiet => { quietTimer = setTimeout(resolveQuiet, CHATGPT_REPLY_QUIET_WAIT_MS + 250); }),
+          ]);
+          clearTimeout(quietTimer);
+        }
        } catch (error) {
         // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,
         // aborts, closed tabs, DOM-health verdicts — still fails the turn immediately.

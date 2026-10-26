@@ -24,7 +24,7 @@ import { MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
-import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
+import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout, execGatewayProgram } from "../src/adapters/chatgpt-web/mcp-server";
 import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
@@ -1385,6 +1385,351 @@ describe("ChatGPT outer-native harness v4", () => {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       await TurnBroker.forSocket(socketPath).close();
     }
+  });
+
+  test("connection recovery preserves its logical journal and receipts and waits for exact physical release", async () => {
+    const sessions = new ChatGptTurnSessions();
+    const request = rawWireRequest(environmentXml);
+    const receipt = { role: "toolResult" as const, toolCallId: "completed", toolName: "exec_command", content: "saved once", isError: false, timestamp: 4 };
+    request.context.messages.push(receipt);
+    const interrupted = new ChatGptWebAdapterError("Connection interrupted", {
+      status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+    });
+    const order: string[] = [];
+    let settlePhysical!: () => void;
+    let releaseLease!: () => void;
+    let failReplacement!: (error: Error) => void;
+    const physical = new Promise<void>(resolve => { settlePhysical = resolve; });
+    const lease = new Promise<void>(resolve => { releaseLease = resolve; });
+    const session = sessions.getOrCreate("same-execution", () => ({
+      mode: "tools", token: Promise.resolve("old-token"), externalProgress: new ChatGptExternalTurnProgress(),
+      browser: Promise.reject(interrupted), physicalSettlement: physical,
+      trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+      submission: { phase: "accepted" }, conversationKey: "owned-conversation",
+      retireCapability: () => { order.push("revoke-old"); },
+      releaseRetainedConversation: async () => { order.push("release-owned-lease"); await lease; order.push("cleanup-requested"); },
+      cancel: () => { order.push("cancel-old"); },
+    }), "trace", "owner", "turn_test_123", "thread_test_123");
+    session.setOutstanding([{ callId: "completed", wireName: "exec_command", freeform: false, arguments: { cmd: "save", workdir: tempRoot } }]);
+    session.markResultDelivered("completed", receipt);
+    session.appendRoundEvents("outgoing", [{ type: "text_delta", phase: "commentary", text: "Saved the file" }]);
+    session.completeRound("outgoing");
+    const journal = session.roundEvents("outgoing");
+    await session.browserOutcome;
+    let starts = 0;
+    const recover = session.runExclusive(() => session.recoverInterruptedBrowser(request, () => {
+      starts += 1;
+      order.push("start-fresh");
+      return {
+        mode: "read-only", browser: new Promise<string>((_resolve, reject) => { failReplacement = reject; }),
+        physicalSettlement: Promise.resolve(), trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+        submission: { phase: "accepted" }, cancel: () => {},
+      };
+    }));
+    await Bun.sleep(0);
+    expect(starts).toBe(0);
+    expect(order).toEqual(["revoke-old", "cancel-old"]);
+    const other = sessions.getOrCreate("other-execution", () => ({
+      mode: "read-only", browser: Promise.resolve("other task"), physicalSettlement: Promise.resolve(),
+      trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), cancel: () => { throw new Error("other task cancelled"); },
+    }), "other-trace", "other-owner");
+    expect((await other.browserOutcome).type).toBe("final");
+    settlePhysical();
+    await Bun.sleep(0);
+    expect(order).toContain("release-owned-lease");
+    expect(starts).toBe(0);
+    releaseLease();
+    expect(await recover).toBeTrue();
+    expect(order.indexOf("start-fresh")).toBeGreaterThan(order.indexOf("cleanup-requested"));
+    expect(session.roundEvents("outgoing")).toEqual(journal);
+    expect(session.outstanding()).toEqual([]);
+    expect(sessions.getOrCreate("same-execution", () => { throw new Error("reconnect restarted browser"); })).toBe(session);
+    expect(() => session.setOutstanding([{ callId: "new-id", wireName: "exec_command", freeform: false, arguments: { workdir: tempRoot, cmd: "save" } }]))
+      .toThrow("already completed");
+    failReplacement(interrupted);
+    await session.browserOutcome;
+    expect(await session.runExclusive(() => session.recoverInterruptedBrowser(request, () => { throw new Error("third browser"); }))).toBeFalse();
+    expect(starts).toBe(1);
+  });
+
+  test.each(["missing-receipt", "changed-receipt", "pending-tool", "partial-answer", "cancelled"])(
+    "connection recovery refuses unsafe state: %s", async variant => {
+      const request = rawWireRequest(environmentXml);
+      const text = new ChatGptTextFeed();
+      if (variant === "partial-answer") text.push("An answer already emitted");
+      const session = new ChatGptTurnSessions().getOrCreate(variant, () => ({
+        mode: "read-only", browser: Promise.reject(new ChatGptWebAdapterError("interrupted", {
+          status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+        })), physicalSettlement: Promise.resolve(), trace: new ChatGptTraceFeed(), text,
+        submission: { phase: "accepted" }, cancel: () => {},
+      }), "trace", "owner", "turn_test_123", "thread_test_123");
+      if (["missing-receipt", "changed-receipt", "pending-tool"].includes(variant)) {
+        session.setOutstanding([{ callId: "finished", wireName: "exec_command", freeform: false, arguments: { cmd: "save" } }]);
+        if (variant !== "pending-tool") session.markResultDelivered("finished", {
+          role: "toolResult", toolCallId: "finished", toolName: "exec_command", content: "saved", isError: false, timestamp: 4,
+        });
+        if (variant === "changed-receipt") request.context.messages.push({
+          role: "toolResult", toolCallId: "finished", toolName: "exec_command", content: "different result", isError: false, timestamp: 4,
+        });
+      }
+      if (variant === "cancelled") session.cancel(new DOMException("user cancelled", "AbortError"));
+      await session.browserOutcome;
+      expect(await session.runExclusive(() => session.recoverInterruptedBrowser(request, () => { throw new Error("unsafe replay"); }))).toBeFalse();
+    },
+  );
+
+  test("connection recovery permits old and new observation polls while blocking old completed mutations", async () => {
+    const request = rawWireRequest(environmentXml);
+    request.context.tools!.push({ name: "write_stdin", description: "Poll a native process", parameters: {} });
+    const receipt = { role: "toolResult" as const, toolCallId: "old-poll", toolName: "write_stdin", content: "process still running", isError: false, timestamp: 4 };
+    request.context.messages.push(receipt);
+    const session = new ChatGptTurnSessions().getOrCreate("polling", () => ({
+      mode: "read-only", browser: Promise.reject(new ChatGptWebAdapterError("interrupted", {
+        status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+      })), physicalSettlement: Promise.resolve(), trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+      submission: { phase: "accepted" }, cancel: () => {},
+    }), "trace", "owner", "turn_test_123", "thread_test_123");
+    session.setOutstanding([{ callId: "old-poll", wireName: "write_stdin", freeform: false, arguments: { session_id: 123, chars: "" } }]);
+    session.markResultDelivered("old-poll", receipt);
+    await session.browserOutcome;
+    expect(await session.runExclusive(() => session.recoverInterruptedBrowser(request, () => ({
+      mode: "read-only", browser: Promise.resolve("continued"), physicalSettlement: Promise.resolve(),
+      trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), cancel: () => {},
+    })))).toBeTrue();
+    for (const [callId, sessionId] of [["old-poll-again", 123], ["new-poll-1", 456], ["new-poll-2", 456]] as const) {
+      const poll = { callId, wireName: "write_stdin", freeform: false, arguments: { session_id: sessionId, chars: "" } };
+      expect(() => session.setOutstanding([poll])).not.toThrow();
+      session.markResultDelivered(callId, { ...receipt, toolCallId: callId });
+    }
+    expect(() => session.setOutstanding([{ callId: "old-poll", wireName: "write_stdin", freeform: false, arguments: { session_id: 123, chars: "" } }]))
+      .toThrow("duplicate ChatGPT bridge tool call id");
+    // Fresh actions are not added to the frozen pre-interruption replay set.
+    for (const callId of ["new-action-1", "new-action-2"]) {
+      session.setOutstanding([{ callId, wireName: "exec_command", freeform: false, arguments: { cmd: "newly-requested-action" } }]);
+      session.markResultDelivered(callId, { ...receipt, toolCallId: callId });
+    }
+  });
+
+  test("connection recovery recognizes only the exact generated gateway poll, never arbitrary exec code", async () => {
+    const request = rawWireRequest(environmentXml);
+    request.context.tools = [{ name: "exec", description: "Native tool gateway", parameters: {}, freeform: true }];
+    const poll = execGatewayProgram("write_stdin", false, { arguments: { session_id: 123, chars: "" } }, ["exec"]);
+    const mutation = `${poll}\nawait tools.exec_command({cmd:'save-again'});`;
+    const receipt = { role: "toolResult" as const, toolCallId: "poll", toolName: "exec", content: "running", isError: false, timestamp: 4 };
+    request.context.messages.push(receipt, { ...receipt, toolCallId: "mutation" });
+    const session = new ChatGptTurnSessions().getOrCreate("gateway-poll", () => ({
+      mode: "read-only", browser: Promise.reject(new ChatGptWebAdapterError("interrupted", {
+        status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+      })), physicalSettlement: Promise.resolve(), trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+      submission: { phase: "accepted" }, cancel: () => {},
+    }), "trace", "owner", "turn_test_123", "thread_test_123");
+    for (const [callId, input] of [["poll", poll], ["mutation", mutation]]) {
+      session.setOutstanding([{ callId: callId!, wireName: "exec", freeform: true, input }]);
+      session.markResultDelivered(callId!, { ...receipt, toolCallId: callId! });
+    }
+    await session.browserOutcome;
+    expect(await session.runExclusive(() => session.recoverInterruptedBrowser(request, () => ({
+      mode: "read-only", browser: Promise.resolve("continued"), physicalSettlement: Promise.resolve(),
+      trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), cancel: () => {},
+    })))).toBeTrue();
+    session.setOutstanding([{ callId: "poll-again", wireName: "exec", freeform: true, input: poll }]);
+    session.markResultDelivered("poll-again", { ...receipt, toolCallId: "poll-again" });
+    expect(() => session.setOutstanding([{ callId: "mutation-again", wireName: "exec", freeform: true, input: mutation }])).toThrow("already completed");
+  });
+
+  test("connection recovery keeps the old lease release owned after its HTTP observer aborts", async () => {
+    const sessions = new ChatGptTurnSessions();
+    const request = rawWireRequest(environmentXml);
+    let release!: () => void;
+    let releaseStarted!: () => void;
+    const started = new Promise<void>(resolve => { releaseStarted = resolve; });
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const session = sessions.getOrCreate("aborted-release", () => ({
+      mode: "read-only", browser: Promise.reject(new ChatGptWebAdapterError("interrupted", {
+        status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+      })), physicalSettlement: Promise.resolve(), trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+      submission: { phase: "accepted" }, conversationKey: "same-conversation", cancel: () => {},
+      releaseRetainedConversation: () => { releaseStarted(); return pending; },
+    }), "trace", "owner", "turn_test_123", "thread_test_123", "old-instruction");
+    await session.browserOutcome;
+    const controller = new AbortController();
+    const recovery = session.runExclusive(() => session.recoverInterruptedBrowser(request, () => { throw new Error("aborted recovery restarted"); }, controller.signal));
+    await started;
+    controller.abort();
+    expect((await rejection(recovery)).name).toBe("AbortError");
+    expect(session.isPhysicallySettled()).toBeFalse();
+    let replacements = 0;
+    const replacement = sessions.getOrCreateAfterOwnerRetirement("new-instruction", "owner", () => {
+      replacements += 1;
+      return {
+        mode: "read-only", browser: Promise.resolve("new task"), physicalSettlement: Promise.resolve(),
+        trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), cancel: () => {},
+      };
+    }, "new-trace", undefined, "new-turn", "thread_test_123", { current: "new-instruction", predecessors: new Set(["old-instruction"]) });
+    await Bun.sleep(0);
+    expect(replacements).toBe(0);
+    release();
+    expect((await replacement).traceId).toBe("new-trace");
+    expect(replacements).toBe(1);
+  });
+
+  test("connection recovery observes failed cleanup and keeps replacement owners blocked", async () => {
+    const sessions = new ChatGptTurnSessions();
+    const cleanupError = new Error("exact lease release failed");
+    const request = rawWireRequest(environmentXml);
+    const session = sessions.getOrCreate("failed-release", () => ({
+      mode: "read-only", browser: Promise.reject(new ChatGptWebAdapterError("interrupted", {
+        status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+      })), physicalSettlement: Promise.resolve(), trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+      submission: { phase: "accepted" }, conversationKey: "same-conversation", cancel: () => {},
+      releaseRetainedConversation: async () => { throw cleanupError; },
+    }), "trace", "owner", "turn_test_123", "thread_test_123");
+    await session.browserOutcome;
+    expect(await rejection(session.runExclusive(() => session.recoverInterruptedBrowser(request, () => { throw new Error("unsafe replacement"); }))))
+      .toBe(cleanupError);
+    await Bun.sleep(0);
+    expect(session.isPhysicallySettled()).toBeFalse();
+    expect(await rejection(sessions.getOrCreateAfterOwnerRetirement("next", "owner", () => { throw new Error("owner bypassed failed release"); })))
+      .toBe(cleanupError);
+  });
+
+  test("the adapter continues one interrupted connection without replaying commentary or resetting on HTTP reconnect", async () => {
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://connection-recovery-${Date.now()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const original = worker.run;
+    const starts: BrowserTurn[] = [];
+    worker.run = async turn => {
+      starts.push(turn);
+      turn.onSendActivated?.();
+      turn.onSubmitted?.();
+      if (starts.length === 1) {
+        turn.onCommentary?.("Inspecting files");
+        throw new ChatGptWebAdapterError("Connection interrupted", {
+          status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+        });
+      }
+      turn.onTextDelta("Recovered answer");
+      return "Recovered answer";
+    };
+    try {
+      const request = rawWireRequest(environmentXml);
+      const adapter = createChatGptWebAdapter(provider);
+      const events: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      expect(starts).toHaveLength(2);
+      expect(starts[1]!.nativeThreadId).toBe(starts[0]!.nativeThreadId);
+      expect(starts[1]!.modelId).toBe(starts[0]!.modelId);
+      expect(starts[1]!.reasoning).toBe(starts[0]!.reasoning);
+      expect(starts[1]!.capabilities).toEqual(starts[0]!.capabilities);
+      expect(events.filter(event => event.type === "text_delta" && event.text === "Inspecting files")).toHaveLength(1);
+      expect(events.filter(event => event.type === "text_delta" && event.text.includes("fresh ChatGPT conversation"))).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
+      const replay: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => replay.push(event));
+      expect(starts).toHaveLength(2);
+      expect(replay.filter(event => event.type !== "heartbeat")).toEqual(events.filter(event => event.type !== "heartbeat"));
+    } finally { worker.run = original; }
+  });
+
+  test("connection recovery carries canonical tool results into the fresh prompt without executing the tool twice", async () => {
+    const socketPath = brokerTestEndpoint(`connection-result-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://connection-result-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const original = worker.run;
+    const prompts: string[] = [];
+    let invocations = 0;
+    worker.run = async turn => {
+      const prepared = await turn.prepare();
+      prompts.push(prepared.text);
+      turn.onSendActivated?.();
+      turn.onSubmitted?.();
+      try {
+        if (prompts.length === 1) {
+          const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
+          if (!token) throw new Error("missing turn token");
+          const activityId = "activity_connection_recovery_123456";
+          const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token, activityId });
+          invocations += 1;
+          const result = await invokeAfterBrowserBoundary(turn, () => callTurnBroker<BrokerToolResult>(socketPath, {
+            method: "invoke", bindingId: claimed.bindingId, wireName: "exec_command", freeform: false,
+            arguments: { cmd: "save-once", workdir: tempRoot },
+          }));
+          expect(result.content).toEqual([{ type: "text", text: "saved-once-receipt" }]);
+          expect(await turn.completionFence!.begin()).toBeUndefined();
+          await callTurnBroker(socketPath, { method: "activity_complete", token, activityId });
+          const revision = await turn.completionFence!.begin();
+          expect(revision).toBeDefined();
+          expect(await turn.completionFence!.commit(revision!)).toBeTrue();
+          throw new ChatGptWebAdapterError("Connection interrupted", {
+            status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+          });
+        }
+        expect(prepared.text).toContain("saved-once-receipt");
+        expect(prepared.text).toContain("save-once");
+        turn.onTextDelta("Continued from the completed result");
+        return "Continued from the completed result";
+      } finally { prepared.release(); }
+    };
+    try {
+      const initial = rawWireRequest(environmentXml);
+      const adapter = createChatGptWebAdapter(provider);
+      const events: AdapterEvent[] = [];
+      await adapter.runTurn!(initial, { headers: new Headers() }, event => events.push(event));
+      const call = events.find((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start");
+      expect(call?.name).toBe("exec_command");
+      const continuation = structuredClone(initial);
+      continuation.context.messages.push(
+        { role: "assistant", content: [{ type: "toolCall", id: call!.id, name: "exec_command", arguments: { cmd: "save-once", workdir: tempRoot } }], timestamp: 3 },
+        { role: "toolResult", toolCallId: call!.id, toolName: "exec_command", content: "saved-once-receipt", isError: false, timestamp: 4 },
+      );
+      ((continuation._rawBody as { input: unknown[] }).input).push(
+        { type: "function_call", call_id: call!.id, name: "exec_command", arguments: JSON.stringify({ cmd: "save-once", workdir: tempRoot }) },
+        { type: "function_call_output", call_id: call!.id, output: "saved-once-receipt" },
+      );
+      const continued: AdapterEvent[] = [];
+      await adapter.runTurn!(continuation, { headers: new Headers() }, event => continued.push(event));
+      expect(continued.at(-1)).toMatchObject({ type: "done", endTurn: true });
+      expect(continued.some(event => event.type === "tool_call_start")).toBeFalse();
+      await adapter.runTurn!(continuation, { headers: new Headers() }, () => {});
+      expect(invocations).toBe(1);
+      expect(prompts).toHaveLength(2);
+    } finally {
+      worker.run = original;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test("a second connection interruption stays terminal across repeated HTTP requests", async () => {
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://connection-exhausted-${Date.now()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const original = worker.run;
+    let starts = 0;
+    worker.run = async turn => {
+      starts += 1;
+      turn.onSendActivated?.();
+      turn.onSubmitted?.();
+      throw new ChatGptWebAdapterError("Connection interrupted again", {
+        status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+      });
+    };
+    try {
+      const request = rawWireRequest(environmentXml);
+      for (let reconnect = 0; reconnect < 3; reconnect += 1) {
+        const events: AdapterEvent[] = [];
+        await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
+        expect(events.at(-1)).toMatchObject({ type: "error", code: "chatgpt_connection_interrupted", retryable: false });
+      }
+      expect(starts).toBe(2);
+    } finally { worker.run = original; }
   });
 
   test("Stopped thinking reaches the native response as a failed upstream turn without an automatic retry", async () => {
@@ -2873,12 +3218,14 @@ describe("ChatGPT outer-native harness v4", () => {
       await client.connect(transport);
       const listed = await client.listTools();
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
+        "codex_app_call",
         "codex_apply_patch",
         "codex_chat_send",
         "codex_chat_sessions",
         "codex_exec",
         "codex_tool_call",
         "codex_tool_inventory",
+        "codex_tool_status",
         "codex_view_image",
         "codex_write_stdin",
         "coding_tools_agent_orchestrator",
@@ -2897,7 +3244,7 @@ describe("ChatGPT outer-native harness v4", () => {
       // ChatGPT caches the complete tools/list contract under a connector identity.
       // An intentional hash change therefore requires an explicit connector refresh or identity migration.
       expect(createHash("sha256").update(canonicalJson(publicConnectorAbi)).digest("hex"))
-        .toBe("2415c0436133874bd3b4f14fb5dd0dbcda9fa0b02e7c43a006bbd2499345419a");
+        .toBe("d423efdf28d473ce1277d91246b4697d3f2cb462ace070f35fa043d4109b727d");
       for (const tool of listed.tools.filter(tool => tool.name.startsWith("codex_"))) {
         const properties = tool.inputSchema.properties as Record<string, unknown>;
         expect(properties.turn_token).toEqual({ type: "string", minLength: 20, maxLength: 256 });
@@ -3030,6 +3377,8 @@ describe("ChatGPT outer-native harness v4", () => {
         tools: [],
         total: 0,
         next_offset: null,
+        availability: "advertised_in_current_turn; native permissions still apply; execution unverified",
+        discovery_tools: [],
       });
 
       const rawGatewayInventory = await inventoryThroughGateway(

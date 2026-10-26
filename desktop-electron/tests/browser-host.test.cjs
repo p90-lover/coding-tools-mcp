@@ -69,6 +69,22 @@ test("descriptor publishes native surface identities without inspecting renderer
     BrowserHost.prototype.writeDescriptor.call(fixture);
     assert.deepEqual(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).surfaceTargets, {});
     assert.deepEqual(queried, ["home-target", "auto-target"]);
+    // Nothing the bridge reads changed (a tab was selected): no disk write on the main process.
+    const written = fs.readFileSync(fixture.descriptorPath, "utf8");
+    fs.rmSync(fixture.descriptorPath);
+    BrowserHost.prototype.writeDescriptor.call(fixture);
+    assert.equal(fs.existsSync(fixture.descriptorPath), false);
+    // A change is written at once, and a host that removed its descriptor writes it again.
+    fixture.getBrowserInteractionMode = () => "automatic";
+    BrowserHost.prototype.writeDescriptor.call(fixture);
+    assert.equal(Object.keys(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).surfaceTargets).length, 2);
+    fixture.window = { off() {} };
+    fixture.shellZoomShortcutBindings = new Map();
+    fs.writeFileSync(fixture.descriptorPath, written.replace(/"pid": \d+/, `"pid": ${process.pid}`));
+    try { BrowserHost.prototype.destroy.call(fixture); } catch {}
+    fixture.getBrowserInteractionMode = () => "manual";
+    BrowserHost.prototype.writeDescriptor.call(fixture);
+    assert.equal(fs.existsSync(fixture.descriptorPath), true);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -2626,7 +2642,8 @@ test("a retained conversation is not reused for a different connector identity",
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
     createTurnTab: (...args) => {
-      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector"]);
+      // The fifth is the native thread id (#583), which this turn has none of.
+      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector", undefined]);
       return created;
     },
     writeDescriptor() {},
@@ -3082,7 +3099,8 @@ test("a completed keyed turn is retained for thirty minutes and preserves its ac
     true,
   );
 
-  assert.deepEqual(result, { cancelledByUser: false });
+  // A retained tab reports the conversation it holds, so a steer can return to it (#588).
+  assert.deepEqual(result, { cancelledByUser: false, conversationUrl: `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}` });
   assert.equal(fixture.turnTabs.get(tab.id), tab);
   assert.equal(tab.status, "ready");
   assert.equal(tab.connectorBound, true);

@@ -49,7 +49,7 @@ test("classic CPA catalog remains usable but absent capabilities are not invente
   assert.match(result.capabilities["cpa/plain-model"].effortReason, /advertis|report|unknown/i);
 });
 
-test("all AO harnesses receive truthful tuning outcomes; unsupported transport and recognized Claude context stay unavailable", async () => {
+test("all AO harnesses receive truthful tuning outcomes; unsupported transport stays unavailable and Claude models take a window", async () => {
   const ids = ["aider", "grok", "droid", "agy", "crush", "cursor", "qwen", "copilot", "goose", "auggie", "continue",
     "devin", "cline", "kimi", "muse", "kiro", "kilocode", "vibe", "kimchi", "prime-agent", "autohand", "omp", "amp", "pi", "unreal-agent"];
   const workflow = createAgentOrchestratorWorkflow({
@@ -64,18 +64,21 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport a
     assert.equal(result.capabilities["own-model"].contextWindow, undefined, id);
     assert.match(result.capabilities["own-model"].contextReason, /support|verified|setter/i, id);
   }
-  // Claude Code lists only CPA models; a recognized Claude model through CPA keeps CPA's advertised
-  // efforts but no context override (Claude Code would lose compaction).
+  // Claude Code lists only CPA models; a Claude model through CPA keeps CPA's advertised efforts and
+  // takes a window up to its reported limit (its picker was off). A CPA alias with no reported limit
+  // ("Claude Opus 5.5") offers the client's 2M ceiling, said to be unverified.
   const claude = createAgentOrchestratorWorkflow({
     aoHarness: { models: async () => { throw Error("Claude Code's own aliases are not listed"); } },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
     fetchImpl: async () => ({ ok: true, json: async () => ({ models: [{ slug: "claude-sonnet-4-6", context_window: 200000,
-      supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }) }),
+      supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }, { slug: "Claude Opus 5.5" }] }) }),
   });
-  const caps = (await claude.call("models", { harness: "ao:claude-code" })).capabilities["cpa/claude-sonnet-4-6"];
+  const catalog = (await claude.call("models", { harness: "ao:claude-code" })).capabilities;
+  const caps = catalog["cpa/claude-sonnet-4-6"];
   assert.deepEqual(caps.efforts, ["low", "high"]);
-  assert.equal(caps.contextWindow, undefined);
-  assert.match(caps.contextReason, /compaction|recognized/i);
+  assert.deepEqual(caps.contextWindow, { min: 4096, max: 200000, kind: "context" });
+  assert.deepEqual(catalog["cpa/Claude Opus 5.5"].contextWindow, { min: 4096, max: 2000000, kind: "context" });
+  assert.match(catalog["cpa/Claude Opus 5.5"].contextReason, /unverified/);
 });
 
 test("Native Codex lists WebGPT even without CPA and never reads AO catalogs", async () => {
