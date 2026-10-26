@@ -4957,12 +4957,20 @@ async fn ao_harness_observe(
         )
         .into_response();
     }
-    if native.as_ref().is_some_and(|native| {
-        !matches!(
-            native["status"].as_str(),
-            Some("completed" | "failed" | "interrupted")
-        )
-    }) {
+    // A connection that stopped (its Codex exited, the app restarted it) leaves its turn
+    // "unknown_stopped", and nothing will ever finish it: the card read "not connected" for hours
+    // and the chat queued every message behind it. It ends as a failed turn, never replayed.
+    let stopped = native
+        .as_ref()
+        .is_some_and(|native| native["status"] == "unknown_stopped");
+    if !stopped
+        && native.as_ref().is_some_and(|native| {
+            !matches!(
+                native["status"].as_str(),
+                Some("completed" | "failed" | "interrupted")
+            )
+        })
+    {
         return Json(
             json!({"ok":true,"run":run,"receipt":receipt,"pending_approvals":pending_approvals}),
         )
@@ -4972,6 +4980,7 @@ async fn ao_harness_observe(
         .as_ref()
         .is_some_and(|native| native["status"] == "completed");
     let failure = native.as_ref().and_then(|native| native["notice"].as_str()).map(str::to_owned)
+        .or_else(|| stopped.then(|| "Native connection stopped before its turn finished; the turn will not be replayed".to_owned()))
         .or_else(|| native.is_none().then(|| "Native connection ended without a terminal receipt; the reserved request will not be replayed".to_owned()));
     let expected_request_key = receipt.request_key.clone();
     let turn_id = native

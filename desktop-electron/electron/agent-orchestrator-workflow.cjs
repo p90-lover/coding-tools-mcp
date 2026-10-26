@@ -2016,6 +2016,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               const thread = (Array.isArray(status.threads) ? status.threads : []).find(entry => entry.id === node.receipt?.thread_id);
               const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
               const output = publicText(status.live_output || thread?.answer || thread?.output);
+              if (!status.connected) settleOrphanedNative(id, run, node, key);
+              else orphanedSince.delete(key);
               frame = { ...base, turn_started: turnStarted,
                 activity: !status.connected ? "not connected" : thread?.activity || (turnStarted ? "working" : "waiting for the turn to start"),
                 step: publicText(thread?.activity || "working", 120), output,
@@ -2184,6 +2186,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     void screenApprovals(workspaceId, runId, found.mission, [found.node], [result])
       .then((note) => { if (note) logger?.info?.("ao.undriven_screened", { note: publicText(note, 200) }); }, () => undefined)
       .finally(() => undrivenScreens.delete(key));
+  }
+
+  // A Native Codex card whose connection is gone (headless restarted, its Codex exited) stays
+  // "running" until something observes it, and a run no loop drives (an app restart past the resume
+  // window) never was: seen live 2026-10-26, a WebGPT chat read "not connected" for 1h 25m and
+  // queued every message behind it. Observing it records the lost turn, so the next message starts
+  // a new one. A minute's grace lets a resuming loop or a reconnect get there first.
+  const ORPHANED_NATIVE_MS = 60_000;
+  const orphanedSince = new Map(); // activity key -> when its card was first seen not connected
+  function settleOrphanedNative(workspaceId, runId, node, key) {
+    const state = backgroundRuns.get(runKey(workspaceId, runId));
+    if (node.state !== "running" || state?.driving || state?.starting) { orphanedSince.delete(key); return; }
+    const since = orphanedSince.get(key);
+    if (since === undefined) {
+      orphanedSince.set(key, now());
+      if (orphanedSince.size > 256) orphanedSince.delete(orphanedSince.keys().next().value);
+      return;
+    }
+    if (since === Infinity || now() - since < ORPHANED_NATIVE_MS) return;
+    orphanedSince.set(key, Infinity);
+    void observe({ workspaceId, runId, nodeId: node.id }).then(
+      () => logger?.info?.("ao.orphaned_native_settled", {}),
+      (error) => {
+        orphanedSince.set(key, now());
+        logger?.warn?.("ao.orphaned_native_settle_failed", { message: publicText(error?.message || error, 200) });
+      });
   }
 
   // The person's answers to AO requests and questions (request id -> { question, answer }), for the

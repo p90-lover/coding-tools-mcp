@@ -2273,6 +2273,41 @@ test("a Native Codex card's steps show in order, its note before the command it 
   ]);
 });
 
+test("a Native Codex card left not connected in a run nobody drives is observed after a minute, so its lost turn settles", async () => {
+  // Seen live 2026-10-26: a WebGPT chat read "not connected" for 1h 25m, every message queued behind it.
+  const native = { id: "w1", role: "planner", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-1", started_at_ms: 1_000 } };
+  let clock = 10_000;
+  const observed = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [native] }] };
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, owned: false, status: { connected: false } };
+      if (endpoint === "/api/v1/ao/harness/observe") { observed.push(body.node_id); return { ok: true }; }
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    confirm: async () => true,
+  });
+  const read = async () => {
+    for (let pass = 0; pass < 2; pass++) {
+      await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  await read();
+  clock += 30_000;
+  await read();
+  assert.deepEqual(observed, [], "a resuming loop or a reconnect gets a minute first");
+  clock += 31_000;
+  await read();
+  assert.deepEqual(observed, ["w1"], "then the card is observed, which records its lost turn");
+  clock += 120_000;
+  await read();
+  assert.deepEqual(observed, ["w1"], "once");
+});
+
 test("a finished AO card's work is read back for the chat (turn_timeline), redacted, with labels, details and full reasoning", async () => {
   const asked = [];
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna" };
