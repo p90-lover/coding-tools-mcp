@@ -462,7 +462,6 @@ function LauncherShell({
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
-  const [updateQueued, setUpdateQueued] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const [refreshMenuOpen, setRefreshMenuOpen] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
@@ -480,15 +479,12 @@ function LauncherShell({
     && snapshot.state.mcpSetupComplete !== true;
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
-  const updateBlockedByWork = operation?.status === "running" || browser?.status === "running";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
   const appUpdate = "kind" in snapshot.update && snapshot.update.kind === "app";
   const updateProgress = "progress" in snapshot.update && typeof snapshot.update.progress === "number"
     ? ` ${Math.round(snapshot.update.progress * 100)}%` : "";
   const updateLabel = updateBusy
     ? `${copy.updating}${snapshot.update.status === "downloading" ? updateProgress : ""}`
-    : updateQueued
-      ? (language === "zh-TW" ? "更新已排程（按一下取消）" : "Update queued (click to cancel)")
     : appUpdate
       ? (language === "zh-TW" ? `更新至 v${updateVersion}` : `Update to v${updateVersion}`)
       : (language === "zh-TW" ? `更新 GUI ${updateVersion}` : `Update GUI ${updateVersion}`);
@@ -639,28 +635,13 @@ function LauncherShell({
     }
   }, [setError]);
 
-  // A user-triggered update is never a dead, disabled button. If a task is
-  // active, queue it instead of interrupting the running browser/Codex turn.
+  // One click updates now. While the browser was "running" (it nearly always is) a click only
+  // put the update off until the browser went idle, which could be never. The automatic update still waits for an idle app; a browser turn in progress makes the
+  // app refuse to close, and the sidebar shows why.
   const installUpdate = () => {
     if (updateBusy) return;
-    if (updateBlockedByWork) {
-      setUpdateQueued((queued) => !queued);
-      return;
-    }
-    setUpdateQueued(false);
     void startAvailableUpdate();
   };
-
-  useEffect(() => {
-    if (!updateQueued) return;
-    if (snapshot.update.status !== "available") {
-      setUpdateQueued(false);
-      return;
-    }
-    if (updateBlockedByWork || updateBusy) return;
-    setUpdateQueued(false);
-    void startAvailableUpdate();
-  }, [updateQueued, updateBlockedByWork, updateBusy, snapshot.update.status, startAvailableUpdate]);
 
   const dismissSessionReminder = async () => {
     if (sessionReminderBusy) return;
