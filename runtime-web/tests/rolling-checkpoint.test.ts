@@ -7,6 +7,7 @@ import { extractChatGptTurnUserRevision } from "../src/adapters/chatgpt-web/envi
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { estimateChatGptWebInputTokens } from "../src/adapters/chatgpt-web/usage";
 import { ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
+import { formatChatGptRichOutput } from "../src/adapters/chatgpt-web/rich-output";
 import {
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
   CHATGPT_LUNA_CHECKPOINT_MARKER,
@@ -260,4 +261,35 @@ test("Luna checkpoint preserves the server-resolved backend model when the raw b
   expect(applied.applied).toBeTrue();
   expect(applied.parsed.modelId).toBe("gpt-5.6-luna");
   expect(applied.parsed.options.reasoning).toBe("low");
+});
+
+test("Luna checkpoint persists the displayed rich answer while validating the captured browser answer", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-luna-rich-checkpoint-"));
+  roots.push(root);
+  const path = join(root, "checkpoints.json");
+  const threadId = "thread_luna_rich";
+  const sourceTurnId = "turn_rich_source";
+  const source = request(threadId, sourceTurnId, [message("user", "Create a chart", sourceTurnId)]);
+  const answer = "Created the chart.";
+  const displayedAnswer = answer + formatChatGptRichOutput({
+    sourceUrl: "https://chatgpt.com/c/owned-luna-chart",
+    items: [{ kind: "chart", label: "Revenue" }],
+  }, answer);
+  const captured = { checkpoint, answerHash: hashChatGptLunaAnswer(answer) };
+  const store = new ChatGptLunaCheckpointStore(path);
+  store.commit(source, captured, answer, displayedAnswer);
+
+  const nextTurnId = "turn_rich_next";
+  const next = (parent: string) => request(threadId, nextTurnId, [
+    message("assistant", parent, sourceTurnId),
+    message("user", "Continue with the chart", nextTurnId),
+  ]);
+  const reloaded = new ChatGptLunaCheckpointStore(path);
+  expect(reloaded.apply(next(displayedAnswer)).applied).toBeTrue();
+  expect(reloaded.apply(next(answer)).applied).toBeFalse();
+  expect(reloaded.apply(next(`${displayedAnswer}\nChanged footer`)).applied).toBeFalse();
+  expect(() => store.commit(source, {
+    checkpoint,
+    answerHash: hashChatGptLunaAnswer(displayedAnswer),
+  }, answer, displayedAnswer)).toThrow("does not match the completed browser answer");
 });
