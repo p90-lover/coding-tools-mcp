@@ -947,23 +947,43 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       : "This harness/model has no verified reasoning-effort transport.";
     const limit = info?.contextLimit;
     if (Number.isSafeInteger(limit) && limit > 0) capabilities.contextLimit = limit;
-    const base = model.split("(")[0].trim().toLowerCase();
-    const claudeFixedWindow = agent === "claude-code"
-      && (!base || ["default", "sonnet", "opus", "haiku", "fable"].includes(base) || model.toLowerCase().includes("claude") || model.toLowerCase().includes("[1m]"));
     const slash = model.indexOf("/");
     const unqualifiedOpenCode = agent === "opencode" && !viaCpa
       && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
-    // agy's gateway variables carry no window, so it takes no context-window setting.
-    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !claudeFixedWindow && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+    // agy's gateway variables carry no window, so it takes no context-window setting. Claude Code
+    // takes one for every model, Claude ones included (their picker was off): AO declares a CPA
+    // alias's window and has a model Claude Code recognizes compact at it, capped at its own.
+    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
         : "The provider did not report this model's limit, so 2M (the client's ceiling) is unverified.";
-    } else capabilities.contextReason = claudeFixedWindow
-      ? "Claude Code cannot override this recognized model's window while preserving compaction."
-      : unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
+    } else capabilities.contextReason = unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
       : "This harness/model has no verified context-window setter.";
     return capabilities;
+  }
+
+  /**
+   * WebGPT's window is the Codex bridge's: its catalog row's max_context_window (111 193 tokens on
+   * 2026-10-26), which Codex already takes from the card's models.json. The chip offered 4K–2M and a
+   * chat picked 200K, more than ChatGPT holds. Asking the runtime takes seconds, so the answer is
+   * kept 10 minutes (a failure 1); unknown, the chip keeps its range.
+   */
+  const WEB_WINDOW_FRESH_MS = 10 * 60_000;
+  let webWindowCache = null;
+  function webWindow() {
+    if (!webModelCatalog) return Promise.resolve(null);
+    if (webWindowCache && now() - webWindowCache.at < (webWindowCache.failed ? 60_000 : WEB_WINDOW_FRESH_MS)) return webWindowCache.value;
+    const at = now();
+    const value = Promise.resolve().then(async () => {
+      const row = (await webModelCatalog({ executable: findCodexExecutable(), model: WEB_TIERS[2] }))?.models?.[0];
+      const tokens = row?.max_context_window ?? row?.context_window;
+      if (!Number.isSafeInteger(tokens) || tokens < 4096) throw new Error("The WebGPT catalog reports no window");
+      return { efforts: [], contextLimit: tokens, contextWindow: { min: tokens, max: tokens, kind: "context", fixed: true },
+        contextReason: `WebGPT's window is the Codex bridge's: ${tokens.toLocaleString("en-US")} tokens` };
+    }).catch(() => { webWindowCache = { at, failed: true, value: Promise.resolve(null) }; return null; });
+    webWindowCache = { at, value };
+    return value;
   }
 
   async function models({ harness, workspaceId } = {}) {
@@ -1010,11 +1030,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       let pool = { models: [], capabilities: {} };
       try { pool = await models(); } catch {}
       const cpa = pool.models.filter(id => !id.startsWith("chatgpt-web/"));
+      const web = await webWindow();
       // Only ChatGPT's own effort tiers are offered. Luna and Think exist only on Free/Go accounts
       // without the effort picker, and there the bridge already runs these tiers as Luna (Instant,
       // Medium) or Think (High and up). A saved Luna or Think route still runs (webModel).
       return { ok: true, harness, models: [...WEB_TIERS, ...cpa],
-        capabilities: Object.fromEntries(cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)),
+        capabilities: Object.fromEntries([...(web ? WEB_TIERS.map(id => [id, web]) : []),
+          ...cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)]),
         ...(pool.held ? { held: pool.held } : {}), ...(pool.stale ? { stale: true } : {}) };
     }
     return cachedCpaCatalog();
@@ -2897,7 +2919,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // took one of the three places a check has while the other two were down (502), stalling the goal.
   const MODEL_GONE_MS = 6 * 3_600_000;
   const reviewerDown = new Map(); // model -> until
-  const reviewerFailed = (model, error) => reviewerDown.set(model, now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
+  // Any other failure may be the provider's, not the model's: seen live 2026-10-26, Cline Pass
+  // answered 502 for every model, and each goal check spent its three places on three of them.
+  const providerDown = new Map(); // "cline-pass" -> until
+  const modelProvider = model => /^([^/]+)\//.exec(String(model))?.[1] ?? "";
+  const reviewerFailed = (model, error) => {
+    reviewerDown.set(model, now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
+    if (error?.status !== 404 && modelProvider(model)) providerDown.set(modelProvider(model), now() + REVIEWER_DOWN_MS);
+  };
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
   // request goes to the person: one 502 from the card's model put a routine command in front of
   // them while the very next review answered.
@@ -4673,15 +4702,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * then Codex's own review model. None is billed to the person's Codex quota (codexQuotaModel):
    * these run unasked, and picking by name alone ("mini") chose a ChatGPT-account model. A model
    * that just failed waits REVIEWER_DOWN_MS, as for reviews, or MODEL_GONE_MS when it is not
-   * served at all (404).
+   * served at all (404), and the rest of a provider that just failed come after every model of a
+   * provider that did not. The first places go to different providers, so one provider's outage
+   * costs a call one failed request, not all three.
    */
   function freeModels(catalog, hidden = []) {
     const free = catalog.filter(model => !codexQuotaModel(model) && model !== AUTO_REVIEW_MODEL);
     const quick = free.filter(model => /haiku|flash|mini|lite|fast/i.test(model));
     const review = catalog.includes(AUTO_REVIEW_MODEL) || hidden.includes(AUTO_REVIEW_MODEL) ? [AUTO_REVIEW_MODEL] : [];
-    const up = model => !(reviewerDown.get(model) > now());
+    const rank = model => reviewerDown.get(model) > now() ? 2 : providerDown.get(modelProvider(model)) > now() ? 1 : 0;
     const order = [...new Set([...quick, ...free, ...review])];
-    return [...order.filter(up), ...order.filter(model => !up(model))].slice(0, 3);
+    const ranked = [0, 1, 2].flatMap(level => order.filter(model => rank(model) === level));
+    const providers = new Set();
+    // Provider diversity must not promote a benched provider over another healthy model.
+    const spread = ranked.filter(model => rank(model) === 0 && !providers.has(modelProvider(model)) && providers.add(modelProvider(model)));
+    return [...new Set([...spread, ...ranked])].slice(0, 3);
   }
   /** `judge`: "Let the model judge" is on, and `ended` says how the round ended when it did not finish. */
   async function checkGoal(goal, mission, { judge = false, ended = "" } = {}) {

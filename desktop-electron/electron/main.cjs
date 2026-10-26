@@ -2622,7 +2622,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
   }
   shutdownInProgress = true;
   try {
-    const browserOperation = browserHost?.currentOperation();
+    const browserOperation = browserHost?.currentOperation() || (browserHost?.activeTraceId ? "ChatGPT turn" : null);
     if (browserOperation) {
       throw new Error(`Wait for ${browserOperation} to finish before quitting Coding Tools`);
     }

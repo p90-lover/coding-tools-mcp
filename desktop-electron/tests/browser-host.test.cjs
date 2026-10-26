@@ -1163,7 +1163,7 @@ test("launcher quit remains gated through an active embedded-browser operation",
   assert.ok(start >= 0, "requestQuit must exist");
   const quit = source.slice(start);
   // An active browser operation, then an active runtime operation, each refuses the quit.
-  assert.match(quit, /const browserOperation = browserHost\?\.currentOperation\(\);\s*if \(browserOperation\) \{\s*throw new Error/);
+  assert.match(quit, /const browserOperation = browserHost\?\.currentOperation\(\) \|\| \(browserHost\?\.activeTraceId \? "ChatGPT turn" : null\);\s*if \(browserOperation\) \{\s*throw new Error/);
   assert.match(quit, /const runtimeOperation = runtimeHost\?\.currentOperation\(\);\s*if \(runtimeOperation\) \{\s*throw new Error/);
 });
 
@@ -2642,7 +2642,8 @@ test("a retained conversation is not reused for a different connector identity",
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
     createTurnTab: (...args) => {
-      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector"]);
+      // The fifth is the native thread id (#583), which this turn has none of.
+      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector", undefined]);
       return created;
     },
     writeDescriptor() {},
@@ -3098,7 +3099,8 @@ test("a completed keyed turn is retained for thirty minutes and preserves its ac
     true,
   );
 
-  assert.deepEqual(result, { cancelledByUser: false });
+  // A retained tab reports the conversation it holds, so a steer can return to it (#588).
+  assert.deepEqual(result, { cancelledByUser: false, conversationUrl: `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}` });
   assert.equal(fixture.turnTabs.get(tab.id), tab);
   assert.equal(tab.status, "ready");
   assert.equal(tab.connectorBound, true);

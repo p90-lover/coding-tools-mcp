@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -40,6 +41,7 @@ import type {
   Language,
   LauncherSnapshot,
   LauncherState,
+  LogRecord,
   McpServerEntry,
   McpServerInput,
   OperationState,
@@ -460,7 +462,6 @@ function LauncherShell({
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
-  const [updateQueued, setUpdateQueued] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const [refreshMenuOpen, setRefreshMenuOpen] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
@@ -478,15 +479,12 @@ function LauncherShell({
     && snapshot.state.mcpSetupComplete !== true;
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
-  const updateBlockedByWork = operation?.status === "running" || browser?.status === "running";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
   const appUpdate = "kind" in snapshot.update && snapshot.update.kind === "app";
   const updateProgress = "progress" in snapshot.update && typeof snapshot.update.progress === "number"
     ? ` ${Math.round(snapshot.update.progress * 100)}%` : "";
   const updateLabel = updateBusy
     ? `${copy.updating}${snapshot.update.status === "downloading" ? updateProgress : ""}`
-    : updateQueued
-      ? (language === "zh-TW" ? "更新已排程（按一下取消）" : "Update queued (click to cancel)")
     : appUpdate
       ? (language === "zh-TW" ? `更新至 v${updateVersion}` : `Update to v${updateVersion}`)
       : (language === "zh-TW" ? `更新 GUI ${updateVersion}` : `Update GUI ${updateVersion}`);
@@ -637,28 +635,13 @@ function LauncherShell({
     }
   }, [setError]);
 
-  // A user-triggered update is never a dead, disabled button. If a task is
-  // active, queue it instead of interrupting the running browser/Codex turn.
+  // One click updates now. While the browser was "running" (it nearly always is) a click only
+  // put the update off until the browser went idle, which could be never. The automatic update still waits for an idle app; a browser turn in progress makes the
+  // app refuse to close, and the sidebar shows why.
   const installUpdate = () => {
     if (updateBusy) return;
-    if (updateBlockedByWork) {
-      setUpdateQueued((queued) => !queued);
-      return;
-    }
-    setUpdateQueued(false);
     void startAvailableUpdate();
   };
-
-  useEffect(() => {
-    if (!updateQueued) return;
-    if (snapshot.update.status !== "available") {
-      setUpdateQueued(false);
-      return;
-    }
-    if (updateBlockedByWork || updateBusy) return;
-    setUpdateQueued(false);
-    void startAvailableUpdate();
-  }, [updateQueued, updateBlockedByWork, updateBusy, snapshot.update.status, startAvailableUpdate]);
 
   const dismissSessionReminder = async () => {
     if (sessionReminderBusy) return;
@@ -2057,16 +2040,7 @@ function ActivitySurface({
             <span>{copy.noLogs}</span>
           </div>
         ) : null}
-        {[...logs].reverse().map((record) => (
-          <div className="activity-row" key={logKey(record)}>
-            <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
-            <div>
-              <strong>{humanEvent(record.event)}</strong>
-              <span>{logDetail(record.detail)}</span>
-            </div>
-            <time>{formatTime(record.at, language)}</time>
-          </div>
-        ))}
+        {[...logs].reverse().map((record) => <ActivityRow key={logKey(record)} record={record} language={language} />)}
       </div>
     </ContentSurface>
   );
@@ -3454,13 +3428,36 @@ function logDetail(detail: Record<string, unknown>): string {
     .join(" · ");
 }
 
+// A record never changes once logged, so its row renders once. Inline rows re-ran the formatting
+// below for all 300 rows on every new line, even with the Activity page closed (it stays mounted),
+// which was a quarter of the renderer's script time while a chat worked and the person typed.
+const ActivityRow = memo(function ActivityRow({ record, language }: { record: LogRecord; language: Language }) {
+  return (
+    <div className="activity-row">
+      <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
+      <div>
+        <strong>{humanEvent(record.event)}</strong>
+        <span>{logDetail(record.detail)}</span>
+      </div>
+      <time>{formatTime(record.at, language)}</time>
+    </div>
+  );
+});
+
+// toLocaleTimeString builds a new Intl.DateTimeFormat on every call; one per language is reused.
+const timeFormats = new Map<Language, Intl.DateTimeFormat>();
+
 function formatTime(value: string, language: Language): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleTimeString(language === "ja" ? "ja-JP" : language === "zh-TW" ? "zh-TW" : language === "zh-CN" ? "zh-CN" : "en", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
+  if (Number.isNaN(date.getTime())) return value;
+  let format = timeFormats.get(language);
+  if (!format) {
+    format = new Intl.DateTimeFormat(language === "ja" ? "ja-JP" : language === "zh-TW" ? "zh-TW" : language === "zh-CN" ? "zh-CN" : "en", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    timeFormats.set(language, format);
+  }
+  return format.format(date);
 }

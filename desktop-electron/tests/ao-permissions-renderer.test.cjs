@@ -566,6 +566,25 @@ test("the composer starts a window only for a model whose limit is known, and dr
   assert.deepEqual(view.routes, [], "a window the model takes is kept");
 });
 
+test("a WebGPT chat's window is the Codex bridge's: shown, locked, and a carried 200K fitted to it", async () => {
+  // The user: "on web gpt model, it should follow codexbridge max context window and lock it".
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-account", model: "chatgpt-web/high", permission_profile: ":workspace", effort: "high", context_window: 200_000 };
+  const capabilities = { "chatgpt-web/high": { efforts: [], contextLimit: 111193, contextWindow: { min: 111193, max: 111193, kind: "context", fixed: true },
+    contextReason: "WebGPT's window is the Codex bridge's: 111,193 tokens" } };
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false,
+    loadModels: async () => ({ models: Object.keys(capabilities), capabilities }) };
+  view.render("AgentOrchestratorComposerControls", props, composerState(null));
+  view.effects[view.effects.length - 1]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(routes.at(-1).context_window, 111193, "the 200K the chat carried becomes the bridge's window");
+  const chip = menuNamed(view.render("AgentOrchestratorComposerControls", { ...props, route: routes.at(-1) }), "Context window");
+  assert.equal(chip.props.disabled, true, "locked");
+  assert.equal(text(chip.props.label), "111,193");
+  assert.match(chip.props.title, /Codex bridge's: 111,193 tokens/);
+});
+
 test("a model that lists efforts but no Auto starts on one it takes, as an adjustment, not a pick", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/deepseek-v4.1-flash", permission_profile: ":ao-default" };
   const adjusted = [];
