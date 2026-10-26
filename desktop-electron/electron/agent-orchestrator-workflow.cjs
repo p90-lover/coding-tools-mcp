@@ -947,21 +947,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       : "This harness/model has no verified reasoning-effort transport.";
     const limit = info?.contextLimit;
     if (Number.isSafeInteger(limit) && limit > 0) capabilities.contextLimit = limit;
-    const base = model.split("(")[0].trim().toLowerCase();
-    const claudeFixedWindow = agent === "claude-code"
-      && (!base || ["default", "sonnet", "opus", "haiku", "fable"].includes(base) || model.toLowerCase().includes("claude") || model.toLowerCase().includes("[1m]"));
     const slash = model.indexOf("/");
     const unqualifiedOpenCode = agent === "opencode" && !viaCpa
       && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
-    // agy's gateway variables carry no window, so it takes no context-window setting.
-    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !claudeFixedWindow && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+    // agy's gateway variables carry no window, so it takes no context-window setting. Claude Code
+    // takes one for every model, Claude ones included (their picker was off): AO declares a CPA
+    // alias's window and has a model Claude Code recognizes compact at it, capped at its own.
+    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
         : "The provider did not report this model's limit, so 2M (the client's ceiling) is unverified.";
-    } else capabilities.contextReason = claudeFixedWindow
-      ? "Claude Code cannot override this recognized model's window while preserving compaction."
-      : unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
+    } else capabilities.contextReason = unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
       : "This harness/model has no verified context-window setter.";
     return capabilities;
   }
