@@ -64,6 +64,12 @@ async function main() {
     : { repository: "Untrivial-ai/agent-orchestrator", commit: upstreamCommit, workingTreeIntegration: true };
   fs.mkdirSync(stageRoot, { recursive: true });
   fs.mkdirSync(outputRoot, { recursive: true });
+  // The staged packages live underneath the superproject, whose tsconfig extends
+  // a SvelteKit-generated file. Give packages without their own tsconfig a local
+  // boundary so Vite/Rolldown never inherits that unrelated configuration.
+  fs.writeFileSync(path.join(stageRoot, "tsconfig.json"), `${JSON.stringify({
+    compilerOptions: { target: "ES2022", module: "ESNext", moduleResolution: "Bundler", jsx: "react-jsx" },
+  }, null, 2)}\n`);
   for (const directory of ["frontend", "packages"]) {
     fs.cpSync(path.join(sourceRoot, directory), path.join(stageRoot, directory), {
       recursive: true,
