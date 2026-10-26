@@ -21,6 +21,7 @@ import {
   ChatGptMarkdownConsistencyError,
   type ChatGptMarkdownSegment,
 } from "./markdown";
+import { normalizeChatGptRichOutput, type ChatGptRichOutput } from "./rich-output";
 import {
   CHATGPT_WEB_LUNA_MODEL_ID,
   CHATGPT_WEB_MODEL_ID,
@@ -150,8 +151,11 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-busy",
   "aria-disabled",
   "aria-expanded",
+  "alt",
   "class",
   "data-item-anchor",
+  "data-artifact-id",
+  "data-code-block-preview-pane",
   "data-is-last-node",
   "data-message-author-role",
   "data-state",
@@ -164,11 +168,15 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "data-conversation-role",
   "disabled",
   "hidden",
+  "href",
   "inert",
   "open",
   "role",
   "start",
+  "src",
+  "srcset",
   "style",
+  "title",
 ] as const;
 
 const settleChatGptUi = (): Promise<void> => (
@@ -1323,6 +1331,8 @@ export interface BrowserTurn {
   onCommentary?: (text: string, continuation?: boolean) => void;
   /** Append-only, structurally stable Markdown chunks. */
   onTextDelta: (delta: string) => void;
+  /** Owned rich references, emitted once after verified completion and before run resolves. */
+  onRichOutput?: (output: ChatGptRichOutput) => void;
   /** Proven current-turn MCP activity; never response content or completion. */
   externalProgress?: ChatGptTurnProgressReader;
   /** Atomically fences browser completion against concurrent MCP claims in the turn broker. */
@@ -1400,12 +1410,13 @@ export function chatGptTurnIsComplete(state: {
   responsePresent: boolean;
   running: boolean;
   currentText: string;
+  currentRichContent?: string;
   currentHtml?: string;
   completionActionVisible: boolean;
 }): boolean {
   return state.responsePresent
     && !state.running
-    && state.currentText.length > 0
+    && (state.currentText.length > 0 || Boolean(state.currentRichContent))
     && state.completionActionVisible;
 }
 
@@ -1574,6 +1585,7 @@ export class ChatGptCompletionTracker {
   private candidate?: { signature: string; since: number };
   private lastToolBatchRevision = 0;
   private postToolAnswerBaselineText?: string;
+  private postToolSourceGenerationStarted = false;
   private missingPostToolAnswerSince?: number;
 
   constructor(
@@ -1593,6 +1605,7 @@ export class ChatGptCompletionTracker {
     // The caller acknowledges the batch only after this projection is captured. The outer Codex
     // harness therefore cannot execute the tool until this exact pre-tool answer boundary exists.
     this.postToolAnswerBaselineText = currentText;
+    this.postToolSourceGenerationStarted = false;
     this.lastToolBatchRevision = revision;
     this.missingPostToolAnswerSince = undefined;
     this.candidate = undefined;
@@ -1605,16 +1618,26 @@ export class ChatGptCompletionTracker {
     },
     now = Date.now(),
   ): boolean {
-    const signature = `${state.currentText}\0${state.currentHtml ?? state.currentText}`;
+    const richOnly = state.currentText.length === 0 && Boolean(state.currentRichContent);
+    // A source view can keep animating after generation ends. Its public completion controls,
+    // rather than renderer frames, establish that the owned preview is available to the user.
+    const signature = richOnly ? "owned-rich-source-view" : `${state.currentText}\0${state.currentHtml ?? state.currentText}`;
     // An outstanding tool call proves the model has more to say, whatever the rendered message
     // currently looks like. Completing here would return a truncated answer and retire the turn
     // while its own tool calls were still in flight.
     if (state.externalToolCallsInFlight) {
       this.candidate = undefined;
       this.missingPostToolAnswerSince = undefined;
+      this.postToolSourceGenerationStarted = false;
       return false;
     }
-    if (this.postToolAnswerBaselineText === state.currentText) {
+    const sourceOnly = this.lastToolBatchRevision > 0 && richOnly;
+    if (sourceOnly && state.responsePresent && state.externalToolCallsInFlight === false
+      && state.running && !state.completionActionVisible) this.postToolSourceGenerationStarted = true;
+    const sourceGenerationCompleted = sourceOnly && this.postToolSourceGenerationStarted
+      && state.externalToolCallsInFlight === false && !state.running && state.completionActionVisible;
+    const unchangedProse = !richOnly && this.postToolAnswerBaselineText === state.currentText;
+    if ((sourceOnly && !sourceGenerationCompleted) || unchangedProse) {
       this.candidate = undefined;
       if (!chatGptTurnIsComplete(state)) {
         this.missingPostToolAnswerSince = undefined;
@@ -1622,6 +1645,10 @@ export class ChatGptCompletionTracker {
       }
       this.missingPostToolAnswerSince ??= now;
       if (now - this.missingPostToolAnswerSince >= this.missingPostToolAnswerMs) {
+        if (sourceOnly) throw new ChatGptWebAdapterError(
+          "ChatGPT's interactive preview could not be verified after its last tool call. Open the original ChatGPT tab to inspect the preview before continuing.",
+          { status: 502, errorType: "server_error", code: "browser_rich_preview_unreadable", retryable: false },
+        );
         throw new Error("ChatGPT completed without producing a final answer after its last Codex tool call");
       }
       return false;
@@ -1666,6 +1693,7 @@ export class ChatGptTurnDomHealthTracker {
     responsePresent: boolean;
     running: boolean;
     currentText: string;
+    currentRichContent?: string;
     completionActionVisible: boolean;
     externalProgressLive?: boolean;
   }, now = Date.now()): string | undefined {
@@ -1690,9 +1718,10 @@ export class ChatGptTurnDomHealthTracker {
       }
     }
 
+    const hasContent = state.currentText.length > 0 || Boolean(state.currentRichContent);
     const emptyCompletion = state.responsePresent
       && !state.running
-      && state.currentText.length === 0
+      && !hasContent
       && state.completionActionVisible;
     if (!emptyCompletion) {
       this.emptyCompletionSince = undefined;
@@ -1705,12 +1734,12 @@ export class ChatGptTurnDomHealthTracker {
 
     const missingCompletionAction = state.responsePresent
       && !state.running
-      && state.currentText.length > 0
+      && hasContent
       && !state.completionActionVisible;
     if (!missingCompletionAction) {
       this.missingCompletionAction = undefined;
-    } else if (this.missingCompletionAction?.text !== state.currentText) {
-      this.missingCompletionAction = { text: state.currentText, since: now };
+    } else if (this.missingCompletionAction?.text !== `${state.currentText}\0${state.currentRichContent ?? ""}`) {
+      this.missingCompletionAction = { text: `${state.currentText}\0${state.currentRichContent ?? ""}`, since: now };
     } else if (now - this.missingCompletionAction.since >= this.missingCompletionActionMs) {
       return "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed";
     }
@@ -1778,6 +1807,8 @@ interface ChatGptResponseDomSnapshot {
   completionActionVisible: boolean;
   stoppedThinkingVisible: boolean;
   traceBlocks: ChatGptVisibleTraceBlock[];
+  richOutput?: ChatGptRichOutput;
+  richContentKey?: string;
 }
 
 export function observeChatGptMarkdown(buffer: ChatGptMarkdownBuffer, snapshot: ChatGptResponseDomSnapshot, completed = false): string {
@@ -4147,6 +4178,113 @@ export class ChatGptBrowserWorker {
       const classified = selectChatGptAnswerRoots(allMarkdownRoots, streamingStatusContainers);
       const commentaryRoots = classified.commentaryRoots;
       const renderedRoots = classified.answerRoots;
+      // CHATGPT_RICH_OUTPUT_BEGIN
+      // Read references from the owned answer before Markdown projection removes embedded UI.
+      // This function is deliberately self-contained for browser evaluation and DOM fixtures.
+      const captureChatGptRichOutput = (
+        responseRoot: HTMLElement,
+        answerRoots: HTMLElement[],
+        sourceUrl: string,
+        isAnswerContent: (candidate: HTMLElement) => boolean,
+      ): ChatGptRichOutput => {
+        const items: ChatGptRichOutput["items"] = [];
+        const labelCounts = new Map<string, number>();
+        const widgetSelector = ".chart-widget-container, [data-code-block-preview-pane], [data-artifact-id], [data-canvas-id]";
+        const markdownSelector = '.markdown, [data-markdown-text-style="assistant-message"]';
+        const owned = (candidate: Element): boolean => {
+          if (!isAnswerContent(candidate as HTMLElement)) return false;
+          if (candidate.tagName.toLowerCase() === "canvas" && candidate.getAttribute("role") === "presentation") return false;
+          if (candidate.closest("[role=toolbar], pre, code, script, style, template, [data-streaming-response-status], [data-testid^=cot-v5]")) return false;
+          const button = candidate.closest("button");
+          if (button && !(button === candidate && candidate.matches(widgetSelector))) {
+            // Generated images can be wrapped in an image-zoom button. A toolbar icon is not an
+            // answer image; require an image control or a large image inside the answer itself.
+            const image = candidate as HTMLImageElement;
+            const answerImage = candidate.matches("img, picture") && (button.matches('[data-testid*="image"]')
+              || (answerRoots.some(answer => answer.contains(candidate))
+                && Math.max(image.naturalWidth || 0, Number(candidate.getAttribute("width")) || 0) >= 64));
+            if (!answerImage) return false;
+          }
+          const markdownRoot = candidate.closest(markdownSelector);
+          if (markdownRoot && !answerRoots.some(answer => answer.contains(candidate))) return false;
+          for (let node: Element | null = candidate; node; node = node.parentElement) {
+            if (node.hasAttribute("hidden") || node.hasAttribute("inert") || node.getAttribute("aria-hidden") === "true") return false;
+            if (typeof getComputedStyle === "function") {
+              const style = getComputedStyle(node);
+              if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+            }
+            if (node === responseRoot) break;
+          }
+          return true;
+        };
+        const labelFor = (candidate: Element, fallback: string): string => (
+          candidate.getAttribute("aria-label") || candidate.getAttribute("alt") || candidate.getAttribute("title")
+          || candidate.querySelector("figcaption, title")?.textContent || fallback
+        ).replace(/\s+/g, " ").trim().slice(0, 240);
+        const urlFor = (value: string | null | undefined): string | undefined => {
+          if (!value || value.length > 4_096 || /[\u0000-\u0020\u007f<>]/.test(value)) return undefined;
+          try { return new URL(value, sourceUrl).href; } catch { return undefined; }
+        };
+        const selector = `${widgetSelector}, img, picture, audio, video, iframe, canvas, svg, a[href]`;
+        for (const candidate of [...responseRoot.querySelectorAll(selector)].slice(0, 256)) {
+          if (!owned(candidate)) continue;
+          const widget = candidate.closest(widgetSelector);
+          if (widget && widget !== candidate) continue;
+          let kind: ChatGptRichOutput["items"][number]["kind"];
+          let label: string;
+          let url: string | undefined;
+          const tag = candidate.tagName.toLowerCase();
+          const preview = candidate.getAttribute("data-code-block-preview-pane");
+          if (candidate.matches(".chart-widget-container") || (preview !== null && /vega|chart|plot/i.test(preview))) {
+            kind = "chart";
+            label = labelFor(candidate, "Interactive chart");
+          } else if (preview !== null || tag === "iframe") {
+            kind = "app";
+            label = labelFor(candidate, "Interactive app");
+            url = urlFor(candidate.getAttribute("src") ?? candidate.querySelector("iframe")?.getAttribute("src"));
+          } else if (candidate.matches("[data-artifact-id], [data-canvas-id]")) {
+            kind = "artifact";
+            label = labelFor(candidate, "Artifact preview");
+          } else if (tag === "img" || tag === "picture") {
+            if (tag === "picture" && candidate.querySelector("img")) continue;
+            kind = "image";
+            label = labelFor(candidate, "Image");
+            url = urlFor((candidate as HTMLImageElement).currentSrc || candidate.getAttribute("src")
+              || candidate.querySelector("source")?.getAttribute("srcset")?.split(",")[0]?.trim().split(/\s+/)[0]);
+          } else if (tag === "audio" || tag === "video") {
+            kind = tag;
+            label = labelFor(candidate, tag === "audio" ? "Audio" : "Video");
+            url = urlFor((candidate as HTMLMediaElement).currentSrc || candidate.getAttribute("src")
+              || candidate.querySelector("source")?.getAttribute("src"));
+          } else if (tag === "a") {
+            const href = candidate.getAttribute("href") ?? "";
+            if (!candidate.hasAttribute("download") && !/^(?:sandbox:|attachment:)/i.test(href)
+              && !/\.(?:pdf|csv|tsv|xlsx?|docx?|pptx?|zip|tar|gz|json|txt|md|html?)(?:[?#]|$)/i.test(href)
+              && !/\/(?:backend-api\/.*\/download|files\/[^/]+\/download)(?:[?#]|$)/i.test(href)) continue;
+            kind = "file";
+            label = (candidate.getAttribute("download") || candidate.textContent || "Download").replace(/\s+/g, " ").trim().slice(0, 240);
+            url = urlFor(href);
+          } else if (tag === "svg" || tag === "canvas") {
+            if (tag === "svg" && !candidate.matches('[role="img"], [aria-label], .mermaid svg') && !candidate.querySelector("title")) continue;
+            kind = "diagram";
+            label = labelFor(candidate, "Diagram preview");
+          } else continue;
+          if (!url) {
+            const key = `${kind}\0${label}`;
+            const count = (labelCounts.get(key) ?? 0) + 1;
+            labelCounts.set(key, count);
+            if (count > 1) label += ` (${count})`;
+          }
+          const item = { kind, label, ...(url ? { url } : {}) };
+          items.push(item);
+          if (items.length === 32) break;
+        }
+        return { sourceUrl, items };
+      };
+      // CHATGPT_RICH_OUTPUT_END
+      const richOutput = captureChatGptRichOutput(root, renderedRoots, location.href, candidate => (
+        selectChatGptAnswerRoots([candidate], streamingStatusContainers).answerRoots.includes(candidate)
+      ));
       // CHATGPT_MARKDOWN_CONTENT_BEGIN
       const chatGptMarkdownContent = (markdownRoot: HTMLElement): HTMLElement => {
         const content = markdownRoot.cloneNode(true) as HTMLElement;
@@ -4157,7 +4295,7 @@ export class ChatGptBrowserWorker {
         // Remove only interactive controls and nonportable embedded renderers.
         // Ordinary code blocks, surrounding prose and the original observed DOM remain intact.
         for (const widget of Array.from(content.querySelectorAll(
-          ".chart-widget-container, [data-code-block-preview-pane], button, script, style, svg, source",
+          ".chart-widget-container, [data-code-block-preview-pane], [data-artifact-id], [data-canvas-id], iframe, canvas, audio, video, button, script, style, svg, source",
         ))) widget.remove();
         return content;
       };
@@ -4177,7 +4315,7 @@ export class ChatGptBrowserWorker {
         "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr",
         "li", "main", "nav", "ol", "p", "pre", "section", "table", "ul",
       ]);
-      const markdownText = (element: HTMLElement): string => {
+      const markdownText = (element: HTMLElement, includeImageDescriptions = true): string => {
         // Detached content has no layout-derived innerText. Preserve textual line boundaries
         // explicitly: plain textContent would conflate "A<br>B" with "AB" in the guard.
         const parts: string[] = [];
@@ -4192,7 +4330,7 @@ export class ChatGptBrowserWorker {
           if (block) blockBoundary();
           if (tag === "br") parts.push("\n");
           if (tag === "img") {
-            parts.push(`[Image: ${node.getAttribute("alt")?.trim() || node.getAttribute("title")?.trim() || "Image"}]`);
+            if (includeImageDescriptions) parts.push(`[Image: ${node.getAttribute("alt")?.trim() || node.getAttribute("title")?.trim() || "Image"}]`);
             return;
           }
           node.childNodes.forEach(visit);
@@ -4250,7 +4388,8 @@ export class ChatGptBrowserWorker {
           });
         });
       };
-      renderedRoots.map(chatGptMarkdownContent).forEach((markdownRoot) => {
+      const markdownContents = renderedRoots.map(chatGptMarkdownContent);
+      markdownContents.forEach((markdownRoot) => {
         const children = [...markdownRoot.children] as HTMLElement[];
         const hasBlockChildren = children.some(child => blockMarkdownTags.has(child.tagName.toLowerCase()));
         if (!hasBlockChildren) {
@@ -4313,12 +4452,13 @@ export class ChatGptBrowserWorker {
         streamable: index < segments.length - 1,
       }));
       const rendered = renderedRoots.at(-1);
-      const completionAction = rendered
-        ? [...root.querySelectorAll<HTMLElement>(options.completionActionSelector)]
-          .filter(renderedInDom)
-          .find(candidate => !rendered.contains(candidate)
-            && Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING))
-        : undefined;
+      const completionAction = [...root.querySelectorAll<HTMLElement>(options.completionActionSelector)]
+        .filter(renderedInDom)
+        .find(candidate => rendered
+          ? !rendered.contains(candidate)
+            && Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING)
+          : richOutput.items.length > 0
+            && !candidate.closest('[data-streaming-response-status], [data-testid^="cot-v5"], .chart-widget-container, [data-code-block-preview-pane], [data-artifact-id], [data-canvas-id]'));
       const completionActionSet = new Set(completionAction ? [completionAction] : []);
       const candidates = new Map<HTMLElement, ChatGptVisibleTraceBlock["kind"]>();
       renderedRoots.forEach(candidate => candidates.set(candidate, "answer"));
@@ -4461,12 +4601,13 @@ export class ChatGptBrowserWorker {
         snapshot: {
           responsePresent: true,
           mutableProjection: root.hasAttribute("data-turn-key"),
-          visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
-          fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
+          visibleText: markdownContents.map(candidate => markdownText(candidate, false)).filter(Boolean).join("\n\n"),
+          fullHtml: markdownContents.map(candidate => candidate.innerHTML).join(""),
           markdownSegments,
           completionActionVisible: completionAction !== undefined,
           stoppedThinkingVisible,
           traceBlocks,
+          ...(richOutput.items.length ? { richOutput } : {}),
         },
       };
     }, {
@@ -4480,7 +4621,7 @@ export class ChatGptBrowserWorker {
       }
       return absentResponseDomSnapshot();
     }
-    const snapshot = observed.snapshot ?? cache?.snapshot ?? absentResponseDomSnapshot();
+    const snapshot: ChatGptResponseDomSnapshot = observed.snapshot ?? cache?.snapshot ?? absentResponseDomSnapshot();
     if (observed.snapshot && cache) {
       cache.key = observed.key;
       cache.snapshot = observed.snapshot;
@@ -4491,6 +4632,8 @@ export class ChatGptBrowserWorker {
     snapshot.traceBlocks = snapshot.traceBlocks
       .map(stripChatGptTraceControlSuffix)
       .filter(block => block.text.length > 0 && !isChatGptTraceControl(block));
+    snapshot.richOutput = normalizeChatGptRichOutput(snapshot.richOutput);
+    snapshot.richContentKey = snapshot.richOutput ? JSON.stringify(snapshot.richOutput) : undefined;
     return snapshot;
   }
 
@@ -5326,6 +5469,7 @@ export class ChatGptBrowserWorker {
             responsePresent: snapshot.responsePresent,
             running,
             currentText: snapshot.visibleText,
+            currentRichContent: snapshot.richContentKey,
             completionActionVisible: snapshot.completionActionVisible,
             externalProgressLive,
           });
@@ -5335,6 +5479,7 @@ export class ChatGptBrowserWorker {
             running,
             currentText: snapshot.visibleText,
             currentHtml: snapshot.fullHtml,
+            currentRichContent: snapshot.richContentKey,
             completionActionVisible: snapshot.completionActionVisible,
             externalToolCallsInFlight,
           });
@@ -5378,7 +5523,8 @@ export class ChatGptBrowserWorker {
                 return throwMarkdownConsistencyError(error);
               }
             })();
-            if (!final.markdown && snapshot.visibleText) {
+            if (!final.markdown && snapshot.visibleText
+              && (!snapshot.richOutput || snapshot.markdownSegments.some(segment => segment.text.trim()))) {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
             if (final.delta) emitMarkdownDelta(final.delta);
@@ -5391,6 +5537,7 @@ export class ChatGptBrowserWorker {
             } else {
               finalText = final.markdown;
             }
+            if (snapshot.richOutput) turn.onRichOutput?.(snapshot.richOutput);
             break;
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 60_000) {

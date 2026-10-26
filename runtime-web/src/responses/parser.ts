@@ -10,6 +10,7 @@ import type {
   CodexThinkingContent,
   CodexTool,
   CodexToolCall,
+  CanonicalToolResult,
 } from "../types";
 import { namespacedToolName } from "../types";
 import { responsesRequestSchema } from "./schema";
@@ -148,6 +149,9 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
     };
     if (t.strict !== undefined) tool.strict = t.strict as boolean;
     if (namespace) tool.namespace = namespace;
+    if (isObj(t.outputSchema)) tool.outputSchema = t.outputSchema;
+    if (isObj(t.annotations)) tool.annotations = t.annotations;
+    if (isObj(t._meta)) tool._meta = t._meta;
     out.push(tool);
   };
   const pushFreeform = (t: Record<string, unknown>) => {
@@ -165,6 +169,9 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
         required: ["input"],
       },
       freeform: true,
+      ...(isObj(t.outputSchema) ? { outputSchema: t.outputSchema } : {}),
+      ...(isObj(t.annotations) ? { annotations: t.annotations } : {}),
+      ...(isObj(t._meta) ? { _meta: t._meta } : {}),
     };
     out.push(tool);
   };
@@ -205,6 +212,9 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
           required: ["query"],
         }) as Record<string, unknown>,
         toolSearch: true,
+        ...(isObj(t.outputSchema) ? { outputSchema: t.outputSchema } : {}),
+        ...(isObj(t.annotations) ? { annotations: t.annotations } : {}),
+        ...(isObj(t._meta) ? { _meta: t._meta } : {}),
       });
     }
     else if (typeof t.name === "string" && t.type !== "web_search" && t.type !== "image_generation") {
@@ -227,13 +237,31 @@ function ensureAssistantPlaceholder(messages: CodexMessage[], modelId: string, n
   return placeholder;
 }
 
+function publicResourceUri(uri: string): string {
+  return uri.length > 4_096 || /^(?:data|blob):/i.test(uri.trimStart())
+    ? "[resource URI omitted]"
+    : uri;
+}
+
 /**
  * Tool-call output content. Preserves images (e.g. Codex `view_image` returns
  * `input_image` items): returns content parts when any image is present, else a plain joined string.
  * Never inlines an image_url as text (that would explode the token count).
  */
-function outputToToolResultContent(output: string | unknown[] | undefined): string | CodexContentPart[] {
+function outputToToolResultContent(output: unknown): string | CodexContentPart[] {
   if (typeof output === "string") return output;
+  if (isObj(output) && Array.isArray(output.content)) {
+    const content = outputToToolResultContent(output.content);
+    // structuredContent is public model/component data. Result _meta is component-only.
+    const structured = output.structuredContent !== undefined ? JSON.stringify(output.structuredContent) : undefined;
+    if (!structured) return content;
+    if (typeof content === "string") return content === structured ? content : [content, structured].filter(Boolean).join("\n");
+    return [...content, { type: "text", text: structured }];
+  }
+  if (isObj(output)) {
+    const { _meta: _componentOnly, ...publicValue } = output;
+    return JSON.stringify(publicValue);
+  }
   if (!Array.isArray(output)) return "";
   const parts: CodexContentPart[] = [];
   let hasImage = false;
@@ -246,6 +274,20 @@ function outputToToolResultContent(output: string | unknown[] | undefined): stri
     } else if (raw.type === "input_image" && typeof raw.image_url === "string") {
       parts.push({ type: "image", imageUrl: raw.image_url, ...(typeof raw.detail === "string" ? { detail: normalizeImageDetail(raw.detail) } : {}) });
       hasImage = true;
+    } else if (raw.type === "image" && typeof raw.data === "string" && typeof raw.mimeType === "string") {
+      parts.push({ type: "image", imageUrl: `data:${raw.mimeType};base64,${raw.data}` });
+      hasImage = true;
+    } else if (raw.type === "resource_link" && typeof raw.uri === "string") {
+      parts.push({ type: "text", text: `[resource: ${typeof raw.name === "string" ? `${raw.name.slice(0, 200)} — ` : ""}${publicResourceUri(raw.uri)}]` });
+    } else if (raw.type === "resource" && isObj(raw.resource)) {
+      const resource = raw.resource;
+      if (typeof resource.text === "string") parts.push({ type: "text", text: resource.text });
+      else if (typeof resource.uri === "string") parts.push({ type: "text", text: `[resource: ${publicResourceUri(resource.uri)}]` });
+    } else if (raw.type === "audio") {
+      parts.push({ type: "text", text: `[audio${typeof raw.mimeType === "string" ? `: ${raw.mimeType}` : ""}]` });
+    } else if (raw.type === "input_file") {
+      const ref = typeof raw.file_id === "string" ? raw.file_id : typeof raw.filename === "string" ? raw.filename : "?";
+      parts.push({ type: "text", text: `[file: ${ref}]` });
     } else if (raw.type === "encrypted_content") {
       // codex-rs FunctionCallOutputContentItem::EncryptedContent — opaque to routed models.
       parts.push({ type: "text", text: "[encrypted content omitted]" });
@@ -253,6 +295,40 @@ function outputToToolResultContent(output: string | unknown[] | undefined): stri
   }
   if (!hasImage) return parts.map(p => (p.type === "text" ? p.text : "")).join("");
   return parts;
+}
+
+function suppliedMcpResult(output: unknown): CanonicalToolResult | undefined {
+  if (Array.isArray(output)) {
+    const mcpTypes = new Set(["text", "image", "audio", "resource", "resource_link"]);
+    return output.length > 0 && output.every(part => isObj(part) && mcpTypes.has(String(part.type)))
+      ? { content: output }
+      : undefined;
+  }
+  if (!isObj(output)) return undefined;
+  if (output.content !== undefined && !Array.isArray(output.content)) {
+    throw new Error("MCP tool result content must be an array");
+  }
+  const envelopeKeys = new Set(["content", "structuredContent", "isError", "_meta"]);
+  const suppliedEnvelope = Array.isArray(output.content) || isObj(output.structuredContent)
+    || ((typeof output.isError === "boolean" || isObj(output._meta))
+      && Object.keys(output).every(key => envelopeKeys.has(key)));
+  if (!suppliedEnvelope) {
+    if (output._meta === undefined) return undefined;
+    // Unknown business fields stay public; component metadata still travels only to the MCP host.
+    const { _meta, ...publicValue } = output;
+    return {
+      content: [{ type: "text", text: JSON.stringify(publicValue) }],
+      structuredContent: publicValue,
+      ...(typeof output.isError === "boolean" ? { isError: output.isError } : {}),
+      _meta,
+    };
+  }
+  return {
+    content: Array.isArray(output.content) ? output.content : [],
+    ...(output.structuredContent !== undefined ? { structuredContent: output.structuredContent } : {}),
+    ...(typeof output.isError === "boolean" ? { isError: output.isError } : {}),
+    ...(output._meta !== undefined ? { _meta: output._meta } : {}),
+  };
 }
 
 /**
@@ -552,26 +628,32 @@ export function parseRequest(body: unknown): CodexParsedRequest {
 
       if (effectiveType === "function_call_output") {
         pendingReasoning.length = 0;
-        const output = item as { call_id: string; output?: string | unknown[] };
+        const output = item as { call_id: string; output?: unknown };
         const toolInfo = findToolById(messages, output.call_id);
+        const mcpResult = suppliedMcpResult(output.output);
         messages.push({
           role: "toolResult", toolCallId: output.call_id,
           toolName: toolInfo.name, toolNamespace: toolInfo.namespace,
-          content: outputToToolResultContent(output.output), isError: false, timestamp: now,
+          content: outputToToolResultContent(mcpResult ?? output.output),
+          ...(mcpResult ? { mcpResult } : {}),
+          isError: mcpResult?.isError === true, timestamp: now,
         });
         continue;
       }
 
       if (effectiveType === "custom_tool_call_output") {
         pendingReasoning.length = 0;
-        const output = item as { call_id: string; output: string | unknown[] };
+        const output = item as { call_id: string; output: unknown };
         const toolInfo = findToolById(messages, output.call_id);
+        const mcpResult = suppliedMcpResult(output.output);
         messages.push({
           role: "toolResult", toolCallId: output.call_id,
           toolName: toolInfo.name, toolNamespace: toolInfo.namespace,
           // Same payload shape as function_call_output (codex-rs FunctionCallOutputPayload):
           // string or content items — normalize arrays instead of leaking raw wire blocks.
-          content: outputToToolResultContent(output.output), isError: false, timestamp: now,
+          content: outputToToolResultContent(mcpResult ?? output.output),
+          ...(mcpResult ? { mcpResult } : {}),
+          isError: mcpResult?.isError === true, timestamp: now,
         });
       }
     }
