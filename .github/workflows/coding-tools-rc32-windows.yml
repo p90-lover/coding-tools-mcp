@@ -85,7 +85,7 @@ jobs:
           node --test desktop-electron/tests/agent-orchestrator-workflow.test.cjs 2>&1 | tee aiTemp/rc32-build/mission-tests.log
           bun run --cwd desktop-electron package:win 2>&1 | tee aiTemp/rc32-build/package.log
           shopt -s nullglob
-          installers=(desktop-electron/release/*.exe)
+          installers=(desktop-electron/artifacts/*.exe)
           if [ "${#installers[@]}" -eq 0 ]; then
             echo 'Installer is missing after package:win' >&2
             exit 1
