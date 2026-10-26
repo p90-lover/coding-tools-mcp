@@ -505,7 +505,9 @@ function partitionMultipartContext(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   };
-  for (let attempt = 0; allowFragments && !fits(weights); attempt += 1) {
+  // Ordinary turns retain whole-record packing unless a record exceeds every stage's capacity.
+  const oversizedRecord = weights.some(weight => weight.tokens > maxTokens || weight.chars > maxChars);
+  for (let attempt = 0; (allowFragments || oversizedRecord) && !fits(weights); attempt += 1) {
     if (attempt >= 128) impossible();
     const totalTokens = weights.reduce((sum, weight) => sum + weight.tokens, 0);
     const totalChars = weights.reduce((sum, weight) => sum + weight.chars, 0);
