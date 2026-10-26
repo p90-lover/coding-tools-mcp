@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const path = require("node:path");
 
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
@@ -131,8 +132,7 @@ function readState(filePath) {
   }
 }
 
-function writeState(filePath, state) {
-  if (!filePath) return;
+function serializeState(state) {
   const payload = {
     schemaVersion: SCHEMA_VERSION,
     tools: {
@@ -141,7 +141,38 @@ function writeState(filePath, state) {
     },
     events: trimJournal(state.events),
   };
-  writePrivateFileAtomic(filePath, `${JSON.stringify(payload)}\n`);
+  return `${JSON.stringify(payload)}\n`;
+}
+
+function writeState(filePath, state) {
+  if (!filePath) return;
+  writePrivateFileAtomic(filePath, serializeState(state));
+}
+
+const RENAME_RETRY_DELAYS_MS = [25, 50, 100, 250, 500];
+let temporarySequence = 0;
+
+/** writeState without holding the thread: a temp file, then a rename over the state file. */
+async function writeStateAsync(filePath, state) {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const temporary = `${filePath}.tmp-${process.pid}-${Date.now()}-${++temporarySequence}`;
+  try {
+    await fs.promises.writeFile(temporary, serializeState(state), { flag: "wx", mode: 0o600 });
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await fs.promises.rename(temporary, filePath);
+        return;
+      } catch (error) {
+        const delay = RENAME_RETRY_DELAYS_MS[attempt];
+        // Windows refuses a rename over a file another process has open for a moment.
+        if (process.platform !== "win32" || !["EBUSY", "EPERM", "EACCES"].includes(error?.code) || delay === undefined) throw error;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  } catch (error) {
+    await fs.promises.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function projectLongRun(toolState) {
@@ -173,8 +204,27 @@ function attachCpaCodexLongRun(inner, {
   let disposed = false;
   let lastKeepalivePersist = -Infinity;
 
+  // The state file is written from one queue, never on the thread: each synchronous save (an open
+  // and a rename on the busy hard disk) held the main process for about 0.6 s, every 10 minutes
+  // while CPA ran (profiled live on 0.8.25, 2026-10-27). The queue always writes the latest state,
+  // so an older save can never land after a newer one; saves asked for meanwhile become one.
+  let saving = null;
+  let unsaved = false;
   function persist() {
-    writeState(statePath, state);
+    if (!statePath) return;
+    unsaved = true;
+    saving ??= (async () => {
+      try {
+        while (unsaved) {
+          unsaved = false;
+          await writeStateAsync(statePath, state);
+        }
+      } catch (error) {
+        logger?.warn?.("cpa_long_run.state_not_saved", { message: error instanceof Error ? error.message : String(error) });
+      } finally {
+        saving = null;
+      }
+    })();
   }
 
   function record(toolId, event, extra = {}) {
@@ -433,6 +483,8 @@ function attachCpaCodexLongRun(inner, {
     copyCpaManagementKey: (...args) => inner.copyCpaManagementKey(...args),
     resume,
     dispose,
+    /** Resolves once every save asked for so far is on disk. */
+    settled: () => saving ?? Promise.resolve(),
     longRunState: () => ({
       schemaVersion: SCHEMA_VERSION,
       tools: {

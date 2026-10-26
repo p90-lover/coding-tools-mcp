@@ -152,6 +152,7 @@ test("supervisor reconnects after a crash, keeps desired run across durable stat
   await clock.flush(0);
   await clock.flush(1_000);
   assert.equal(calls.filter((entry) => entry[0] === "start").length, 2);
+  await first.settled();
   first.dispose();
 
   status = "offline";
@@ -233,11 +234,48 @@ test("healthy polls that change nothing do not rewrite the state file every time
   });
   await controller.start("cpa");
   await clock.flush(0);
+  await controller.settled();
   const settled = fs.readFileSync(statePath, "utf8");
   for (let poll = 0; poll < 3; poll++) await clock.flush(HEALTH_POLL_MS);
+  await controller.settled();
   assert.equal(fs.readFileSync(statePath, "utf8"), settled, "three quiet polls wrote nothing");
   assert.notEqual(controller.snapshot().tools[0].longRun.keptAliveAt, JSON.parse(settled).tools.cpa.keptAliveAt, "the live time still moves");
   for (let poll = 0; poll < 12; poll++) await clock.flush(HEALTH_POLL_MS);
+  await controller.settled();
   assert.notEqual(fs.readFileSync(statePath, "utf8"), settled, "the time on disk is refreshed now and then");
   controller.dispose();
+});
+
+test("the state file is saved off the calling thread, latest state last, however many saves pile up", async () => {
+  // A synchronous save (open + rename on the busy hard disk) held the main process ~0.6 s.
+  const clock = fakeClock();
+  const statePath = path.join(temporaryDirectory("coding-tools-long-run-async-"), "state.json");
+  const tool = { id: "cpa", status: "ready", pid: 9, originalChrome: true };
+  const inner = {
+    snapshot: () => ({ version: 1, tools: [tool] }), inspect: async () => tool,
+    start: async () => tool, stop: async () => tool, restart: async () => tool,
+    openEmbedded: async () => ({ tool, section: "dashboard", url: "", embedded: true }),
+    openExternalTool: async () => ({ tool, section: "dashboard", url: "", embedded: false }),
+    copyCpaManagementKey: () => ({ copied: true, length: 36 }), dispose() {},
+  };
+  const synchronous = [];
+  const watched = ["openSync", "writeFileSync", "renameSync"];
+  const originals = Object.fromEntries(watched.map((name) => [name, fs[name]]));
+  for (const name of watched) fs[name] = (...args) => { if (String(args[0]).startsWith(path.dirname(statePath))) synchronous.push(name); return originals[name](...args); };
+  try {
+    const controller = attachCpaCodexLongRun(inner, {
+      statePath, now: clock.now, setTimeoutFn: clock.setTimeoutFn, clearTimeoutFn: clock.clearTimeoutFn, resumeOnCreate: false,
+    });
+    await controller.start("cpa");
+    await controller.stop("cpa");
+    await controller.start("cpa");
+    await controller.settled();
+    assert.deepEqual(synchronous, []);
+    const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(saved.tools.cpa.desiredRunning, true, "the last change is the one on disk");
+    assert.deepEqual(fs.readdirSync(path.dirname(statePath)), ["state.json"], "no temp file left behind");
+    controller.dispose();
+  } finally {
+    Object.assign(fs, originals);
+  }
 });
