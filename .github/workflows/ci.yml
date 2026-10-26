@@ -91,7 +91,7 @@ jobs:
 
   rust-macos:
     name: Rust macOS — test and clippy
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-macos
