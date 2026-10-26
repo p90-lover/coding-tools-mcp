@@ -8,6 +8,8 @@ const test = require("node:test");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(desktopRoot, "..");
+const scratchRoot = path.join(repositoryRoot, "aiTemp");
+fs.mkdirSync(scratchRoot, { recursive: true });
 
 function file(relativePath) {
   return path.join(repositoryRoot, relativePath);
@@ -26,7 +28,7 @@ function requireFile(relativePath) {
 test("managed CPA keeps saved user settings and extra plugin registrations while replacing owned bindings", () => {
   const { runtimeConfiguration } = require("../electron/cpa-managed.cjs");
   const yaml = globalThis.Bun?.YAML ?? require("js-yaml");
-  const state = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "cpa-config-preserve-"));
+  const state = fs.mkdtempSync(path.join(scratchRoot, "cpa-config-preserve-"));
   try {
     fs.writeFileSync(path.join(state, "config.yaml"), JSON.stringify({
       host: "0.0.0.0", port: 9999, "auth-dir": "/old/auth", "api-keys": ["old-key"],
@@ -45,7 +47,8 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
     assert.equal(config.host, "127.0.0.1");
     assert.equal(config.port, 8317);
     assert.equal(config["auth-dir"], path.join(state, "auth"));
-    assert.deepEqual(config["api-keys"], ["p".repeat(36)]);
+    assert.equal(config["api-keys"], undefined);
+    assert.deepEqual(config.access["api-keys"], ["p".repeat(36)]);
     assert.equal(config["remote-management"]["allow-remote"], false);
     assert.equal(config["remote-management"]["secret-key"], "m".repeat(36));
     assert.equal(config["proxy-url"] ?? "", "", "a stale saved proxy cannot replace the managed route");
@@ -71,7 +74,7 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
 test("managed CPA writes no main.log and removes the ones an older build left", () => {
   const { runtimeConfiguration, removeOldMainLogs } = require("../electron/cpa-managed.cjs");
   const yaml = globalThis.Bun?.YAML ?? require("js-yaml");
-  const state = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "cpa-config-logs-"));
+  const state = fs.mkdtempSync(path.join(scratchRoot, "cpa-config-logs-"));
   try {
     const config = (yaml.parse ?? yaml.load)(runtimeConfiguration(state, "m".repeat(36), "p".repeat(36)));
     assert.equal(config["logging-to-file"], false);
@@ -91,7 +94,7 @@ test("managed CPA writes no main.log and removes the ones an older build left", 
 
 test("invalid saved CPA YAML is refused without replacing it or exposing its source", () => {
   const { runtimeConfiguration } = require("../electron/cpa-managed.cjs");
-  const state = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "cpa-config-invalid-"));
+  const state = fs.mkdtempSync(path.join(scratchRoot, "cpa-config-invalid-"));
   try {
     const target = path.join(state, "config.yaml");
     for (const source of ["api-keys: [PRIVATE_FIXTURE_SECRET", "- item", "plugins:\n  configs: []", "oauth: []"]) {
