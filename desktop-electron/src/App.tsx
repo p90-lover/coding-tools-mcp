@@ -2517,14 +2517,18 @@ function RtkSurface({ active, enabled, setError, updateState }: {
   );
 }
 
-/** One line per entry, "KEY=value" (env) or "Name: value" (headers); blank lines are skipped. */
+/**
+ * One line per entry, "KEY=value" (env) or "Name: value" (headers); blank lines are skipped. An env
+ * value is kept exactly as typed after "=" (" secret " stays padded); a header value is trimmed.
+ */
 function parsePairs(text: string, separator: "=" | ":", label: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [index, raw] of text.split(/\r?\n/).entries()) {
     if (!raw.trim()) continue;
     const at = raw.indexOf(separator);
     if (at <= 0) throw new Error(`${label} line ${index + 1} needs ${separator === "=" ? "NAME=value" : "Name: value"}`);
-    out[raw.slice(0, at).trim()] = raw.slice(at + 1).trim();
+    const value = raw.slice(at + 1);
+    out[raw.slice(0, at).trim()] = separator === "=" ? value : value.trim();
   }
   return out;
 }
