@@ -6,7 +6,7 @@ import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptDetachedTurnIdentity, chatGptAcceptedUserTurnCount, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, ChatGptFailedSendRetrier, CHATGPT_SEND_RETRY_AFTER_MS, CHATGPT_SEND_RETRY_GIVE_UP_MS, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_FILE_INPUT_SELECTOR, ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
-import { chatGptComposerPromptText, observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptComposerPromptText, chatGptConnectionInterruptedAlertVisible, observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -2711,6 +2711,53 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
     retryable: true,
   });
   expect(fixture.pressed).toEqual([]);
+});
+
+test("connection interruption requires visible error UI in the current response, never quoted or stale text", async () => {
+  const text = "Connection interrupted. Waiting for the complete answer";
+  const nodes = [
+    { turn: "user", role: "paragraph", text, visible: true },
+    { turn: "previous", role: "alert", text, visible: true },
+    { turn: "current", role: "paragraph", text, visible: true },
+    { turn: "current", role: "status", text, visible: false },
+  ];
+  const scope = {
+    locator: (selector: string) => {
+      expect(selector).toBe('[role="alert"], [role="status"]');
+      const locator = {
+        filter: ({ hasText }: { hasText: RegExp }) => {
+          const filtered = {
+            last: () => filtered,
+            isVisible: async () => nodes.filter(node => node.turn === "current"
+              && ["alert", "status"].includes(node.role) && hasText.test(node.text)).at(-1)?.visible === true,
+          };
+          return filtered;
+        },
+      };
+      return locator;
+    },
+  };
+  expect(await chatGptConnectionInterruptedAlertVisible(scope as never)).toBeFalse();
+  nodes[3]!.visible = true;
+  expect(await chatGptConnectionInterruptedAlertVisible(scope as never)).toBeTrue();
+  nodes[3]!.text = `A quoted error: ${text}`;
+  expect(await chatGptConnectionInterruptedAlertVisible(scope as never)).toBeFalse();
+});
+
+test("connection interruption waits for a quiet grace period and resets on tools, text, or banner recovery", () => {
+  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const state = { visible: true, currentText: "Working", externalProgressLive: false, externalToolCallsInFlight: false };
+  expect(tracker.connectionInterruptionReady(state, 1_000)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 1_749)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 1_750)).toBeTrue();
+  expect(tracker.connectionInterruptionReady({ ...state, externalToolCallsInFlight: true }, 100_000)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 100_001)).toBeFalse();
+  expect(tracker.connectionInterruptionReady({ ...state, externalProgressLive: true }, 100_751)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 100_752)).toBeFalse();
+  expect(tracker.connectionInterruptionReady({ ...state, currentText: "New progress" }, 101_502)).toBeFalse();
+  expect(tracker.connectionInterruptionReady({ ...state, visible: false }, 102_252)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 103_002)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 103_752)).toBeTrue();
 });
 
 test("the current response error action identifies short and localized failures without clicking Retry", async () => {

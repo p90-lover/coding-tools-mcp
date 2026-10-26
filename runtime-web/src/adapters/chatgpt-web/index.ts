@@ -1141,8 +1141,12 @@ export function createChatGptWebAdapter(
         const emitRoundEvent = (event: AdapterEvent): void => emitRoundEvents([event]);
         try {
           await session.runExclusive(async () => {
+            let replayed = false;
+            for (;;) {
+             try {
             const replay = session.roundEvents(roundKey);
-            replayEvents(replay, emit);
+            if (!replayed) replayEvents(replay, emit);
+            replayed = true;
             if (session.roundCompleted(roundKey)) {
               const failure = session.roundFailure(roundKey);
               if (failure) throw failure;
@@ -1221,7 +1225,7 @@ export function createChatGptWebAdapter(
                 for (const message of results) {
                   await broker.completeTool(turnToken, message.toolCallId, codexToolResultToBrokerResult(message));
                   session.runtime.externalProgress.recordToolResult();
-                  session.markResultDelivered(message.toolCallId);
+                  session.markResultDelivered(message.toolCallId, message);
                 }
               }
             } else if (session.outstanding().length > 0) {
@@ -1359,6 +1363,25 @@ export function createChatGptWebAdapter(
               }
             } finally {
               toolWaitAbort.abort();
+            }
+             } catch (error) {
+              if (!(error instanceof ChatGptWebAdapterError)
+                || error.code !== "chatgpt_connection_interrupted"
+                || incoming.abortSignal?.aborted) throw error;
+              const traces = session.runtime.trace.drain();
+              session.appendRoundReasoning(roundKey, traces.map(trace => trace.text));
+              emitRoundBatch(buffer => emitTraceEvents(traces, buffer));
+              if (!await session.recoverInterruptedBrowser(
+                parsed,
+                () => startRuntime(parsed, environment, traceId, turnCapabilities),
+                incoming.abortSignal,
+              )) throw error;
+              emitRoundBatch(buffer => {
+                buffer({ type: "assistant_boundary" });
+                buffer({ type: "text_delta", phase: "commentary", text: "Continuing this Codex task in a fresh ChatGPT conversation. Cleanup of its previous conversation was requested." });
+                buffer({ type: "assistant_boundary" });
+              });
+             }
             }
           });
         } catch (error) {
