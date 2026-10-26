@@ -2909,7 +2909,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // took one of the three places a check has while the other two were down (502), stalling the goal.
   const MODEL_GONE_MS = 6 * 3_600_000;
   const reviewerDown = new Map(); // model -> until
-  const reviewerFailed = (model, error) => reviewerDown.set(model, now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
+  // Any other failure may be the provider's, not the model's: seen live 2026-10-26, Cline Pass
+  // answered 502 for every model, and each goal check spent its three places on three of them.
+  const providerDown = new Map(); // "cline-pass" -> until
+  const modelProvider = model => /^([^/]+)\//.exec(String(model))?.[1] ?? "";
+  const reviewerFailed = (model, error) => {
+    reviewerDown.set(model, now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
+    if (error?.status !== 404 && modelProvider(model)) providerDown.set(modelProvider(model), now() + REVIEWER_DOWN_MS);
+  };
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
   // request goes to the person: one 502 from the card's model put a routine command in front of
   // them while the very next review answered.
@@ -4664,15 +4671,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * then Codex's own review model. None is billed to the person's Codex quota (codexQuotaModel):
    * these run unasked, and picking by name alone ("mini") chose a ChatGPT-account model. A model
    * that just failed waits REVIEWER_DOWN_MS, as for reviews, or MODEL_GONE_MS when it is not
-   * served at all (404).
+   * served at all (404), and the rest of a provider that just failed come after every model of a
+   * provider that did not. The first places go to different providers, so one provider's outage
+   * costs a call one failed request, not all three.
    */
   function freeModels(catalog, hidden = []) {
     const free = catalog.filter(model => !codexQuotaModel(model) && model !== AUTO_REVIEW_MODEL);
     const quick = free.filter(model => /haiku|flash|mini|lite|fast/i.test(model));
     const review = catalog.includes(AUTO_REVIEW_MODEL) || hidden.includes(AUTO_REVIEW_MODEL) ? [AUTO_REVIEW_MODEL] : [];
-    const up = model => !(reviewerDown.get(model) > now());
+    const rank = model => reviewerDown.get(model) > now() ? 2 : providerDown.get(modelProvider(model)) > now() ? 1 : 0;
     const order = [...new Set([...quick, ...free, ...review])];
-    return [...order.filter(up), ...order.filter(model => !up(model))].slice(0, 3);
+    const ranked = [0, 1, 2].flatMap(level => order.filter(model => rank(model) === level));
+    const providers = new Set();
+    // Provider diversity must not promote a benched provider over another healthy model.
+    const spread = ranked.filter(model => rank(model) === 0 && !providers.has(modelProvider(model)) && providers.add(modelProvider(model)));
+    return [...new Set([...spread, ...ranked])].slice(0, 3);
   }
   /** `judge`: "Let the model judge" is on, and `ended` says how the round ended when it did not finish. */
   async function checkGoal(goal, mission, { judge = false, ended = "" } = {}) {
