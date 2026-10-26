@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptDetachedTurnIdentity, chatGptAcceptedUserTurnCount, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptDetachedTurnIdentity, chatGptAcceptedUserTurnCount, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, ChatGptFailedSendRetrier, CHATGPT_SEND_RETRY_AFTER_MS, CHATGPT_SEND_RETRY_GIVE_UP_MS, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_FILE_INPUT_SELECTOR, ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptComposerPromptText, observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
@@ -2898,6 +2898,94 @@ test("terminal model errors are scoped to the new assistant turn instead of glob
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("throwIfChatGptTerminalErrorAlert(responseTurn.locator)");
   expect(workerSource).not.toContain("throwIfChatGptTerminalErrorAlert(page)");
+});
+
+function failedSendPage() {
+  const state = { shown: true, clicks: 0, selectors: [] as string[] };
+  const retry = {
+    last: () => retry,
+    isVisible: async () => state.shown,
+    click: async () => { state.clicks += 1; state.shown = false; },
+  };
+  const alert = {
+    last: () => alert,
+    isVisible: async () => state.shown,
+    innerText: async () => "Failed to fetch\nRetry",
+    getByRole: (role: string, options: { name: RegExp }) => {
+      expect(role).toBe("button");
+      expect(options.name.test("Retry")).toBe(true);
+      return retry;
+    },
+  };
+  const page = { locator: (selector: string) => { state.selectors.push(selector); return alert; } } as unknown as Page;
+  return { page, state };
+}
+
+test("a send ChatGPT could not make (\"Failed to fetch\") is retried with its own Retry, then fails retryably", async () => {
+  let now = 0;
+  const fixture = failedSendPage();
+  const retrier = new ChatGptFailedSendRetrier(() => now);
+  const attempts: number[] = [];
+  const onRetry = (attempt: number) => { attempts.push(attempt); };
+
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  now += CHATGPT_SEND_RETRY_AFTER_MS[0] - 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  expect(fixture.state.clicks).toBe(0);
+  now += 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  expect(fixture.state.clicks).toBe(1);
+  expect(attempts).toEqual([1]);
+  expect(fixture.state.selectors[0]).toBe("main aside[role=\"alert\"]");
+
+  // The resend is under way: no alert, nothing to do.
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(false);
+  // It failed again: the second press waits longer, counted from when the alert came back.
+  fixture.state.shown = true;
+  now += 60_000;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  now += CHATGPT_SEND_RETRY_AFTER_MS[1] - 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  expect(fixture.state.clicks).toBe(1);
+  now += 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  expect(fixture.state.clicks).toBe(2);
+  expect(retrier.retries).toBe(2);
+
+  // A third failure gets no more presses; the turn fails for the caller to retry.
+  fixture.state.shown = true;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  now += CHATGPT_SEND_RETRY_GIVE_UP_MS - 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  now += 1;
+  await expect(retrier.handle(fixture.page, onRetry)).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 502,
+    code: "chatgpt_send_failed",
+    retryable: true,
+  });
+  await expect(retrier.handle(fixture.page, onRetry)).rejects.toThrow(/"Failed to fetch".*failed 2 time/);
+  expect(fixture.state.clicks).toBe(2);
+});
+
+test("a failed-send alert that clears on its own restarts the wait before the next press", async () => {
+  let now = 0;
+  const fixture = failedSendPage();
+  const retrier = new ChatGptFailedSendRetrier(() => now);
+  expect(await retrier.handle(fixture.page)).toBe(true);
+  now += CHATGPT_SEND_RETRY_AFTER_MS[0] - 1;
+  fixture.state.shown = false;
+  expect(await retrier.handle(fixture.page)).toBe(false);
+  fixture.state.shown = true;
+  now += 1;
+  expect(await retrier.handle(fixture.page)).toBe(true);
+  expect(fixture.state.clicks).toBe(0);
+});
+
+test("both response waits check for a failed send instead of waiting on it forever", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource.match(/await failedSend\.handle\(page/g)?.length).toBe(2);
+  expect(workerSource).toContain("diagnostics.capture(page, `send-retry-${attempt}`)");
 });
 
 test("submission acceptance stops when its stage is aborted", async () => {
