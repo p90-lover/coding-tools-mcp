@@ -192,7 +192,7 @@ export function AgentOrchestratorComposerControls({
   const harness = harnesses.find(item => item.id === route.harness_id);
   const harnessName = harness?.label ?? harnessLabel(route.harness_id, harnesses);
   const capability = caps[route.model];
-  const { efforts, context, fullLimit, presets } = routeTuning(route, models === null ? undefined : capability);
+  const { efforts, context, fullLimit, presets, fixed } = routeTuning(route, models === null ? undefined : capability);
   // "auto" is always takeable: the model runs at its own effort and nothing is sent (aoLaunchArgs).
   const effortUnsupported = Boolean(route.effort && route.effort !== "auto" && efforts && !efforts.includes(route.effort));
   const levels = (efforts ?? []).filter(effort => effort !== "auto");
@@ -203,7 +203,7 @@ export function AgentOrchestratorComposerControls({
   // it once it knows the model's range, and so does picking a model. A model whose limit is not
   // known runs at the agent's own window, which the chip calls "Auto" like an unpicked effort.
   const startWindow = models === null ? null : defaultWindow(route, capability);
-  const shownWindow = route.context_window || startWindow || fullLimit;
+  const shownWindow = fixed || route.context_window || startWindow || fullLimit;
   const windowLabel = shownWindow ? contextText(shownWindow) : "Auto";
   // No "Default" effort either: unpicked, a model runs at its own effort, which the chip names
   // when the model's id carries it ("Gemini 3.8 Flash High" -> High) and otherwise calls "Auto".
@@ -337,8 +337,9 @@ export function AgentOrchestratorComposerControls({
           {effortUnsupported && levels.length ? <p className="ao-popup-muted" role="status">This model doesn't take {effortWord(route.effort)}. Pick another above.</p> : null}
         </div>}
       </ChipMenu>}
-      <ChipMenu heading="Context window" popupClass="ao-tuning-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context}
-        title={!context ? capability?.contextReason || "This agent's window cannot be set" : "How much of the conversation the agent keeps in view"}
+      {/* WebGPT's window is the Codex bridge's (ChatGPT's own limit): shown, locked. */}
+      <ChipMenu heading="Context window" popupClass="ao-tuning-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context || Boolean(fixed)}
+        title={fixed ? capability?.contextReason || "WebGPT's window is the Codex bridge's" : !context ? capability?.contextReason || "This agent's window cannot be set" : "How much of the conversation the agent keeps in view"}
         label={<span>{windowLabel}</span>}>
         {(close) => <div role="radiogroup" aria-label="Context windows">
           {[...new Set([...presets, ...(fullLimit ? [fullLimit] : [])])].sort((a, b) => a - b).map(tokens => <Option key={tokens}

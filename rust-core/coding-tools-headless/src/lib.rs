@@ -4342,7 +4342,13 @@ async fn ao_harness_connect(
     };
     // The card's tuning comes from its saved (and fingerprinted) route, never from the caller.
     connection.effort = node.route.effort.clone();
-    connection.context_window = node.route.context_window;
+    // A WebGPT card runs on the Codex bridge's window (its catalog's models.json): a saved one
+    // (200K picked on a 111K bridge, 2026-10-26) would tell Codex it holds more than ChatGPT does.
+    connection.context_window = if web_catalog.is_some() {
+        None
+    } else {
+        node.route.context_window
+    };
     let worker = match ao_connect_policy(&node, &connection, private_key.as_deref()) {
         Ok(worker) => worker,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, "AO_ROUTE_MISMATCH", error),

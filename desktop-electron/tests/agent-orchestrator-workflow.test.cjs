@@ -1038,6 +1038,35 @@ test("Native Codex offers ChatGPT's five effort tiers and every CPA pool model",
   assert.deepEqual((await offline.call("models", { harness: "codex-native" })).models, WEB);
 });
 
+test("WebGPT's tiers carry the Codex bridge's window, fixed, and it is read once per 10 minutes", async () => {
+  // The user: "on web gpt model, it should follow codexbridge max context window and lock it". The
+  // chip offered 4K–2M and a chat ran on 200K over a bridge that holds 111 193 tokens.
+  let clock = Date.parse("2026-10-26T09:00:00Z"), asked = 0, reply = { models: [{ slug: "chatgpt-web/high", context_window: 111193, max_context_window: 111193 }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => { throw new Error("no headless call expected"); },
+    cpaConnection: () => null, confirm: async () => true, now: () => clock,
+    findCodexExecutable: () => "C:/Codex/codex.exe",
+    webModelCatalog: async ({ executable, model }) => { asked += 1; assert.equal(executable, "C:/Codex/codex.exe"); assert.equal(model, "chatgpt-web/high"); return reply; },
+  });
+  const catalog = await workflow.call("models", { harness: "codex-native" });
+  for (const tier of ["chatgpt-web/light", "chatgpt-web/high", "chatgpt-web/pro"]) {
+    assert.equal(catalog.capabilities[tier].contextLimit, 111193, tier);
+    assert.deepEqual({ ...catalog.capabilities[tier].contextWindow }, { min: 111193, max: 111193, kind: "context", fixed: true }, tier);
+  }
+  await workflow.call("models", { harness: "codex-native" });
+  assert.equal(asked, 1, "kept, not asked on every menu open");
+  clock += 11 * 60_000;
+  reply = { models: [{ slug: "chatgpt-web/high", context_window: 90000 }] };
+  assert.equal((await workflow.call("models", { harness: "codex-native" })).capabilities["chatgpt-web/high"].contextLimit, 90000, "a later bridge window is taken");
+  // Unreadable: the tiers are still listed, without a window, and asked again a minute later.
+  clock += 11 * 60_000;
+  reply = { models: [] };
+  const unknown = await workflow.call("models", { harness: "codex-native" });
+  assert.ok(unknown.models.includes("chatgpt-web/high"));
+  assert.equal(unknown.capabilities["chatgpt-web/high"], undefined);
+  workflow.dispose();
+});
+
 test("WebGPT is offered only on Native Codex; AO harnesses get every other CPA model", async () => {
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },
