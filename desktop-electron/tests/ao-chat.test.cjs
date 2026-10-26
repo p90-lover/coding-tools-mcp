@@ -40,6 +40,30 @@ test("a DeepSeek model's work is grouped and worded as DeepSeek Harness does it"
   assert.equal(chat.dshItemDetail(item("command", { text: "npm test", description: "Check backend health" })), "Check backend health");
   assert.equal(chat.dshItemDetail(item("tool", { text: "read_file", input: JSON.stringify({ path: "src/app.ts" }) })), "src/app.ts");
   assert.equal(chat.dshItemDetail(item("command", { text: "x".repeat(400) })).length, 160, "bounded to 160 characters");
+  // process-activity.ts LIVE_TOOL_DETAIL_KEYS: title and description before the command or path.
+  assert.equal(chat.dshItemDetail(item("tool", { text: "Task", input: JSON.stringify({ prompt: "Look around", description: "Survey the repo" }) })), "Survey the repo");
+  assert.equal(chat.dshItemDetail(item("tool", { text: "update_goal", input: JSON.stringify({ objective: "Ship 0.9", status: "active" }) })), "Ship 0.9");
+  assert.equal(chat.dshItemDetail(item("tool", { text: "web_search", input: JSON.stringify({ queries: ["dsh releases", "dsh changelog"] }) })), "dsh releases, dsh changelog", "a list of strings joined");
+  assert.equal(chat.dshItemDetail(item("tool", { text: "ask_user_question", input: JSON.stringify({ questions: [{ header: "x" }, { question: "Which branch?" }] }) })), "Which branch?",
+    "the first question asked");
+  assert.equal(chat.dshItemDetail(item("tool", { text: "mcp__coding-tools__browser_open", input: JSON.stringify({ wait: true }) })), "browser_open", "no detail field: the tool's name");
+  assert.equal(chat.dshCommandText(item("command", { text: "npm test", description: "Check tests" })), "npm test");
+  assert.equal(chat.dshCommandText(item("tool", { text: "exec_command", input: JSON.stringify({ cmd: "npm test", description: "Check tests" }) })), "npm test");
+  assert.equal(chat.dshCommandText(item("tool", { input: JSON.stringify({ command: "x".repeat(400), description: "Long command" }) })).length, 400);
+  assert.equal(chat.dshCommandText(item("tool", { input: "raw command" })), "raw command");
+  assert.equal(chat.dshCommandText(item("tool", { text: "exec_command", input: "null" })), "null");
+  // terminalExitLabel: only a settled, failed command with a status it can read.
+  assert.equal(chat.dshExitLabel(item("command", { status: "failed", output: "Exit code 2\nboom" })), "exit code 2", "Claude Code's status line");
+  assert.equal(chat.dshExitLabel(item("tool", { status: "failed", text: "exec_command", output: "Exit code: 127\nWall time: 0.1 seconds" })), "exit code 127", "Codex's");
+  assert.equal(chat.dshExitLabel(item("tool", { status: "failed", text: "exec_command", output: "Process exited with code 1" })), "exit code 1");
+  assert.equal(chat.dshExitLabel(item("command", { status: "failed", output: "out\n[killed by signal: SIGTERM]" })), "signal SIGTERM");
+  assert.equal(chat.dshExitLabel(item("command", { status: "failed", output: "out\n[exit code: null]" })), "no exit code");
+  assert.equal(chat.dshExitLabel(item("command", { status: "failed", output: "spawn ENOENT" })), null, "no code invented");
+  assert.equal(chat.dshExitLabel(item("command", { status: "completed", output: "Exit code 1" })), null, "only a failure");
+  assert.equal(chat.dshExitLabel(item("tool", { status: "failed", text: "read_file", output: "Exit code 1" })), null, "only a command");
+  // A closed group's icon is its most-called kind of work.
+  assert.equal(chat.dshGroupActivity([read, item("command"), item("command")]), "commands");
+  assert.equal(chat.dshGroupActivity([item("reasoning")]), "thinking");
 });
 
 test("a sent message splits back into its text and its attachments, for cards and thumbnails", () => {
@@ -103,8 +127,10 @@ test("queued annotated messages join into one block numbered across both, and a 
 test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek Harness's", () => {
   const item = (kind, extra = {}) => ({ id: `${kind}${Math.random()}`, kind, status: "completed", text: "", ...extra });
   assert.equal(chat.dshLiveTitle([item("reasoning", { text: "x" }), item("command", { status: "running", text: "npm test" })]).label, "Running commands · npm test");
-  assert.equal(chat.dshLiveTitle([item("command"), item("reasoning", { text: "First idea.\n\n**Second** idea" })]).label,
-    "Analyzing the request · Second idea", "no call running: the latest thought's last paragraph, ** dropped");
+  assert.equal(chat.dshLiveTitle([item("command"), item("reasoning", { status: "running", text: "First idea.\n\n**Second** idea" })]).label,
+    "Analyzing the request · Second idea", "no call running: the streaming thought's last paragraph, ** dropped");
+  assert.equal(chat.dshLiveTitle([item("command"), item("reasoning", { text: "A settled thought" })]).label, "Analyzing the request",
+    "a settled thought adds nothing (liveReasoningDetail reads running reasoning only)");
   // A request nobody answered holds the turn; it said "Running commands" for 85 minutes.
   const waiting = chat.dshLiveTitle([item("command", { status: "running", text: "Invoke-RestMethod :7411" }), item("approval", { status: "pending", text: "PowerShell" })]);
   assert.deepEqual(plain(waiting), { activity: "questions", label: "Waiting for approval · Invoke-RestMethod :7411" });
@@ -987,6 +1013,27 @@ function rendererCallback(file, name, globals) {
   return exports.callback;
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
+
+test("an unsent split chat can switch projects and finish choosing its new chat", () => {
+  const paneWanted = { current: { workspaceId: "old-project", taskId: "" } };
+  const state = { workspaceId: "old-project", taskId: null };
+  const pendingSelect = { current: null };
+  const choose = rendererCallback("AgentOrchestratorSurface.tsx", "chooseWorkspace", {
+    pane: { workspaceId: "old-project", taskId: "" }, paneWanted, pendingSelect,
+    switchTarget: { current: "" },
+    switchToWorkspace: id => { state.workspaceId = id; state.taskId = null; },
+  });
+  choose("new-project");
+  const decide = rendererCallback("AgentOrchestratorSurface.tsx", "effect:const wanted = paneWanted.current", {
+    chatTaskId: null, workspaceId: state.workspaceId, loadedWorkspace: "new-project",
+    board: { tasks: [] }, boardWorkspace: { current: "new-project" }, paneWanted, pendingSelect,
+    missions: [], taskLifecycle: [], chatSeed: { workspaceId: "new-project", text: "Keep my draft" },
+    chatList: chat.chatList, setChatTaskId: id => { state.taskId = id; }, setView() {}, setSelectedRunId() {},
+  });
+  decide();
+  assert.equal(state.taskId, "", "the pane resolves its new chat so it can accept input and notify its parent");
+  assert.equal(paneWanted.current.workspaceId, "new-project");
+});
 
 function workspaceRecovery({ hidden = false, selected = "p3" } = {}) {
   let isHidden = hidden, timerId = 0;

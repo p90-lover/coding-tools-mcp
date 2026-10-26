@@ -107,7 +107,8 @@ test("an adopted CPA with a stale config gets the current config written; an ide
   const configPath = path.join(state, "config.yaml");
   const stale = yaml.load(runtimeConfiguration(state, "m".repeat(40), "p".repeat(40)));
   delete stale.payload;
-  fs.writeFileSync(configPath, yaml.dump({ ...stale, routing: { strategy: "fill-first" } }));
+  const providers = { claude: [{ name: "fixture-anthropic", keys: [{ "api-key": "sk-ant-fixture" }] }] };
+  fs.writeFileSync(configPath, yaml.dump({ ...stale, "api-keys": providers, routing: { strategy: "fill-first" } }));
   const before = fs.statSync(configPath, { bigint: true });
 
   let respawned = 0;
@@ -119,7 +120,8 @@ test("an adopted CPA with a stale config gets the current config written; an ide
 
   const written = yaml.load(fs.readFileSync(configPath, "utf8"));
   assert.deepEqual(written.payload.default[0].params, { "reasoning.summary": "auto" });
-  assert.deepEqual(written["api-keys"], [proxyApiKey]);
+  assert.deepEqual(written.access["api-keys"], [proxyApiKey]);
+  assert.deepEqual(written["api-keys"], providers, "v8 upstream providers survive an app update");
   assert.equal(written["remote-management"]["secret-key"], managementKey);
   assert.equal(written["proxy-url"], "socks5://127.0.0.1:1080");
   assert.deepEqual(written.routing, { strategy: "fill-first" }, "user settings survive");

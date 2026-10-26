@@ -45,6 +45,7 @@ describe("fixed ChatGPT Web model routes", () => {
       ["chatgpt-web/pro", "ultra", "max"],
     ]);
     expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web — Instant");
+    expect(CHATGPT_WEB_MODEL_ROUTES.find(route => route.slug === "chatgpt-web/high")?.displayName).toBe("ChatGPT Web High");
   });
 
   test("lists every Sol tier and runs Pro-only tiers at High without the Pro capability", () => {

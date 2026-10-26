@@ -327,7 +327,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
   {
     slug: "chatgpt-web/high",
-    displayName: "ChatGPT Web — High",
+    displayName: "ChatGPT Web High",
     description: "ChatGPT Web High through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,

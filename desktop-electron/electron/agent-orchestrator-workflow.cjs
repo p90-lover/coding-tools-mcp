@@ -222,41 +222,57 @@ function aoWebCatalogForModel(catalog, model) {
 
 const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
 const REVIEW_SCRIPT_BYTES = 4000;
+// Each name a command mentions costs a disk lookup; a grep listing a dozen .ts files is not a script.
+const REVIEW_SCRIPT_LOOKUPS = 6;
+// The excerpts only help the reviewer, so a slow disk does not hold the review up past this.
+const REVIEW_SCRIPT_BUDGET_MS = 2_000;
 /**
  * The local scripts a tool request runs, read for the command reviewer. It saw only the command
  * line, so "run start-nova.ps1" came back "ask" every time and the person had to answer. Only
  * files whose real path is inside the request's working folder are read (a command cannot point
  * the reviewer at files elsewhere), at most two, the first 4 KB of each.
+ *
+ * Read asynchronously, within REVIEW_SCRIPT_BUDGET_MS: it ran synchronously on the main process for
+ * every review (about 200 an hour), and on the full hard disk that holds the app's data a lookup
+ * took 0.6 s on average and up to 7 s (seen live 2026-10-24), freezing every window meanwhile.
+ * What was read by the deadline is used.
  */
-function reviewScriptExcerpts(approval, sessionFolder = null) {
+async function reviewScriptExcerpts(approval, sessionFolder = null, { files = fs.promises, budgetMs = REVIEW_SCRIPT_BUDGET_MS } = {}) {
   let input = {};
   try { input = typeof approval?.toolInput === "string" ? JSON.parse(approval.toolInput) : (approval?.toolInput ?? {}); } catch {}
   // A request that names no working folder runs in the agent's session folder.
   const folder = [approval?.cwd, input?.workdir, input?.cwd, input?.project_root, sessionFolder]
     .find((value) => typeof value === "string" && path.isAbsolute(value));
   if (!folder) return [];
-  let root;
-  try { root = fs.realpathSync.native(folder); } catch { return []; }
   const text = [approval?.command, input?.cmd, input?.command].filter((value) => typeof value === "string").join(" ");
+  const tokens = [...new Set(text.match(REVIEW_SCRIPT) ?? [])].slice(0, REVIEW_SCRIPT_LOOKUPS);
+  if (!tokens.length) return [];
   const excerpts = [];
-  for (const token of [...new Set(text.match(REVIEW_SCRIPT) ?? [])]) {
-    if (excerpts.length >= 2) break;
-    let real;
-    try { real = fs.realpathSync.native(path.resolve(root, token)); } catch { continue; }
-    const relative = path.relative(root, real);
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
-    try {
-      const stat = fs.statSync(real);
-      if (!stat.isFile()) continue;
-      const handle = fs.openSync(real, "r");
+  const read = async () => {
+    let root;
+    try { root = await files.realpath(folder); } catch { return; }
+    for (const token of tokens) {
+      if (excerpts.length >= 2) return;
+      let real;
+      try { real = await files.realpath(path.resolve(root, token)); } catch { continue; }
+      const relative = path.relative(root, real);
+      if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
       try {
-        const buffer = Buffer.alloc(Math.min(stat.size, REVIEW_SCRIPT_BYTES));
-        const read = fs.readSync(handle, buffer, 0, buffer.length, 0);
-        excerpts.push({ file: relative, text: buffer.subarray(0, read).toString("utf8"), truncated: stat.size > REVIEW_SCRIPT_BYTES });
-      } finally { fs.closeSync(handle); }
-    } catch {}
-  }
-  return excerpts;
+        const handle = await files.open(real, "r");
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile()) continue;
+          const buffer = Buffer.alloc(Math.min(stat.size, REVIEW_SCRIPT_BYTES));
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+          excerpts.push({ file: relative, text: buffer.subarray(0, bytesRead).toString("utf8"), truncated: stat.size > REVIEW_SCRIPT_BYTES });
+        } finally { await handle.close(); }
+      } catch {}
+    }
+  };
+  let timer = null;
+  const deadline = new Promise((resolve) => { timer = setTimeout(resolve, budgetMs); timer.unref?.(); });
+  try { await Promise.race([read(), deadline]); } finally { clearTimeout(timer); }
+  return excerpts.slice();
 }
 
 function delayToMilliseconds(value, unit) {
@@ -931,21 +947,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       : "This harness/model has no verified reasoning-effort transport.";
     const limit = info?.contextLimit;
     if (Number.isSafeInteger(limit) && limit > 0) capabilities.contextLimit = limit;
-    const base = model.split("(")[0].trim().toLowerCase();
-    const claudeFixedWindow = agent === "claude-code"
-      && (!base || ["default", "sonnet", "opus", "haiku", "fable"].includes(base) || model.toLowerCase().includes("claude") || model.toLowerCase().includes("[1m]"));
     const slash = model.indexOf("/");
     const unqualifiedOpenCode = agent === "opencode" && !viaCpa
       && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
-    // agy's gateway variables carry no window, so it takes no context-window setting.
-    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !claudeFixedWindow && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+    // agy's gateway variables carry no window, so it takes no context-window setting. Claude Code
+    // takes one for every model, Claude ones included (their picker was off): AO declares a CPA
+    // alias's window and has a model Claude Code recognizes compact at it, capped at its own.
+    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
         : "The provider did not report this model's limit, so 2M (the client's ceiling) is unverified.";
-    } else capabilities.contextReason = claudeFixedWindow
-      ? "Claude Code cannot override this recognized model's window while preserving compaction."
-      : unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
+    } else capabilities.contextReason = unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
       : "This harness/model has no verified context-window setter.";
     return capabilities;
   }
@@ -2969,7 +2982,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const deadline = now() + REVIEW_BUDGET_MS;
     const [folder, task, evidence] = await Promise.all([requestFolder(approval, mission), requestTask(mission), requestEvidence(approval)]);
-    const scripts = reviewScriptExcerpts(approval, folder);
+    const scripts = await reviewScriptExcerpts(approval, folder);
     const request = describeRequest(approval);
     // A shell command is reviewed as its bare command line, which leaves out the agent's own
     // description of it ("Kill uvicorn backend process tree").
@@ -4367,7 +4380,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
   }
 
-  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
+  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind } = {}) {
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -4375,6 +4388,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const text = objective ? goalMessage(objective, 1) : asked;
     const naming = objective ?? asked;
     if (!text.trim()) throw new Error("Type a message to start the chat");
+    if (rewind !== undefined && (!taskId || !rewind || !Number.isSafeInteger(rewind.index) || rewind.index < 0
+      || typeof rewind.description !== "string" || goal !== undefined)) throw new Error("Choose a message to rewind in this chat");
     // Compacting the chat cannot make room for one message over the board's byte limit by itself.
     if (utf8Bytes(text) > BOARD_TEXT_BYTES) {
       throw new Error(`This message is ${utf8Bytes(text).toLocaleString("en-US")} bytes; a chat message can be at most ${BOARD_TEXT_BYTES.toLocaleString("en-US")}. Shorten it or send it in parts.`);
@@ -4425,6 +4440,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let continuation = null;
     // The follow-up as written to the chat, and the chat as it was before (withdrawFollowUp).
     let followUp = null;
+    let rewindBefore;
     if (taskId) {
       task = clean(taskId, 128);
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
@@ -4433,8 +4449,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The session keeps the permission mode, effort and context it was started with, so only an
       // unchanged route continues it; any change starts a fresh session with the new settings. A Team
       // follow-up has no single route and never continues the single card's session.
-      const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
+      const live = rewind || freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
       if (live) continuation = { session: live.receipt.thread_id, text };
+      if (rewind && (chatWorking(id, task, saved.runs)
+        || chatEdits.visible(id, saved.runs.filter(run => run.project_id === task)).some(run => !runSettled(run)))) {
+        throw new Error("Stop the chat before rewinding a message");
+      }
       try {
         await retireOpenRuns(id, task, saved.runs);
       } catch (error) {
@@ -4443,9 +4463,34 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       let detail = await board({ workspaceId: id, taskId: task });
       if (!detail.task) throw new Error("This chat's task no longer exists");
+      let rewoundDescription = null;
+      let discarded = [];
+      if (rewind) {
+        const before = String(detail.task.description || "");
+        if (before !== rewind.description) throw new Error("The chat changed before rewind; reload it and try again");
+        const marker = /\n\nFollow-up \(([^)]+) UTC\):\n/g;
+        const marks = [...before.matchAll(marker)];
+        const bodies = before.split(new RegExp(marker.source)).filter((_, index) => index % 2 === 0);
+        if (!bodies[0].trim() || rewind.index >= bodies.length) throw new Error("That message is no longer in this chat; reload it");
+        const selected = bodies[rewind.index].split(/\n\n↳ Steer \(([^)]+) UTC\): /)[0].trim();
+        if (text !== boardText(clean(selected, 8192, false))) throw new Error("The selected message changed before rewind; reload it");
+        const shown = chatEdits.visible(id, saved.runs.filter(run => run.project_id === task));
+        const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id);
+        if (roots.length !== bodies.length) throw new Error("This chat's messages are still synchronizing; reload before rewind");
+        const hidden = new Set(roots.slice(rewind.index).map(run => run.id));
+        for (let size = -1; size !== hidden.size;) {
+          size = hidden.size;
+          for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
+        }
+        discarded = [...hidden];
+        rewoundDescription = rewind.index === 0 ? text
+          : `${before.slice(0, marks[rewind.index - 1].index)}\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
+        rewindBefore = chatEdits.get(id, task);
+      }
       const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
-      let description = extended();
+      let description = rewoundDescription ?? extended();
+      if (rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This rewind exceeds the chat size limit; shorten the conversation first");
       if (utf8Bytes(description) > BOARD_TEXT_BYTES) {
         // A long chat compacts itself, as Codex does, instead of stopping at the size limit: the
         // earlier conversation becomes a handoff summary (what /compact does) and the chat goes on.
@@ -4460,6 +4505,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
       followUp = { before: saidBefore, description };
+      if (rewind) {
+        try { chatEdits.deleteMessage(id, task, discarded); }
+        catch (error) {
+          await withdrawFollowUp(id, task, runsBefore, followUp);
+          chatEdits.restore(id, task, rewindBefore);
+          throw error;
+        }
+      }
     } else {
       const before = await board({ workspaceId: id });
       const known = new Set(before.tasks.map((entry) => entry.id));
@@ -4478,6 +4531,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true));
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
+      if (rewind && followUp) {
+        const detail = await board({ workspaceId: id, taskId: task });
+        if (detail.task?.description === followUp.before) chatEdits.restore(id, task, rewindBefore);
+      }
       throw error;
     }
     // After a deleted message this run started without the old session; later follow-ups continue its own.

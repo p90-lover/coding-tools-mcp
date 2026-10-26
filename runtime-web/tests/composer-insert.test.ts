@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { insertPlainTextIntoComposer } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, insertPlainTextIntoComposer } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_CONNECTOR_NAME } from "../src/config";
 
 /**
  * The composer insert runs inside the page, where the caret state is whatever the last UI
@@ -101,4 +102,54 @@ test("reports a genuinely rejected edit as a failure", () => {
   });
 
   expect(insertPlainTextIntoComposer(composer, "staged part")).toBeFalse();
+});
+
+test("an already-selected connector replaces a failed draft before attaching the next full context", async () => {
+  // Seen in a stopped native chat: 276925 old characters + one separator +138312 new characters
+  // produced 415238 observed characters. Both contexts shared their first137768 characters, so
+  // the strict checker correctly rejected them instead of submitting accumulated instructions.
+  const common = "S".repeat(137_768);
+  let draft = common + "A".repeat(276_925 - common.length);
+  const prompt = common + "B".repeat(138_312 - common.length);
+  let connectorSelected = true;
+  let inserted = "";
+  let verified = "";
+  const composer = {
+    fill: async (value: string) => { draft = value; connectorSelected = false; },
+    focus: async () => {},
+    pressSequentially: async (value: string) => { draft += value; },
+    press: async (key: string) => {
+      if (key === "Enter") { connectorSelected = true; draft = ""; }
+    },
+  };
+  const appResult = { waitFor: async () => {}, count: async () => 1, getAttribute: async () => "" };
+  const menuRows = { filter: () => appResult };
+  const page = { url: () => "https://chatgpt.com/c/owned-regression", locator: () => menuRows, getByText: () => ({}) };
+  const prototype = ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown): Promise<unknown>;
+    attachPrompt(page: unknown, text: string, localTools: boolean): Promise<void>;
+  };
+  const worker = {
+    config: { appName: CHATGPT_CONNECTOR_NAME },
+    activeComposer: async () => composer,
+    connectorIsSelected: async () => connectorSelected,
+    selectedConnectorControl: () => ({ waitFor: async () => {} }),
+    attachedPromptText: async () => draft.trimStart(),
+    selectConnector: prototype.selectConnector,
+    clearChatGptComposerState: async () => { draft = ""; connectorSelected = false; },
+    insertPromptText: async (_page: unknown, value: string) => { inserted = value; draft += value; },
+    assertPromptAttached: async (_page: unknown, expected: string) => {
+      verified = draft.trimStart();
+      if (verified !== expected) {
+        throw new ChatGptPromptAttachmentIntegrityError(
+          `Controlled readback mismatch: expectedChars=${expected.length}, actualChars=${verified.length}`,
+        );
+      }
+    },
+  };
+
+  await expect(prototype.attachPrompt.call(worker, page, prompt, true)).resolves.toBeUndefined();
+  expect(inserted.trimStart()).toBe(prompt);
+  expect(verified).toBe(prompt);
+  expect(connectorSelected).toBeTrue();
 });

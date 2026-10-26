@@ -60,8 +60,10 @@ test("nested inventory preserves supplied schemas and labels unavailable schemas
     const [request] = await broker.nextToolBatch(token);
     const emitted: string[] = [];
     const schema = { type: "object", properties: { tab: { type: "string" } }, required: ["tab"] };
+    const metadata = { outputSchema: { type: "object" }, annotations: { readOnlyHint: true },
+      _meta: { "openai/outputTemplate": "ui://browser/screenshot" } };
     const registry = [
-      { name: "mcp__browser__screenshot", description: "Browser screenshot", inputSchema: schema },
+      { name: "mcp__browser__screenshot", description: "Browser screenshot", inputSchema: schema, ...metadata },
       { name: "mcp__browser__snapshot", description: "Browser screenshot", parameters: undefined },
     ];
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
@@ -69,7 +71,7 @@ test("nested inventory preserves supplied schemas and labels unavailable schemas
     broker.completeTool(token, request!.callId, { content: [{ type: "text", text: emitted[0] }] });
     const result = await pending;
     expect(result.structuredContent).toMatchObject({ total: 2, tools: [
-      { wire_name: registry[0]!.name, schema_available: true, parameters: schema },
+      { wire_name: registry[0]!.name, schema_available: true, parameters: schema, ...metadata },
       { wire_name: registry[1]!.name, schema_available: false },
     ] });
   });

@@ -521,6 +521,7 @@ export function ChatThreadList(props: ThreadListProps) {
   const projectMenu = (item: ThreadWorkspace): ChatMenuItem[] => {
     const current = item.id === workspaceId;
     return [
+      { label: "New chat", icon: "plus", run: () => actions.newChatIn(item.id) },
       { label: props.pinnedProjects.includes(item.id) ? "Unpin" : "Pin", icon: "pin", run: () => props.toggleProjectPin(item.id) },
       { label: "Edit", icon: "edit", run: () => actions.editProject(item.id) },
       { label: "New section…", icon: "section", run: () => setNaming({ name: "" }) },
@@ -737,9 +738,9 @@ export function ChatThreadList(props: ThreadListProps) {
   const projectsDrag: DragList = { list: "projects", order: projectOrder.map((item) => item.id), save: saveProjectOrder };
   return (
     <aside className="cx-threads" aria-label="Projects and chats" onDragOver={listDragOver} onDrop={listDrop}>
-      {/* Claude Code's top row: a round "+" before its label (df-new-circle). */}
+      {/* The Codex sidebar uses the compose glyph for New chat. */}
       <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat} title="New chat (Ctrl+N)">
-        <span className="cx-new-circle" aria-hidden="true"><ChatGlyph name="plus" size={16} /></span>New chat
+        <span className="cx-new-circle" aria-hidden="true"><ChatGlyph name="compose" size={16} /></span>New chat
       </button>
       <nav className="cx-thread-scroll">
         {pinnedChats.length ? <section className="cx-thread-group">
@@ -796,10 +797,11 @@ export function ChatThreadList(props: ThreadListProps) {
                     {git?.warn ? <span className="cx-project-tag is-warn" title={git.line}>{git.tag}</span> : null}
                     {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
                   </button>
-                  {/* Its one hover action, as Claude Code's: a new chat in this folder. The rest is on right-click. */}
+                  {/* Codex's project options are available by both click and right-click. */}
                   <span className="cx-project-hover">
-                    <button type="button" aria-label={`New chat in ${item.name}`} title={`New chat in ${item.name}`} onClick={() => actions.newChatIn(item.id)}>
-                      <ChatGlyph name="plus" size={16} /></button>
+                    <button type="button" aria-label={`More options for ${item.name}`} title={`More options for ${item.name}`}
+                      onClick={(event) => openMenu(event, projectMenu(item), item.name)}>
+                      <ChatGlyph name="more" size={16} /></button>
                   </span>
                 </div>
                 {open && !current ? <ul>{otherRows(item.id)}</ul> : null}

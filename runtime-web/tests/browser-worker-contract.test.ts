@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptDetachedTurnIdentity, chatGptAcceptedUserTurnCount, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptDetachedTurnIdentity, chatGptAcceptedUserTurnCount, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, ChatGptFailedSendRetrier, CHATGPT_SEND_RETRY_AFTER_MS, CHATGPT_SEND_RETRY_GIVE_UP_MS, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_FILE_INPUT_SELECTOR, ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
-import { chatGptComposerPromptText, observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptComposerPromptText, chatGptConnectionInterruptedAlertVisible, observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -461,7 +461,7 @@ test("compaction retry submission evidence cannot make prompt-stage settlement u
       clock: { suspendedMs(): number },
       awaitAbortedActionSettlement: boolean,
     ): Promise<T>;
-    attachPromptWithCompactionRetry(
+    attachPromptWithIntegrityRetry(
       page: unknown,
       prompt: string,
       localTools: boolean,
@@ -486,7 +486,7 @@ test("compaction retry submission evidence cannot make prompt-stage settlement u
     "trace_compaction_retry_timeout",
     "prompt_attachment",
     10,
-    signal => prototype.attachPromptWithCompactionRetry.call(
+    signal => prototype.attachPromptWithIntegrityRetry.call(
       fixture,
       page,
       "prompt",
@@ -1174,9 +1174,9 @@ test("plain-text editing command fails closed when the focused composer rejects 
     .rejects.toThrow("rejected the plain-text editing command");
 });
 
-test("compaction prompt attachment retries once only before submission evidence", async () => {
+test("prompt attachment retries once before submission evidence, including normal turns", async () => {
   const attachWithRetry = (ChatGptBrowserWorker.prototype as unknown as {
-    attachPromptWithCompactionRetry(
+    attachPromptWithIntegrityRetry(
       page: unknown,
       prompt: string,
       localTools: boolean,
@@ -1184,7 +1184,7 @@ test("compaction prompt attachment retries once only before submission evidence"
       baseline: unknown,
       captureDiagnostic?: (checkpoint: string) => Promise<void>,
     ): Promise<void>;
-  }).attachPromptWithCompactionRetry;
+  }).attachPromptWithIntegrityRetry;
   const baseline = {
     userTurns: {},
     responseTurns: {},
@@ -1203,7 +1203,7 @@ test("compaction prompt attachment retries once only before submission evidence"
       }
     },
     currentSubmissionEvidence: async () => undefined,
-    resetCompactionComposerForRetry: async () => { resets += 1; },
+    resetPromptComposerForRetry: async () => { resets += 1; },
   }, {}, "compact prompt", false, true, baseline, async checkpoint => { checkpoints.push(checkpoint); });
 
   expect(attempts).toBe(2);
@@ -1217,20 +1217,41 @@ test("compaction prompt attachment retries once only before submission evidence"
       throw new ChatGptPromptAttachmentIntegrityError("composer cleared");
     },
     currentSubmissionEvidence: async () => "user_turn",
-    resetCompactionComposerForRetry: async () => { throw new Error("must not reset"); },
+    resetPromptComposerForRetry: async () => { throw new Error("must not reset"); },
   }, {}, "compact prompt", false, true, baseline)).rejects.toThrow(
-    "ChatGPT changed while the compaction prompt was being prepared",
+    "ChatGPT changed while the prompt was being prepared",
   );
   expect(duplicateAttempts).toBe(1);
 
   let normalAttempts = 0;
+  let normalResets = 0;
   await expect(attachWithRetry.call({
     attachPrompt: async () => {
       normalAttempts += 1;
       throw new ChatGptPromptAttachmentIntegrityError("composer cleared");
     },
+    currentSubmissionEvidence: async () => undefined,
+    resetPromptComposerForRetry: async () => { normalResets += 1; },
   }, {}, "normal prompt", false, false, baseline)).rejects.toThrow("composer cleared");
-  expect(normalAttempts).toBe(1);
+  expect(normalAttempts).toBe(2);
+  expect(normalResets).toBe(1);
+
+  let recoveredAttempts = 0;
+  let recoveredResets = 0;
+  await expect(attachWithRetry.call({
+    attachPrompt: async () => {
+      if (++recoveredAttempts === 1) throw new ChatGptPromptAttachmentIntegrityError("stale draft");
+    },
+    currentSubmissionEvidence: async () => undefined,
+    resetPromptComposerForRetry: async () => { recoveredResets += 1; },
+  }, {}, "normal prompt", true, false, baseline)).resolves.toBeUndefined();
+  expect(recoveredAttempts).toBe(2);
+  expect(recoveredResets).toBe(1);
+
+  await expect(attachWithRetry.call({
+    attachPrompt: async () => { throw new Error("other attachment failure"); },
+    currentSubmissionEvidence: async () => { throw new Error("must not inspect"); },
+  }, {}, "normal prompt", false, false, baseline)).rejects.toThrow("other attachment failure");
 });
 
 test("prompt insertion stops before touching the composer when its stage is already aborted", async () => {
@@ -1431,6 +1452,7 @@ for (const saved of [false, true]) test(`repeated connector verification reuses 
     config: { appName: "Codex Native2 DEV" },
     activeComposer: async () => selectedComposer,
     connectorIsSelected: async () => true,
+    attachedPromptText: async () => "",
   }, page, async checkpoint => { checkpoints.push(checkpoint); })).resolves.toBe(selectedComposer);
 
   expect(fillCalls).toBe(0);
@@ -2691,6 +2713,53 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
   expect(fixture.pressed).toEqual([]);
 });
 
+test("connection interruption requires visible error UI in the current response, never quoted or stale text", async () => {
+  const text = "Connection interrupted. Waiting for the complete answer";
+  const nodes = [
+    { turn: "user", role: "paragraph", text, visible: true },
+    { turn: "previous", role: "alert", text, visible: true },
+    { turn: "current", role: "paragraph", text, visible: true },
+    { turn: "current", role: "status", text, visible: false },
+  ];
+  const scope = {
+    locator: (selector: string) => {
+      expect(selector).toBe('[role="alert"], [role="status"]');
+      const locator = {
+        filter: ({ hasText }: { hasText: RegExp }) => {
+          const filtered = {
+            last: () => filtered,
+            isVisible: async () => nodes.filter(node => node.turn === "current"
+              && ["alert", "status"].includes(node.role) && hasText.test(node.text)).at(-1)?.visible === true,
+          };
+          return filtered;
+        },
+      };
+      return locator;
+    },
+  };
+  expect(await chatGptConnectionInterruptedAlertVisible(scope as never)).toBeFalse();
+  nodes[3]!.visible = true;
+  expect(await chatGptConnectionInterruptedAlertVisible(scope as never)).toBeTrue();
+  nodes[3]!.text = `A quoted error: ${text}`;
+  expect(await chatGptConnectionInterruptedAlertVisible(scope as never)).toBeFalse();
+});
+
+test("connection interruption waits for a quiet grace period and resets on tools, text, or banner recovery", () => {
+  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const state = { visible: true, currentText: "Working", externalProgressLive: false, externalToolCallsInFlight: false };
+  expect(tracker.connectionInterruptionReady(state, 1_000)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 1_749)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 1_750)).toBeTrue();
+  expect(tracker.connectionInterruptionReady({ ...state, externalToolCallsInFlight: true }, 100_000)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 100_001)).toBeFalse();
+  expect(tracker.connectionInterruptionReady({ ...state, externalProgressLive: true }, 100_751)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 100_752)).toBeFalse();
+  expect(tracker.connectionInterruptionReady({ ...state, currentText: "New progress" }, 101_502)).toBeFalse();
+  expect(tracker.connectionInterruptionReady({ ...state, visible: false }, 102_252)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 103_002)).toBeFalse();
+  expect(tracker.connectionInterruptionReady(state, 103_752)).toBeTrue();
+});
+
 test("the current response error action identifies short and localized failures without clicking Retry", async () => {
   for (const text of [
     "An error occurred while generating the response.",
@@ -2876,6 +2945,94 @@ test("terminal model errors are scoped to the new assistant turn instead of glob
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("throwIfChatGptTerminalErrorAlert(responseTurn.locator)");
   expect(workerSource).not.toContain("throwIfChatGptTerminalErrorAlert(page)");
+});
+
+function failedSendPage() {
+  const state = { shown: true, clicks: 0, selectors: [] as string[] };
+  const retry = {
+    last: () => retry,
+    isVisible: async () => state.shown,
+    click: async () => { state.clicks += 1; state.shown = false; },
+  };
+  const alert = {
+    last: () => alert,
+    isVisible: async () => state.shown,
+    innerText: async () => "Failed to fetch\nRetry",
+    getByRole: (role: string, options: { name: RegExp }) => {
+      expect(role).toBe("button");
+      expect(options.name.test("Retry")).toBe(true);
+      return retry;
+    },
+  };
+  const page = { locator: (selector: string) => { state.selectors.push(selector); return alert; } } as unknown as Page;
+  return { page, state };
+}
+
+test("a send ChatGPT could not make (\"Failed to fetch\") is retried with its own Retry, then fails retryably", async () => {
+  let now = 0;
+  const fixture = failedSendPage();
+  const retrier = new ChatGptFailedSendRetrier(() => now);
+  const attempts: number[] = [];
+  const onRetry = (attempt: number) => { attempts.push(attempt); };
+
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  now += CHATGPT_SEND_RETRY_AFTER_MS[0] - 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  expect(fixture.state.clicks).toBe(0);
+  now += 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  expect(fixture.state.clicks).toBe(1);
+  expect(attempts).toEqual([1]);
+  expect(fixture.state.selectors[0]).toBe("main aside[role=\"alert\"]");
+
+  // The resend is under way: no alert, nothing to do.
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(false);
+  // It failed again: the second press waits longer, counted from when the alert came back.
+  fixture.state.shown = true;
+  now += 60_000;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  now += CHATGPT_SEND_RETRY_AFTER_MS[1] - 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  expect(fixture.state.clicks).toBe(1);
+  now += 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  expect(fixture.state.clicks).toBe(2);
+  expect(retrier.retries).toBe(2);
+
+  // A third failure gets no more presses; the turn fails for the caller to retry.
+  fixture.state.shown = true;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  now += CHATGPT_SEND_RETRY_GIVE_UP_MS - 1;
+  expect(await retrier.handle(fixture.page, onRetry)).toBe(true);
+  now += 1;
+  await expect(retrier.handle(fixture.page, onRetry)).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 502,
+    code: "chatgpt_send_failed",
+    retryable: true,
+  });
+  await expect(retrier.handle(fixture.page, onRetry)).rejects.toThrow(/"Failed to fetch".*failed 2 time/);
+  expect(fixture.state.clicks).toBe(2);
+});
+
+test("a failed-send alert that clears on its own restarts the wait before the next press", async () => {
+  let now = 0;
+  const fixture = failedSendPage();
+  const retrier = new ChatGptFailedSendRetrier(() => now);
+  expect(await retrier.handle(fixture.page)).toBe(true);
+  now += CHATGPT_SEND_RETRY_AFTER_MS[0] - 1;
+  fixture.state.shown = false;
+  expect(await retrier.handle(fixture.page)).toBe(false);
+  fixture.state.shown = true;
+  now += 1;
+  expect(await retrier.handle(fixture.page)).toBe(true);
+  expect(fixture.state.clicks).toBe(0);
+});
+
+test("both response waits check for a failed send instead of waiting on it forever", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource.match(/await failedSend\.handle\(page/g)?.length).toBe(2);
+  expect(workerSource).toContain("diagnostics.capture(page, `send-retry-${attempt}`)");
 });
 
 test("submission acceptance stops when its stage is aborted", async () => {

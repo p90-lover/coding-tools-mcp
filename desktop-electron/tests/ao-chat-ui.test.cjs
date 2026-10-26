@@ -44,7 +44,21 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
-test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving while it runs, Completed once it ends", () => {
+test("a project switch keeps its chat pane readable while loading and offers Retry after a failed read", () => {
+  const props = { runs: [], tasks: [], selectedTaskId: "", deciding: true, busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},
+    onRetryProject() {} };
+  const loading = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  assert.match(loading, /Opening project/);
+  assert.match(loading, /Loading project chats/);
+  assert.doesNotMatch(loading, /Retry loading/);
+  const failed = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, projectLoadError: "Request failed" }));
+  assert.match(failed, /Couldn&#x27;t load project/);
+  assert.match(failed, /Couldn&#x27;t load chats: Request failed/);
+  assert.match(failed, /Retry loading/);
+});
+
+test("a DeepSeek turn renders as DeepSeek Desktop's Standard view: a live group heading and Deep diving while it runs, Completed once it ends", () => {
   const timeline = [
     { id: "r1", kind: "reasoning", status: "completed", text: "**Let me check health.**\nThen the configs." },
     { id: "c1", kind: "command", status: "completed", text: "curl /healthz", description: "Check backend health", output: "ok" },
@@ -56,22 +70,45 @@ test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving w
   const turn = { key: "k", runId: "run", steps: [step], status: "running", solo: false, startedAtMs: Date.now() - 64_000 };
   const useWork = (item) => item.working?.timeline ?? null;
   const running = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: false, useWork }));
-  assert.match(running, /dsh-title">Think<\/span><span class="dsh-sep"[^>]*><\/span><span class="dsh-summary">Let me check health\.<\/span>/, "a Think row with its first line, ** dropped");
-  assert.match(running, />Bash<\/span><span class="dsh-sep"[^>]*><\/span><span class="dsh-summary">Check backend health</, "a Bash row with the agent's words");
-  assert.match(running, />Edit<\/span>.*src\/_recovery_state\.py.*\+28<\/span> <span class="is-del">-0</, "an Edit row with its path and totals");
-  assert.match(running, /dsh-row-text dsh-shimmer"><span class="dsh-title">Read<\/span>.*README\.md/, "the running call shimmers");
+  assert.match(running, /data-process-activity="read"[^>]*>.*dsh-group-label dsh-shimmer">Reading files · README\.md</, "the running group reads what its newest call does, and shimmers");
+  assert.doesNotMatch(running, /dsh-title">Think</, "its rows stay folded under the heading (group bodies start collapsed)");
   assert.match(running, /Deep diving for 1m [45]s ···/, "the running status, with its clock");
-  assert.doesNotMatch(running, /dsh-group-title|dsh-turn-process/, "a running turn stays flat, without a Completed header");
+  assert.doesNotMatch(running, /dsh-turn-process/, "no Completed header while it runs");
+  // A reply closes the group before it: that one reads what it did, the one after it what it is doing.
+  const replied = [timeline[0], timeline[1], { id: "m1", kind: "message", status: "completed", text: "Health is fine." }, timeline[3]];
+  const split = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: { ...turn, steps: [{ ...step, working: { ...step.working, timeline: replied } }] }, live: true, expanded: false, useWork }));
+  assert.match(split, /data-process-activity="commands"[^>]*>.*dsh-group-label">Ran commands<\/span>.*Health is fine\..*dsh-group-label dsh-shimmer">Reading files · README\.md</);
   // The same turn, seen ending: it took 1m 4s. A turn ended before the chat saw it says only "Completed".
   const settled = (key) => ({ ...turn, key, status: "done", steps: [{ ...step, state: "finished", working: undefined, hasWork: true }] });
   const doneWork = () => timeline.map((item) => ({ ...item, status: "completed" }));
   const done = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("k"), live: false, expanded: true, useWork: doneWork }));
   assert.match(done, /dsh-turn-process-label">Completed in <span class="dsh-num">1m [45]s<\/span>/, "a turn seen ending is headed with its time");
   assert.match(done, /dsh-group-label">Ran commands, edited files, read files</, "its work grouped under the kinds it did");
-  assert.doesNotMatch(done, /Deep diving/);
+  assert.doesNotMatch(done, /Deep diving|dsh-shimmer/);
   const earlier = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("older"), live: false, expanded: false, useWork: doneWork }));
   assert.match(earlier, /dsh-turn-process-label">Completed<\/span>/, "an earlier turn says Completed");
   assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
+});
+
+test("a DeepSeek group's rows read as DeepSeek Harness's: Think, Bash, Edit, and a failed command's exit capsule", () => {
+  const row = (item) => renderToStaticMarkup(React.createElement(dsh.DshItem, { item }));
+  assert.match(row({ id: "r1", kind: "reasoning", status: "completed", text: "**Let me check health.**\nThen the configs." }),
+    /dsh-title">Think<\/span><span class="dsh-sep"[^>]*><\/span><span class="dsh-summary">Let me check health\.<\/span>/, "a Think row with its first line, ** dropped");
+  assert.match(row({ id: "r2", kind: "reasoning", status: "running", text: "Checking.\n\nStill" }), /data-state="running"/, "a streaming thought fades at its right edge (data-state running)");
+  assert.match(row({ id: "c1", kind: "command", status: "completed", text: "curl /healthz", description: "Check backend health", output: "ok" }),
+    />Bash<\/span><span class="dsh-sep"[^>]*><\/span><span class="dsh-summary">Check backend health</, "a Bash row with the agent's words");
+  assert.match(row({ id: "e1", kind: "edit", status: "completed", text: "", files: [{ path: "src/_recovery_state.py", additions: 28, deletions: 0, diff: "+a" }] }),
+    />Edit<\/span>.*src\/_recovery_state\.py.*\+28<\/span> <span class="is-del">-0</, "an Edit row with its path and totals");
+  assert.match(row({ id: "t1", kind: "tool", status: "running", text: "mcp__coding-tools__read_file", input: JSON.stringify({ path: "README.md" }) }),
+    /dsh-row-text dsh-shimmer"><span class="dsh-title">Read<\/span>.*README\.md/, "the running call shimmers");
+  // bash-sample.tsx: a failed command with an exit status keeps its own words and adds the neutral capsule.
+  const failed = row({ id: "c2", kind: "command", status: "failed", text: "npm test", description: "Run the tests", output: "Exit code 1\nnpm ERR! Test failed." });
+  assert.match(failed, /dsh-summary">Run the tests<\/span><span class="dsh-exit"><span class="dsh-exit-dot" aria-hidden="true"><\/span>exit code 1<\/span>/);
+  assert.match(failed, /data-state="error"/, "the row is still a failure");
+  const unnumbered = row({ id: "c3", kind: "command", status: "failed", text: "npm test", description: "Run the tests", output: "spawn npm ENOENT" });
+  assert.match(unnumbered, /dsh-summary is-error">spawn npm ENOENT</, "a failure with no exit status keeps its red error line");
+  assert.doesNotMatch(unnumbered, /dsh-exit/, "and no code is invented");
+  assert.match(row({ id: "c4", kind: "command", status: "cancelled", text: "npm test", description: "Run the tests" }), /dsh-summary is-stopped">Stopped</, "a stopped command says Stopped");
 });
 
 test("a retried single DeepSeek card shows its earlier attempt above the attempt now", () => {
@@ -615,7 +652,7 @@ test("in split view the pet keeps to its box's top edge and leaps to another pan
   const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
   const act = source.slice(source.indexOf("const act = () =>"), source.indexOf("const wander = () =>"));
   assert.doesNotMatch(act, /hop\(/, "no leap to another pane on a whim");
-  assert.match(source, /const spot = split \? onTop\(current, target\) : target;/, "its strolls stay on the top edge");
+  assert.match(source, /const spot = split \|\| working \? onTop\(current, target\) : target;/, "its strolls stay on the top edge");
 });
 
 test("a walking pet reads no layout per frame and is redrawn at most 60 times a second", () => {
@@ -629,6 +666,9 @@ test("a walking pet reads no layout per frame and is redrawn at most 60 times a 
   assert.match(step, /blocked\(atNow\.current, rects, box\)/);
   assert.match(step, /if \(arrived \|\| now - shown >= 1000 \/ WALK_FPS\) \{ shown = now; setAt\(atNow\.current\); \}/);
   assert.match(source, /const WALK_FPS = 60;/);
+  // Asking for a frame every refresh costs one even when nothing draws: the step waits out its interval.
+  assert.match(step, /const wait = shown \+ 1000 \/ WALK_FPS - now;[\s\S]*walkTimer\.current = window\.setTimeout\(/);
+  assert.match(source, /const stopWalking = \(\) => \{[\s\S]*?window\.clearTimeout\(walkTimer\.current\);/, "stopping cancels a waiting step too");
 });
 
 test("a reviewer keeps every earlier cycle, oldest first and folded, not only the last review", () => {

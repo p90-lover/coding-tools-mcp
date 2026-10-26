@@ -674,7 +674,9 @@ test("a /goal continuation sends Codex's goal instruction as the prompt and says
     { role: "user", content: goal, timestamp: 2 },
   ] } };
   const plain = compileChatGptWebPrompt(goalTurn, capabilities, token, { plainPrompt: true });
-  expect(plain.text).toBe(`${goal}\n\n(turn_token ${token} — pass it to Codex tools; call update_goal through codex_tool_call)`);
+  expect(plain.text.startsWith(`${goal}\n\n`)).toBe(true);
+  expect(plain.text).toContain("The latest native Codex /goal objective is authoritative.");
+  expect(plain.text.endsWith(`\n\n(turn_token ${token} — pass it to Codex tools; call update_goal through codex_tool_call)`)).toBe(true);
   // Other Codex blocks in the user role are still left out, and an ordinary prompt's line is unchanged.
   const page = compileChatGptWebPrompt({ ...goalTurn, context: { messages: [
     { role: "user", content: "<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>", timestamp: 1 },

@@ -25,6 +25,8 @@ const KEEP_BUNDLES = 3;
 
 // The backend JavaScript closure. Each file may require only Node built-ins and files here.
 const BACKEND_MODULES = Object.freeze([
+  "atomic-file.cjs",
+  "ipc-schema.cjs",
   "agent-orchestrator-gateway.cjs",
   "agent-orchestrator-accounting.cjs",
   "agent-orchestrator-upstream.cjs",
@@ -223,15 +225,21 @@ function createBackendBundles({
     if (incomingTimer) return;
     incomingTimer = setInterval(async () => {
       if (applying) return;
+      // Listed asynchronously: this runs every few seconds while the app is open, and a synchronous
+      // listing held the main process (every window) for as long as the app's disk took to answer,
+      // up to seconds on a busy hard disk. `applying` also keeps a slow listing from overlapping
+      // the next tick's.
+      applying = true;
       let ready;
       try {
-        ready = fs.readdirSync(incomingRoot, { withFileTypes: true })
-          .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(incomingRoot, entry.name, READY_MARKER)));
+        const folders = (await fs.promises.readdir(incomingRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+        const marked = await Promise.all(folders.map((entry) =>
+          fs.promises.access(path.join(incomingRoot, entry.name, READY_MARKER)).then(() => true, () => false)));
+        ready = folders.filter((_, index) => marked[index]);
       } catch {
-        return;
+        ready = [];
       }
-      if (!ready.length) return;
-      applying = true;
+      if (!ready.length) { applying = false; return; }
       const source = path.join(incomingRoot, ready[0].name);
       try {
         const manifest = install(source);

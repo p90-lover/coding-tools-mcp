@@ -4,15 +4,17 @@
  * Copyright (c) 2026 DeepSeek). Its rows, groups, icons and words are ported as they are:
  * - every thought is its own "Think" row with its first line, opening on the whole thought;
  * - each tool call is a 24px row, "Bash · <what it does>", "Read · <path>", "Edit · <path> +3 -1";
- * - while the turn runs its rows stand flat, with "Deep diving for 1m 4s ···" under them;
- * - once it ends, "Completed in 1m 4s" heads it and folds its work, grouped as "Ran commands,
- *   read files" runs between the replies.
+ * - thinking and calls run together into groups between the replies, folded under one heading:
+ *   "Running commands · npm test" while the group runs (Desktop's Standard view), "Ran commands,
+ *   read files" once a reply follows it or the turn ends;
+ * - "Deep diving for 1m 4s ···" sits under a running turn; once it ends, "Completed in 1m 4s"
+ *   heads it and folds its work.
  */
-import { useContext, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, ToolImages } from "./ChatToolParts";
 import {
-  dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
+  dshActivity, dshCommandText, dshDuration, dshExitLabel, dshGroupActivity, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
   steerReader, steerReceipts, tidyTimeline, withoutReplied, cpaRefusalNote, waitsForPerson, type ChatLiveItem, type ChatStep, type ChatTurn, type CpaRefusal,
   type DshActivity, type SteerReceipt,
 } from "./ao-chat";
@@ -49,12 +51,38 @@ const ICON = {
   </>),
   down: glyph(<path d="M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6" stroke="currentColor" />),
   up: glyph(<path d="M12 10L8.70711 6.70711C8.31658 6.31658 7.68342 6.31658 7.29289 6.70711L4 10" stroke="currentColor" />),
+  globe: glyph(<>
+    <path d="M7.99986 14.0887C11.3626 14.0887 14.0886 11.3627 14.0886 7.99998C14.0886 4.63727 11.3626 1.91125 7.99986 1.91125C4.63715 1.91125 1.91113 4.63727 1.91113 7.99998C1.91113 11.3627 4.63715 14.0887 7.99986 14.0887Z" stroke="currentColor" />
+    <path d="M2.34619 8H13.6538" stroke="currentColor" strokeLinecap="square" />
+    <path d="M7.99976 14.0889C9.23509 14.0889 10.1743 11.3629 10.1743 8.00006C10.1743 4.63739 9.23509 1.91138 7.99976 1.91138" stroke="currentColor" />
+    <path d="M7.99973 14.0889C6.76445 14.0889 5.8252 11.3629 5.8252 8.00006C5.8252 4.63739 6.76445 1.91138 7.99973 1.91138" stroke="currentColor" />
+  </>),
+  question: glyph(<>
+    <path d="M8 14.5C11.5899 14.5 14.5 11.5899 14.5 8C14.5 4.41015 11.5899 1.5 8 1.5C4.41015 1.5 1.5 4.41015 1.5 8C1.5 11.5899 4.41015 14.5 8 14.5Z" stroke="currentColor" />
+    <path d="M5.75 6.69646C5.75 6.29865 5.88196 5.90976 6.12919 5.57899C6.37643 5.24821 6.72783 4.99041 7.13896 4.83817C7.5501 4.68593 8.0025 4.6461 8.43895 4.72371C8.87541 4.80132 9.27632 4.99289 9.59099 5.27419C9.90566 5.55549 10.12 5.91388 10.2068 6.30406C10.2936 6.69423 10.249 7.09866 10.0787 7.4662C9.90843 7.83373 9.62004 8.14787 9.25003 8.36889C9.19476 8.4019 9.13803 8.43262 9.08004 8.46099C8.52566 8.73217 8 9.20817 8 9.82532" stroke="currentColor" />
+    <path d="M8 10.7416V11.7416" stroke="currentColor" />
+  </>),
+  plan: glyph(<>
+    <path d="M4.9375 5.90295H11.0625" stroke="currentColor" /><path d="M4.9375 9.02991H8.27841" stroke="currentColor" />
+    <path d="M12.5 1.32617C13.3039 1.32617 14 1.95171 14 2.77637V7.61328L13 8.68164V2.77637C13 2.55186 12.8007 2.32617 12.5 2.32617H3.5C3.1993 2.32617 3 2.55186 3 2.77637V13.2246C3.00044 13.4489 3.19963 13.6738 3.5 13.6738H8.32812L7.39258 14.6738H3.5C2.69637 14.6738 2.00042 14.0489 2 13.2246V2.77637C2 1.95171 2.69613 1.32617 3.5 1.32617H12.5Z" fill="currentColor" />
+    <path d="M8.97212 14.3693C9.17511 14.5723 9.37811 14.7753 9.5811 14.9783C9.67012 14.8953 9.75914 14.8123 9.84815 14.7293C11.4505 13.2352 13.0528 11.7411 14.6551 10.247C14.7441 10.164 14.8331 10.081 14.9221 9.99803C14.5989 9.6748 14.2756 9.35157 13.9524 9.02834C13.8694 9.11736 13.7864 9.20637 13.7034 9.29539C12.2093 10.8977 10.7152 12.5 9.22113 14.1023C9.13813 14.1913 9.05513 14.2803 8.97212 14.3693Z" fill="currentColor" />
+    <path d="M11.6323 13.7841C11.6323 14.0395 11.6323 14.295 11.6323 14.5504C11.6812 14.5523 11.7301 14.5543 11.779 14.5562C12.659 14.5913 13.539 14.6263 14.419 14.6614C14.4679 14.6633 14.5168 14.6653 14.5657 14.6672C14.5657 14.3339 14.5657 14.0006 14.5657 13.6672C14.5168 13.6692 14.4679 13.6711 14.419 13.6731C13.539 13.7081 12.659 13.7432 11.779 13.7783C11.7301 13.7802 11.6812 13.7821 11.6323 13.7841Z" fill="currentColor" />
+  </>),
+  agent: glyph(<>
+    <path d="M6.51867 12.3282C7.29816 12.6011 8.16475 12.6514 9.02269 12.4216C9.57879 12.2726 10.0784 12.0185 10.5087 11.6888C10.7819 12.0555 11.1606 12.3304 11.5913 12.4805C10.9688 13.029 10.2149 13.4478 9.35911 13.6771C8.13946 14.0038 6.90632 13.8971 5.82126 13.4533C6.15821 13.1562 6.4021 12.7652 6.51867 12.3282ZM9.17629 2.89409C11.1101 3.34433 12.739 4.81872 13.2889 6.87043C13.4219 7.3665 13.4811 7.8649 13.4774 8.35466C13.0924 8.13213 12.6422 8.01837 12.1741 8.05276L12.1711 8.05257C12.1539 7.77199 12.109 7.48889 12.0334 7.20684C11.6363 5.72533 10.5048 4.6372 9.13549 4.22844C9.25559 3.87667 9.29214 3.49087 9.22309 3.09892C9.2108 3.02922 9.19451 2.96108 9.17629 2.89409ZM4.7311 3.89107L4.78302 4.11879C4.87648 4.4488 5.04146 4.74263 5.25579 4.98896C3.98078 6.01355 3.35848 7.72904 3.8089 9.41059C3.81828 9.44559 3.82866 9.48025 3.83885 9.51479C3.38217 9.61268 2.98548 9.84137 2.68107 10.1556C2.63414 10.022 2.5897 9.88632 2.55244 9.74726C1.93301 7.43489 2.86717 5.07173 4.71504 3.76697L4.7311 3.89107Z" fill="currentColor" />
+    <path d="M7.99136 5.28105C8.87501 5.28105 9.59136 4.56471 9.59136 3.68105C9.59136 2.7974 8.87501 2.08105 7.99136 2.08105C7.1077 2.08105 6.39136 2.7974 6.39136 3.68105C6.39136 4.56471 7.1077 5.28105 7.99136 5.28105Z" stroke="currentColor" />
+    <path d="M3.94009 12.9417C4.82374 12.9417 5.54009 12.2254 5.54009 11.3417C5.54009 10.458 4.82374 9.7417 3.94009 9.7417C3.05643 9.7417 2.34009 10.458 2.34009 11.3417C2.34009 12.2254 3.05643 12.9417 3.94009 12.9417Z" stroke="currentColor" />
+    <path d="M12.0851 12.9417C12.9688 12.9417 13.6851 12.2254 13.6851 11.3417C13.6851 10.458 12.9688 9.7417 12.0851 9.7417C11.2015 9.7417 10.4851 10.458 10.4851 11.3417C10.4851 12.2254 11.2015 12.9417 12.0851 12.9417Z" stroke="currentColor" />
+  </>),
 };
+/** ChatGroupSeat's PROCESS_ICONS: each kind of work's icon, used on its rows and its group's header. */
 const ACTIVITY_ICON: Record<DshActivity | "thinking", ReactNode> = {
   thinking: ICON.think, read: ICON.browse, readImage: ICON.browse, search: ICON.search, edit: ICON.edit, write: ICON.edit,
-  commands: ICON.api, code: ICON.code, webSearch: ICON.search, webFetch: ICON.browse, subagents: ICON.sparkle,
-  plan: ICON.sparkle, questions: ICON.sparkle, tools: ICON.sparkle,
+  commands: ICON.api, code: ICON.code, webSearch: ICON.globe, webFetch: ICON.browse, subagents: ICON.agent,
+  plan: ICON.plan, questions: ICON.question, tools: ICON.sparkle,
 };
+/** A group header draws thinking at its full 16px (`size: 16` in PROCESS_ICONS), the others at 14px. */
+const GROUP_THINK = <svg width={16} height={16} viewBox="0 0 16 16" fill="none" strokeWidth={1} aria-hidden="true">{ICON.think.props.children}</svg>;
 /** The whale's tail at rest (RunningWhaleTail.tsx); the animated tail is a CSS mask over it. */
 const WHALE = "M8.844 13.742C8.967 12.328 8.45 10.4 8.45 9.65C8.45 8.94 8.88 8.43 9.6 8.43C11.285 8.43 12.106 8.281 12.685 8.104C13.71 7.791 14.585 6.768 15.055 5.945C15.137 5.803 14.99 5.641 14.829 5.671C13.829 5.86 12.828 5.376 11.827 4.978C10.659 4.514 9.491 4.707 8.935 4.876C8.805 4.915 8.658 4.819 8.636 4.686C8.468 3.643 7.405 2.615 5.498 2.238C4.54 2.048 3.748 1.574 3.347 1.202C3.252 1.113 3.088 1.125 3.03 1.242C2.628 2.059 2.168 3.82 5.248 6.115C5.82 6.494 6.31 6.785 6.574 7.637C6.72 8.104 6.157 9.168 6.061 9.368C5.157 11.27 5.089 12.19 4.926 13.742";
 
@@ -84,8 +112,8 @@ function useNow(live: boolean): number {
  * secondary on hover; hovering a row that opens swaps its icon for a chevron, and an open row
  * keeps the up chevron.
  */
-function DshRow({ icon, title, summary, suffix, running, tone = "ok", open, expandable, onToggle, children, className }: {
-  icon: ReactNode; title: string; summary?: string; suffix?: ReactNode; running?: boolean; tone?: Tone;
+function DshRow({ icon, title, summary, suffix, running, tone = "ok", plainSummary, open, expandable, onToggle, children, className }: {
+  icon: ReactNode; title: string; summary?: string; suffix?: ReactNode; running?: boolean; tone?: Tone; plainSummary?: boolean;
   open: boolean; expandable: boolean; onToggle: () => void; children?: ReactNode; className?: string;
 }) {
   const key = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -102,7 +130,7 @@ function DshRow({ icon, title, summary, suffix, running, tone = "ok", open, expa
       <span className={`dsh-row-text${running ? " dsh-shimmer" : ""}`}>
         <span className="dsh-title">{title}</span>
         {summary ? <><span className="dsh-sep" aria-hidden="true" />
-          <span className={`dsh-summary${tone === "error" ? " is-error" : tone === "stopped" ? " is-stopped" : ""}`}>{summary}</span></> : null}
+          <span className={`dsh-summary${plainSummary ? "" : tone === "error" ? " is-error" : tone === "stopped" ? " is-stopped" : ""}`}>{summary}</span></> : null}
         {suffix}
       </span>
     </div>
@@ -115,7 +143,7 @@ function DshThink({ item }: { item: ChatLiveItem }) {
   const [open, setOpen] = useState(false);
   const running = item.status === "running";
   const summary = open ? "" : dshThinkSummary(item.text, running);
-  return <DshRow className="dsh-think" icon={ICON.think} title="Think" summary={summary} running={running}
+  return <DshRow className="dsh-think" icon={ICON.think} title="Think" summary={summary} running={running} tone={running ? "running" : "ok"}
     open={open} expandable={Boolean(item.text.trim())} onToggle={() => setOpen(!open)}>
     <div className="dsh-think-body"><ChatMarkdown text={item.text} /></div>
   </DshRow>;
@@ -128,34 +156,40 @@ function prettyJson(text: string): string {
 /**
  * ToolRow: its title ("Bash", "Read", "Edit", "Search", "Tool call") and one line, opening on a
  * terminal card for a command, the changed lines for an edit, or an IN/OUT card for anything else.
- * A failed call's line is its first error line, in red.
+ * A failed command with an exit status keeps its own line and adds the neutral "exit code 1"
+ * capsule (bash-sample.tsx, ExitCodeBadge); any other failed call's line is its first error line,
+ * in red, and a stopped command reads "Stopped".
  */
 function DshTool({ item }: { item: ChatLiveItem }) {
   const [open, setOpen] = useState(false);
   const tone = toneOf(item.status);
   const activity = item.kind === "edit" ? "edit" : dshActivity(item);
   const title = item.kind === "edit" ? "Edit" : dshToolTitle(item);
-  const failure = tone === "error" ? (item.output ?? "").split(/\r?\n/).find((line) => line.trim())?.trim() : undefined;
-  const summary = failure || dshItemDetail(item);
+  const exitLabel = dshExitLabel(item);
+  const failure = tone === "error" && !exitLabel ? (item.output ?? "").split(/\r?\n/).find((line) => line.trim())?.trim() : undefined;
+  const stopped = tone === "stopped" && (item.kind === "command" || activity === "commands") ? "Stopped" : undefined;
+  const summary = failure || stopped || dshItemDetail(item);
   const files = item.files ?? [];
   const added = files.reduce((sum, file) => sum + file.additions, 0);
   const removed = files.reduce((sum, file) => sum + file.deletions, 0);
   const settled = tone === "error" || tone === "stopped";
   const suffix = <>
     {!settled && files.length ? <span className="dsh-suffix dsh-diff-stat"><span className="is-add">+{added}</span> <span className="is-del">-{removed}</span></span> : null}
+    {exitLabel ? <span className="dsh-exit"><span className="dsh-exit-dot" aria-hidden="true" />{exitLabel}</span> : null}
     <ApprovedMark text={item.approval} />
   </>;
   const images = item.images ?? [];
   const expandable = item.kind === "command" || activity === "commands" || Boolean(item.input || item.output) || files.some((file) => file.diff) || images.length > 0;
   return <DshRow className="dsh-tool" icon={ACTIVITY_ICON[activity]} title={title} summary={summary} suffix={suffix}
-    running={tone === "running"} tone={tone} open={open} expandable={expandable} onToggle={() => setOpen(!open)}>
+    running={tone === "running"} tone={tone} plainSummary={Boolean(exitLabel)} open={open} expandable={expandable} onToggle={() => setOpen(!open)}>
     <div className="dsh-body">
       {/* A screenshot or a picture the call returned, read from disk only once the row is open. */}
       {open && images.length ? <ToolImages paths={images} /> : null}
       {item.kind === "command" || activity === "commands"
         ? <div className="dsh-terminal">
-          <div className="dsh-terminal-cmd"><span aria-hidden="true">$ </span>{item.kind === "command" ? item.text : dshItemDetail(item)}</div>
-          {item.output ? <pre className="dsh-terminal-out">{item.output}</pre> : null}
+          <div className="dsh-terminal-cmd"><span aria-hidden="true">$ </span>{dshCommandText(item)}</div>
+          {/* The status line the capsule now says is left out, as TerminalBlock leaves out its marker. */}
+          {item.output ? <pre className="dsh-terminal-out">{exitLabel ? item.output.replace(/^\s*Exit code:? -?\d+[^\S\r\n]*\r?\n/, "") : item.output}</pre> : null}
         </div>
         : files.some((file) => file.diff)
           ? files.map((file) => <div key={file.path} className="dsh-diff">
@@ -173,7 +207,8 @@ function DshTool({ item }: { item: ChatLiveItem }) {
   </DshRow>;
 }
 
-function DshItem({ item }: { item: ChatLiveItem }) {
+/** One row of a group (exported for its tests). */
+export function DshItem({ item }: { item: ChatLiveItem }) {
   if (item.answered) return <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />;
   if (item.kind === "reasoning") return <DshThink item={item} />;
   if (item.kind === "message") return <div className="dsh-reply"><StreamingMarkdown text={item.text} live={item.status === "running"} /></div>;
@@ -187,44 +222,92 @@ function DshSteer({ text, receipt }: { text: string; receipt?: SteerReceipt }) {
   return <div className="cx-user cx-steer">{sent(text)}{receipt ? <div className="cx-msg-foot"><SteerReceiptMark receipt={receipt} /></div> : null}</div>;
 }
 
+/** How long a running group keeps a live heading before showing a newer one (ChatGroupSeat, 150ms). */
+const LIVE_TITLE_MIN_MS = 150;
+
+/**
+ * useStableLiveProcessTitle: a live heading stays up at least 150ms, keeping only the newest one
+ * waiting; a group that closes shows its finished heading at once.
+ */
+function useHeldTitle<T extends { label: string }>(title: T, live: boolean): T {
+  const [shown, setShown] = useState(title);
+  const shownAt = useRef(Date.now());
+  const newest = useRef(title);
+  newest.current = title;
+  useEffect(() => {
+    if (!live || title.label === shown.label) return;
+    const timer = window.setTimeout(() => { shownAt.current = Date.now(); setShown(newest.current); }, Math.max(0, shownAt.current + LIVE_TITLE_MIN_MS - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [live, title.label, shown.label]);
+  return live ? shown : title;
+}
+
 /**
  * ChatGroupSeat: a run of thinking and tool calls under one heading, its kind of work's icon
  * turning into a chevron on hover. Open, it scrolls inside min(400px, 50vh) with faded edges.
+ * A running group (`live`: nothing has closed it yet) reads what it is doing now and shimmers;
+ * opened by hand it starts at its newest row and follows new rows while scrolled to the bottom
+ * (use-process-scroll.ts), where a closed group opens at its top.
  */
 function DshGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
   const [open, setOpen] = useState(false);
   const [edges, setEdges] = useState({ up: false, down: false });
   const body = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const start = useRef<"top" | "bottom" | null>(null);
+  const following = useRef(false);
   const measure = () => {
     const box = body.current;
-    if (box) setEdges({ up: box.scrollTop > 0, down: box.scrollTop + box.clientHeight < box.scrollHeight - 1 });
+    if (!box) return;
+    following.current = box.scrollTop >= box.scrollHeight - box.clientHeight - 1;
+    setEdges({ up: box.scrollTop > 1, down: box.scrollTop < box.scrollHeight - box.clientHeight - 1 });
   };
-  useEffect(() => { if (open) measure(); }, [open, items.length]);
-  const now = live ? dshLiveTitle(items) : null;
-  const activity = now?.activity ?? (items.find((item) => item.kind !== "reasoning") ? dshActivity(items.find((item) => item.kind !== "reasoning")!) : "thinking");
-  const label = now?.label ?? dshProcessTitle(items);
-  return <div className="dsh-group">
-    <button type="button" className="dsh-group-title" aria-expanded={open} onClick={() => setOpen(!open)}>
+  useLayoutEffect(() => {
+    const box = body.current;
+    if (!open || !box) return;
+    if (start.current) box.scrollTop = start.current === "bottom" ? box.scrollHeight : 0;
+    start.current = null;
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (following.current) box.scrollTop = box.scrollHeight;
+      measure();
+    });
+    observer.observe(box);
+    if (content.current) observer.observe(content.current);
+    return () => observer.disconnect();
+  }, [open]);
+  const toggle = () => {
+    if (!open) start.current = live ? "bottom" : "top";
+    setOpen(!open);
+  };
+  const now = useHeldTitle(live ? dshLiveTitle(items) : { activity: dshGroupActivity(items), label: dshProcessTitle(items) }, live);
+  return <div className="dsh-group" data-open={open || undefined}>
+    <button type="button" className="dsh-group-title" aria-expanded={open} data-process-activity={now.activity} onClick={toggle}>
       <span className="dsh-group-leading" aria-hidden="true">
-        <span className="dsh-group-icon">{ACTIVITY_ICON[activity]}</span>
+        <span className="dsh-group-icon">{now.activity === "thinking" ? GROUP_THINK : ACTIVITY_ICON[now.activity]}</span>
         <span className="dsh-group-chevron">{open ? ICON.up : ICON.down}</span>
       </span>
-      <span className={`dsh-group-label${live ? " dsh-shimmer" : ""}`}>{label}</span>
+      <span className={`dsh-group-label${live ? " dsh-shimmer" : ""}`}>{now.label}</span>
     </button>
     {open ? <div ref={body} className={`dsh-group-body${edges.up ? " fade-top" : ""}${edges.down ? " fade-bottom" : ""}`} onScroll={measure}>
-      <div className="dsh-flow">{items.map((item) => <DshItem key={item.id} item={item} />)}</div>
+      <div ref={content} className="dsh-flow">{items.map((item) => <DshItem key={item.id} item={item} />)}</div>
     </div> : null}
   </div>;
 }
 
-/** A card's work: flat while it runs (DeepSeek Harness keeps a running turn flat), grouped once done. */
-function DshFlow({ items, grouped, finished, hideReply }: { items: ChatLiveItem[]; grouped: boolean; finished: boolean; hideReply?: string }) {
+/**
+ * A card's work as DeepSeek Desktop's Standard view lays it out: groups between the replies, each
+ * folded under its heading. Only the last group of a running card is live; a reply or a steered
+ * message after a group closes it.
+ */
+function DshFlow({ items, live, finished, hideReply }: { items: ChatLiveItem[]; live: boolean; finished: boolean; hideReply?: string }) {
   // The reply is the turn's messages joined: each one in it shows once, in the reply (withoutReplied).
   const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), hideReply);
-  if (!grouped) return <div className="dsh-flow">{tidy.map((item) => <DshItem key={item.id} item={item} />)}</div>;
-  return <div className="dsh-flow">{dshSegments(tidy).map((segment) => segment.kind === "item"
+  const segments = dshSegments(tidy);
+  return <div className="dsh-flow">{segments.map((segment, index) => segment.kind === "item"
     ? <DshItem key={segment.item.id} item={segment.item} />
-    : <DshGroup key={segment.key} items={segment.items} live={false} />)}</div>;
+    : <DshGroup key={segment.key} items={segment.items} live={live && index === segments.length - 1} />)}</div>;
 }
 
 function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseStepWork; answer?: string }) {
@@ -234,7 +317,7 @@ function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseSt
   const earlier = <EarlierRounds rounds={step.earlier} />;
   if (!work.length) return <>{earlier}{step.hasWork && !step.working ? <p className="dsh-hint">Loading…</p> : null}</>;
   return <>{earlier}<SteerReader.Provider value={steerReader(step)}>
-    <DshFlow items={work} grouped={!step.working} finished={!step.working && step.state === "finished"} hideReply={answer} />
+    <DshFlow items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} hideReply={answer} />
   </SteerReader.Provider></>;
 }
 
@@ -252,7 +335,7 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
     <div className="dsh-agent-body">
       <EarlierRounds rounds={step.earlier} />
       {work?.length ? <SteerReader.Provider value={steerReader(step)}>
-        <DshFlow items={work} grouped={!live} finished={!live && step.state === "finished"} hideReply={answer} />
+        <DshFlow items={work} live={live} finished={!live && step.state === "finished"} hideReply={answer} />
       </SteerReader.Provider> : null}
       {step.text && step.text.trim() !== answer?.trim() ? <div className="dsh-reply"><ChatMarkdown text={step.text} /></div> : null}
     </div>
@@ -300,7 +383,7 @@ const WATCHED = new Set<string>();
 export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null };
 
 /**
- * A DeepSeek turn's work. Running: its rows flat, "Deep diving" under them. Ended: "Completed in
+ * A DeepSeek turn's work. Running: its work in groups, the last one live, "Deep diving" under them. Ended: "Completed in
  * 1m 4s" heads it, folded unless the chat shows work details; a failed or stopped turn stays open.
  * The chat memoizes it with its own check of what a turn shows.
  */

@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatGptWebTraceId } from "../src/adapters/chatgpt-web";
+import { ChatGptThreadEnvironmentStore } from "../src/adapters/chatgpt-web/thread-environment";
 import { runStructuredCompactionOnce } from "../src/adapters/chatgpt-web/compaction-handoff";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, closeTurnBrokers, RemoteTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
@@ -404,6 +405,94 @@ test("native passthrough response and compaction requests expose their exact int
   });
   expect(boundCompactIdentity).toEqual(compactIdentity);
   expect(compact.status).toBe(502);
+});
+
+test("a first WebGPT HTTP turn recovers its trusted rollout from canonical header-only metadata", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-http-turn-metadata-"));
+  const cwd = join(directory, "project");
+  const auxiliaryRoot = join(directory, "visualizations");
+  const sessions = join(directory, "sessions", "2026", "10", "26");
+  const threadId = "01a17596-1000-7601-96ef-85c60ff1d640";
+  const turnId = "01a17596-2000-78f0-b1ce-564c698c73e9";
+  for (const path of [cwd, auxiliaryRoot, sessions]) mkdirSync(path, { recursive: true });
+  writeFileSync(join(sessions, `rollout-2026-10-26T08-22-50-${threadId}.jsonl`), [
+    { type: "session_meta", payload: { id: threadId, cwd, source: "vscode" } },
+    { type: "turn_context", payload: {
+      turn_id: turnId, cwd,
+      sandbox_policy: {
+        type: "workspace-write", writable_roots: [auxiliaryRoot], network_access: false,
+        exclude_tmpdir_env_var: true, exclude_slash_tmp: true,
+      },
+      permission_profile: { type: "managed", network: "restricted", file_system: {
+        type: "restricted", entries: [
+          { path: { type: "special", value: { kind: "root" } }, access: "read" },
+          ...[cwd, auxiliaryRoot].map(path => ({ path: { type: "path", path }, access: "write" })),
+        ],
+      } },
+    } },
+  ].map(record => JSON.stringify(record)).join("\n") + "\n");
+  const metadata = { thread_id: threadId, turn_id: turnId, sandbox: "windows-sandbox", workspaces: { [cwd]: {} } };
+  let environments = new ChatGptThreadEnvironmentStore(undefined, Date.now, directory);
+  const accepted: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1", port: 0,
+    fetch: req => responseRequest(req, defaultConfig("full"), () => ({
+      name: "trusted-http-header-fixture",
+      async runTurn(parsed, incoming, emit) {
+        expect(incoming.headers.get("authorization")).toBe("Bearer test-codex-session");
+        expect((parsed._rawBody as { client_metadata: { fixture_note: string } }).client_metadata.fixture_note).toBe("retained");
+        const environment = environments.resolve(parsed);
+        expect(environment.roots).toEqual([cwd, auxiliaryRoot]);
+        expect(environment.sandboxPolicy.type).toBe("workspaceWrite");
+        accepted.push(environment.cwd);
+        emit({ type: "text_delta", text: environment.cwd, phase: "final_answer" });
+        emit({ type: "done", stopReason: "stop", endTurn: true });
+      },
+    }), { rememberState: false }),
+  });
+  const send = async (header?: string, bodyMetadata?: unknown) => {
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json", authorization: "Bearer test-codex-session",
+        ...(header === undefined ? {} : { "x-codex-turn-metadata": header }),
+      },
+      body: JSON.stringify({
+        model: "chatgpt-web/high", stream: false,
+        client_metadata: { fixture_note: "retained", ...(bodyMetadata === undefined ? {} : { "x-codex-turn-metadata": bodyMetadata }) },
+        input: [{ type: "message", role: "user", id: "msg_native_followup",
+          internal_chat_message_metadata_passthrough: { turn_id: turnId },
+          content: [{ type: "input_text", text: "Continue the native task in WebGPT" }] }],
+      }),
+    });
+    return await response.json() as { status?: string; error?: { message: string } };
+  };
+  try {
+    // Body metadata already worked; the same native identity in its canonical header must too.
+    expect((await send(undefined, JSON.stringify(metadata))).status).toBe("completed");
+    // Switching from a native provider starts without a WebGPT environment cache.
+    environments = new ChatGptThreadEnvironmentStore(undefined, Date.now, directory);
+    const headerOnly = await send(JSON.stringify(metadata));
+    expect(headerOnly.error).toBeUndefined();
+    expect(headerOnly.status).toBe("completed");
+    expect(accepted).toEqual([cwd, cwd]);
+
+    for (const header of [
+      undefined,
+      "{malformed",
+      JSON.stringify({ ...metadata, thread_id: "01a17596-3000-7601-96ef-85c60ff1d640" }),
+      JSON.stringify({ ...metadata, turn_id: "01a17596-4000-78f0-b1ce-564c698c73e9" }),
+    ]) {
+      // A malformed/conflicting canonical header cannot fall back to valid body or cached authority.
+      const rejected = await send(header, header === undefined ? undefined : JSON.stringify(metadata));
+      expect(rejected.error).toBeDefined();
+      expect(rejected.status).not.toBe("completed");
+      expect(accepted).toHaveLength(2);
+    }
+  } finally {
+    await server.stop(true);
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("authenticated Interrupt hook endpoint releases the exact routed Web turn", async () => {
