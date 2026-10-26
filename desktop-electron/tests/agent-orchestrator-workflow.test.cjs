@@ -3446,6 +3446,30 @@ test("a provider that is down for every model costs a goal check one request, no
   assert.equal(checks.length, 3);
 });
 
+test("healthy models fill a goal check before benched providers, with healthy providers tried first", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const round = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "not yet" } }] });
+  const clock = { at: Date.parse("2026-10-26T08:00:00Z") };
+  let nextRound = false;
+  const { world, workflow, checks } = await goalChat({ now: () => clock.at, timers: [],
+    models: ["cline-pass/fast-a", "other-provider/fast-a", "healthy-one/fast-a", "healthy-one/fast-b", "healthy-two/fast-a",
+      "cline-pass/fast-b", "other-provider/fast-b", "gpt-6-luna"],
+    refuse: (model) => /^(cline-pass|other-provider)\//.test(model) ? 502
+      : nextRound && ["healthy-one/fast-a", "healthy-two/fast-a"].includes(model) ? 404 : 0 });
+  world.runs.push(round("r1"));
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.deepEqual(checks.map((check) => check.model), ["cline-pass/fast-a", "other-provider/fast-a", "healthy-one/fast-a"]);
+
+  clock.at += 5 * 60_000;
+  nextRound = true;
+  const next = (await goalOf(workflow)).lastRunId;
+  world.runs.push(round(next));
+  await workflow.goalAfterRun("ws-1", next, "finished", null);
+  assert.deepEqual(checks.slice(3).map((check) => check.model), ["healthy-one/fast-a", "healthy-two/fast-a", "healthy-one/fast-b"],
+    "spread healthy providers first, then use another healthy model before a benched provider");
+});
+
 test("a message the person sends into a chat whose goal stalled picks the goal up again", async () => {
   // The user: "if goal stalled, i cant use chat message to retrigger the chat".
   const route = { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" };

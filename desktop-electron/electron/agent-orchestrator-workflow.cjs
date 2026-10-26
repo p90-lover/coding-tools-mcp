@@ -4658,7 +4658,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const order = [...new Set([...quick, ...free, ...review])];
     const ranked = [0, 1, 2].flatMap(level => order.filter(model => rank(model) === level));
     const providers = new Set();
-    const spread = ranked.filter(model => rank(model) < 2 && !providers.has(modelProvider(model)) && providers.add(modelProvider(model)));
+    // Provider diversity must not promote a benched provider over another healthy model.
+    const spread = ranked.filter(model => rank(model) === 0 && !providers.has(modelProvider(model)) && providers.add(modelProvider(model)));
     return [...new Set([...spread, ...ranked])].slice(0, 3);
   }
   /** `judge`: "Let the model judge" is on, and `ended` says how the round ended when it did not finish. */
