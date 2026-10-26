@@ -485,8 +485,37 @@ class RuntimeSupervisor {
     return structuredClone(this.configCache.value);
   }
 
+  /**
+   * readConfigJson for timers: the same cache, checked and (when it changed) read without blocking.
+   * Even the one statSync left above froze every window for 3 s from the catalog monitor's 15 s
+   * check (a main-process profile, 2026-10-24): the file's metadata had left the cache, and the hard
+   * disk holding it answered a read in 0.6 s on average and up to 7 s.
+   */
+  async readConfigJsonAsync() {
+    let stat;
+    try { stat = await fs.promises.stat(this.configPath); } catch { this.configCache = null; return undefined; }
+    const cached = this.configCache;
+    if (!cached || cached.size !== stat.size || cached.mtimeMs !== stat.mtimeMs) {
+      const value = JSON.parse((await fs.promises.readFile(this.configPath, "utf8")).replace(/^﻿/, ""));
+      this.configCache = { size: stat.size, mtimeMs: stat.mtimeMs, value };
+    }
+    return structuredClone(this.configCache.value);
+  }
+
   readConfig() {
     const config = this.readConfigJson();
+    if (config === undefined) return null;
+    return validateConfig(
+      config,
+      this.browserDescriptorPath,
+      this.platform,
+      this.launcherProfile,
+    );
+  }
+
+  /** readConfig for timers, which must not block the main process (readConfigJsonAsync). */
+  async readConfigAsync() {
+    const config = await this.readConfigJsonAsync();
     if (config === undefined) return null;
     return validateConfig(
       config,
