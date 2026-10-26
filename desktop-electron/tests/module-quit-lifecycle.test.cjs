@@ -18,7 +18,7 @@ function visit(node) {
 }
 visit(file);
 
-function fixture({ active = null, failCleanup = false, restoreFails = false, quitAnyway = false, registerShutdownFails = false, browserSaveFails = false } = {}) {
+function fixture({ active = null, browserActive = null, failCleanup = false, restoreFails = false, quitAnyway = false, registerShutdownFails = false, browserSaveFails = false } = {}) {
   const disposed = [];
   const nativeStops = [];
   const quits = [];
@@ -34,8 +34,9 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
       order.push("restore-route");
       if (restoreFails) throw new Error("Route restore failed");
     } },
-    browserHost: { currentOperation: () => null, persistSession: async () => { if (browserSaveFails) throw new Error("Browser save failed"); }, destroy() {} },
-    runtimeSupervisor: { shutdown: async () => { order.push("stop-runtime"); nativeStops.push("runtime"); } },
+    browserHost: { currentOperation: () => null, activeTraceId: browserActive, state: { status: "running" },
+      persistSession: async () => { if (browserSaveFails) throw new Error("Browser save failed"); }, destroy() {} },
+    runtimeSupervisor: { detach: async () => ({ status: "detached" }), shutdown: async () => { order.push("stop-runtime"); nativeStops.push("runtime"); } },
     headlessHost: { shutdown: async () => {} }, browserControl: { close: async () => {} },
     registerHost: { shutdown: async () => { order.push("stop-register"); if (registerShutdownFails) throw new Error("Register stop failed"); },
       recoverAfterCancelledQuit: async () => { recovered.push(context.quitting); } },
@@ -58,7 +59,7 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
   const quit = vm.runInContext(`(${quitSource})`, context);
   let result;
   context.requestQuit = () => (result = quit());
-  return { disposed, nativeStops, quits, order, recovered, quit, async beforeQuit() {
+  return { disposed, nativeStops, quits, order, recovered, browser: context.browserHost, quit, async beforeQuit() {
     let prevented = 0;
     for (const listener of listeners) vm.runInContext(`(${listener})`, context)({ preventDefault: () => { prevented += 1; } });
     assert.equal(prevented, 1);
@@ -74,6 +75,20 @@ test("rejected app quit does not dispose integrations before the active-operatio
   assert.deepEqual(f.nativeStops, []);
   assert.deepEqual(f.quits, []);
   assert.deepEqual(f.order, []);
+});
+
+test("updating refuses a live browser turn, then closes once it ends despite a stale running status", async () => {
+  const f = fixture({ browserActive: "live-turn" });
+  const refused = await f.quit({ keepBridge: true });
+  assert.equal(refused.ok, false);
+  assert.match(refused.message, /ChatGPT turn.*finish before quitting/);
+  assert.deepEqual(f.disposed, []);
+  assert.deepEqual(f.quits, []);
+
+  f.browser.activeTraceId = null;
+  assert.equal(f.browser.state.status, "running");
+  assert.equal((await f.quit({ keepBridge: true })).ok, true, "the refused quit clears its guard so the update can be retried immediately");
+  assert.equal(f.quits.length, 1);
 });
 
 test("accepted app quit disposes each integration controller once", async () => {

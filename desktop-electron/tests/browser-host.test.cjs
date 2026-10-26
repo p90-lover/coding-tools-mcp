@@ -1163,7 +1163,7 @@ test("launcher quit remains gated through an active embedded-browser operation",
   assert.ok(start >= 0, "requestQuit must exist");
   const quit = source.slice(start);
   // An active browser operation, then an active runtime operation, each refuses the quit.
-  assert.match(quit, /const browserOperation = browserHost\?\.currentOperation\(\);\s*if \(browserOperation\) \{\s*throw new Error/);
+  assert.match(quit, /const browserOperation = browserHost\?\.currentOperation\(\) \|\| \(browserHost\?\.activeTraceId \? "ChatGPT turn" : null\);\s*if \(browserOperation\) \{\s*throw new Error/);
   assert.match(quit, /const runtimeOperation = runtimeHost\?\.currentOperation\(\);\s*if \(runtimeOperation\) \{\s*throw new Error/);
 });
 
