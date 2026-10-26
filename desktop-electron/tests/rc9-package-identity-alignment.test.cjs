@@ -43,3 +43,15 @@ test("the installer migration contract names the current rc.14 release", () => {
   assert.match(source, /manifest\.version, PRODUCT_IDENTITY\.version/);
   assert.match(source, /require\("\.\.\/electron\/product\.cjs"\)/);
 });
+
+test("frozen RC11/RC12 publishers require manual dispatch and exact matching source versions", () => {
+  for (const rc of ["11", "12"]) {
+    const file = path.resolve(desktopRoot, "..", ".github", "workflows",
+      `codex-router-multiprovider-release-rc${rc}.yml`);
+    const workflow = fs.readFileSync(file, "utf8");
+    assert.match(workflow, /^  workflow_dispatch:\s*$/m);
+    assert.doesNotMatch(workflow, /^  push:\s*$/m, "old RC publishers must not run on a new main version");
+    assert.match(workflow, /Require the exact frozen RC source version/);
+    assert.match(workflow, /\$manifest\.version -ne \$env:RELEASE_VERSION/);
+  }
+});
