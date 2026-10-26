@@ -143,6 +143,33 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  * editor has taken the previous one. This is headroom for that, not a readiness check.
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
+/**
+ * A reply read is a dozen Playwright round trips through the app's main process; at one every
+ * 250 ms, four busy chats cost it ~400 DevTools messages a second while ChatGPT only thought.
+ * After this many unchanged reads with ChatGPT still running, the next read waits for the page
+ * or the turn's tool progress to change, for at most CHATGPT_REPLY_QUIET_WAIT_MS more.
+ */
+export const CHATGPT_REPLY_QUIET_READS = 4;
+export const CHATGPT_REPLY_QUIET_WAIT_MS = 1_000;
+
+export interface ChatGptReplyRead {
+  running: boolean;
+  text: string;
+  rich: unknown;
+  action: boolean;
+  progress: number | undefined;
+}
+
+/**
+ * How many reads in a row saw nothing change while ChatGPT ran. Only a running reply counts: once
+ * ChatGPT stops, completion needs the reply to hold still for CHATGPT_COMPLETION_SETTLE_MS, and
+ * that keeps the 250 ms reads.
+ */
+export function chatGptQuietReads(quietReads: number, previous: ChatGptReplyRead | undefined, read: ChatGptReplyRead): number {
+  return read.running && previous
+    && previous.running && read.text === previous.text && read.rich === previous.rich
+    && read.action === previous.action && read.progress === previous.progress ? quietReads + 1 : 0;
+}
 export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
@@ -2938,8 +2965,9 @@ export class ChatGptBrowserWorker {
     afterProgressRevision: number,
     externalProgress?: ChatGptTurnProgressReader,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<void> {
-    const domMutation = this.waitForTurnDomMutation(page);
+    const domMutation = this.waitForTurnDomMutation(page, timeoutMs);
     if (!externalProgress) {
       await withBrowserTurnAbort(domMutation, signal);
       return;
@@ -5413,6 +5441,9 @@ export class ChatGptBrowserWorker {
       let completionFenceRevision: number | undefined;
       const failedSend = new ChatGptFailedSendRetrier();
       let interruptionFenceRevision: number | undefined;
+      // What the last read saw, and how many reads in a row saw the same while ChatGPT ran.
+      let lastRead: ChatGptReplyRead | undefined;
+      let quietReads = 0;
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -5688,7 +5719,32 @@ export class ChatGptBrowserWorker {
           });
           if (domError) throw new Error(domError);
         }
+        const read: ChatGptReplyRead = {
+          running,
+          text: snapshot.visibleText,
+          rich: snapshot.richContentKey,
+          action: snapshot.completionActionVisible,
+          progress: externalProgressSnapshot?.revision,
+        };
+        quietReads = chatGptQuietReads(quietReads, lastRead, read);
+        lastRead = read;
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        if (quietReads >= CHATGPT_REPLY_QUIET_READS && !page.isClosed()) {
+          // Wakes on a page mutation or tool progress. Never fails the turn: the next read
+          // handles a closed page or an abort, and the timer bounds a renderer that stops answering.
+          let quietTimer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            this.waitForTurnDomOrExternalProgress(
+              page,
+              read.progress ?? 0,
+              turn.externalProgress,
+              turn.abortSignal,
+              CHATGPT_REPLY_QUIET_WAIT_MS,
+            ).catch(() => undefined),
+            new Promise(resolveQuiet => { quietTimer = setTimeout(resolveQuiet, CHATGPT_REPLY_QUIET_WAIT_MS + 250); }),
+          ]);
+          clearTimeout(quietTimer);
+        }
        } catch (error) {
         // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,
         // aborts, closed tabs, DOM-health verdicts — still fails the turn immediately.

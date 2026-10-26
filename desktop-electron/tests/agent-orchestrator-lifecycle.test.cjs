@@ -204,6 +204,8 @@ function createHarness(hooks = {}) {
     "./ao-daemon-log.cjs": require("../electron/ao-daemon-log.cjs"),
     // Compacting AO's database has its own worker; a fixture's database never needs it.
     "./ao-db-maintenance.cjs": { compactAoDatabase: async () => ({ action: "none" }) },
+    // The IPC size limits are plain constants, used as they are.
+    "./ipc-schema.cjs": require("../electron/ipc-schema.cjs"),
   };
   const loadedModule = { exports: {} };
   vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), {

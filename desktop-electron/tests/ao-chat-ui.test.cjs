@@ -652,7 +652,7 @@ test("in split view the pet keeps to its box's top edge and leaps to another pan
   const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
   const act = source.slice(source.indexOf("const act = () =>"), source.indexOf("const wander = () =>"));
   assert.doesNotMatch(act, /hop\(/, "no leap to another pane on a whim");
-  assert.match(source, /const spot = split \? onTop\(current, target\) : target;/, "its strolls stay on the top edge");
+  assert.match(source, /const spot = split \|\| working \? onTop\(current, target\) : target;/, "its strolls stay on the top edge");
 });
 
 test("a walking pet reads no layout per frame and is redrawn at most 60 times a second", () => {
@@ -666,6 +666,9 @@ test("a walking pet reads no layout per frame and is redrawn at most 60 times a 
   assert.match(step, /blocked\(atNow\.current, rects, box\)/);
   assert.match(step, /if \(arrived \|\| now - shown >= 1000 \/ WALK_FPS\) \{ shown = now; setAt\(atNow\.current\); \}/);
   assert.match(source, /const WALK_FPS = 60;/);
+  // Asking for a frame every refresh costs one even when nothing draws: the step waits out its interval.
+  assert.match(step, /const wait = shown \+ 1000 \/ WALK_FPS - now;[\s\S]*walkTimer\.current = window\.setTimeout\(/);
+  assert.match(source, /const stopWalking = \(\) => \{[\s\S]*?window\.clearTimeout\(walkTimer\.current\);/, "stopping cancels a waiting step too");
 });
 
 test("a reviewer keeps every earlier cycle, oldest first and folded, not only the last review", () => {
