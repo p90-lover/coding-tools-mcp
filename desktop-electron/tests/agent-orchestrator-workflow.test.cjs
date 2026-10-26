@@ -1038,6 +1038,35 @@ test("Native Codex offers ChatGPT's five effort tiers and every CPA pool model",
   assert.deepEqual((await offline.call("models", { harness: "codex-native" })).models, WEB);
 });
 
+test("WebGPT's tiers carry the Codex bridge's window, fixed, and it is read once per 10 minutes", async () => {
+  // The user: "on web gpt model, it should follow codexbridge max context window and lock it". The
+  // chip offered 4K–2M and a chat ran on 200K over a bridge that holds 111 193 tokens.
+  let clock = Date.parse("2026-10-26T09:00:00Z"), asked = 0, reply = { models: [{ slug: "chatgpt-web/high", context_window: 111193, max_context_window: 111193 }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => { throw new Error("no headless call expected"); },
+    cpaConnection: () => null, confirm: async () => true, now: () => clock,
+    findCodexExecutable: () => "C:/Codex/codex.exe",
+    webModelCatalog: async ({ executable, model }) => { asked += 1; assert.equal(executable, "C:/Codex/codex.exe"); assert.equal(model, "chatgpt-web/high"); return reply; },
+  });
+  const catalog = await workflow.call("models", { harness: "codex-native" });
+  for (const tier of ["chatgpt-web/light", "chatgpt-web/high", "chatgpt-web/pro"]) {
+    assert.equal(catalog.capabilities[tier].contextLimit, 111193, tier);
+    assert.deepEqual({ ...catalog.capabilities[tier].contextWindow }, { min: 111193, max: 111193, kind: "context", fixed: true }, tier);
+  }
+  await workflow.call("models", { harness: "codex-native" });
+  assert.equal(asked, 1, "kept, not asked on every menu open");
+  clock += 11 * 60_000;
+  reply = { models: [{ slug: "chatgpt-web/high", context_window: 90000 }] };
+  assert.equal((await workflow.call("models", { harness: "codex-native" })).capabilities["chatgpt-web/high"].contextLimit, 90000, "a later bridge window is taken");
+  // Unreadable: the tiers are still listed, without a window, and asked again a minute later.
+  clock += 11 * 60_000;
+  reply = { models: [] };
+  const unknown = await workflow.call("models", { harness: "codex-native" });
+  assert.ok(unknown.models.includes("chatgpt-web/high"));
+  assert.equal(unknown.capabilities["chatgpt-web/high"], undefined);
+  workflow.dispose();
+});
+
 test("WebGPT is offered only on Native Codex; AO harnesses get every other CPA model", async () => {
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },
@@ -3331,7 +3360,7 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
  */
 async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
   ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." }, refuse = () => 0,
-  timers = null, request = null, goalsFile = null, now = Date.now, world: restarted = null } = {}) {
+  timers = null, request = null, goalsFile = null, now = Date.now, world: restarted = null, models = ["gpt-6-luna", "deepseek-v4", "gemini-3-flash"] } = {}) {
   // `world` given: the app restarting on the same AO state (and `goalsFile`), its goal kept.
   const world = restarted ?? chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
   const checks = [];
@@ -3345,7 +3374,7 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     fetchImpl: async (url, init) => {
       // The pool the chats' own models come from too (the next round checks its model is offered).
-      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }, { id: "deepseek-v4" }, { id: "gemini-3-flash" }] }) };
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: models.map((id) => ({ id })) }) };
       const body = JSON.parse(init.body);
       checks.push(body);
       if (refuse(body.model)) return { ok: false, status: refuse(body.model), json: async () => ({}) };
@@ -3423,6 +3452,51 @@ test("a model the evaluator gets a 404 for sits out for hours; one that was down
     await workflow.goalAfterRun("ws-1", next, "finished", null);
     assert.equal(checks[2].model, sitsOut ? "deepseek-v4" : "gemini-3-flash", `HTTP ${status}, half an hour on`);
   }
+});
+
+test("a provider that is down for every model costs a goal check one request, not all three", async () => {
+  // Seen live 2026-10-26: Cline Pass answered 502 for every model, and each check spent its three
+  // places on three of them, then waited two minutes, before gemini-3-flash answered.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const round = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "not yet" } }] });
+  const clock = { at: Date.parse("2026-10-26T08:00:00Z") };
+  const { world, workflow, checks } = await goalChat({ now: () => clock.at, refuse: (model) => model.startsWith("cline-pass/") ? 502 : 0,
+    models: ["cline-pass/deepseek-v4.1-flash", "cline-pass/glm-5.3-flash", "cline-pass/mimo-v2.6-flash", "gemini-3-flash", "gpt-6-luna"] });
+  world.runs.push(round("r1"));
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.deepEqual(checks.map((check) => check.model), ["cline-pass/deepseek-v4.1-flash", "gemini-3-flash"]);
+  // The next round, minutes on: Cline Pass's other models wait behind the provider that answered.
+  clock.at += 5 * 60_000;
+  const next = (await goalOf(workflow)).lastRunId;
+  world.runs.push(round(next));
+  await workflow.goalAfterRun("ws-1", next, "finished", null);
+  assert.equal(checks[2].model, "gemini-3-flash");
+  assert.equal(checks.length, 3);
+});
+
+test("healthy models fill a goal check before benched providers, with healthy providers tried first", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const round = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "not yet" } }] });
+  const clock = { at: Date.parse("2026-10-26T08:00:00Z") };
+  let nextRound = false;
+  const { world, workflow, checks } = await goalChat({ now: () => clock.at, timers: [],
+    models: ["cline-pass/fast-a", "other-provider/fast-a", "healthy-one/fast-a", "healthy-one/fast-b", "healthy-two/fast-a",
+      "cline-pass/fast-b", "other-provider/fast-b", "gpt-6-luna"],
+    refuse: (model) => /^(cline-pass|other-provider)\//.test(model) ? 502
+      : nextRound && ["healthy-one/fast-a", "healthy-two/fast-a"].includes(model) ? 404 : 0 });
+  world.runs.push(round("r1"));
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.deepEqual(checks.map((check) => check.model), ["cline-pass/fast-a", "other-provider/fast-a", "healthy-one/fast-a"]);
+
+  clock.at += 5 * 60_000;
+  nextRound = true;
+  const next = (await goalOf(workflow)).lastRunId;
+  world.runs.push(round(next));
+  await workflow.goalAfterRun("ws-1", next, "finished", null);
+  assert.deepEqual(checks.slice(3).map((check) => check.model), ["healthy-one/fast-a", "healthy-two/fast-a", "healthy-one/fast-b"],
+    "spread healthy providers first, then use another healthy model before a benched provider");
 });
 
 test("a message the person sends into a chat whose goal stalled picks the goal up again", async () => {
