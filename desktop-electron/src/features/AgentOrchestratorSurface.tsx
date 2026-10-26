@@ -511,6 +511,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // The project whose board and runs were last read in full: until it is the open one, the chat
   // list is still loading, not empty.
   const [loadedWorkspace, setLoadedWorkspace] = useState("");
+  const [projectLoadError, setProjectLoadError] = useState("");
+  const [projectLoadRevision, setProjectLoadRevision] = useState(0);
+  const autoRetriedProjects = useRef(new Set<string>());
   // A split pane opens its own project, and never changes the one the window opens next time.
   const [workspaceId, setWorkspaceId] = useState(() => { if (pane) return pane.workspaceId; try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
   // The chat a split pane is to show once its project has loaded (null: not a pane).
@@ -917,6 +920,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   useEffect(() => {
     if (!workspaceReady || !workspaceId) { setBoard(null); setMissions([]); return; }
     let live = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const stalledTimer = setTimeout(() => {
+      if (live && loadedWorkspace !== workspaceId) setProjectLoadError("The project is taking too long to respond.");
+    }, 15000);
+    setProjectLoadError("");
     const ready = preloaded.current?.workspaceId === workspaceId ? preloaded.current : null;
     preloaded.current = null;
     boardWorkspace.current = "";
@@ -945,6 +953,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       applyBoard(ready.board);
       applyRuns(ready.runs);
       setLoadedWorkspace(workspaceId);
+      clearTimeout(stalledTimer);
       return () => { live = false; };
     }
     // Both reads start at once (one after the other, behind every poll a switch sets off, they left
@@ -956,7 +965,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         if (live) applyBoard(current);
         return true;
       } catch (cause) {
-        if (live) setError(cause instanceof Error ? cause.message : String(cause));
+        if (live) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          setProjectLoadError(message);
+          setError(message);
+        }
         return false;
       }
     })();
@@ -969,14 +982,29 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           runsLoaded = true;
         }
       } catch (cause) {
-        if (live) setError(cause instanceof Error ? cause.message : String(cause));
+        if (live) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          setProjectLoadError(message);
+          setError(message);
+        }
       }
       // A failed read leaves the list loading (the runs poller marks it loaded once a read lands),
       // never the false "No chats yet".
-      if (await boardRead && runsLoaded && live) setLoadedWorkspace(workspaceId);
+      const boardLoaded = await boardRead;
+      if (!live) return;
+      if (boardLoaded && runsLoaded) {
+        clearTimeout(stalledTimer);
+        setProjectLoadError("");
+        setLoadedWorkspace(workspaceId);
+      } else if (!autoRetriedProjects.current.has(workspaceId)) {
+        // One bounded retry recovers a transient read error after a project switch. Further failures
+        // stay visible in the chat pane with a manual Retry button instead of an empty screen.
+        autoRetriedProjects.current.add(workspaceId);
+        retryTimer = setTimeout(() => { if (live) setProjectLoadRevision((value) => value + 1); }, 1500);
+      }
     })();
-    return () => { live = false; };
-  }, [workspaceId, workspaceReady, setError]);
+    return () => { live = false; clearTimeout(stalledTimer); if (retryTimer) clearTimeout(retryTimer); };
+  }, [workspaceId, workspaceReady, setError, projectLoadRevision]);
 
   const run = async (name: string, action: () => Promise<void>) => {
     if (busy) return;
@@ -2090,6 +2118,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     // A chat clicked in a project still loading gives way to whatever is chosen now: a project, a
     // new chat in one, a conversation continued there. Only that click's own switch keeps it.
     switchTarget.current = ""; pendingSelect.current = null;
+    // A project chosen inside a split pane opens a new chat there. Keeping the old pane target
+    // left selection waiting for that project's load while the parent waited for selection.
+    if (pane) paneWanted.current = { workspaceId: id, taskId: "" };
     switchToWorkspace(id);
   };
   // A chat opened from another project's rows in the list. As in Codex the open chat stays until the
@@ -2557,7 +2588,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
               <AgentOrchestratorChat
                 onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
                 runs={chatRuns}
-                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null} onComposing={prewarmOnTyping}
+                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
+                projectLoadError={projectLoadError} onRetryProject={() => setProjectLoadRevision((value) => value + 1)} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}
                 thread={chatThread}

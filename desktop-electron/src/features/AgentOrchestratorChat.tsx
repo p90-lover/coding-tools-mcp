@@ -772,7 +772,7 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork, onClosePane,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane,
 }: {
   /** Close split view: set on every pane while the window is split (ChatSplit). */
   onClosePane?: () => void;
@@ -784,6 +784,9 @@ export function AgentOrchestratorChat({
   pendingMessage?: string; pendingTitle?: string; pendingCreation?: boolean;
   /** Which chat to show is not known yet (a project is opening): show neither a chat nor the new chat page. */
   deciding?: boolean;
+  /** An initial project read failed. Give the user a recovery action instead of an empty chat pane. */
+  projectLoadError?: string;
+  onRetryProject?: () => void;
   /** The user started typing a message: the surface gets the agent it needs ready (chat_prewarm). */
   onComposing?: () => void;
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
@@ -1899,7 +1902,7 @@ export function AgentOrchestratorChat({
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
           <span className="cx-head-folder" title={projectName}><ChatGlyph name="folder" size={15} /></span>
-          {deciding && !selectedTaskId ? <h2 aria-hidden="true" /> : selectedTaskId || pendingCreation
+          {deciding && !selectedTaskId ? <h2>{projectLoadError ? "Couldn't load project" : "Opening project…"}</h2> : selectedTaskId || pendingCreation
             ? renaming !== null
               ? <input autoFocus className="cx-title-input" aria-label="Chat name" maxLength={240} value={renaming}
                   onChange={(event) => setRenaming(event.target.value)} onBlur={() => void commitRename()}
@@ -1997,7 +2000,10 @@ export function AgentOrchestratorChat({
             requestAnimationFrame(() => requestAnimationFrame(() => { clicked.current = false; }));
           }}>
             {!turns.length ? <div className="cx-empty">
-              {deciding && !selectedTaskId ? null : selectedTaskId ? <p>Loading…</p> : <>
+              {deciding && !selectedTaskId ? <div role="status">
+                <p>{projectLoadError ? `Couldn't load chats: ${projectLoadError}` : "Loading project chats…"}</p>
+                {projectLoadError && onRetryProject ? <button type="button" className="button-primary" onClick={onRetryProject}>Retry loading</button> : null}
+              </div> : selectedTaskId ? <p>Loading…</p> : <>
                 <span className="cx-empty-glyph" aria-hidden="true"><ChatGlyph name="codex" size={40} /></span>
                 <h1>What should we build{projectName ? <> in {onOpenProject
                   ? <button type="button" className="cx-empty-project" title="Open the project folder" onClick={onOpenProject}>{projectName}</button>

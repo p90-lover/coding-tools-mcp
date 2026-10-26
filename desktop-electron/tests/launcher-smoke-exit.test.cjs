@@ -113,12 +113,25 @@ test("packaged smoke startup failures never block on a native error dialog", () 
   );
   assert.match(
     source,
-    /if \(!LAUNCHER_SMOKE_TEST\)\s*\{\s*dialog\.showErrorBox\("Codex Web GPT could not start", message\);\s*\}/,
+    /if \(!LAUNCHER_SMOKE_TEST\)\s*\{\s*dialog\.showErrorBox\("Coding Tools could not start", message\);\s*\}/,
   );
   assert.equal(
     (source.match(/process\.argv\.includes\("--launcher-smoke-test"\)/g) || []).length,
     1,
   );
+});
+
+test("Windows shell identity and window caption match the Coding Tools package", () => {
+  const desktopRoot = path.join(__dirname, "..");
+  const source = fs.readFileSync(path.join(desktopRoot, "electron", "main.cjs"), "utf8");
+  const { build } = require(path.join(desktopRoot, "package.json"));
+  const { resolveLauncherProfile } = require("../electron/profile.cjs");
+  const profile = resolveLauncherProfile({ appData: path.resolve("aiTemp", "profile-test"), env: {}, argv: [] });
+  assert.equal(build.productName, profile.displayName);
+  assert.match(source, /title: LAUNCHER_PROFILE\.displayName/);
+  const html = fs.readFileSync(path.join(desktopRoot, "index.html"), "utf8");
+  assert.ok(html.includes(`<title>${build.productName}</title>`), "the loaded renderer must keep the package name as its native window title");
+  assert.ok(source.includes(`app.setAppUserModelId(IS_DEV_PROFILE ? "${build.appId}.dev" : "${build.appId}")`));
 });
 
 test("packaged smoke validates the runtime CLI version instead of the desktop release version", () => {
