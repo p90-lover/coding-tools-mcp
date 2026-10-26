@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { estimateChatGptWebInputTokens, resolveBiggerContextMultipartParts } from "../src/adapters/chatgpt-web/usage";
-import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
+import { compileChatGptWebPrompt, formatChatGptWebMultipartCommit } from "../src/adapters/chatgpt-web/prompt";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
 import { estimateTokens } from "../src/lib/token-estimate";
@@ -53,6 +53,55 @@ test("Bigger Context compaction selects three parts before the legacy inline byt
   expect(compiled.multipart!.parts.flatMap(part => JSON.parse(part).records).map(record => record.message.content))
     .toEqual([parsed.context.messages[0]!.content]);
 });
+
+test("native GPT to Web GPT compaction transports one oversized history message without dropping it", () => {
+  const plus = { ...capabilities, proAvailable: false };
+  // One native-history item can be larger than the entire capacity of any single web effort.
+  // The whole transaction still fits the three available message budgets.
+  const history = `native-model-transcript: ${"word ".repeat(174_241)}`;
+  const parsed = request(history);
+  parsed._compactionRequest = true;
+  parsed.context.messages.push({ role: "user", content: "latest request after model switch", timestamp: 2 });
+  expect(estimateTokens(history)).toBeGreaterThan(100_000);
+
+  const compiled = compileChatGptWebPrompt(parsed, plus, undefined, { experimentalMultipartParts: 3 });
+  const records = compiled.multipart!.parts.flatMap(part => JSON.parse(part).records as Array<{
+    kind: string;
+    record_index?: number;
+    fragment_index?: number;
+    fragment_count?: number;
+    record_json_fragment?: string;
+    message?: { content: string };
+  }>);
+  const fragments = records.filter(record => record.kind === "record_fragment");
+  expect(fragments.length).toBeGreaterThan(1);
+  expect(fragments.map(fragment => fragment.fragment_index))
+    .toEqual(Array.from({ length: fragments.length }, (_, index) => index + 1));
+  expect(fragments.every(fragment => fragment.fragment_count === fragments.length && fragment.record_index === 0)).toBe(true);
+  const recovered = JSON.parse(fragments.map(fragment => fragment.record_json_fragment).join(""));
+  expect(recovered).toEqual({ kind: "message", message_index: 0, message: { role: "user", content: history } });
+  expect(records.at(-1)?.message?.content).toBe("latest request after model switch");
+  expect(formatChatGptWebMultipartCommit(compiled.multipart!, `ctx_${"0".repeat(32)}`))
+    .toContain("record_json_fragment");
+
+  const messages = compiledChatGptWebMessages(compiled);
+  const stageTokens = Math.max(...messages.slice(0, -1).map(message => estimateTokens(message)));
+  const stageChars = Math.max(...messages.slice(0, -1).map(message => message.length));
+  const staging = resolveChatGptWebMultipartStagingMode(parsed.modelId, plus, stageTokens, stageChars);
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId),
+    Math.max(...messages.map(message => estimateTokens(message))),
+    parsed.modelId, "high", plus, Math.max(...messages.map(message => message.length)), 3,
+    {
+      stagingEffort: staging.effort,
+      maxStageMessageTokens: stageTokens,
+      maxStageChars: stageChars,
+      finalMessageTokens: estimateTokens(messages.at(-1)!),
+      finalMessageChars: messages.at(-1)!.length,
+      finalImageTokens: 0,
+    },
+  )).not.toThrow();
+}, 30_000);
 
 test("multipart planning leaves room for final attachments and execution instructions without losing history", () => {
   for (const scenario of [
