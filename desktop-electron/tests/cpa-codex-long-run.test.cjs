@@ -279,3 +279,39 @@ test("the state file is saved off the calling thread, latest state last, however
     Object.assign(fs, originals);
   }
 });
+
+test("a failed save neither drops a change queued behind it nor leaves an older intent on disk", async () => {
+  const clock = fakeClock();
+  const statePath = path.join(temporaryDirectory("coding-tools-long-run-failed-save-"), "state.json");
+  const tool = { id: "cpa", status: "ready", pid: 9, originalChrome: true };
+  const inner = {
+    snapshot: () => ({ version: 1, tools: [tool] }), inspect: async () => tool,
+    start: async () => tool, stop: async () => tool, restart: async () => tool,
+    openEmbedded: async () => ({ tool, section: "dashboard", url: "", embedded: true }),
+    openExternalTool: async () => ({ tool, section: "dashboard", url: "", embedded: false }),
+    copyCpaManagementKey: () => ({ copied: true, length: 36 }), dispose() {},
+  };
+  const realRename = fs.promises.rename;
+  let failing = 2;
+  const warnings = [];
+  fs.promises.rename = async (...args) => {
+    if (failing > 0) { failing -= 1; throw Object.assign(new Error("disk is busy"), { code: "EIO" }); }
+    return realRename(...args);
+  };
+  try {
+    const controller = attachCpaCodexLongRun(inner, {
+      statePath, now: clock.now, setTimeoutFn: clock.setTimeoutFn, clearTimeoutFn: clock.clearTimeoutFn,
+      resumeOnCreate: false, logger: { warn: (event, detail) => warnings.push([event, detail.attempt]), info() {} },
+    });
+    // The start's save fails while the stop is queued behind it.
+    await controller.start("cpa");
+    await controller.stop("cpa");
+    await controller.settled();
+    assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).tools.cpa.desiredRunning, false, "the stop reached the disk");
+    assert.deepEqual(warnings.map(([event]) => event), ["cpa_long_run.state_not_saved", "cpa_long_run.state_not_saved"]);
+    assert.deepEqual(fs.readdirSync(path.dirname(statePath)), ["state.json"], "failed saves leave no temp file");
+    controller.dispose();
+  } finally {
+    fs.promises.rename = realRename;
+  }
+});

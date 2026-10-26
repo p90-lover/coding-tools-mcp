@@ -208,19 +208,35 @@ function attachCpaCodexLongRun(inner, {
   // and a rename on the busy hard disk) held the main process for about 0.6 s, every 10 minutes
   // while CPA ran (profiled live on 0.8.25, 2026-10-27). The queue always writes the latest state,
   // so an older save can never land after a newer one; saves asked for meanwhile become one.
+  // A failed save never ends the queue: a change asked for meanwhile (a stop, say) is still written,
+  // and the failed state itself is tried again a few times, so the file does not keep an older
+  // intent that the next start would resume.
+  const SAVE_RETRY_DELAYS_MS = [250, 1_000];
   let saving = null;
   let unsaved = false;
   function persist() {
     if (!statePath) return;
     unsaved = true;
     saving ??= (async () => {
+      let failures = 0;
       try {
         while (unsaved) {
           unsaved = false;
-          await writeStateAsync(statePath, state);
+          try {
+            await writeStateAsync(statePath, state);
+            failures = 0;
+          } catch (error) {
+            const delay = SAVE_RETRY_DELAYS_MS[failures];
+            failures += 1;
+            logger?.warn?.("cpa_long_run.state_not_saved", {
+              message: error instanceof Error ? error.message : String(error), attempt: failures,
+            });
+            if (delay !== undefined) {
+              unsaved = true;
+              await new Promise((resolve) => setTimeout(resolve, delay));
+            }
+          }
         }
-      } catch (error) {
-        logger?.warn?.("cpa_long_run.state_not_saved", { message: error instanceof Error ? error.message : String(error) });
       } finally {
         saving = null;
       }
