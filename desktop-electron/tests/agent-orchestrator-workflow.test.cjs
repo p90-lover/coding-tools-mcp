@@ -3331,7 +3331,7 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
  */
 async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
   ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." }, refuse = () => 0,
-  timers = null, request = null, goalsFile = null, now = Date.now, world: restarted = null } = {}) {
+  timers = null, request = null, goalsFile = null, now = Date.now, world: restarted = null, models = ["gpt-6-luna", "deepseek-v4", "gemini-3-flash"] } = {}) {
   // `world` given: the app restarting on the same AO state (and `goalsFile`), its goal kept.
   const world = restarted ?? chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
   const checks = [];
@@ -3345,7 +3345,7 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     fetchImpl: async (url, init) => {
       // The pool the chats' own models come from too (the next round checks its model is offered).
-      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }, { id: "deepseek-v4" }, { id: "gemini-3-flash" }] }) };
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: models.map((id) => ({ id })) }) };
       const body = JSON.parse(init.body);
       checks.push(body);
       if (refuse(body.model)) return { ok: false, status: refuse(body.model), json: async () => ({}) };
@@ -3423,6 +3423,27 @@ test("a model the evaluator gets a 404 for sits out for hours; one that was down
     await workflow.goalAfterRun("ws-1", next, "finished", null);
     assert.equal(checks[2].model, sitsOut ? "deepseek-v4" : "gemini-3-flash", `HTTP ${status}, half an hour on`);
   }
+});
+
+test("a provider that is down for every model costs a goal check one request, not all three", async () => {
+  // Seen live 2026-10-26: Cline Pass answered 502 for every model, and each check spent its three
+  // places on three of them, then waited two minutes, before gemini-3-flash answered.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const round = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "not yet" } }] });
+  const clock = { at: Date.parse("2026-10-26T08:00:00Z") };
+  const { world, workflow, checks } = await goalChat({ now: () => clock.at, refuse: (model) => model.startsWith("cline-pass/") ? 502 : 0,
+    models: ["cline-pass/deepseek-v4.1-flash", "cline-pass/glm-5.3-flash", "cline-pass/mimo-v2.6-flash", "gemini-3-flash", "gpt-6-luna"] });
+  world.runs.push(round("r1"));
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.deepEqual(checks.map((check) => check.model), ["cline-pass/deepseek-v4.1-flash", "gemini-3-flash"]);
+  // The next round, minutes on: Cline Pass's other models wait behind the provider that answered.
+  clock.at += 5 * 60_000;
+  const next = (await goalOf(workflow)).lastRunId;
+  world.runs.push(round(next));
+  await workflow.goalAfterRun("ws-1", next, "finished", null);
+  assert.equal(checks[2].model, "gemini-3-flash");
+  assert.equal(checks.length, 3);
 });
 
 test("a message the person sends into a chat whose goal stalled picks the goal up again", async () => {

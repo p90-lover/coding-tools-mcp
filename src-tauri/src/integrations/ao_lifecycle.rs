@@ -659,14 +659,23 @@ fn apply_inner(
                     "Stop and acknowledge this task's owned attempts before hiding it",
                 ));
             }
-            let board_revision = data.control_board.revision;
-            board::apply(
-                &mut data.control_board,
-                board_revision,
-                board::Change::Archive {
-                    id: task_id.clone(),
-                },
-            )?;
+            // Archived -> deleted: the card was archived when the task was first hidden, and the
+            // board refuses archiving it twice, so every delete of an archived chat failed.
+            let archived = data
+                .control_board
+                .tasks
+                .iter()
+                .any(|t| t.id == task_id && t.state == "archived");
+            if !archived {
+                let board_revision = data.control_board.revision;
+                board::apply(
+                    &mut data.control_board,
+                    board_revision,
+                    board::Change::Archive {
+                        id: task_id.clone(),
+                    },
+                )?;
+            }
             item.visibility = visibility;
             cancel_pending(data, workspace_id, &task_id);
             if let Some(job) = item.schedule.as_mut() {
@@ -1103,6 +1112,27 @@ mod tests {
             data.control_board.tasks[0].description,
             "Original user input"
         );
+        assert_ne!(data.control_board.tasks[0].state, "archived");
+    }
+    #[test]
+    fn an_archived_task_can_be_deleted_and_restored() {
+        let mut data = fixture();
+        for (revision, visibility) in [(0, "archived"), (1, "deleted")] {
+            change(
+                &mut data,
+                json!({"operation":"set_visibility","task_id":"goal",
+                "expected_revision":revision,"visibility":visibility}),
+                100 + revision,
+            )
+            .unwrap();
+        }
+        assert_eq!(data.control_board.tasks[0].state, "archived");
+        change(
+            &mut data,
+            json!({"operation":"restore_task","task_id":"goal","expected_revision":2}),
+            102,
+        )
+        .unwrap();
         assert_ne!(data.control_board.tasks[0].state, "archived");
     }
     #[test]
