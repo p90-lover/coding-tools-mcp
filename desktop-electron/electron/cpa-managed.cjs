@@ -200,6 +200,10 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
       for (const value of [saved.plugins, saved.plugins?.configs, saved.oauth]) {
         if (value !== undefined && Object.prototype.toString.call(value) !== "[object Object]") throw new Error();
       }
+      const apiKeys = saved["api-keys"];
+      if (apiKeys !== undefined && !Array.isArray(apiKeys)
+        && (Object.prototype.toString.call(apiKeys) !== "[object Object]"
+          || Object.values(apiKeys).some((groups) => !Array.isArray(groups)))) throw new Error();
     } catch {
       throw new Error("Saved CPA configuration is invalid; it was not replaced");
     }
@@ -220,11 +224,13 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     fs.chmodSync(pluginDirectory, 0o700);
   }
   const generated = [
+    "config-version: 8",
     "host: \"127.0.0.1\"",
     "port: 8317",
     `auth-dir: ${yamlString(authDirectory)}`,
-    "api-keys:",
-    `  - ${yamlString(proxyApiKey)}`,
+    "access:",
+    "  api-keys:",
+    `    - ${yamlString(proxyApiKey)}`,
     ...(outboundProxyUrl ? [`proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
     "remote-management:",
     "  allow-remote: false",
@@ -279,12 +285,12 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   ].join("\n");
   if (!savedSource.trim()) return generated;
   const managed = (yaml.parse ?? yaml.load)(generated);
-  // User settings survive restarts; listener, credentials, bundled plugin paths and file logging
+  // User settings survive restarts; listener, client access, bundled plugin paths and file logging
   // stay managed (an older build saved logging-to-file: true; none saved commercial-mode). So do
   // config v8's grouped forms of the same security settings: a saved `server` (host 0.0.0.0, or
   // commercial-mode off), `management` or `access` block would otherwise reopen what the flat keys
   // above keep closed.
-  const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins", "logging-to-file",
+  const owned = ["config-version", "host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins", "logging-to-file",
     "commercial-mode", "server", "management", "access"];
   const retained = Object.fromEntries(Object.entries(saved).filter(([key]) => !owned.includes(key)));
   const merged = {
@@ -292,6 +298,8 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     plugins: { ...saved.plugins, ...managed.plugins,
       configs: { ...saved.plugins?.configs, ...managed.plugins.configs } },
   };
+  // In v8 api-keys is the upstream provider map; legacy arrays are client keys, now managed above.
+  if (Object.prototype.toString.call(saved["api-keys"]) === "[object Object]") merged["api-keys"] = saved["api-keys"];
   if (saved.oauth) merged.oauth = { ...saved.oauth, "auth-dir": authDirectory };
   return (yaml.stringify ?? yaml.dump)(merged);
 }
