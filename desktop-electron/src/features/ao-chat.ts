@@ -1200,14 +1200,7 @@ function dshDetail(text: string): string {
  * only thought reads "Analysis completed".
  */
 export function dshProcessTitle(items: ChatLiveItem[]): string {
-  const counts = new Map<DshActivity, number>();
-  for (const item of items) {
-    if (!DSH_WORK.has(item.kind)) continue;
-    const kind = dshActivity(item);
-    counts.set(kind, (counts.get(kind) ?? 0) + 1);
-  }
-  // Array.prototype.sort is stable, so equal counts keep their first-appearance order.
-  const ranked = [...counts].sort((a, b) => b[1] - a[1]).map(([kind]) => kind);
+  const ranked = dshRanked(items);
   const labels = ranked.slice(0, 3).map((kind) => DSH_DONE[kind]);
   if (!labels.length) return "Analysis completed";
   const continuation = (label: string) => label.charAt(0).toLowerCase() + label.slice(1);
@@ -1217,24 +1210,91 @@ export function dshProcessTitle(items: ChatLiveItem[]): string {
   return ranked.length > 3 ? `${title}, etc.` : title;
 }
 
-/** What a row's detail is: the agent's own words, else its command, path or query. */
+/** The argument fields a row's detail is read from, in this order (process-activity.ts LIVE_TOOL_DETAIL_KEYS). */
+const DSH_DETAIL_KEYS = [
+  "title", "description", "objective", "task", "task_name", "name", "question", "questions", "prompt", "message",
+  "command", "cmd", "queries", "query", "pattern", "url", "uri", "file_path", "path", "target", "action", "status",
+];
+
+/** One argument's detail: its text, a list of strings joined with ", ", or the first question asked. */
+function dshArgDetail(key: string, value: unknown): string {
+  if (key === "questions") {
+    if (!Array.isArray(value)) return "";
+    for (const entry of value) {
+      const detail = entry !== null && typeof entry === "object" ? dshArgDetail("question", (entry as Record<string, unknown>).question) : "";
+      if (detail) return detail;
+    }
+    return "";
+  }
+  if (typeof value === "string") return dshDetail(value);
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? dshDetail(value.join(", ")) : "";
+}
+
+/** A group's kinds of work by number of calls, ties in order of first appearance (processActivity). */
+function dshRanked(items: ChatLiveItem[]): DshActivity[] {
+  const counts = new Map<DshActivity, number>();
+  for (const item of items) {
+    if (!DSH_WORK.has(item.kind)) continue;
+    const kind = dshActivity(item);
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
+  // Array.prototype.sort is stable, so equal counts keep their first-appearance order.
+  return [...counts].sort((a, b) => b[1] - a[1]).map(([kind]) => kind);
+}
+
+/** A closed group's icon (ChatGroupSeat): its most-called kind of work, else thinking. */
+export function dshGroupActivity(items: ChatLiveItem[]): DshActivity | "thinking" {
+  return dshRanked(items)[0] ?? "thinking";
+}
+
+/** What a row's detail is: the agent's own words, else the first of its arguments DeepSeek Harness reads, else the tool's name. */
 export function dshItemDetail(item: ChatLiveItem): string {
   if (item.description) return dshDetail(item.description);
   if (item.kind === "edit") return dshDetail((item.files ?? []).map((file) => file.path).join(", "));
   try {
     const args = item.input ? JSON.parse(item.input) as Record<string, unknown> : {};
-    for (const key of ["command", "cmd", "file_path", "path", "pattern", "query", "url", "prompt", "description"]) {
-      const value = args[key];
-      if (typeof value === "string" && value.trim()) return dshDetail(value);
+    for (const key of DSH_DETAIL_KEYS) {
+      const detail = args && typeof args === "object" ? dshArgDetail(key, args[key]) : "";
+      if (detail) return detail;
     }
   } catch { /* arguments that are not JSON fall back to the row's own text */ }
   return dshDetail(item.kind === "command" ? item.text : dshToolName(item) || item.text);
 }
 
+/** The terminal body keeps the full command even when its row summary is a description. */
+export function dshCommandText(item: ChatLiveItem): string {
+  if (item.kind === "command") return item.text;
+  try {
+    const args = JSON.parse(item.input ?? "{}");
+    if (typeof args?.command === "string") return args.command;
+    if (typeof args?.cmd === "string") return args.cmd;
+  } catch { /* Preserve unparsed command arguments below. */ }
+  return item.input || item.text;
+}
+
+/**
+ * A settled command's exit capsule (ExitCodeBadge, terminalExitLabel): "exit code 1" or "signal
+ * SIGTERM" for a failed foreground command, read from the status line its harness leaves in the
+ * output (Claude Code "Exit code 1", Codex "Exit code: 1" or "Process exited with code 1",
+ * DeepSeek Harness "[exit code: 1]"). Null for a running, successful or unknown one: no code is
+ * invented, so a failure the output does not number keeps its red error line.
+ */
+export function dshExitLabel(item: ChatLiveItem): string | null {
+  const command = item.kind === "command" || (item.kind === "tool" && dshActivity(item) === "commands");
+  if (!command || !/fail|error/i.test(item.status)) return null;
+  const output = item.output ?? "";
+  const signal = output.match(/\[killed by signal: ([^\]\n]+)\]\s*$/)?.[1];
+  if (signal) return `signal ${signal}`;
+  const code = output.match(/^\s*Exit code:? (-?\d+)\b/)?.[1] ?? output.match(/\bProcess exited with code (-?\d+)\b/)?.[1]
+    ?? output.match(/\[exit code: (-?\d+|null)\]\s*$/)?.[1];
+  if (code === "null") return "no exit code";
+  return code !== undefined && code !== "0" ? `exit code ${code}` : null;
+}
+
 /**
  * A running group's heading (ChatGroupSeat's live title): what its newest unfinished call does and
- * that call's detail, "Running commands · npm test"; with no call running, its latest thought,
- * "Analyzing the request · <the thought's last paragraph>".
+ * that call's detail, "Running commands · npm test"; with no call running, the thought it is still
+ * writing, "Analyzing the request · <its last paragraph>".
  */
 export function dshLiveTitle(items: ChatLiveItem[]): { activity: DshActivity | "thinking"; label: string } {
   const running = [...items].reverse().find((item) => DSH_WORK.has(item.kind) && !/complet|done|success|fail|error|reject|denied|cancel/i.test(item.status));
@@ -1249,7 +1309,9 @@ export function dshLiveTitle(items: ChatLiveItem[]): { activity: DshActivity | "
     const detail = dshItemDetail(running);
     return { activity, label: detail ? `${DSH_NOW[activity]} · ${detail}` : DSH_NOW[activity] };
   }
-  const thought = [...items].reverse().find((item) => item.kind === "reasoning" && item.text.trim());
+  // Only a thought still streaming names what the group is on (liveReasoningDetail); a settled one
+  // under no running call leaves the bare "Analyzing the request".
+  const thought = [...items].reverse().find((item) => item.kind === "reasoning" && item.status === "running" && item.text.trim());
   const paragraph = thought?.text.split(/\r?\n[\t ]*\r?\n/).map((part) => dshDetail(part.replaceAll("**", ""))).filter(Boolean).at(-1) ?? "";
   return { activity: "thinking", label: paragraph ? `${DSH_NOW.thinking} · ${paragraph}` : DSH_NOW.thinking };
 }

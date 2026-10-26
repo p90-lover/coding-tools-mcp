@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -40,6 +41,7 @@ import type {
   Language,
   LauncherSnapshot,
   LauncherState,
+  LogRecord,
   McpServerEntry,
   McpServerInput,
   OperationState,
@@ -2057,16 +2059,7 @@ function ActivitySurface({
             <span>{copy.noLogs}</span>
           </div>
         ) : null}
-        {[...logs].reverse().map((record) => (
-          <div className="activity-row" key={logKey(record)}>
-            <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
-            <div>
-              <strong>{humanEvent(record.event)}</strong>
-              <span>{logDetail(record.detail)}</span>
-            </div>
-            <time>{formatTime(record.at, language)}</time>
-          </div>
-        ))}
+        {[...logs].reverse().map((record) => <ActivityRow key={logKey(record)} record={record} language={language} />)}
       </div>
     </ContentSurface>
   );
@@ -3454,13 +3447,36 @@ function logDetail(detail: Record<string, unknown>): string {
     .join(" · ");
 }
 
+// A record never changes once logged, so its row renders once. Inline rows re-ran the formatting
+// below for all 300 rows on every new line, even with the Activity page closed (it stays mounted),
+// which was a quarter of the renderer's script time while a chat worked and the person typed.
+const ActivityRow = memo(function ActivityRow({ record, language }: { record: LogRecord; language: Language }) {
+  return (
+    <div className="activity-row">
+      <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
+      <div>
+        <strong>{humanEvent(record.event)}</strong>
+        <span>{logDetail(record.detail)}</span>
+      </div>
+      <time>{formatTime(record.at, language)}</time>
+    </div>
+  );
+});
+
+// toLocaleTimeString builds a new Intl.DateTimeFormat on every call; one per language is reused.
+const timeFormats = new Map<Language, Intl.DateTimeFormat>();
+
 function formatTime(value: string, language: Language): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleTimeString(language === "ja" ? "ja-JP" : language === "zh-TW" ? "zh-TW" : language === "zh-CN" ? "zh-CN" : "en", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
+  if (Number.isNaN(date.getTime())) return value;
+  let format = timeFormats.get(language);
+  if (!format) {
+    format = new Intl.DateTimeFormat(language === "ja" ? "ja-JP" : language === "zh-TW" ? "zh-TW" : language === "zh-CN" ? "zh-CN" : "en", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    timeFormats.set(language, format);
+  }
+  return format.format(date);
 }

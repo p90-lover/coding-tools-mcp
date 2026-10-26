@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { KeyboardEvent, ReactNode } from "react";
+import type { CSSProperties, KeyboardEvent, ReactNode } from "react";
 import { Caret, Icon } from "../icons";
 import {
   capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning, EFFORTS,
@@ -75,7 +75,7 @@ export function useComposerPopover() {
     if (event.key === "Enter" && (event.target as HTMLElement).tagName === "INPUT") event.preventDefault();
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
     if (event.key === "Tab") {
-      const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled), [tabindex='0']") ?? []);
+      const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled), summary, [tabindex='0']") ?? []);
       if (!controls.length) return;
       const first = controls[0], last = controls[controls.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
@@ -105,9 +105,10 @@ function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClas
   </div>;
 }
 
-/** An option row in a chip menu: a radio mark, its text, and a check when it is the pick. */
-function Option({ picked, disabled, onPick, title, children }: { picked: boolean; disabled: boolean; onPick: () => void; title?: string; children: ReactNode }) {
-  return <button type="button" role="radio" aria-checked={picked} className="ao-picker-option" disabled={disabled} onClick={onPick} title={title}>
+/** An option row in a chip menu: a radio mark, its text, and a check when it is the pick. `row` staggers its entrance. */
+function Option({ picked, disabled, onPick, title, row, children }: { picked: boolean; disabled: boolean; onPick: () => void; title?: string; row?: number; children: ReactNode }) {
+  return <button type="button" role="radio" aria-checked={picked} className="ao-picker-option" disabled={disabled} onClick={onPick} title={title}
+    style={row === undefined ? undefined : { "--row": row } as CSSProperties}>
     <span className="ao-option-radio" aria-hidden="true" /><span>{children}</span>{picked ? <Icon name="check" width="16" height="16" /> : null}
   </button>;
 }
@@ -191,7 +192,7 @@ export function AgentOrchestratorComposerControls({
   const harness = harnesses.find(item => item.id === route.harness_id);
   const harnessName = harness?.label ?? harnessLabel(route.harness_id, harnesses);
   const capability = caps[route.model];
-  const { efforts, context, fullLimit, presets } = routeTuning(route, models === null ? undefined : capability);
+  const { efforts, context, fullLimit, presets, fixed } = routeTuning(route, models === null ? undefined : capability);
   // "auto" is always takeable: the model runs at its own effort and nothing is sent (aoLaunchArgs).
   const effortUnsupported = Boolean(route.effort && route.effort !== "auto" && efforts && !efforts.includes(route.effort));
   const levels = (efforts ?? []).filter(effort => effort !== "auto");
@@ -202,7 +203,7 @@ export function AgentOrchestratorComposerControls({
   // it once it knows the model's range, and so does picking a model. A model whose limit is not
   // known runs at the agent's own window, which the chip calls "Auto" like an unpicked effort.
   const startWindow = models === null ? null : defaultWindow(route, capability);
-  const shownWindow = route.context_window || startWindow || fullLimit;
+  const shownWindow = fixed || route.context_window || startWindow || fullLimit;
   const windowLabel = shownWindow ? contextText(shownWindow) : "Auto";
   // No "Default" effort either: unpicked, a model runs at its own effort, which the chip names
   // when the model's id carries it ("Gemini 3.8 Flash High" -> High) and otherwise calls "Auto".
@@ -244,22 +245,39 @@ export function AgentOrchestratorComposerControls({
     </div>
     {mode === "single" ? <>
       {/* The harness shows only its logo; its name is in the tooltip and the accessible label. */}
-      <ChipMenu heading="Harness" popupClass="ao-tuning-popup" className="is-logo" ariaLabel={`Harness: ${harnessName}`} disabled={busy || isWebModel(route.model)}
+      <ChipMenu heading="Harness" popupClass="ao-tuning-popup ao-harness-popup" className="is-logo" ariaLabel={`Harness: ${harnessName}`} disabled={busy || isWebModel(route.model)}
         title={isWebModel(route.model) ? `${harnessName} · WebGPT runs only on Native Codex` : `${harnessName} · the agent that runs this chat`}
         label={<HarnessLogo harnessId={route.harness_id} label={harnessName} />}>
-        {(close) => <div role="radiogroup" aria-label="Harnesses" className="ao-harness-list">
-          {harnesses.map(item => <Option key={item.id} picked={item.id === route.harness_id} disabled={busy || !item.runnable} onPick={() => {
-            // Each harness starts on an explicit model; one without a known model shows "Choose a model".
-            const model = item.id === NATIVE_HARNESS ? WEB_ROUTE.model : item.id === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
-            if (item.id !== route.harness_id) onRouteChange(withTuning(workerRoute(item.id, model, nativePermission(route)), route));
-            close();
-          }}>
-            {/* One line per harness: its logo, its name, and a short state tag at the end. */}
-            <span className="ao-harness-option"><HarnessLogo harnessId={item.id} label={item.label} size={18} /><strong>{item.label}</strong>
-              {!item.runnable ? <small>not installed</small> : item.authStatus === "unauthorized" ? <small>sign in</small> : null}</span>
-          </Option>)}
-          {!harnesses.length ? <p role="status">No agents found yet.</p> : null}
-        </div>}
+        {(close) => {
+          // One slim line per harness: its logo and name. Its state is no word on the row: a missing
+          // harness is greyed (and folded under "+N"), one that needs a sign-in has a dot on its logo;
+          // the tooltip says which.
+          const row = (item: AoHarness, index: number) => <Option key={item.id} picked={item.id === route.harness_id} disabled={busy || !item.runnable} row={index}
+            title={!item.runnable ? `${item.label} · not installed` : item.authStatus === "unauthorized" ? `${item.label} · sign in to use it` : item.label}
+            onPick={() => {
+              // Each harness starts on an explicit model; one without a known model shows "Choose a model".
+              const model = item.id === NATIVE_HARNESS ? WEB_ROUTE.model : item.id === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
+              if (item.id !== route.harness_id) onRouteChange(withTuning(workerRoute(item.id, model, nativePermission(route)), route));
+              close();
+            }}>
+            <span className={item.runnable ? "ao-harness-option" : "ao-harness-option is-missing"}>
+              <span className="ao-harness-face"><HarnessLogo harnessId={item.id} label={item.label} size={18} />
+                {item.runnable && item.authStatus === "unauthorized" ? <i className="ao-harness-signin" aria-hidden="true" /> : null}</span>
+              <strong>{item.label}</strong></span>
+          </Option>;
+          // The picked harness always stays in view, even if it went missing since.
+          const ready = harnesses.filter(item => item.runnable || item.id === route.harness_id);
+          const missing = harnesses.filter(item => !item.runnable && item.id !== route.harness_id);
+          return <div role="radiogroup" aria-label="Harnesses" className="ao-harness-list">
+            {ready.map(row)}
+            {missing.length ? <details className="ao-harness-more">
+              <summary title={`Not installed: ${missing.map(item => item.label).join(", ")}`} aria-label={`${missing.length} more, not installed`}>
+                <Icon name="chevron" width="12" height="12" /><span>+{missing.length}</span></summary>
+              {missing.map(row)}
+            </details> : null}
+            {!harnesses.length ? <p role="status">No agents found yet.</p> : null}
+          </div>;
+        }}
       </ChipMenu>
       <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}
         onOpen={() => setReload(value => value + 1)}
@@ -319,8 +337,9 @@ export function AgentOrchestratorComposerControls({
           {effortUnsupported && levels.length ? <p className="ao-popup-muted" role="status">This model doesn't take {effortWord(route.effort)}. Pick another above.</p> : null}
         </div>}
       </ChipMenu>}
-      <ChipMenu heading="Context window" popupClass="ao-tuning-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context}
-        title={!context ? capability?.contextReason || "This agent's window cannot be set" : "How much of the conversation the agent keeps in view"}
+      {/* WebGPT's window is the Codex bridge's (ChatGPT's own limit): shown, locked. */}
+      <ChipMenu heading="Context window" popupClass="ao-tuning-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context || Boolean(fixed)}
+        title={fixed ? capability?.contextReason || "WebGPT's window is the Codex bridge's" : !context ? capability?.contextReason || "This agent's window cannot be set" : "How much of the conversation the agent keeps in view"}
         label={<span>{windowLabel}</span>}>
         {(close) => <div role="radiogroup" aria-label="Context windows">
           {[...new Set([...presets, ...(fullLimit ? [fullLimit] : [])])].sort((a, b) => a - b).map(tokens => <Option key={tokens}
