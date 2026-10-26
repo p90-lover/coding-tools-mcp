@@ -6402,6 +6402,108 @@ test("one send reads its agent's model catalog once, and a failed read is not ke
 
 // ---- Delete message ----
 
+test("rewind truncates and resends in the same chat, preserves earlier replies, and never continues the future session", async () => {
+  for (const index of [0, 1, 2]) {
+    const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): use pnpm"
+      + "\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
+    const done = id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false,
+      nodes: [{ id: "lead", role: "planner", state: "finished", receipt: { thread_id: `session-${id}`, answer: `answer ${id}` } }] });
+    const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description }], runs: [done("r1"), done("r2"), done("r3")] });
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+      findCodexExecutable: () => process.execPath, resolveHarness: async () => { throw new Error("offline test"); } });
+    const message = ["first ask", "second ask", "third ask"][index];
+    const result = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message,
+      rewind: { index, description }, deferStart: true });
+    assert.equal(result.taskId, "task-1");
+    assert.equal(world.tasks.length, 1, "no replacement chat is created");
+    assert.deepEqual(Array.from(aoChat.chatMessagesFromDescription(world.tasks[0].description), item => item.text),
+      ["first ask", "second ask", "third ask"].slice(0, index + 1));
+    const shown = (await workflow.call("runs", { workspaceId: "ws-1" })).runs;
+    assert.deepEqual(shown.map(run => run.id), ["r1", "r2", "r3"].slice(0, index), "old reply and all later replies are hidden");
+    assert.equal(world.runs.length, 3, "removed runs remain recoverable in AO history");
+    assert.ok(result.runId, "the selected message starts a run without another click");
+    if (index < 2) assert.doesNotMatch(world.tasks[0].description, /use pnpm|third ask/);
+  }
+});
+
+test("rewind refuses stale descriptions, changed messages, invalid indexes and busy chats before writing", async () => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description }], runs: ["r1", "r2"].map(id => ({
+    id, workspace_id: "ws-1", project_id: "task-1", nodes: [{ id: "lead", role: "planner", state: "finished" }],
+  })) });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => process.execPath });
+  const send = extra => workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "second ask", ...extra });
+  for (const rewind of [{ index: -1, description }, { index: 8, description }, { index: 1, description: "changed" }]) {
+    await assert.rejects(send({ rewind }), /rewind|changed|reload|message/i);
+  }
+  await assert.rejects(send({ rewind: { index: 0, description } }), /message|changed/i);
+  world.runs[1].nodes[0].state = "running";
+  await assert.rejects(send({ rewind: { index: 1, description } }), /stop.*chat|still running/i);
+  assert.equal(world.edits.length, 0);
+  assert.equal(world.tasks[0].description, description);
+});
+
+test("a failed rewind run creation restores both the transcript and the visible replies", async () => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description }], runs: ["r1", "r2"].map(id => ({
+    id, workspace_id: "ws-1", project_id: "task-1", nodes: [{ id: "lead", role: "planner", state: "finished" }],
+  })) });
+  const workflow = createAgentOrchestratorWorkflow({ findCodexExecutable: () => process.execPath,
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/update") throw new Error("run creation failed");
+      return world.requestHeadless(endpoint, body);
+    } });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "second ask",
+    rewind: { index: 1, description }, deferStart: true }), /run creation failed/);
+  assert.equal(world.tasks[0].description, description);
+  assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2"]);
+});
+
+test("rewind starts a fresh agent with earlier answers but without later answers or steers", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model", permission_profile: ":ao-default" };
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): discarded steer";
+  const single = (id, answer) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+    nodes: [{ id: "lead", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "old-session", answer } }] });
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description, clauses: [] }],
+    runs: [single("r1", "earlier answer"), single("r2", "discarded answer"),
+      { ...single("r2b", "discarded restart"), restarts_run_id: "r2" }] });
+  const spawned = [], sent = [], created = new Map();
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/read" && body.run_id) {
+        const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+          grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "lead", role: "planner", state: "pending", parents: [], route }] };
+        created.set(body.run_id, run);
+        return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+      }
+      const latest = [...created.values()].at(-1);
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "rewind-key",
+        prompt: aoChat.chatMessagesFromDescription(world.tasks[0].description).map(item => item.text).join("\n\nFollow-up: ") }; }
+      if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+      if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+      return world.requestHeadless(endpoint, body, options);
+    },
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return "fresh-session"; },
+      continuable: async () => true,
+      send: async (id, text) => { sent.push([id, text]); return { turnId: "new-turn", state: "running" }; },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "new answer" }),
+    },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "second ask",
+    executionMode: "single", singleRoute: route, rewind: { index: 1, description } });
+  await until(() => spawned.length || sent.length);
+  assert.equal(spawned.length, 1, "the session that remembers the discarded exchange is never continued");
+  assert.ok(spawned[0].prompt.includes("earlier answer"), "the kept reply goes to the new agent");
+  assert.ok(spawned[0].prompt.includes("second ask"), "the selected message is sent automatically");
+  assert.doesNotMatch(spawned[0].prompt, /discarded answer|discarded restart|discarded steer/);
+  assert.ok(!sent.some(([id]) => id === "old-session"));
+  assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1"]);
+});
+
 test("deleting a chat message removes it and its steers from the task and hides its run from the chat", async () => {
   const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): use pnpm"
     + "\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";

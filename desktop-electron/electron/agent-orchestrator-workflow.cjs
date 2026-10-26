@@ -4367,7 +4367,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
   }
 
-  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
+  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind } = {}) {
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -4375,6 +4375,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const text = objective ? goalMessage(objective, 1) : asked;
     const naming = objective ?? asked;
     if (!text.trim()) throw new Error("Type a message to start the chat");
+    if (rewind !== undefined && (!taskId || !rewind || !Number.isSafeInteger(rewind.index) || rewind.index < 0
+      || typeof rewind.description !== "string" || goal !== undefined)) throw new Error("Choose a message to rewind in this chat");
     // Compacting the chat cannot make room for one message over the board's byte limit by itself.
     if (utf8Bytes(text) > BOARD_TEXT_BYTES) {
       throw new Error(`This message is ${utf8Bytes(text).toLocaleString("en-US")} bytes; a chat message can be at most ${BOARD_TEXT_BYTES.toLocaleString("en-US")}. Shorten it or send it in parts.`);
@@ -4425,6 +4427,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let continuation = null;
     // The follow-up as written to the chat, and the chat as it was before (withdrawFollowUp).
     let followUp = null;
+    let rewindBefore;
     if (taskId) {
       task = clean(taskId, 128);
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
@@ -4433,8 +4436,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The session keeps the permission mode, effort and context it was started with, so only an
       // unchanged route continues it; any change starts a fresh session with the new settings. A Team
       // follow-up has no single route and never continues the single card's session.
-      const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
+      const live = rewind || freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
       if (live) continuation = { session: live.receipt.thread_id, text };
+      if (rewind && (chatWorking(id, task, saved.runs)
+        || chatEdits.visible(id, saved.runs.filter(run => run.project_id === task)).some(run => !runSettled(run)))) {
+        throw new Error("Stop the chat before rewinding a message");
+      }
       try {
         await retireOpenRuns(id, task, saved.runs);
       } catch (error) {
@@ -4443,9 +4450,34 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       let detail = await board({ workspaceId: id, taskId: task });
       if (!detail.task) throw new Error("This chat's task no longer exists");
+      let rewoundDescription = null;
+      let discarded = [];
+      if (rewind) {
+        const before = String(detail.task.description || "");
+        if (before !== rewind.description) throw new Error("The chat changed before rewind; reload it and try again");
+        const marker = /\n\nFollow-up \(([^)]+) UTC\):\n/g;
+        const marks = [...before.matchAll(marker)];
+        const bodies = before.split(new RegExp(marker.source)).filter((_, index) => index % 2 === 0);
+        if (!bodies[0].trim() || rewind.index >= bodies.length) throw new Error("That message is no longer in this chat; reload it");
+        const selected = bodies[rewind.index].split(/\n\n↳ Steer \(([^)]+) UTC\): /)[0].trim();
+        if (text !== boardText(clean(selected, 8192, false))) throw new Error("The selected message changed before rewind; reload it");
+        const shown = chatEdits.visible(id, saved.runs.filter(run => run.project_id === task));
+        const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id);
+        if (roots.length !== bodies.length) throw new Error("This chat's messages are still synchronizing; reload before rewind");
+        const hidden = new Set(roots.slice(rewind.index).map(run => run.id));
+        for (let size = -1; size !== hidden.size;) {
+          size = hidden.size;
+          for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
+        }
+        discarded = [...hidden];
+        rewoundDescription = rewind.index === 0 ? text
+          : `${before.slice(0, marks[rewind.index - 1].index)}\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
+        rewindBefore = chatEdits.get(id, task);
+      }
       const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
-      let description = extended();
+      let description = rewoundDescription ?? extended();
+      if (rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This rewind exceeds the chat size limit; shorten the conversation first");
       if (utf8Bytes(description) > BOARD_TEXT_BYTES) {
         // A long chat compacts itself, as Codex does, instead of stopping at the size limit: the
         // earlier conversation becomes a handoff summary (what /compact does) and the chat goes on.
@@ -4460,6 +4492,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
       followUp = { before: saidBefore, description };
+      if (rewind) {
+        try { chatEdits.deleteMessage(id, task, discarded); }
+        catch (error) {
+          await withdrawFollowUp(id, task, runsBefore, followUp);
+          chatEdits.restore(id, task, rewindBefore);
+          throw error;
+        }
+      }
     } else {
       const before = await board({ workspaceId: id });
       const known = new Set(before.tasks.map((entry) => entry.id));
@@ -4478,6 +4518,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true));
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
+      if (rewind && followUp) {
+        const detail = await board({ workspaceId: id, taskId: task });
+        if (detail.task?.description === followUp.before) chatEdits.restore(id, task, rewindBefore);
+      }
       throw error;
     }
     // After a deleted message this run started without the old session; later follow-ups continue its own.
