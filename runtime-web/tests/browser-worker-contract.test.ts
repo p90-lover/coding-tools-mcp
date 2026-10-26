@@ -461,7 +461,7 @@ test("compaction retry submission evidence cannot make prompt-stage settlement u
       clock: { suspendedMs(): number },
       awaitAbortedActionSettlement: boolean,
     ): Promise<T>;
-    attachPromptWithCompactionRetry(
+    attachPromptWithIntegrityRetry(
       page: unknown,
       prompt: string,
       localTools: boolean,
@@ -486,7 +486,7 @@ test("compaction retry submission evidence cannot make prompt-stage settlement u
     "trace_compaction_retry_timeout",
     "prompt_attachment",
     10,
-    signal => prototype.attachPromptWithCompactionRetry.call(
+    signal => prototype.attachPromptWithIntegrityRetry.call(
       fixture,
       page,
       "prompt",
@@ -1174,9 +1174,9 @@ test("plain-text editing command fails closed when the focused composer rejects 
     .rejects.toThrow("rejected the plain-text editing command");
 });
 
-test("compaction prompt attachment retries once only before submission evidence", async () => {
+test("prompt attachment retries once before submission evidence, including normal turns", async () => {
   const attachWithRetry = (ChatGptBrowserWorker.prototype as unknown as {
-    attachPromptWithCompactionRetry(
+    attachPromptWithIntegrityRetry(
       page: unknown,
       prompt: string,
       localTools: boolean,
@@ -1184,7 +1184,7 @@ test("compaction prompt attachment retries once only before submission evidence"
       baseline: unknown,
       captureDiagnostic?: (checkpoint: string) => Promise<void>,
     ): Promise<void>;
-  }).attachPromptWithCompactionRetry;
+  }).attachPromptWithIntegrityRetry;
   const baseline = {
     userTurns: {},
     responseTurns: {},
@@ -1203,7 +1203,7 @@ test("compaction prompt attachment retries once only before submission evidence"
       }
     },
     currentSubmissionEvidence: async () => undefined,
-    resetCompactionComposerForRetry: async () => { resets += 1; },
+    resetPromptComposerForRetry: async () => { resets += 1; },
   }, {}, "compact prompt", false, true, baseline, async checkpoint => { checkpoints.push(checkpoint); });
 
   expect(attempts).toBe(2);
@@ -1217,20 +1217,41 @@ test("compaction prompt attachment retries once only before submission evidence"
       throw new ChatGptPromptAttachmentIntegrityError("composer cleared");
     },
     currentSubmissionEvidence: async () => "user_turn",
-    resetCompactionComposerForRetry: async () => { throw new Error("must not reset"); },
+    resetPromptComposerForRetry: async () => { throw new Error("must not reset"); },
   }, {}, "compact prompt", false, true, baseline)).rejects.toThrow(
-    "ChatGPT changed while the compaction prompt was being prepared",
+    "ChatGPT changed while the prompt was being prepared",
   );
   expect(duplicateAttempts).toBe(1);
 
   let normalAttempts = 0;
+  let normalResets = 0;
   await expect(attachWithRetry.call({
     attachPrompt: async () => {
       normalAttempts += 1;
       throw new ChatGptPromptAttachmentIntegrityError("composer cleared");
     },
+    currentSubmissionEvidence: async () => undefined,
+    resetPromptComposerForRetry: async () => { normalResets += 1; },
   }, {}, "normal prompt", false, false, baseline)).rejects.toThrow("composer cleared");
-  expect(normalAttempts).toBe(1);
+  expect(normalAttempts).toBe(2);
+  expect(normalResets).toBe(1);
+
+  let recoveredAttempts = 0;
+  let recoveredResets = 0;
+  await expect(attachWithRetry.call({
+    attachPrompt: async () => {
+      if (++recoveredAttempts === 1) throw new ChatGptPromptAttachmentIntegrityError("stale draft");
+    },
+    currentSubmissionEvidence: async () => undefined,
+    resetPromptComposerForRetry: async () => { recoveredResets += 1; },
+  }, {}, "normal prompt", true, false, baseline)).resolves.toBeUndefined();
+  expect(recoveredAttempts).toBe(2);
+  expect(recoveredResets).toBe(1);
+
+  await expect(attachWithRetry.call({
+    attachPrompt: async () => { throw new Error("other attachment failure"); },
+    currentSubmissionEvidence: async () => { throw new Error("must not inspect"); },
+  }, {}, "normal prompt", false, false, baseline)).rejects.toThrow("other attachment failure");
 });
 
 test("prompt insertion stops before touching the composer when its stage is already aborted", async () => {
