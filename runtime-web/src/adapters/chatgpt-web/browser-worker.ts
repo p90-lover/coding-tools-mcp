@@ -946,6 +946,13 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   );
 }
 
+/** Only error/status UI inside the accepted response may trigger connection recovery. */
+export async function chatGptConnectionInterruptedAlertVisible(scope: Pick<Locator, "locator">): Promise<boolean> {
+  return scope.locator('[role="alert"], [role="status"]')
+    .filter({ hasText: /^\s*Connection interrupted\.?\s*Waiting for the complete answer\.?\s*$/i })
+    .last().isVisible().catch(() => false);
+}
+
 export async function resolveChatGptToolConfirmation(
   page: Page,
   appName: string,
@@ -1667,6 +1674,7 @@ export class ChatGptCompletionTracker {
 }
 
 export class ChatGptTurnDomHealthTracker {
+  private connectionInterruption?: { text: string; since: number };
   private sawResponse = false;
   private missingResponseSince?: number;
   private emptyCompletionSince?: number;
@@ -1687,6 +1695,23 @@ export class ChatGptTurnDomHealthTracker {
    */
   clearMissingResponse(): void {
     this.missingResponseSince = undefined;
+  }
+
+  connectionInterruptionReady(state: {
+    visible: boolean;
+    currentText: string;
+    externalProgressLive: boolean;
+    externalToolCallsInFlight: boolean;
+  }, now = Date.now()): boolean {
+    if (!state.visible || state.externalProgressLive || state.externalToolCallsInFlight) {
+      this.connectionInterruption = undefined;
+      return false;
+    }
+    if (this.connectionInterruption?.text !== state.currentText) {
+      this.connectionInterruption = { text: state.currentText, since: now };
+      return false;
+    }
+    return now - this.connectionInterruption.since >= this.missingCompletionActionMs;
   }
 
   update(state: {
@@ -5326,6 +5351,7 @@ export class ChatGptBrowserWorker {
       let internalObservationFaults = 0;
       let observedThisIteration = false;
       let completionFenceRevision: number | undefined;
+      let interruptionFenceRevision: number | undefined;
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -5347,7 +5373,8 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
-        await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+        const connectionInterruptedVisible = await chatGptConnectionInterruptedAlertVisible(responseTurn.locator);
+        if (!connectionInterruptedVisible) await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
         // ChatGPT's offer to move the chat to Work applies itself unless declined in time.
         await throwIfChatGptWorkMode(page);
 
@@ -5433,6 +5460,41 @@ export class ChatGptBrowserWorker {
           Date.now(),
         );
         const externalToolCallsInFlight = chatGptExternalToolCallsAreInFlight(externalProgressSnapshot);
+        const interruptionReady = domHealthTracker.connectionInterruptionReady({
+          visible: connectionInterruptedVisible && snapshot.responsePresent,
+          currentText: snapshot.visibleText,
+          externalProgressLive,
+          externalToolCallsInFlight,
+        });
+        if (!interruptionReady) interruptionFenceRevision = undefined;
+        if (connectionInterruptedVisible) {
+          if (interruptionReady) {
+            if (turn.completionFence) {
+              if (interruptionFenceRevision === undefined) {
+                interruptionFenceRevision = await turn.completionFence.begin();
+                responseDomCache.key = undefined;
+                responseDomCache.snapshot = undefined;
+                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                continue;
+              }
+              if (!await turn.completionFence.commit(interruptionFenceRevision)) {
+                interruptionFenceRevision = undefined;
+                responseDomCache.key = undefined;
+                responseDomCache.snapshot = undefined;
+                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                continue;
+              }
+            } else if (mode.localTools) {
+              throw new Error("ChatGPT connection interruption could not prove that MCP activity settled");
+            }
+            throw new ChatGptWebAdapterError("ChatGPT's connection was interrupted and the complete answer did not resume.", {
+              status: 502, errorType: "server_error", code: "chatgpt_connection_interrupted", retryable: false,
+            });
+          }
+          completionFenceRevision = undefined;
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          continue;
+        }
         if (!snapshot.responsePresent && externalProgressLive) {
           // Current-turn MCP activity proves that ChatGPT is still executing even if its renderer
           // temporarily cannot expose the response subtree. DOM remains authoritative for text and
