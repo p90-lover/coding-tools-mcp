@@ -219,6 +219,8 @@ test("browser control server authenticates and owns turn visibility", async () =
         "Codex Native2",
         true,
         startRequest,
+        // No nativeThreadId: this start opens a fresh ChatGPT thread.
+        undefined,
       ],
       ["heartbeat", "abcdef123456", process.pid, true],
       ["end", "abcdef123456", process.pid, "completed", true, undefined, true, true],
