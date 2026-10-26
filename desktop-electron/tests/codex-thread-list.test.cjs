@@ -302,7 +302,7 @@ test("right-click menus match Codex: its order and glyphs, and every chat item d
 
   walk(list.render()).find((element) => element.props?.className === "cx-project" && text(element).includes("Alpha")).props.onContextMenu(event);
   const projectMenu = menuOf().items.filter((item) => item.kind !== "separator");
-  assert.deepEqual(plain(projectMenu.map((item) => item.label)), ["Pin", "Edit", "New section…", "Open in Explorer", "Archive chats", "Remove project"]);
+  assert.deepEqual(plain(projectMenu.map((item) => item.label)), ["New chat", "Pin", "Edit", "New section…", "Open in Explorer", "Archive chats", "Remove project"]);
   for (const item of projectMenu) assert.ok(item.run || item.reason, `${item.label} is wired or explains why not`);
   projectMenu.find((item) => item.label === "Open in Explorer").run();
   assert.deepEqual(plain(calls.at(-1)), ["openFolder", { id: "a", name: "Alpha", path: "C:\\alpha" }]);
@@ -522,22 +522,27 @@ test("a long project shows 5 chats and Show more, like Codex; the count is a lis
   assert.equal(JSON.parse(stored["coding-tools:ao:chat-list-settings"]).visible, 3);
 });
 
-test("a project is Codex's row: an open folder while its chats show, a closed one when not, \"+\" on hover; its menu is on right-click", () => {
+test("Codex's compose icon and project ellipsis open their working actions", () => {
   const { props, calls } = fixture();
   const list = mount("ChatThreadList.tsx", props);
   const button = (label) => walk(list.render()).find((element) => element.type === "button" && element.props["aria-label"] === label);
-  assert.ok(button("New chat in Alpha") && button("New chat in Beta"));
-  assert.equal(button("Alpha actions"), undefined, "one hover action, as Claude Code's");
+  assert.ok(button("More options for Alpha") && button("More options for Beta"));
+  const create = walk(list.render()).find((element) => element.props?.className === "cx-new-chat");
+  assert.equal(walk(create).find((element) => element.type === "ChatGlyph").props.name, "compose");
+  create.props.onClick();
   const header = projectButton(list.render(), "Alpha");
   const folder = (name) => walk(projectButton(list.render(), name)).find((element) => element.type === "ChatGlyph")?.props.name;
   assert.equal(folder("Alpha"), "folderOpen", "the open project shows an open folder");
   assert.equal(folder("Beta"), "folder", "a closed one shows a closed folder");
   assert.ok(!walk(header).some((element) => element.type === "Icon" && element.props.name === "chevron"), "no caret: the folder says open or closed");
-  button("New chat in Beta").props.onClick();
+  button("More options for Beta").props.onClick({ preventDefault() {}, clientX: 5, clientY: 9 });
+  let menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
+  assert.equal(menu.label, "Beta");
+  menu.items.find((item) => item.label === "New chat").run();
   header.props.onContextMenu({ preventDefault() {}, clientX: 5, clientY: 9 });
-  const menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
+  menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
   menu.items.find((item) => item.label === "Edit").run();
-  assert.deepEqual(calls, [["newChatIn", "b"], ["editProject", "a"]]);
+  assert.deepEqual(calls, [["newChat"], ["newChatIn", "b"], ["editProject", "a"]]);
 });
 
 test("archived chats sit in their own section and can be restored", () => {

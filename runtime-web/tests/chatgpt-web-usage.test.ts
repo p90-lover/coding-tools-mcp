@@ -54,14 +54,15 @@ test("Bigger Context compaction selects three parts before the legacy inline byt
     .toEqual([parsed.context.messages[0]!.content]);
 });
 
-test("native GPT to Web GPT compaction transports one oversized history message without dropping it", () => {
+test.each([false, true])("native GPT to Web GPT transports oversized history losslessly (compaction=%s)", (compaction) => {
   const plus = { ...capabilities, proAvailable: false };
   // One native-history item can be larger than the entire capacity of any single web effort.
   // The whole transaction still fits the three available message budgets.
   const history = `native-model-transcript: ${"word ".repeat(174_241)}`;
   const parsed = request(history);
-  parsed._compactionRequest = true;
-  parsed.context.messages.push({ role: "user", content: "latest request after model switch", timestamp: 2 });
+  if (compaction) parsed._compactionRequest = true;
+  parsed.context.messages.push({ role: "assistant", content: [{ type: "text", text: "earlier native answer" }], timestamp: 2 });
+  parsed.context.messages.push({ role: "user", content: "latest request after model switch", timestamp: 3 });
   expect(estimateTokens(history)).toBeGreaterThan(100_000);
 
   const compiled = compileChatGptWebPrompt(parsed, plus, undefined, { experimentalMultipartParts: 3 });
@@ -71,7 +72,8 @@ test("native GPT to Web GPT compaction transports one oversized history message 
     fragment_index?: number;
     fragment_count?: number;
     record_json_fragment?: string;
-    message?: { content: string };
+    message_index?: number;
+    message?: { role: string; content: unknown };
   }>);
   const fragments = records.filter(record => record.kind === "record_fragment");
   expect(fragments.length).toBeGreaterThan(1);
@@ -81,6 +83,10 @@ test("native GPT to Web GPT compaction transports one oversized history message 
   const recovered = JSON.parse(fragments.map(fragment => fragment.record_json_fragment).join(""));
   expect(recovered).toEqual({ kind: "message", message_index: 0, message: { role: "user", content: history } });
   expect(records.at(-1)?.message?.content).toBe("latest request after model switch");
+  expect(records.filter(record => record.kind === "message")).toEqual([
+    { kind: "message", message_index: 1, message: { role: "assistant", content: [{ type: "text", text: "earlier native answer" }] } },
+    { kind: "message", message_index: 2, message: { role: "user", content: "latest request after model switch" } },
+  ]);
   expect(formatChatGptWebMultipartCommit(compiled.multipart!, `ctx_${"0".repeat(32)}`))
     .toContain("record_json_fragment");
 
@@ -101,6 +107,18 @@ test("native GPT to Web GPT compaction transports one oversized history message 
       finalImageTokens: 0,
     },
   )).not.toThrow();
+}, 30_000);
+
+test.each([false, true])("native history exceeding the aggregate multipart budget is rejected (compaction=%s)", (compaction) => {
+  const parsed = request("word ".repeat(280_000));
+  if (compaction) parsed._compactionRequest = true;
+  let message = "";
+  try {
+    compileChatGptWebPrompt(parsed, { ...capabilities, proAvailable: false }, undefined, {
+      experimentalMultipartParts: 3,
+    });
+  } catch (cause) { message = cause instanceof Error ? cause.message : String(cause); }
+  expect(message).toContain("cannot fit the complete native history");
 }, 30_000);
 
 test("multipart planning leaves room for final attachments and execution instructions without losing history", () => {

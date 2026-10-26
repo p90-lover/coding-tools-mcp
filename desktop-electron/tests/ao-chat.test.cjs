@@ -988,6 +988,27 @@ function rendererCallback(file, name, globals) {
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
 
+test("an unsent split chat can switch projects and finish choosing its new chat", () => {
+  const paneWanted = { current: { workspaceId: "old-project", taskId: "" } };
+  const state = { workspaceId: "old-project", taskId: null };
+  const pendingSelect = { current: null };
+  const choose = rendererCallback("AgentOrchestratorSurface.tsx", "chooseWorkspace", {
+    pane: { workspaceId: "old-project", taskId: "" }, paneWanted, pendingSelect,
+    switchTarget: { current: "" },
+    switchToWorkspace: id => { state.workspaceId = id; state.taskId = null; },
+  });
+  choose("new-project");
+  const decide = rendererCallback("AgentOrchestratorSurface.tsx", "effect:const wanted = paneWanted.current", {
+    chatTaskId: null, workspaceId: state.workspaceId, loadedWorkspace: "new-project",
+    board: { tasks: [] }, boardWorkspace: { current: "new-project" }, paneWanted, pendingSelect,
+    missions: [], taskLifecycle: [], chatSeed: { workspaceId: "new-project", text: "Keep my draft" },
+    chatList: chat.chatList, setChatTaskId: id => { state.taskId = id; }, setView() {}, setSelectedRunId() {},
+  });
+  decide();
+  assert.equal(state.taskId, "", "the pane resolves its new chat so it can accept input and notify its parent");
+  assert.equal(paneWanted.current.workspaceId, "new-project");
+});
+
 function workspaceRecovery({ hidden = false, selected = "p3" } = {}) {
   let isHidden = hidden, timerId = 0;
   const focus = new Set(), visibility = new Set(), timers = new Map(), replies = [];

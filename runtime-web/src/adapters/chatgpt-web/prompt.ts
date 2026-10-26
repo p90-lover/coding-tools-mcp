@@ -55,6 +55,8 @@ const CODEX_USER_BLOCK = /^\s*(<[a-z_]+[\s>]|# AGENTS\.md instructions)/;
  * objective, how to keep going, and when to call update_goal), so it is sent as the prompt.
  */
 const GOAL_TURN = /^\s*<codex_internal_context source="goal">[\s\S]*<\/codex_internal_context>\s*$/;
+// A new native goal supersedes earlier goal revisions, including after a context checkpoint.
+const CURRENT_GOAL_DIRECTION = "The latest native Codex /goal objective is authoritative. Re-evaluate your current plan before doing more work, preserve verified progress, stop obsolete steps, and continue the active objective across tool calls and context compaction. Use the native update_goal tool through the supplied Codex tool bridge when the goal requests progress updates; never report completion without verifying the goal criteria.";
 
 /**
  * The person's prompt exactly as they typed it in Codex, with its images, and one line carrying the
@@ -80,6 +82,12 @@ export function compilePlainChatGptWebPrompt(
     if (isReadableCompactionSummaryText(text) || text === OPAQUE_COMPACTION_NOTE) return undefined;
     const goalTurn = GOAL_TURN.test(text);
     if (CODEX_USER_BLOCK.test(text) && !goalTurn) continue;
+    // A model must never pursue two obsolete goal revisions in the same plain turn.
+    if (goalTurn) {
+      for (let index = texts.length - 1; index >= 0; index--) {
+        if (GOAL_TURN.test(texts[index]!)) texts.splice(index, 1);
+      }
+    }
     goal ||= goalTurn;
     if (text) texts.push(text);
     for (const part of parts) {
@@ -93,7 +101,7 @@ export function compilePlainChatGptWebPrompt(
     ? `(turn_token ${turnToken} — pass it to Codex tools; call update_goal through codex_tool_call)`
     : `(turn_token ${turnToken} — pass it to Codex tools)`;
   // A handle copied from an earlier turn would bind to a finished turn, as in the full context.
-  return { text: `${withoutRetiredTurnHandles(texts.join("\n\n"))}\n\n${tokenLine}`, images };
+  return { text: `${withoutRetiredTurnHandles(texts.join("\n\n"))}${goal ? `\n\n${CURRENT_GOAL_DIRECTION}` : ""}\n\n${tokenLine}`, images };
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
@@ -505,7 +513,9 @@ function partitionMultipartContext(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   };
-  for (let attempt = 0; allowFragments && !fits(weights); attempt += 1) {
+  // Ordinary turns retain whole-record packing unless a record exceeds every stage's capacity.
+  const oversizedRecord = weights.some(weight => weight.tokens > maxTokens || weight.chars > maxChars);
+  for (let attempt = 0; (allowFragments || oversizedRecord) && !fits(weights); attempt += 1) {
     if (attempt >= 128) impossible();
     const totalTokens = weights.reduce((sum, weight) => sum + weight.tokens, 0);
     const totalChars = weights.reduce((sum, weight) => sum + weight.chars, 0);
@@ -610,6 +620,11 @@ export function compileChatGptWebPrompt(
     if (plain) return plain;
   }
   const system = parsed.context.systemPrompt ?? [];
+  const goalRevisionContract = !parsed._compactionRequest && parsed.context.messages.some(message => {
+    if (message.role !== "user") return false;
+    const parts: CodexContentPart[] = typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
+    return parts.some(part => part.type === "text" && GOAL_TURN.test(part.text));
+  }) ? [CURRENT_GOAL_DIRECTION] : [];
   const sharedContract = [
     "Act as the model backend for the Codex task encoded below.",
     multipartEnabled
@@ -760,6 +775,7 @@ export function compileChatGptWebPrompt(
           ...manualControlContract,
           ...checkpointContract,
           answerContract,
+          ...goalRevisionContract,
           ...transportResume,
         ].join("\n"),
       };
@@ -799,6 +815,7 @@ export function compileChatGptWebPrompt(
       "<codex_context_json>",
       envelopeJson,
       "</codex_context_json>",
+      ...goalRevisionContract,
       ...transportResume,
     ].join("\n");
     return { text, images };

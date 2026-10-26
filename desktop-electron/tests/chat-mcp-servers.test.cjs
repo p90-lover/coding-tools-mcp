@@ -76,3 +76,14 @@ test("a hand-edited entry that no longer passes is dropped, not sent to AO", (t)
   ] }));
   assert.deepEqual(createChatMcpServers({ filePath }).list().map((server) => server.name), ["ok"]);
 });
+
+test("a malformed file is logged by reason only, never with the text around the error", (t) => {
+  const { filePath, done } = store();
+  t.after(done);
+  fs.writeFileSync(filePath, '{"servers":[{"name":"x","env":{"TOKEN": sk-live-hunter2}}]}');
+  const warnings = [];
+  const servers = createChatMcpServers({ filePath, logger: { warn: (event, fields) => warnings.push([event, fields]) } });
+  assert.deepEqual(servers.list(), []);
+  assert.deepEqual(warnings, [["chat_mcp_servers.unreadable", { reason: "invalid_json" }]]);
+  assert.ok(!JSON.stringify(warnings).includes("hunter2"));
+});

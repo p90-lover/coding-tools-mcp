@@ -1,6 +1,4 @@
-import { parseDataUrl } from "../image";
 import type {
-  CodexContentPart,
   CodexParsedRequest,
   CodexToolResultMessage,
 } from "../../types";
@@ -14,42 +12,10 @@ import {
   structuredCompactionHandoffInstruction,
   zeroRiskActiveCompactionToolResultInstruction,
 } from "./native-compaction-control";
-import type { BrokerToolResult, TurnBroker, TurnBrokerOwner } from "./turn-broker";
+import { codexToolResultToBrokerResult, type BrokerToolResult, type TurnBroker, type TurnBrokerOwner } from "./turn-broker";
 import type { ChatGptTurnSession } from "./turn-execution";
 
 export const LATEST_USER_PROMPT_MARKER = "CODEX_LATEST_USER_PROMPT_JSON";
-
-function brokerContent(content: string | CodexContentPart[]): unknown[] {
-  if (typeof content === "string") return [{ type: "text", text: content }];
-  return content.map(part => {
-    if (part.type === "text") return { type: "text", text: part.text };
-    const parsed = parseDataUrl(part.imageUrl);
-    if (parsed) return { type: "image", data: parsed.base64, mimeType: parsed.mediaType };
-    return { type: "resource_link", uri: part.imageUrl, name: "Codex tool image", mimeType: "image/*" };
-  });
-}
-
-function structuredContent(text: string): unknown | undefined {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return parsed !== null && typeof parsed === "object" ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function toolResult(message: CodexToolResultMessage): BrokerToolResult {
-  const content = brokerContent(message.content);
-  const text = typeof message.content === "string"
-    ? message.content
-    : message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
-  const structured = structuredContent(text);
-  return {
-    content,
-    ...(structured !== undefined ? { structuredContent: structured } : {}),
-    ...(message.isError ? { isError: true } : {}),
-  };
-}
 
 function interruptedByActiveCompaction(): BrokerToolResult {
   return {
@@ -189,7 +155,7 @@ export async function settleActiveCompactionSource(
         await broker.completeTool(
           token,
           request.callId,
-          toolResult(result),
+          codexToolResultToBrokerResult(result),
         );
         source.runtime.externalProgress.recordToolResult();
         source.markResultDelivered(request.callId);
@@ -245,7 +211,7 @@ export async function settleActiveZeroRiskCompactionSource(
       );
       for (const [index, request] of outstanding.entries()) {
         const result = results.get(request.callId)!;
-        const canonical = toolResult(result);
+        const canonical = codexToolResultToBrokerResult(result);
         await broker.completeTool(
           token,
           request.callId,

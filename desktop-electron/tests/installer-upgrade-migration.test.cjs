@@ -9,6 +9,7 @@ const desktopRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(desktopRoot, "..");
 const manifestPath = path.join(desktopRoot, "package.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const { PRODUCT_IDENTITY } = require("../electron/product.cjs");
 const includePath = path.join(desktopRoot, "build", "installer.nsh");
 
 function readInstallerInclude() {
@@ -21,7 +22,7 @@ function readInstallerInclude() {
 }
 
 test("rc.14 keeps the stable Electron installer identity and enables the NSIS migration include", () => {
-  assert.equal(manifest.version, "0.8.24");
+  assert.equal(manifest.version, PRODUCT_IDENTITY.version);
   assert.equal(manifest.build.appId, "dev.codingtools.fullharness");
   assert.equal(manifest.build.productName, "Coding Tools");
   assert.equal(manifest.build.nsis.guid, "3cb2ea96-3319-55b8-95a5-7f180a5f3ed4");
