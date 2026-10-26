@@ -3524,9 +3524,16 @@ class BrowserHost {
       idleUrl: IDLE_BROWSER_URL,
       surfaceId: this.surfaceId,
       surfaceTargets,
-      createdAt: new Date().toISOString(),
     };
+    // Selecting a tab, a manual turn's start and cancel, and closing a tab each asked for a rewrite,
+    // most of them with nothing changed. Each atomic write is about six synchronous disk calls on the
+    // main process (every window waits), seconds on the busy hard disk, so an unchanged descriptor
+    // that this process already wrote stays as it is. Only this process writes or removes it.
+    const unchanged = JSON.stringify(descriptor);
+    if (this.writtenDescriptor === unchanged) return;
+    descriptor.createdAt = new Date().toISOString();
     writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+    this.writtenDescriptor = unchanged;
     // The app is back: the bridge no longer needs to wait out a restart.
     try { fs.rmSync(restartMarkerPath(this.descriptorPath), { force: true }); } catch {}
   }
@@ -3544,6 +3551,7 @@ class BrowserHost {
       const current = JSON.parse(fs.readFileSync(this.descriptorPath, "utf8"));
       if (current.pid === process.pid) fs.rmSync(this.descriptorPath, { force: true });
     } catch {}
+    this.writtenDescriptor = null;
     for (const [contents, handler] of this.shellZoomShortcutBindings) {
       if (!contents.isDestroyed()) contents.off("before-input-event", handler);
     }

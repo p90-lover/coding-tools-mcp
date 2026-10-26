@@ -69,6 +69,22 @@ test("descriptor publishes native surface identities without inspecting renderer
     BrowserHost.prototype.writeDescriptor.call(fixture);
     assert.deepEqual(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).surfaceTargets, {});
     assert.deepEqual(queried, ["home-target", "auto-target"]);
+    // Nothing the bridge reads changed (a tab was selected): no disk write on the main process.
+    const written = fs.readFileSync(fixture.descriptorPath, "utf8");
+    fs.rmSync(fixture.descriptorPath);
+    BrowserHost.prototype.writeDescriptor.call(fixture);
+    assert.equal(fs.existsSync(fixture.descriptorPath), false);
+    // A change is written at once, and a host that removed its descriptor writes it again.
+    fixture.getBrowserInteractionMode = () => "automatic";
+    BrowserHost.prototype.writeDescriptor.call(fixture);
+    assert.equal(Object.keys(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).surfaceTargets).length, 2);
+    fixture.window = { off() {} };
+    fixture.shellZoomShortcutBindings = new Map();
+    fs.writeFileSync(fixture.descriptorPath, written.replace(/"pid": \d+/, `"pid": ${process.pid}`));
+    try { BrowserHost.prototype.destroy.call(fixture); } catch {}
+    fixture.getBrowserInteractionMode = () => "manual";
+    BrowserHost.prototype.writeDescriptor.call(fixture);
+    assert.equal(fs.existsSync(fixture.descriptorPath), true);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
