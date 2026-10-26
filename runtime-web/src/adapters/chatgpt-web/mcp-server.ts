@@ -379,7 +379,7 @@ function execGatewayResultProgram(invocation: string[]): string {
   ].join("\n");
 }
 
-function execGatewayProgram(
+export function execGatewayProgram(
   nestedToolName: string,
   freeform: boolean,
   payload: { arguments?: Record<string, unknown>; input?: string },
