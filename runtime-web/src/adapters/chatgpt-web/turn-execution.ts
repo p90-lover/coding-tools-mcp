@@ -269,6 +269,29 @@ export function chatGptCompactionSourceExecutionKey(parsed: CodexParsedRequest):
   });
 }
 
+/** Fresh ChatGPT conversations one Codex turn may move to before its failure is final. */
+export const MAX_CHATGPT_BROWSER_RECOVERIES = 2;
+
+const RECOVERABLE_BROWSER_CODES = new Set([
+  "chatgpt_connection_interrupted",
+  "upstream_server_error",
+  "chatgpt_send_failed",
+]);
+
+/**
+ * A browser failure that a fresh ChatGPT conversation can get past: the connection dropped, the
+ * tab showed "Something went wrong" or could not send, or a submission stage never acknowledged.
+ * Before this, only a dropped connection was recovered, so a tab stuck on a stage acknowledgement
+ * failed the turn, and Codex's own reconnects replayed that failure until the chat gave up.
+ * Rate limits, sign-in, Work mode and a tab the user closed are not recovered: a new conversation
+ * would meet the same condition.
+ */
+export function recoverableBrowserFailure(error: unknown): boolean {
+  if (error instanceof ChatGptWebAdapterError) return RECOVERABLE_BROWSER_CODES.has(error.code);
+  return error instanceof Error && !(error instanceof DOMException)
+    && /^ChatGPT browser stage timed out:|timed out while awaiting a stage acknowledgement/.test(error.message);
+}
+
 export class ChatGptTurnSession {
   supersededError?: Error;
   readonly createdAt = Date.now();
@@ -277,7 +300,7 @@ export class ChatGptTurnSession {
   private runtimePhysicalSettlement!: Promise<void>;
   private recoverySettlement?: Promise<void>;
   private generation = 0;
-  private recoveryAttempted = false;
+  private recoveries = 0;
   private recovering = false;
   private recoveryCleanupPending = false;
   private cancelled = false;
@@ -412,7 +435,7 @@ export class ChatGptTurnSession {
         || (pollName === "wait" && typeof pollArguments?.cell_id === "string"
           && (pollArguments?.terminate === undefined || pollArguments.terminate === false));
       const readOnly = tool?.annotations?.readOnlyHint === true && tool.annotations.destructiveHint !== true;
-      if (this.recoveryAttempted && !nativePoll && !readOnly && this.recoveryCompletedToolRequests.some(completed => (
+      if (this.recoveries > 0 && !nativePoll && !readOnly && this.recoveryCompletedToolRequests.some(completed => (
         completed.wireName === request.wireName
         && completed.freeform === request.freeform
         && isDeepStrictEqual(completed.freeform ? completed.input : completed.arguments,
@@ -439,7 +462,8 @@ export class ChatGptTurnSession {
     const request = this.outstandingById.get(callId);
     if (!this.outstandingById.delete(callId)) throw new Error(`ChatGPT bridge tool result does not match an outstanding call: ${callId}`);
     this.deliveredResultIds.add(callId);
-    if (request && !this.recoveryAttempted) this.completedToolRequests.push(structuredClone(request));
+    // Every recovery snapshots this list, so actions completed between two recoveries are guarded too.
+    if (request) this.completedToolRequests.push(structuredClone(request));
     if (result) this.deliveredReceipts.set(callId, JSON.stringify([result.content, result.isError === true]));
     if (this.outstandingById.size === 0) {
       this.outstandingReasoning = [];
@@ -532,13 +556,14 @@ export class ChatGptTurnSession {
     signal?: AbortSignal,
   ): Promise<boolean> {
     const outcome = this.settledBrowserOutcome;
-    if (this.recoveryAttempted || this.cancelled || this.supersededError
+    // Any submission phase qualifies: a stage that never acknowledged left nothing in ChatGPT to
+    // continue, and the old conversation is retired below either way. Only an answer already
+    // streamed to Codex pins the turn to the failed conversation.
+    if (this.recoveries >= MAX_CHATGPT_BROWSER_RECOVERIES || this.cancelled || this.supersededError
       || parsed._compactionRequest || this.runtime.manualControl
-      || this.runtime.submission?.phase !== "accepted"
       || this.runtime.text.value().length > 0
       || outcome?.type !== "error"
-      || !(outcome.error instanceof ChatGptWebAdapterError)
-      || outcome.error.code !== "chatgpt_connection_interrupted") return false;
+      || !recoverableBrowserFailure(outcome.error)) return false;
     const identity = extractChatGptTurnIdentity(parsed);
     if (!identity.threadId || identity.threadId !== this.nativeThreadId
       || identity.turnId !== this.nativeTurnId) return false;
@@ -556,7 +581,7 @@ export class ChatGptTurnSession {
     const outstanding = this.outstanding();
     if (outstanding.some(request => !receipts.has(request.callId))) return false;
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    this.recoveryAttempted = true;
+    this.recoveries += 1;
     for (const tool of parsed.context.tools ?? []) this.recoveryTools.set(namespacedToolName(tool.namespace, tool.name), tool);
     this.recovering = true;
     const previous = this.runtime;
@@ -578,7 +603,7 @@ export class ChatGptTurnSession {
       }
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       for (const request of outstanding) this.markResultDelivered(request.callId, receipts.get(request.callId)!);
-      this.recoveryCompletedToolRequests = [...this.completedToolRequests, ...outstanding].map(request => structuredClone(request));
+      this.recoveryCompletedToolRequests = this.completedToolRequests.map(request => structuredClone(request));
       this.installRuntime(start());
       this.scheduleCapabilityRetirement();
       return true;

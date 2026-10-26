@@ -777,6 +777,15 @@ struct AoHarnessNodeRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AoHarnessSteerRequest {
+    workspace_id: String,
+    run_id: String,
+    node_id: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AoHarnessConnectRequest {
     workspace_id: String,
     run_id: String,
@@ -4787,6 +4796,73 @@ async fn ao_harness_execute(
     }
 }
 
+/// A chat message steered into a Native Codex card's running turn (Codex's turn/steer), as an AO
+/// card's steer reaches its ACP session. `steered` is false when its turn already ended.
+async fn ao_harness_steer(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessSteerRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_harness_steer") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    let (_, node, cancelled) =
+        match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+            Ok(target) => target,
+            Err(_) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "AO_NODE_SCOPE_FAILED",
+                    "AO node unavailable",
+                )
+            }
+        };
+    let thread_id = node
+        .receipt
+        .as_ref()
+        .and_then(|receipt| receipt.thread_id.clone());
+    let (false, integrations::ao::State::Running, Some(thread_id)) =
+        (cancelled, node.state, thread_id)
+    else {
+        return Json(json!({"ok":true,"steered":false})).into_response();
+    };
+    let key = (body.workspace_id, body.run_id, body.node_id);
+    let Some(hub) = state
+        .ao_hubs
+        .lock()
+        .ok()
+        .and_then(|hubs| hubs.get(&key).cloned())
+    else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_HARNESS_NOT_CONNECTED",
+            "AO harness unavailable",
+        );
+    };
+    let request_key = format!("steer-{}", uuid::Uuid::new_v4());
+    let text = body.text;
+    match tokio::task::spawn_blocking(move || hub.steer(request_key, thread_id, text)).await {
+        Ok(Ok(value)) if value["ok"] == true => {
+            Json(json!({"ok":true,"steered":value["steered"] == true})).into_response()
+        }
+        Ok(Ok(value)) => json_error(
+            StatusCode::CONFLICT,
+            "AO_STEER_FAILED",
+            value["error"].as_str().unwrap_or("Native steer failed"),
+        ),
+        Ok(Err(error)) => json_error(StatusCode::CONFLICT, "AO_STEER_FAILED", &error),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AO_STEER_FAILED",
+            "Native steer outcome unknown",
+        ),
+    }
+}
+
 async fn ao_harness_observe(
     State(state): State<ServiceState>,
     headers: HeaderMap,
@@ -6140,6 +6216,7 @@ fn router(state: ServiceState) -> Router {
         .route("/api/v1/ao/harness/execute", post(ao_harness_execute))
         .route("/api/v1/ao/harness/observe", post(ao_harness_observe))
         .route("/api/v1/ao/harness/approval", post(ao_harness_approval))
+        .route("/api/v1/ao/harness/steer", post(ao_harness_steer))
         .route("/api/v1/ao/harness/permission-profiles", post(ao_harness_permission_profiles))
         .route("/api/v1/ao/harness/disconnect", post(ao_harness_disconnect))
         .route("/api/v1/ao/external/reserve", post(ao_external_reserve))

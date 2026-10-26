@@ -2232,6 +2232,16 @@ test("a Native Codex card's steps show in order, its note before the command it 
   // Text written after the steps follows them.
   thread = { ...thread, answer_before_step: null };
   assert.deepEqual((await read()).map(item => item.kind), ["tool", "command", "tool", "message"]);
+  // Earlier notes a later message replaced stay at their own places ("missing text from webgpt").
+  thread = { ...thread, answer_before_step: "m1", notes: [{ before_step: "e1", text: "Editing the app" }, { before_step: "c1", text: "Testing it" }] };
+  assert.deepEqual((await read()).map(item => [item.kind, item.text]), [
+    ["message", "Editing the app"],
+    ["tool", "app.ts, readme.md"],
+    ["message", "Testing it"],
+    ["command", "npm test"],
+    ["message", "Running the tests now"],
+    ["tool", "coding-tools: read_file"],
+  ]);
 });
 
 test("a finished AO card's work is read back for the chat (turn_timeline), redacted, with labels, details and full reasoning", async () => {
@@ -8068,6 +8078,30 @@ test("Restart stops a turn that is not yet past its stall limit, and an interrup
   assert.match(result.reason, /message is sent as the next turn/i);
   assert.deepEqual(world.interrupted, ["sess-1"]);
   assert.deepEqual(world.exited, [], "the interrupt settled, so the agent keeps running");
+});
+
+test("a Native Codex (WebGPT) chat steers its running turn, and Restart stops a stuck one instead of steering it", async () => {
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "thread-1" } }] }] });
+  const steers = [], controls = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/harness/steer") { steers.push(body); return { ok: true, steered: true }; }
+      if (endpoint === "/api/v1/ao/control") { controls.push(body.action); return { ok: true, run: { id: body.run_id, workspace_id: "ws-1", nodes: [] } }; }
+      return world.requestHeadless(endpoint, body, options);
+    },
+  });
+  const plain = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and lint" });
+  assert.equal(plain.steered, true);
+  assert.deepEqual(steers.map(body => [body.run_id, body.node_id, body.text]), [["r1", "one", "and lint"]]);
+  assert.deepEqual(controls, []);
+  const restarted = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "continue", restart: true });
+  assert.equal(restarted.restarted, true);
+  assert.match(restarted.reason, /message is sent as the next turn/i);
+  assert.deepEqual(controls, ["stop"]);
+  assert.equal(steers.length, 1, "nothing is steered into the stuck turn");
 });
 
 test("a steer is never sent to an agent whose state could not be read", async () => {

@@ -28,7 +28,7 @@ import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, codexToolResultToBrokerResult, type BrokerToolRequest, type TurnBrokerOwner } from "./turn-broker";
 import { formatChatGptRichOutput, normalizeChatGptRichOutput, type ChatGptRichOutput } from "./rich-output";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, recoverableBrowserFailure, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
@@ -1365,9 +1365,7 @@ export function createChatGptWebAdapter(
               toolWaitAbort.abort();
             }
              } catch (error) {
-              if (!(error instanceof ChatGptWebAdapterError)
-                || error.code !== "chatgpt_connection_interrupted"
-                || incoming.abortSignal?.aborted) throw error;
+              if (!recoverableBrowserFailure(error) || incoming.abortSignal?.aborted) throw error;
               const traces = session.runtime.trace.drain();
               session.appendRoundReasoning(roundKey, traces.map(trace => trace.text));
               emitRoundBatch(buffer => emitTraceEvents(traces, buffer));

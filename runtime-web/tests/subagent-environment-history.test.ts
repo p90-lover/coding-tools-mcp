@@ -103,9 +103,10 @@ test("V2 parent instructions bind the current environment without changing nativ
     expect(() => extractChatGptTurnEnvironment(rejected)).toThrow("missing cwd");
     expect(() => extractChatGptTurnUserRevision(rejected)).toThrow("current-turn user message");
   }
+  // An instruction from an earlier turn (a killed or restarted run) resumes that task.
   const stale = parseRequest({ ...raw, input: [environmentItem, { ...task, internal_chat_message_metadata_passthrough: { turn_id: parentTurnId } }] });
   expect(() => extractChatGptTurnEnvironment(stale)).toThrow("missing cwd");
-  expect(() => extractChatGptTurnUserRevision(stale)).toThrow("conflicts with native Codex turn_id");
+  expect(extractChatGptTurnUserRevision(stale)).toEqual(task.content);
   const metadata = JSON.parse((raw.client_metadata as Record<string, string>)["x-codex-turn-metadata"]!);
   for (const changes of [{ parent_thread_id: undefined }, { parent_thread_id: childThreadId }, { subagent_kind: undefined }, { agent_name: "/root" }]) {
     const rejected = parseRequest({ ...raw, client_metadata: { "x-codex-turn-metadata": JSON.stringify({ ...metadata, ...changes }) } });

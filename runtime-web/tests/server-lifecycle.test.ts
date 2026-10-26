@@ -1028,13 +1028,13 @@ test("a Codex retry after tab cancellation receives terminal HTTP 400 without a 
   }
 });
 
-test("a restart recovery turn without a new user instruction fails terminally instead of replaying the stopped prompt", async () => {
+test("a restart recovery turn without a new user instruction resumes the stopped task instead of failing", async () => {
   const config = defaultConfig("browser-only");
   const previousTurnId = "turn_before_codex_restart";
   const recoveryTurnId = "turn_after_codex_restart";
   const body = {
     model: "chatgpt-web/high",
-    stream: true,
+    stream: false,
     client_metadata: {
       "x-codex-turn-metadata": JSON.stringify({
         thread_id: "thread_codex_restart",
@@ -1064,18 +1064,18 @@ test("a restart recovery turn without a new user instruction fails terminally in
     body: JSON.stringify(body),
   }), config, () => {
     adapterConstructions += 1;
-    throw new Error("a context-only recovery turn must not construct a browser adapter");
+    return {
+      name: "restart-resume-fixture",
+      async runTurn(_parsed, _incoming, emit) {
+        emit({ type: "text_delta", text: "Resumed", phase: "final_answer" });
+        emit({ type: "done", stopReason: "stop", endTurn: true });
+      },
+    };
   });
 
-  expect(response.status).toBe(400);
-  expect(await response.json()).toEqual({
-    error: {
-      code: "invalid_request_error",
-      type: "invalid_request_error",
-      message: "ChatGPT web current user message conflicts with native Codex turn_id metadata",
-    },
-  });
-  expect(adapterConstructions).toBe(0);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ status: "completed" });
+  expect(adapterConstructions).toBe(1);
 });
 
 test.each(["alpha/search", "images/generations"])("authenticated lifecycle control aborts active %s before acknowledging cancellation", async path => {

@@ -150,9 +150,11 @@ export function classifyError(status: number, type: string, message: string): Co
     text.includes("server is busy") ||
     text.includes("temporarily unavailable")
   ) {
-    // Codex recognizes "server_is_overloaded" and applies retry-after backoff
-    // (responses.rs is_server_overloaded_error); generic "upstream_server_error" is not recognized.
-    return { message, type: "server_error", code: "server_is_overloaded" };
+    // Not "server_is_overloaded": Codex maps that code to its fatal ServerOverloaded ("Selected
+    // model is at capacity. Please try a different model.") and ends the turn, so a ChatGPT tab
+    // that was briefly busy or a draining runtime lost the task for good. An unrecognized code is
+    // retried with backoff ("Reconnecting n/5"), honouring any retry-after in the message.
+    return { message, type: "server_error", code: "upstream_server_error" };
   }
   if (
     text.includes("validationexception") ||

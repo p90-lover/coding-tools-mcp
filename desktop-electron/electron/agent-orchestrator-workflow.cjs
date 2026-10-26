@@ -1765,8 +1765,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * `answer` is the thread's text so far. It goes where it was said: before `answerBeforeStep` when
    * the bridge names that step (a note before a long command), else after every step. As a message
    * item it also keeps the chat from appending it after the steps.
+   *
+   * `notes` are the turn's earlier answers, each said before the step it names (codex_bridge keeps
+   * them once a later message replaced them). Without them a WebGPT turn's progress notes vanished
+   * one by one as it went on, and only its latest message was ever shown.
    */
-  function nativeStepTimeline(steps, answer = "", answerBeforeStep = null) {
+  function nativeStepTimeline(steps, answer = "", answerBeforeStep = null, notes = []) {
     const kind = { commandExecution: "command", fileChange: "tool", mcpToolCall: "tool", dynamicToolCall: "tool", webSearch: "tool" };
     const label = { fileChange: "Edited", webSearch: "Web search" };
     const all = Array.isArray(steps) ? steps : [];
@@ -1774,8 +1778,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     let pending = Boolean(answer);
     const place = () => { items.push({ id: "native:answer", kind: "message", status: "running", text: answer }); pending = false; };
     // A step the bridge has since dropped from its bounded list came first, so the note goes first.
-    const before = answerBeforeStep ? Math.max(0, all.findIndex(step => step?.id === answerBeforeStep)) : -1;
+    const stepIndex = id => Math.max(0, all.findIndex(step => step?.id === id));
+    const before = answerBeforeStep ? stepIndex(answerBeforeStep) : -1;
+    const earlier = (Array.isArray(notes) ? notes : [])
+      .filter(note => typeof note?.text === "string" && note.text.trim() && typeof note.before_step === "string")
+      .map((note, index) => ({ at: stepIndex(note.before_step), item: { id: `native:note:${index}`, kind: "message", status: "completed", text: note.text } }));
+    if (!all.length) earlier.forEach(note => items.push(note.item));
     all.forEach((step, index) => {
+      for (const note of earlier) if (note.at === index) items.push(note.item);
       if (pending && before >= 0 && index >= before) place();
       if (!step || !kind[step.kind]) return;
       items.push({
@@ -1991,7 +2001,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 activity_at_ms: thread?.activity_at_ms || null, last_event_at_ms: thread?.last_event_at_ms || null,
                 // What a Native Codex card is doing (its commands, edits and tools), as AO cards show
                 // it, with its text where it was said.
-                timeline: publicTimeline(nativeStepTimeline(thread?.steps, output, thread?.answer_before_step)),
+                timeline: publicTimeline(nativeStepTimeline(thread?.steps, output, thread?.answer_before_step, thread?.notes)),
                 started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
             }
             const latest = await savedNode(id, run, node.id);
@@ -4235,9 +4245,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const saved = await runs({ workspaceId: id });
     const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
     // A single chat steers its one card; a team steers its orchestrator, never an arbitrary worker.
-    const card = run?.nodes.find(node => node.state === "running" && externalAgent(node) && node.receipt?.thread_id
-      && (run.execution_mode === "single" || node.role === "planner"));
+    const card = run?.nodes.find(node => node.state === "running" && (externalAgent(node) || node.route?.harness_id === "codex-native")
+      && node.receipt?.thread_id && (run.execution_mode === "single" || node.role === "planner"));
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
+    // Native Codex (WebGPT and the shared CPA pool) steers its running turn through Codex's own
+    // turn/steer, as the Codex app does: the message joins the turn at the agent's next step. Its
+    // chats queued every message until the turn ended ("Running. New messages send when it finishes").
+    if (!externalAgent(card)) {
+      // A turn whose ChatGPT tab stopped answering takes a steer and never reads it, and Restart on
+      // "may be stuck" used to steer it too, so a stuck WebGPT chat stayed stuck. Restart stops its
+      // run (as Stop does, interrupting the native turn); the message then starts the next turn.
+      if (restart === true) {
+        await controlRun({ workspaceId: id, runId: run.id, action: "stop" });
+        logger?.info?.("ao.steer_restarted_stalled_turn", { native: true, asked: true });
+        return { ok: true, steered: false, waiting: true, restarted: true, reason: "Its turn was stopped. Your message is sent as the next turn." };
+      }
+      const response = await requestHeadless("/api/v1/ao/harness/steer", { workspace_id: id, run_id: run.id, node_id: card.id, text });
+      if (response?.ok !== true || response.steered !== true) return { ok: true, steered: false, reason: "The agent's turn already ended" };
+      return steered(id, task, run, card, text, objective);
+    }
     // Steering a turn that waits on an approval or a question cancelled that request ("Tool use
     // aborted"), and the agent lost the step it asked about. While one waits, the steer waits for it
     // to be answered: with "Approve for me" every tool call waits a moment (the routine ones are
@@ -4306,6 +4332,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return { ok: true, steered: false, waiting: true, starting: true, reason: "The agent is still starting. Your message is sent after its turn." };
     }
     if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
+    return steered(id, task, run, card, text, objective);
+  }
+
+  /** A steer that reached the card's turn: its goal and its note in the chat's transcript. */
+  function steered(id, task, run, card, text, objective) {
     // The goal is judged when the steered run settles (goalAfterRun), like a goal sent as a new turn.
     if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: run.id }); }
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
