@@ -17,10 +17,15 @@
   --cc-muted: #898781;
   --cc-hover: #f0efec;
   --cc-hover-selected: #edece8;
+  --cc-open: #e1e1e1;
   --cc-border: rgb(11 11 11 / 10%);
   --cc-accent: #2a78d6;
   --cc-warning: #fab219;
   --cc-side-font: "anthropic-sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.ao-workflow[data-theme="dark"] {
+  --cc-open: var(--cx-active);
 }
 
 /* ---------- Thread list ---------- */
@@ -29,11 +34,11 @@
 .ao-workflow > .cx-threads { position: relative; display: flex; flex: 0 0 288px; flex-direction: column; width: 288px; min-width: 0; min-height: 0; overflow: hidden;
   padding: calc(env(titlebar-area-height, 36px) + 12px) 8px 6px; border-right: .5px solid var(--cc-border); background: var(--cc-side-bg);
   color: var(--cc-text-2); font-family: var(--cc-side-font); line-height: 1.5; user-select: none; }
-/* The top row: a round "+" (df-new-circle) and its label. */
+/* The top row uses Codex's square-and-pencil compose glyph and label. */
 .cx-new-chat { display: flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px 0 2px; border: 0; border-radius: 6px;
   background: transparent; color: var(--cc-text-2); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .cx-new-chat:hover, .cx-new-chat[aria-pressed="true"] { background: var(--cc-hover); color: var(--cc-text); }
-.cx-new-circle { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; color: var(--cc-text); }
+.cx-new-circle { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 24px; height: 24px; color: var(--cc-text); }
 .cx-thread-scroll { flex: 1 1 auto; min-height: 0; margin-top: 4px; overflow-x: hidden; overflow-y: auto; }
 .cx-thread-group { margin-bottom: 0; }
 /* A section title (Pinned, Projects) and a folder group header: 28 px, 12 px regular, muted, 10 px in. */
@@ -72,6 +77,9 @@
   border-radius: 6px; background: transparent; color: var(--cc-text-2); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }
 .cx-thread-select[aria-current="true"] { background: var(--cc-hover); color: var(--cc-text); }
 .cx-thread-row:hover .cx-thread-select[aria-current="true"] { background: var(--cc-hover-selected); }
+.cx-thread-select[data-open="true"], .cx-thread-row:hover .cx-thread-select[data-open="true"] {
+  background: var(--cc-open); color: var(--color-text-primary, var(--cc-text));
+}
 /* Titles fade out over their last 24 px instead of an ellipsis (dframe-fade-label). */
 .cx-thread-title { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap;
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
@@ -96,7 +104,7 @@
 .cx-thread-more:hover { background: var(--cc-hover-selected); color: var(--cc-text); }
 .cx-thread-row.is-renaming input { width: 100%; height: 28px; padding: 0 10px; border: 1px solid var(--cc-accent); border-radius: 6px; background: var(--color-bg-primary); color: inherit; font: inherit; font-size: 13px; }
 .cx-thread-empty { padding: 4px 10px; color: var(--cc-muted); font-size: 12px; }
-/* A folder header's one hover action: "+", a new chat in that folder. */
+/* A folder header's Codex-style ellipsis opens its full project menu. */
 .cx-project-row { position: relative; display: flex; align-items: center; }
 .cx-project-hover { position: absolute; right: 2px; display: flex; opacity: 0; transition: opacity .15s ease; }
 .cx-project-row:hover .cx-project-hover, .cx-project-row:focus-within .cx-project-hover { opacity: 1; }
@@ -104,6 +112,7 @@
 .cx-project-hover button { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0;
   border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; }
 .cx-project-hover button:hover { background: var(--cc-hover); color: var(--cc-text); }
+@media (hover: none) { .cx-project-hover { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .cx-thread-dot, .cx-project-badge { animation: none !important; } }
 .cx-project-card { position: fixed; z-index: 65; display: grid; gap: 6px; width: 280px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 12px;
   background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 16%); color: var(--color-text-primary); font-size: 12px; }
@@ -1220,7 +1229,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   font: 700 13px/16px ui-monospace, "Cascadia Mono", Consolas, monospace; text-align: center; white-space: pre; pointer-events: none; }
 /* Its tool (laptop, magnifier, hammer, mug, book) stands on the ground at its right hand; a carried
    file box rides over its raised arms. */
-.cx-pet-body svg.cx-pet-prop { position: absolute; left: 70px; bottom: 0; }
+.cx-pet-body svg.cx-pet-prop { position: absolute; left: 70px; bottom: 0; pointer-events: none; }
+/* Keep the keyboard next to Clawd's claw, not off-screen beyond the chat field. */
+.cx-pet-body.is-tool-left svg.cx-pet-prop { left: auto; right: 68px; transform: scaleX(-1); }
 .cx-pet-body svg.cx-pet-box { position: absolute; left: 20px; top: -16px; }
 .cx-pet-bubble { position: absolute; bottom: 54px; right: 0; padding: 3px 9px; border: 1px solid var(--ao-line, rgba(31, 30, 29, .15)); border-radius: 8px;
   background: var(--color-bg-primary, #fff); color: var(--color-text-primary, #1f1e1d); font-size: 12px; line-height: 1.4; white-space: nowrap; }

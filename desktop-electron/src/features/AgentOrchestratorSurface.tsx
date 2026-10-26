@@ -511,6 +511,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // The project whose board and runs were last read in full: until it is the open one, the chat
   // list is still loading, not empty.
   const [loadedWorkspace, setLoadedWorkspace] = useState("");
+  const [projectLoadError, setProjectLoadError] = useState("");
+  const [projectLoadRevision, setProjectLoadRevision] = useState(0);
+  const autoRetriedProjects = useRef(new Set<string>());
   // A split pane opens its own project, and never changes the one the window opens next time.
   const [workspaceId, setWorkspaceId] = useState(() => { if (pane) return pane.workspaceId; try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
   // The chat a split pane is to show once its project has loaded (null: not a pane).
@@ -917,6 +920,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   useEffect(() => {
     if (!workspaceReady || !workspaceId) { setBoard(null); setMissions([]); return; }
     let live = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const stalledTimer = setTimeout(() => {
+      if (live && loadedWorkspace !== workspaceId) setProjectLoadError("The project is taking too long to respond.");
+    }, 15000);
+    setProjectLoadError("");
     const ready = preloaded.current?.workspaceId === workspaceId ? preloaded.current : null;
     preloaded.current = null;
     boardWorkspace.current = "";
@@ -945,6 +953,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       applyBoard(ready.board);
       applyRuns(ready.runs);
       setLoadedWorkspace(workspaceId);
+      clearTimeout(stalledTimer);
       return () => { live = false; };
     }
     // Both reads start at once (one after the other, behind every poll a switch sets off, they left
@@ -956,7 +965,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         if (live) applyBoard(current);
         return true;
       } catch (cause) {
-        if (live) setError(cause instanceof Error ? cause.message : String(cause));
+        if (live) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          setProjectLoadError(message);
+          setError(message);
+        }
         return false;
       }
     })();
@@ -969,14 +982,29 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           runsLoaded = true;
         }
       } catch (cause) {
-        if (live) setError(cause instanceof Error ? cause.message : String(cause));
+        if (live) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          setProjectLoadError(message);
+          setError(message);
+        }
       }
       // A failed read leaves the list loading (the runs poller marks it loaded once a read lands),
       // never the false "No chats yet".
-      if (await boardRead && runsLoaded && live) setLoadedWorkspace(workspaceId);
+      const boardLoaded = await boardRead;
+      if (!live) return;
+      if (boardLoaded && runsLoaded) {
+        clearTimeout(stalledTimer);
+        setProjectLoadError("");
+        setLoadedWorkspace(workspaceId);
+      } else if (!autoRetriedProjects.current.has(workspaceId)) {
+        // One bounded retry recovers a transient read error after a project switch. Further failures
+        // stay visible in the chat pane with a manual Retry button instead of an empty screen.
+        autoRetriedProjects.current.add(workspaceId);
+        retryTimer = setTimeout(() => { if (live) setProjectLoadRevision((value) => value + 1); }, 1500);
+      }
     })();
-    return () => { live = false; };
-  }, [workspaceId, workspaceReady, setError]);
+    return () => { live = false; clearTimeout(stalledTimer); if (retryTimer) clearTimeout(retryTimer); };
+  }, [workspaceId, workspaceReady, setError, projectLoadRevision]);
 
   const run = async (name: string, action: () => Promise<void>) => {
     if (busy) return;
@@ -1603,7 +1631,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     await loadMissions(workspaceId);
   });
 
-  const sendChat = (input: { taskId?: string; title?: string; message: string; goal?: string }) => new Promise<void>((resolve, reject) => {
+  const sendChat = (input: { taskId?: string; title?: string; message: string; goal?: string; rewind?: { index: number; description: string } }) => new Promise<void>((resolve, reject) => {
     // run() skips its action while another one is in flight; never leave the chat waiting on it.
     if (busy) { reject(new Error("Another action is still running")); return; }
     const owner = selection.current;
@@ -1625,7 +1653,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         // status says why (run_status detail), as the chat's notice.
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
-          ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}), deferStart: true });
+          ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}), ...(input.rewind ? { rewind: input.rewind } : {}), deferStart: true });
         if (result.cancelled) throw new Error("Message not sent. The start was cancelled.");
         if (!current()) { resolve(); return; }
         // The route is not kept here: picks are kept as they are made, and a follow-up in an older
@@ -1634,6 +1662,10 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         // reads, then the same two again) held the sent message for seconds on a busy disk. The new
         // run and the new chat's task are set from the answer meanwhile.
         const taskId = String(result.taskId);
+        if (input.rewind) {
+          await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
+          if (!current()) { resolve(); return; }
+        }
         if (result.run) {
           const created = result.run as AoMission;
           setMissions(previous => [...previous.filter(mission => mission.id !== created.id), created]);
@@ -1650,7 +1682,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
         setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
-        void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+        if (!input.rewind) void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
       } catch (cause) {
         if (current() && !input.taskId) setPendingChat(null);
         reject(cause);
@@ -1937,18 +1969,12 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setChatTaskId("");
     await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
   });
-  // Rewind (Codex's backtrack): a new chat whose composer holds just the chosen message, to edit and
-  // send; the messages before it go along as context (shown as a chip that can be dropped). Nothing
-  // is sent and this chat stays as it is (files are not reverted).
-  const rewindChat = (taskId: string, upTo: number) => void (async () => {
-    const messages = chatMessagesFromDescription(await loadDescription(taskId));
-    if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) return;
-    // Earlier messages keep the steers sent during their turns; the chosen one is just what was typed.
-    const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]).map(chatMessageReadable);
-    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text: chatMessageReadable(messages[upTo].text),
-      ...(earlier.length ? { context: earlier } : {}) });
-    setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
-    setChatTaskId(""); setView("chat");
+  // Rewind the conversation and run the selected message again; workspace files stay unchanged.
+  const rewindChat = (taskId: string, upTo: number) => (async () => {
+    const description = await loadDescription(taskId);
+    const messages = chatMessagesFromDescription(description);
+    if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) throw new Error("That message is no longer in this chat; reload it");
+    await sendChat({ taskId, message: messages[upTo].text, rewind: { index: upTo, description } });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Fork: a new chat starting from this chat's messages (all, the first, or up to one of them).
   const forkChat = (taskId: string, upTo?: number | "first") => void (async () => {
@@ -2092,6 +2118,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     // A chat clicked in a project still loading gives way to whatever is chosen now: a project, a
     // new chat in one, a conversation continued there. Only that click's own switch keeps it.
     switchTarget.current = ""; pendingSelect.current = null;
+    // A project chosen inside a split pane opens a new chat there. Keeping the old pane target
+    // left selection waiting for that project's load while the parent waited for selection.
+    if (pane) paneWanted.current = { workspaceId: id, taskId: "" };
     switchToWorkspace(id);
   };
   // A chat opened from another project's rows in the list. As in Codex the open chat stays until the
@@ -2559,7 +2588,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
               <AgentOrchestratorChat
                 onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
                 runs={chatRuns}
-                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null} onComposing={prewarmOnTyping}
+                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
+                projectLoadError={projectLoadError} onRetryProject={() => setProjectLoadRevision((value) => value + 1)} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}
                 thread={chatThread}

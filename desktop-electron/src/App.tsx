@@ -460,6 +460,7 @@ function LauncherShell({
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
+  const [updateQueued, setUpdateQueued] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const [refreshMenuOpen, setRefreshMenuOpen] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
@@ -477,12 +478,15 @@ function LauncherShell({
     && snapshot.state.mcpSetupComplete !== true;
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
+  const updateBlockedByWork = operation?.status === "running" || browser?.status === "running";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
   const appUpdate = "kind" in snapshot.update && snapshot.update.kind === "app";
   const updateProgress = "progress" in snapshot.update && typeof snapshot.update.progress === "number"
     ? ` ${Math.round(snapshot.update.progress * 100)}%` : "";
   const updateLabel = updateBusy
     ? `${copy.updating}${snapshot.update.status === "downloading" ? updateProgress : ""}`
+    : updateQueued
+      ? (language === "zh-TW" ? "更新已排程（按一下取消）" : "Update queued (click to cancel)")
     : appUpdate
       ? (language === "zh-TW" ? `更新至 v${updateVersion}` : `Update to v${updateVersion}`)
       : (language === "zh-TW" ? `更新 GUI ${updateVersion}` : `Update GUI ${updateVersion}`);
@@ -624,14 +628,37 @@ function LauncherShell({
     if (compactSidebar) setSidebarOpen(false);
   };
 
-  const installUpdate = async () => {
+  const startAvailableUpdate = useCallback(async () => {
     setError(null);
     try {
       await api!.installUpdate();
     } catch (cause) {
       setError(messageOf(cause));
     }
+  }, [setError]);
+
+  // A user-triggered update is never a dead, disabled button. If a task is
+  // active, queue it instead of interrupting the running browser/Codex turn.
+  const installUpdate = () => {
+    if (updateBusy) return;
+    if (updateBlockedByWork) {
+      setUpdateQueued((queued) => !queued);
+      return;
+    }
+    setUpdateQueued(false);
+    void startAvailableUpdate();
   };
+
+  useEffect(() => {
+    if (!updateQueued) return;
+    if (snapshot.update.status !== "available") {
+      setUpdateQueued(false);
+      return;
+    }
+    if (updateBlockedByWork || updateBusy) return;
+    setUpdateQueued(false);
+    void startAvailableUpdate();
+  }, [updateQueued, updateBlockedByWork, updateBusy, snapshot.update.status, startAvailableUpdate]);
 
   const dismissSessionReminder = async () => {
     if (sessionReminderBusy) return;
@@ -848,7 +875,7 @@ function LauncherShell({
               {updateVisible ? (
                 <SidebarItem
                   active={false}
-                  disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
+                  disabled={updateBusy}
                   icon="update"
                   label={updateLabel}
                   onClick={() => void installUpdate()}
@@ -1309,8 +1336,9 @@ function BrowserSurface({
             aria-selected={tab.active}
           >
             <BrandMark small />
-            <span title={tab.traceId ? `${tab.title} · ${tab.traceId}` : tab.title}>
+            <span title={[tab.title, tab.threadId && `Codex task: ${tab.threadId}`, tab.conversationUrl && `ChatGPT: ${tab.conversationUrl}`, tab.traceId && `Turn: ${tab.traceId}`].filter(Boolean).join("\n")}>
               {browserTabTitleFromTitle(tab.title, copy)}
+              {tab.threadId ? ` · ${tab.threadId.slice(0, 8)}` : ""}
             </span>
             {tab.loading ? <i className="tab-spinner" /> : <StateDot state={browserTabTone(tab.status)} />}
             {tab.closable ? (
@@ -2489,14 +2517,18 @@ function RtkSurface({ active, enabled, setError, updateState }: {
   );
 }
 
-/** One line per entry, "KEY=value" (env) or "Name: value" (headers); blank lines are skipped. */
+/**
+ * One line per entry, "KEY=value" (env) or "Name: value" (headers); blank lines are skipped. An env
+ * value is kept exactly as typed after "=" (" secret " stays padded); a header value is trimmed.
+ */
 function parsePairs(text: string, separator: "=" | ":", label: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [index, raw] of text.split(/\r?\n/).entries()) {
     if (!raw.trim()) continue;
     const at = raw.indexOf(separator);
     if (at <= 0) throw new Error(`${label} line ${index + 1} needs ${separator === "=" ? "NAME=value" : "Name: value"}`);
-    out[raw.slice(0, at).trim()] = raw.slice(at + 1).trim();
+    const value = raw.slice(at + 1);
+    out[raw.slice(0, at).trim()] = separator === "=" ? value : value.trim();
   }
   return out;
 }
@@ -3369,7 +3401,7 @@ function FatalMessage({ message }: { message: string }) {
   return (
     <main className="fatal-message">
       <BrandMark />
-      <h1>Codex Web GPT</h1>
+      <h1>Coding Tools</h1>
       <p>{message}</p>
     </main>
   );

@@ -80,6 +80,10 @@ test("daemon streams browser lifecycle through the real helper process", async (
       turn.onReasoningSummary("Reading project");
       turn.onReasoningSummary(" files", true);
       turn.onTextDelta("done");
+      turn.onRichOutput?.({
+        sourceUrl: "https://chatgpt.com/c/helper-rich-test",
+        items: [{ kind: "chart", label: "Revenue" }, { kind: "artifact", label: "Report" }],
+      });
       if (turn.captureLunaCheckpoint) turn.onLunaCheckpoint({
         answerHash: "a".repeat(64),
         checkpoint: {
@@ -130,6 +134,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
+  const richOutputs: unknown[] = [];
   const acknowledgedStages: number[] = [];
   let sendActivated = false;
   let submitted = false;
@@ -151,6 +156,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       onSubmitted: () => { submitted = true; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onTextDelta: text => deltas.push(text),
+      onRichOutput: output => richOutputs.push(output),
       captureLunaCheckpoint: true,
       onLunaCheckpoint: checkpoint => checkpoints.push(checkpoint),
     });
@@ -160,6 +166,10 @@ test("daemon streams browser lifecycle through the real helper process", async (
       { text: " files", continuation: true },
     ]);
     expect(deltas).toEqual(["done"]);
+    expect(richOutputs).toEqual([{
+      sourceUrl: "https://chatgpt.com/c/helper-rich-test",
+      items: [{ kind: "chart", label: "Revenue" }, { kind: "artifact", label: "Report" }],
+    }]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
     expect(acknowledgedStages).toEqual([1, 2]);

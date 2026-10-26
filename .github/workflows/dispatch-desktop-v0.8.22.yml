@@ -1,0 +1,34 @@
+# One-time release dispatcher. Runs only when this file is added/updated on main.
+# Actual build, SHA256 verification, draft creation, asset readback and publication
+# are performed by the existing electron-windows-release.yml workflow.
+name: Dispatch Coding Tools v0.8.22 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/dispatch-desktop-v0.8.22.yml'
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  request-release:
+    if: contains(github.event.head_commit.message, 'v0.8.22 publication')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify release version, then dispatch canonical publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(gh api "repos/$GITHUB_REPOSITORY/contents/desktop-electron/package.json" -H "Accept: application/vnd.github.raw+json" | jq -r '.version')"
+          test "$version" = "0.8.22"
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.8.22" >/dev/null 2>&1; then
+            echo "v0.8.22 is already published; skipping duplicate dispatch"
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/electron-windows-release.yml/dispatches" -f ref=main -F 'inputs[publish]=true'
+          echo "Dispatched official v0.8.22 publisher from main"

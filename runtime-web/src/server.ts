@@ -518,6 +518,20 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
   return { toolNsMap, freeformToolNames, toolSearchToolNames };
 }
 
+function withCodexTurnMetadataHeader(req: Request, raw: Record<string, unknown>): Record<string, unknown> {
+  const headerTurnMetadata = req.headers.get("x-codex-turn-metadata");
+  if (!headerTurnMetadata) return raw;
+  const existingMetadata = raw.client_metadata;
+  const clientMetadata = existingMetadata && typeof existingMetadata === "object" && !Array.isArray(existingMetadata)
+    ? existingMetadata as Record<string, unknown>
+    : {};
+  // The canonical header wins on both endpoints, including turns whose body omits this metadata.
+  return {
+    ...raw,
+    client_metadata: { ...clientMetadata, "x-codex-turn-metadata": headerTurnMetadata },
+  };
+}
+
 export async function responseRequest(
   req: Request,
   config: AppConfig,
@@ -533,6 +547,9 @@ export async function responseRequest(
       "invalid_request_error",
       error instanceof Error ? error.message : "Request body must be valid JSON",
     );
+  }
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    raw = withCodexTurnMetadataHeader(req, raw as Record<string, unknown>);
   }
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
@@ -742,22 +759,7 @@ export async function compactRequest(
       error instanceof Error ? error.message : "Compaction request body must be a JSON object",
     );
   }
-  const headerTurnMetadata = req.headers.get("x-codex-turn-metadata");
-  if (headerTurnMetadata) {
-    const existingMetadata = raw.client_metadata;
-    const clientMetadata = existingMetadata && typeof existingMetadata === "object" && !Array.isArray(existingMetadata)
-      ? existingMetadata as Record<string, unknown>
-      : {};
-    raw = {
-      ...raw,
-      client_metadata: {
-        ...clientMetadata,
-        // `/responses/compact` carries native turn authority in this canonical Codex header,
-        // unlike ordinary `/responses` payloads where the same value also appears in the body.
-        "x-codex-turn-metadata": headerTurnMetadata,
-      },
-    };
-  }
+  raw = withCodexTurnMetadataHeader(req, raw);
   try {
     const identity = extractCodexTurnIdentityFromBody(raw);
     if (identity.threadId && identity.turnId) {

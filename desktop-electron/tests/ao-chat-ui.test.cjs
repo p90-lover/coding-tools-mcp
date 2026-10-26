@@ -44,6 +44,20 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
+test("a project switch keeps its chat pane readable while loading and offers Retry after a failed read", () => {
+  const props = { runs: [], tasks: [], selectedTaskId: "", deciding: true, busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},
+    onRetryProject() {} };
+  const loading = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  assert.match(loading, /Opening project/);
+  assert.match(loading, /Loading project chats/);
+  assert.doesNotMatch(loading, /Retry loading/);
+  const failed = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, projectLoadError: "Request failed" }));
+  assert.match(failed, /Couldn&#x27;t load project/);
+  assert.match(failed, /Couldn&#x27;t load chats: Request failed/);
+  assert.match(failed, /Retry loading/);
+});
+
 test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving while it runs, Completed once it ends", () => {
   const timeline = [
     { id: "r1", kind: "reasoning", status: "completed", text: "**Let me check health.**\nThen the configs." },
@@ -336,13 +350,61 @@ test("an AO agent's question and tool request show as Codex's cards: numbered op
   const ask = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: request, busy: false, approve() {}, actor: "DeepSeek V4.1 Flash" }));
   assert.match(ask, /class="cdx-kind">Terminal</);
   assert.match(ask, /Allow DeepSeek V4\.1 Flash to run this command\?/);
-  assert.match(ask, /<pre>\$env:PYTHONUTF8=&#x27;1&#x27;/);
+  assert.match(ask, /<pre[^>]*>\$env:PYTHONUTF8=&#x27;1&#x27;/);
   assert.match(ask, /<span>Reason<\/span><p>Parse recent refresh and recovery task results/);
   assert.match(ask, /<span>Reviewer<\/span><p>Inspect the complete native command yourself/);
   assert.deepEqual([...ask.matchAll(/class="cdx-option-label">([^<]+)</g)].map((match) => match[1]), ["Allow once", "Allow this conversation", "Deny"], "Codex's words");
   // Clicking an option answers at once, as Claude Code's prompt does: no Submit or Deny button.
   assert.doesNotMatch(ask, />Submit </);
   assert.doesNotMatch(ask, /cdx-foot/);
+});
+
+test("AO and native approval commands share directly scrollable cards without extra viewer controls", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  const command = [...Array.from({ length: 30 }, (_, index) => `echo command-line-${index}`), "echo FULL_COMMAND_TAIL"].join("\n");
+  const base = { nodeId: "one", approval_id: "req", kind: "command" };
+  const cases = [
+    { ...base, source: "ao", tool: "Bash", command },
+    { ...base, command },
+    { ...base, method: "item/commandExecution/requestApproval", thread_id: "thread", turn_id: "turn", request: { command } },
+  ];
+  for (const approval of cases) {
+    const html = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval, busy: false, approve() {} }));
+    assert.match(html, /class="cdx-card"[^>]*><div class="cdx-body">/, "native and AO commands share the same card and body structure");
+    assert.doesNotMatch(html, /ao-msg-approval|cdx-native-command/, "legacy native command styling cannot override the shared card");
+    assert.match(html, /class="cdx-kind">Terminal</);
+    assert.match(html, /Allow the agent to run this command\?/);
+    assert.match(html, /<pre[^>]*tabindex="0"[^>]*aria-label="Command"[^>]*>/, "the command can receive keyboard scrolling focus");
+    assert.ok(html.includes(command), "the entire multiline command, including its tail, is rendered");
+    assert.doesNotMatch(html, /<dialog|>Copy<|>Open full |is-collapsed|>Expand<|>Collapse</, "the complete command is available directly");
+  }
+  const short = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
+    approval: { ...base, source: "ao", command: "pwd" }, busy: false, approve() {},
+  }));
+  assert.match(short, /<pre[^>]*aria-label="Command"[^>]*>pwd<\/pre>/);
+  assert.doesNotMatch(short, /<dialog|>Copy<|>Open full /, "short commands have no extra viewer controls either");
+  const permissions = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
+    approval: { ...base, kind: "permissions", method: "item/permissions/requestApproval", thread_id: "thread", turn_id: "turn", request: { permissions: {} } }, busy: false, approve() {},
+  }));
+  assert.match(permissions, /class="ao-msg ao-msg-approval"/);
+  assert.doesNotMatch(permissions, /cdx-card/, "other native request types keep their existing layout");
+});
+
+test("approval tool input uses the complete original text in the same viewer", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  const toolInput = '{  "path": "src/example.ts",\n "content": "FULL_TOOL_INPUT_TAIL" }';
+  for (const source of ["ao", undefined]) {
+    const html = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
+      approval: { nodeId: "one", approval_id: "req", source, tool: "read_file", toolInput }, busy: false, approve() {},
+    }));
+    assert.match(html, /<pre[^>]*aria-label="Tool input"/);
+    assert.ok(html.includes(toolInput.replaceAll('"', "&quot;")), "JSON spacing and every field are preserved");
+    assert.doesNotMatch(html, /<dialog|>Copy<|>Open full |is-collapsed/);
+  }
+  const edit = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, {
+    approval: { nodeId: "one", approval_id: "edit", source: "ao", tool: "Edit", path: "src/example.ts", toolInput }, busy: false, approve() {},
+  }));
+  assert.match(edit, /FULL_TOOL_INPUT_TAIL/, "an edit's file path must not hide its requested content");
 });
 
 test("a question the person answered shows as Claude Code shows one: the question, then the answer", () => {

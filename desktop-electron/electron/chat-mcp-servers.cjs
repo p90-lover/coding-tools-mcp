@@ -89,7 +89,9 @@ function createChatMcpServers({ filePath, logger = null }) {
     servers = [];
     let saved = null;
     try { saved = JSON.parse(fs.readFileSync(filePath, "utf8")); } catch (error) {
-      if (error?.code !== "ENOENT") logger?.warn?.("chat_mcp_servers.unreadable", { message: String(error?.message ?? error).slice(0, 200) });
+      // Never the message: JSON.parse quotes the text around a syntax error, which can be a token.
+      if (error?.code !== "ENOENT") logger?.warn?.("chat_mcp_servers.unreadable", {
+        reason: error instanceof SyntaxError ? "invalid_json" : typeof error?.code === "string" ? error.code : "read_failed" });
     }
     for (const item of Array.isArray(saved?.servers) ? saved.servers.slice(0, MAX_SAVED_SERVERS) : []) {
       // A saved entry that no longer passes (edited by hand, or the rules changed) is dropped, not sent to AO.

@@ -14,6 +14,11 @@ on:
   pull_request:
     paths:
       - .github/workflows/electron-windows-release.yml
+      - desktop-electron/package.json
+  push:
+    branches: [main]
+    paths:
+      - desktop-electron/package.json
 
 permissions:
   contents: read

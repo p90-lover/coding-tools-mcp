@@ -13,7 +13,7 @@ const {
   skipFiveStackPackageEntry,
 } = require("../scripts/prepare-package-resources.cjs");
 
-const PRODUCT_VERSION = "0.8.20";
+const PRODUCT_VERSION = require("../package.json").version;
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {

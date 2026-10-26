@@ -6,7 +6,7 @@ const path = require("node:path");
 const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
-const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
+const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
@@ -130,6 +130,23 @@ function findInstalledCodexExecutable(env = process.env) {
 }
 
 const CHAT_TASK_TITLE = "New task";
+
+/**
+ * The name rename_chat writes for a chat now titled `current` when its agent asks for `proposed`
+ * (the model's own text, up to 200 characters), or null to leave the chat's name as it is.
+ */
+function agentChatTitle(current, proposed) {
+  // One line without markdown or wrapping quotes, as nameChat cleans a model's name; an apostrophe
+  // inside a word stays ("user's"). Control characters would fail the board's clean().
+  let name = String(proposed ?? "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/[*#`]/g, "").replace(/\s+/g, " ").trim()
+    .replace(/^["'“”‘’]+|["'“”‘’.]+$/g, "").trim();
+  // A long one is cut at a word, not mid-word.
+  if (name.length > 80) name = /\s/.test(name.slice(0, 81)) ? name.slice(0, 81).replace(/\s+\S*$/, "") : name.slice(0, 80);
+  // Nothing left, the placeholder, or the name it already has (case and spacing aside): nothing to write.
+  const same = (text) => String(text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!name || same(name) === same(CHAT_TASK_TITLE) || same(name) === same(current)) return null;
+  return name;
+}
 
 // The WebGPT tiers the bridge serves; it runs a tier the account lacks at the nearest lower one.
 const WEB_TIERS = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro"];
@@ -1295,15 +1312,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // "if cant reconnect to chat agent can it just create a new agent chat with current context").
         // It is stopped (its session, worktree and conversation stay), so it cannot come back beside
         // the new agent, which starts with the chat so far (the handoff below).
-        let unconfirmed = false;
+        let unconfirmed = null;
         const usable = Boolean(continued) && await continuableSession(continued.session).catch((error) => {
           if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
-          unconfirmed = true;
+          unconfirmed = error;
           return false;
         });
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
-          await Promise.resolve().then(() => harnessService().exitAgent?.(continued.session)).catch(() => undefined);
+          const stopped = await harnessService().exitAgent?.(continued.session);
+          if (stopped?.ok !== true) throw unconfirmed;
         }
         if (usable) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
@@ -2755,6 +2773,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (group === "chats") return "Reads the app's chats, read-only; other projects' chats only after you allow them";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
+    if (short === "rename_chat") return "Names this chat after the task it works on; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
     if (short === "view_app") return "An image of the Coding Tools window you see; nothing else on the screen";
@@ -3869,7 +3888,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         throw new Error("AO run has an active or unresolved card; inspect it before starting");
       }
       if (missionSettled(mission)) throw new Error("This task is already finished");
-      const resuming = mission.nodes.some((node) => node.state === "running")
+      let resuming = mission.nodes.some((node) => node.state === "running")
         || Boolean(mission.grant && !grantSpent(mission.grant) && mission.nodes.some(node => ["held", "failed"].includes(node.state)));
       const readyWebRole = mission.nodes.find(node => node.state === "pending"
         && node.route?.provider_id === "chatgpt-web"
@@ -3879,6 +3898,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         executable: selectedExecutable, model: mission.nodes[0].route.model });
       if (!/^[a-f0-9]{64}$/.test(selected?.expected_sha256 || "") || !path.isAbsolute(selected.executable)) {
         throw new Error("AO executable identity changed; select the current executable");
+      }
+      // A grant for another build of the agent's program (Claude Code updates itself; an app update
+      // replaces the harnesses) can start nothing: a held or failed card waiting on it is retried on a
+      // fresh grant, as one whose grant is spent is. Retry refused "no matching background grant"
+      // (2026-10-24 08:31). A card still running on the old program keeps the refusal.
+      if (resuming && mission.grant?.executable_sha256 !== selected.expected_sha256
+        && !mission.nodes.some((node) => ["running", "reserved"].includes(node.state))) {
+        await controlRun({ workspaceId: id, runId: run, action: "retry" });
+        const again = await runs({ workspaceId: id, runId: run });
+        mission = again.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+        if (!mission || mission.cancelled || mission.nodes.some((node) => ["running", "reserved", "held"].includes(node.state))) {
+          throw new Error("AO run changed while it was reset for a fresh grant; inspect it before starting");
+        }
+        resuming = false;
       }
       if (resuming && mission.grant?.executable_sha256 !== selected.expected_sha256) {
         throw new Error("AO running turn has no matching background grant");
@@ -4276,9 +4309,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The goal is judged when the steered run settles (goalAfterRun), like a goal sent as a new turn.
     if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: run.id }); }
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
-    const note = async () => {
+    // `messages`: how many messages the chat had when the steer went in; it belongs under the last.
+    const note = async (messages) => {
       const detail = await board({ workspaceId: id, taskId: task });
-      const description = `${detail.task?.description || ""}\n\n↳ Steer (${stamp} UTC): ${text}`.trim();
+      const description = chatDescriptionWithSteer(detail.task?.description || "", messages, `↳ Steer (${stamp} UTC): ${text}`);
       if (detail.task && utf8Bytes(description) <= BOARD_TEXT_BYTES) {
         await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
       }
@@ -4286,8 +4320,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The steer itself was delivered; the transcript note is best-effort, and a team's waits for
     // its run to settle (see whenTaskIdle). It is written after replying: waiting for its board
     // read and write held the chat's composer for seconds after the agent already had the message.
+    // A team's note can be written after the next message started a new mission, so the message
+    // the steer was sent under is counted now, not when the note is written.
     if (!grantAtRisk(run)) void note().catch(() => undefined);
-    else whenTaskIdle(id, task, note);
+    else {
+      const messages = board({ workspaceId: id, taskId: task }).then((detail) => chatMessageCount(detail.task?.description)).catch(() => undefined);
+      whenTaskIdle(id, task, async () => note(await messages));
+    }
     return { ok: true, steered: true, runId: run.id, nodeId: card.id };
   }
 
@@ -4344,7 +4383,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
   }
 
-  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
+  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind } = {}) {
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -4352,6 +4391,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const text = objective ? goalMessage(objective, 1) : asked;
     const naming = objective ?? asked;
     if (!text.trim()) throw new Error("Type a message to start the chat");
+    if (rewind !== undefined && (!taskId || !rewind || !Number.isSafeInteger(rewind.index) || rewind.index < 0
+      || typeof rewind.description !== "string" || goal !== undefined)) throw new Error("Choose a message to rewind in this chat");
     // Compacting the chat cannot make room for one message over the board's byte limit by itself.
     if (utf8Bytes(text) > BOARD_TEXT_BYTES) {
       throw new Error(`This message is ${utf8Bytes(text).toLocaleString("en-US")} bytes; a chat message can be at most ${BOARD_TEXT_BYTES.toLocaleString("en-US")}. Shorten it or send it in parts.`);
@@ -4402,6 +4443,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let continuation = null;
     // The follow-up as written to the chat, and the chat as it was before (withdrawFollowUp).
     let followUp = null;
+    let rewindBefore;
     if (taskId) {
       task = clean(taskId, 128);
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
@@ -4410,8 +4452,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The session keeps the permission mode, effort and context it was started with, so only an
       // unchanged route continues it; any change starts a fresh session with the new settings. A Team
       // follow-up has no single route and never continues the single card's session.
-      const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
+      const live = rewind || freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
       if (live) continuation = { session: live.receipt.thread_id, text };
+      if (rewind && (chatWorking(id, task, saved.runs)
+        || chatEdits.visible(id, saved.runs.filter(run => run.project_id === task)).some(run => !runSettled(run)))) {
+        throw new Error("Stop the chat before rewinding a message");
+      }
       try {
         await retireOpenRuns(id, task, saved.runs);
       } catch (error) {
@@ -4420,9 +4466,34 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       let detail = await board({ workspaceId: id, taskId: task });
       if (!detail.task) throw new Error("This chat's task no longer exists");
+      let rewoundDescription = null;
+      let discarded = [];
+      if (rewind) {
+        const before = String(detail.task.description || "");
+        if (before !== rewind.description) throw new Error("The chat changed before rewind; reload it and try again");
+        const marker = /\n\nFollow-up \(([^)]+) UTC\):\n/g;
+        const marks = [...before.matchAll(marker)];
+        const bodies = before.split(new RegExp(marker.source)).filter((_, index) => index % 2 === 0);
+        if (!bodies[0].trim() || rewind.index >= bodies.length) throw new Error("That message is no longer in this chat; reload it");
+        const selected = bodies[rewind.index].split(/\n\n↳ Steer \(([^)]+) UTC\): /)[0].trim();
+        if (text !== boardText(clean(selected, 8192, false))) throw new Error("The selected message changed before rewind; reload it");
+        const shown = chatEdits.visible(id, saved.runs.filter(run => run.project_id === task));
+        const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id);
+        if (roots.length !== bodies.length) throw new Error("This chat's messages are still synchronizing; reload before rewind");
+        const hidden = new Set(roots.slice(rewind.index).map(run => run.id));
+        for (let size = -1; size !== hidden.size;) {
+          size = hidden.size;
+          for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
+        }
+        discarded = [...hidden];
+        rewoundDescription = rewind.index === 0 ? text
+          : `${before.slice(0, marks[rewind.index - 1].index)}\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
+        rewindBefore = chatEdits.get(id, task);
+      }
       const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
-      let description = extended();
+      let description = rewoundDescription ?? extended();
+      if (rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This rewind exceeds the chat size limit; shorten the conversation first");
       if (utf8Bytes(description) > BOARD_TEXT_BYTES) {
         // A long chat compacts itself, as Codex does, instead of stopping at the size limit: the
         // earlier conversation becomes a handoff summary (what /compact does) and the chat goes on.
@@ -4437,6 +4508,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
       followUp = { before: saidBefore, description };
+      if (rewind) {
+        try { chatEdits.deleteMessage(id, task, discarded); }
+        catch (error) {
+          await withdrawFollowUp(id, task, runsBefore, followUp);
+          chatEdits.restore(id, task, rewindBefore);
+          throw error;
+        }
+      }
     } else {
       const before = await board({ workspaceId: id });
       const known = new Set(before.tasks.map((entry) => entry.id));
@@ -4455,6 +4534,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true));
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
+      if (rewind && followUp) {
+        const detail = await board({ workspaceId: id, taskId: task });
+        if (detail.task?.description === followUp.before) chatEdits.restore(id, task, rewindBefore);
+      }
       throw error;
     }
     // After a deleted message this run started without the old session; later follow-ups continue its own.
@@ -4945,6 +5028,38 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Limits take precedence over pausing.
     if (status !== undefined && !(status === "paused" && goal.status === "limited")) Object.assign(change, AGENT_GOAL_STATUS[status]);
     return codexGoal(goals.update(id, task, change));
+  }
+
+  /**
+   * rename_chat from a chat agent (chat-agent-tools.cjs): the chat whose run holds its AO `session`
+   * is named `title`, as the person's Rename does. A team run with cards still to reserve would
+   * refuse them after the edit (grantAtRisk), so the name waits for them, as the chat's first name does.
+   * A newer rename (the agent's, or the person's Rename) retires a waiting one: it applied late over
+   * the newer name (Codex review of #575).
+   */
+  const waitingTitles = new Map();
+  const titleKey = (workspaceId, taskId) => JSON.stringify([workspaceId, taskId]);
+  async function chatTitleTool({ workspaceId, session, title } = {}) {
+    const id = clean(workspaceId, 128);
+    const { latest } = await sessionChat(id, clean(session, 256), "rename its chat");
+    const task = latest.project_id;
+    const turn = {};
+    waitingTitles.set(titleKey(id, task), turn);
+    const detail = await board({ workspaceId: id, taskId: task });
+    if (!detail.task || detail.task.id !== task) throw new Error("This chat's task no longer exists");
+    const name = agentChatTitle(detail.task.title, title);
+    if (name === null) return { ok: true, taskId: task, title: detail.task.title, renamed: false };
+    const saved = await runs({ workspaceId: id });
+    if (saved.runs.some(run => run.project_id === task && grantAtRisk(run))) {
+      whenTaskIdle(id, task, () => {
+        if (waitingTitles.get(titleKey(id, task)) !== turn) return;
+        waitingTitles.delete(titleKey(id, task));
+        return taskRename({ workspaceId: id, taskId: task, title: name });
+      });
+      return { ok: true, taskId: task, title: name, renamed: false, note: "Renamed once the team's open cards have started" };
+    }
+    await taskRename({ workspaceId: id, taskId: task, title: name });
+    return { ok: true, taskId: task, title: name, renamed: true };
   }
 
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
@@ -5845,7 +5960,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "codex_executable": return { ok: true, executable: findCodexExecutable() };
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };
       case "board": return board(args);
-      case "task_rename": return taskRename(args);
+      // The person's name wins over an agent's rename_chat still waiting on a team round.
+      case "task_rename": waitingTitles.delete(titleKey(String(args?.workspaceId ?? "").trim(), String(args?.taskId ?? "").trim())); return taskRename(args);
       case "models": return models(args);
       case "harnesses": return harnesses();
       // Runtime > Subagents (subagents.cjs): its settings and subagents, and the ones running now.
@@ -5988,7 +6104,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

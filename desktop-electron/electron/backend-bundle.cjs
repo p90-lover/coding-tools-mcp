@@ -25,6 +25,8 @@ const KEEP_BUNDLES = 3;
 
 // The backend JavaScript closure. Each file may require only Node built-ins and files here.
 const BACKEND_MODULES = Object.freeze([
+  "atomic-file.cjs",
+  "ipc-schema.cjs",
   "agent-orchestrator-gateway.cjs",
   "agent-orchestrator-accounting.cjs",
   "agent-orchestrator-upstream.cjs",

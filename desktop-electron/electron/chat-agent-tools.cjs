@@ -85,7 +85,7 @@ const AGENT_TOOLS = new Set([
   "git_status", "git_diff", "git_log", "git_show", "git_blame",
   "view_image", "image_info", "compare_images", "ocr_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
-  "show_in_chat", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal",
+  "show_in_chat", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. Seen
 // live: an agent asked to "open the browser and keep checking" started it, but nothing showed in
@@ -201,6 +201,17 @@ const GOAL_TOOL_DEFS = Object.freeze([{
   },
 }]);
 const GOAL_TOOLS = new Set(GOAL_TOOL_DEFS.map((tool) => tool.name));
+// The app's own: the chat's name is its task's title (the chat list's row), renamed as the user's Rename does.
+const RENAME_TOOL_DEFS = Object.freeze([{
+  name: "rename_chat", title: "Rename this chat",
+  description: "Rename this chat. Its name is the title of the task it works on, shown in the app's chat list. Call it when you "
+    + "start a new task: the chat's first message, or a message that moves it on to different work. Give a short title of that "
+    + "task (at most 6 words, no quotes). Not again while the task stays the same.",
+  inputSchema: {
+    type: "object", additionalProperties: false, required: ["title"],
+    properties: { title: { type: "string", maxLength: 200, description: "The task's title, at most 6 words" } },
+  },
+}]);
 // Opt-in: commands start in the worktree but are not confined to it.
 const TERMINAL_TOOLS = new Set([
   "exec_command", "write_stdin", "read_output", "kill_command", "kill_session", "check_exec_environment",
@@ -969,7 +980,7 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false,
-  ownFileTools = false } = {}) {
+  renames = false, ownFileTools = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
   // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either.
   const scriptTool = ownFileTools ? "your Write tool" : "apply_patch";
@@ -1041,6 +1052,12 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
         + "loop or poll in your turn. Call schedule_wakeup with how many minutes it really takes and a note of what to check, "
         + "tell the user in one line, and end your turn; the chat wakes you with that note. "
       : "")
+    // The chat list is how the person finds a chat again: named once at its first message, a chat
+    // that moved on to other work kept the first task's name.
+    + (renames
+      ? "Chat name: when you start a new task (this chat's first message, or a message that moves it on to different work), "
+        + "call rename_chat with a short title of that task before you begin; not again while the task stays the same. "
+      : "")
     + "Large results are paged; ask for less per call.";
 }
 
@@ -1105,6 +1122,8 @@ function createChatAgentTools({
   chatHistory = null,
   // The goal tools' service ({ call({ workspaceId, session, action, ... }) }); without it they are not offered.
   goals = null,
+  // rename_chat's service ({ rename({ workspaceId, session, title }) }); without it the tool is not offered.
+  chatTitles = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -1346,14 +1365,15 @@ function createChatAgentTools({
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
     const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
-      ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []), ...CAPTURE_PROCESS_DEFS,
+      ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
+      ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
       ...(captureApp ? VIEW_APP_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
         && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
-        && tool?.name !== "view_app"), ...own]
+        && tool?.name !== "view_app" && tool?.name !== "rename_chat"), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
@@ -1701,6 +1721,21 @@ function createChatAgentTools({
     }
   }
 
+  // A subagent works for another chat's agent: the chat it would rename is not its own.
+  const canRename = (entry) => Boolean(chatTitles) && !entry.subagent;
+  /** rename_chat: the chat whose run holds this session is named after its task (agent-orchestrator-workflow.cjs chatTitleTool). */
+  async function renameChat(entry, given) {
+    if (!canRename(entry)) return failedCall("Unknown tool: rename_chat");
+    if (!entry.aoSession) return failedCall("This chat's session is not ready yet; try again in a moment.");
+    if (typeof given.title !== "string" || !given.title.trim()) return failedCall("Give the chat a title");
+    try {
+      const value = await chatTitles.rename({ workspaceId: entry.workspaceId, session: entry.aoSession, title: given.title.slice(0, 200) });
+      return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
+    } catch (error) {
+      return failedCall(errorMessage(error));
+    }
+  }
+
   async function callTool(entry, params) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
@@ -1716,6 +1751,7 @@ function createChatAgentTools({
     if (name === "app_processes") return listProcesses(given);
     if (name === "view_app") return viewApp(given);
     if (GOAL_TOOLS.has(name)) return goalCall(entry, name, given);
+    if (name === "rename_chat") return renameChat(entry, given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
       const found = await Promise.resolve().then(() => sessionWorkspace?.(entry.aoSession, entry.workspaceId)).catch(() => null);
@@ -2011,7 +2047,7 @@ function createChatAgentTools({
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
-              wakeups: canWake(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
+              wakeups: canWake(entry), renames: canRename(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };

@@ -138,6 +138,68 @@ test("another open project lists its chats; opening one switches to its project 
   delete stored["coding-tools:ao:open-projects"];
 });
 
+test("split-pane chat rows stay open across focus changes and clear their marker on close", async () => {
+  const saved = { ...stored };
+  for (const key of Object.keys(stored)) delete stored[key];
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  try {
+    const { props } = fixture();
+    const list = mount("ChatThreadList.tsx", { ...props, pinned: ["t1"], openTaskIds: ["t1", "t2", "b1"],
+      chats: [...props.chats, { ...props.chats[1], taskId: "closed", title: "Closed chat" }],
+      loadProjectChats: async () => [{ ...props.chats[1], taskId: "b1", title: "Beta chat" }] }, { effects: true });
+    list.render();
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const selectedTaskId of ["t1", "t2", "b1"]) {
+      const view = list.render({ selectedTaskId });
+      for (const [id, title] of [["t1", "Fix app"], ["t2", "Older"], ["b1", "Beta chat"]]) {
+        const button = walk(view).find((element) => element.type === "button" && element.props.className === "cx-thread-select" && text(element) === title);
+        assert.ok(button, `${title} is listed`);
+        assert.equal(String(button.props["data-open"]), "true", `${title} stays highlighted while ${selectedTaskId} is focused`);
+        assert.equal(button.props["aria-current"], id === selectedTaskId, "only the focused pane is current");
+      }
+      const closed = walk(view).find((element) => element.props?.className === "cx-thread-select" && text(element) === "Closed chat");
+      assert.equal(closed.props["data-open"], undefined, "a chat outside the split view is not highlighted");
+    }
+    const afterClose = list.render({ selectedTaskId: "t2", openTaskIds: ["t2", "b1"] });
+    const closedPane = walk(afterClose).find((element) => element.props?.className === "cx-thread-select" && text(element) === "Fix app");
+    assert.equal(closedPane.props["data-open"], undefined, "closing a pane clears its highlight");
+    const fallback = list.render({ selectedTaskId: "t2", openTaskIds: undefined });
+    const selected = walk(fallback).find((element) => element.props?.className === "cx-thread-select" && text(element) === "Older");
+    assert.equal(String(selected.props["data-open"]), "true", "without split membership the selected chat remains highlighted");
+  } finally {
+    for (const key of Object.keys(stored)) delete stored[key];
+    Object.assign(stored, saved);
+  }
+});
+
+test("split-pane chat rows stay listed beyond each project's Show more cutoff", async () => {
+  const saved = { ...stored };
+  for (const key of Object.keys(stored)) delete stored[key];
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  stored["coding-tools:ao:chat-list-settings"] = JSON.stringify({ visible: 1, keepActiveOnTop: false });
+  try {
+    const { props } = fixture();
+    const list = mount("ChatThreadList.tsx", { ...props, selectedTaskId: "t1", openTaskIds: ["t1", "t2", "b2"],
+      chats: [...props.chats, { ...props.chats[1], taskId: "closed", title: "Hidden closed chat" }],
+      loadProjectChats: async () => [
+        { ...props.chats[1], taskId: "b1", title: "Beta first" },
+        { ...props.chats[1], taskId: "b2", title: "Beta open" },
+        { ...props.chats[1], taskId: "b3", title: "Hidden Beta chat" }] }, { effects: true });
+    list.render();
+    await new Promise((resolve) => setImmediate(resolve));
+    const view = list.render();
+    for (const title of ["Fix app", "Older", "Beta first", "Beta open"]) {
+      assert.ok(walk(view).some((element) => element.props?.className === "cx-thread-select" && text(element) === title), `${title} stays listed`);
+    }
+    for (const title of ["Hidden closed chat", "Hidden Beta chat"]) {
+      assert.ok(!walk(view).some((element) => element.props?.className === "cx-thread-select" && text(element) === title), `${title} still follows the cutoff`);
+    }
+  } finally {
+    for (const key of Object.keys(stored)) delete stored[key];
+    Object.assign(stored, saved);
+  }
+});
+
 test("right after switching to a project, its list loads instead of saying No chats yet, and a chat's hover card closes", async () => {
   const { props } = fixture();
   stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
@@ -240,7 +302,7 @@ test("right-click menus match Codex: its order and glyphs, and every chat item d
 
   walk(list.render()).find((element) => element.props?.className === "cx-project" && text(element).includes("Alpha")).props.onContextMenu(event);
   const projectMenu = menuOf().items.filter((item) => item.kind !== "separator");
-  assert.deepEqual(plain(projectMenu.map((item) => item.label)), ["Pin", "Edit", "New section…", "Open in Explorer", "Archive chats", "Remove project"]);
+  assert.deepEqual(plain(projectMenu.map((item) => item.label)), ["New chat", "Pin", "Edit", "New section…", "Open in Explorer", "Archive chats", "Remove project"]);
   for (const item of projectMenu) assert.ok(item.run || item.reason, `${item.label} is wired or explains why not`);
   projectMenu.find((item) => item.label === "Open in Explorer").run();
   assert.deepEqual(plain(calls.at(-1)), ["openFolder", { id: "a", name: "Alpha", path: "C:\\alpha" }]);
@@ -460,22 +522,27 @@ test("a long project shows 5 chats and Show more, like Codex; the count is a lis
   assert.equal(JSON.parse(stored["coding-tools:ao:chat-list-settings"]).visible, 3);
 });
 
-test("a project is Codex's row: an open folder while its chats show, a closed one when not, \"+\" on hover; its menu is on right-click", () => {
+test("Codex's compose icon and project ellipsis open their working actions", () => {
   const { props, calls } = fixture();
   const list = mount("ChatThreadList.tsx", props);
   const button = (label) => walk(list.render()).find((element) => element.type === "button" && element.props["aria-label"] === label);
-  assert.ok(button("New chat in Alpha") && button("New chat in Beta"));
-  assert.equal(button("Alpha actions"), undefined, "one hover action, as Claude Code's");
+  assert.ok(button("More options for Alpha") && button("More options for Beta"));
+  const create = walk(list.render()).find((element) => element.props?.className === "cx-new-chat");
+  assert.equal(walk(create).find((element) => element.type === "ChatGlyph").props.name, "compose");
+  create.props.onClick();
   const header = projectButton(list.render(), "Alpha");
   const folder = (name) => walk(projectButton(list.render(), name)).find((element) => element.type === "ChatGlyph")?.props.name;
   assert.equal(folder("Alpha"), "folderOpen", "the open project shows an open folder");
   assert.equal(folder("Beta"), "folder", "a closed one shows a closed folder");
   assert.ok(!walk(header).some((element) => element.type === "Icon" && element.props.name === "chevron"), "no caret: the folder says open or closed");
-  button("New chat in Beta").props.onClick();
+  button("More options for Beta").props.onClick({ preventDefault() {}, clientX: 5, clientY: 9 });
+  let menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
+  assert.equal(menu.label, "Beta");
+  menu.items.find((item) => item.label === "New chat").run();
   header.props.onContextMenu({ preventDefault() {}, clientX: 5, clientY: 9 });
-  const menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
+  menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
   menu.items.find((item) => item.label === "Edit").run();
-  assert.deepEqual(calls, [["newChatIn", "b"], ["editProject", "a"]]);
+  assert.deepEqual(calls, [["newChat"], ["newChatIn", "b"], ["editProject", "a"]]);
 });
 
 test("archived chats sit in their own section and can be restored", () => {

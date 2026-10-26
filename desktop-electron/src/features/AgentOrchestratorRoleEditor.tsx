@@ -335,7 +335,7 @@ export function prettyModelName(id: string): string {
  * agent's own docs call it. modelLabel stays the full, unambiguous form for cards and hints.
  */
 export function modelShortLabel(model: string, cpaPool = false): { group: string; name: string } {
-  // WebGPT keeps its whole name ("WebGPT High") in the list and on the chip, ungrouped: the
+  // WebGPT keeps its whole name ("ChatGPT Web High") in the list and on the chip, ungrouped: the
   // tier at its end is the effort, which the effort chip then shows and picks.
   if (model.startsWith("chatgpt-web/")) return { group: "", name: modelLabel(model) };
   const cpa = model.startsWith("cpa/") ? model.slice(4) : cpaPool && model ? model : null;
@@ -350,6 +350,7 @@ export function modelLabel(model: string, cpaPool = false): string {
   if (model.startsWith("cpa/")) return cpaLabel(model.slice(4));
   if (cpaPool && model && !model.startsWith("chatgpt-web/")) return cpaLabel(model);
   if (!model.startsWith("chatgpt-web/")) return model;
+  if (model === "chatgpt-web/high") return "ChatGPT Web High";
   // A tier reads as ChatGPT names it ("light" is ChatGPT's Instant); a saved Luna/Think route keeps its own name.
   return `WebGPT ${webTier(model)?.label ?? model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
 }

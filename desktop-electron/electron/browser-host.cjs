@@ -29,6 +29,29 @@ const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const SAVED_CHAT_URL = "https://chatgpt.com/";
 const SAVED_CONVERSATION_PATH = /^\/c\/[0-9a-f-]{36}$/;
 const CHATGPT_ORIGIN = "https://chatgpt.com";
+// Preserve only a concrete ChatGPT conversation address, never a sign-in page, homepage,
+// or a navigation to another origin. The live WebContents URL is the source of truth.
+function liveConversationUrl(tab) {
+  const contents = tab.view?.webContents;
+  let url = tab.url;
+  try {
+    if (contents && typeof contents.getURL === "function"
+      && (typeof contents.isDestroyed !== "function" || !contents.isDestroyed())) {
+      url = contents.getURL();
+    }
+  } catch {
+    // A renderer can close between the snapshot and the URL read.
+    return undefined;
+  }
+  if (typeof url !== "string") return undefined;
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === CHATGPT_ORIGIN && SAVED_CONVERSATION_PATH.test(parsed.pathname)
+      ? `${parsed.origin}${parsed.pathname}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 /** The primary view's idle-document windows at startup: a timed-out load is retried with the next. */
@@ -702,9 +725,12 @@ class BrowserHost {
   }
 
   tabSnapshot(tab) {
+    const conversationUrl = liveConversationUrl(tab);
     const snapshot = {
       id: tab.id,
       traceId: tab.traceId,
+      ...(tab.nativeThreadId ? { threadId: tab.nativeThreadId } : {}),
+      ...(conversationUrl ? { conversationUrl } : {}),
       title: tab.label,
       status: tab.status,
       loading: tab.loading === true,
@@ -731,7 +757,7 @@ class BrowserHost {
     return this.userTabs?.get(this.selectedTabId) || null;
   }
 
-  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity) {
+  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId) {
     if (this.turnTabs.size + (this.userTabs?.size ?? 0) >= MAX_BROWSER_TABS
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
@@ -758,6 +784,7 @@ class BrowserHost {
       id,
       surfaceId,
       traceId,
+      nativeThreadId,
       conversationKey,
       connectorIdentity,
       connectorBound: false,
@@ -2694,6 +2721,7 @@ class BrowserHost {
     // The start request this call answers (the control server's): the tab records the latest one
     // it was handed to, so an abandoned start releases the tab only if no later start took it.
     startRequest = null,
+    nativeThreadId,
   ) {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
@@ -2706,7 +2734,8 @@ class BrowserHost {
       throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
     }
     if (sameTrace && (sameTrace.conversationKey !== conversationKey
-      || sameTrace.connectorIdentity !== connectorIdentity)) {
+      || sameTrace.connectorIdentity !== connectorIdentity
+      || (nativeThreadId && sameTrace.nativeThreadId && sameTrace.nativeThreadId !== nativeThreadId))) {
       throw new Error(`ChatGPT browser turn ${traceId} conversation metadata does not match its owned tab`);
     }
     // A start whose request gave up while its tab was still loading (a busy machine) is repeated by
@@ -2724,6 +2753,7 @@ class BrowserHost {
       tab.interactionMode === "automatic"
       && tab.status === "ready"
       && tab.conversationKey === conversationKey
+      && (!nativeThreadId || !tab.nativeThreadId || tab.nativeThreadId === nativeThreadId)
       && tab.connectorIdentity === connectorIdentity
       && (!connectorIdentity || tab.connectorBound === true)
     )) : [];
@@ -2748,6 +2778,11 @@ class BrowserHost {
     const existing = sameTrace?.status === "running" ? sameTrace : exactRetained;
     if (existing) {
       const reused = existing.status === "ready";
+      if (reused && existing.conversationUrl && liveConversationUrl(existing) !== existing.conversationUrl) {
+        const error = new Error("The retained ChatGPT tab has navigated away from its original conversation");
+        error.code = "retained_conversation_unavailable";
+        throw error;
+      }
       if (existing.status === "running" && existing.helperPid !== helperPid) {
         if (processRunning(existing.helperPid)) {
           throw new Error(`ChatGPT browser turn ${traceId} is owned by another helper process`);
@@ -2761,6 +2796,7 @@ class BrowserHost {
         });
       }
       existing.helperPid = helperPid;
+      if (nativeThreadId) existing.nativeThreadId = nativeThreadId;
       existing.traceId = traceId;
       existing.status = "running";
       existing.loading = true;
@@ -2780,11 +2816,13 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
+      const conversationUrl = liveConversationUrl(existing);
       return {
         surfaceId: existing.surfaceId,
         tabId: existing.id,
         reused,
         connectorBound: existing.connectorBound === true,
+        ...(conversationUrl ? { conversationUrl } : {}),
       };
     }
     if (requireRetainedConversation) {
@@ -2792,7 +2830,7 @@ class BrowserHost {
       error.code = "retained_conversation_unavailable";
       throw error;
     }
-    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity);
+    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId);
     tab.startRequest = startRequest;
     this.selectedTabId = tab.id;
     if (reveal) this.show();
@@ -2834,15 +2872,16 @@ class BrowserHost {
       );
     }
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
-    tab.status = status === "completed" ? "ready" : status === "aborted" ? "aborted" : "error";
+    tab.status = status === "completed" || status === "superseded" ? "ready" : status === "aborted" ? "aborted" : "error";
     this.syncPowerSaveBlocker();
-    tab.message = status === "completed" ? "Task completed" : message || `ChatGPT turn ${status}`;
+    tab.message = status === "completed" ? "Task completed"
+      : status === "superseded" ? "Continuing this Codex task" : message || `ChatGPT turn ${status}`;
     tab.loading = false;
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
-    const retainedLocation = status === "completed" && retain && !tab.view.webContents.isDestroyed()
+    const retainedLocation = (status === "completed" || status === "superseded") && retain && !tab.view.webContents.isDestroyed()
       ? retainedConversationLocation(tab.view.webContents.getURL(), useSavedChatsFor(this))
       : null;
     // The saved chat this turn wrote in, recorded now while the bridge still drives the tab, so its
@@ -2851,14 +2890,17 @@ class BrowserHost {
       tab.ownedConversation = ownedSavedConversationId(tab.view.webContents.getURL(), useSavedChatsFor(this))
         ?? tab.ownedConversation ?? null;
     }
-    if (status === "completed" && retain && !retainedLocation) {
+    if ((status === "completed" || status === "superseded") && retain && !retainedLocation) {
       this.logger.warn("browser.tab_retention_refused", { tabId: tab.id, traceId, reason: "no owned conversation page" });
     }
-    if (status === "completed"
+    if ((status === "completed" || status === "superseded")
       && retain
       && retainedLocation
       && tab.conversationKey
       && (!tab.connectorIdentity || connectorBound)) {
+      // The URL stays with the task-scoped retained lease, not with the current prompt.
+      // Subsequent turns use the same surfaceId and thus the same physical browser page.
+      tab.conversationUrl = liveConversationUrl(tab);
       // Pin the exact conversation: the next turn types into this tab only while it still shows it.
       tab.retainedLocation = retainedLocation;
       tab.connectorBound = connectorBound === true;
@@ -2867,7 +2909,7 @@ class BrowserHost {
       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
-      return { cancelledByUser };
+      return { cancelledByUser, ...(tab.conversationUrl ? { conversationUrl: tab.conversationUrl } : {}) };
     }
     // A browser tab represents an active Codex turn, not durable task history. The result already
     // lives in Codex, so release the terminal browser document without touching concurrent turns.

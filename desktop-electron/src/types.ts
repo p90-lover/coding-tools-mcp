@@ -516,6 +516,8 @@ export interface BrowserState {
 export interface BrowserTabState {
   id: string;
   traceId: string | null;
+  threadId?: string;
+  conversationUrl?: string;
   title: string;
   status: "idle" | "loading" | "signed-out" | "ready" | "testing" | "running" | "error" | "aborted";
   loading: boolean;

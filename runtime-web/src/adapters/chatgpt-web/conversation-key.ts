@@ -39,27 +39,35 @@ export function chatGptConversationKey(
     modelId: parsed.modelId,
     reasoning: parsed.options.reasoning,
     compaction: compactionEpoch(raw?.input),
-    // Changed Codex instructions start a new conversation, which receives them in full.
-    instructions: createHash("sha256").update(JSON.stringify(parsed.context.systemPrompt ?? [])).digest("hex"),
+    // An active Codex thread may refresh its system/environment instructions while steering.
+    // Those revisions do not change the owner of its existing ChatGPT page. Keep the key
+    // scoped to the provider, thread, model, effort and compaction epoch instead.
   })).digest("hex");
 }
 
 /**
  * Full history remains canonical; a retained epoch receives only the suffix after its last
- * assistant reply. The retained ChatGPT conversation already holds the Codex instructions from
- * its first turn, and the conversation key changes if they change, so they are not re-sent.
+ * assistant reply. The retained ChatGPT page already holds the task's initial instructions;
+ * steering preserves its page ownership even if later requests refresh instruction metadata.
  */
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,
 ): CodexParsedRequest | undefined {
-  const lastAssistant = parsed.context.messages.findLastIndex(message => message.role === "assistant");
-  if (lastAssistant < 0 || lastAssistant === parsed.context.messages.length - 1) return undefined;
+  const messages = parsed.context.messages;
+  const lastAssistant = messages.findLastIndex(message => message.role === "assistant");
+  // Steering can append a second user instruction while the first answer is still streaming.
+  // That earlier user prompt is already in the retained ChatGPT tab. Include only the new
+  // instruction and any tool results since it; never post the previous prompt twice.
+  const latestUser = messages.findLastIndex(message => message.role === "user");
+  const previousUser = messages.findLastIndex((message, index) => index < latestUser && message.role === "user");
+  const from = previousUser > lastAssistant ? previousUser + 1 : lastAssistant + 1;
+  if (from <= 0 || from >= messages.length) return undefined;
   const { systemPrompt: _sentWithTheFirstTurn, ...context } = parsed.context;
   return {
     ...parsed,
     context: {
       ...context,
-      messages: parsed.context.messages.slice(lastAssistant + 1),
+      messages: messages.slice(from),
     },
   };
 }

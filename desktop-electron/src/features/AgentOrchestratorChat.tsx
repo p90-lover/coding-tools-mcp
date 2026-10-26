@@ -151,7 +151,7 @@ export type ChatThreadActions = {
   archive: () => void;
   /** Fork from here: a new chat with the messages up to this one (its index in the chat's messages). */
   fork: (messageIndex?: number) => void;
-  /** Rewind: a new chat with the messages before this one, this message ready to edit. */
+  /** Rewind this chat to the selected message and immediately run it again. Files are unchanged. */
   rewind?: (messageIndex: number) => void;
   /**
    * Delete a message and its reply from the chat (asked to confirm first). `runIds` are the runs
@@ -355,7 +355,22 @@ const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.i
  * Messages steered into the running turn that its timeline does not show yet: the same bubble the
  * timeline gives a steer, where it will show it, checked "Sending…" until the agent has it.
  */
-function PendingSteers({ steers }: { steers: { id: string; text: string; sent?: boolean }[] }) {
+type PendingSteer = { id: string; taskId: string | undefined; text: string; at: number; waiting?: boolean; sent?: boolean;
+  turnKey?: string; messageIndex?: number };
+
+/**
+ * The turn a steer on its way shows in: the one it was sent in (its key, else the latest turn of
+ * its message, as a queued turn's key becomes its run's), or -1. It followed whichever turn was
+ * live, so a steer the agent had not read yet jumped from where it was sent down into the next
+ * mission as soon as that one started.
+ */
+function steerTurnIndex(turns: ChatTurn[], steer: PendingSteer): number {
+  const own = steer.turnKey ? turns.findIndex((turn) => turn.key === steer.turnKey) : -1;
+  if (own >= 0 || steer.messageIndex === undefined) return own;
+  return turns.findLastIndex((turn) => turn.messageIndex === steer.messageIndex);
+}
+
+function PendingSteers({ steers }: { steers: PendingSteer[] }) {
   return <>{steers.map((entry) => <div key={entry.id} className="cx-user cx-steer" data-pending={entry.sent ? "sent" : "sending"}>
     <SentMessage text={entry.text} />
     <div className="cx-msg-foot"><SteerReceiptMark receipt={entry.sent ? "unread" : "sending"} /><MessageActions text={chatMessageReadable(entry.text)} /></div>
@@ -601,9 +616,9 @@ function SentMessage({ text }: { text: string }) {
 
 function MessageActions({ text, children }: { text: string; children?: ReactNode }) {
   const [copied, setCopied] = useState(false);
-  return <div className="cx-msg-actions">
+  return <div className="cx-msg-actions" style={{ userSelect: "none" }}>
     <button type="button" title="Copy" aria-label="Copy message" onClick={() => void navigator.clipboard.writeText(text).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1500); })}>
-      {copied ? <Icon name="check" width="14" height="14" /> : "⧉"}</button>
+      {copied ? <Icon name="check" width="14" height="14" /> : <ChatGlyph name="copy" />}</button>
     {children}
   </div>;
 }
@@ -757,7 +772,7 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork, onClosePane,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane,
 }: {
   /** Close split view: set on every pane while the window is split (ChatSplit). */
   onClosePane?: () => void;
@@ -769,6 +784,9 @@ export function AgentOrchestratorChat({
   pendingMessage?: string; pendingTitle?: string; pendingCreation?: boolean;
   /** Which chat to show is not known yet (a project is opening): show neither a chat nor the new chat page. */
   deciding?: boolean;
+  /** An initial project read failed. Give the user a recovery action instead of an empty chat pane. */
+  projectLoadError?: string;
+  onRetryProject?: () => void;
   /** The user started typing a message: the surface gets the agent it needs ready (chat_prewarm). */
   onComposing?: () => void;
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
@@ -864,7 +882,8 @@ export function AgentOrchestratorChat({
   // Steers shown at once while they reach the agent (deliver), until the turn shows them itself.
   // `waiting`: the agent was busy with a request of its own, so the steer waits in the chat's queue
   // and goes in once the request is answered; it stays shown meanwhile. `sent`: the agent has it.
-  const [pendingSteers, setPendingSteers] = useState<{ id: string; taskId: string | undefined; text: string; at: number; waiting?: boolean; sent?: boolean }[]>([]);
+  // `turnKey`/`messageIndex`: the turn it was sent in, where it stays shown (steerTurnIndex).
+  const [pendingSteers, setPendingSteers] = useState<PendingSteer[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
@@ -997,13 +1016,21 @@ export function AgentOrchestratorChat({
       for (const steer of turn.user?.steers ?? []) seen.add(steer.text.trim());
       for (const step of turn.steps) for (const item of step.working?.timeline ?? []) if (item.kind === "steer") seen.add(item.text.trim());
     }
-    const fresh = (entry: typeof pendingSteers[number]) => Date.now() - entry.at < 60_000
+    const fresh = (entry: PendingSteer) => Date.now() - entry.at < 60_000
       || Boolean(entry.waiting && entry.taskId && (CHAT_QUEUES.get(entry.taskId) ?? []).some((item) => item.message === entry.text));
-    const keep = pendingSteers.filter((entry) => !seen.has(entry.text.trim()) && fresh(entry));
+    // One that waited in the queue and went as the next turn's message shows there, as that message.
+    const sentAsTurn = (entry: PendingSteer) => {
+      const at = steerTurnIndex(turns, entry);
+      return at >= 0 && turns.slice(at + 1).some((turn) => turn.user?.text.trim() === entry.text.trim());
+    };
+    // `turns` are the open chat's: another chat's steer is never matched against them (a "continue"
+    // here dropped one still on its way there), only aged out.
+    const shown = (entry: PendingSteer) => entry.taskId === selectedTaskId && (seen.has(entry.text.trim()) || sentAsTurn(entry));
+    const keep = pendingSteers.filter((entry) => !shown(entry) && fresh(entry));
     if (keep.length !== pendingSteers.length) setPendingSteers(keep);
     const timer = window.setTimeout(() => setPendingSteers((list) => list.filter(fresh)), 60_000);
     return () => window.clearTimeout(timer);
-  }, [turns, pendingSteers]);
+  }, [turns, pendingSteers, selectedTaskId]);
   // The stats line counts the latest turn and the unfinished attempts before it (chatStatsSpan).
   const statsSpan = useMemo(() => chatStatsSpan(turns, chatRuns), [turns, chatRuns]);
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
@@ -1150,7 +1177,7 @@ export function AgentOrchestratorChat({
   // Messages a rewound chat carries as context ahead of its first message; the composer holds only
   // the chosen message. Dropped with the chip's ×, or sent once with that first message.
   const [carried, setCarried] = useState<string[] | null>(null);
-  // Continue in project / Rewind: the new chat opens with the seeded message, ready to review and send.
+  // Continue in project: the new chat opens with the seeded message, ready to review and send.
   useEffect(() => {
     if (!seed || selectedTaskId) return;
     setDraft(seed.text); setTitle(seed.title); setCarried(seed.context?.length ? seed.context : null);
@@ -1236,9 +1263,11 @@ export function AgentOrchestratorChat({
     const pendingId = steerNow ? pendingSteers.find((entry) => entry.taskId === selectedTaskId && entry.text === message)?.id
       ?? `steer-${Date.now()}-${Math.random().toString(36).slice(2)}` : "";
     if (steerNow) {
+      // It stays with the turn it is sent in (the running one, else the last), also once a new mission starts.
+      const host = turns.findLast(liveTurn) ?? turns.at(-1);
       setPendingSteers((list) => list.some((entry) => entry.id === pendingId)
         ? list.map((entry) => entry.id === pendingId ? { ...entry, at: Date.now() } : entry)
-        : [...list, { id: pendingId, taskId: selectedTaskId, text: message, at: Date.now() }]);
+        : [...list, { id: pendingId, taskId: selectedTaskId, text: message, at: Date.now(), turnKey: host?.key, messageIndex: host?.messageIndex }]);
       if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
     } else setSending(true);
     const dropPending = () => { if (pendingId) setPendingSteers((list) => list.filter((entry) => entry.id !== pendingId)); };
@@ -1477,7 +1506,7 @@ export function AgentOrchestratorChat({
     if (item) setQueue(selectedTaskId, queue.filter((_, at) => at !== index));
     return item;
   };
-  // A steer is in the chat from the moment it is sent (pendingShown), not in this bar. One that waits
+  // A steer is in the chat from the moment it is sent (steersByTurn), not in this bar. One that waits
   // for the agent's own request is in the queue too, to go in later; it shows once, in the chat.
   const steerWaiting = (message: string) => pendingSteers.some((entry) => entry.taskId === selectedTaskId && entry.waiting && entry.text === message);
   const queuedBar: QueuedBarItem[] = queued.flatMap((item, index): QueuedBarItem[] => {
@@ -1652,7 +1681,7 @@ export function AgentOrchestratorChat({
             break;
           }
           setCard({ title: "Rewind",
-            text: "Pick a message to go back to. A new chat opens with it ready to edit. This chat and your files don't change.",
+            text: "Pick a message to rewind and resend in this chat. Later replies leave the conversation; your files don't change. Stop any running task first.",
             items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
               run: () => { setCard(null); thread.rewind?.(point.messageIndex); } })).reverse() });
           break;
@@ -1787,10 +1816,19 @@ export function AgentOrchestratorChat({
   const recovering = Boolean(latest && chat?.status === "attention");
   const failedTurn = recovering ? turns.findLast((turn) => turn.runId === latest?.id) : undefined;
   const failedStep = failedTurn ? [...failedTurn.steps, ...(failedTurn.final ? [failedTurn.final] : [])].find((step) => step.error) : undefined;
-  // This chat's steers on their way, and the turn that shows them: the running one (else the last).
-  const pendingShown = useMemo(() => pendingSteers.filter((entry) => entry.taskId === selectedTaskId), [pendingSteers, selectedTaskId]);
-  const liveIndex = turns.findLastIndex(liveTurn);
-  const steerHost = !pendingShown.length ? -1 : liveIndex >= 0 ? liveIndex : turns.length - 1;
+  // This chat's steers on their way, each under the turn it was sent in (steerTurnIndex); one whose
+  // turn is not in the chat shows in the running turn (else the last).
+  const steersByTurn = useMemo(() => {
+    const byTurn = new Map<number, PendingSteer[]>();
+    const live = turns.findLastIndex(liveTurn);
+    for (const entry of pendingSteers) {
+      if (entry.taskId !== selectedTaskId) continue;
+      const own = steerTurnIndex(turns, entry);
+      const at = own >= 0 ? own : live >= 0 ? live : turns.length - 1;
+      byTurn.set(at, [...(byTurn.get(at) ?? []), entry]);
+    }
+    return byTurn;
+  }, [pendingSteers, selectedTaskId, turns]);
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
     // A turn on a DeepSeek model shows as DeepSeek Harness shows one (DshTranscript); others as Claude Code.
     const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
@@ -1812,10 +1850,10 @@ export function AgentOrchestratorChat({
               </div> : turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
                 <MessageActions text={chatMessageReadable(turn.user.text)}>
-                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}
-                  {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}>↶</button> : null}
+                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
+                  {thread?.rewind ? <button type="button" title="Rewind and resend this message (files are unchanged)" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
                   {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
-                    disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}>🗑</button> : null}
+                    disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}><ChatGlyph name="delete" /></button> : null}
                 </MessageActions>
                 {turn.user.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
               </div> : null}
@@ -1833,7 +1871,7 @@ export function AgentOrchestratorChat({
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
                   errorShownBelow={turn === failedTurn} refusal={!idle && liveTurn(turn) ? cpaRefusal : null} />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
-              {turnIndex === steerHost ? <PendingSteers steers={pendingShown} /> : null}
+              {steersByTurn.has(turnIndex) ? <PendingSteers steers={steersByTurn.get(turnIndex)!} /> : null}
               {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
@@ -1847,7 +1885,7 @@ export function AgentOrchestratorChat({
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
                 <ChatMarkdown text={turn.final.text ?? ""} />
                 <MessageActions text={turn.final.text ?? ""}>
-                  {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}>↻</button> : null}
+                  {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}><Icon name="reload" width="14" height="14" /></button> : null}
                 </MessageActions>
               </div> : null}
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
@@ -1856,7 +1894,7 @@ export function AgentOrchestratorChat({
                 : turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
             </article></PartErrorBoundary>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerHost, pendingShown]);
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steersByTurn]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>
@@ -1864,7 +1902,7 @@ export function AgentOrchestratorChat({
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
           <span className="cx-head-folder" title={projectName}><ChatGlyph name="folder" size={15} /></span>
-          {deciding && !selectedTaskId ? <h2 aria-hidden="true" /> : selectedTaskId || pendingCreation
+          {deciding && !selectedTaskId ? <h2>{projectLoadError ? "Couldn't load project" : "Opening project…"}</h2> : selectedTaskId || pendingCreation
             ? renaming !== null
               ? <input autoFocus className="cx-title-input" aria-label="Chat name" maxLength={240} value={renaming}
                   onChange={(event) => setRenaming(event.target.value)} onBlur={() => void commitRename()}
@@ -1962,7 +2000,10 @@ export function AgentOrchestratorChat({
             requestAnimationFrame(() => requestAnimationFrame(() => { clicked.current = false; }));
           }}>
             {!turns.length ? <div className="cx-empty">
-              {deciding && !selectedTaskId ? null : selectedTaskId ? <p>Loading…</p> : <>
+              {deciding && !selectedTaskId ? <div role="status">
+                <p>{projectLoadError ? `Couldn't load chats: ${projectLoadError}` : "Loading project chats…"}</p>
+                {projectLoadError && onRetryProject ? <button type="button" className="button-primary" onClick={onRetryProject}>Retry loading</button> : null}
+              </div> : selectedTaskId ? <p>Loading…</p> : <>
                 <span className="cx-empty-glyph" aria-hidden="true"><ChatGlyph name="codex" size={40} /></span>
                 <h1>What should we build{projectName ? <> in {onOpenProject
                   ? <button type="button" className="cx-empty-project" title="Open the project folder" onClick={onOpenProject}>{projectName}</button>

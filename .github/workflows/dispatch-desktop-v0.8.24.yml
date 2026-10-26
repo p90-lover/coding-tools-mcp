@@ -1,0 +1,32 @@
+# One-time publisher trigger for the merged PR rollup. The release workflow itself
+# builds, checksum-verifies, uploads and reads back all artifacts before publishing.
+name: Dispatch Coding Tools v0.8.24 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/dispatch-desktop-v0.8.24.yml'
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  publish-v0824:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Confirm release version and request verified Windows publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(gh api "repos/$GITHUB_REPOSITORY/contents/desktop-electron/package.json" -H "Accept: application/vnd.github.raw+json" | jq -r '.version')"
+          test "$version" = "0.8.24"
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.8.24" >/dev/null 2>&1; then
+            echo "Release v0.8.24 already exists; skip duplicate dispatch"
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/electron-windows-release.yml/dispatches" -f ref=main -F 'inputs[publish]=true'
+          echo "Official Windows v0.8.24 publication dispatched"

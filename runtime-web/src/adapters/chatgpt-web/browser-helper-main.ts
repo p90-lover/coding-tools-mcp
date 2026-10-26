@@ -24,6 +24,7 @@ interface RunMessage {
   };
   turn: {
     traceId: string;
+    nativeThreadId?: string;
     modelId: string;
     reasoning?: string;
     capabilities: ChatGptWebCapabilities;
@@ -34,6 +35,7 @@ interface RunMessage {
     conversationKey?: string;
     compaction?: boolean;
     captureLunaCheckpoint?: boolean;
+    captureRichOutput?: boolean;
     externalProgress?: boolean;
   };
 }
@@ -70,7 +72,7 @@ type InputMessage = RunMessage
   | { type: "completion_fence_begin_ack"; id: string; requestId: number; revision: number | null }
   | { type: "completion_fence_commit_ack"; id: string; requestId: number; committed: boolean }
   | { type: "progress"; id: string; snapshot: ChatGptExternalTurnProgressSnapshot }
-  | { type: "abort"; id: string; reason?: "compaction_handoff_accepted" }
+  | { type: "abort"; id: string; reason?: "compaction_handoff_accepted" | "steering_superseded" }
   | { type: "shutdown" };
 
 let outputFailure: Error | undefined;
@@ -178,6 +180,9 @@ async function run(message: RunMessage): Promise<void> {
   if (message.turn.captureLunaCheckpoint !== undefined && typeof message.turn.captureLunaCheckpoint !== "boolean") {
     throw new Error("Browser helper Luna checkpoint flag is invalid");
   }
+  if (message.turn.captureRichOutput !== undefined && typeof message.turn.captureRichOutput !== "boolean") {
+    throw new Error("Browser helper rich-output flag is invalid");
+  }
   if (message.turn.externalProgress !== undefined && typeof message.turn.externalProgress !== "boolean") {
     throw new Error("Browser helper external progress flag is invalid");
   }
@@ -216,6 +221,7 @@ async function run(message: RunMessage): Promise<void> {
   const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
   const turn: BrowserTurn = {
     traceId: message.turn.traceId,
+    ...(message.turn.nativeThreadId ? { nativeThreadId: message.turn.nativeThreadId } : {}),
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
     capabilities: message.turn.capabilities,
@@ -295,6 +301,13 @@ async function run(message: RunMessage): Promise<void> {
     }),
     onCommentary: (text, continuation) => writeProtocol({ type: "event", id: message.id, event: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
     onTextDelta: text => writeProtocol({ type: "event", id: message.id, event: "text", text }),
+    ...(message.turn.captureRichOutput ? {
+      onRichOutput: output => {
+        if (!writeProtocol({ type: "event", id: message.id, event: "rich_output", output })) {
+          throw new Error("Browser helper could not persist rich response references");
+        }
+      },
+    } : {}),
     ...(message.turn.captureLunaCheckpoint ? {
       captureLunaCheckpoint: true,
       onLunaCheckpoint: captured => writeProtocol({
@@ -478,7 +491,9 @@ input.on("line", line => {
   } else if (message.type === "abort") {
     abortControllers.get(message.id)?.abort(message.reason === "compaction_handoff_accepted"
       ? new ChatGptCompactionHandoffAccepted()
-      : undefined);
+      : message.reason === "steering_superseded"
+        ? new DOMException("A newer Codex instruction superseded this turn", "SteeringSuperseded")
+        : undefined);
     preparedSelections.get(message.id)?.cancel();
     const waiter = sendActivationWaiters.get(message.id);
     sendActivationWaiters.delete(message.id);
@@ -530,4 +545,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack"] });
+writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "rich-output"] });

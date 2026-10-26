@@ -138,6 +138,24 @@ test("one browser conversation spans native turns and rotates only at compaction
   expect(retainedConversationResumeRequest(before)?.context.messages).toEqual([
     { role: "user", content: "Continue with the next step", timestamp: 3 },
   ]);
+  const steering = structuredClone(before);
+  steering.context.messages.push(
+    { role: "toolResult", content: "Build is still running", timestamp: 4, toolCallId: "build-1", toolName: "exec_command", isError: false },
+    { role: "user", content: "How long until it finishes?", timestamp: 5 },
+  );
+  expect(chatGptConversationKey(steering, "provider")).toBe(chatGptConversationKey(before, "provider"));
+  expect(retainedConversationResumeRequest(steering)?.context.messages).toEqual([
+    { role: "toolResult", content: "Build is still running", timestamp: 4, toolCallId: "build-1", toolName: "exec_command", isError: false },
+    { role: "user", content: "How long until it finishes?", timestamp: 5 },
+  ]);
+  const beforeFirstReply = structuredClone(before);
+  beforeFirstReply.context.messages = [
+    { role: "user", content: "Build version 1", timestamp: 1 },
+    { role: "user", content: "And show its progress", timestamp: 2 },
+  ];
+  expect(retainedConversationResumeRequest(beforeFirstReply)?.context.messages).toEqual([
+    { role: "user", content: "And show its progress", timestamp: 2 },
+  ]);
 
   const v1Compact = structuredClone(before);
   (v1Compact._rawBody as { input: unknown[] }).input.unshift({
@@ -673,6 +691,11 @@ test("structured compaction rejects incomplete native interruption identities", 
 });
 
 test("active compaction settles canonical tool results before the separate retained handoff", async () => {
+  const canonical = {
+    content: [{ type: "resource_link", uri: "https://example.test/report.csv", name: "Report" }],
+    structuredContent: { rows: 3 },
+    _meta: { componentState: "private-compaction-fixture" },
+  };
   const completed: Array<{ callId: string; result: BrokerToolResult }> = [];
   const compactionTokens: string[] = [];
   let finishBrowser!: (answer: string) => void;
@@ -706,7 +729,7 @@ test("active compaction settles canonical tool results before the separate retai
   ]);
   const parsed = request(true);
   parsed.context.messages.push(
-    { role: "toolResult", toolCallId: "call_one", toolName: "exec_command", content: "one", isError: false, timestamp: 4 },
+    { role: "toolResult", toolCallId: "call_one", toolName: "exec_command", content: "one", mcpResult: canonical, isError: false, timestamp: 4 },
     { role: "toolResult", toolCallId: "call_two", toolName: "exec_command", content: "two", isError: false, timestamp: 5 },
   );
 
@@ -716,6 +739,7 @@ test("active compaction settles canonical tool results before the separate retai
   });
   expect(compactionTokens).toEqual(["turn_active"]);
   expect(completed.map(entry => entry.callId)).toEqual(["call_one", "call_two"]);
+  expect(completed[0]!.result).toEqual(canonical);
   expect(JSON.stringify(completed[0])).not.toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);
   expect(JSON.stringify(completed[1])).not.toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);
   expect(JSON.stringify(completed[1])).not.toContain("codex.control.compaction_handoff");

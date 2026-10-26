@@ -88,6 +88,7 @@ test("Linux autostart launches the durable AppImage invisibly", () => {
     entry,
     /^Exec="\/home\/example\/Applications\/Codex Web GPT\.AppImage" --hidden$/m,
   );
+  assert.match(entry, /^Name=Coding Tools$/m);
   assert.doesNotMatch(entry, /APPIMAGE_EXTRACT_AND_RUN/);
   assert.match(entry, /^Terminal=false$/m);
   assert.match(entry, /^X-GNOME-Autostart-enabled=true$/m);

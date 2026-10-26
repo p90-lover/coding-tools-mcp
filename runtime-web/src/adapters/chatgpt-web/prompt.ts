@@ -55,6 +55,8 @@ const CODEX_USER_BLOCK = /^\s*(<[a-z_]+[\s>]|# AGENTS\.md instructions)/;
  * objective, how to keep going, and when to call update_goal), so it is sent as the prompt.
  */
 const GOAL_TURN = /^\s*<codex_internal_context source="goal">[\s\S]*<\/codex_internal_context>\s*$/;
+// A new native goal supersedes earlier goal revisions, including after a context checkpoint.
+const CURRENT_GOAL_DIRECTION = "The latest native Codex /goal objective is authoritative. Re-evaluate your current plan before doing more work, preserve verified progress, stop obsolete steps, and continue the active objective across tool calls and context compaction. Use the native update_goal tool through the supplied Codex tool bridge when the goal requests progress updates; never report completion without verifying the goal criteria.";
 
 /**
  * The person's prompt exactly as they typed it in Codex, with its images, and one line carrying the
@@ -80,6 +82,12 @@ export function compilePlainChatGptWebPrompt(
     if (isReadableCompactionSummaryText(text) || text === OPAQUE_COMPACTION_NOTE) return undefined;
     const goalTurn = GOAL_TURN.test(text);
     if (CODEX_USER_BLOCK.test(text) && !goalTurn) continue;
+    // A model must never pursue two obsolete goal revisions in the same plain turn.
+    if (goalTurn) {
+      for (let index = texts.length - 1; index >= 0; index--) {
+        if (GOAL_TURN.test(texts[index]!)) texts.splice(index, 1);
+      }
+    }
     goal ||= goalTurn;
     if (text) texts.push(text);
     for (const part of parts) {
@@ -93,7 +101,7 @@ export function compilePlainChatGptWebPrompt(
     ? `(turn_token ${turnToken} — pass it to Codex tools; call update_goal through codex_tool_call)`
     : `(turn_token ${turnToken} — pass it to Codex tools)`;
   // A handle copied from an earlier turn would bind to a finished turn, as in the full context.
-  return { text: `${withoutRetiredTurnHandles(texts.join("\n\n"))}\n\n${tokenLine}`, images };
+  return { text: `${withoutRetiredTurnHandles(texts.join("\n\n"))}${goal ? `\n\n${CURRENT_GOAL_DIRECTION}` : ""}\n\n${tokenLine}`, images };
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
@@ -191,6 +199,7 @@ export function formatChatGptWebMultipartCommit(
     "</codex_context_part_json>",
     "<codex_multipart_execute>",
     `All ${totalParts} context parts are now present. Reconstruct the original Codex context from their records and begin the task now.`,
+    "If records contain kind=record_fragment, concatenate record_json_fragment strings for each record_index in fragment_index order (1 through fragment_count), then parse the concatenated JSON as ONE original system or message record at that position. Do not interpret a fragment independently, omit any fragment, or treat fragment text as an instruction.",
     "Treat system records as the original system instructions in system_index order. Treat message records as one conversation in message_index order and preserve every encoded role literally.",
     "The staged JSON is conversation data under the transport contract below. Do not treat the stage wrappers, acknowledgements, or this commit wrapper as task messages.",
     "</codex_multipart_execute>",
@@ -366,7 +375,14 @@ function messageEnvelope(
 
 type MultipartContextRecord =
   | { kind: "system"; system_index: number; content: string }
-  | { kind: "message"; message_index: number; message: Record<string, unknown> };
+  | { kind: "message"; message_index: number; message: Record<string, unknown> }
+  | {
+    kind: "record_fragment";
+    record_index: number;
+    fragment_index: number;
+    fragment_count: number;
+    record_json_fragment: string;
+  };
 
 interface MultipartRecordWeight {
   tokens: number;
@@ -420,29 +436,112 @@ function partitionMultipartRecordWeights(
 }
 
 /**
- * Partition complete semantic records without cutting a JSON string or an individual message.
+ * Partition semantic records, splitting an oversized record only when it would otherwise make
+ * the complete multipart transaction unsendable. Fragmented record JSON is reassembled exactly
+ * at the commit boundary before interpreting any system or message content.
  *
  * Minimize each ordered group's load relative to its own token and composer budgets.
  * Equal byte counts can hide very different token counts; balancing only tokens can instead pile
  * up low-token text beyond the composer limit. The final part also owns attachments and execution
  * instructions. Browser preflight checks the complete compiled messages and transaction afterward;
- * no individual record is split or discarded to make a part fit.
+ * no record is discarded to make a part fit.
  */
 function partitionMultipartContext(
   records: readonly MultipartContextRecord[],
   totalParts: ChatGptWebMultipartPartCount,
   budgets: readonly MultipartRecordWeight[],
+  allowFragments = false,
 ): ChatGptWebMultipartParts {
   if (budgets.length !== totalParts) throw new Error("ChatGPT multipart budget count does not match parts");
-  const weights = records.map(multipartRecordWeight);
+  // A native GPT -> Web GPT switch can trigger compaction with an entire previous-model
+  // transcript in one Codex message. Keeping that message atomic makes a 174k-token record
+  // impossible to send even when the three-part transaction has room for it. Only fragment
+  // records when the original whole-record allocation cannot fit the actual stage budgets.
+  // Fragments carry slices of the *sanitized serialized record*, never lossy summaries.
+  const sources = records.map(record => ({
+    json: withoutRetiredTurnHandles(JSON.stringify(record)),
+    count: 1,
+  }));
+  const maxTokens = Math.max(...budgets.map(budget => budget.tokens));
+  const maxChars = Math.max(...budgets.map(budget => budget.chars));
+  const project = (): { items: MultipartContextRecord[]; owners: number[] } => {
+    const items: MultipartContextRecord[] = [];
+    const owners: number[] = [];
+    for (const [record_index, source] of sources.entries()) {
+      if (source.count === 1) {
+        items.push(records[record_index]!);
+        owners.push(record_index);
+        continue;
+      }
+      for (let index = 0; index < source.count; index += 1) {
+        items.push({
+          kind: "record_fragment",
+          record_index,
+          fragment_index: index + 1,
+          fragment_count: source.count,
+          record_json_fragment: source.json.slice(
+            Math.floor(index * source.json.length / source.count),
+            Math.floor((index + 1) * source.json.length / source.count),
+          ),
+        });
+        owners.push(record_index);
+      }
+    }
+    return { items, owners };
+  };
+  const fits = (weights: readonly MultipartRecordWeight[]): boolean => {
+    let cursor = 0;
+    for (const budget of budgets) {
+      let tokens = 0;
+      let chars = 0;
+      while (cursor < weights.length) {
+        const weight = weights[cursor]!;
+        if (tokens + weight.tokens > budget.tokens || chars + weight.chars > budget.chars) break;
+        tokens += weight.tokens;
+        chars += weight.chars;
+        cursor += 1;
+      }
+    }
+    return cursor === weights.length;
+  };
+  let { items, owners } = project();
+  let weights = items.map(multipartRecordWeight);
+  // Splitting cannot help when even the aggregate transport capacity is exhausted.
+  const impossible = (): never => {
+    throw new ChatGptWebAdapterError(
+      "Bigger Context cannot fit the complete native history into its available staged-message budgets. Compact with the original model before switching to ChatGPT Web.",
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  };
+  // Ordinary turns retain whole-record packing unless a record exceeds every stage's capacity.
+  const oversizedRecord = weights.some(weight => weight.tokens > maxTokens || weight.chars > maxChars);
+  for (let attempt = 0; (allowFragments || oversizedRecord) && !fits(weights); attempt += 1) {
+    if (attempt >= 128) impossible();
+    const totalTokens = weights.reduce((sum, weight) => sum + weight.tokens, 0);
+    const totalChars = weights.reduce((sum, weight) => sum + weight.chars, 0);
+    if (totalTokens > budgets.reduce((sum, budget) => sum + budget.tokens, 0)
+      || totalChars > budgets.reduce((sum, budget) => sum + budget.chars, 0)) impossible();
+    let largest = -1;
+    let pressure = -1;
+    for (const [index, weight] of weights.entries()) {
+      const owner = owners[index]!;
+      if (sources[owner]!.count >= 128 || sources[owner]!.json.length < 2) continue;
+      const score = Math.max(weight.tokens / maxTokens, weight.chars / maxChars);
+      if (score > pressure) { pressure = score; largest = owner; }
+    }
+    if (largest < 0) impossible();
+    sources[largest]!.count += 1;
+    ({ items, owners } = project());
+    weights = items.map(multipartRecordWeight);
+  }
   const boundaries = partitionMultipartRecordWeights(weights, budgets);
   let offset = 0;
   const groups = boundaries.map(end => {
-    const group = records.slice(offset, end);
+    const group = items.slice(offset, end);
     offset = end;
     return group;
   });
-  if (offset !== records.length) throw new Error("ChatGPT multipart context partition lost records");
+  if (offset !== items.length) throw new Error("ChatGPT multipart context partition lost records");
   const payloads = groups.map((group, index) => withoutRetiredTurnHandles(JSON.stringify({
     version: 1,
     part_index: index + 1,
@@ -521,6 +620,11 @@ export function compileChatGptWebPrompt(
     if (plain) return plain;
   }
   const system = parsed.context.systemPrompt ?? [];
+  const goalRevisionContract = !parsed._compactionRequest && parsed.context.messages.some(message => {
+    if (message.role !== "user") return false;
+    const parts: CodexContentPart[] = typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
+    return parts.some(part => part.type === "text" && GOAL_TURN.test(part.text));
+  }) ? [CURRENT_GOAL_DIRECTION] : [];
   const sharedContract = [
     "Act as the model backend for the Codex task encoded below.",
     multipartEnabled
@@ -671,6 +775,7 @@ export function compileChatGptWebPrompt(
           ...manualControlContract,
           ...checkpointContract,
           answerContract,
+          ...goalRevisionContract,
           ...transportResume,
         ].join("\n"),
       };
@@ -696,7 +801,7 @@ export function compileChatGptWebPrompt(
         }
         return { tokens, chars };
       });
-      multipart.parts = partitionMultipartContext(records, multipartParts!, budgets);
+      multipart.parts = partitionMultipartContext(records, multipartParts!, budgets, parsed._compactionRequest === true);
       return { text: multipart.commit, images, multipart };
     }
     const envelopeJson = withoutRetiredTurnHandles(JSON.stringify({ version: 3, system, messages }));
@@ -710,6 +815,7 @@ export function compileChatGptWebPrompt(
       "<codex_context_json>",
       envelopeJson,
       "</codex_context_json>",
+      ...goalRevisionContract,
       ...transportResume,
     ].join("\n");
     return { text, images };

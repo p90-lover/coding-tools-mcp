@@ -13,9 +13,21 @@ const turndown = new TurndownService({
 
 turndown.use(gfm);
 turndown.remove(["button", "script", "style"]);
-turndown.addRule("removeImages", {
+turndown.addRule("preserveAnswerImages", {
   filter: node => ["IMG", "PICTURE", "SOURCE"].includes(node.nodeName),
-  replacement: () => "",
+  replacement: (content, node) => {
+    if (node.nodeName === "PICTURE") return content;
+    if (node.nodeName === "SOURCE") return "";
+
+    const element = node as HTMLElement;
+    const source = element.getAttribute("src")?.trim() ?? "";
+    const alt = element.getAttribute("alt")?.trim() || element.getAttribute("title")?.trim() || "Image";
+    const label = alt.replace(/\s+/g, " ").replace(/\\/g, "\\\\").replace(/\]/g, "\\]");
+    // ChatGPT blob/data URLs and local paths cannot be opened from the Codex transcript.
+    // Keep their description rather than silently dropping the entire image.
+    if (!/^https?:\/\/[^\s<>]+$/i.test(source)) return `[Image: ${label}]`;
+    return `![${label}](<${source}>)`;
+  },
 });
 turndown.addRule("removeSvg", {
   filter: node => node.nodeName === "SVG",

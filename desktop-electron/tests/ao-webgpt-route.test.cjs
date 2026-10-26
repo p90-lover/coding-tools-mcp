@@ -118,7 +118,7 @@ test("a context window is typed freely (272000, 272,000, 272k, 1.5m) and shown s
 
 test("every card describes how it runs, with a custom role in place of the built-in one", () => {
   const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only", effort: "xhigh", context_window: 1048576 };
-  assert.equal(editor.cardMeta({ role: "planner", route, settings: {} }, []), "Native Codex · WebGPT High · effort xhigh · 1M context · Orchestrator");
+  assert.equal(editor.cardMeta({ role: "planner", route, settings: {} }, []), "Native Codex · ChatGPT Web High · effort xhigh · 1M context · Orchestrator");
   assert.equal(editor.cardMeta({ role: "worker", settings: { role_name: "Security auditor" },
     route: { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "high" } },
   [{ id: "ao:codex", label: "Codex" }]), "Codex · CPA · OpenAI · gpt-6-luna · effort high · Security auditor", "AO cards show requested tuning");
@@ -140,7 +140,7 @@ test("CPA models are labelled CPA, then their provider, then the model name", ()
   assert.equal(editor.modelLabel("cpa/claude-sonnet-4-6"), "CPA · Claude · claude-sonnet-4-6", "a model family");
   assert.equal(editor.modelLabel("gpt-6-luna", true), "CPA · OpenAI · gpt-6-luna", "a Native Codex pool id");
   assert.equal(editor.modelLabel("gpt-6-luna"), "gpt-6-luna", "an agent's own model is not a CPA model");
-  assert.equal(editor.modelLabel("chatgpt-web/high", true), "WebGPT High");
+  assert.equal(editor.modelLabel("chatgpt-web/high", true), "ChatGPT Web High");
   editor.rememberCpaProviders({ "cpa/gemini-3.8-flash-high": { provider: "antigravity" } });
   assert.equal(editor.modelLabel("cpa/gemini-3.8-flash-high"), "CPA · Antigravity · gemini-3.8-flash-high", "the provider CPA reported wins");
 });
@@ -152,6 +152,7 @@ test("model list rows name the provider once in a group and tidy the model's own
     ["kimi-k2.7-code", "Kimi K2.7 Code"], ["glm-5.3-flash", "GLM 5.3 Flash"], ["mimo-v2.5-pro", "MiMo V2.5 Pro"],
     ["minimax-m3", "MiniMax M3"], ["qwen3.7-max", "Qwen3.7 Max"], ["gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"],
   ]) assert.equal(editor.prettyModelName(id), name, id);
+  assert.deepEqual(plain(editor.modelShortLabel("chatgpt-web/high")), { group: "", name: "ChatGPT Web High" });
   assert.deepEqual(plain(editor.modelShortLabel("chatgpt-web/extra-high")), { group: "", name: "WebGPT Extra High" }, "WebGPT keeps its whole name");
   assert.equal(editor.modelLabel("chatgpt-web/light"), "WebGPT Instant", "named as ChatGPT's effort picker names it");
   assert.equal(editor.modelLabel("chatgpt-web/luna"), "WebGPT Luna", "a saved Luna route keeps its name");

@@ -4030,6 +4030,64 @@ test("the agent's goal tools work as Codex's: it creates, completes, blocks, pau
   await assert.rejects(workflow.goalTool({ workspaceId: "ws-1", session: "someone-else", action: "get" }), /not one of this project's chats/);
 });
 
+test("rename_chat names the agent's own chat after its task, and a team chat only once its open cards have started", async () => {
+  // The user: the model should "change the chat name when starting a new task".
+  const { world, workflow, advance } = wakeChat();
+  const rename = (title, session = "sess-1") => workflow.chatTitleTool({ workspaceId: "ws-1", session, title });
+  const renamed = await rename("Fix the login redirect");
+  assert.equal(renamed.renamed, true);
+  assert.equal(renamed.taskId, "task-1");
+  const task = () => world.tasks.find((entry) => entry.id === "task-1");
+  assert.equal(task().title, renamed.title);
+  assert.equal(task().description, "watch CI", "the chat's messages (its description) are kept");
+  const edits = world.edits.length;
+  assert.equal((await rename(renamed.title)).renamed, false, "the same name again writes nothing");
+  assert.equal(world.edits.length, edits);
+  await assert.rejects(rename("Anything", "someone-else"), /not one of this project's chats/);
+  assert.equal(workflow.routineAppTool("mcp__coding-tools__rename_chat"), "Names this chat after the task it works on; it runs nothing");
+
+  // A team round with cards still to reserve: an edit now would void its grant, so the name waits.
+  const team = { id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+    { id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: "sess-2" } },
+    { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+  world.runs.push(team);
+  const waiting = await rename("Ship the release notes", "sess-2");
+  assert.equal(waiting.renamed, false);
+  assert.match(waiting.note, /open cards have started/);
+  assert.equal(world.edits.length, edits, "not while a card is still pending");
+  team.nodes[1].state = "running";
+  await advance(20_000);
+  await goalSettle(() => world.edits.length > edits);
+  assert.equal(task().title, waiting.title, "renamed once nothing is left to reserve");
+
+  // Codex review of #575: a waiting rename applied late over a newer one, from the agent or the person.
+  const round = (runId, thread) => {
+    const run = { id: runId, workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+      { id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: thread } },
+      { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+    world.runs.push(run);
+    return run;
+  };
+  const third = round("r3", "sess-3");
+  assert.equal((await rename("Draft the changelog", "sess-3")).renamed, false);
+  // Its first look found the card pending, so it waits for the 20 s poll.
+  await goalSettle();
+  third.nodes[1].state = "running";
+  // The cards started before the poll: the agent's newer name applies at once and stands.
+  assert.equal((await rename("Publish the changelog", "sess-3")).renamed, true);
+  await advance(20_000);
+  await goalSettle();
+  assert.equal(task().title, "Publish the changelog", "the older waiting name does not come back");
+  const fourth = round("r4", "sess-4");
+  assert.equal((await rename("Agent's choice", "sess-4")).renamed, false);
+  await goalSettle();
+  await workflow.call("task_rename", { workspaceId: "ws-1", taskId: "task-1", title: "The person's name" });
+  fourth.nodes[1].state = "running";
+  await advance(20_000);
+  await goalSettle();
+  assert.equal(task().title, "The person's name", "the person's Rename wins over a waiting one");
+});
+
 test("a wake-up sends the chat the agent's note after its minutes, on the same Single model", async () => {
   const { world, workflow, route, advance } = wakeChat();
   const scheduled = await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 10, reason: "see whether CI run 42 passed" });
@@ -5717,6 +5775,30 @@ test("steering a team chat reaches its orchestrator, not a worker", async () => 
   assert.deepEqual(steered, [["lead-session", "focus on the UI"]]);
 });
 
+test("a team steer noted after the next mission started stays under the message it was sent in", async () => {
+  // The note waits for the team run to settle; the next message was saved first, and the steer was
+  // appended under it, so the chat moved it from its turn down into the new mission.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const run = { id: "r1", project_id: "task-1", execution_mode: "team", cancelled: false, nodes: [
+    { id: "lead", role: "planner", state: "running", route, receipt: { thread_id: "lead-session" } },
+    { id: "w1", role: "worker", state: "pending", route }] };
+  const world = chatWorld({ tasks: [task], runs: [run] });
+  const timers = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    setTimer: (callback) => { timers.push(callback); return { unref() {} }; },
+    aoHarness: { steer: async () => ({ steered: true }) } });
+  assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "focus on the UI" })).steered, true);
+  for (let tick = 0; tick < 100 && !timers.length; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(world.edits.length, 0, "the team run is still reserving its cards");
+  // The run settles and the next mission's message is saved before the note's next look.
+  for (const node of run.nodes) node.state = "finished";
+  world.tasks[0].description += "\n\nFollow-up (2026-10-24 09:00 UTC):\nnow the API";
+  timers.shift()();
+  for (let tick = 0; tick < 100 && !world.edits.length; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.match(world.edits[0].description, /^first ask\n\n↳ Steer \([^)]+ UTC\): focus on the UI\n\nFollow-up \(2026-10-24 09:00 UTC\):\nnow the API$/);
+});
+
 test("a follow-up that would overflow a long chat compacts it first instead of refusing", async () => {
   const task = { id: "task-1", title: "Long job", description: "x".repeat(8180), state: "in_progress", clauses: [] };
   const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
@@ -6343,6 +6425,108 @@ test("one send reads its agent's model catalog once, and a failed read is not ke
 });
 
 // ---- Delete message ----
+
+test("rewind truncates and resends in the same chat, preserves earlier replies, and never continues the future session", async () => {
+  for (const index of [0, 1, 2]) {
+    const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): use pnpm"
+      + "\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
+    const done = id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false,
+      nodes: [{ id: "lead", role: "planner", state: "finished", receipt: { thread_id: `session-${id}`, answer: `answer ${id}` } }] });
+    const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description }], runs: [done("r1"), done("r2"), done("r3")] });
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+      findCodexExecutable: () => process.execPath, resolveHarness: async () => { throw new Error("offline test"); } });
+    const message = ["first ask", "second ask", "third ask"][index];
+    const result = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message,
+      rewind: { index, description }, deferStart: true });
+    assert.equal(result.taskId, "task-1");
+    assert.equal(world.tasks.length, 1, "no replacement chat is created");
+    assert.deepEqual(Array.from(aoChat.chatMessagesFromDescription(world.tasks[0].description), item => item.text),
+      ["first ask", "second ask", "third ask"].slice(0, index + 1));
+    const shown = (await workflow.call("runs", { workspaceId: "ws-1" })).runs;
+    assert.deepEqual(shown.map(run => run.id), ["r1", "r2", "r3"].slice(0, index), "old reply and all later replies are hidden");
+    assert.equal(world.runs.length, 3, "removed runs remain recoverable in AO history");
+    assert.ok(result.runId, "the selected message starts a run without another click");
+    if (index < 2) assert.doesNotMatch(world.tasks[0].description, /use pnpm|third ask/);
+  }
+});
+
+test("rewind refuses stale descriptions, changed messages, invalid indexes and busy chats before writing", async () => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description }], runs: ["r1", "r2"].map(id => ({
+    id, workspace_id: "ws-1", project_id: "task-1", nodes: [{ id: "lead", role: "planner", state: "finished" }],
+  })) });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => process.execPath });
+  const send = extra => workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "second ask", ...extra });
+  for (const rewind of [{ index: -1, description }, { index: 8, description }, { index: 1, description: "changed" }]) {
+    await assert.rejects(send({ rewind }), /rewind|changed|reload|message/i);
+  }
+  await assert.rejects(send({ rewind: { index: 0, description } }), /message|changed/i);
+  world.runs[1].nodes[0].state = "running";
+  await assert.rejects(send({ rewind: { index: 1, description } }), /stop.*chat|still running/i);
+  assert.equal(world.edits.length, 0);
+  assert.equal(world.tasks[0].description, description);
+});
+
+test("a failed rewind run creation restores both the transcript and the visible replies", async () => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description }], runs: ["r1", "r2"].map(id => ({
+    id, workspace_id: "ws-1", project_id: "task-1", nodes: [{ id: "lead", role: "planner", state: "finished" }],
+  })) });
+  const workflow = createAgentOrchestratorWorkflow({ findCodexExecutable: () => process.execPath,
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/update") throw new Error("run creation failed");
+      return world.requestHeadless(endpoint, body);
+    } });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "second ask",
+    rewind: { index: 1, description }, deferStart: true }), /run creation failed/);
+  assert.equal(world.tasks[0].description, description);
+  assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2"]);
+});
+
+test("rewind starts a fresh agent with earlier answers but without later answers or steers", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model", permission_profile: ":ao-default" };
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): discarded steer";
+  const single = (id, answer) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+    nodes: [{ id: "lead", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "old-session", answer } }] });
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description, clauses: [] }],
+    runs: [single("r1", "earlier answer"), single("r2", "discarded answer"),
+      { ...single("r2b", "discarded restart"), restarts_run_id: "r2" }] });
+  const spawned = [], sent = [], created = new Map();
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/read" && body.run_id) {
+        const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+          grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "lead", role: "planner", state: "pending", parents: [], route }] };
+        created.set(body.run_id, run);
+        return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+      }
+      const latest = [...created.values()].at(-1);
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "rewind-key",
+        prompt: aoChat.chatMessagesFromDescription(world.tasks[0].description).map(item => item.text).join("\n\nFollow-up: ") }; }
+      if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+      if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+      return world.requestHeadless(endpoint, body, options);
+    },
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return "fresh-session"; },
+      continuable: async () => true,
+      send: async (id, text) => { sent.push([id, text]); return { turnId: "new-turn", state: "running" }; },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "new answer" }),
+    },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "second ask",
+    executionMode: "single", singleRoute: route, rewind: { index: 1, description } });
+  await until(() => spawned.length || sent.length);
+  assert.equal(spawned.length, 1, "the session that remembers the discarded exchange is never continued");
+  assert.ok(spawned[0].prompt.includes("earlier answer"), "the kept reply goes to the new agent");
+  assert.ok(spawned[0].prompt.includes("second ask"), "the selected message is sent automatically");
+  assert.doesNotMatch(spawned[0].prompt, /discarded answer|discarded restart|discarded steer/);
+  assert.ok(!sent.some(([id]) => id === "old-session"));
+  assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1"]);
+});
 
 test("deleting a chat message removes it and its steers from the task and hides its run from the chat", async () => {
   const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): use pnpm"
@@ -7474,7 +7658,7 @@ test("restoration uncertainty: a sent message stops the old agent and starts a n
     const workflow = workflowInternals({
       requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [previous] }
         : endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "follow-up" } : { ok: true, run: previous },
-      aoHarness: { continuable: async () => { throw uncertainty; }, exitAgent: async (id) => { order.push(`exit ${id}`); },
+      aoHarness: { continuable: async () => { throw uncertainty; }, exitAgent: async (id) => { order.push(`exit ${id}`); return { ok: true }; },
         spawn: async () => { order.push("spawn"); return "replacement"; } },
     });
     try {
@@ -7493,6 +7677,76 @@ test("restoration uncertainty: a sent message stops the old agent and starts a n
       }
     } finally { workflow.dispose(); }
   }
+});
+
+test("restoration uncertainty: a replacement requires confirmed shutdown", async t => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const shutdownFailure = new Error("host shutdown failed");
+  for (const scenario of [
+    { name: "rejected shutdown", exitAgent: async () => { throw shutdownFailure; }, failure: shutdownFailure },
+    { name: "negative acknowledgement", exitAgent: async () => ({ ok: false }) },
+    { name: "missing acknowledgement", exitAgent: async () => undefined },
+    { name: "missing shutdown method" },
+  ]) await t.test(scenario.name, async () => {
+    const uncertainty = Object.assign(new Error("restore pending"), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
+    const calls = [], submitted = [];
+    const continuation = { session: "existing", text: "follow-up" };
+    const workflow = workflowInternals({
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/reserve")) return { ok: true, request_key: "k", prompt: "follow-up" };
+        if (endpoint.endsWith("/submitted")) submitted.push(body);
+        return { ok: true, run: {} };
+      },
+      aoHarness: { continuable: async () => { throw uncertainty; },
+        ...(scenario.exitAgent ? { exitAgent: scenario.exitAgent } : {}),
+        send: async () => { calls.push("send"); return { turnId: "next" }; },
+        spawn: async () => { calls.push("spawn"); return "replacement"; } },
+    });
+    try {
+      workflow.continuations.set("new", continuation);
+      const expected = scenario.failure ?? uncertainty;
+      await assert.rejects(workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true),
+        error => error === expected);
+      assert.deepEqual(calls, [], "neither an old nor a replacement agent receives the message");
+      assert.deepEqual(submitted, [{ workspace_id: "ws", run_id: "new", node_id: "next", request_key: "k", error: expected.message }],
+        "the launch failure is saved without claiming a session");
+      assert.equal(workflow.continuations.get("new"), continuation, "the same session remains available for a later retry");
+    } finally { workflow.dispose(); }
+  });
+});
+
+test("restoration uncertainty: a replacement waits for shutdown acknowledgement", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const uncertainty = Object.assign(new Error("restore pending"), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
+  let finishExit, exitStarted;
+  const stopping = new Promise(resolve => { exitStarted = resolve; });
+  const exitGate = new Promise(resolve => { finishExit = resolve; });
+  const calls = [], submitted = [];
+  const continuation = { session: "existing", text: "follow-up" };
+  const workflow = workflowInternals({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/reserve")) return { ok: true, request_key: "k", prompt: "follow-up" };
+      if (endpoint.endsWith("/submitted")) submitted.push(body);
+      return { ok: true, run: {} };
+    },
+    aoHarness: { continuable: async () => { throw uncertainty; },
+      exitAgent: async id => { calls.push(`exit ${id}`); exitStarted(); await exitGate; return { ok: true }; },
+      send: async () => { calls.push("send"); return { turnId: "next" }; },
+      spawn: async () => { calls.push("spawn"); return "replacement"; } },
+  });
+  try {
+    workflow.continuations.set("new", continuation);
+    const pending = workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true);
+    await stopping;
+    assert.deepEqual(calls, ["exit existing"], "no new agent starts while shutdown is pending");
+    assert.deepEqual(submitted, [], "no session is recorded while shutdown is pending");
+    assert.equal(workflow.continuations.get("new"), continuation);
+    finishExit();
+    const result = await pending;
+    assert.equal(result.session_id, "replacement");
+    assert.deepEqual(calls, ["exit existing", "spawn"]);
+    assert.equal(workflow.continuations.has("new"), false);
+  } finally { finishExit(); workflow.dispose(); }
 });
 
 test("concurrent host-release upgrades recheck the in-flight stop after its first settlement", async () => {
@@ -7880,4 +8134,41 @@ test("with Retry automatically on, a turn silent past its limit is stopped so it
   observed = silent(40, [{ kind: "command", status: "pending", timeoutMs: 300_000 }]);
   await look();
   assert.deepEqual(interrupts, ["sess-1", "sess-1"], "a command long past its stated timeout is stopped too");
+});
+
+test("a held worker whose unspent grant names another build of the agent's program is started on a fresh grant", async () => {
+  // Activity log 2026-10-24 08:31: start_run refused "AO running turn has no matching background
+  // grant": Claude Code (or the app) had updated since the grant, so nothing could start on it.
+  const old = "a".repeat(64), current = "b".repeat(64);
+  for (const state of ["held", "running"]) {
+    const world = { controls: [], grants: 0, state };
+    const requestHeadless = async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, team: null, worker_capacity: { r1: 1 }, runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1",
+        revision: 2, cancelled: false, execution_mode: "team",
+        grant: { executable_sha256: old, max_turns: 3, turns_started: 1, granted_at_ms: Date.now(), expires_at_ms: Date.now() + 3_600_000 },
+        nodes: [{ id: "lead", role: "planner", state: "finished", route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" }, history: [], receipt: { answer: "plan" } },
+          { id: "w1", role: "worker", state: world.state, parents: ["lead"], route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" },
+            history: [], receipt: world.state === "held" ? { error: "Launch failed" } : null },
+          { id: "rev", role: "reviewer", state: "pending", parents: ["w1"], route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" }, history: [], receipt: null }] }] };
+      if (endpoint === "/api/v1/ao/control") { world.controls.push(body.action); world.state = "pending"; return { ok: true, run: { id: "r1", workspace_id: "ws-1", nodes: [] } }; }
+      if (endpoint === "/api/v1/ao/grant") { world.grants += 1; return { ok: true, run: { id: "r1", workspace_id: "ws-1" }, grant: { executable_sha256: current } }; }
+      if (endpoint === "/api/v1/tools/call") return { operation: { state: "completed", result: { ok: true, revision: 1, workspace_id: "ws-1", steps: [], task: { id: "task-1", title: "T", description: "d" } } } };
+      throw new Error(`stop at ${endpoint}`);
+    };
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+      fetchImpl: async () => { throw new Error("no helper"); },
+      webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+      resolveHarness: async () => ({ expected_sha256: current, executable: path.resolve("codex.exe") }) });
+    try {
+      if (state === "held") {
+        await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+        assert.deepEqual(world.controls, ["retry"], "the held card is reset");
+        assert.equal(world.grants, 1, "and started on a grant for the current build");
+      } else {
+        // A card still running on the old program cannot be granted again.
+        await assert.rejects(workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" }), /no matching background grant/);
+        assert.deepEqual(world.controls, []);
+      }
+    } finally { workflow.dispose(); }
+  }
 });
