@@ -52,7 +52,7 @@ describe("native Codex /goal over ChatGPT Web", () => {
     const goal = (objective: string) => ({
       type: "message", role: "user",
       content_item_kinds: ["goal.internal_context"],
-      content: [{ type: "input_text", text: `<codex_internal_context source="goal">\\n${objective}\\n</codex_internal_context>` }],
+      content: [{ type: "input_text", text: `<codex_internal_context source="goal">\n${objective}\n</codex_internal_context>` }],
     });
     const parsed = parseRequest({
       model: "chatgpt-web/high", stream: true,
@@ -72,7 +72,7 @@ describe("native Codex /goal over ChatGPT Web", () => {
     const goal = (objective: string) => ({
       type: "message", role: "user",
       content_item_kinds: ["goal.internal_context"],
-      content: [{ type: "input_text", text: `<codex_internal_context source="goal">\\n${objective}\\n</codex_internal_context>` }],
+      content: [{ type: "input_text", text: `<codex_internal_context source="goal">\n${objective}\n</codex_internal_context>` }],
     });
     const parsed = parseRequest({
       model: "chatgpt-web/high", stream: true,
