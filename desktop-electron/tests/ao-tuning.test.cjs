@@ -182,6 +182,14 @@ test("Native Codex offers its own efforts only for WebGPT; a CPA model there off
   assert.deepEqual(plain(editor.routeTuning(native("glm-5"), { efforts: [], effortReason: "CPA did not advertise reasoning levels for this model." }).efforts), []);
   assert.deepEqual(plain(editor.routeTuning(native("glm-5"), undefined).efforts), []);
   assert.deepEqual(plain(editor.routeTuning(native("gpt-5.5"), { efforts: ["low", "high"] }).efforts), ["low", "high"]);
+  // WebGPT's window is the Codex bridge's: one fixed size, no presets, and a carried window fits to it.
+  const bridge = { efforts: [], contextLimit: 111193, contextWindow: { min: 111193, max: 111193, kind: "context", fixed: true } };
+  const web = editor.routeTuning(native("chatgpt-web/high"), bridge);
+  assert.deepEqual(plain(web.context), { min: 111193, max: 111193 });
+  assert.equal(web.fixed, 111193);
+  assert.deepEqual(plain(web.presets), []);
+  assert.equal(editor.fitWindow({ ...native("chatgpt-web/high"), context_window: 200000 }, bridge).context_window, 111193);
+  assert.equal(editor.routeTuning(native("chatgpt-web/high"), undefined).fixed, null, "unknown, the range stays open");
   const p = await picker({ ...native("glm-5"), effort: "xhigh" }, []);
   const effort = p.field("Reasoning effort");
   assert.equal(effort.props.disabled, true);
