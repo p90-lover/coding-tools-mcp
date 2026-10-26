@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import type { AdapterEvent, CodexParsedRequest } from "../../types";
+import { isDeepStrictEqual } from "node:util";
+import { namespacedToolName, type AdapterEvent, type CodexParsedRequest, type CodexTool, type CodexToolResultMessage } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
-import { chatGptBrowserTabClosedError, chatGptTurnSupersededError } from "./adapter-error";
+import { ChatGptWebAdapterError, chatGptBrowserTabClosedError, chatGptTurnSupersededError } from "./adapter-error";
 import {
   chatGptTurnUserRevisionHistory,
   extractChatGptCompactionSourceRevision,
@@ -9,6 +10,7 @@ import {
   extractChatGptTurnUserRevision,
 } from "./environment";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { execGatewayProgram } from "./mcp-server";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
 
 function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -271,10 +273,21 @@ export class ChatGptTurnSession {
   supersededError?: Error;
   readonly createdAt = Date.now();
   private lastTouchedAt = this.createdAt;
-  readonly browserOutcome: Promise<ChatGptBrowserOutcome>;
-  readonly physicalSettlement: Promise<void>;
+  browserOutcome!: Promise<ChatGptBrowserOutcome>;
+  private runtimePhysicalSettlement!: Promise<void>;
+  private recoverySettlement?: Promise<void>;
+  private generation = 0;
+  private recoveryAttempted = false;
+  private recovering = false;
+  private recoveryCleanupPending = false;
+  private cancelled = false;
+  private cancellationReason?: Error;
   private readonly outstandingById = new Map<string, BrokerToolRequest>();
   private readonly deliveredResultIds = new Set<string>();
+  private readonly deliveredReceipts = new Map<string, string>();
+  private readonly completedToolRequests: BrokerToolRequest[] = [];
+  private recoveryCompletedToolRequests: readonly BrokerToolRequest[] = [];
+  private readonly recoveryTools = new Map<string, CodexTool>();
   private outstandingReasoning: string[] = [];
   private finalReasoning: string[] = [];
   private outstandingPrelude: AdapterEvent[] = [];
@@ -292,18 +305,31 @@ export class ChatGptTurnSession {
   }>();
 
   constructor(
-    readonly runtime: ChatGptTurnRuntime,
+    public runtime: ChatGptTurnRuntime,
     readonly traceId?: string,
     readonly ownerKey?: string,
     readonly nativeTurnId?: string,
     readonly nativeThreadId?: string,
     readonly instruction?: string,
   ) {
+    this.installRuntime(runtime);
+  }
+
+  get physicalSettlement(): Promise<void> {
+    return this.recoverySettlement ?? this.runtimePhysicalSettlement;
+  }
+
+  private installRuntime(runtime: ChatGptTurnRuntime): void {
+    const generation = ++this.generation;
+    this.runtime = runtime;
+    this.settledBrowserOutcome = undefined;
+    this.settledPhysical = false;
+    this.capabilityRetirementScheduled = false;
     this.attachedConversationKey = runtime.conversationKey;
-    this.physicalSettlement = runtime.physicalSettlement.then(
-      () => { this.settledPhysical = true; },
+    this.runtimePhysicalSettlement = runtime.physicalSettlement.then(
+      () => { if (generation === this.generation) this.settledPhysical = true; },
       error => {
-        this.settledPhysical = true;
+        if (generation === this.generation) this.settledPhysical = true;
         throw error;
       },
     );
@@ -311,7 +337,7 @@ export class ChatGptTurnSession {
       .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
       .then(outcome => {
-      this.settledBrowserOutcome = outcome;
+      if (generation === this.generation) this.settledBrowserOutcome = outcome;
       return outcome;
     });
   }
@@ -351,17 +377,51 @@ export class ChatGptTurnSession {
   }
 
   isActive(): boolean {
-    return this.settledBrowserOutcome === undefined;
+    return this.recovering || this.settledBrowserOutcome === undefined;
   }
 
   /** The client-visible browser result can settle before launcher/helper cleanup does. */
   isPhysicallySettled(): boolean {
-    return this.settledPhysical;
+    return !this.recovering && !this.recoveryCleanupPending && this.settledPhysical;
   }
 
   setOutstanding(requests: BrokerToolRequest[], reasoning: string[] = [], prelude: AdapterEvent[] = []): void {
     if (this.outstandingById.size > 0) throw new Error("cannot emit a new ChatGPT tool batch while the previous batch is unresolved");
     for (const request of requests) {
+      const tool = this.recoveryTools.get(request.wireName);
+      const native = tool && (!tool.namespace || tool.namespace === "functions");
+      let pollName = native && !request.freeform ? tool.name : undefined;
+      let pollArguments = request.arguments;
+      if (native && tool.name === "exec" && tool.freeform && request.freeform && request.input) {
+        const name = request.input.match(/^const nestedToolName = "(write_stdin|wait)";$/m)?.[1];
+        const input = request.input.match(/^const result = await nestedTool\((.+)\);$/m)?.[1];
+        if (name && input) {
+          try {
+            const args: unknown = JSON.parse(input);
+            if (args && typeof args === "object" && !Array.isArray(args)
+              && request.input === execGatewayProgram(name, false,
+                { arguments: args as Record<string, unknown> }, [...this.recoveryTools.keys()])) {
+              pollName = name;
+              pollArguments = args as Record<string, unknown>;
+            }
+          } catch { /* Arbitrary freeform programs remain unsafe to replay. */ }
+        }
+      }
+      const nativePoll = (pollName === "write_stdin" && Number.isSafeInteger(pollArguments?.session_id)
+        && (pollArguments?.chars === undefined || pollArguments.chars === ""))
+        || (pollName === "wait" && typeof pollArguments?.cell_id === "string"
+          && (pollArguments?.terminate === undefined || pollArguments.terminate === false));
+      const readOnly = tool?.annotations?.readOnlyHint === true && tool.annotations.destructiveHint !== true;
+      if (this.recoveryAttempted && !nativePoll && !readOnly && this.recoveryCompletedToolRequests.some(completed => (
+        completed.wireName === request.wireName
+        && completed.freeform === request.freeform
+        && isDeepStrictEqual(completed.freeform ? completed.input : completed.arguments,
+          request.freeform ? request.input : request.arguments)
+      ))) {
+        throw new ChatGptWebAdapterError("ChatGPT requested an action already completed before connection recovery. Inspect the recorded result before continuing.", {
+          status: 409, errorType: "invalid_request_error", code: "chatgpt_recovery_tool_replay", retryable: false,
+        });
+      }
       if (this.deliveredResultIds.has(request.callId) || this.outstandingById.has(request.callId)) {
         throw new Error(`duplicate ChatGPT bridge tool call id: ${request.callId}`);
       }
@@ -375,9 +435,12 @@ export class ChatGptTurnSession {
     return this.outstandingById.has(callId);
   }
 
-  markResultDelivered(callId: string): void {
+  markResultDelivered(callId: string, result?: CodexToolResultMessage): void {
+    const request = this.outstandingById.get(callId);
     if (!this.outstandingById.delete(callId)) throw new Error(`ChatGPT bridge tool result does not match an outstanding call: ${callId}`);
     this.deliveredResultIds.add(callId);
+    if (request && !this.recoveryAttempted) this.completedToolRequests.push(structuredClone(request));
+    if (result) this.deliveredReceipts.set(callId, JSON.stringify([result.content, result.isError === true]));
     if (this.outstandingById.size === 0) {
       this.outstandingReasoning = [];
       this.outstandingPrelude = [];
@@ -457,19 +520,84 @@ export class ChatGptTurnSession {
   }
 
   cancel(reason?: Error): void {
+    this.cancelled = true;
+    this.cancellationReason = reason;
     this.runtime.cancel(reason);
+  }
+
+  /** Replace only the physical browser; native rounds and completed tool receipts stay immutable. */
+  async recoverInterruptedBrowser(
+    parsed: CodexParsedRequest,
+    start: () => ChatGptTurnRuntime,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const outcome = this.settledBrowserOutcome;
+    if (this.recoveryAttempted || this.cancelled || this.supersededError
+      || parsed._compactionRequest || this.runtime.manualControl
+      || this.runtime.submission?.phase !== "accepted"
+      || this.runtime.text.value().length > 0
+      || outcome?.type !== "error"
+      || !(outcome.error instanceof ChatGptWebAdapterError)
+      || outcome.error.code !== "chatgpt_connection_interrupted") return false;
+    const identity = extractChatGptTurnIdentity(parsed);
+    if (!identity.threadId || identity.threadId !== this.nativeThreadId
+      || identity.turnId !== this.nativeTurnId) return false;
+    const receipts = new Map<string, CodexToolResultMessage>();
+    for (const message of parsed.context.messages) {
+      if (message.role !== "toolResult") continue;
+      if (receipts.has(message.toolCallId)) return false;
+      receipts.set(message.toolCallId, message);
+    }
+    for (const callId of this.deliveredResultIds) {
+      const receipt = receipts.get(callId);
+      if (!receipt || this.deliveredReceipts.get(callId)
+        !== JSON.stringify([receipt.content, receipt.isError === true])) return false;
+    }
+    const outstanding = this.outstanding();
+    if (outstanding.some(request => !receipts.has(request.callId))) return false;
+    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    this.recoveryAttempted = true;
+    for (const tool of parsed.context.tools ?? []) this.recoveryTools.set(namespacedToolName(tool.namespace, tool.name), tool);
+    this.recovering = true;
+    const previous = this.runtime;
+    this.recoveryCleanupPending = true;
+    const cleanup = (async () => {
+      await previous.retireCapability?.();
+      previous.cancel();
+      await previous.physicalSettlement;
+      await previous.releaseRetainedConversation?.();
+      this.recoveryCleanupPending = false;
+    })();
+    // HTTP detachment never releases ownership while an exact old lease release is still live.
+    this.recoverySettlement = this.tail.then(() => cleanup).then(() => this.runtimePhysicalSettlement);
+    void this.recoverySettlement.catch(() => {});
+    try {
+      await awaitWithAbort(cleanup, signal);
+      if (this.cancelled || this.supersededError) {
+        throw this.supersededError ?? this.cancellationReason ?? new DOMException("ChatGPT web turn aborted", "AbortError");
+      }
+      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      for (const request of outstanding) this.markResultDelivered(request.callId, receipts.get(request.callId)!);
+      this.recoveryCompletedToolRequests = [...this.completedToolRequests, ...outstanding].map(request => structuredClone(request));
+      this.installRuntime(start());
+      this.scheduleCapabilityRetirement();
+      return true;
+    } finally {
+      this.recovering = false;
+    }
   }
 
   private scheduleCapabilityRetirement(): void {
     if (this.capabilityRetirementScheduled || !this.runtime.retireCapability) return;
     this.capabilityRetirementScheduled = true;
+    const runtime = this.runtime;
     // Register only after the first observer entered `runExclusive`. This ensures an immediately
     // completed mocked/real browser cannot revoke its token ahead of the browser-outcome branch.
     // At physical settlement, read the current tail so every tool-result/reconnect observer that
     // was already admitted finishes before the capability is retired.
-    void this.physicalSettlement
+    void runtime.physicalSettlement
       .then(() => this.tail)
-      .then(() => this.runtime.retireCapability!())
+      .then(() => runtime.retireCapability!())
       .catch(error => {
         console.error(
           `[chatgpt-web] failed to retire settled turn capability: ${error instanceof Error ? error.message : String(error)}`,
