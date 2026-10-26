@@ -3,23 +3,87 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
+const { Worker } = require("node:worker_threads");
 
-function git(directory, args) {
+/**
+ * Starting a process on Windows holds the thread that starts it until the program is loaded, and
+ * the branch bar runs about a dozen git commands every 15 s while a project is open: on the busy
+ * hard disk that held the main process (every window) for 15 s of 20 minutes, up to 400 ms at a
+ * time (profiled live 2026-10-26). git is started from a worker thread instead, so only the worker
+ * waits; it runs git directly when the worker cannot be used.
+ */
+const GIT_WORKER_SOURCE = `
+const { parentPort } = require("node:worker_threads");
+const { execFile } = require("node:child_process");
+parentPort.on("message", ({ id, args, timeout }) => {
+  execFile("git", args, { windowsHide: true, timeout }, (error, stdout, stderr) => {
+    parentPort.postMessage({ id, error: error ? String(error.message || error) : null, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+  });
+});`;
+let gitWorker = null;
+let gitWorkerBroken = false;
+let gitCalls = 0;
+const gitPending = new Map();
+
+function runGitDirectly(args, timeout) {
   return new Promise((resolve) => {
-    execFile("git", ["-C", directory, ...args], { windowsHide: true, timeout: 10_000 }, (error, stdout) => {
-      resolve(error ? null : String(stdout).trim());
+    execFile("git", args, { windowsHide: true, timeout }, (error, stdout, stderr) => {
+      resolve({ error: error ? String(error.message || error) : null, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 
-/** Like git(), but keeps git's own message when it refuses, for the user to read. */
-function gitOutcome(directory, args) {
-  return new Promise((resolve) => {
-    execFile("git", ["-C", directory, ...args], { windowsHide: true, timeout: 60_000 }, (error, stdout, stderr) => {
-      const message = String(stderr || error?.message || "").split(/\r?\n/).map(line => line.trim()).find(Boolean) || "";
-      resolve({ ok: !error, stdout: String(stdout).trim(), message: message.replace(/^(fatal|error):\s*/i, "") });
-    });
+function startGitWorker() {
+  const worker = new Worker(GIT_WORKER_SOURCE, { eval: true });
+  worker.unref();
+  worker.on("message", (reply) => {
+    const call = gitPending.get(reply.id);
+    gitPending.delete(reply.id);
+    // Held only while git runs, so an idle worker never keeps a process from exiting.
+    if (!gitPending.size) worker.unref();
+    call?.resolve(reply);
   });
+  const stopped = () => {
+    if (gitWorker !== worker) return;
+    gitWorker = null;
+    gitWorkerBroken = true;
+    // Whatever it had not answered runs directly.
+    const calls = [...gitPending.values()];
+    gitPending.clear();
+    for (const call of calls) runGitDirectly(call.args, call.timeout).then(call.resolve);
+  };
+  worker.on("error", stopped);
+  worker.on("exit", stopped);
+  return worker;
+}
+
+/** git's { error, stdout, stderr }, never a rejection. */
+function runGit(args, timeout) {
+  if (gitWorkerBroken) return runGitDirectly(args, timeout);
+  try {
+    gitWorker ??= startGitWorker();
+  } catch {
+    gitWorkerBroken = true;
+    return runGitDirectly(args, timeout);
+  }
+  return new Promise((resolve) => {
+    const id = ++gitCalls;
+    gitPending.set(id, { args, timeout, resolve });
+    gitWorker.ref();
+    gitWorker.postMessage({ id, args, timeout });
+  });
+}
+
+async function git(directory, args) {
+  const { error, stdout } = await runGit(["-C", directory, ...args], 10_000);
+  return error ? null : stdout.trim();
+}
+
+/** Like git(), but keeps git's own message when it refuses, for the user to read. */
+async function gitOutcome(directory, args) {
+  const { error, stdout, stderr } = await runGit(["-C", directory, ...args], 60_000);
+  const message = String(stderr || error || "").split(/\r?\n/).map(line => line.trim()).find(Boolean) || "";
+  return { ok: !error, stdout: stdout.trim(), message: message.replace(/^(fatal|error):\s*/i, "") };
 }
 
 /**
@@ -121,10 +185,8 @@ async function listBranches(folder, chatRoot = null) {
 /** Uncommitted work in a checkout: staged, modified and untracked files. Null when unreadable. */
 async function changesIn(directory) {
   // Not git(): its trim() would eat the first line's leading status column (" M file").
-  const status = await new Promise((resolve) => {
-    execFile("git", ["-C", directory, "status", "--porcelain=v1"], { windowsHide: true, timeout: 10_000 },
-      (error, stdout) => resolve(error ? null : String(stdout)));
-  });
+  const { error, stdout } = await runGit(["-C", directory, "status", "--porcelain=v1"], 10_000);
+  const status = error ? null : stdout;
   if (status === null) return null;
   const counts = { staged: 0, modified: 0, untracked: 0 };
   for (const line of status.split(/\r?\n/)) {

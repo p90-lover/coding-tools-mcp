@@ -283,11 +283,13 @@ describe("Zero Risk public MCP ABI", () => {
       // The three read-only discovery tools (chat history, workspaces, module status) are part of
       // both contracts; they carry readOnlyHint and cannot change access or invoke mutations.
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
+        "codex_app_call",
         "codex_apply_patch",
         "codex_chat_sessions",
         "codex_exec",
         "codex_tool_call",
         "codex_tool_inventory",
+        "codex_tool_status",
         "codex_turn_complete",
         "codex_turn_start",
         "codex_view_image",

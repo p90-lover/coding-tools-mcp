@@ -262,16 +262,60 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     schedule();
   };
 
-  useLayoutEffect(() => {
-    for (const [id, element] of elements.current) heights.current.set(id, element.offsetHeight || height);
-    const next = canvasLayout(nodes, levels, heights.current);
+  // Lays the cards out from their known heights; a group being dragged stays where it is.
+  const relayout = () => {
+    const next = canvasLayout(current.current.nodes, current.current.levels, heights.current);
     if (drag.current?.id) for (const id of drag.current.group.keys()) {
       const point = positions.current.get(id);
       if (point) next.set(id, point);
     }
     positions.current = next;
     if (!initialized.current) initialized.current = fit(); else schedule();
-  }, [nodes, levels]);
+  };
+  const relayoutLatest = useRef(relayout);
+  relayoutLatest.current = relayout;
+
+  // What the layout and its links depend on besides card heights: each level's cards in order, where
+  // placed cards were put, and each card's parents (draw() lays a path per link). The pages rebuild
+  // nodes and levels on every render (their 1-3 s polls), and re-measuring every card's offsetHeight
+  // each time forced a layout several times a second.
+  const layoutKey = `${levels.map(level => level.map(node => node.id).join(",")).join("|")}#${
+    nodes.map(node => `${node.id}<${node.parents.join("+")}${node.positioned ? `@${node.x},${node.y}` : ""}`).join(";")}`;
+  // Card heights come from a ResizeObserver, which reports them after layout instead of forcing one;
+  // a new card is measured once here. Without one (tests), every card is measured as before.
+  const sizes = useRef<{ observer: ResizeObserver; watched: Map<Element, string> } | null>(null);
+  useLayoutEffect(() => {
+    for (const [id, element] of elements.current) {
+      if (!sizes.current || !heights.current.has(id)) heights.current.set(id, element.offsetHeight || height);
+    }
+    relayout();
+  }, [layoutKey]);
+  useLayoutEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    const watched = new Map<Element, string>();
+    const observer = new ResizeObserver(entries => {
+      let changed = false;
+      for (const entry of entries) {
+        const id = watched.get(entry.target);
+        const measured = (entry.target as HTMLElement).offsetHeight || height;
+        if (id && heights.current.get(id) !== measured) { heights.current.set(id, measured); changed = true; }
+      }
+      if (changed) relayoutLatest.current();
+    });
+    sizes.current = { observer, watched };
+    return () => { observer.disconnect(); sizes.current = null; };
+  }, []);
+  // After every render: watch cards that appeared, stop watching ones that went.
+  useLayoutEffect(() => {
+    const watching = sizes.current;
+    if (!watching) return;
+    for (const [element, id] of watching.watched) {
+      if (elements.current.get(id) !== element) { watching.observer.unobserve(element); watching.watched.delete(element); }
+    }
+    for (const [id, element] of elements.current) {
+      if (!watching.watched.has(element)) { watching.watched.set(element, id); watching.observer.observe(element); }
+    }
+  });
 
   // New saved points (or a loop switched on or off) redraw the links; a released point gives way.
   useLayoutEffect(() => { released.current.clear(); schedule(); }, [points, loop?.from, loop?.to]);

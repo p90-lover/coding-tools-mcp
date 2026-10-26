@@ -40,7 +40,7 @@ function fixture() {
   });
   context.verifyMcpConnection = vm.runInContext(`(${manual})`, context);
   const run = vm.runInContext(`(${automatic})`, context);
-  return { state, browser, health, context, calls, run: () => run(options) };
+  return { state, browser, health, context, calls, run: (extra = {}) => run({ ...options, ...extra }) };
 }
 
 test("automatic MCP waits for an owned accepting bridge and real Codex catalog observation", async () => {
@@ -81,4 +81,28 @@ test("automatic MCP reports doctor failure without setup, connector changes, or 
   assert.deepEqual(f.calls, ["running", "doctor", "failed"]);
   await f.run();
   assert.equal(f.calls.filter(x => x === "doctor").length, 1);
+});
+
+test("automatic MCP reads no file while the browser is busy, and uses the config the monitor read", async () => {
+  // It waits for as long as the browser is in use, asked every 15 s; each synchronous file check on
+  // the app's busy hard disk could freeze every window (3 s for one stat, 2026-10-24).
+  const f = fixture();
+  const reads = [];
+  f.context.runtimeSupervisor = { readConfig: () => { reads.push("config"); return { mode: "full", releaseVersion: "5.0.6" }; },
+    readState: () => { reads.push("state"); return { daemonPid: 123 }; } };
+  f.context.runtimeHost.mcpCredentialsConfigured = () => { reads.push("credentials"); return true; };
+  f.browser.surfaceActive = true;
+  assert.equal(await f.run(), true, "still waiting");
+  f.browser.surfaceActive = false;
+  f.health.active_browser_turns = 1;
+  assert.equal(await f.run(), true, "still waiting");
+  assert.deepEqual(reads, [], "nothing read while the browser is in use");
+  // A config the monitor already read: a browser-only setup stops waiting without any read.
+  assert.equal(await f.run({ config: { mode: "browser-only" } }), false);
+  assert.deepEqual(reads, []);
+  // Once idle it checks the files, then connects.
+  f.health.active_browser_turns = 0;
+  assert.equal(await f.run(), false);
+  assert.deepEqual(reads, ["credentials", "config", "state"]);
+  assert.equal(f.state.mcpSetupComplete, true);
 });

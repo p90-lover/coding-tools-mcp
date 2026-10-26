@@ -628,7 +628,9 @@ test("catalog verification reports a failed request instead of requesting anothe
   const context = {
     catalogVerificationInFlight: false, catalogVerificationTimer: null, lastOperation: null,
     stopCatalogVerificationMonitor() {},
-    runtimeSupervisor: { readConfig: () => ({}), proxyHealthPayload: async () => payload },
+    // A timer must not read the config synchronously (it froze the app for seconds on a busy disk).
+    runtimeSupervisor: { readConfig: () => { throw new Error("the monitor read config.json synchronously"); },
+      readConfigAsync: async () => ({}), proxyHealthPayload: async () => payload },
     stateStore: { read: () => state, update: patch => Object.assign(state, patch) },
     setInterval: callback => { tick = callback; return { unref() {} }; },
     logger: { info: (...args) => events.push(args), warn: (...args) => events.push(args), debug() {} },

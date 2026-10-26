@@ -290,6 +290,45 @@ test("the runtime config is parsed once per change, not on every monitor read", 
   }
 });
 
+test("timers read the runtime config without a synchronous disk call, sharing the same cache", async () => {
+  // A main-process profile (2026-10-24): the catalog monitor's one statSync of config.json froze
+  // every window for 3 s on the busy hard disk holding the app's data.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-config-async-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const configPath = path.join(root, "config.json");
+  const sync = { statSync: fs.statSync, readFileSync: fs.readFileSync };
+  try {
+    // Saved by Windows PowerShell, with a byte order mark.
+    fs.writeFileSync(configPath, `﻿${JSON.stringify(launcherConfig(descriptorPath))}\n`);
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: descriptorPath,
+    });
+    const blocking = [];
+    fs.statSync = function (file, ...rest) { if (file === configPath) blocking.push("stat"); return sync.statSync.call(this, file, ...rest); };
+    fs.readFileSync = function (file, ...rest) { if (file === configPath) blocking.push("read"); return sync.readFileSync.call(this, file, ...rest); };
+    assert.equal((await supervisor.readConfigAsync()).port, 17841);
+    assert.equal((await supervisor.readConfigAsync()).port, 17841);
+    assert.deepEqual(blocking, [], "no synchronous call on the timers' path");
+    (await supervisor.readConfigAsync()).port = 1;
+    assert.equal((await supervisor.readConfigAsync()).port, 17841, "a caller's change does not leak into the next read");
+    // The synchronous readers use what the timer parsed: one stat, no second parse.
+    assert.equal(supervisor.readConfig().port, 17841);
+    assert.deepEqual(blocking, ["stat"]);
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath, { port: 17999, appName: "Changed app" }))}\n`);
+    fs.utimesSync(configPath, new Date(), new Date(Date.now() + 5_000));
+    assert.equal((await supervisor.readConfigAsync()).port, 17999, "another writer's change is seen");
+    fs.rmSync(configPath);
+    assert.equal(await supervisor.readConfigAsync(), null);
+  } finally {
+    Object.assign(fs, sync);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher runtime validation rejects a relative full-mode executable before spawn", () => {
   const descriptorPath = path.join(os.tmpdir(), "launcher.json");
   assert.throws(() => validateConfig(launcherConfig(descriptorPath, {

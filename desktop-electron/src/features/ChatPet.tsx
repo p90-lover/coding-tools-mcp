@@ -419,7 +419,9 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const rideTimer = useRef<number | undefined>(undefined);
   const bubbleTimer = useRef<number | undefined>(undefined);
   const napTimer = useRef<number | undefined>(undefined);
+  // Non-zero while it walks (reanchor reads it): the next frame's id, or -1 while the walk waits on walkTimer.
   const walkFrame = useRef(0);
+  const walkTimer = useRef(0);
   // The two paint frames that start a leap, pointer ride, or drop must not outlive that motion.
   const transitionFrame = useRef(0);
   // Where the walk under way ends (a distance around), moved with the box when it resizes.
@@ -458,7 +460,12 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const clawd = useClawdPlayer(still);
 
   const later = (ms: number, run: () => void) => { plans.current.push(window.setTimeout(run, ms)); };
-  const stopWalking = () => { if (walkFrame.current) window.cancelAnimationFrame(walkFrame.current); walkFrame.current = 0; };
+  const stopWalking = () => {
+    if (walkFrame.current > 0) window.cancelAnimationFrame(walkFrame.current);
+    window.clearTimeout(walkTimer.current);
+    walkFrame.current = 0;
+    walkTimer.current = 0;
+  };
   const cancelTransitionFrame = () => {
     if (transitionFrame.current) window.cancelAnimationFrame(transitionFrame.current);
     transitionFrame.current = 0;
@@ -652,7 +659,20 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       // Bit moves every frame but is drawn at most WALK_FPS times a second: on a 165 Hz screen each
       // step re-rendered the pet and recalculated styles 165 times a second.
       if (arrived || now - shown >= 1000 / WALK_FPS) { shown = now; setAt(atNow.current); }
-      if (!arrived) { walkFrame.current = window.requestAnimationFrame(frame); return; }
+      if (!arrived) {
+        // Each requestAnimationFrame costs Chromium a main-thread frame even when the step draws
+        // nothing, so asking for one every refresh still ran 165 frames a second while it walked.
+        // Wait out the rest of the WALK_FPS interval first; the frame after it draws.
+        const wait = shown + 1000 / WALK_FPS - now;
+        if (wait > 4) {
+          walkFrame.current = -1;
+          walkTimer.current = window.setTimeout(() => {
+            walkTimer.current = 0;
+            walkFrame.current = window.requestAnimationFrame(frame);
+          }, wait - 4);
+        } else walkFrame.current = window.requestAnimationFrame(frame);
+        return;
+      }
       walkFrame.current = 0;
       setPose(REST);
       remember();
