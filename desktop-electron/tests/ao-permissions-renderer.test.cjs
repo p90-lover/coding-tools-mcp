@@ -164,6 +164,29 @@ test("the effort and window chips show the pick and offer exactly what the model
   assert.match(harness.props.ariaLabel, /Claude Code/);
 });
 
+test("the harness menu is slim: no state words on rows, missing harnesses fold under +N, the pick stays in view", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const route = { harness_id: "ao:aider", model: "", permission_profile: ":ao-default" };
+  const harnesses = [
+    { id: "ao:claude-code", label: "Claude Code", runnable: true, installed: true, authStatus: "unauthorized" },
+    { id: "ao:codex", label: "Codex", runnable: true, installed: true },
+    { id: "ao:aider", label: "Aider", runnable: false, installed: false },
+    { id: "ao:amp", label: "Amp", runnable: false, installed: false },
+    { id: "ao:cline", label: "Cline", runnable: false, installed: false },
+  ];
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses, loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const menu = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState([])), "Harness");
+  const list = menu.props.children(() => {});
+  assert.doesNotMatch(text(list), /not installed|sign in/i, "no state words on the rows");
+  const rows = optionsIn(menu);
+  assert.deepEqual(rows.map(row => row.props.title), ["Claude Code · sign in to use it", "Codex", "Aider · not installed", "Amp · not installed", "Cline · not installed"],
+    "the state moved to the tooltip; the picked missing harness stays up top");
+  assert.equal(elements(list, item => item.props?.className === "ao-harness-signin").length, 1, "a sign-in dot on the one harness that needs it");
+  const fold = elements(list, item => item.type === "details")[0];
+  assert.equal(elements(fold, item => item.type === "summary")[0].props["aria-label"], "2 more, not installed", "the other two missing harnesses fold under +2");
+  assert.equal(elements(fold, item => typeof item.type === "function" && item.type.name === "Option").length, 2);
+});
+
 test("unpicked, the effort chip names the model's own effort and the model chip shows no provider", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const routes = [];
