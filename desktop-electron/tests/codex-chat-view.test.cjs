@@ -427,9 +427,25 @@ test("while the agent works, /review, /init and a new goal steer it; /rewind goe
   assert.ok(walk(view.render()).some((element) => element.props?.["aria-label"] === "Rewind to this message"), "each message offers Rewind");
 });
 
-test("a working chat on a non-AO model is not offered steering; a message typed meanwhile is queued, not refused", async () => {
+test("a working WebGPT (Native Codex) chat steers its turn, as the Codex bridge does", async () => {
+  // The user: "steering message into chat are not able to use on webgpt model". It queued every message.
+  const steered = [];
   const { props, calls } = base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
+    steer: async (input) => { steered.push(input.message); return true; } });
+  const view = mount(props);
+  const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+  assert.notEqual(textarea().props.placeholder, "Running. New messages send when it finishes");
+  textarea().props.onChange({ target: { value: "also check the logs" } });
+  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(steered, ["also check the logs"], "the message joins the running turn");
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
+});
+
+test("a working chat on a model that can't be steered queues a message typed meanwhile, not refused", async () => {
+  const { props, calls } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],
     steer: async () => { throw new Error("not steerable"); } });
   const view = mount(props);
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
@@ -465,7 +481,7 @@ test("Enter is never refused while another action holds the surface: the message
 
 test("a queued message waits in Claude Code's queued bar: 1 message queued, its text greyed, Send now, Edit and Remove", async () => {
   const { props, calls } = base({ selectedTaskId: "t-bar", working: true,
-    runs: [run("r1", "t-bar", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
+    runs: [run("r1", "t-bar", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],
     steer: async () => { throw new Error("not steerable"); } });
   const view = mount(props);
   const all = () => walk(view.render());
@@ -551,7 +567,7 @@ test("two queued messages fold into Claude Code's stack: Next: …, then a list 
 
 test("Edit in composer gives a queued message's annotations back as the composer's own, not as the block the agent reads", async () => {
   const { props } = base({ selectedTaskId: "t-notes", working: true,
-    runs: [run("r1", "t-notes", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
+    runs: [run("r1", "t-notes", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],
     steer: async () => { throw new Error("not steerable"); } });
   const view = mount(props);
   const all = () => walk(view.render());

@@ -21,7 +21,7 @@ import {
 } from "../src/adapters/chatgpt-web/native-compaction-control";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, withoutSupersededModelSwitchContracts } from "../src/adapters/chatgpt-web/prompt";
 import { MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-policy";
-import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, MAX_CHATGPT_BROWSER_RECOVERIES, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions, recoverableBrowserFailure } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout, execGatewayProgram } from "../src/adapters/chatgpt-web/mcp-server";
@@ -449,13 +449,13 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(() => chatGptTurnExecutionKey(request)).not.toThrow();
   });
 
-  test("rejects canonical environment and user revision when an item conflicts with the current turn", () => {
+  test("a current turn without its own items keeps no canonical environment but resumes its execution", () => {
     const request = canonicalCurrentWireRequest(environmentXml);
     const raw = request._rawBody as { input: Array<Record<string, unknown>> };
     raw.input[2]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_other" };
 
     expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
-    expect(() => chatGptTurnExecutionKey(request)).toThrow("conflicts with native Codex turn_id");
+    expect(() => chatGptTurnExecutionKey(request)).not.toThrow();
   });
 
   test("starts a tool-capable browser turn across a same-turn developer gap", async () => {
@@ -1347,7 +1347,20 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test("an unclassified browser failure retires its session before the next native retry", async () => {
+  test("only a stuck or broken ChatGPT tab is recovered in a fresh conversation", () => {
+    const adapterError = (code: string) => new ChatGptWebAdapterError(code, { status: 502, errorType: "server_error", code, retryable: false });
+    for (const code of ["chatgpt_connection_interrupted", "upstream_server_error", "chatgpt_send_failed"]) {
+      expect(recoverableBrowserFailure(adapterError(code))).toBeTrue();
+    }
+    expect(recoverableBrowserFailure(new Error("ChatGPT browser stage timed out: browser_page"))).toBeTrue();
+    for (const code of ["rate_limit_exceeded", "client_cancelled", "chatgpt_submission_ambiguous"]) {
+      expect(recoverableBrowserFailure(adapterError(code))).toBeFalse();
+    }
+    expect(recoverableBrowserFailure(new Error("unexpected"))).toBeFalse();
+    expect(recoverableBrowserFailure(new DOMException("ChatGPT browser stage timed out: x", "AbortError"))).toBeFalse();
+  });
+
+  test("a browser stage timeout continues the same turn in a fresh ChatGPT conversation", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h4-error-retry-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -1365,14 +1378,6 @@ describe("ChatGPT outer-native harness v4", () => {
       return answer;
     };
     try {
-      await expect(
-        createChatGptWebAdapter(provider).runTurn!(
-          rawWireRequest(environmentXml),
-          { headers: new Headers() },
-          () => {},
-        ),
-      ).rejects.toThrow("stage timed out");
-
       const events: AdapterEvent[] = [];
       await createChatGptWebAdapter(provider).runTurn!(
         rawWireRequest(environmentXml),
@@ -1380,6 +1385,7 @@ describe("ChatGPT outer-native harness v4", () => {
         event => events.push(event),
       );
       expect(browserStarts).toBe(2);
+      expect(events.filter(event => event.type === "text_delta" && event.text.includes("fresh ChatGPT conversation"))).toHaveLength(1);
       expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
@@ -1448,8 +1454,19 @@ describe("ChatGPT outer-native harness v4", () => {
       .toThrow("already completed");
     failReplacement(interrupted);
     await session.browserOutcome;
+    expect(await session.runExclusive(() => session.recoverInterruptedBrowser(request, () => {
+      starts += 1;
+      return {
+        mode: "read-only", browser: new Promise<string>((_resolve, reject) => { failReplacement = reject; }),
+        physicalSettlement: Promise.resolve(), trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+        submission: { phase: "accepted" }, cancel: () => {},
+      };
+    }))).toBeTrue();
+    expect(session.roundEvents("outgoing")).toEqual(journal);
+    failReplacement(interrupted);
+    await session.browserOutcome;
     expect(await session.runExclusive(() => session.recoverInterruptedBrowser(request, () => { throw new Error("third browser"); }))).toBeFalse();
-    expect(starts).toBe(1);
+    expect(starts).toBe(MAX_CHATGPT_BROWSER_RECOVERIES);
   });
 
   test.each(["missing-receipt", "changed-receipt", "pending-tool", "partial-answer", "cancelled"])(
@@ -1705,7 +1722,7 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test("a second connection interruption stays terminal across repeated HTTP requests", async () => {
+  test("a connection interruption after the last browser recovery stays terminal across repeated HTTP requests", async () => {
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web", baseUrl: `browser://connection-exhausted-${Date.now()}`,
       chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
@@ -1728,7 +1745,7 @@ describe("ChatGPT outer-native harness v4", () => {
         await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
         expect(events.at(-1)).toMatchObject({ type: "error", code: "chatgpt_connection_interrupted", retryable: false });
       }
-      expect(starts).toBe(2);
+      expect(starts).toBe(1 + MAX_CHATGPT_BROWSER_RECOVERIES);
     } finally { worker.run = original; }
   });
 

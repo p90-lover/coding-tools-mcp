@@ -100,7 +100,24 @@ struct ThreadState {
     /// before the turn's latest steps; the chat places it there instead of after them.
     #[serde(skip)]
     answer_before_step: Option<String>,
+    /// The turn's earlier notes: each answer a later message replaced, with the step it was said
+    /// before. Only the latest answer was kept, so a WebGPT turn's progress notes vanished from the
+    /// chat one by one as it went on ("missing text from webgpt model").
+    #[serde(skip)]
+    notes: Vec<NoteItem>,
 }
+
+/// An answer said before one of the turn's tool steps, kept once a later message replaced it.
+#[derive(Clone, Default)]
+struct NoteItem {
+    turn: String,
+    before_step: String,
+    text: String,
+}
+
+/// Notes kept per thread (the oldest go first); a note is cut to this many bytes.
+const MAX_NOTE_ITEMS: usize = 40;
+const MAX_NOTE_TEXT: usize = 4096;
 
 /// One tool step of a turn: its item id, Codex's item type, its status, and a short label.
 #[derive(Clone, Default)]
@@ -225,6 +242,7 @@ impl ThreadState {
             return Some(index);
         }
         if self.tool_step {
+            self.keep_note();
             self.clear_messages();
         }
         if self.messages.len() >= MAX_MESSAGE_ITEMS {
@@ -243,6 +261,26 @@ impl ThreadState {
         // A first final-answer message replaces the commentary shown until then.
         self.rebuild_answer();
         Some(self.messages.len() - 1)
+    }
+    /// Keeps the answer said before the turn's latest steps as a note, before a new message
+    /// replaces it.
+    fn keep_note(&mut self) {
+        let (Some(turn), Some(before_step)) =
+            (self.turn_id.clone(), self.answer_before_step.clone())
+        else {
+            return;
+        };
+        if self.answer.trim().is_empty() {
+            return;
+        }
+        if self.notes.len() >= MAX_NOTE_ITEMS {
+            self.notes.remove(0);
+        }
+        self.notes.push(NoteItem {
+            turn,
+            before_step,
+            text: bounded(&self.answer, MAX_NOTE_TEXT),
+        });
     }
     /// Whether the answer is the commentary: the turn has given no final-answer message so far.
     fn only_commentary(&self) -> bool {
@@ -558,7 +596,9 @@ fn validate_control(request: &Control) -> Result<bool> {
         request.operation.as_str(),
         "start" | "send" | "review" | "compact"
     );
-    if !uses_model && !matches!(request.operation.as_str(), "interrupt" | "close") {
+    // A steer joins the running turn (turn/steer), so it is admitted while a turn is active and
+    // counts no new model request of its own.
+    if !uses_model && !matches!(request.operation.as_str(), "interrupt" | "close" | "steer") {
         return Err("Unsupported native operation; arbitrary methods are not forwarded".into());
     }
     if request.operation == "start" {
@@ -568,7 +608,10 @@ fn validate_control(request: &Control) -> Result<bool> {
     } else if request.thread_id.as_deref().is_none_or(|v| !token(v)) {
         return Err("An owned thread_id is required".into());
     }
-    if matches!(request.operation.as_str(), "start" | "send" | "review") {
+    if matches!(
+        request.operation.as_str(),
+        "start" | "send" | "review" | "steer"
+    ) {
         if request
             .text
             .as_deref()
@@ -1071,7 +1114,9 @@ impl Hub {
                 "activity":t.activity,"activity_at_ms":t.activity_at_ms,"last_event_at_ms":t.last_event_at_ms,"started_at_ms":t.started_at_ms,"effective_policy":t.effective_policy,
                 "steps":t.steps.iter().filter(|step| t.turn_id.as_deref() == Some(step.turn.as_str()))
                     .map(|step| json!({"id":step.id,"kind":step.kind,"status":step.status,"label":step.label})).collect::<Vec<_>>(),
-                "answer_before_step":t.answer_before_step})).collect::<Vec<_>>(),
+                "answer_before_step":t.answer_before_step,
+                "notes":t.notes.iter().filter(|note| t.turn_id.as_deref() == Some(note.turn.as_str()))
+                    .map(|note| json!({"before_step":note.before_step,"text":note.text})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "requested_sandbox":match bridge.options.permission_profile.as_str() {":workspace"=>json!("workspace-write"),":read-only"=>json!("read-only"),":danger-full-access"=>json!("danger-full-access"),_=>Value::Null},
             "permission_profile":bridge.options.permission_profile,
             "approval_policy":bridge.approval_policy(),"approvals_reviewer":bridge.approvals_reviewer(),
@@ -1244,6 +1289,16 @@ impl Hub {
             request_id: request_key,
             thread_id: None,
             text: Some(prompt),
+        })?
+        .run()
+    }
+    /// Sends `text` into the thread's running turn; `steered` is false when no turn is running.
+    pub fn steer(&self, request_key: String, thread_id: String, text: String) -> Result<Value> {
+        self.admit(Control {
+            operation: "steer".into(),
+            request_id: request_key,
+            thread_id: Some(thread_id),
+            text: Some(text),
         })?
         .run()
     }
@@ -1875,6 +1930,38 @@ impl Bridge {
         } else {
             request.thread_id.clone().ok_or("Missing thread")?
         };
+        if request.operation == "steer" {
+            // The message joins the turn that is running now, as Codex's own composer steers it; a
+            // turn that already ended is reported (steered: false) and the caller sends a new turn.
+            let turn = {
+                let memory = lock(&self.memory)?;
+                let thread = memory.threads.get(&id).ok_or("Thread not owned")?;
+                if thread.status == "inProgress" {
+                    thread.turn_id.clone()
+                } else {
+                    None
+                }
+            };
+            let Some(turn) = turn else {
+                return Ok(
+                    json!({"ok":true,"thread_id":id,"steered":false,"request_id":request.request_id}),
+                );
+            };
+            return match self.rpc(
+                "turn/steer",
+                json!({"threadId":id,"expectedTurnId":turn,"input":[{"type":"text","text":request.text}]}),
+            ) {
+                Ok(_) => Ok(
+                    json!({"ok":true,"thread_id":id,"turn_id":turn,"steered":true,"request_id":request.request_id}),
+                ),
+                // Codex refuses a steer into a turn that ended between the read above and the
+                // steer reaching it ("no active turn to steer", or another turn id).
+                Err(error) if error.starts_with("Native RPC rejected") => Ok(
+                    json!({"ok":true,"thread_id":id,"steered":false,"request_id":request.request_id}),
+                ),
+                Err(error) => Err(error),
+            };
+        }
         if matches!(request.operation.as_str(), "interrupt" | "close") {
             let state = lock(&self.memory)?
                 .threads
@@ -2758,6 +2845,13 @@ mod tests {
         );
         assert_eq!(memory.threads["owned"].answer_before_step, None);
         assert_eq!(memory.threads["owned"].answer, "All green");
+        // The replaced note stays, placed before the step it was said before.
+        let notes = &memory.threads["owned"].notes;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(
+            (notes[0].before_step.as_str(), notes[0].text.as_str()),
+            ("c1", "Running the tests now")
+        );
     }
 
     #[test]

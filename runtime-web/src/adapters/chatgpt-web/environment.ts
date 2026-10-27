@@ -223,6 +223,43 @@ export function priorChatGptAbortedTurnIds(parsed: CodexParsedRequest): string[]
   }))];
 }
 
+function rawInput(parsed: CodexParsedRequest): unknown[] {
+  const body = record(parsed._rawBody);
+  return Array.isArray(body?.input) ? body.input : [];
+}
+
+/**
+ * The earlier turn whose instruction is still the latest one when Codex reopens an interrupted task
+ * (a killed chat, a restarted app) under a new turn_id without adding an instruction of its own.
+ * Only a person's or parent's message resumes: an app delegation belongs to the turn it was
+ * delivered in, and one from another turn is never the current instruction.
+ */
+function resumedChatGptTurnId(input: unknown[], metadata?: Record<string, unknown>): string | undefined {
+  const turnId = metadata?.turn_id;
+  if (typeof turnId !== "string" || !turnId) return undefined;
+  let latest: string | undefined;
+  let delegated = false;
+  const aborted = new Set<string>();
+  for (const value of input) {
+    const item = record(value);
+    // A compacted history continues only from its exact checkpoint (isAcceptedCompactionContinuation).
+    if (["compaction", "compaction_summary", "context_compaction"].includes(String(item?.type))
+      || (item?.role === "user" && isReadableCompactionSummaryText(rawMessageText(item).trim()))) return undefined;
+    if (item?.type === "message" && item.role === "user" && isTurnAbortedNotice(item)) {
+      const owner = itemTurnId(item);
+      if (owner) aborted.add(owner);
+      continue;
+    }
+    if (!isUserOrParentInstruction(item, metadata)) continue;
+    const owner = itemTurnId(item);
+    if (owner === turnId) return undefined;
+    latest = owner;
+    delegated = isAppDelegation(item, metadata);
+  }
+  // A turn the user stopped (its <turn_aborted> notice) is finished; its prompt is not replayed.
+  return latest && !delegated && !aborted.has(latest) ? latest : undefined;
+}
+
 /**
  * Return the latest human or direct-parent instruction owned by the current native Codex turn.
  *
@@ -240,7 +277,11 @@ export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unkn
   // A pre-turn compact may summarize an earlier user message before native Codex continues
   // under its new turn id without adding a new human message. Accept only our exact completed
   // checkpoint; an arbitrary older prompt is still not a new instruction or a valid handoff.
+  // Codex reopening an interrupted task under a new turn_id with no new instruction (a killed
+  // chat, a restarted app) continues that instruction, as the Responses API would: refusing it
+  // ("conflicts with native Codex turn_id metadata") left the chat unusable.
   if (revision.turnId !== undefined && revision.turnId !== turnId
+    && revision.turnId !== resumedChatGptTurnId(rawInput(parsed), clientTurnMetadata(parsed))
     && (priorChatGptAbortedTurnIds(parsed).includes(revision.turnId)
       || !isAcceptedCompactionContinuation(parsed, identity, revision))) {
     throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
@@ -610,6 +651,18 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
     if (sameTurn) return sameTurn;
   }
 
+  // A reopened task (see resumedChatGptTurnId) carries Codex's refreshed context under the new
+  // turn_id with no instruction after it: that whole envelope, owned by the current turn, is its
+  // current environment.
+  if (typeof turnId === "string" && resumedChatGptTurnId(input, metadata)) {
+    for (let index = input.length - 1; index > activeUserIndex; index -= 1) {
+      const item = record(input[index]);
+      if (item?.type !== "message" || item.role !== "user" || itemTurnId(item) !== turnId) continue;
+      const text = rawMessageText(item).trim();
+      if (/^<environment_context>[\s\S]*<\/environment_context>$/.test(text)) return text;
+    }
+  }
+
   // An attempted current update takes precedence over all older authority, even when its native
   // item metadata is incomplete. Never mask malformed permissions/cwd with a previous turn.
   if (hasCurrentChatGptEnvironmentContext(parsed)) return undefined;
@@ -635,14 +688,27 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
     && typeof activeUser.id === "string"
     && activeUser.id.length > 0
     && itemTurnId(activeUser) === currentTurnId;
-  if (currentTurnId && itemTurnId(activeUser) === currentTurnId) {
+  // Codex reopens an interrupted task (a killed chat, a restarted app) under a new turn_id without
+  // a new instruction: the interrupted instruction is still the active one, and its environment is
+  // resolved as its own turn's was. Without this the chat failed every later turn with "missing
+  // cwd in trusted Codex environment context" and could not be used again.
+  const resumedTurnId = isUserOrParentInstruction(activeUser, metadata) ? resumedChatGptTurnId(input, metadata) : undefined;
+  if (resumedTurnId) {
+    const own = environmentBeforeUser(input, activeUserIndex, resumedTurnId, metadata);
+    if (own) return own;
+  }
+  const effectiveTurnId = resumedTurnId ?? currentTurnId;
+  // A turn Codex marked interrupted (its <turn_aborted> notice) is finished history, like one that
+  // ended with an answer: a chat killed before the model said anything kept failing without it.
+  const abortedTurnIds = new Set(priorChatGptAbortedTurnIds(parsed));
+  if (effectiveTurnId && itemTurnId(activeUser) === effectiveTurnId) {
     for (let index = activeUserIndex - 1; index > 0; index -= 1) {
       const historicalUser = record(input[index]);
       const historicalTurnId = itemTurnId(historicalUser);
-      if (!historicalTurnId || historicalTurnId === currentTurnId) continue;
+      if (!historicalTurnId || historicalTurnId === effectiveTurnId) continue;
       const historical = environmentBeforeUser(input, index, undefined, metadata);
       if (!historical) continue;
-      if (hasAssistantOutputBetween(input, index + 1, activeUserIndex)) return historical;
+      if (hasAssistantOutputBetween(input, index + 1, activeUserIndex) || abortedTurnIds.has(historicalTurnId)) return historical;
       if (!currentThreadId || !metadata || !activeUserOwned) continue;
       const bounded = canonicalMetadataEnvironmentBeforeUser(
         input,

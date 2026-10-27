@@ -1199,8 +1199,10 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem("coding-tools:ao:steer", current ? "off" : "on"); } catch { /* the choice still applies now */ }
     return !current;
   });
-  // Only an AO agent can be steered: a single chat's card, or a team's orchestrator (see chat_steer).
-  const steerable = Boolean(latest?.nodes.some((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")
+  // An AO agent or a Native Codex one (WebGPT; Codex's turn/steer) can be steered: a single chat's
+  // card, or a team's orchestrator (see chat_steer).
+  const steerable = Boolean(latest?.nodes.some((node) => node.state === "running"
+    && (node.route?.harness_id?.startsWith("ao:") || node.route?.harness_id === "codex-native")
     && (latest.execution_mode === "single" || node.role === "planner")));
   // A running AO card is steerable whether or not this page is driving its run: after an app restart
   // the run goes on without the page's loop, and the user must still be able to reach the agent.

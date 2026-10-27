@@ -188,9 +188,11 @@ export class ChatGptThreadEnvironmentStore {
           return rolloutEnvironment;
         }
       }
-      // Only a current native rollout can supersede an unrecognized historical envelope. Without
-      // that proof, do not turn arbitrary history or an invalid update into cached authority.
-      if (hasRawChatGptEnvironmentContext(parsed)) throw error;
+      // An invalid current update is never masked by cached authority. Only historical envelopes
+      // fall back to this thread's own last trusted environment: Native Codex threads are ephemeral
+      // (no rollout to read), and a chat whose history the parser could not attribute (a killed
+      // turn) otherwise failed "missing cwd" on every later turn.
+      if (hasCurrentContext && hasRawChatGptEnvironmentContext(parsed)) throw error;
       const sameThread = this.get(identity.threadId);
       if (sameThread) return {
         cwd: sameThread.cwd,
