@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
-import { createServer, type Socket } from "node:net";
+import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
@@ -315,6 +315,34 @@ test("turn broker binds once a previous owner releases its endpoint", async () =
     }
   }
 }, 15_000);
+
+test("closing a turn broker ends held connections and frees its endpoint for the next runtime", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-held-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  await broker.listen();
+  // An MCP long poll: connected, request not yet answered.
+  const held = createConnection(socketPath);
+  await new Promise<void>(connected => held.once("connect", connected));
+  held.on("error", () => {});
+  held.write('{"id":"held"');
+  await Bun.sleep(200);
+  const successor = { close: async () => {} };
+  try {
+    const outcome = await Promise.race([
+      broker.close().then(() => "closed"),
+      Bun.sleep(3_000).then(() => "hung"),
+    ]);
+    expect(outcome).toBe("closed");
+    const next = TurnBroker.forSocket(socketPath);
+    successor.close = () => next.close();
+    await next.listen();
+  } finally {
+    held.destroy();
+    await successor.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 10_000);
 
 test("an unbounded broker call fails when the broker closes without answering", async () => {
   const broker = unansweredBrokerEndpoint("cgw-broker-closed-", socket => socket.on("data", () => socket.end()));

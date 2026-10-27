@@ -306,6 +306,7 @@ export class TurnBroker implements TurnBrokerOwner {
   private readonly retiredTokens = new Map<string, string>();
   private acceptingExternalOwners = true;
   private server?: Server;
+  private readonly sockets = new Set<Socket>();
   private startPromise?: Promise<void>;
 
   private constructor(readonly socketPath: string) {}
@@ -774,10 +775,16 @@ export class TurnBroker implements TurnBrokerOwner {
     this.startPromise = undefined;
     brokers.delete(this.socketPath);
     if (server?.listening) {
-      await new Promise<void>((resolveClose, rejectClose) => server.close(error => {
+      const closed = new Promise<void>((resolveClose, rejectClose) => server.close(error => {
         if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolveClose();
         else rejectClose(error);
       }));
+      // close() waits for every accepted connection, and the MCP process holds some open in long
+      // polls. Left open they hung the runtime's shutdown and, on Windows, kept the pipe name
+      // taken, so the next runtime's broker failed with EADDRINUSE. Nothing is served after this.
+      for (const socket of this.sockets) socket.destroy();
+      this.sockets.clear();
+      await closed;
     }
     if (!isWindowsPipeEndpoint(this.socketPath)
       && existsSync(this.socketPath)
@@ -906,9 +913,13 @@ export class TurnBroker implements TurnBrokerOwner {
     let buffered = "";
     let handled = false;
     const disconnected = new AbortController();
+    this.sockets.add(socket);
     socket.setEncoding("utf8");
     socket.on("error", () => {});
-    socket.once("close", () => disconnected.abort());
+    socket.once("close", () => {
+      this.sockets.delete(socket);
+      disconnected.abort();
+    });
     socket.on("data", chunk => {
       if (handled) return;
       buffered += chunk;
