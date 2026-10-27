@@ -111,6 +111,26 @@ test("a DeepSeek group's rows read as DeepSeek Harness's: Think, Bash, Edit, and
   assert.match(row({ id: "c4", kind: "command", status: "cancelled", text: "npm test", description: "Run the tests" }), /dsh-summary is-stopped">Stopped</, "a stopped command says Stopped");
 });
 
+test("a finished turn's rows stop shimmering even when their stored status still says running", () => {
+  // Reasoning items whose completion never arrived kept the shimmer forever: 106 of them repainting
+  // every frame in a long chat kept the GPU process near a full core.
+  const stale = [
+    { id: "r1", kind: "reasoning", status: "running", text: "Workers 7411 are down.\nRestarting them." },
+    { id: "t1", kind: "tool", status: "running", text: "mcp__coding-tools__read_file", input: JSON.stringify({ path: "README.md" }) },
+  ];
+  const step = { key: "s", nodeId: "n", role: "planner", name: "Agent", detail: "", state: "finished", startedAtMs: Date.now() - 60_000, hasWork: true };
+  const turn = { key: "done", runId: "run", steps: [step], status: "done", solo: true, startedAtMs: Date.now() - 60_000 };
+  const html = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: false, expanded: true, useWork: () => stale }));
+  assert.doesNotMatch(html, /dsh-shimmer|data-state="running"/, "nothing in the finished turn shimmers or reads as running");
+  // Its groups render folded here; opened (as they were live), each row decides for itself.
+  const row = (item, live) => renderToStaticMarkup(React.createElement(dsh.DshItem, { item, live }));
+  for (const item of stale) {
+    assert.match(row(item, true), /data-state="running"/, `a live turn's running ${item.kind} row still reads as running`);
+    assert.doesNotMatch(row(item, false), /dsh-shimmer|data-state="running"/, `the same ${item.kind} row in a finished turn is settled`);
+  }
+  assert.match(row(stale[0], false), /dsh-title">Think</, "and the thought is still there to open");
+});
+
 test("a retried single DeepSeek card shows its earlier attempt above the attempt now", () => {
   const timeline = [{ id: "c1", kind: "command", status: "running", text: "npm test", description: "Run the tests" }];
   const step = { key: "s", nodeId: "n", role: "planner", name: "MiMo V2.6 Pro", detail: "", state: "running", startedAtMs: Date.now() - 5_000,
