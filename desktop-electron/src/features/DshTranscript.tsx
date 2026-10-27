@@ -207,8 +207,13 @@ function DshTool({ item }: { item: ChatLiveItem }) {
   </DshRow>;
 }
 
-/** One row of a group (exported for its tests). */
-export function DshItem({ item }: { item: ChatLiveItem }) {
+/**
+ * One row of a group (exported for its tests). A row of a turn that is no longer live is settled
+ * whatever its stored status: reasoning items whose completion never arrived otherwise kept their
+ * shimmer for good, and a long chat repainted a hundred of them every frame.
+ */
+export function DshItem({ item: stored, live = true }: { item: ChatLiveItem; live?: boolean }) {
+  const item = live || stored.status !== "running" ? stored : { ...stored, status: "completed" as const };
   if (item.answered) return <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />;
   if (item.kind === "reasoning") return <DshThink item={item} />;
   if (item.kind === "message") return <div className="dsh-reply"><StreamingMarkdown text={item.text} live={item.status === "running"} /></div>;
@@ -249,7 +254,7 @@ function useHeldTitle<T extends { label: string }>(title: T, live: boolean): T {
  * opened by hand it starts at its newest row and follows new rows while scrolled to the bottom
  * (use-process-scroll.ts), where a closed group opens at its top.
  */
-function DshGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
+function DshGroup({ items, live, turnLive }: { items: ChatLiveItem[]; live: boolean; turnLive: boolean }) {
   const [open, setOpen] = useState(false);
   const [edges, setEdges] = useState({ up: false, down: false });
   const body = useRef<HTMLDivElement>(null);
@@ -291,7 +296,7 @@ function DshGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
       <span className={`dsh-group-label${live ? " dsh-shimmer" : ""}`}>{now.label}</span>
     </button>
     {open ? <div ref={body} className={`dsh-group-body${edges.up ? " fade-top" : ""}${edges.down ? " fade-bottom" : ""}`} onScroll={measure}>
-      <div ref={content} className="dsh-flow">{items.map((item) => <DshItem key={item.id} item={item} />)}</div>
+      <div ref={content} className="dsh-flow">{items.map((item) => <DshItem key={item.id} item={item} live={turnLive} />)}</div>
     </div> : null}
   </div>;
 }
@@ -306,8 +311,8 @@ function DshFlow({ items, live, finished, hideReply }: { items: ChatLiveItem[]; 
   const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), hideReply);
   const segments = dshSegments(tidy);
   return <div className="dsh-flow">{segments.map((segment, index) => segment.kind === "item"
-    ? <DshItem key={segment.item.id} item={segment.item} />
-    : <DshGroup key={segment.key} items={segment.items} live={live && index === segments.length - 1} />)}</div>;
+    ? <DshItem key={segment.item.id} item={segment.item} live={live} />
+    : <DshGroup key={segment.key} items={segment.items} live={live && index === segments.length - 1} turnLive={live} />)}</div>;
 }
 
 function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseStepWork; answer?: string }) {
