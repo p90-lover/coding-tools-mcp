@@ -27,7 +27,7 @@ test("a new chat's Team picker sits in the chat header, with no setting bar abov
 // Since the Chat redesign (2574a6bd) the "Chat" entry mounts the Coding Tools AO surface; the
 // original upstream AO UI keeps its own destination and links back to Chat.
 test("Chat mounts the AO chat surface and the original AO UI links back to it", () => {
-  assert.match(appSource, /keepAlive\("agent-orchestrator", \(\) => \(\s*<AgentOrchestratorSurface language=\{language\} setError=\{setError\} \/>/);
+  assert.match(appSource, /keepAlive\("agent-orchestrator", \(\) => \(\s*<section className="gpb-chat"[\s\S]*?<AgentOrchestratorSurface language=\{language\} setError=\{setError\} \/>/);
   assert.match(appSource, /keepAlive\("agent-orchestrator-original", \(\) => \(\s*<AgentOrchestratorOriginalSurface openMissions=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
   assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
 });

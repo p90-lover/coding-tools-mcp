@@ -31,7 +31,7 @@ import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
-import { GptBrowserSurface } from "./features/GptBrowserSurface";
+import { GptBrowserDock } from "./features/GptBrowserDock";
 import { RegisterSurface } from "./features/RegisterSurface";
 
 import type {
@@ -430,6 +430,20 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
+  const [nativeChatOpen, setNativeChatOpen] = useState(false);
+  const [nativeChatHost, setNativeChatHost] = useState<HTMLDivElement | null>(null);
+  const [standaloneChatHost, setStandaloneChatHost] = useState<HTMLDivElement | null>(null);
+  const openNativeChat = () => {
+    setNativeChatOpen(true);
+    void api!.gptBrowserStatus().then(status => {
+      if (!status.activeId || !status.page?.url) return;
+      try {
+        const host = new URL(status.page.url).hostname.toLowerCase();
+        if (host === "chatgpt.com" || host.endsWith(".chatgpt.com")) return;
+      } catch { /* Return to ChatGPT from non-web addresses too. */ }
+      return api!.openGptBrowserUrl("https://chatgpt.com/");
+    }).catch(cause => setError(messageOf(cause)));
+  };
   // Tabs mount on first visit and then stay mounted while hidden, so switching back never reloads
   // them. The MCP wizard is left out: it seeds its step from how it was opened.
   const [visitedSurfaces, setVisitedSurfaces] = useState<ReadonlySet<Surface>>(() => new Set([surface]));
@@ -890,13 +904,13 @@ function LauncherShell({
                 setError={setError}
               />
             ))}
-            {keepAlive("gpt-browser", () => (
-              <GptBrowserSurface
-                active={surface === "gpt-browser" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
-                api={api!}
-                setError={setError}
-              />
-            ))}
+            {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
+            {(nativeChatOpen || surface === "gpt-browser" || visitedSurfaces.has("gpt-browser")) ? <GptBrowserDock
+              standaloneHost={standaloneChatHost} chatHost={nativeChatHost}
+              inChat={surface === "agent-orchestrator" && nativeChatOpen}
+              active={(surface === "gpt-browser" || (surface === "agent-orchestrator" && nativeChatOpen))
+                && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
+              api={api!} setError={setError} /> : null}
             {keepAlive("chatgpt-desktop", () => (
               <ChatGptDesktopSurface
                 active={surface === "chatgpt-desktop" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
@@ -966,7 +980,19 @@ function LauncherShell({
               <ProviderCenterSurface initialCategory={surface === "api-models" ? "api_key" : "all"} language={language} setError={setError} />
             ))}
             {keepAlive("agent-orchestrator", () => (
-              <AgentOrchestratorSurface language={language} setError={setError} />
+              <section className="gpb-chat" aria-label="Coding Tools Chat">
+                <nav className="gpb-chat-tabs" aria-label="Chat mode">
+                  <button type="button" aria-pressed={!nativeChatOpen} onClick={() => setNativeChatOpen(false)}>Mission chat</button>
+                  <button type="button" aria-pressed={nativeChatOpen} onClick={openNativeChat}>Native ChatGPT Web</button>
+                  {nativeChatOpen ? <span>ChatGPT keeps its own conversations.</span> : null}
+                </nav>
+                <div className="gpb-chat-pane" hidden={nativeChatOpen}>
+                  <SurfaceHiddenContext.Provider value={nativeChatOpen || surface !== "agent-orchestrator"}>
+                    <AgentOrchestratorSurface language={language} setError={setError} />
+                  </SurfaceHiddenContext.Provider>
+                </div>
+                <div className="gpb-portal-host" hidden={!nativeChatOpen} ref={setNativeChatHost} />
+              </section>
             ))}
             {keepAlive("agent-orchestrator-teams", () => (
               <AgentOrchestratorTeamsSurface active={surface === "agent-orchestrator-teams"} setError={setError} />

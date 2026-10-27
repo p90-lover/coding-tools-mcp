@@ -1,4 +1,10 @@
 .gpb-surface { --gpb-line: rgb(255 255 255 / 9%); display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.gpb-portal-host, .gpb-portal-root, .gpb-chat, .gpb-chat-pane { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; width: 100%; height: 100%; }
+.gpb-portal-host[hidden], .gpb-chat-pane[hidden] { display: none; }
+.gpb-chat-tabs { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-bottom: 1px solid rgb(255 255 255 / 9%); }
+.gpb-chat-tabs button { border: 1px solid transparent; border-radius: 6px; padding: 5px 10px; color: var(--color-text-primary); background: transparent; cursor: pointer; }
+.gpb-chat-tabs button[aria-pressed="true"] { background: rgb(128 128 128 / 15%); }
+.gpb-chat-tabs span { color: var(--color-text-secondary); font-size: 12px; }
 .gpb-bar {
   display: flex; flex: 0 0 auto; align-items: center; gap: 8px; height: 46px; padding: 0 12px;
   padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw) + 12px);

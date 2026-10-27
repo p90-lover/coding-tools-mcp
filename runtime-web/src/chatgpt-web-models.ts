@@ -93,14 +93,15 @@ export function isChatGptWebZeroRiskBackendModel(
 
 function contextLimits(
   contextWindow: number,
-  autoCompactTokenLimit: number,
+  usableTokenLimit: number,
 ): ChatGptWebContextLimits {
+  const effectiveContextWindowPercent = Math.round((usableTokenLimit / contextWindow) * 100);
+  const effectiveContextWindow = Math.floor(contextWindow * effectiveContextWindowPercent / 100);
   return {
     contextWindow,
-    // Codex reports this effective window in its context indicator. Align it with the practical
-    // pre-compaction budget instead of exposing an unreachable underlying model window.
-    effectiveContextWindowPercent: Math.round((autoCompactTokenLimit / contextWindow) * 100),
-    autoCompactTokenLimit,
+    // Keep Codex's usable-window indicator stable and compact at 85% of that window.
+    effectiveContextWindowPercent,
+    autoCompactTokenLimit: Math.floor(effectiveContextWindow * 85 / 100),
   };
 }
 
@@ -129,34 +130,35 @@ export function resolveChatGptWebContextLimits(
     // Luna carries continuity through a private checkpoint on every completed browser turn. Codex
     // internally clamps this field to 90% of the model window, but the reported active usage is the
     // bounded payload actually sent to ChatGPT and therefore stays far below that threshold.
-    return contextLimits(CHATGPT_WEB_LUNA_CONTEXT_WINDOW, CHATGPT_WEB_LUNA_CONTEXT_WINDOW);
+    return {
+      contextWindow: CHATGPT_WEB_LUNA_CONTEXT_WINDOW,
+      effectiveContextWindowPercent: 100,
+      autoCompactTokenLimit: CHATGPT_WEB_LUNA_CONTEXT_WINDOW,
+    };
   }
 
-  let limits: ChatGptWebContextLimits;
+  let contextWindow: number;
+  let usableTokenLimit: number;
   if (capabilities.proAvailable) {
-    const contextWindow = effort === "low"
+    contextWindow = effort === "low"
       ? CHATGPT_WEB_PRO_STANDARD_CONTEXT_WINDOW
       : effort === "max"
         ? CHATGPT_WEB_PRO_MODEL_CONTEXT_WINDOW
         : CHATGPT_WEB_PRO_STANDARD_CONTEXT_WINDOW;
-    limits = contextLimits(contextWindow, CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT);
+    usableTokenLimit = CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT;
   } else if (effort === "low") {
-    limits = contextLimits(
-      CHATGPT_WEB_INSTANT_CONTEXT_WINDOW,
-      CHATGPT_WEB_INSTANT_AUTO_COMPACT_TOKEN_LIMIT,
-    );
+    contextWindow = CHATGPT_WEB_INSTANT_CONTEXT_WINDOW;
+    usableTokenLimit = CHATGPT_WEB_INSTANT_AUTO_COMPACT_TOKEN_LIMIT;
   } else if (effort === "medium" || effort === "high") {
-    limits = contextLimits(
-      CHATGPT_WEB_MEDIUM_HIGH_CONTEXT_WINDOW,
-      CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT,
-    );
+    contextWindow = CHATGPT_WEB_MEDIUM_HIGH_CONTEXT_WINDOW;
+    usableTokenLimit = CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT;
   } else {
     throw new Error(`ChatGPT Plus context limit is not defined for unavailable effort: ${effort}`);
   }
-  if (!capabilities.experimentalBiggerContext) return limits;
+  const multiplier = capabilities.experimentalBiggerContext ? CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER : 1;
   return contextLimits(
-    limits.contextWindow * CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
-    limits.autoCompactTokenLimit * CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
+    contextWindow * multiplier,
+    usableTokenLimit * multiplier,
   );
 }
 
