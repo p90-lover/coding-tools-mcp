@@ -223,19 +223,22 @@ export function priorChatGptAbortedTurnIds(parsed: CodexParsedRequest): string[]
   }))];
 }
 
-/**
- * The earlier turn whose instruction is still the latest one when Codex reopens an interrupted task
- * (a killed chat, a restarted app) under a new turn_id without adding an instruction of its own.
- */
 function rawInput(parsed: CodexParsedRequest): unknown[] {
   const body = record(parsed._rawBody);
   return Array.isArray(body?.input) ? body.input : [];
 }
 
+/**
+ * The earlier turn whose instruction is still the latest one when Codex reopens an interrupted task
+ * (a killed chat, a restarted app) under a new turn_id without adding an instruction of its own.
+ * Only a person's or parent's message resumes: an app delegation belongs to the turn it was
+ * delivered in, and one from another turn is never the current instruction.
+ */
 function resumedChatGptTurnId(input: unknown[], metadata?: Record<string, unknown>): string | undefined {
   const turnId = metadata?.turn_id;
   if (typeof turnId !== "string" || !turnId) return undefined;
   let latest: string | undefined;
+  let delegated = false;
   const aborted = new Set<string>();
   for (const value of input) {
     const item = record(value);
@@ -251,9 +254,10 @@ function resumedChatGptTurnId(input: unknown[], metadata?: Record<string, unknow
     const owner = itemTurnId(item);
     if (owner === turnId) return undefined;
     latest = owner;
+    delegated = isAppDelegation(item, metadata);
   }
   // A turn the user stopped (its <turn_aborted> notice) is finished; its prompt is not replayed.
-  return latest && !aborted.has(latest) ? latest : undefined;
+  return latest && !delegated && !aborted.has(latest) ? latest : undefined;
 }
 
 /**
