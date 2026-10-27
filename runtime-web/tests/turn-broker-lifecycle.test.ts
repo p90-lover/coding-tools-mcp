@@ -289,6 +289,33 @@ function unansweredBrokerEndpoint(name: string, onConnection: (socket: Socket) =
   };
 }
 
+test("turn broker binds once a previous owner releases its endpoint", async () => {
+  const previous = unansweredBrokerEndpoint("cgw-broker-handover-", socket => socket.destroy());
+  await previous.listen();
+  const broker = TurnBroker.forSocket(previous.socketPath);
+  try {
+    if (process.platform === "win32") {
+      // A pipe name stays taken while the previous runtime finishes its shutdown; the bind waits.
+      const listening = broker.listen();
+      await Bun.sleep(300);
+      await previous.close();
+      await listening;
+    } else {
+      // The socket probe refuses a live owner; a later attempt must not replay that refusal.
+      await expect(broker.listen()).rejects.toThrow("already owned");
+      await previous.close();
+      await broker.listen();
+    }
+    await expect(callTurnBroker(previous.socketPath, { method: "claim", token: "turn_handover" }))
+      .rejects.toThrow("turn token is invalid");
+  } finally {
+    await broker.close();
+    if (!isWindowsPipeEndpoint(previous.socketPath)) {
+      rmSync(dirname(dirname(previous.socketPath)), { recursive: true, force: true });
+    }
+  }
+}, 15_000);
+
 test("an unbounded broker call fails when the broker closes without answering", async () => {
   const broker = unansweredBrokerEndpoint("cgw-broker-closed-", socket => socket.on("data", () => socket.end()));
   await broker.listen();

@@ -1159,6 +1159,24 @@ test("a full-mode runtime exposes its broker endpoint before any turn registers"
   }
 });
 
+test("a runtime that cannot bind its port never claims the broker endpoint", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-serve-busy-"));
+  const predecessor = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("busy") });
+  const config = { ...defaultConfig("full"), port: predecessor.port!, brokerSocketPath: defaultBrokerEndpoint(root) };
+  try {
+    expect(() => startServer(config)).toThrow();
+    await Bun.sleep(100);
+    // Owning the endpoint without a port kept the failed runtime alive and turned every later
+    // runtime's turns into EADDRINUSE; nothing may be listening there.
+    await expect(callTurnBroker(config.brokerSocketPath, { method: "claim", token: "turn_portless" }))
+      .rejects.toThrow("unavailable");
+  } finally {
+    await predecessor.stop(true);
+    await closeTurnBrokers();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("lifecycle drain and cancellation include browser turns owned by the external DEV driver", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-dev-lifecycle-"));
   const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };

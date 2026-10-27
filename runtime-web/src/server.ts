@@ -857,13 +857,6 @@ export function startServer(
   configureCompactionContinuationStorage(getConfigDir());
   const startedAt = Date.now();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
-  if (config.mode === "full") {
-    void turnBroker!.listen().catch(error => {
-      console.error(
-        `[chatgpt-web] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
-  }
   let draining = false;
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;
@@ -1183,6 +1176,16 @@ export function startServer(
       return new Response("Not found", { status: 404 });
     },
   });
+  // Claim the broker endpoint only once the port is ours. Claiming it first let a runtime whose
+  // port was still held by its predecessor throw here yet stay alive on the open pipe, owning the
+  // endpoint without serving anything, so every later runtime failed its turns with EADDRINUSE.
+  if (turnBroker) {
+    void turnBroker.listen().catch(error => {
+      console.error(
+        `[chatgpt-web] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  }
   function shutdown(): void {
     if (shutdownPromise) return;
     draining = true;
