@@ -1108,6 +1108,7 @@ test("large Markdown-rich context uses one plain-text editing command before exa
   await attachPrompt.call({
     activeComposer: async () => composer,
     insertPromptText,
+    attachedPromptText: async () => "",
     assertPromptAttached: async (_page: unknown, value: string) => { asserted = value; },
   }, {}, prompt, false);
 
@@ -1170,8 +1171,26 @@ test("plain-text editing command fails closed when the focused composer rejects 
 
   await expect(insertPromptText.call({
     activeComposer: async () => composer,
+    attachedPromptText: async () => "",
   }, {}, "literal `markdown`"))
     .rejects.toThrow("rejected the plain-text editing command");
+});
+
+test("stale five-character draft fails before a large prompt can be appended", async () => {
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string): Promise<void>;
+  }).insertPromptText;
+  let inserted = false;
+  const worker = {
+    activeComposer: async () => ({
+      focus: async () => {},
+      evaluate: async () => { inserted = true; return true; },
+    }),
+    attachedPromptText: async () => "Think",
+  };
+  await expect(insertPromptText.call(worker, {}, "A".repeat(189_370)))
+    .rejects.toThrow("residualChars=5");
+  expect(inserted).toBeFalse();
 });
 
 test("prompt attachment retries once before submission evidence, including normal turns", async () => {
@@ -1914,6 +1933,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     config: { appName: "Codex Native2" },
     selectConnector,
     insertPromptText,
+    attachedPromptText: async () => "",
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
