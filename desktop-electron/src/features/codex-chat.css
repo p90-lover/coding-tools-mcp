@@ -59,8 +59,8 @@
 .cx-project-badge { flex: 0 0 auto; width: 6px; height: 6px; margin-left: 2px; border-radius: 50%; box-shadow: 0 0 0 .5px var(--cc-side-bg); }
 .cx-project-badge.is-attention { background: var(--cc-warning); }
 /* A running project spins at its end, as Codex's does, until none of its chats runs. */
-.cx-project-badge.is-running { box-sizing: border-box; width: 10px; height: 10px; margin-left: auto; box-shadow: none; border: 1.5px solid color-mix(in srgb, var(--cc-muted) 30%, transparent);
-  border-top-color: var(--cc-text-2); animation: cx-spin .8s linear infinite; }
+.cx-project-badge.is-running { box-sizing: border-box; width: 12px; height: 12px; margin-left: auto; box-shadow: none; border: 2px solid color-mix(in srgb, var(--cc-muted) 22%, transparent);
+  border-top-color: var(--cc-text-2); border-right-color: var(--cc-text-2); animation: cx-spin .8s linear infinite; }
 .cx-project-badge.is-running ~ .cx-project-tag.is-warn, .cx-project-badge.is-running ~ .cx-project-pin { margin-left: 4px; }
 .cx-project-badge.is-unread { background: var(--cc-accent); }
 .cx-project-pin { margin-left: auto; font-size: 10px; opacity: .7; }
@@ -89,9 +89,12 @@
 .cx-thread-dot { position: absolute; top: calc(50% - 3px); right: 9px; width: 6px; height: 6px; border-radius: 50%; background: transparent;
   box-shadow: 0 0 0 .5px var(--cc-side-bg); pointer-events: none; transition: opacity .15s ease; }
 .cx-thread-dot:not(.status-running):not(.status-queued):not(.status-attention) { box-shadow: none; }
-/* A running or starting chat shows Codex's spinner in the dot's place: a 10 px ring that keeps turning. */
-.cx-thread-dot.status-running, .cx-thread-dot.status-queued { box-sizing: border-box; top: calc(50% - 5px); right: 7px; width: 10px; height: 10px; box-shadow: none;
-  border: 1.5px solid color-mix(in srgb, var(--cc-muted) 30%, transparent); border-top-color: var(--cc-text-2); animation: cx-spin .8s linear infinite; }
+/* A running or starting chat shows Codex's spinner in the dot's place: a 12 px ring that keeps turning.
+   The stroke is 2 px because 1.5 px draws as 1 px at 100 % scale, and the dark arc spans two sides:
+   a one-side 1 px arc over a same-hue track read as a still, pale circle. */
+.cx-thread-dot.status-running, .cx-thread-dot.status-queued { box-sizing: border-box; top: calc(50% - 6px); right: 6px; width: 12px; height: 12px; box-shadow: none;
+  border: 2px solid color-mix(in srgb, var(--cc-muted) 22%, transparent); border-top-color: var(--cc-text-2); border-right-color: var(--cc-text-2);
+  animation: cx-spin .8s linear infinite; }
 .cx-thread-dot.status-attention { background: var(--cc-warning); }
 .cx-thread-row.is-unread .cx-thread-dot:not(.status-running):not(.status-queued):not(.status-attention) { background: var(--cc-accent); box-shadow: 0 0 0 .5px var(--cc-side-bg); }
 @keyframes cx-spin { to { transform: rotate(360deg); } }
