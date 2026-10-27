@@ -316,6 +316,26 @@ test("turn broker binds once a previous owner releases its endpoint", async () =
   }
 }, 15_000);
 
+test("Windows broker restarts after an occupied pipe exhausts the retry window", async () => {
+  if (process.platform !== "win32") return;
+  const previous = unansweredBrokerEndpoint("cgw-broker-long-contention-", socket => socket.destroy());
+  await previous.listen();
+  const broker = TurnBroker.forSocket(previous.socketPath);
+  let previousClosed = false;
+  try {
+    // A prolonged incumbent must not permanently cache a failed startup promise.
+    await expect(broker.listen()).rejects.toThrow(/EADDRINUSE/i);
+    await previous.close();
+    previousClosed = true;
+    await broker.listen();
+    await expect(callTurnBroker(previous.socketPath, { method: "claim", token: "turn_after_retry" }))
+      .rejects.toThrow("turn token is invalid");
+  } finally {
+    if (!previousClosed) await previous.close();
+    await broker.close();
+  }
+}, 25_000);
+
 test("closing a turn broker ends held connections and frees its endpoint for the next runtime", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-broker-held-"));
   const socketPath = defaultBrokerEndpoint(root);
