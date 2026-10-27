@@ -93,7 +93,7 @@ describe("native /models augmentation", () => {
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
     const pro = models.find(model => model.slug === "chatgpt-web/pro")!;
     expect(pro.context_window).toBe(336_579);
-    expect(pro.auto_compact_token_limit).toBe(285_000);
+    expect(pro.auto_compact_token_limit).toBe(243_178);
   });
 
   test("keeps native Sol selectable in the bounded Compatibility V1 registry", () => {
@@ -174,11 +174,11 @@ describe("native /models augmentation", () => {
       effectiveContextWindowPercent: model.effective_context_window_percent,
       autoCompactTokenLimit: model.auto_compact_token_limit,
     }))).toEqual([
-      { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 32_000 },
-      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
-      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
-      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
-      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
+      { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 27_183 },
+      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 68_085 },
+      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 68_085 },
+      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 68_085 },
+      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 68_085 },
     ]);
   });
 
@@ -219,7 +219,7 @@ describe("native /models augmentation", () => {
       context_window: CHATGPT_WEB_ZERO_RISK_CONTEXT_WINDOW,
       max_context_window: CHATGPT_WEB_ZERO_RISK_CONTEXT_WINDOW,
       effective_context_window_percent: 78,
-      auto_compact_token_limit: 96_000,
+      auto_compact_token_limit: 81_549,
     });
 
     config.zeroRiskProEnabled = true;
@@ -231,7 +231,7 @@ describe("native /models augmentation", () => {
       display_name: CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE.displayName,
       input_modalities: ["text"],
       context_window: 336_579,
-      auto_compact_token_limit: 285_000,
+      auto_compact_token_limit: 243_178,
     });
   });
 
