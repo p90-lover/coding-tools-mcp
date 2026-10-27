@@ -2,14 +2,20 @@
 //! Wire shapes checked against OpenAI's rust-v0.153.4 Python SDK harness.
 use super::*;
 use std::net::{TcpListener, TcpStream};
-struct Fixture {
-    address: String,
-    calls: Arc<AtomicU64>,
+pub(super) struct Fixture {
+    pub(super) address: String,
+    pub(super) calls: Arc<AtomicU64>,
+    pub(super) models: Arc<Mutex<Vec<String>>>,
     delay: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
-fn serve(stream: &mut TcpStream, count: &AtomicU64, delay: &AtomicBool) -> std::io::Result<()> {
+fn serve(
+    stream: &mut TcpStream,
+    count: &AtomicU64,
+    delay: &AtomicBool,
+    models: &Mutex<Vec<String>>,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -60,6 +66,12 @@ fn serve(stream: &mut TcpStream, count: &AtomicU64, delay: &AtomicBool) -> std::
         return Ok(());
     }
     let n = count.fetch_add(1, Ordering::SeqCst) + 1;
+    if let Ok(body) = serde_json::from_slice::<Value>(&body) {
+        models
+            .lock()
+            .unwrap()
+            .push(body["model"].as_str().unwrap_or("").to_owned());
+    }
     if delay.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_secs(1));
     }
@@ -81,19 +93,21 @@ fn serve(stream: &mut TcpStream, count: &AtomicU64, delay: &AtomicBool) -> std::
     stream.flush()
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = format!("http://{}/v1", listener.local_addr().unwrap());
         let calls = Arc::new(AtomicU64::new(0));
         let delay = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
+        let models = Arc::new(Mutex::new(Vec::new()));
+        let recorded_models = models.clone();
         let (c, d, s) = (calls.clone(), delay.clone(), stop.clone());
         let worker = std::thread::spawn(move || {
             while !s.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let _ = serve(&mut stream, &c, &d);
+                        let _ = serve(&mut stream, &c, &d, &recorded_models);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5))
@@ -105,6 +119,7 @@ impl Fixture {
         Self {
             address,
             calls,
+            models,
             delay,
             stop,
             worker: Some(worker),
@@ -126,6 +141,8 @@ fn go(hub: &Hub, operation: &str, id: &str, thread: Option<&str>, text: Option<&
         request_id: id.into(),
         thread_id: thread.map(str::to_owned),
         text: text.map(str::to_owned),
+        model: None,
+        effort: None,
     })
     .unwrap()
     .run()
@@ -369,7 +386,9 @@ fn native_bridge_actual_turns_against_loopback_fixture() {
             operation: "send".into(),
             request_id: "foreign".into(),
             thread_id: Some("not-owned".into()),
-            text: Some("never send".into())
+            text: Some("never send".into()),
+            model: None,
+            effort: None,
         })
         .is_err());
     hub.cancel("fixture_complete");

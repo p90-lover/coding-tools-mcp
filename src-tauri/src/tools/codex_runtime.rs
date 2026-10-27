@@ -15,6 +15,10 @@ pub const NAMES: &[&str] = &[
 ];
 pub fn input_schema(name: &str) -> Value {
     match name {
+        "codex_runtime_status" => json!({"type":"object","properties":{
+            "view":{"type":"string","enum":["status","models"]},
+            "cursor":{"type":"string","maxLength":1000},
+            "limit":{"type":"integer","minimum":1,"maximum":50,"default":20}},"additionalProperties":false}),
         "codex_command_exec" => json!({"type":"object","properties":{
             "request_id":{"type":"string","minLength":1,"maxLength":128},
             "argv":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"string","maxLength":8192}},
@@ -29,7 +33,9 @@ pub fn input_schema(name: &str) -> Value {
             "operation":{"type":"string","enum":["start","send","review","compact","interrupt","close"]},
             "request_id":{"type":"string","minLength":1,"maxLength":128},
             "thread_id":{"type":"string","minLength":1,"maxLength":128},
-            "text":{"type":"string","minLength":1,"maxLength":16000}},"required":["operation","request_id"],"additionalProperties":false}),
+            "text":{"type":"string","minLength":1,"maxLength":16000},
+            "model":{"type":"string","minLength":1,"maxLength":128,"description":"Optional exact native model ID on start; remains bound to this chat."},
+            "effort":{"type":"string","enum":["none","minimal","low","medium","high","xhigh","max","ultra"],"description":"Optional supported reasoning effort on start."}},"required":["operation","request_id"],"additionalProperties":false}),
         _ => json!({"type":"object","properties":{},"additionalProperties":false}),
     }
 }
@@ -55,8 +61,50 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, Worksp
             "Native request exceeds the size limit",
         ));
     }
+    ctx.restore_native_codex().map_err(error)?;
+    if (name != "codex_runtime_status" || object.get("view").is_some_and(|view| view == "models"))
+        && ctx.codex_bridge.status().map_err(error)?["initializing"] == true
+    {
+        return Err(WorkspaceError::Tool { code:"NATIVE_CODEX_RECONNECTING",
+            message:"Saved chats are reconnecting. Poll codex_runtime_status using fresh read request IDs until connected. This operation was not submitted; once ready, start a new operation with a fresh request_id.".into(),
+            category:"native_runtime", retryable:true });
+    }
     match name {
-        "codex_runtime_status" if object.is_empty() => {
+        "codex_runtime_status"
+            if object
+                .keys()
+                .all(|key| matches!(key.as_str(), "view" | "cursor" | "limit")) =>
+        {
+            if object.get("view").and_then(Value::as_str) == Some("models") {
+                let cursor = match object.get("cursor") {
+                    None => None,
+                    Some(value) => Some(
+                        value
+                            .as_str()
+                            .ok_or_else(|| WorkspaceError::invalid_argument("cursor must be text"))?
+                            .to_owned(),
+                    ),
+                };
+                let limit = match object.get("limit") {
+                    None => 20,
+                    Some(value) => value.as_u64().ok_or_else(|| {
+                        WorkspaceError::invalid_argument("limit must be an integer")
+                    })?,
+                };
+                return ctx
+                    .codex_bridge
+                    .models(cursor, limit)
+                    .map(tool_ok)
+                    .map_err(error);
+            }
+            if object.get("view").is_some_and(|view| view != "status")
+                || object.contains_key("cursor")
+                || object.contains_key("limit")
+            {
+                return Err(WorkspaceError::invalid_argument(
+                    "Use view=models for catalog pagination",
+                ));
+            }
             ctx.codex_bridge.status().map(tool_ok).map_err(error)
         }
         "codex_agent_read"

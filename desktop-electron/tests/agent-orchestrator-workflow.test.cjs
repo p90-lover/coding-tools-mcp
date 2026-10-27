@@ -567,9 +567,13 @@ test("the role inspector lets every role choose any harness and model", () => {
   assert.doesNotMatch(surface, /node\.route\.model === "chatgpt-web\/high" \? "WebGPT High"/, "cards name the chosen tier");
 });
 
-test("AO native resolver pins an executable and a distinct unopened home per node", async () => {
+test("AO native resolver pins an executable and a distinct unopened home per node", async (t) => {
   const root = path.resolve(__dirname, "../../aiTemp/ao-native-resolver-tests", `${process.pid}-${crypto.randomUUID()}`);
   fs.mkdirSync(root, { recursive: true });
+  t.after(() => {
+    assert.ok(root.startsWith(path.resolve(__dirname, "../../aiTemp") + path.sep));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const executable = path.join(root, "codex.exe");
   fs.writeFileSync(executable, "MZ fixture");
   const userData = path.join(root, "user-data");
@@ -582,6 +586,19 @@ test("AO native resolver pins an executable and a distinct unopened home per nod
   assert.equal(path.dirname(first.codex_home), path.join(userData, "headless", "ao-homes"));
   assert.match(path.basename(first.codex_home), /^[a-f0-9]{64}$/);
   assert.notEqual(first.codex_home, second.codex_home);
+  const chat = await resolveAoNativeConnection({ ...input, taskId: "chat-1", roleId: "planner" });
+  const followUp = await resolveAoNativeConnection({ ...input, runId: "run-2", nodeId: "replacement-node", taskId: "chat-1", roleId: "planner" });
+  const otherChat = await resolveAoNativeConnection({ ...input, taskId: "chat-2", roleId: "planner" });
+  const otherRole = await resolveAoNativeConnection({ ...input, taskId: "chat-1", roleId: "reviewer" });
+  assert.equal(chat.codex_home, followUp.codex_home, "follow-ups preserve the chat/role's native identity");
+  assert.notEqual(chat.codex_home, otherChat.codex_home);
+  assert.notEqual(chat.codex_home, otherRole.codex_home);
+  const single = await resolveAoNativeConnection({ ...input, taskId:"chat-1", executionMode:"single" });
+  const singleFollowUp = await resolveAoNativeConnection({ ...input, taskId:"chat-1", executionMode:"single", runId:"next-run", nodeId:"next-node" });
+  const otherSingle = await resolveAoNativeConnection({ ...input, taskId:"chat-2", executionMode:"single" });
+  assert.equal(single.codex_home, singleFollowUp.codex_home, "single-model follow-ups keep their chat identity");
+  assert.notEqual(single.codex_home, otherSingle.codex_home);
+  assert.notEqual(single.codex_home, chat.codex_home, "single and team-role scopes stay distinct");
   assert.equal(fs.existsSync(first.codex_home), false, "inspection must not create an AO home before approval");
   assert.equal(first.permission_profile, ":read-only");
   assert.equal(first.allow_command_execution, false);
@@ -1812,6 +1829,103 @@ test("a follow-up to a chat whose last run is stuck stops that run and starts a 
     assert.deepEqual(world.updates[0], { operation: "cancel", run_id: "old-run", expected_revision: 4 }, state);
     assert.match(world.tasks[0].description, /Follow-up \(.* UTC\):\nand the other dots$/, state);
   }
+});
+
+test("a follow-up reconciles a stopped native receipt before retiring its saved running chat", async () => {
+  const old = { id: "old-run", project_id: "task-1", workspace_id: "ws-1", revision: 4, cancelled: false,
+    nodes: [{ id: "lead", state: "running", route: { harness_id: "codex-native" },
+      receipt: { request_key: "original-request", thread_id: "original-thread" } }] };
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Saved chat", description: "Original task", state: "backlog", clauses: [] }], runs: [old] });
+  const observations = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read" && body.run_id === old.id) return { ok: true, runs: [old] };
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        observations.push(body);
+        old.nodes[0].state = "held";
+        old.revision += 1;
+        return { ok: true, run: old };
+      }
+      return world.requestHeadless(endpoint, body);
+    },
+    resolveHarness: async () => { throw new Error("Fixture stops before inference"); },
+  });
+  const sent = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "Continue the saved task" });
+  assert.equal(sent.taskId, "task-1");
+  assert.notEqual(sent.runId, old.id);
+  assert.deepEqual(observations, [{ workspace_id: "ws-1", run_id: old.id, node_id: "lead" }]);
+  assert.deepEqual(world.updates.map(change => change.operation), ["cancel", "create_from_team"]);
+  assert.equal(world.updates[0].expected_revision, 5, "retirement uses the reconciled revision");
+});
+
+test("startup recovery observes a spent native grant without retries, new grants or confirmation", async () => {
+  const calls = [];
+  let confirmations = 0;
+  const run = { id: "saved", workspace_id: "ws", project_id: "chat", revision: 1, execution_mode: "single",
+    grant: { executable_sha256: "a".repeat(64), turns_started: 1, max_turns: 1, expires_at_ms: Date.now() + 60_000 },
+    nodes: [{ id: "worker", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+      receipt: { request_key: "original", thread_id: "original-thread", status: "submitted" } }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    confirm: async () => { confirmations += 1; return true; },
+    requestHeadless: async (endpoint) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)] };
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        run.nodes[0].state = "held";
+        return { ok: true, run: structuredClone(run), receipt: { error: "Native process was interrupted" } };
+      }
+      throw new Error(`Recovery must not call ${endpoint}`);
+    },
+  });
+  try {
+    await workflow.call("chat_auto_retry", { enabled: true });
+    assert.deepEqual(await workflow.restoreRuns(["ws"]), { restored: 1 });
+    assert.deepEqual(calls.filter(endpoint => endpoint !== "/api/v1/ao/read"), ["/api/v1/ao/harness/observe"]);
+    assert.equal(confirmations, 0);
+  } finally { workflow.dispose(); }
+});
+
+test("Stop during startup recovery's receipt refresh prevents reconnect dispatch", async () => {
+  let reads = 0, release;
+  const calls = [];
+  const run = { id:"saved", workspace_id:"ws", revision:1,
+    grant:{expires_at_ms:Date.now()+60_000}, nodes:[{id:"worker", state:"running",
+      route:{harness_id:"codex-native",provider_id:"chatgpt-web"}, receipt:{thread_id:"original",request_key:"old"}}] };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async endpoint => {
+    calls.push(endpoint);
+    if (endpoint !== "/api/v1/ao/read") throw new Error("Stop must prevent reconnect");
+    reads += 1;
+    if (reads === 2) return new Promise(resolve => { release=resolve; });
+    return {ok:true,runs:[run]};
+  }});
+  try {
+    const restoring = workflow.restoreRuns(["ws"]);
+    await until(() => reads === 2);
+    workflow.stopTracking();
+    release({ok:true,runs:[run]});
+    assert.deepEqual(await restoring, {restored:0});
+    assert.ok(calls.every(endpoint => endpoint === "/api/v1/ao/read"));
+  } finally { workflow.dispose(); }
+});
+
+test("startup recovery leaves paused, cancelled, expired and unsubmitted runs alone", async () => {
+  const grant = { expires_at_ms: Date.now() + 60_000 };
+  const running = { id: "running", state: "running" };
+  const saved = [
+    { id: "paused", grant, paused: true, nodes: [running] },
+    { id: "cancelled", grant, cancelled: true, nodes: [running] },
+    { id: "expired", grant: { expires_at_ms: Date.now() - 1 }, nodes: [running] },
+    { id: "unsubmitted", grant, nodes: [{ id: "pending", state: "pending" }] },
+    { id: "unknown-submit", grant, nodes: [running, { id: "reserved", state: "reserved" }] },
+  ];
+  let nativeStarts = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => { assert.equal(endpoint, "/api/v1/ao/read"); return { ok: true, runs: saved }; },
+    findCodexExecutable: () => { nativeStarts += 1; return "C:\\fixture-codex.exe"; },
+  });
+  assert.deepEqual(await workflow.restoreRuns(["ws-1"]), { restored: 0 });
+  assert.equal(nativeStarts, 0);
+  workflow.stopTracking();
 });
 
 test("a follow-up still waits while the chat's last run has a card working", async () => {

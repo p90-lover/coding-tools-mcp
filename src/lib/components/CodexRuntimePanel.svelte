@@ -5,7 +5,7 @@
   import { locale } from '$lib/control-center/state';
   import { translated as t } from '$lib/control-center/model';
   type Thread = { id: string; status: string; turn_id?: string | null };
-  type Snapshot = { connected: boolean; model_usage_enabled: boolean; command_execution_enabled?: boolean; command_runtime_sha256?: string | null; model?: string;
+  type Snapshot = { connected: boolean; initializing?: boolean; model_usage_enabled: boolean; command_execution_enabled?: boolean; command_runtime_sha256?: string | null; model?: string;
     requests_used?: number; request_limit?: number | null; request_limit_unbounded?: boolean; seconds_remaining?: number | null; lifetime_unbounded?: boolean;
     stop_reason?: string | null; native_identity?: string; threads?: Thread[] };
   type Answer = Thread & { answer: string; answer_truncated: boolean; notice?: string | null };
@@ -116,7 +116,7 @@
   }
   onMount(() => {
     disposed = false;
-    const timer = setInterval(() => { if (snapshot?.connected) void refresh(); }, 1200);
+    const timer = setInterval(() => { if (snapshot?.connected || snapshot?.initializing) void refresh(); }, 1200);
     return () => { disposed = true; clearInterval(timer); };
   });
 </script>

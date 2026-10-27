@@ -885,6 +885,26 @@ pub fn grant_valid(
     now_ms: u64,
     executable_sha256: &str,
 ) -> AppResult<()> {
+    validate_grant(data, run, now_ms, executable_sha256, true)
+}
+
+/// Rejoining an already submitted turn does not reserve or spend another turn.
+pub fn grant_valid_for_resume(
+    data: &AppData,
+    run: &Run,
+    now_ms: u64,
+    executable_sha256: &str,
+) -> AppResult<()> {
+    validate_grant(data, run, now_ms, executable_sha256, false)
+}
+
+fn validate_grant(
+    data: &AppData,
+    run: &Run,
+    now_ms: u64,
+    executable_sha256: &str,
+    needs_new_turn: bool,
+) -> AppResult<()> {
     let grant = run
         .grant
         .as_ref()
@@ -895,7 +915,7 @@ pub fn grant_valid(
     if sha256_text(executable_sha256) && grant.executable_sha256 != executable_sha256 {
         return Err(fail(GRANT_BUILD_CHANGED));
     }
-    if grant.turns_started >= grant.max_turns && grant.max_turns > 0 {
+    if needs_new_turn && grant.turns_started >= grant.max_turns && grant.max_turns > 0 {
         return Err(fail(GRANT_TURNS_USED));
     }
     if now_ms >= grant.expires_at_ms && now_ms >= grant.granted_at_ms {
@@ -924,7 +944,8 @@ pub fn grant_valid(
             .is_none_or(|span| span > 60 * 60 * 1000)
         || now_ms < grant.granted_at_ms
         || now_ms >= grant.expires_at_ms
-        || grant.turns_started >= grant.max_turns
+        || grant.turns_started > grant.max_turns
+        || needs_new_turn && grant.turns_started == grant.max_turns
     {
         return Err(fail(GRANT_INVALID));
     }
@@ -2141,6 +2162,45 @@ fn verdict_word(answer: &str) -> Option<String> {
 // One terminal receipt names its run, node and turn plus the outcome fields; keeping them as
 // explicit parameters matches the other AO receipt recorders.
 #[allow(clippy::too_many_arguments)]
+pub fn record_terminal_for_request(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: &str,
+    node_id: &str,
+    request_key: &str,
+    thread_id: &str,
+    turn_id: Option<&str>,
+    answer: Option<&str>,
+    completed: bool,
+    failure: Option<&str>,
+) -> AppResult<Run> {
+    // A restored thread can serve several attempts. Its ID alone cannot identify the
+    // receipt an asynchronous observer read before another attempt started.
+    let receipt = data
+        .ao_runs
+        .iter()
+        .find(|run| run.id == run_id && run.workspace_id == workspace_id)
+        .and_then(|run| run.nodes.iter().find(|node| node.id == node_id))
+        .and_then(|node| node.receipt.as_ref());
+    if receipt.is_none_or(|receipt| receipt.request_key != request_key) {
+        return Err(fail(
+            "AO request identity changed before terminal observation",
+        ));
+    }
+    record_terminal(
+        data,
+        workspace_id,
+        run_id,
+        node_id,
+        thread_id,
+        turn_id,
+        answer,
+        completed,
+        failure,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn record_terminal(
     data: &mut AppData,
     workspace_id: &str,
@@ -2935,11 +2995,29 @@ mod tests {
         )
         .unwrap();
         let submitted = data.clone();
-        let approved = record_terminal(
+        assert!(record_terminal_for_request(
             &mut data,
             "qa",
             "run",
             "reviewer",
+            "previous-attempt",
+            "review-thread",
+            Some("old-turn"),
+            Some("APPROVED stale answer"),
+            true,
+            None,
+        )
+        .is_err());
+        assert_eq!(
+            data.ao_runs, submitted.ao_runs,
+            "stale observations cannot settle a reused thread"
+        );
+        let approved = record_terminal_for_request(
+            &mut data,
+            "qa",
+            "run",
+            "reviewer",
+            "review",
             "review-thread",
             Some("review-turn"),
             Some("APPROVED despite failed work"),
@@ -3045,6 +3123,13 @@ mod tests {
         let grant = grant_run(&mut granted, "qa", "run", 1, &sha, 1_000).unwrap();
         assert_eq!(grant.grant.as_ref().unwrap().max_turns, 9);
         assert!(grant_valid(&granted, &grant, 1_001, &sha).is_ok());
+        let mut spent = grant.clone();
+        let budget = spent.grant.as_mut().unwrap();
+        budget.turns_started = budget.max_turns;
+        assert!(grant_valid(&granted, &spent, 1_001, &sha).is_err());
+        assert!(grant_valid_for_resume(&granted, &spent, 1_001, &sha).is_ok());
+        assert!(grant_valid_for_resume(&granted, &spent, 3_601_000, &sha).is_err());
+        assert!(grant_valid_for_resume(&granted, &spent, 1_001, &"b".repeat(64)).is_err());
         let mut moved_workspace = granted.clone();
         moved_workspace.profiles[0].path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .canonicalize()

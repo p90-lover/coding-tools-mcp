@@ -72,7 +72,7 @@ pub fn spawn_listener(
     );
     Arc::get_mut(&mut mcp)
         .ok_or("Workspace context is unexpectedly shared")?
-        .workspace_id = Some(workspace_id.clone());
+        .bind_workspace_id(&workspace_id);
     let bearer_token = if auth.bearer_enabled() {
         let key = "bearer_token";
         if auth.use_shared_secrets {

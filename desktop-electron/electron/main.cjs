@@ -212,6 +212,7 @@ let antigravityAuthBrowser = null;
 let backendBundles = null;
 let backendControl = null;
 let activeBackend = null;
+let activeAoWorkflow = null;
 let getFiveStack = () => ({ ok: false });
 const appsMcp = createCodingToolsAppsMcp({
   getHost: () => appsHost,
@@ -762,6 +763,14 @@ async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reaso
     const route = await runtimeHost.connectBridgeRoute();
     applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: route.changed === true });
     logger.info("bridge.auto_connected", { reason, changed: route.changed === true });
+    const workflow = activeAoWorkflow;
+    const host = headlessHost;
+    if (host && typeof workflow?.restoreRuns === "function") {
+      void host.request("/api/v1/workspaces", null, { method: "GET" }).then((catalog) => {
+        if (headlessHost !== host || activeAoWorkflow !== workflow) return;
+        return workflow.restoreRuns((catalog.workspaces ?? []).map(workspace => workspace.id));
+      }).catch(error => logger.warn("ao.restart_recovery_failed", { message: String(error?.message || error).slice(0, 500) }));
+    }
     return { connected: true, changed: route.changed === true, runtime };
   })();
   codexBridgeConnectInFlight = work;
@@ -1504,7 +1513,7 @@ function registerIpc({ logger, stateStore }) {
       message: "Connect this native Codex App Server?",
       detail: [
         name, location, "Executable: " + executable, "SHA-256: " + digest,
-        "Dedicated home: " + home, "Model: " + model,
+        "Dedicated home: " + home, "Default model: " + model + "; new chats can select another available model.",
         "Permission profile: " + input.permissionProfile,
         "Approval reviewer: " + (input.permissionProfile === ":workspace" ? reviewer : "native read-only default") + "; native runtime must acknowledge this selection",
         "Model use: " + (input.allowModelUsage ? "allowed" : "off")
@@ -1512,6 +1521,7 @@ function registerIpc({ logger, stateStore }) {
         "Limit: " + (input.requestLimit || "unbounded") + " requests; duration: "
           + (input.lifetimeSeconds || "until stopped") + " seconds.",
         "All authenticated clients of this workspace MCP listener share this grant.",
+        "Saved chats reconnect after restart while this grant remains valid. Stop revokes the grant.",
         "An exact existing outside-file write can be approved in the Native Codex panel for the current turn. Other extra requests are declined; no unsandboxed fallback is used.",
       ].join("\n"),
       buttons: ["Cancel", "Connect"],
@@ -3429,6 +3439,8 @@ async function start() {
       binaryRoot: backend.source === "bundle" ? backend.resourcesRoot : null,
       aoWorktreesRoot,
     });
+    activeAoWorkflow = agentOrchestratorWorkflow;
+    if (!LAUNCHER_SMOKE_TEST && runtimeHost && browserHost) scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "backend-restart" });
     activeBackend = backend;
     missionWorkflowRuntime = agentOrchestratorWorkflow;
     void listHeadlessWorkspaces().then(items => agentOrchestratorWorkflow.restoreSchedules(items))
@@ -3451,6 +3463,8 @@ async function start() {
     }
   };
   const stopBackend = async (reason) => {
+    activeAoWorkflow?.stopTracking?.();
+    activeAoWorkflow = null;
     antigravityReauth?.stop();
     antigravityAuthBrowser?.closeAll();
     await agentOrchestratorUpstream?.stop().catch((error) => {
