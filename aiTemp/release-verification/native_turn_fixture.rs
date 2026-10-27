@@ -10,7 +10,12 @@ pub(super) struct Fixture {
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
-fn serve(stream: &mut TcpStream, count: &AtomicU64, delay: &AtomicBool, models: &Mutex<Vec<String>>) -> std::io::Result<()> {
+fn serve(
+    stream: &mut TcpStream,
+    count: &AtomicU64,
+    delay: &AtomicBool,
+    models: &Mutex<Vec<String>>,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -62,7 +67,10 @@ fn serve(stream: &mut TcpStream, count: &AtomicU64, delay: &AtomicBool, models: 
     }
     let n = count.fetch_add(1, Ordering::SeqCst) + 1;
     if let Ok(body) = serde_json::from_slice::<Value>(&body) {
-        models.lock().unwrap().push(body["model"].as_str().unwrap_or("").to_owned());
+        models
+            .lock()
+            .unwrap()
+            .push(body["model"].as_str().unwrap_or("").to_owned());
     }
     if delay.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_secs(1));

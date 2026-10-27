@@ -593,6 +593,12 @@ test("AO native resolver pins an executable and a distinct unopened home per nod
   assert.equal(chat.codex_home, followUp.codex_home, "follow-ups preserve the chat/role's native identity");
   assert.notEqual(chat.codex_home, otherChat.codex_home);
   assert.notEqual(chat.codex_home, otherRole.codex_home);
+  const single = await resolveAoNativeConnection({ ...input, taskId:"chat-1", executionMode:"single" });
+  const singleFollowUp = await resolveAoNativeConnection({ ...input, taskId:"chat-1", executionMode:"single", runId:"next-run", nodeId:"next-node" });
+  const otherSingle = await resolveAoNativeConnection({ ...input, taskId:"chat-2", executionMode:"single" });
+  assert.equal(single.codex_home, singleFollowUp.codex_home, "single-model follow-ups keep their chat identity");
+  assert.notEqual(single.codex_home, otherSingle.codex_home);
+  assert.notEqual(single.codex_home, chat.codex_home, "single and team-role scopes stay distinct");
   assert.equal(fs.existsSync(first.codex_home), false, "inspection must not create an AO home before approval");
   assert.equal(first.permission_profile, ":read-only");
   assert.equal(first.allow_command_execution, false);

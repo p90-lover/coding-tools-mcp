@@ -2176,14 +2176,28 @@ pub fn record_terminal_for_request(
 ) -> AppResult<Run> {
     // A restored thread can serve several attempts. Its ID alone cannot identify the
     // receipt an asynchronous observer read before another attempt started.
-    let receipt = data.ao_runs.iter()
+    let receipt = data
+        .ao_runs
+        .iter()
         .find(|run| run.id == run_id && run.workspace_id == workspace_id)
         .and_then(|run| run.nodes.iter().find(|node| node.id == node_id))
         .and_then(|node| node.receipt.as_ref());
     if receipt.is_none_or(|receipt| receipt.request_key != request_key) {
-        return Err(fail("AO request identity changed before terminal observation"));
+        return Err(fail(
+            "AO request identity changed before terminal observation",
+        ));
     }
-    record_terminal(data, workspace_id, run_id, node_id, thread_id, turn_id, answer, completed, failure)
+    record_terminal(
+        data,
+        workspace_id,
+        run_id,
+        node_id,
+        thread_id,
+        turn_id,
+        answer,
+        completed,
+        failure,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2982,10 +2996,22 @@ mod tests {
         .unwrap();
         let submitted = data.clone();
         assert!(record_terminal_for_request(
-            &mut data, "qa", "run", "reviewer", "previous-attempt", "review-thread",
-            Some("old-turn"), Some("APPROVED stale answer"), true, None,
-        ).is_err());
-        assert_eq!(data.ao_runs, submitted.ao_runs, "stale observations cannot settle a reused thread");
+            &mut data,
+            "qa",
+            "run",
+            "reviewer",
+            "previous-attempt",
+            "review-thread",
+            Some("old-turn"),
+            Some("APPROVED stale answer"),
+            true,
+            None,
+        )
+        .is_err());
+        assert_eq!(
+            data.ao_runs, submitted.ao_runs,
+            "stale observations cannot settle a reused thread"
+        );
         let approved = record_terminal_for_request(
             &mut data,
             "qa",

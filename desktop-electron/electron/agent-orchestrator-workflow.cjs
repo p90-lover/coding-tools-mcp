@@ -55,7 +55,7 @@ function executableSha256(resolved, metadata) {
 
 // Keep the actual native profile ID. The consented runtime's profile metadata enforces
 // availability/managed policy; the standalone command grant is independent and stays off.
-async function resolveAoNativeConnection({ workspaceId, runId, nodeId, taskId, roleId, executable, model, permissionProfile = ":read-only",
+async function resolveAoNativeConnection({ workspaceId, runId, nodeId, taskId, roleId, executionMode, executable, model, permissionProfile = ":read-only",
   approvalPolicy, approvalsReviewer, userData }) {
   clean(permissionProfile, 128);
   if (permissionProfile === ":ao-default" || /[\x00-\x1F\x7F]/.test(permissionProfile)) throw new Error("Choose an actual native permission profile");
@@ -71,10 +71,11 @@ async function resolveAoNativeConnection({ workspaceId, runId, nodeId, taskId, r
     || process.platform === "win32" && !resolved.toLowerCase().endsWith(".exe")) {
     throw new Error("Select a native codex.exe within the 512 MiB inspection limit");
   }
+  const chatScope = taskId && (roleId || executionMode === "single");
   const nodeHash = createHash("sha256").update(JSON.stringify([
     clean(workspaceId, 128),
-    taskId && roleId ? `chat:${clean(taskId, 128)}` : clean(runId, 80),
-    taskId && roleId ? `role:${clean(roleId, 80)}` : clean(nodeId, 80),
+    chatScope ? `chat:${clean(taskId, 128)}` : clean(runId, 80),
+    chatScope ? roleId ? `role:${clean(roleId, 80)}` : "single" : clean(nodeId, 80),
   ])).digest("hex");
   return {
     executable: resolved, expected_sha256: await executableSha256(resolved, metadata),
@@ -2111,7 +2112,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       await requireWebReadiness(node);
     }
     const selected = await resolveHarness({ workspaceId, runId, nodeId, executable,
-      taskId: mission.project_id, roleId: node.template_role_id,
+      taskId: mission.project_id, roleId: node.template_role_id, executionMode: mission.execution_mode,
       model: route.model, providerId: route.provider_id, accountId: route.account_id, permissionProfile: route.permission_profile,
       approvalPolicy: route.approval_policy, approvalsReviewer: route.approvals_reviewer });
     if (!selected || selected.model !== route.model || selected.permission_profile !== route.permission_profile
