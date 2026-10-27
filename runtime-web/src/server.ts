@@ -23,6 +23,7 @@ import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import {
   readCodexModelContextOverride,
@@ -518,17 +519,43 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
   return { toolNsMap, freeformToolNames, toolSearchToolNames };
 }
 
+function codexTurnMetadataObject(value: unknown, source: "header" | "body"): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    throw new Error(`Codex turn metadata ${source} must be valid JSON`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Codex turn metadata ${source} must be a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 function withCodexTurnMetadataHeader(req: Request, raw: Record<string, unknown>): Record<string, unknown> {
   const headerTurnMetadata = req.headers.get("x-codex-turn-metadata");
   if (!headerTurnMetadata) return raw;
+  const header = codexTurnMetadataObject(headerTurnMetadata, "header");
   const existingMetadata = raw.client_metadata;
   const clientMetadata = existingMetadata && typeof existingMetadata === "object" && !Array.isArray(existingMetadata)
     ? existingMetadata as Record<string, unknown>
     : {};
-  // The canonical header wins on both endpoints, including turns whose body omits this metadata.
+  const existing = clientMetadata["x-codex-turn-metadata"] === undefined
+    ? {}
+    : codexTurnMetadataObject(clientMetadata["x-codex-turn-metadata"], "body");
+  // Do not rebind a restored Codex chat to another thread, turn, or workspace.
+  // Missing body fields may be filled from the transport header, but conflicts fail closed.
+  for (const [key, value] of Object.entries(existing)) {
+    if (Object.hasOwn(header, key) && !isDeepStrictEqual(header[key], value)) {
+      throw new Error(`Conflicting Codex turn metadata in header and body: ${key}`);
+    }
+  }
   return {
     ...raw,
-    client_metadata: { ...clientMetadata, "x-codex-turn-metadata": headerTurnMetadata },
+    client_metadata: {
+      ...clientMetadata,
+      "x-codex-turn-metadata": JSON.stringify({ ...existing, ...header }),
+    },
   };
 }
 
@@ -549,7 +576,11 @@ export async function responseRequest(
     );
   }
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    raw = withCodexTurnMetadataHeader(req, raw as Record<string, unknown>);
+    try {
+      raw = withCodexTurnMetadataHeader(req, raw as Record<string, unknown>);
+    } catch (error) {
+      return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+    }
   }
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
@@ -758,8 +789,8 @@ export async function compactRequest(
       error instanceof Error ? error.message : "Compaction request body must be a JSON object",
     );
   }
-  raw = withCodexTurnMetadataHeader(req, raw);
   try {
+    raw = withCodexTurnMetadataHeader(req, raw);
     const identity = extractCodexTurnIdentityFromBody(raw);
     if (identity.threadId && identity.turnId) {
       options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
