@@ -108,11 +108,40 @@ test("the host draws the window's chat and its panes in Claude Code's grid, with
     panes: [{ ...pane("b", 1, 0), content: React.createElement("p", null, "pane b") }, { ...pane("c", 1, 1), content: React.createElement("p", null, "pane c") }],
   }, React.createElement("p", null, "window chat")));
   assert.match(html, /class="cx-split" data-split=""/);
-  assert.match(html, /<div class="cx-pane" data-col="0" data-row="0" role="region" aria-label="Primary pane" style="grid-column:1;grid-row:1 \/ span 2">/);
+  assert.match(html, /<div class="cx-pane" data-col="0" data-row="0" role="region" aria-label="Primary pane" data-pane-immovable="" style="grid-column:1;grid-row:1 \/ span 2">/);
   assert.match(html, /aria-label="Secondary pane" aria-current="true" data-focused=""/, "the focused pane says so; the others are dimmed by CSS");
   assert.match(html, /aria-label="Resize pane columns"/);
   assert.match(html, /aria-label="Resize pane rows"/, "column 1 has a top and a bottom pane");
   const single = renderToStaticMarkup(React.createElement(ChatSplit, { focused: "main", onFocus() {}, rowSplit: 0.5, maxColumns: 2, panes: [] },
     React.createElement("p", null, "window chat")));
   assert.doesNotMatch(single, /role="region"|separator|data-split/, "one chat alone is no split: no regions, no dividers");
+});
+
+test("a pane dragged by its grip moves: a new column, an empty cell, or trading places", () => {
+  const panes = [pane("b", 1, 0), pane("c", 1, 1), pane("d", 2, 0)];
+  const at = (list) => Object.fromEntries(list.map((item) => [item.id, `${item.col}:${item.row}`]));
+  assert.deepEqual(at(split.movePane(panes, "c", { kind: "column" })), { b: "1:0", c: "3:0", d: "2:0" }, "a new column at the end");
+  assert.deepEqual(at(split.movePane(panes, "d", { kind: "cell", col: 1, row: 0 })), { b: "2:0", c: "1:1", d: "1:0" }, "onto a pane: the two trade places");
+  assert.deepEqual(at(split.movePane(panes, "c", { kind: "cell", col: 2, row: 1 })), { b: "1:0", c: "2:1", d: "2:0" }, "into an empty bottom cell");
+  assert.deepEqual(at(split.movePane([pane("b", 1, 0), pane("c", 1, 1)], "b", { kind: "cell", col: 1, row: 1 })), { b: "1:1", c: "1:0" }, "top and bottom swap");
+  // A lone pane leaving its column closes the gap it left.
+  assert.deepEqual(at(split.movePane([pane("b", 1, 0), pane("d", 2, 0)], "b", { kind: "cell", col: 2, row: 1 })), { b: "1:1", d: "1:0" });
+  assert.equal(split.movePane(panes, "b", { kind: "cell", col: 1, row: 0 }), null, "its own cell: no move");
+  assert.equal(split.movePane(panes, "b", { kind: "cell", col: 0, row: 0 }), null, "the primary's cell is not a target");
+  assert.equal(split.movePane(panes, "b", { kind: "left" }), null, "the window makes a chat dropped left its own");
+  assert.equal(split.movePane([pane("b", 1, 0)], "b", { kind: "column" }), null, "the last column's only pane stays");
+});
+
+test("a movable split gives each other pane a Move grip and a corner where dividers meet", () => {
+  const { ChatSplit } = load("ChatSplit.tsx", { "./chat-split": split });
+  const render = (props) => renderToStaticMarkup(React.createElement(ChatSplit, {
+    focused: "main", onFocus() {}, rowSplit: 0.5, maxColumns: 3,
+    panes: [{ ...pane("b", 1, 0), content: "b" }, { ...pane("c", 1, 1), content: "c" }], ...props,
+  }, "window chat"));
+  const html = render({ onMovePane() {} });
+  assert.equal(html.match(/class="cx-pane-grip" title="Move"/g)?.length, 2, "one grip on each pane but the window's own");
+  assert.equal(html.match(/data-pane-immovable/g)?.length, 1, "only the window's own pane stays put");
+  assert.match(html, /class="cx-split-corner" aria-hidden="true" style="left:50%"/, "column 1 is split, so the divider before it has a corner");
+  assert.doesNotMatch(render({}), /cx-pane-grip/, "without onMovePane, nothing moves");
+  assert.doesNotMatch(render({ panes: [{ ...pane("b", 1, 0), content: "b" }] }), /cx-split-corner/, "no row divider, no corner");
 });

@@ -55,6 +55,22 @@ export function normalizeSplit(panes: readonly SplitPane[]): SplitPane[] {
   });
 }
 
+/**
+ * The grid after pane `id` was dragged by its grip to `target` (Claude Code's pane move): a new
+ * column at the end, or a cell, trading places with the pane already there. null: no change (its
+ * own cell, the primary's, or "left", which the window handles by making the chat its own).
+ */
+export function movePane(panes: readonly SplitPane[], id: string, target: SplitDropTarget): SplitPane[] | null {
+  const moving = panes.find((pane) => pane.id === id);
+  if (!moving || target.kind === "left") return null;
+  const to: PanePos = target.kind === "column" ? { col: splitColumns(panes), row: 0 } : { col: target.col, row: target.row };
+  if ((to.col === 0 && to.row === 0) || (to.col === moving.col && to.row === moving.row)) return null;
+  const other = panes.find((pane) => pane.col === to.col && pane.row === to.row);
+  const next = normalizeSplit(panes.map((pane) => pane.id === id ? { ...pane, ...to }
+    : pane.id === other?.id ? { ...pane, col: moving.col, row: moving.row } : pane));
+  return next.every((pane, index) => pane.col === panes[index].col && pane.row === panes[index].row) ? null : next;
+}
+
 /** Column weights for `count` columns: the saved ones while each column keeps 320 px, else equal. */
 export function splitWeights(saved: readonly number[] | undefined, count: number, width: number): number[] {
   const even = Array.from({ length: count }, () => 1);

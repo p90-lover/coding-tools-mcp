@@ -9,7 +9,7 @@ import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ArchivedChat, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
-  SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, normalizeSplit, paneOrder, readSplit, spatialNeighbour, splitColumns,
+  SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, movePane, normalizeSplit, paneOrder, readSplit, spatialNeighbour, splitColumns,
   type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
@@ -1857,6 +1857,26 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setSplitPanes((current) => normalizeSplit([...current, added]));
     setFocusedPane(added.id);
   };
+  /**
+   * A pane dragged by its grip (Claude Code's pane move): to a new column or another cell, trading
+   * places with the pane there; dropped in front of the window's own chat, it becomes that chat and
+   * the window's chat moves into a pane of its own.
+   */
+  const moveSplitPane = (id: string, target: SplitDropTarget) => {
+    const moving = splitPanes.find((item) => item.id === id);
+    if (!moving) return;
+    if (target.kind === "left") {
+      const moved = { id: crypto.randomUUID(), workspaceId, taskId: chatTaskId ?? "", col: 1, row: 0 as const };
+      setSplitPanes((current) => normalizeSplit([moved, ...current.filter((item) => item.id !== id).map((item) => ({ ...item, col: item.col + 1 }))]));
+      setFocusedPane("main");
+      showInMain(moving.workspaceId, moving.taskId);
+      return;
+    }
+    const next = movePane(splitPanes, id, target);
+    if (!next) return;
+    setSplitPanes(next);
+    setFocusedPane(id);
+  };
   /** Close split view: a pane goes; the window's own chat closed hands its place to the first pane with a chat. */
   const closeSplitPane = (id: string) => {
     if (!splitPanes.length) return;
@@ -2575,17 +2595,20 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           </div>
         </FloatingSheet> : null}
 
+        {/* The split view holds every view of the window's own pane (chat, Mission Board, team
+            graph), so the other panes stay open while that pane shows the board, as Claude Code's do. */}
+        <ChatSplit focused={focusedPane} onFocus={setFocusedPane}
+          weights={splitWeightsSaved} onWeights={setSplitWeightsSaved} rowSplit={splitRow} onRowSplit={setSplitRow}
+          maxColumns={splitMaxCols} onMaxColumns={setSplitMaxCols}
+          onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
+          onMovePane={pane ? undefined : moveSplitPane}
+          panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError}
+            pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => openInSplit(id, ""), onClose: () => closeSplitPane(item.id),
+              onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
         {view === "chat" ? (
           !workspaceId && workspaceReady
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
-            : <ChatSplit focused={focusedPane} onFocus={setFocusedPane}
-                weights={splitWeightsSaved} onWeights={setSplitWeightsSaved} rowSplit={splitRow} onRowSplit={setSplitRow}
-                maxColumns={splitMaxCols} onMaxColumns={setSplitMaxCols}
-                onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
-                panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError}
-                  pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => openInSplit(id, ""), onClose: () => closeSplitPane(item.id),
-                    onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
-              <AgentOrchestratorChat
+            : <AgentOrchestratorChat
                 onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
                 runs={chatRuns}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
@@ -2644,7 +2667,6 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                 retryStart={retryChatStart} retrying={Boolean(chatTaskId && chatBusy.includes(chatTaskId))}
                 describeNode={describeChatNode} activity={chatActivity} modelName={chatModelName}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
-              </ChatSplit>
         ) : null}
 
         {view === "board" ? <section className="ao-board-view" aria-label="Mission Board">
@@ -2688,6 +2710,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
               : sheet || projectEdit ? <div className="ao-empty-state">The mission board returns when you close this dialog.</div> : null}
           </div>
         </OverviewSplit>
+        </ChatSplit>
       </div>
       </div>
       {(() => {

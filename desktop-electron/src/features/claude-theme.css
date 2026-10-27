@@ -365,6 +365,32 @@
 /* A pane is a Surface of its own: it fills its cell and draws no sidebar or drag strip. */
 .cx-pane > .cx-pane-surface { flex: 1 1 auto; height: auto; background: #faf9f5; }
 .cx-split[data-split] .cx-pane-close { color: var(--ao-muted); }
+/* A pane not focused shows its header actions only while hovered, as Claude Code's panes do. */
+.cx-split[data-split] > .cx-pane:not([data-focused]) .cx-thread-head > :is(.cx-icon-button, .cx-browser-chip, .cx-head-team) { opacity: 0; transition: opacity 0.12s ease-out; }
+.cx-split[data-split] > .cx-pane:not([data-focused]):hover .cx-thread-head > :is(.cx-icon-button, .cx-browser-chip, .cx-head-team) { opacity: 1; }
+
+/* Claude Code's pane move: a grip at the top middle of each pane (its pill shows on hover), or the
+   whole pane with Ctrl held; while a pane moves, its title follows the pointer. */
+.cx-pane-grip { position: absolute; top: 0; left: calc(50% - 22px); z-index: 6; width: 44px; height: 8px; padding: 0; border: 0; background: none; touch-action: none; cursor: move; -webkit-app-region: no-drag; }
+.cx-split > .cx-pane[data-row="1"] > .cx-pane-grip { top: 6px; }
+.cx-pane-grip::before { content: ""; position: absolute; top: 2.5px; left: 6px; width: 32px; height: 3px; border-radius: 999px; background: rgb(31 30 29 / 30%); opacity: 0; transition: opacity 0.12s; }
+@media (hover: hover) { .cx-pane-grip:hover::before { opacity: 1; } }
+.cx-split[data-split] > .cx-pane::before { content: ""; position: absolute; inset: 0; z-index: 5; border-radius: 12px; box-shadow: inset 0 0 0 2px #d97757; opacity: 0; pointer-events: none; transition: opacity 0.1s ease-out; }
+.cx-split[data-ctrl-held][data-split]:not([data-pane-dragging]) > .cx-pane:not([data-pane-immovable]):hover { cursor: move; }
+.cx-split[data-ctrl-held][data-split]:not([data-pane-dragging]) > .cx-pane:not([data-pane-immovable]):hover::before { opacity: 1; transition-delay: 0.6s; }
+.cx-split[data-pane-dragging] { cursor: move; user-select: none; }
+.cx-split[data-pane-dragging] :is(iframe, webview, .cx-pane-grip) { pointer-events: none; }
+.cx-pane-drag-label { position: fixed; top: 0; left: 0; z-index: 50; pointer-events: none; will-change: transform; }
+.cx-pane-drag-label > span {
+  position: absolute; top: 0; left: 0; transform: translate(-50%, -50%);
+  max-width: 240px; height: 32px; padding: 0 12px; overflow: hidden; border-radius: 9999px;
+  background: #f5f4ed; box-shadow: 0 4px 16px rgb(0 0 0 / 12%), 0 0 0 0.5px rgb(31 30 29 / 15%); opacity: 0.9;
+  color: #141413; font-size: 14px; line-height: 32px; white-space: nowrap; text-overflow: ellipsis;
+}
+/* Where a column divider meets a row divider: one drag moves both; hovering it shows their pills. */
+.cx-split-corner { position: absolute; z-index: 12; width: 12px; height: 12px; margin-left: -6px; top: calc(var(--cx-pane-row) * 100%); transform: translateY(-50%); cursor: move; touch-action: none; -webkit-app-region: no-drag; }
+.cx-split:has(> .cx-split-corner:is(:hover, [data-dragging])) > .cx-split-resize .cx-split-pill { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .cx-split > .cx-pane-extra { animation: none; } .cx-split > .cx-pane, .cx-pane-grip::before, .cx-split[data-split] > .cx-pane::before { transition: none; } }
 
 .cx-split-resize { position: absolute; z-index: 11; display: flex; align-items: center; justify-content: center; touch-action: none; -webkit-app-region: no-drag; }
 .cx-split-resize.is-col { top: 0; bottom: 0; width: 12px; margin-left: -6px; cursor: col-resize; }
