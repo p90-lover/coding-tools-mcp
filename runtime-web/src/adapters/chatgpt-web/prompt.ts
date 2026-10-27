@@ -662,6 +662,7 @@ export function compileChatGptWebPrompt(
     : mode.localTools
     ? [
       "For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.",
+      "The local bridge also preserves the ChatGPT-native capabilities supplied by this chat. Use available apps, browser, computer, research and other first-party tools when the task calls for them; discover host-provided capabilities through codex_tool_inventory and invoke the returned exact schema. Use the host's chat-management tools to open a new Codex chat with the requested model when those tools are supplied.",
       "Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.",
       "Use actual Codex Native results as evidence for local observations and effects.",
       "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",

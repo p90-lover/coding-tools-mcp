@@ -517,8 +517,8 @@ impl ServiceState {
             ),
             None => tools::ToolContext::new(PathBuf::from(&profile.path))?,
         };
-        context.bind_workspace_id(workspace_id);
         context.auth = profile.auth.clone();
+        context.bind_workspace_id(workspace_id);
         context.policy = tools::PolicySettings::from_runtime(&profile.runtime);
         context.tool_profile =
             tools::registry::normalize_tool_profile(&profile.runtime.tool_profile).into();
@@ -4592,17 +4592,29 @@ async fn ao_harness_disconnect(
             "Confirm AO harness stop locally",
         );
     }
-    if let Err(error) = ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
-        return json_error(StatusCode::BAD_REQUEST, "AO_NODE_SCOPE_FAILED", error);
-    }
+    let (root, node, _) = match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        Ok(target) => target,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, "AO_NODE_SCOPE_FAILED", error),
+    };
+    // Resolve saved ownership before the registry lock; never hold the data-file fence
+    // while taking this lock in the opposite order to reservation/terminal recording.
+    let saved = state.core.with_data(|store| {
+        store.refresh()?;
+        Ok(store.data().ao_runs.iter().find(|run| run.id == body.run_id && run.workspace_id == body.workspace_id).cloned())
+    }).ok().flatten().and_then(|run| {
+        let root = root.join(&node.settings.working_directory).canonicalize().ok()?;
+        saved_ao_web_connections(&state, &run, &node, &root).ok()
+    });
     let key = (body.workspace_id, body.run_id, body.node_id);
-    let hub = state
-        .ao_hubs
-        .lock()
-        .ok()
-        .and_then(|mut hubs| hubs.remove(&key));
-    if let Some(hub) = hub {
-        hub.disconnect();
+    if let Ok(mut hubs) = state.ao_hubs.lock() {
+        if let Some(hub) = hubs.remove(&key) {
+            hub.disconnect();
+        }
+        for connection in saved.unwrap_or_default() {
+            // Publication takes the same registry lock. A later recovery must recheck
+            // this now-revoked journal before it can admit a native process.
+            AoCodexHub::with_state_file(connection.codex_home.join("coding-tools-native-session.json")).disconnect();
+        }
     }
     Json(json!({"ok":true,"connected":false,"owned":false})).into_response()
 }
@@ -4715,6 +4727,9 @@ async fn ao_harness_execute(
     let node_id = body.node_id;
     let expected_revision = body.expected_revision;
     let reserved = tokio::task::spawn_blocking({
+        let registered = state.ao_hubs.clone();
+        let registered_key = key.clone();
+        let registered_hub = hub.clone();
         let workspace_id = workspace_id.clone();
         let run_id = run_id.clone();
         let node_id = node_id.clone();
@@ -4723,6 +4738,12 @@ async fn ao_harness_execute(
             let request = context.for_request().map_err(text_error)?;
             let _guard = request.policy_execution_guard().map_err(text_error)?;
             coding_tools_core::data::DataStore::update_file(|data| {
+                let current = registered.lock().map_err(|_| coding_tools_core::error::AppError::Message("AO harness unavailable".into()))?;
+                if !current.get(&registered_key).is_some_and(|current| Arc::ptr_eq(current, &registered_hub))
+                    || registered_hub.status().ok().is_none_or(|status| status["connected"] != true) {
+                    return Err(coding_tools_core::error::AppError::Message("AO harness changed before reservation".into()));
+                }
+                drop(current);
                 let run = data
                     .ao_runs
                     .iter()
@@ -4869,6 +4890,71 @@ async fn ao_harness_steer(
     }
 }
 
+fn saved_ao_web_connections(
+    state: &ServiceState, run: &integrations::ao::Run, node: &integrations::ao::Node, root: &Path,
+) -> Result<Vec<AoCodexConnection>, String> {
+    if node.route.provider_id != "chatgpt-web" || node.route.harness_id != "codex-native" { return Ok(vec![]) }
+    let scopes = if let Some(role) = &node.template_role_id {
+        vec![json!([run.workspace_id, format!("chat:{}", run.project_id), format!("role:{role}")]),
+             json!([run.workspace_id, run.id, node.id])]
+    } else { vec![json!([run.workspace_id, run.id, node.id])] };
+    let mut selected = vec![];
+    for scope in scopes {
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&scope).map_err(text_error)?));
+        let home = state.ao_home_root.join(hash);
+        if let Some(connection) = AoCodexHub::saved_connection(root, &home)? {
+            selected.push(connection);
+        }
+    }
+    Ok(selected)
+}
+
+async fn recover_ao_web_hub(
+    state: &ServiceState,
+    run: &integrations::ao::Run,
+    node: &integrations::ao::Node,
+) -> Result<Option<Arc<AoCodexHub>>, String> {
+    if run.paused || run.cancelled || node.route.provider_id != "chatgpt-web"
+        || node.route.harness_id != "codex-native" { return Ok(None) }
+    let (root, _, _) = ao_target(state, &run.workspace_id, &run.id, &node.id)?;
+    let root = root.join(&node.settings.working_directory).canonicalize().map_err(text_error)?;
+    let workspace_root = state.context(&run.workspace_id).map_err(text_error)?;
+    if !root.starts_with(workspace_root.workspace.root())
+        || node.route.permission_profile == ":workspace" && workspace_root.permission_mode != "workspace-write" {
+        return Err("Saved AO chat no longer matches its workspace permissions".into());
+    }
+    let selected = saved_ao_web_connections(state, run, node, &root)?.into_iter().next();
+    let Some(connection) = selected else { return Ok(None) };
+    let resume_granted = state.core.with_data(|store| {
+        store.refresh()?;
+        let current = store.data().ao_runs.iter().find(|current|
+            current.id == run.id && current.workspace_id == run.workspace_id)
+            .ok_or_else(|| coding_tools_core::error::AppError::Message("AO run unavailable".into()))?;
+        integrations::ao::grant_valid_for_resume(store.data(), current, now_ms(), &connection.expected_sha256)
+    }).is_ok();
+    if ao_connect_policy(node, &connection, None).is_err() || !resume_granted {
+        return Ok(None);
+    }
+    let key = (run.workspace_id.clone(), run.id.clone(), node.id.clone());
+    let hub = Arc::new(AoCodexHub::with_state_file(connection.codex_home.join("coding-tools-native-session.json")));
+    {
+        let mut hubs = state.ao_hubs.lock().map_err(|_| "AO harness store unavailable")?;
+        if let Some(existing) = hubs.get(&key) { return Ok(Some(existing.clone())) }
+        if hubs.len() >= 8 { return Err("AO_RECOVERY_CAPACITY".into()) }
+        hubs.insert(key.clone(), hub.clone());
+    }
+    let recovering = hub.clone();
+    let result = tokio::task::spawn_blocking(move || recovering.recover_ao_web(&root, connection))
+        .await.map_err(text_error).and_then(|value| value);
+    if let Err(error) = result {
+        if let Ok(mut hubs) = state.ao_hubs.lock() {
+            if hubs.get(&key).is_some_and(|current| Arc::ptr_eq(current, &hub)) { hubs.remove(&key); }
+        }
+        return Err(error);
+    }
+    Ok(Some(hub))
+}
+
 async fn ao_harness_observe(
     State(state): State<ServiceState>,
     headers: HeaderMap,
@@ -4935,11 +5021,27 @@ async fn ao_harness_observe(
             "AO native thread identity unavailable",
         );
     };
-    let hub = state
+    let mut hub = state
         .ao_hubs
         .lock()
         .ok()
         .and_then(|hubs| hubs.get(&key).cloned());
+    let mut recovery_error = None;
+    if hub.is_none() {
+        match recover_ao_web_hub(&state, &run, node).await {
+            Ok(recovered) => hub = recovered,
+            Err(error) if error == "AO_RECOVERY_CAPACITY" => return Json(json!({"ok":true,"run":run,
+                "receipt":receipt,"waiting":true,"reason":"harness_capacity","pending_approvals":[]})).into_response(),
+            Err(error) => recovery_error = Some(error),
+        }
+    }
+    // Another observer can see the provisional hub while its saved thread is being loaded.
+    // Missing ownership during that handshake is not a terminal native outcome.
+    if hub.as_ref().and_then(|hub| hub.status().ok()).is_some_and(|status|
+        status["connected"] != true && status["stop_reason"].is_null()) {
+        return Json(json!({"ok":true,"run":run,"receipt":receipt,"waiting":true,
+            "reason":"native_reconnect","pending_approvals":[]})).into_response();
+    }
     let pending_approvals = hub
         .as_ref()
         .and_then(|hub| hub.status().ok())
@@ -4980,6 +5082,7 @@ async fn ao_harness_observe(
         .as_ref()
         .is_some_and(|native| native["status"] == "completed");
     let failure = native.as_ref().and_then(|native| native["notice"].as_str()).map(str::to_owned)
+        .or(recovery_error)
         .or_else(|| stopped.then(|| "Native connection stopped before its turn finished; the turn will not be replayed".to_owned()))
         .or_else(|| native.is_none().then(|| "Native connection ended without a terminal receipt; the reserved request will not be replayed".to_owned()));
     let expected_request_key = receipt.request_key.clone();
@@ -5010,19 +5113,34 @@ async fn ao_harness_observe(
     let run_id = body.run_id;
     let node_id = body.node_id;
     let thread_id = thread_id.to_owned();
+    let observed_request_key = expected_request_key.clone();
+    let registered = state.ao_hubs.clone();
+    let registered_key = key.clone();
+    let observed_hub = native.as_ref().and(hub.clone());
     let saved = tokio::task::spawn_blocking(move || {
         coding_tools_core::data::DataStore::update_file(|data| {
-            integrations::ao::record_terminal(
+            let run = integrations::ao::record_terminal_for_request(
                 data,
                 &workspace_id,
                 &run_id,
                 &node_id,
+                &observed_request_key,
                 &thread_id,
                 turn_id.as_deref(),
                 answer.as_deref(),
                 completed,
                 failure.as_deref(),
-            )
+            )?;
+            // Retire under the same data-file fence that admits a subsequent attempt.
+            // A previously captured execution also rechecks registry identity before reserve.
+            if let Some(observed) = &observed_hub {
+                if let Ok(mut hubs) = registered.lock() {
+                    if hubs.get(&registered_key).is_some_and(|current| Arc::ptr_eq(current, observed)) {
+                        if let Some(hub) = hubs.remove(&registered_key) { hub.disconnect(); }
+                    }
+                }
+            }
+            Ok(run)
         })
     })
     .await;
@@ -5033,13 +5151,6 @@ async fn ao_harness_observe(
                 .iter()
                 .find(|node| node.id == key.2.as_str())
                 .and_then(|node| node.receipt.clone());
-            if native.is_some() {
-                if let Ok(mut hubs) = state.ao_hubs.lock() {
-                    if let Some(hub) = hubs.remove(&key) {
-                        hub.disconnect();
-                    }
-                }
-            }
             if receipt.as_ref().is_some_and(|receipt| receipt.verdict.as_deref() == Some("CHANGES_REQUIRED")) {
                 if let Ok(Some(reworked)) = coding_tools_core::data::DataStore::update_file(|data| {
                     integrations::ao_team::queue_rework(data, &key.0, &key.1, &key.2, &expected_request_key, now_ms())

@@ -72,8 +72,7 @@ pub fn codex_local_status(
 ) -> AppResult<Value> {
     local(&window, false)?;
     context(&state, &workspace_id)?
-        .codex_bridge
-        .status()
+        .native_codex_status()
         .map_err(AppError::Message)
 }
 #[tauri::command]
@@ -114,10 +113,9 @@ pub fn codex_local_read(
     thread_id: String,
 ) -> AppResult<Value> {
     local(&window, false)?;
-    context(&state, &workspace_id)?
-        .codex_bridge
-        .read(&thread_id)
-        .map_err(AppError::Message)
+    let ctx = context(&state, &workspace_id)?;
+    ctx.restore_native_codex().map_err(AppError::Message)?;
+    ctx.codex_bridge.read(&thread_id).map_err(AppError::Message)
 }
 
 #[tauri::command]

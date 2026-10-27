@@ -30,6 +30,7 @@ pub struct ToolContext {
     pub(crate) execution_lease: Option<Arc<crate::harness::resource_lease::ResourceLease>>,
     default_cwd: Arc<Mutex<PathBuf>>,
     auto_history_sessions: Arc<Mutex<HashMap<String, Value>>>,
+    native_state_dir: PathBuf,
     pub sessions: Arc<SessionStore>,
     pub(crate) operations: Arc<crate::mcp::operation_store::OperationStore>,
 }
@@ -80,6 +81,7 @@ impl ToolContext {
     ) -> Self {
         let root = workspace.root().to_path_buf();
         let permission_mode = policy.canonical_permission_mode().to_string();
+        let native_state_dir = harness_root.join("native-codex");
         Self {
             workspace,
             workspace_id: None,
@@ -89,6 +91,7 @@ impl ToolContext {
             live_policy: Arc::new(RwLock::new(None)),
             policy_revision: 0,
             codex_bridge: Arc::new(crate::codex_bridge::Hub::default()),
+            native_state_dir,
             local_plan: Arc::new(Mutex::new(
                 serde_json::json!({"revision":0,"plan":[],"explanation":""}),
             )),
@@ -142,7 +145,32 @@ impl ToolContext {
     }
 
     pub fn native_codex_status(&self) -> Result<Value, String> {
+        self.restore_native_codex()?;
         self.codex_bridge.status()
+    }
+
+    pub(crate) fn restore_native_codex(&self) -> Result<(), String> {
+        let snapshot = self.for_request().map_err(|error| error.message())?;
+        if !matches!(snapshot.auth.auth_type.as_str(), "bearer" | "oauth") {
+            return Ok(());
+        }
+        let restoring = {
+            let _fence = snapshot
+                .policy_execution_guard()
+                .map_err(|error| error.message())?;
+            snapshot.codex_bridge.restore_workspace(
+                snapshot.workspace.root(),
+                snapshot.policy.canonical_permission_mode() == "workspace-write",
+            )?
+        };
+        if restoring {
+            let bridge = snapshot.codex_bridge.clone();
+            // Initialization records failures on the bridge; status polls must stay responsive.
+            std::thread::spawn(move || {
+                let _ = bridge.initialize();
+            });
+        }
+        Ok(())
     }
 
     pub fn resolve_native_codex_approval(&self, id: &str, allow: bool) -> Result<Value, String> {
@@ -158,7 +186,23 @@ impl ToolContext {
     }
 
     pub fn bind_workspace_id(&mut self, workspace_id: impl Into<String>) {
-        self.workspace_id = Some(workspace_id.into());
+        let id = workspace_id.into();
+        if self.workspace_id.as_deref() != Some(&id) {
+            use sha2::{Digest, Sha256};
+            let scope = serde_json::json!([
+                self.workspace.root(),
+                id,
+                self.auth.auth_type,
+                self.auth.oauth_client_id
+            ]);
+            let file = self.native_state_dir.join(format!(
+                "{:x}.json",
+                Sha256::digest(scope.to_string().as_bytes())
+            ));
+            self.codex_bridge.disconnect();
+            self.codex_bridge = Arc::new(crate::codex_bridge::Hub::with_state_file(file));
+        }
+        self.workspace_id = Some(id);
     }
 
     pub fn default_cwd_display(&self) -> String {

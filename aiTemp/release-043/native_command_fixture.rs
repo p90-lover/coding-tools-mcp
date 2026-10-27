@@ -101,7 +101,9 @@ fn native_043_actual_commands_no_model_and_write_denial() {
             operation: "start".into(),
             request_id: "denied-model".into(),
             thread_id: None,
-            text: Some("must never be sent".into())
+            text: Some("must never be sent".into()),
+            model: None,
+            effort: None,
         })
         .is_err());
     let request = CommandRequest {

@@ -4,6 +4,7 @@ mod form_format;
 mod native_command;
 mod permissions;
 mod process;
+mod sessions;
 pub use native_command::CommandRequest;
 use process::OwnedProcess;
 use serde::{Deserialize, Serialize};
@@ -35,7 +36,7 @@ const LEDGER_RETENTION: Duration = Duration::from_secs(90 * 60);
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 type Result<T> = std::result::Result<T, String>;
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Connection {
     pub executable: PathBuf,
@@ -68,8 +69,12 @@ pub struct Control {
     pub request_id: String,
     pub thread_id: Option<String>,
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct ThreadState {
     id: String,
     status: String,
@@ -77,6 +82,14 @@ struct ThreadState {
     answer: String,
     answer_truncated: bool,
     notice: Option<String>,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    context_window: Option<u32>,
+    #[serde(default)]
+    restored: bool,
     effective_policy: Option<Value>,
     /// The turn's agentMessage items since its last tool step, in order; `answer` joins them.
     #[serde(skip)]
@@ -543,10 +556,57 @@ struct Memory {
     stop_reason: Option<String>,
 }
 
+impl Memory {
+    fn ao_thread(&mut self, options: &Connection) -> Result<Option<String>> {
+        let terminal = |thread: &ThreadState| {
+            thread.restored
+                && matches!(
+                    thread.status.as_str(),
+                    "idle" | "completed" | "failed" | "interrupted"
+                )
+        };
+        let matches = self
+            .threads
+            .values()
+            .filter(|thread| {
+                terminal(thread)
+                    && thread.model == options.model
+                    && thread.effort == options.effort
+                    && thread.context_window == options.context_window
+            })
+            .map(|thread| thread.id.clone())
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            return Err(
+                "AO chat owns multiple matching saved threads; inspect before continuing".into(),
+            );
+        }
+        if let Some(id) = matches.into_iter().next() {
+            return Ok(Some(id));
+        }
+        // This dedicated AO home serves one role/chat. Retire only superseded terminal
+        // ownership when its selection changes; native rollout history remains on disk.
+        if self.threads.len() >= MAX_THREADS {
+            let oldest = self
+                .threads
+                .values()
+                .filter(|thread| terminal(thread))
+                .min_by_key(|thread| thread.started_at_ms)
+                .map(|thread| thread.id.clone());
+            if let Some(id) = oldest {
+                self.threads.remove(&id);
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// Owned by an actual authenticated listener, never keyed only by a filesystem path.
 #[derive(Default)]
 pub struct Hub {
     current: Mutex<Option<Arc<Bridge>>>,
+    state_file: Option<PathBuf>,
+    recovery: Mutex<()>,
 }
 pub struct Ticket {
     bridge: Arc<Bridge>,
@@ -556,6 +616,12 @@ pub struct Ticket {
 struct Bridge {
     root: PathBuf,
     options: Connection,
+    session_file: PathBuf,
+    consent_until_ms: Option<u64>,
+    session_write: Mutex<()>,
+    preserve_budget: AtomicBool,
+    state_loaded: AtomicBool,
+    _session_lease: std::fs::File,
     ao_worker_command_approvals: bool,
     /// A WebGPT (ChatGPT web bridge) card; see `web_unattended`.
     ao_web: bool,
@@ -605,8 +671,25 @@ fn validate_control(request: &Control) -> Result<bool> {
         if request.thread_id.is_some() {
             return Err("start cannot reuse an existing thread".into());
         }
+        if request
+            .model
+            .as_deref()
+            .is_some_and(|model| !model_id(model))
+        {
+            return Err("Use an exact model ID from codex_runtime_status view=models".into());
+        }
+        if request.effort.as_deref().is_some_and(|effort| {
+            !matches!(
+                effort,
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+            )
+        }) {
+            return Err("Use a supported reasoning effort from the native model catalog".into());
+        }
     } else if request.thread_id.as_deref().is_none_or(|v| !token(v)) {
         return Err("An owned thread_id is required".into());
+    } else if request.model.is_some() || request.effort.is_some() {
+        return Err("Model and effort are selected on start and remain bound to that chat".into());
     }
     if matches!(
         request.operation.as_str(),
@@ -909,7 +992,7 @@ impl Hub {
     /// Local desktop admission only. Caller must hold the listener's current policy fence.
     /// Returns before the handshake; a later policy change can cancel the provisional child.
     pub fn connect(&self, root: &Path, options: Connection) -> Result<()> {
-        self.connect_inner(root, options, None, false)
+        self.connect_inner(root, options, None, false, None, false)
     }
     pub fn connect_ao_with_cpa_key(
         &self,
@@ -923,19 +1006,10 @@ impl Hub {
         if !ao_permission_allowed(&options) {
             return Err("AO CPA child must use a read-only or workspace profile".into());
         }
-        self.connect_inner(root, options, Some(key), false)
+        self.connect_inner(root, options, Some(key), false, None, false)
     }
     pub fn connect_ao_web(&self, root: &Path, options: Connection) -> Result<()> {
-        let tier = options.model.strip_prefix("chatgpt-web/");
-        if !tier.is_some_and(|tier| crate::integrations::ao::WEB_TIERS.contains(&tier))
-            || !ao_permission_allowed(&options)
-        {
-            return Err(
-                "AO WebGPT child must use a served tier and a read-only or workspace profile"
-                    .into(),
-            );
-        }
-        self.connect_inner(root, options, None, true)
+        self.connect_inner(root, options, None, true, None, false)
     }
     fn connect_inner(
         &self,
@@ -943,12 +1017,39 @@ impl Hub {
         options: Connection,
         private_cpa_key: Option<String>,
         ao_web: bool,
+        recovery_deadline: Option<u64>,
+        preserve_budget: bool,
     ) -> Result<()> {
-        let options = checked_options(root, options)?;
+        if ao_web {
+            let tier = options.model.strip_prefix("chatgpt-web/");
+            if !tier.is_some_and(|tier| crate::integrations::ao::WEB_TIERS.contains(&tier))
+                || !ao_permission_allowed(&options)
+            {
+                return Err(
+                    "AO WebGPT child must use a served tier and a read-only or workspace profile"
+                        .into(),
+                );
+            }
+        }
+        let started = Instant::now();
+        let admitted_at = unix_ms();
+        let mut options = checked_options(root, options)?;
+        if let Some(until) = recovery_deadline {
+            options.lifetime_seconds = until.saturating_sub(admitted_at) / 1000;
+            if options.lifetime_seconds == 0 {
+                return Err("Saved native grant expired before recovery admission".into());
+            }
+        }
         let mut current = lock(&self.current)?;
         if current.is_some() {
             return Err("Disconnect the existing native session before reconnecting".into());
         }
+        let session_file = self
+            .state_file
+            .clone()
+            .unwrap_or_else(|| sessions::default_path(&options.codex_home));
+        let session_lease = sessions::claim_session(&session_file)?;
+        sessions::prepare(&session_file, root, &options, preserve_budget)?;
         let temp = options.codex_home.join("aiTemp");
         std::fs::create_dir_all(&temp).map_err(|_| "Cannot prepare dedicated aiTemp directory")?;
         let mut command = native_child_command(&options, &temp, private_cpa_key.as_deref(), ao_web);
@@ -962,13 +1063,23 @@ impl Hub {
         let output = child.stdout.take().ok_or("Native stdout unavailable")?;
         let process = OwnedProcess::attach(child)?;
         let (tx, rx) = mpsc::sync_channel::<Value>(16);
+        let consent_until_ms = recovery_deadline.or_else(|| {
+            (options.lifetime_seconds != 0)
+                .then(|| admitted_at.saturating_add(options.lifetime_seconds * 1000))
+        });
         let bridge = Arc::new(Bridge {
             root: root.to_path_buf(),
             options,
+            session_file,
+            consent_until_ms,
+            session_write: Mutex::new(()),
+            preserve_budget: AtomicBool::new(preserve_budget),
+            state_loaded: AtomicBool::new(false),
+            _session_lease: session_lease,
             // Every AO child routes its command approvals to the local approval queue.
             ao_worker_command_approvals: private_cpa_key.is_some() || ao_web,
             ao_web,
-            started: Instant::now(),
+            started,
             live: AtomicBool::new(true),
             ready: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
@@ -1041,19 +1152,17 @@ impl Hub {
         let lifetime = bridge.options.lifetime_seconds;
         if lifetime != 0 {
             let weak = Arc::downgrade(&bridge);
-            std::thread::spawn(move || {
-                for _ in 0..lifetime {
-                    std::thread::sleep(Duration::from_secs(1));
-                    let Some(bridge) = weak.upgrade() else {
-                        return;
-                    };
-                    if !bridge.live.load(Ordering::SeqCst) {
-                        return;
-                    }
+            std::thread::spawn(move || loop {
+                let Some(bridge) = weak.upgrade() else { return };
+                if !bridge.live.load(Ordering::SeqCst) {
+                    return;
                 }
-                if let Some(bridge) = weak.upgrade() {
+                if bridge.started.elapsed().as_secs() >= lifetime {
                     bridge.stop("local_consent_expired");
+                    return;
                 }
+                drop(bridge);
+                std::thread::sleep(Duration::from_secs(1));
             });
         }
         Ok(())
@@ -1073,6 +1182,13 @@ impl Hub {
                         bounded(value["userAgent"].as_str().unwrap_or("initialized"), 300);
                 }
                 bridge.enqueue(json!({"method":"initialized","params":{}}))?;
+                if let Err(error) = bridge
+                    .restore_sessions()
+                    .and_then(|_| bridge.save_session())
+                {
+                    bridge.stop("native_session_restore_failed");
+                    return Err(error);
+                }
                 bridge.ready.store(true, Ordering::SeqCst);
                 self.status()
             }
@@ -1091,7 +1207,7 @@ impl Hub {
         let current = lock(&self.current)?;
         let Some(bridge) = current.as_ref() else {
             return Ok(
-                json!({"connected":false,"model_usage_enabled":false,"command_execution_enabled":false,"command_runtime_sha256":native_command::COMMAND_RUNTIME_SHA256,"implementation":"native_app_server_opt_in",
+                json!({"connected":false,"initializing":false,"model_usage_enabled":false,"command_execution_enabled":false,"command_runtime_sha256":native_command::COMMAND_RUNTIME_SHA256,"implementation":"native_app_server_opt_in",
                 "protocol_source":PROTOCOL_SOURCE,"native_sandbox_verified":false,"pending_approvals":[]}),
             );
         };
@@ -1099,6 +1215,7 @@ impl Hub {
         let approvals = lock(&bridge.approvals)?;
         Ok(
             json!({"connected":bridge.live.load(Ordering::SeqCst)&&bridge.ready.load(Ordering::SeqCst),
+            "initializing":bridge.live.load(Ordering::SeqCst)&&!bridge.ready.load(Ordering::SeqCst),
             "model_usage_enabled":bridge.live.load(Ordering::SeqCst)&&bridge.options.allow_model_usage,
             "command_execution_enabled":bridge.live.load(Ordering::SeqCst)&&bridge.options.allow_command_execution
                 && native_command::COMMAND_RUNTIME_SHA256.is_some_and(|sha|sha.eq_ignore_ascii_case(&bridge.options.expected_sha256)),
@@ -1110,7 +1227,7 @@ impl Hub {
             "seconds_remaining":if bridge.options.lifetime_seconds==0 { Value::Null } else { json!(bridge.options.lifetime_seconds.saturating_sub(bridge.started.elapsed().as_secs())) },
             "lifetime_unbounded":bridge.options.lifetime_seconds==0,
             "replay_retention_seconds":LEDGER_RETENTION.as_secs(),"replay_capacity":MAX_LEDGER,
-            "stop_reason":memory.stop_reason,"threads":memory.threads.values().map(|t|json!({"id":t.id,"status":t.status,"turn_id":t.turn_id,
+            "stop_reason":memory.stop_reason,"threads":memory.threads.values().map(|t|json!({"id":t.id,"status":t.status,"turn_id":t.turn_id,"model":t.model,"effort":t.effort,"restored":t.restored,
                 "activity":t.activity,"activity_at_ms":t.activity_at_ms,"last_event_at_ms":t.last_event_at_ms,"started_at_ms":t.started_at_ms,"effective_policy":t.effective_policy,
                 "steps":t.steps.iter().filter(|step| t.turn_id.as_deref() == Some(step.turn.as_str()))
                     .map(|step| json!({"id":step.id,"kind":step.kind,"status":step.status,"label":step.label})).collect::<Vec<_>>(),
@@ -1125,8 +1242,18 @@ impl Hub {
             "ao_worker_command_approvals":bridge.ao_worker_command_approvals,
             "pending_approvals":approvals.iter().filter(|(_, request)| request.expires_at > Instant::now()).map(|(id, request)| json!({"approval_id":id,"kind":if request.method.is_empty() {if request.command.is_some() {"command"} else {"file_write"}} else {consent::kind(&request.method, &request.request).unwrap_or("unsupported")}, "method":request.method,"item_id":request.request["itemId"],"request":request.request,"path":request.display_path(),"cwd":request.display_cwd(),"command":request.command,"permissions":request.permissions,"reason":request.reason,"thread_id":request.thread_id,"turn_id":request.turn_id,"seconds_remaining":request.expires_at.saturating_duration_since(Instant::now()).as_secs()})).collect::<Vec<_>>(),
             "native_sandbox_verified":false,"protocol_source":PROTOCOL_SOURCE,
-            "storage":"bounded_bridge_memory; native runtime and provider retention are separate",
-            "limits_note":"Zero request/lifetime limits mean no app-side ceiling until disconnect; provider quotas still apply. Completed replay receipts are bounded RAM with 90-minute age expiry and oldest-first pressure eviction; pending outcomes are never evicted."}),
+            "storage":"scoped_native_session_journal_and_native_rollouts",
+            "limits_note":"Zero request/lifetime limits mean no app-side ceiling until disconnect; provider quotas still apply. Completed replay receipts have 90-minute age expiry and oldest-first capacity eviction; pending outcomes are never evicted."}),
+        )
+    }
+    /// Native catalog only: no inference and no credential or provider configuration changes.
+    pub fn models(&self, cursor: Option<String>, limit: u64) -> Result<Value> {
+        if !(1..=50).contains(&limit) || cursor.as_ref().is_some_and(|value| value.len() > 1000) {
+            return Err("Use a bounded native model catalog page".into());
+        }
+        self.bridge()?.rpc(
+            "model/list",
+            json!({"cursor":cursor,"limit":limit,"includeHidden":false}),
         )
     }
     pub fn permission_profiles(&self) -> Result<Value> {
@@ -1277,6 +1404,9 @@ impl Hub {
                 bridge.ready.load(Ordering::SeqCst),
             )?
         };
+        // Persist admission before any RPC, so a process restart cannot turn an unknown
+        // submitted request into a fresh model call with the same request ID.
+        bridge.save_session()?;
         Ok(Ticket {
             bridge,
             request,
@@ -1284,11 +1414,15 @@ impl Hub {
         })
     }
     pub fn start_ao(&self, request_key: String, prompt: String) -> Result<Value> {
+        let bridge = self.bridge()?;
+        let thread_id = lock(&bridge.memory)?.ao_thread(&bridge.options)?;
         self.admit(Control {
-            operation: "start".into(),
+            operation: if thread_id.is_some() { "send" } else { "start" }.into(),
             request_id: request_key,
-            thread_id: None,
+            thread_id,
             text: Some(prompt),
+            model: None,
+            effort: None,
         })?
         .run()
     }
@@ -1299,6 +1433,8 @@ impl Hub {
             request_id: request_key,
             thread_id: Some(thread_id),
             text: Some(text),
+            model: None,
+            effort: None,
         })?
         .run()
     }
@@ -1311,16 +1447,23 @@ impl Hub {
         }
     }
     pub fn disconnect(&self) {
+        let _recovery = self.recovery.lock().ok();
         if let Ok(mut current) = self.current.lock() {
             if let Some(bridge) = current.take() {
                 bridge.stop("local_disconnect");
+            } else if let Some(path) = &self.state_file {
+                let _ = sessions::revoke(path);
             }
         }
     }
 }
 impl Drop for Hub {
     fn drop(&mut self) {
-        self.disconnect();
+        if let Ok(mut current) = self.current.lock() {
+            if let Some(bridge) = current.take() {
+                bridge.stop("bridge_dropped");
+            }
+        }
     }
 }
 impl Ticket {
@@ -1346,6 +1489,7 @@ impl Ticket {
                 entry.completed_at = Some(Instant::now());
             }
         }
+        self.bridge.save_session()?;
         // Return the exact stored result on both the first call and retry, including failures.
         Ok(stored)
     }
@@ -1431,6 +1575,12 @@ impl Bridge {
     }
     fn stop(&self, reason: &str) {
         if !self.live.swap(false, Ordering::SeqCst) {
+            if !sessions::resumable_stop(Some(reason)) {
+                if let Ok(mut memory) = self.memory.lock() {
+                    memory.stop_reason = Some(reason.into());
+                }
+                let _ = self.save_session();
+            }
             return;
         }
         self.ready.store(false, Ordering::SeqCst);
@@ -1445,6 +1595,7 @@ impl Bridge {
                 }
             }
         }
+        let _ = self.save_session();
         if let Ok(mut pending) = self.pending.lock() {
             for (_, sender) in std::mem::take(&mut *pending) {
                 let _ = sender.try_send(Err(
@@ -1765,8 +1916,13 @@ impl Bridge {
                             params["command"].as_str().is_some(), params["itemId"].as_str().is_some_and(token), self.ao_worker_command_approvals));
                     }
                 }
-            } else if let Ok(mut memory) = self.memory.lock() {
-                apply_notification(&mut memory, method, &value["params"]);
+            } else {
+                if let Ok(mut memory) = self.memory.lock() {
+                    apply_notification(&mut memory, method, &value["params"]);
+                }
+                if method == "turn/completed" && self.save_session().is_err() {
+                    self.stop("native_session_persistence_failed");
+                }
             }
             return;
         }
@@ -1875,6 +2031,7 @@ impl Bridge {
             // Select only a locally approved built-in profile and require exact confirmation.
             // Never substitute an unsandboxed permission profile on native failure.
             let profile = self.options.permission_profile.as_str();
+            let model = request.model.as_deref().unwrap_or(&self.options.model);
             if self.explicit_policy() {
                 let metadata = self.permission_metadata()?;
                 permissions::require_allowed(
@@ -1882,11 +2039,11 @@ impl Bridge {
                     profile,
                     self.codex_approval_policy(),
                     self.codex_approvals_reviewer(),
-                    &self.options.model,
+                    model,
                 )?;
             }
-            let mut params = json!({"cwd":self.root,"model":self.options.model,
-                "permissions":profile,"approvalPolicy":self.codex_approval_policy(),"approvalsReviewer":self.codex_approvals_reviewer(),"ephemeral":true,
+            let mut params = json!({"cwd":self.root,"model":model,
+                "permissions":profile,"approvalPolicy":self.codex_approval_policy(),"approvalsReviewer":self.codex_approvals_reviewer(),"ephemeral":false,
                 "developerInstructions":developer_instructions(profile)});
             if let Some(tokens) = self.options.context_window {
                 params["config"] = json!({"model_context_window": tokens});
@@ -1922,10 +2079,18 @@ impl Bridge {
                     id: id.clone(),
                     status: "idle".into(),
                     effective_policy: Some(effective),
+                    model: model.into(),
+                    effort: request
+                        .effort
+                        .clone()
+                        .or_else(|| self.options.effort.clone()),
+                    context_window: self.options.context_window,
                     started_at_ms: unix_ms(),
                     ..Default::default()
                 },
             );
+            drop(memory);
+            self.save_session()?;
             id
         } else {
             request.thread_id.clone().ok_or("Missing thread")?
@@ -2043,11 +2208,16 @@ impl Bridge {
                 "target":{"type":"custom","instructions":request.text}}),
             ),
             _ => {
+                let (model, effort) = {
+                    let memory = lock(&self.memory)?;
+                    let thread = memory.threads.get(&id).ok_or("Thread not owned")?;
+                    (thread.model.clone(), thread.effort.clone())
+                };
                 let mut params = json!({"threadId":id,"input":[{"type":"text","text":request.text}],
                 // Reassert the same supported boundary on every turn, including send.
                 "permissions":self.options.permission_profile,"approvalsReviewer":self.codex_approvals_reviewer(),
-                "cwd":self.root,"model":self.options.model,"approvalPolicy":self.codex_approval_policy()});
-                if let Some(effort) = &self.options.effort {
+                "cwd":self.root,"model":model,"approvalPolicy":self.codex_approval_policy()});
+                if let Some(effort) = &effort {
                     params["effort"] = json!(effort);
                 }
                 self.rpc("turn/start", params)
@@ -2292,6 +2462,48 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ao_model_changes_retire_only_superseded_terminal_ownership() {
+        let options: Connection = serde_json::from_value(json!({"executable":"codex.exe", "expected_sha256":"a".repeat(64),
+            "codex_home":"home", "allow_model_usage":true, "model":"fifth-model", "request_limit":6, "lifetime_seconds":60})).unwrap();
+        let mut memory = Memory::default();
+        for index in 0..MAX_THREADS {
+            let id = format!("old-{index}");
+            memory.threads.insert(
+                id.clone(),
+                ThreadState {
+                    id,
+                    model: format!("model-{index}"),
+                    status: "completed".into(),
+                    restored: true,
+                    started_at_ms: index as u64,
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(memory.ao_thread(&options).unwrap(), None);
+        assert_eq!(memory.threads.len(), MAX_THREADS - 1);
+        assert!(!memory.threads.contains_key("old-0"));
+        memory.threads.insert(
+            "working".into(),
+            ThreadState {
+                id: "working".into(),
+                status: "inProgress".into(),
+                restored: true,
+                ..Default::default()
+            },
+        );
+        for thread in memory.threads.values_mut() {
+            thread.status = "inProgress".into();
+        }
+        assert_eq!(memory.ao_thread(&options).unwrap(), None);
+        assert_eq!(
+            memory.threads.len(),
+            MAX_THREADS,
+            "active ownership is never evicted"
+        );
+    }
+
     use super::*;
     #[test]
     fn web_card_approve_for_me_runs_unattended_instead_of_waiting_on_codex_review() {
@@ -2349,6 +2561,8 @@ mod tests {
             request_id: "test-1".into(),
             thread_id: None,
             text: Some("Review without edits".into()),
+            model: None,
+            effort: None,
         };
         assert!(validate_control(&good).unwrap());
         let mut bad = good.clone();
@@ -2405,6 +2619,25 @@ mod tests {
         changed.request_id = "test-2".into();
         assert!(reserve(&mut memory, &changed, true, &options, true, true).is_err());
     }
+    #[test]
+    fn native_bridge_chat_model_selection_is_bound_to_start() {
+        let selected: Control =
+            serde_json::from_value(json!({"operation":"start","request_id":"selected",
+            "text":"Explain the task","model":"chatgpt-web/high","effort":"high"}))
+            .unwrap();
+        assert!(validate_control(&selected).unwrap());
+        let mut send = selected.clone();
+        send.operation = "send".into();
+        send.thread_id = Some("owned".into());
+        assert!(validate_control(&send).is_err());
+        let mut invalid = selected;
+        invalid.model = Some("../foreign".into());
+        assert!(validate_control(&invalid).is_err());
+        assert!(sessions::resumable_stop(Some("native_output_disconnected")));
+        assert!(!sessions::resumable_stop(Some("local_disconnect")));
+        assert!(!sessions::resumable_stop(Some("workspace_policy_changed")));
+    }
+
     #[test]
     fn native_bridge_accepts_web_gpt_model_without_widening_rpc_tokens() {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../aiTemp/ao-model-validation");
@@ -2596,6 +2829,8 @@ mod tests {
             request_id: "unbounded-1".into(),
             thread_id: None,
             text: Some("Review without edits".into()),
+            model: None,
+            effort: None,
         };
         let options = Connection {
             executable: PathBuf::new(),
@@ -3226,7 +3461,9 @@ mod tests {
                 operation: "start".into(),
                 request_id: "must-not-run".into(),
                 thread_id: None,
-                text: Some("Never submitted".into())
+                text: Some("Never submitted".into()),
+                model: None,
+                effort: None,
             })
             .is_err());
         assert_eq!(hub.status().unwrap()["requests_used"], 0);

@@ -42,7 +42,10 @@ fn reserve_command(
     validate(request)?;
     // The slash cannot occur in normal Control IDs; the two ledgers cannot collide.
     let key = format!("command/{}", request.request_id);
-    let fingerprint = serde_json::to_string(request).map_err(|_| "Cannot encode command")?;
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(request).map_err(|_| "Cannot encode command")?)
+    );
     prune_ledger(memory, Instant::now());
     if let Some(entry) = memory.ledger.get(&key) {
         if entry.fingerprint != fingerprint {
@@ -104,6 +107,7 @@ impl Hub {
                 bridge.ready.load(Ordering::SeqCst),
             )?
         };
+        bridge.save_session()?;
         Ok(CommandTicket {
             bridge,
             request,
@@ -132,6 +136,7 @@ impl CommandTicket {
                 entry.completed_at = Some(Instant::now());
             }
         }
+        self.bridge.save_session()?;
         Ok(stored)
     }
     fn execute(&self) -> Result<Value> {

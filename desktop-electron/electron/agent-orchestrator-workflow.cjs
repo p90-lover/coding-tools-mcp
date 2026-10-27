@@ -55,7 +55,7 @@ function executableSha256(resolved, metadata) {
 
 // Keep the actual native profile ID. The consented runtime's profile metadata enforces
 // availability/managed policy; the standalone command grant is independent and stays off.
-async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executable, model, permissionProfile = ":read-only",
+async function resolveAoNativeConnection({ workspaceId, runId, nodeId, taskId, roleId, executable, model, permissionProfile = ":read-only",
   approvalPolicy, approvalsReviewer, userData }) {
   clean(permissionProfile, 128);
   if (permissionProfile === ":ao-default" || /[\x00-\x1F\x7F]/.test(permissionProfile)) throw new Error("Choose an actual native permission profile");
@@ -72,7 +72,9 @@ async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executabl
     throw new Error("Select a native codex.exe within the 512 MiB inspection limit");
   }
   const nodeHash = createHash("sha256").update(JSON.stringify([
-    clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80),
+    clean(workspaceId, 128),
+    taskId && roleId ? `chat:${clean(taskId, 128)}` : clean(runId, 80),
+    taskId && roleId ? `role:${clean(roleId, 80)}` : clean(nodeId, 80),
   ])).digest("hex");
   return {
     executable: resolved, expected_sha256: await executableSha256(resolved, metadata),
@@ -345,6 +347,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       : "The Codex CLI was not found; install it with npm install -g @openai/codex, or choose a codex.exe in AO settings");
   }
   const backgroundRuns = new Map();
+  let recoveryGeneration = 0;
   // Background-run observations for MCP event incidents (stall, held, approval waits).
   // An observer failure must never affect the run it watches.
   function reportRun(workspaceId, runId, state, mission, attention = null) {
@@ -2108,6 +2111,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       await requireWebReadiness(node);
     }
     const selected = await resolveHarness({ workspaceId, runId, nodeId, executable,
+      taskId: mission.project_id, roleId: node.template_role_id,
       model: route.model, providerId: route.provider_id, accountId: route.account_id, permissionProfile: route.permission_profile,
       approvalPolicy: route.approval_policy, approvalsReviewer: route.approvals_reviewer });
     if (!selected || selected.model !== route.model || selected.permission_profile !== route.permission_profile
@@ -2156,8 +2160,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return response;
   }
 
-  async function observe({ workspaceId, runId, nodeId } = {}) {
+  async function observe({ workspaceId, runId, nodeId } = {}, stillCurrent = () => true) {
     const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
+    if (!stillCurrent()) return { ok: true, cancelled: true };
     if (externalAgent(found.node)) {
       const result = await observeExternal(workspaceId, runId, found.node, found.mission);
       screenUndriven(clean(workspaceId, 128), clean(runId, 80), found, result);
@@ -4179,6 +4184,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const starting = (run) => Boolean(backgroundRuns.get(runKey(id, run.id))?.starting);
     const refuse = () => new Error("This mission is still running; wait for it to finish or stop it first");
     let open = openOf(runsOfWorkspace);
+    for (let index = 0; index < open.length; index += 1) {
+      let run = open[index];
+      if (!starting(run) && !looping(run)) {
+        // Reconcile saved receipts before treating persisted card state as liveness.
+        for (const node of run.nodes ?? []) {
+          if (!["running", "reserved"].includes(node.state)) continue;
+          if (!node.id || node.state === "running" && !node.receipt?.thread_id) continue;
+          const observed = await observe({ workspaceId: id, runId: run.id, nodeId: node.id });
+          if (observed?.run) run = observed.run;
+        }
+        open[index] = run;
+      }
+    }
+    open = open.filter(run => !runSettled(run));
     // A run whose cards have all stopped can still have its loop winding down for a moment, as after
     // a steer that stopped a stalled turn: its message, queued for the next turn, was sent as soon as
     // the chat read free and refused twice within a second ("This chat is still running"). That loop
@@ -4198,6 +4217,34 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (const run of open) {
       await updateRun({ workspaceId: id, change: { operation: "cancel", run_id: run.id, expected_revision: run.revision } });
     }
+  }
+
+  async function restoreRuns(workspaceIds) {
+    const generation = ++recoveryGeneration;
+    let restored = 0;
+    for (const workspaceId of workspaceIds) {
+      const saved = await runs({ workspaceId });
+      if (generation !== recoveryGeneration) return { restored };
+      for (const run of saved.runs) {
+        if (run.cancelled || run.paused || !run.grant || run.grant.expires_at_ms <= Date.now()
+          || !run.nodes?.some(node => node.state === "running") || run.nodes.some(node => node.state === "reserved")) continue;
+        try {
+          // Recovery observes existing attempts; startRun may retry and request a fresh grant.
+          for (const node of run.nodes) {
+            if (generation !== recoveryGeneration) return { restored };
+            if (node.state === "running" && node.receipt?.thread_id) {
+              await observe({ workspaceId, runId: run.id, nodeId: node.id }, () => generation === recoveryGeneration);
+              if (generation !== recoveryGeneration) return { restored };
+            }
+          }
+          restored += 1;
+        } catch (error) {
+          if (generation !== recoveryGeneration) return { restored };
+          try { onRunState?.({ workspaceId, runId: run.id, status: "held", attention: "error", detail: publicText(error?.message || error, 500) }); } catch {}
+        }
+      }
+    }
+    return { restored };
   }
 
   async function createTeamRun(id, task, team, selection = {}, includeRun = false) {
@@ -6013,6 +6060,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return ended;
   }
   function dispose() {
+    stopTracking();
     schedulerDisposed = true;
     sessionOwners.clear();
     idleStopped = true;
@@ -6121,6 +6169,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
+  function stopTracking() {
+    recoveryGeneration += 1;
+    for (const state of backgroundRuns.values()) state.stopped = true;
+  }
+
   // goalAfterRun runs on its own when a run settles (reportRun); it is exposed for tests and recovery.
   /**
    * AO's spawn arguments for a subagent (subagents.cjs) on `route`, as a single chat card's: its
@@ -6198,7 +6251,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
