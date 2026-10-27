@@ -586,11 +586,17 @@ export async function responseRequest(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
+  // The turn is bound once: the header now fills the body's metadata, so the parsed request below
+  // names the same turn again and bound it a second time.
+  let boundTurn: string | undefined;
+  const bindTurn = (threadId: string, turnId: string) => {
+    if (boundTurn === `${threadId}\n${turnId}`) return;
+    boundTurn = `${threadId}\n${turnId}`;
+    options.onTurnIdentity?.({ threadId, turnId });
+  };
   try {
     const identity = extractCodexTurnIdentityFromBody(raw);
-    if (identity.threadId && identity.turnId) {
-      options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
-    }
+    if (identity.threadId && identity.turnId) bindTurn(identity.threadId, identity.turnId);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -611,9 +617,7 @@ export async function responseRequest(
     parsed = parseRequest(expanded);
     route = routeChatGptWebRequest(parsed, config);
     const identity = extractChatGptTurnIdentity(parsed);
-    if (identity.threadId && identity.turnId) {
-      options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
-    }
+    if (identity.threadId && identity.turnId) bindTurn(identity.threadId, identity.turnId);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
