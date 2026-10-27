@@ -282,6 +282,8 @@ export interface TurnBrokerOwner {
  * that works on one developer's machine is not silently unbindable on another's.
  */
 const MAX_UNIX_SOCKET_PATH_BYTES = 103;
+/** Waits between Windows pipe binds that hit EADDRINUSE: about 7.5 s in all before giving up. */
+const WINDOWS_PIPE_LISTEN_RETRY_MS = [250, 500, 1_000, 2_000, 4_000];
 
 export class TurnBroker implements TurnBrokerOwner {
   static forSocket(path: string): TurnBroker {
@@ -304,6 +306,7 @@ export class TurnBroker implements TurnBrokerOwner {
   private readonly retiredTokens = new Map<string, string>();
   private acceptingExternalOwners = true;
   private server?: Server;
+  private readonly sockets = new Set<Socket>();
   private startPromise?: Promise<void>;
 
   private constructor(readonly socketPath: string) {}
@@ -772,10 +775,16 @@ export class TurnBroker implements TurnBrokerOwner {
     this.startPromise = undefined;
     brokers.delete(this.socketPath);
     if (server?.listening) {
-      await new Promise<void>((resolveClose, rejectClose) => server.close(error => {
+      const closed = new Promise<void>((resolveClose, rejectClose) => server.close(error => {
         if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolveClose();
         else rejectClose(error);
       }));
+      // close() waits for every accepted connection, and the MCP process holds some open in long
+      // polls. Left open they hung the runtime's shutdown and, on Windows, kept the pipe name
+      // taken, so the next runtime's broker failed with EADDRINUSE. Nothing is served after this.
+      for (const socket of this.sockets) socket.destroy();
+      this.sockets.clear();
+      await closed;
     }
     if (!isWindowsPipeEndpoint(this.socketPath)
       && existsSync(this.socketPath)
@@ -784,7 +793,19 @@ export class TurnBroker implements TurnBrokerOwner {
 
   private start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
-    this.startPromise = new Promise<void>((resolveStart, rejectStart) => {
+    const started = this.bind();
+    this.startPromise = started;
+    // A failed bind must not be remembered: the endpoint is usually free a moment later (a
+    // previous runtime finishing its shutdown), and a cached rejection failed every later turn
+    // of this process with the same EADDRINUSE until it was restarted.
+    started.catch(() => {
+      if (this.startPromise === started) this.startPromise = undefined;
+    });
+    return started;
+  }
+
+  private bind(): Promise<void> {
+    return new Promise<void>((resolveStart, rejectStart) => {
       const windowsPipe = isWindowsPipeEndpoint(this.socketPath);
       if (!windowsPipe) {
         // sun_path is a fixed-size field in the kernel, so an over-long path fails inside listen()
@@ -800,17 +821,31 @@ export class TurnBroker implements TurnBrokerOwner {
         }
         mkdirSync(dirname(this.socketPath), { recursive: true, mode: 0o700 });
       }
-      const listen = () => {
+      const listen = (attempt = 0) => {
         const server = createServer(socket => this.handleSocket(socket));
         this.server = server;
-        server.once("error", rejectStart);
-        server.on("error", error => {
-          console.error(
-            `[chatgpt-web] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
-          );
-        });
+        const failStart = (error: Error) => {
+          if (this.server === server) this.server = undefined;
+          // A Windows pipe name stays taken until its previous owner's last instance closes, so a
+          // runtime started while the old one is still shutting down sees EADDRINUSE briefly.
+          const delay = WINDOWS_PIPE_LISTEN_RETRY_MS[attempt];
+          if (windowsPipe && (error as NodeJS.ErrnoException).code === "EADDRINUSE" && delay !== undefined) {
+            setTimeout(() => {
+              if (this.server === undefined && brokers.get(this.socketPath) === this) listen(attempt + 1);
+              else rejectStart(new Error(`ChatGPT web turn broker closed while binding ${this.socketPath}`));
+            }, delay);
+            return;
+          }
+          rejectStart(error);
+        };
+        server.once("error", failStart);
         server.listen(this.socketPath, () => {
-          server.off("error", rejectStart);
+          server.off("error", failStart);
+          server.on("error", error => {
+            console.error(
+              `[chatgpt-web] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
+            );
+          });
           if (!windowsPipe) chmodSync(this.socketPath, 0o600);
           resolveStart();
         });
@@ -872,16 +907,19 @@ export class TurnBroker implements TurnBrokerOwner {
         });
       });
     });
-    return this.startPromise;
   }
 
   private handleSocket(socket: Socket): void {
     let buffered = "";
     let handled = false;
     const disconnected = new AbortController();
+    this.sockets.add(socket);
     socket.setEncoding("utf8");
     socket.on("error", () => {});
-    socket.once("close", () => disconnected.abort());
+    socket.once("close", () => {
+      this.sockets.delete(socket);
+      disconnected.abort();
+    });
     socket.on("data", chunk => {
       if (handled) return;
       buffered += chunk;
