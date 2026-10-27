@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatGptWebTraceId } from "../src/adapters/chatgpt-web";
@@ -1126,6 +1126,44 @@ test.each(["alpha/search", "images/generations"])("authenticated lifecycle contr
     await activeRequest;
   } finally {
     await server.stop(true);
+  }
+});
+
+
+test("a second full-mode runtime reports an occupied broker pipe before accepting WebGPT turns", async () => {
+  if (process.platform !== "win32") return;
+  const path = defaultBrokerEndpoint(join(process.cwd(), "aiTemp", `occupied-broker-${process.pid}-${Date.now()}`));
+  const owner = createServer(socket => socket.destroy());
+  await new Promise<void>((resolve, reject) => {
+    owner.once("error", reject);
+    owner.listen(path, resolve);
+  });
+  const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: path };
+  const server = startServer(config);
+  try {
+    let response: Response | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      response = await server.fetch(new Request("http://localhost/healthz"));
+      if ((await response.clone().json() as { broker_state: string }).broker_state === "failed") break;
+      await Bun.sleep(10);
+    }
+    expect(response?.status).toBe(503);
+    expect(await response!.json()).toMatchObject({
+      status: "degraded",
+      accepting_turns: false,
+      broker_state: "failed",
+    });
+    const blocked = await server.fetch(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    }));
+    expect(blocked.status).toBe(503);
+    expect(await blocked.text()).toContain("turn broker is unavailable");
+  } finally {
+    await server.stop(true);
+    await closeTurnBrokers();
+    await new Promise<void>((resolve, reject) => owner.close(error => error ? reject(error) : resolve()));
   }
 });
 

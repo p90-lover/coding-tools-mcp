@@ -4044,6 +4044,15 @@ export class ChatGptBrowserWorker {
     throwIfPromptAttachmentAborted(abortSignal);
     const composer = await this.activeComposer(page, 30_000, abortSignal);
     await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+    // Focus or the Think/connector transition may restore an old Lexical draft.
+    // Reject it before inserting a large prompt, allowing the existing reset/retry to clear it.
+    const residualDraft = await this.attachedPromptText(page, abortSignal);
+    throwIfPromptAttachmentAborted(abortSignal);
+    if (residualDraft.length > 0) {
+      throw new ChatGptPromptAttachmentIntegrityError(
+        `ChatGPT composer was not empty before prompt insertion (residualChars=${residualDraft.length})`,
+      );
+    }
     // CDP Input.insertText is interpreted as live typing by ChatGPT's Lexical plugins. On a large
     // JSON transport it can turn literal Markdown backticks into rich code nodes, remove the
     // delimiters from textContent, and leave the next insertion outside the intended block. The

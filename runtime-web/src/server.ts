@@ -891,6 +891,13 @@ export function startServer(
   configureCompactionContinuationStorage(getConfigDir());
   const startedAt = Date.now();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
+  let brokerState: "starting" | "ready" | "failed" = turnBroker ? "starting" : "ready";
+  let brokerError: string | undefined;
+  const brokerUnavailableResponse = (): Response | undefined => brokerState === "ready"
+    ? undefined
+    : formatErrorResponse(503, "server_error", brokerState === "starting"
+      ? "ChatGPT web turn broker is starting; retry after the bridge becomes healthy"
+      : `ChatGPT web turn broker is unavailable: ${brokerError}`);
   let draining = false;
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;
@@ -921,20 +928,22 @@ export function startServer(
       const url = new URL(req.url);
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
-          status: "ok",
+          status: brokerState === "ready" ? "ok" : "degraded",
           service: "codex-chatgpt-web",
           version: VERSION,
           mode: config.mode,
           pid: process.pid,
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
-          accepting_turns: !draining,
+          accepting_turns: !draining && brokerState === "ready",
+          broker_state: brokerState,
+          ...(brokerError ? { broker_error: brokerError } : {}),
           successful_model_catalog_requests: successfulModelCatalogRequests,
           last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
           model_catalog_requests: modelCatalogRequests,
           last_model_catalog_result: lastModelCatalogResult,
           ...activity(),
-        });
+        }, { status: brokerState === "ready" ? 200 : 503 });
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
@@ -1079,6 +1088,8 @@ export function startServer(
         }
       }
       if (req.method === "POST" && url.pathname === "/router/v1/responses") {
+        const brokerUnavailable = brokerUnavailableResponse();
+        if (brokerUnavailable) return brokerUnavailable;
         if (draining) {
           return formatErrorResponse(
             503,
@@ -1158,6 +1169,8 @@ export function startServer(
         });
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
+        const brokerUnavailable = brokerUnavailableResponse();
+        if (brokerUnavailable) return brokerUnavailable;
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
           (signal, bindIdentity) => responseRequest(
@@ -1172,6 +1185,8 @@ export function startServer(
         );
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
+        const brokerUnavailable = brokerUnavailableResponse();
+        if (brokerUnavailable) return brokerUnavailable;
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
           (signal, bindIdentity) => compactRequest(
@@ -1214,11 +1229,14 @@ export function startServer(
   // port was still held by its predecessor throw here yet stay alive on the open pipe, owning the
   // endpoint without serving anything, so every later runtime failed its turns with EADDRINUSE.
   if (turnBroker) {
-    void turnBroker.listen().catch(error => {
-      console.error(
-        `[chatgpt-web] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
+    void turnBroker.listen().then(
+      () => { brokerState = "ready"; },
+      error => {
+        brokerState = "failed";
+        brokerError = error instanceof Error ? error.message : String(error);
+        console.error(`[chatgpt-web] turn broker endpoint is unavailable: ${brokerError}`);
+      },
+    );
   }
   function shutdown(): void {
     if (shutdownPromise) return;
