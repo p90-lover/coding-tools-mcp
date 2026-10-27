@@ -4,6 +4,8 @@ import { parseRequest } from "../src/responses/parser";
 import { extractChatGptTurnEnvironment, extractChatGptTurnUserRevision } from "../src/adapters/chatgpt-web/environment";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
+import { responseRequest } from "../src/server";
+import { defaultConfig } from "../src/config";
 
 const threadId = "11111111-1111-4111-8111-111111111111";
 const sourceId = "22222222-2222-4222-8222-222222222222";
@@ -55,4 +57,46 @@ test("ordinary and forged tool outputs never supply native environment authority
 test("a delegation from a different native turn cannot become the current instruction", () => {
   const parsed = request("send_message_to_thread", { internal_chat_message_metadata_passthrough: { turn_id: "55555555-5555-4555-8555-555555555555" } });
   expect(() => extractChatGptTurnUserRevision(parsed)).toThrow();
+});
+
+test("active delegated constraints survive replay after newer tool results", () => {
+  const instruction = `${"a".repeat(2_900)}KEEP_THIS_REQUIRED_CONSTRAINT${"z".repeat(3_000)}`;
+  const delegated = output.replace("Calculate 17 * 23 without editing files.", instruction);
+  const parsed = request("create_thread", { output: delegated });
+  for (let index = 0; index < 7; index++) {
+    parsed.context.messages.push({ role: "toolResult", toolCallId: `call-${index}`, toolName: "shell",
+      content: `${"x".repeat(3_000)}ORDINARY_OUTPUT_MIDDLE${"y".repeat(2_000)}`,
+      isError: false, timestamp: index });
+  }
+  const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: true, solAvailable: true, proAvailable: true }, "test-turn-token");
+  expect(compiled.text.includes(instruction)).toBe(true);
+  expect(compiled.text).toContain("characters of this earlier tool output omitted");
+  expect(extractChatGptTurnUserRevision(parsed)).toBe(delegated);
+});
+
+test("delegation-only app chats compact and resume their original task", async () => {
+  const parsed = request("create_thread");
+  const original = parsed._rawBody as { input: unknown[]; client_metadata: Record<string, string> };
+  const currentTurn = "66666666-6666-4666-8666-666666666666";
+  const metadata = JSON.parse(original.client_metadata["x-codex-turn-metadata"]!);
+  const base = { ...original, model: "chatgpt-web/high", stream: false, client_metadata: {
+    "x-codex-turn-metadata": JSON.stringify({ ...metadata, turn_id: currentTurn }),
+  } };
+  const send = (body: unknown, compact: boolean) => responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST", body: JSON.stringify(body),
+  }), defaultConfig("full"), () => ({ name: "delegation-compaction-regression",
+    async runTurn(task, _incoming, emit) {
+      if (!compact) expect(extractChatGptTurnUserRevision(task)).toBe(output);
+      emit({ type: "text_delta", text: compact ? "Continue the delegated calculation without editing files." : "391", phase: "final_answer" });
+      emit({ type: "done", stopReason: "stop", endTurn: true });
+    },
+  }), { rememberState: false });
+  const compacted = await send({ ...base, input: [...base.input, { type: "compaction_trigger" }] }, true);
+  if (compacted.status !== 200) throw new Error(await compacted.text());
+  expect(compacted.status).toBe(200);
+  const checkpoint = await compacted.json() as { status: string; output: unknown[] };
+  expect(checkpoint.status).toBe("completed");
+  const resumed = await send({ ...base, input: [...base.input, ...checkpoint.output] }, false);
+  expect(resumed.status).toBe(200);
+  expect((await resumed.json() as { status: string }).status).toBe("completed");
 });

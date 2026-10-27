@@ -742,6 +742,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-md blockquote { padding-left: 12px; border-left: 3px solid var(--ao-line); color: var(--ao-muted); }
 .cx-md hr { margin: 14px 0; border: 0; border-top: 1px solid var(--ao-line); }
 .cx-md a { color: var(--ao-blue); }
+.cx-md-image { display: block; max-width: 100%; max-height: 480px; width: auto; height: auto; object-fit: contain; margin: 8px 0; }
+.cx-md-table { max-width: 100%; overflow-x: auto; margin: 0 0 10px; }
+.cx-md-table table { width: 100%; border-collapse: collapse; font-size: inherit; }
+.cx-md-table th, .cx-md-table td { padding: 6px 10px; border: 1px solid var(--ao-line); text-align: left; vertical-align: top; }
 .cx-md code { padding: 1px 5px; border-radius: 5px; background: var(--cx-hover); font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 12.5px; }
 .cx-code { margin: 0 0 10px; overflow: hidden; border: 1px solid var(--ao-line); border-radius: 10px; }
 .cx-code-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 4px 12px; background: var(--cx-hover); color: var(--ao-muted); font-size: 11px; }

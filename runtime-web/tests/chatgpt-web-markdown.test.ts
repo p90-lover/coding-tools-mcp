@@ -1,6 +1,35 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { chatGptHtmlToMarkdown } from "../src/adapters/chatgpt-web/markdown";
+
+test("native ChatGPT code surfaces keep block fences and exact newlines", () => {
+  const { createDocument, createWindow } = require("@mixmark-io/domino");
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  const source = worker.split("// CHATGPT_MARKDOWN_CONTENT_BEGIN")[1]?.split("// CHATGPT_MARKDOWN_CONTENT_END")[0];
+  if (!source) throw new Error("ChatGPT Markdown projection is absent");
+  const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(source);
+  const window = createWindow();
+  const { project, text } = new Function("HTMLElement", "Node", `${javascript};return {project:chatGptMarkdownContent,text:markdownText}`)(window.HTMLElement, window.Node);
+  // Observed on the actual formatting probe: the native code renderer uses a
+  // source div rather than PRE and keeps its language label in a copy-excluded bar.
+  const nativeCode = (button: string) => createDocument('<p>FENCED_CODE_PROBE_X</p><div class="code-wrapper"><div data-code-block="true" data-start="20" data-end="60">'
+    + `<div data-markdown-copy="exclude"><div>Plain text</div><button>${button}</button></div>`
+    + '<div data-code-block-source="true"><code class="whitespace-pre! block"><span><span>alpha</span>\n<span>beta</span></span></code></div></div></div>').body;
+  const original = nativeCode("Copy");
+  const before = original.innerHTML;
+  const projected = project(original);
+  expect(chatGptHtmlToMarkdown(projected.innerHTML)).toBe("FENCED\\_CODE\\_PROBE\\_X\n\n```text\nalpha\nbeta\n```");
+  expect(projected.querySelector("pre code")?.textContent).toBe("alpha\nbeta");
+  expect(projected.querySelector("pre")?.getAttribute("data-start")).toBe("20");
+  expect(text(projected)).not.toContain("Plain text");
+  expect(projected.innerHTML).toBe(project(nativeCode("Copied")).innerHTML);
+  expect(original.innerHTML).toBe(before);
+  const nestedFence = nativeCode("Copy");
+  nestedFence.querySelector("code").className = "language-c++";
+  nestedFence.querySelector("code").textContent = "  alpha\n\nbeta\n```\n";
+  expect(chatGptHtmlToMarkdown(project(nestedFence).innerHTML))
+    .toContain("````c++\n  alpha\n\nbeta\n```\n````");
+});
 test("preserves answer images and descriptive logos without forwarding transient image sources", () => {
   expect(chatGptHtmlToMarkdown(
     '<p>Diagram <img alt="Design diagram" src="https://assets.example.com/diagram.png?v=2"></p>'

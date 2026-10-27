@@ -435,6 +435,7 @@ function LauncherShell({
   const [standaloneChatHost, setStandaloneChatHost] = useState<HTMLDivElement | null>(null);
   const openNativeChat = () => {
     setNativeChatOpen(true);
+    setVisitedSurfaces(current => current.has("gpt-browser") ? current : new Set(current).add("gpt-browser"));
     void api!.gptBrowserStatus().then(status => {
       if (!status.activeId || !status.page?.url) return;
       try {
