@@ -4410,6 +4410,26 @@ export class ChatGptBrowserWorker {
         for (const widget of Array.from(content.querySelectorAll(
           ".chart-widget-container, [data-code-block-preview-pane], [data-artifact-id], [data-canvas-id], iframe, canvas, audio, video, button, script, style, svg, source",
         ))) widget.remove();
+        // The native renderer uses a DIV source surface instead of PRE. Keep
+        // its exact code whitespace while removing the language/copy toolbar
+        // from the answer and its streaming consistency fingerprint.
+        for (const block of Array.from(content.querySelectorAll<HTMLElement>('[data-code-block="true"]'))) {
+          const originalCode = block.querySelector<HTMLElement>('[data-code-block-source] code');
+          if (!originalCode) continue;
+          const pre = content.ownerDocument.createElement("pre");
+          const code = content.ownerDocument.createElement("code");
+          const namedLanguage = /\blanguage-([a-z0-9_+#.-]+)(?=\s|$)/i.exec(originalCode.className)?.[1];
+          const label = block.querySelector('[data-markdown-copy="exclude"]')?.firstElementChild?.textContent?.trim();
+          const language = namedLanguage ?? (label === "Plain text" ? "text" : label?.toLowerCase());
+          if (language && /^[a-z0-9_+#.-]{1,40}$/i.test(language)) code.className = `language-${language}`;
+          code.textContent = originalCode.textContent ?? "";
+          for (const name of ["data-start", "data-end"]) {
+            const value = block.getAttribute(name);
+            if (value !== null) pre.setAttribute(name, value);
+          }
+          pre.appendChild(code);
+          block.replaceWith(pre);
+        }
         return content;
       };
       // ChatGPT may merge adjacent `.markdown` roots or virtualize an earlier prefix while a streamed

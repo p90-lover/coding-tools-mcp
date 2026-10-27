@@ -34,13 +34,15 @@ function trimmedResult(message: CodexToolResultMessage): CodexToolResultMessage 
 }
 
 /** Shortens large tool results older than the most recent few; everything else is unchanged. */
-export function withTrimmedOldToolResults(messages: CodexMessage[]): CodexMessage[] {
+export function withTrimmedOldToolResults(messages: CodexMessage[], instructionContent?: string): CodexMessage[] {
   let recentSeen = 0;
   let changed = false;
   const result = [...messages];
   for (let index = result.length - 1; index >= 0; index -= 1) {
     const message = result[index]!;
     if (message.role !== "toolResult") continue;
+    // Native app delegation is task input delivered through a synthetic tool result.
+    if (instructionContent !== undefined && message.content === instructionContent) continue;
     recentSeen += 1;
     if (recentSeen <= RECENT_TOOL_RESULTS_KEPT_WHOLE) continue;
     const trimmed = trimmedResult(message);

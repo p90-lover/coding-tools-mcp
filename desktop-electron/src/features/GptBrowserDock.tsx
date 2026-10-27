@@ -1,6 +1,7 @@
 import { useLayoutEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import type { LauncherApi } from "../types";
+import { PartErrorBoundary } from "../PartErrorBoundary";
 import { GptBrowserSurface } from "./GptBrowserSurface";
 
 /** One browser instance and account session shared by Chat and the GPT Browser tab. */
@@ -22,6 +23,8 @@ export function GptBrowserDock({ standaloneHost, chatHost, inChat, active, api, 
     if (host && root.parentElement !== host) host.appendChild(root);
   }, [root, host]);
   useLayoutEffect(() => () => { root.remove(); }, [root]);
-  return createPortal(<GptBrowserSurface api={api} active={active && Boolean(host)}
-    placement={inChat ? "chat" : "standalone"} setError={setError} />, root);
+  return createPortal(<PartErrorBoundary label="ChatGPT Web">
+    <GptBrowserSurface api={api} active={active && Boolean(host)}
+      placement={inChat ? "chat" : "standalone"} setError={setError} />
+  </PartErrorBoundary>, root);
 }

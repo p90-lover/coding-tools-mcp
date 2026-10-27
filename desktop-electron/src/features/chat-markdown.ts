@@ -1,5 +1,5 @@
 // A small Markdown reader for chat answers, Codex-style: headings, paragraphs, lists, quotes,
-// rules and fenced code, with inline code, bold, italic and links. It returns plain data that
+// rules, tables and fenced code, with inline code, bold, italic, links and images. It returns plain data that
 // React renders as elements, so model output never becomes HTML.
 
 export type MdInline =
@@ -8,6 +8,7 @@ export type MdInline =
   | { kind: "strong"; children: MdInline[] }
   | { kind: "em"; children: MdInline[] }
   | { kind: "link"; text: string; href: string }
+  | { kind: "image"; alt: string; src: string }
   // An answer citing the person's Nth annotation (:codex-annotation{index="N"}, as Codex asks for).
   | { kind: "annotation"; index: number };
 
@@ -17,6 +18,7 @@ export type MdBlock =
   | { kind: "list"; ordered: boolean; start: number; items: MdInline[][] }
   | { kind: "quote"; inline: MdInline[] }
   | { kind: "code"; lang: string; text: string }
+  | { kind: "table"; headers: MdInline[][]; rows: MdInline[][][]; align: ("left" | "center" | "right" | undefined)[] }
   | { kind: "rule" };
 
 const FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([\w+#.-]*)\s*$/;
@@ -26,9 +28,16 @@ const ORDERED = /^\s{0,3}(\d{1,9})[.)]\s+(.*)$/;
 const RULE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
 const QUOTE = /^\s{0,3}>\s?(.*)$/;
 
-/** Only web and mail links become clickable; anything else stays text. */
-export function safeHref(href: string): string | null {
-  const value = href.trim();
+/** Only web/mail links become clickable; images use credential-free HTTPS. */
+export function safeHref(href: string, image = false): string | null {
+  const wrapped = href.trim();
+  const value = wrapped.startsWith("<") && wrapped.endsWith(">") ? wrapped.slice(1, -1) : wrapped;
+  if (image) {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" && !url.username && !url.password ? url.href : null;
+    } catch { return null; }
+  }
   return /^(https?:\/\/|mailto:)/i.test(value) ? value : null;
 }
 
@@ -39,11 +48,23 @@ export function parseInline(source: string): MdInline[] {
   let index = 0;
   while (index < source.length) {
     const rest = source.slice(index);
+    const escaped = source.charCodeAt(index + 1);
+    if (source[index] === "\\" && ((escaped >= 33 && escaped <= 47) || (escaped >= 58 && escaped <= 64)
+      || (escaped >= 91 && escaped <= 96) || (escaped >= 123 && escaped <= 126))) {
+      text += source[index + 1]; index += 2; continue;
+    }
     const cite = /^:codex-annotation\{index="?(\d{1,3})"?\}/.exec(rest);
     if (cite) { flush(); out.push({ kind: "annotation", index: Number(cite[1]) }); index += cite[0].length; continue; }
     const code = /^(`+)([\s\S]*?[^`])\1(?!`)/.exec(rest);
     if (code) { flush(); out.push({ kind: "code", text: code[2].replace(/^ (.*) $/, "$1") }); index += code[0].length; continue; }
-    const link = /^\[([^\]\n]+)\]\(([^)\s]+)\)/.exec(rest);
+    const image = /^!\[([^\]\n]*)\]\((<[^>\n]+>|[^)\s]+)\)/.exec(rest);
+    if (image) {
+      const src = safeHref(image[2], true);
+      flush();
+      out.push(src ? { kind: "image", alt: image[1], src } : { kind: "text", text: image[1] || "Image" });
+      index += image[0].length; continue;
+    }
+    const link = /^\[([^\]\n]+)\]\((<[^>\n]+>|[^)\s]+)\)/.exec(rest);
     if (link) {
       const href = safeHref(link[2]);
       flush();
@@ -63,6 +84,31 @@ export function parseInline(source: string): MdInline[] {
   }
   flush();
   return out;
+}
+
+function tableCells(line: string): string[] {
+  const source = line.trim();
+  const cells: string[] = [];
+  let start = 0;
+  let ticks = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === "\\" && !ticks) { index += 1; continue; }
+    if (source[index] === "`") {
+      let end = index + 1;
+      while (source[end] === "`") end += 1;
+      const count = end - index;
+      if (!ticks) ticks = count;
+      else if (ticks === count) ticks = 0;
+      index = end - 1;
+    } else if (source[index] === "|" && !ticks) {
+      cells.push(source.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  cells.push(source.slice(start).trim());
+  if (source.startsWith("|") && cells[0] === "") cells.shift();
+  if (source.endsWith("|") && cells.at(-1) === "") cells.pop();
+  return cells;
 }
 
 export function parseMarkdown(source: string): MdBlock[] {
@@ -124,6 +170,36 @@ export function parseMarkdown(source: string): MdBlock[] {
       }
       blocks.push({ kind: "list", ordered: isOrdered, start: isOrdered ? Number(ordered![1]) : 1, items: items.map(parseInline) });
       continue;
+    }
+    if (line.includes("|") && index + 1 < lines.length) {
+      const headers = tableCells(line);
+      const divider = tableCells(lines[index + 1]);
+      if (headers.length && divider.length === headers.length && divider.every(cell => /^:?-+:?$/.test(cell))) {
+        endParagraph();
+        const tableStart = index;
+        index += 1;
+        const rowLines: string[] = [];
+        while (index + 1 < lines.length) {
+          const next = lines[index + 1];
+          if (!next.trim() || FENCE.test(next) || HEADING.test(next) || RULE.test(next)
+            || QUOTE.test(next) || BULLET.test(next) || ORDERED.test(next)) break;
+          rowLines.push(next);
+          index += 1;
+        }
+        // Sparse untrusted tables must not multiply a small reply into millions of React cells.
+        if (headers.length * (rowLines.length + 1) > 4_096) {
+          blocks.push({ kind: "code", lang: "text", text: lines.slice(tableStart, index + 1).join("\n") });
+          continue;
+        }
+        const rows = rowLines.map(next => {
+          const row = tableCells(next);
+          return headers.map((_, column) => parseInline(row[column] ?? ""));
+        });
+        const align = divider.map(cell => cell.endsWith(":") ? cell.startsWith(":") ? "center" as const : "right" as const
+          : cell.startsWith(":") ? "left" as const : undefined);
+        blocks.push({ kind: "table", headers: headers.map(parseInline), rows, align });
+        continue;
+      }
     }
     paragraph.push(line);
   }

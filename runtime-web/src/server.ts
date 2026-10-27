@@ -14,6 +14,7 @@ import {
   extractChatGptTurnIdentity,
   extractCodexTurnIdentityFromBody,
   extractChatGptCompactionSourceRevision,
+  chatGptTurnUserRevisionHistory,
 } from "./adapters/chatgpt-web/environment";
 import { configureCompactionContinuationStorage, rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
@@ -649,11 +650,13 @@ export async function responseRequest(
     const body = parsed._rawBody as { input?: unknown[] };
     // v1 installs the bounded user-message output, whereas v2 retains the original source.
     // Authenticate both exact producer-defined representations, never arbitrary rewrites.
-    const v1Source = extractChatGptCompactionSourceRevision({
+    const v1Source = chatGptTurnUserRevisionHistory({
       ...parsed,
       _rawBody: { ...body, input: buildCompactV1Output(extractCompactUserMessages(body.input), summary) },
-    });
-    rememberCompactionContinuation(parsed, identity, [source, v1Source], summary);
+    }).at(-1);
+    // App-created v2 chats can consist only of a synthetic delegation. The v1 user-only
+    // representation has no task revision in that case; it must not invalidate the v2 source.
+    rememberCompactionContinuation(parsed, identity, v1Source ? [source, v1Source] : [source], summary);
   };
   if (compaction && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
     return formatErrorResponse(

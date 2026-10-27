@@ -9,6 +9,7 @@ function Inline({ parts }: { parts: MdInline[] }) {
       case "strong": return <strong key={index}><Inline parts={part.children} /></strong>;
       case "em": return <em key={index}><Inline parts={part.children} /></em>;
       case "link": return <a key={index} href={part.href} target="_blank" rel="noreferrer noopener">{part.text}</a>;
+      case "image": return <a key={index} href={part.src} target="_blank" rel="noreferrer noopener"><img className="cx-md-image" src={part.src} alt={part.alt} loading="lazy" referrerPolicy="no-referrer" /></a>;
       case "annotation": return <span key={index} className="cx-annotation-ref" title={`Your annotation ${part.index}`}>{part.index}</span>;
       default: return <span key={index}>{part.text}</span>;
     }
@@ -43,6 +44,10 @@ export const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string 
         : <ul key={index}>{block.items.map((item, at) => <li key={at}><Inline parts={item} /></li>)}</ul>;
       case "quote": return <blockquote key={index}><Inline parts={block.inline} /></blockquote>;
       case "code": return <CodeBlock key={index} lang={block.lang} text={block.text} />;
+      case "table": return <div key={index} className="cx-md-table"><table>
+        <thead><tr>{block.headers.map((cell, column) => <th key={column} scope="col" style={{ textAlign: block.align[column] }}><Inline parts={cell} /></th>)}</tr></thead>
+        <tbody>{block.rows.map((row, at) => <tr key={at}>{row.map((cell, column) => <td key={column} style={{ textAlign: block.align[column] }}><Inline parts={cell} /></td>)}</tr>)}</tbody>
+      </table></div>;
       case "rule": return <hr key={index} />;
       default: return <p key={index}><Inline parts={block.inline} /></p>;
     }
