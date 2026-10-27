@@ -357,10 +357,24 @@ class FakeNode {
   click() { this.clicks += 1; }
 }
 
-function quotaPage({ hash = "#/quota", loaded = false, usage } = {}) {
+function quotaPage({ hash = "#/quota", loaded = false, usage, usageStatus = 200, localStorage = storage() } = {}) {
   const marker = `coding-tools-${"c".repeat(48)}`;
   const sessionStorage = storage();
   sessionStorage.setItem("coding-tools-cpa-session", marker);
+  // The browser's XMLHttpRequest, as CPA's page (axios) uses it; a request that reaches the network
+  // waits in `network` until the test answers it.
+  const network = [];
+  class XMLHttpRequest {
+    open(method, url) { Object.assign(this, { method, url, readyState: 1 }); }
+    setRequestHeader() {}
+    abort() {}
+    send(body) { network.push({ xhr: this, body: JSON.parse(body) }); }
+  }
+  const answer = (index, statusCode, body) => {
+    const { xhr } = network[index];
+    Object.assign(xhr, { status: 200, responseText: JSON.stringify({ status_code: statusCode, header: {}, body }) });
+    xhr.onloadend();
+  };
   const page = new FakeNode("main");
   const header = new FakeNode("header", "QuotaHeader-module__header___FQh-X");
   const button = new FakeNode("button", "QuotaHeader-module__primaryAction___wLlcP");
@@ -376,18 +390,29 @@ function quotaPage({ hash = "#/quota", loaded = false, usage } = {}) {
     addEventListener: () => {},
   });
   const context = vm.createContext({
-    window: {}, document, sessionStorage, innerWidth: 900,
+    window: { XMLHttpRequest }, XMLHttpRequest, Event: class { constructor(type) { this.type = type; } },
+    document, sessionStorage, localStorage, innerWidth: 900,
     location: { hash },
     Date: { now: () => clock.now, parse: Date.parse },
     setInterval: (fn) => ticks.push(fn),
+    setTimeout: (fn) => fn(),
     addEventListener: () => {},
     fetch: async (url, options) => {
       fetches.push({ url, authorization: options.headers.Authorization });
-      return { ok: true, json: async () => usage };
+      return { ok: usageStatus === 200, status: usageStatus, json: async () => usage };
     },
   });
+  /** CPA's page asking for one account's quota, as its quota loaders do; resolves with the answer. */
+  const ask = (authIndex = "codex-1") => {
+    const xhr = new XMLHttpRequest();
+    const result = {};
+    xhr.onloadend = () => Object.assign(result, { status: xhr.status, body: JSON.parse(xhr.responseText) });
+    xhr.open("POST", "http://127.0.0.1:8317/v0/management/api-call");
+    xhr.send(JSON.stringify({ authIndex, method: "GET", url: "https://chatgpt.com/backend-api/wham/usage" }));
+    return result;
+  };
   return {
-    marker, header, button, clock, fetches, sessionStorage, context,
+    marker, header, button, clock, fetches, sessionStorage, localStorage, context, network, answer, ask,
     run: () => vm.runInContext(quotaPageScript(marker), context),
     settle: () => new Promise((resolve) => setImmediate(resolve)),
     tick: () => ticks[0](),
@@ -406,7 +431,7 @@ const USAGE = {
   ],
 };
 
-test("the quota page loads every provider's quota on open, once, and again after five minutes", () => {
+test("the quota page loads every provider's quota on open, once, and again after two minutes", () => {
   const q = quotaPage({ usage: USAGE });
   assert.equal(q.run(), "started");
   assert.equal(q.run(), "running", "one script per page load");
@@ -414,18 +439,18 @@ test("the quota page loads every provider's quota on open, once, and again after
   q.tick();
   q.tick();
   assert.equal(q.button.clicks, 1, "not again on this visit while it is fresh");
-  q.clock.now += 5 * 60e3 + 1;
+  q.clock.now += 2 * 60e3 + 1;
   q.tick();
-  assert.equal(q.button.clicks, 2, "five minutes on, the open page refreshes again");
+  assert.equal(q.button.clicks, 2, "two minutes on, the open page refreshes again");
   q.button.disabled = true;
-  q.clock.now += 5 * 60e3 + 1;
+  q.clock.now += 2 * 60e3 + 1;
   q.tick();
   assert.equal(q.button.clicks, 2, "never while the page has no credentials or is loading");
 });
 
 test("a reopened quota page that still shows loaded quota is not refreshed early, nor while hidden", () => {
   const q = quotaPage({ loaded: true, usage: USAGE });
-  q.sessionStorage.setItem("coding-tools-quota-refreshed", String(q.clock.now - 60e3));
+  q.localStorage.setItem("coding-tools-quota-refreshed", String(q.clock.now - 60e3));
   q.run();
   assert.equal(q.button.clicks, 0);
   q.context.location.hash = "#/auth-files";
@@ -470,6 +495,75 @@ test("no Cline Pass card without enabled keys, and the script waits for a seeded
   unseeded.sessionStorage.setItem("coding-tools-cpa-session", "something-else");
   assert.equal(unseeded.run(), "unseeded");
   assert.equal(unseeded.button.clicks, 0);
+});
+
+const CODEX_QUOTA = { plan_type: "plus", rate_limit: { primary_window: { used_percent: 30 } } };
+
+test("saved quota comes back at once after a restart; the network is asked every two minutes", () => {
+  const first = quotaPage({ usage: USAGE });
+  first.run();
+  first.ask();
+  assert.equal(first.network.length, 1, "the first refresh asks the upstream");
+  assert.equal(first.network[0].body.url, "https://chatgpt.com/backend-api/wham/usage");
+  first.answer(0, 200, CODEX_QUOTA);
+
+  // The app restarts a minute later: a new page, the same saved answers.
+  const again = quotaPage({ usage: USAGE, localStorage: first.localStorage });
+  again.clock.now = first.clock.now + 60e3;
+  again.run();
+  assert.equal(again.button.clicks, 1, "the empty page is filled at once");
+  const replayed = again.ask();
+  assert.equal(again.network.length, 0, "from the saved answer, not the network");
+  assert.deepEqual(replayed, { status: 200, body: { status_code: 200, header: {}, body: CODEX_QUOTA } });
+
+  again.clock.now += 60e3 + 1;
+  again.tick();
+  assert.equal(again.button.clicks, 2);
+  again.ask();
+  assert.equal(again.network.length, 1, "two minutes after the last network refresh, it asks again");
+});
+
+test("an upstream 429 keeps the last good quota on screen and slows refreshes to five minutes", () => {
+  const q = quotaPage({ usage: USAGE });
+  q.run();
+  q.ask();
+  q.answer(0, 200, CODEX_QUOTA);
+  q.clock.now += 2 * 60e3 + 1;
+  q.tick();
+  assert.equal(q.button.clicks, 2);
+  const limited = q.ask();
+  q.answer(1, 429, { error: { message: "rate limited" } });
+  assert.deepEqual(limited.body.body, CODEX_QUOTA, "the page gets the last good answer, not the 429");
+
+  q.clock.now += 2 * 60e3 + 1;
+  q.tick();
+  assert.equal(q.button.clicks, 2, "after a 429, two minutes is too soon");
+  q.clock.now += 3 * 60e3;
+  q.tick();
+  assert.equal(q.button.clicks, 3, "five minutes after the 429 it tries again");
+
+  // An account with nothing saved still sees its own refusal.
+  q.clock.now += 5 * 60e3 + 1;
+  q.tick();
+  const fresh = q.ask("codex-2");
+  q.answer(2, 429, { error: { message: "rate limited" } });
+  assert.equal(fresh.body.status_code, 429);
+});
+
+test("the Cline Pass card shows its saved reading at once and keeps it through a failed read", async () => {
+  const localStorage = storage();
+  localStorage.setItem("coding-tools-quota-cline", JSON.stringify({ at: Date.parse("2026-10-24T07:59:00Z"), value: USAGE }));
+  const q = quotaPage({ usage: null, usageStatus: 503, localStorage });
+  q.run();
+  await q.settle();
+  assert.equal(q.fetches.length, 0, "a minute-old reading is still fresh");
+  const card = q.header.nextElementSibling;
+  assert.match(card.textContent, /2 keys · updated 1m ago[\s\S]*main key[\s\S]*58% left/);
+  q.clock.now += 2 * 60e3;
+  q.tick();
+  await q.settle();
+  assert.equal(q.fetches.length, 1);
+  assert.match(q.header.nextElementSibling.textContent, /main key[\s\S]*58% left/, "a failed read keeps the last good one");
 });
 
 test("the quota script runs only in the managed panel frame", async () => {

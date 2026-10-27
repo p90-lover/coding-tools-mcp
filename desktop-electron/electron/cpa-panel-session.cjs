@@ -248,10 +248,15 @@ function autoReviewSignInScript(marker) {
 
 /**
  * The panel page script for CPA's quota page (#/quota), run once per page load of a seeded panel:
- * - It presses "Refresh all credentials" when the page shows nothing loaded on this visit, and again
- *   every 5 minutes while the page stays open and shown. A press by the user resets that clock.
+ * - CPA keeps quota only in the page's memory, so every reload or app restart showed an empty page.
+ *   The script keeps each account's last good quota answer (localStorage, which the app's default
+ *   session keeps across restarts) and replays it when the page opens, so the page shows at once.
+ * - It refreshes from the network every 2 minutes while the page is open and shown, and every 5
+ *   minutes after an upstream 429 (refreshEvery). An account that answers 429 or fails keeps
+ *   showing its last good quota. A press by the user always goes to the network.
  * - It adds a Cline Pass card under the page header with each key's 5-hour, weekly and monthly
- *   windows, read from the Cline switcher with the marker (the header hook swaps in the key).
+ *   windows, read from the Cline switcher with the marker (the header hook swaps in the key), and
+ *   kept the same way.
  * "running" when the page already has it, "unseeded" before the panel session is seeded.
  */
 function quotaPageScript(marker) {
@@ -260,13 +265,28 @@ function quotaPageScript(marker) {
     if (sessionStorage.getItem('coding-tools-cpa-session') !== marker) return 'unseeded';
     if (window.__codingToolsQuota) return 'running';
     window.__codingToolsQuota = true;
-    const STALE_MS = 5 * 60e3;
     const REFRESHED = 'coding-tools-quota-refreshed';
+    const LIMITED = 'coding-tools-quota-limited';
+    const SAVED = 'coding-tools-quota-saved';
+    const CLINE_SAVED = 'coding-tools-quota-cline';
     const LABELS = { five_hour: '5-hour', weekly: 'Weekly', monthly: 'Monthly' };
     const MONO = 'ui-monospace,SF Mono,Cascadia Mono,JetBrains Mono,Menlo,Consolas,monospace';
+    const read = (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } };
+    const write = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} };
+    const limitedAt = () => Number(read(LIMITED)) || 0;
+    const noteLimited = () => write(LIMITED, Date.now());
+    // How long a refresh holds before the next one goes to the network. 2 minutes normally; after an
+    // upstream 429 (limitedAt(), 0 when never), 5 minutes, so the page does not keep the limit hit.
+    // The slower pace lasts 30 minutes from the last 429; a limit still hit renews it.
+    function refreshEvery() {
+      return Date.now() - limitedAt() < 30 * 60e3 ? 5 * 60e3 : 2 * 60e3;
+    }
+    const savedCline = read(CLINE_SAVED);
     let refreshedThisVisit = false;
-    let usage = null;
-    let usageAt = 0;
+    let networkUntil = 0;
+    let usage = savedCline?.value ?? null;
+    let usageAt = Number(savedCline?.at) || 0;
+    let usageTriedAt = usageAt;
     let renderedAt = 0;
     let loading = false;
     let card = null;
@@ -285,6 +305,10 @@ function quotaPageScript(marker) {
       if (!(minutes > 0)) return 'resets now';
       const d = Math.floor(minutes / 1440), h = Math.floor((minutes % 1440) / 60), m = minutes % 60;
       return 'resets in ' + (d ? d + 'd ' + h + 'h' : h ? h + 'h ' + m + 'm' : m + 'm');
+    };
+    const ago = (at) => {
+      const minutes = Math.floor((Date.now() - at) / 60e3);
+      return minutes < 1 ? 'updated just now' : minutes < 60 ? 'updated ' + minutes + 'm ago' : 'updated ' + Math.floor(minutes / 60) + 'h ago';
     };
     function windowRow(limit) {
       const left = limit.percentUsed === null ? null : Math.round(100 - limit.percentUsed);
@@ -306,7 +330,7 @@ function quotaPageScript(marker) {
       card.dataset.codingTools = 'cline-quota';
       const head = el('div', 'display:flex;align-items:baseline;justify-content:space-between;gap:8px');
       head.append(el('strong', 'color:var(--text-primary);font-size:14px', 'Cline Pass'),
-        el('span', 'color:var(--text-tertiary);font-size:11.5px', accounts.length + (accounts.length === 1 ? ' key' : ' keys')));
+        el('span', 'color:var(--text-tertiary);font-size:11.5px', accounts.length + (accounts.length === 1 ? ' key' : ' keys') + ' · ' + ago(usageAt)));
       const keys = accounts.map((account) => {
         const box = el('div', 'display:flex;flex-direction:column;gap:9px;padding:10px 11px;border-radius:10px;border:1px solid color-mix(in srgb, var(--border-color) 70%, transparent);background:color-mix(in srgb, var(--bg-secondary) 55%, transparent)');
         box.append(el('div', 'color:var(--text-primary);font:600 12.5px ' + MONO + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap', account.name));
@@ -333,34 +357,112 @@ function quotaPageScript(marker) {
       try {
         const response = await fetch('/v0/management/cline-pass-switcher/api/usage-limits' + (fresh ? '?fresh=1' : ''),
           { headers: { Authorization: 'Bearer ' + marker }, cache: 'no-store' });
-        usage = response.ok ? await response.json() : null;
+        if (response.status === 429) noteLimited();
+        // A failed read keeps the last good one on screen; the attempt still waits its turn.
+        if (response.ok) {
+          usage = await response.json();
+          usageAt = Date.now();
+          write(CLINE_SAVED, { at: usageAt, value: usage });
+          if ((usage?.accounts || []).some((a) => /\\b429\\b|rate.?limit/i.test(a.error || ''))) noteLimited();
+        }
       } catch {
-        usage = null;
+        // offline or CPA restarting: keep what is shown
       } finally {
         loading = false;
-        usageAt = Date.now();
+        usageTriedAt = Date.now();
         render();
       }
+    }
+    // CPA's quota page asks each account through POST /v0/management/api-call ({authIndex, method,
+    // url, header, data}); CPA answers 200 with the upstream's status_code and body. On this page the
+    // script answers those requests itself: from the saved answer while it is fresh, else from the
+    // network, saving a good answer and falling back to the saved one when the upstream refuses.
+    const NativeXhr = window.XMLHttpRequest;
+    const savedAnswers = () => read(SAVED) || {};
+    const answerKey = (request, body) => {
+      if (!onQuotaPage() || request.method.toUpperCase() !== 'POST' || !/\\/v0\\/management\\/api-call$/.test(request.url.split('?')[0])) return null;
+      let call;
+      try { call = JSON.parse(body); } catch { return null; }
+      if (!call?.url || /consume/i.test(call.url)) return null;
+      return [call.authIndex ?? call.auth_index ?? '', call.method || 'GET', call.url, call.data ?? ''].join(' ');
+    };
+    const answerWith = (xhr, status, text) => {
+      for (const [name, value] of Object.entries({ readyState: 4, status, statusText: status === 200 ? 'OK' : '', responseText: text, response: text, responseURL: xhr.__codingTools.url })) {
+        Object.defineProperty(xhr, name, { configurable: true, value });
+      }
+      xhr.getAllResponseHeaders = () => 'content-type: application/json\\r\\n';
+      xhr.getResponseHeader = (name) => /^content-type$/i.test(name) ? 'application/json' : null;
+      setTimeout(() => {
+        for (const type of status ? ['readystatechange', 'load', 'loadend'] : ['readystatechange', 'error', 'loadend']) xhr['on' + type]?.(new Event(type));
+      });
+    };
+    if (NativeXhr) {
+      const { open, send, setRequestHeader, abort } = NativeXhr.prototype;
+      NativeXhr.prototype.open = function (method, url, ...rest) {
+        this.__codingTools = { method: String(method), url: String(url), headers: [] };
+        return open.call(this, method, url, ...rest);
+      };
+      NativeXhr.prototype.setRequestHeader = function (name, value) {
+        this.__codingTools?.headers.push([name, value]);
+        return setRequestHeader.call(this, name, value);
+      };
+      NativeXhr.prototype.abort = function () {
+        this.__codingTools?.inner?.abort();
+        return abort.call(this);
+      };
+      NativeXhr.prototype.send = function (body) {
+        const request = this.__codingTools;
+        const key = request && answerKey(request, body);
+        if (!key) return send.call(this, body);
+        const saved = savedAnswers()[key];
+        if (saved && Date.now() > networkUntil && Date.now() - saved.at < refreshEvery()) return answerWith(this, 200, saved.text);
+        const inner = new NativeXhr();
+        request.inner = inner;
+        open.call(inner, request.method, request.url, true);
+        for (const [name, value] of request.headers) setRequestHeader.call(inner, name, value);
+        inner.timeout = this.timeout;
+        inner.withCredentials = this.withCredentials;
+        inner.onloadend = () => {
+          let upstream = 0;
+          try { upstream = Number(JSON.parse(inner.responseText).status_code) || 0; } catch {}
+          const good = inner.status === 200 && upstream >= 200 && upstream < 300;
+          if (inner.status === 429 || upstream === 429) noteLimited();
+          const answers = savedAnswers();
+          if (good) {
+            answers[key] = { at: Date.now(), text: inner.responseText };
+            write(SAVED, answers);
+          }
+          if (!good && answers[key]) answerWith(this, 200, answers[key].text);
+          else answerWith(this, inner.status, inner.responseText);
+        };
+        send.call(inner, body);
+      };
     }
     function tick() {
       if (!onQuotaPage()) { refreshedThisVisit = false; place(); return; }
       if (!shown()) return;
       const button = refreshButton();
       const nothingLoaded = !document.querySelector('[class*="QuotaHeader-module__metaLoaded"]');
-      const stale = Date.now() - (Number(sessionStorage.getItem(REFRESHED)) || 0) > STALE_MS;
-      if (button && !button.disabled && !button.querySelector('[class*="spinning"]') && (stale || (nothingLoaded && !refreshedThisVisit))) {
+      const due = Date.now() - (Number(read(REFRESHED)) || 0) > refreshEvery();
+      if (button && !button.disabled && !button.querySelector('[class*="spinning"]') && (due || (nothingLoaded && !refreshedThisVisit))) {
         refreshedThisVisit = true;
-        sessionStorage.setItem(REFRESHED, String(Date.now()));
+        // A due press goes to the network; any other only puts the saved answers back on the page.
+        if (due) toNetwork();
         button.click();
       }
-      if (Date.now() - usageAt > STALE_MS) loadUsage(false);
+      if (Date.now() - usageTriedAt > refreshEvery()) loadUsage(false);
       else if (Date.now() - renderedAt > 60e3) render();
       else place();
     }
-    // The user's own press: the 5-minute clock restarts and the Cline card skips the switcher's cache.
+    function toNetwork() {
+      networkUntil = Date.now() + 30e3;
+      write(REFRESHED, Date.now());
+    }
+    // The user's own press: it goes to the network, the clock restarts and the Cline card skips the
+    // switcher's cache. Capture phase, so this runs before the page sends its requests.
     document.addEventListener('click', (event) => {
       if (!event.isTrusted || !event.target?.closest?.('[class*="QuotaHeader-module__primaryAction"]')) return;
-      sessionStorage.setItem(REFRESHED, String(Date.now()));
+      toNetwork();
       loadUsage(true);
     }, true);
     addEventListener('hashchange', tick);
