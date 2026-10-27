@@ -6,10 +6,11 @@ const CONFIRM_WINDOW_MS = 4_000;
 
 const accountName = (account: GptBrowserAccount) => account.email ?? account.label;
 
-export function GptBrowserSurface({ api, active, setError }: {
+export function GptBrowserSurface({ api, active, setError, placement = "standalone" }: {
   api: LauncherApi;
   active: boolean;
   setError: (error: string | null) => void;
+  placement?: "standalone" | "chat";
 }) {
   const [status, setStatus] = useState<GptBrowserStatus | null>(null);
   // null while the address bar simply mirrors the page; a string while the user is typing.
@@ -51,7 +52,7 @@ export function GptBrowserSurface({ api, active, setError }: {
       observer.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [active, api, hasAccount, slot]);
+  }, [active, api, hasAccount, slot, placement]);
 
   useEffect(() => () => { void api.setGptBrowserSurfaceActive(false).catch(() => undefined); }, [api]);
   useEffect(() => () => window.clearTimeout(confirmTimer.current), []);
