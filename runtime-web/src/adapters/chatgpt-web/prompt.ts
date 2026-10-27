@@ -826,35 +826,26 @@ export function compileChatGptWebPrompt(
   // Compaction turns summarize the full history and keep their own budget below.
   if (!parsed._compactionRequest) sourceMessages = withTrimmedOldToolResults(sourceMessages);
   const initialMessageCount = sourceMessages.length;
-  let compiled = build(sourceMessages);
-  if (!parsed._compactionRequest) return compiled;
-
-  // The 110k edge budget was measured for the old single-message compaction envelope. Bigger
-  // Context stages are governed by the same model-specific per-message token and composer limits
-  // as ordinary multipart turns in browser-worker. Applying the legacy byte cap here silently
-  // discarded context that the staged transport can carry; preserve it and let browser preflight
-  // fail explicitly if any atomic record is genuinely too large for one stage.
-  if (compiled.multipart) return compiled;
-
-  const exceedsCompactionBudget = (): boolean => (
-    chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET
-  );
-
-  // Match native Codex compaction recovery: discard oldest history items one at a time until the
-  // summarization request fits. Never discard the final compaction instruction itself, and rebuild
-  // image references after every trim so removed messages cannot leave orphaned attachments.
-  while (
-    exceedsCompactionBudget()
-    && sourceMessages.length > 1
-  ) {
+  let compiled: CompiledChatGptWebPrompt;
+  // Match native compaction recovery for both transports, rebuilding attachments after each trim.
+  // Multipart can reject during build, before the inline byte-budget check is reached.
+  while (true) {
+    try {
+      compiled = build(sourceMessages);
+    } catch (error) {
+      if (!parsed._compactionRequest || sourceMessages.length <= 1
+        || !(error instanceof ChatGptWebAdapterError) || error.code !== "context_length_exceeded") throw error;
+      sourceMessages = sourceMessages.slice(1);
+      continue;
+    }
+    if (!parsed._compactionRequest) return compiled;
+    if (compiled.multipart || chatGptPromptJsonBytes(compiled.text) <= CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET) break;
+    if (sourceMessages.length <= 1) {
+      throw new Error(
+        `ChatGPT Web compaction prompt still requires ${chatGptPromptJsonBytes(compiled.text).toLocaleString("en-US")} JSON bytes after all older history was trimmed; the final compaction instruction alone exceeds the browser compaction budget`,
+      );
+    }
     sourceMessages = sourceMessages.slice(1);
-    compiled = build(sourceMessages);
-  }
-  const encodedBytes = chatGptPromptJsonBytes(compiled.text);
-  if (exceedsCompactionBudget()) {
-    throw new Error(
-      `ChatGPT Web compaction prompt still requires ${encodedBytes.toLocaleString("en-US")} JSON bytes after all older history was trimmed; the final compaction instruction alone exceeds the browser compaction budget`,
-    );
   }
   const trimmedCompactionMessages = initialMessageCount - sourceMessages.length;
   return trimmedCompactionMessages > 0 ? { ...compiled, trimmedCompactionMessages } : compiled;

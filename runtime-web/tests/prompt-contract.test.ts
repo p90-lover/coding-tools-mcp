@@ -13,6 +13,9 @@ import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation
 import { biggerContextPartCount, resolveBiggerContextMultipartParts } from "../src/adapters/chatgpt-web/usage";
 import { buildCompactV1Output, encodeCompactionSummary, OPAQUE_COMPACTION_NOTE } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
+import { resolveChatGptWebMessageTokenBudget, resolveChatGptWebTransportLimits } from "../src/chatgpt-web-models";
+import { compiledChatGptWebMessages, estimateChatGptWebImageTokens } from "../src/adapters/chatgpt-web/input-tokens";
+import { estimateTokens } from "../src/lib/token-estimate";
 import type { CodexParsedRequest } from "../src/types";
 
 function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexParsedRequest {
@@ -311,6 +314,63 @@ test("Bigger Context minimizes the largest ordered stage instead of overfilling 
   expect(parts.map(part => part.records.length)).toEqual([2, 1, 2]);
   expect(Math.max(...multipart.multipart!.parts.map(part => part.length))).toBeLessThan(120_000);
 });
+
+test("multipart compaction recovers exhausted stage budgets and rebuilds remaining attachments", () => {
+  const compact = request("high");
+  compact._compactionRequest = true;
+  compact.context.messages = [
+    ...["oldest", "newer"].map((label, index) => ({
+      role: "user" as const,
+      content: [
+        { type: "text" as const, text: `${label}-${"a!b@c#d$e%f^g&h*".repeat(10_000)}` },
+        { type: "image" as const, imageUrl: `data:image/png;base64,${label}-image` },
+      ],
+      timestamp: index + 1,
+    })),
+    { role: "assistant", content: [{ type: "text", text: "verified-progress" }], timestamp: 3 },
+    { role: "user", content: "preserve-latest-checkpoint", timestamp: 4 },
+  ];
+  const original = structuredClone(compact);
+  const capabilities = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
+  for (const parts of [2, 3] as const) {
+    const compiled = compileChatGptWebPrompt(compact, capabilities, undefined, { experimentalMultipartParts: parts });
+    const staged = compiled.multipart!.parts.join("\n");
+    expect(compiled.trimmedCompactionMessages).toBe(1);
+    expect(compiled.multipart!.parts).toHaveLength(parts);
+    expect(staged).not.toContain("oldest-");
+    for (const kept of ["newer-", "preserve-system", "verified-progress", "preserve-latest-checkpoint"]) {
+      expect(staged).toContain(kept);
+    }
+    expect(compiled.images).toEqual([{ ref: "codex-input-image-1", imageUrl: "data:image/png;base64,newer-image" }]);
+    for (const [index, message] of compiledChatGptWebMessages(compiled).entries()) {
+      const final = index === parts - 1;
+      const effort = final ? "high" : "medium";
+      expect(estimateTokens(message)).toBeLessThanOrEqual(resolveChatGptWebMessageTokenBudget(
+        CHATGPT_WEB_MODEL_ID, effort, capabilities, final ? estimateChatGptWebImageTokens(compiled) : 0,
+      ));
+      expect(message.length).toBeLessThanOrEqual(
+        resolveChatGptWebTransportLimits(CHATGPT_WEB_MODEL_ID, effort, capabilities).browserComposerCharLimit!,
+      );
+    }
+    expect(compact).toEqual(original);
+    const normal = structuredClone(compact);
+    delete normal._compactionRequest;
+    expect(() => compileChatGptWebPrompt(normal, capabilities, undefined, { experimentalMultipartParts: parts }))
+      .toThrow("Bigger Context cannot fit");
+  }
+}, 20_000);
+
+test("multipart compaction refuses an irreducible final instruction without discarding it", () => {
+  const compact = request("high");
+  compact._compactionRequest = true;
+  compact.context.messages = [{ role: "user", content: "a!b@c#d$e%f^g&h*".repeat(20_000), timestamp: 1 }];
+  for (const parts of [2, 3] as const) {
+    expect(() => compileChatGptWebPrompt(compact,
+      { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+      undefined, { experimentalMultipartParts: parts })).toThrow("Bigger Context cannot fit");
+  }
+  expect(compact.context.messages).toHaveLength(1);
+}, 20_000);
 
 test("Web compaction rebuilds attachments after trimming an oversized oldest image message", () => {
   const compact = request("high");
