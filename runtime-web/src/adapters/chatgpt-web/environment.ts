@@ -167,12 +167,27 @@ function contextualUserMessage(value: Record<string, unknown>): boolean {
     || text === OPAQUE_COMPACTION_NOTE;
 }
 
-/** V2 delivers tasks as agent_message; only this child's direct parent can revise its task. */
+/** Codex app chat creation/follow-up arrives as a stamped, synthetic tool result. */
+function isAppDelegation(item: Record<string, unknown> | undefined, metadata?: Record<string, unknown>): boolean {
+  const nativeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (item?.type !== "function_call_output" || item.namespace !== "codex_app"
+    || !["create_thread", "send_message_to_thread"].includes(String(item.name))
+    || item.call_id != null || typeof item.id !== "string" || !item.id.startsWith("fco_")
+    || !nativeId.test(item.id.slice(4)) || !nativeId.test(itemTurnId(item) ?? "")
+    || typeof metadata?.thread_id !== "string" || !nativeId.test(metadata.thread_id)
+    || typeof item.output !== "string") return false;
+  const delegation = /^<codex_delegation>\s*<source_thread_id>([^<]+)<\/source_thread_id>\s*<input>([\s\S]+)<\/input>\s*<\/codex_delegation>$/.exec(item.output.trim());
+  return Boolean(delegation && nativeId.test(delegation[1]!)
+    && delegation[1]!.toLowerCase() !== metadata.thread_id.toLowerCase() && delegation[2]!.trim());
+}
+
+/** V2 delivers tasks as agent_message; app-created peer chats use native app delegation. */
 function isUserOrParentInstruction(
   item: Record<string, unknown> | undefined,
   metadata?: Record<string, unknown>,
 ): item is Record<string, unknown> {
   if (item?.type === "message" && item.role === "user") return !contextualUserMessage(item);
+  if (isAppDelegation(item, metadata)) return true;
   if (item?.type !== "agent_message" || typeof item.id !== "string" || !item.id
     || metadata?.subagent_kind !== "thread_spawn"
     || (metadata.request_kind !== "turn" && metadata.request_kind !== "compaction")
@@ -253,7 +268,7 @@ function userRevision(value: unknown, expectedTurnId?: string, metadata?: Record
     && messageTurnId !== undefined && messageTurnId !== expectedTurnId) return undefined;
   const itemId = typeof item.id === "string" && item.id.length > 0 ? item.id : undefined;
   if (messageTurnId === undefined && itemId === undefined) return undefined;
-  return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}),
+  return { content: item.type === "function_call_output" ? item.output : item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}),
     ...(itemId ? { itemId } : {}) };
 }
 
@@ -266,6 +281,15 @@ export function chatGptTurnUserRevisionHistory(parsed: CodexParsedRequest): Chat
     const revision = userRevision(value, turnId, metadata);
     return revision ? [revision] : [];
   });
+}
+
+/** Only describe a delegation as the active task when no newer user/parent instruction exists. */
+export function hasChatGptAppDelegation(parsed: CodexParsedRequest): boolean {
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  const metadata = clientTurnMetadata(parsed);
+  const active = input.findLast(value => isUserOrParentInstruction(record(value), metadata));
+  return isAppDelegation(record(active), metadata);
 }
 
 /** The human instruction summarized by a remote compaction request belongs to an earlier turn. */
