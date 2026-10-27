@@ -1307,13 +1307,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           const servers = [...(renewed?.servers ?? [])];
           servers.push(...userServers(session.harness, servers));
           let body = servers.length ? { mcpServers: servers } : {};
+          // AO answers only once the agent is up. On a busy disk that took 150-180 s (seen live
+          // 2026-10-27), and two attempts at the 180 s POST default kept a message "starting" for
+          // up to 6 min; past 90 s a fresh agent is quicker.
+          const resumeWait = { timeoutMs: 90_000 };
           try {
             let resumed;
-            try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body); }
+            try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body, resumeWait); }
             catch (error) {
               // Only the known old-schema rejection may retry without the optional servers.
               if (!body.mcpServers || !/unknown field [\\"']?mcpServers/.test(String(error?.message))) throw error;
-              resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, {});
+              resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, {}, resumeWait);
             }
             if (resumed?.ok !== true) throw uncertain();
           } catch (error) {
@@ -1353,6 +1357,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             // One that could not be stopped may still come back: a second agent beside it would
             // split the chat, so the message fails as before.
             if (!stopped) throw error;
+            // A resume that ran out of time would only run out again: start the fresh agent now.
+            if (error.cause?.name === "TimeoutError") return refuse("restore_timed_out", null, { attempts: attempt });
             if (attempt >= 2) return refuse("restore_unconfirmed_stopped", null, { attempts: attempt });
             session = await read();
             if (invalid(session)) return refuse(session ? "invalid_after_stop" : "not_found_after_stop", session);
