@@ -2825,6 +2825,42 @@ class BrowserHost {
         ...(conversationUrl ? { conversationUrl } : {}),
       };
     }
+    // The original tab is in memory only. Recover its persisted, verified saved-chat URL
+    // when the exact native thread, retained epoch and connector identity still agree.
+    const savedUrl = useSavedChatsFor(this) && nativeThreadId && conversationKey
+      ? this.chatLifecycleSync?.findRetainedConversation?.(nativeThreadId, conversationKey, connectorIdentity)
+      : undefined;
+    if (savedUrl) {
+      const restored = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId);
+      try {
+        await loadCommittedBrowserSurface(restored.view.webContents, savedUrl, 60_000);
+        const location = retainedConversationLocation(restored.view.webContents.getURL(), true);
+        if (liveConversationUrl(restored) !== savedUrl || !location) {
+          throw new Error("ChatGPT did not restore the verified conversation page");
+        }
+        // Navigation replaces the document; bind the surface marker to the restored page.
+        await this.markTurnTabSurface(restored);
+        restored.retainedLocation = location;
+        restored.conversationUrl = savedUrl;
+        restored.connectorBound = Boolean(connectorIdentity);
+        restored.startRequest = startRequest;
+        this.selectedTabId = restored.id;
+        if (reveal) this.show();
+        else this.syncViewVisibility();
+        this.publishState?.(this.snapshot());
+        this.writeDescriptor();
+        this.logger.info("browser.tab_conversation_restored", { tabId: restored.id, traceId });
+        return {
+          surfaceId: restored.surfaceId, tabId: restored.id, reused: true,
+          connectorBound: restored.connectorBound, conversationUrl: savedUrl,
+        };
+      } catch (error) {
+        this.removeTurnTab(restored, false);
+        const unavailable = new Error("The saved ChatGPT conversation could not be restored");
+        unavailable.code = "retained_conversation_unavailable";
+        throw unavailable;
+      }
+    }
     if (requireRetainedConversation) {
       const error = new Error("The retained ChatGPT conversation is no longer available");
       error.code = "retained_conversation_unavailable";
@@ -2904,6 +2940,17 @@ class BrowserHost {
       // Pin the exact conversation: the next turn types into this tab only while it still shows it.
       tab.retainedLocation = retainedLocation;
       tab.connectorBound = connectorBound === true;
+      if (tab.nativeThreadId && tab.conversationUrl && tab.connectorBound) {
+        try {
+          this.chatLifecycleSync?.register?.(
+            tab.nativeThreadId, tab.conversationUrl, tab.conversationKey, tab.connectorIdentity,
+          );
+        } catch (error) {
+          this.logger.warn("browser.conversation_persistence_failed", {
+            tabId: tab.id, errorType: error instanceof Error ? error.name : "Error",
+          });
+        }
+      }
       tab.lastHeartbeatAt = Date.now();
       if (hideAfterTurn && !this.activeTraceId) this.hide();
       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });

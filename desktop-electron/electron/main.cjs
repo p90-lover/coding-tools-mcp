@@ -26,6 +26,7 @@ const {
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
+const { CodexChatLifecycleSync } = require("./codex-chat-lifecycle-sync.cjs");
 const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
@@ -3611,6 +3612,15 @@ async function start() {
         return stateStore.read().useSavedChats !== false;
       }
     },
+  });
+  // Persist verified ChatGPT conversation ownership across launcher restarts.
+  // Cross-service archive/delete synchronization is outside this recovery feature.
+  browserHost.chatLifecycleSync = new CodexChatLifecycleSync({
+    filePath: path.join(CORE_HOME, "sync", "codex-chatgpt-conversations.json"),
+    codexHome: LAUNCHER_PROFILE.codexHome,
+    logger,
+    enabled: () => false,
+    onSync: async () => false,
   });
   setProviderBrowserHost(() => browserHost);
   registerIpc({ logger, stateStore });
