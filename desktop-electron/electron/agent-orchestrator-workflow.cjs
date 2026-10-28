@@ -4492,7 +4492,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const id = typeof input?.workspaceId === "string" ? input.workspaceId.trim() : "";
     const task = typeof input?.taskId === "string" ? input.taskId.trim() : "";
     const stalled = id && task && input.goal === undefined && goals.get(id, task)?.status === "stalled" ? goals.get(id, task) : null;
-    if (stalled) goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0 });
+    if (stalled) goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
     try {
       const result = await chatSend(input);
       if (stalled && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalled.note });
@@ -5004,7 +5004,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       if (!still()) return;
       goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "checked", checkedAt: now(), checkFailures: 0,
-        failedRounds: outcome === "failed" ? (goal.failedRounds ?? 0) + 1 : 0, note: "", retry: null });
+        failedRounds: outcome === "failed" ? (goal.failedRounds ?? 0) + 1 : 0,
+        agentBlockedRounds: goal.agentBlockedRunId === runId ? (goal.agentBlockedRounds ?? 0) : 0, note: "", retry: null });
       if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
       // Ended by the evaluator ("Let the model judge"): going on was unsafe or pointless. Stalled, as
       // Codex's blocked: nothing more runs, and the person can still resume it.
@@ -5099,7 +5100,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const rounds = goal.rounds > 0 && goal.round >= goal.rounds ? goal.round + goal.rounds : goal.rounds;
     // Resuming carries on now: a pause still waiting is dropped.
     dropGoalRetry(id, task);
-    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0 });
+    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
     // The next round starts in the background: setting it up (board writes, a compaction when the
     // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
     // that long. A round that can't start marks the goal stalled (startGoalRound).
@@ -5124,12 +5125,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   // A goal's status in Codex's words: "achieved" is its complete, "stalled" its blocked.
   const CODEX_GOAL_STATUS = { active: "active", paused: "paused", achieved: "complete", stalled: "blocked", limited: "budgetLimited" };
-  // What update_goal may set: as in Codex, resuming and the limits stay the user's and the app's.
-  const AGENT_GOAL_STATUS = {
-    complete: { status: "achieved", note: "The agent marked it complete" },
-    blocked: { status: "stalled", note: "The agent is blocked and needs you; answer it, then /goal resume" },
-    paused: { status: "paused", note: "Paused at your request; /goal resume picks it up again" },
-  };
+  // Agent reports are provisional. The independent evaluator alone marks a goal achieved.
+  // A single model-reported blocker must not stop an otherwise actionable mission.
+  const AGENT_GOAL_STATUS = new Set(["complete", "blocked", "paused"]);
   function codexGoal(goal) {
     if (!goal) return { goal: null, remainingTokens: null, completionBudgetReport: null };
     const status = CODEX_GOAL_STATUS[goal.status] ?? "active";
@@ -5163,12 +5161,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (action !== "update") throw new Error("Choose get, create or update");
     if (!goal) throw new Error("cannot update goal because this thread has no goal");
     if (status === undefined && objective === undefined) throw new Error("update_goal needs a status or an objective");
-    if (status !== undefined && !Object.hasOwn(AGENT_GOAL_STATUS, status)) {
+    if (status !== undefined && !AGENT_GOAL_STATUS.has(status)) {
       throw new Error("update_goal can only mark the existing goal complete, blocked, or paused at the user's explicit request; resume, budget-limited, and usage-limited status changes are controlled by the user or system");
     }
     const change = objective === undefined ? {} : { objective: cleanObjective(objective) };
-    // Limits take precedence over pausing.
-    if (status !== undefined && !(status === "paused" && goal.status === "limited")) Object.assign(change, AGENT_GOAL_STATUS[status]);
+    if (status === "complete") {
+      // Keep it active until goalAfterRun independently checks the settled round.
+      Object.assign(change, { status: "active", note: "Agent reported completion; awaiting independent goal verification" });
+    } else if (status === "blocked") {
+      // Count distinct goal turns, never repeated calls from one model turn.
+      const blockedRounds = goal.agentBlockedRunId === latest.id
+        ? (goal.agentBlockedRounds ?? 1) : (goal.agentBlockedRounds ?? 0) + 1;
+      Object.assign(change, {
+        agentBlockedRunId: latest.id,
+        agentBlockedRounds: blockedRounds,
+        status: blockedRounds >= GOAL_FAILED_ROUNDS ? "stalled" : "active",
+        note: blockedRounds >= GOAL_FAILED_ROUNDS
+          ? `The agent reported the same blocker in ${blockedRounds} consecutive rounds; /goal resume retries`
+          : `The agent reported a blocker (${blockedRounds} of ${GOAL_FAILED_ROUNDS} rounds); continuing to seek a resolution`,
+      });
+    } else if (status === "paused" && goal.status !== "limited") {
+      Object.assign(change, { status: "paused", note: "Paused at your request; /goal resume picks it up again" });
+    }
     return codexGoal(goals.update(id, task, change));
   }
 
