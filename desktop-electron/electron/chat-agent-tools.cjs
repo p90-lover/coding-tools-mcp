@@ -63,6 +63,7 @@ const path = require("node:path");
 const { PREVIEW_TOOL_DEFS, PREVIEW_TOOLS } = require("./chat-preview.cjs");
 const { SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS } = require("./subagents.cjs");
 const { CHAT_HISTORY_TOOL_DEFS, CHAT_HISTORY_TOOLS } = require("./chat-history.cjs");
+const { MAX_SECRET, MAX_SECRETS } = require("./chat-redaction.cjs");
 
 const SERVER_NAME = "coding-tools";
 const PROTOCOL_VERSIONS = Object.freeze(["2025-06-18", "2025-03-26", "2024-11-05"]);
@@ -86,6 +87,7 @@ const AGENT_TOOLS = new Set([
   "view_image", "image_info", "compare_images", "ocr_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
   "show_in_chat", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
+  "redact_message",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. Seen
 // live: an agent asked to "open the browser and keep checking" started it, but nothing showed in
@@ -212,6 +214,29 @@ const RENAME_TOOL_DEFS = Object.freeze([{
     properties: { title: { type: "string", maxLength: 200, description: "The task's title, at most 6 words" } },
   },
 }]);
+// The app's own (chat-redaction.cjs): secrets the user pasted into this chat's messages are replaced
+// in the stored chat by a marker the chat shows blurred. Offered only when the user turned it on in
+// Settings; `list` is what they named as sensitive there, so the agent hides only those kinds.
+function redactToolDefs(list) {
+  const kinds = list.map((line) => `\n- ${line}`).join("");
+  return [{
+    name: "redact_message", title: "Hide secrets in the user's messages",
+    description: "Hide sensitive text the user pasted into this chat's messages, so it is no longer stored or shown in the "
+      + "chat: each exact occurrence of every string in `secrets` is replaced by \"[hidden: <label>]\", which the user sees "
+      + "blurred. Call it as soon as one of the user's messages contains any of these (the user's own list):" + kinds
+      + "\nPass each secret exactly as it appears in the message, only the secret itself (the key, not the sentence around "
+      + "it). Hide nothing else: ordinary words, file paths, code and names stay. It changes only the user's messages, never "
+      + "files. You may still use a secret the task needs, but never repeat it in your replies.",
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["secrets", "label"],
+      properties: {
+        secrets: { type: "array", minItems: 1, maxItems: MAX_SECRETS, items: { type: "string", minLength: 1, maxLength: MAX_SECRET },
+          description: "The exact secret strings to hide, as they appear in the user's message" },
+        label: { type: "string", maxLength: 40, description: "What they are, shown in place of each, e.g. \"API key\" or \"password\"" },
+      },
+    },
+  }];
+}
 // Opt-in: commands start in the worktree but are not confined to it.
 const TERMINAL_TOOLS = new Set([
   "exec_command", "write_stdin", "read_output", "kill_command", "kill_session", "check_exec_environment",
@@ -980,7 +1005,7 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false,
-  renames = false, ownFileTools = false } = {}) {
+  renames = false, redacts = false, ownFileTools = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
   // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either.
   const scriptTool = ownFileTools ? "your Write tool" : "apply_patch";
@@ -1058,6 +1083,10 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       ? "Chat name: when you start a new task (this chat's first message, or a message that moves it on to different work), "
         + "call rename_chat with a short title of that task before you begin; not again while the task stays the same. "
       : "")
+    + (redacts
+      ? "Secrets: when a message from the user contains a secret of a kind redact_message lists (a key, a password, a token), "
+        + "call redact_message with it first, so the chat stops storing and showing it; never repeat it in your reply. "
+      : "")
     + "Large results are paged; ask for less per call.";
 }
 
@@ -1124,6 +1153,9 @@ function createChatAgentTools({
   goals = null,
   // rename_chat's service ({ rename({ workspaceId, session, title }) }); without it the tool is not offered.
   chatTitles = null,
+  // redact_message's service ({ enabled(), list(), redact({ workspaceId, session, secrets, label }) }): offered
+  // only while enabled() is true, with list() (the user's kinds of sensitive text) as its description.
+  redaction = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -1366,14 +1398,14 @@ function createChatAgentTools({
     // The preview's tools are the app's own, not headless's.
     const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
       ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
-      ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...CAPTURE_PROCESS_DEFS,
+      ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
       ...(captureApp ? VIEW_APP_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
         && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
-        && tool?.name !== "view_app" && tool?.name !== "rename_chat"), ...own]
+        && tool?.name !== "view_app" && tool?.name !== "rename_chat" && tool?.name !== "redact_message"), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
@@ -1736,6 +1768,33 @@ function createChatAgentTools({
     }
   }
 
+  /** The user's kinds of sensitive text (Settings), never empty: an empty list offers no tool. */
+  const redactKinds = () => {
+    try { return (redaction?.list() ?? []).filter((line) => typeof line === "string" && line.trim()).slice(0, 30); } catch { return []; }
+  };
+  // A subagent's messages are another agent's, not the user's; the setting is read on every call,
+  // so turning it off stops a chat already running.
+  const canRedact = (entry) => Boolean(redaction) && !entry.subagent && setting(redaction.enabled) && redactKinds().length > 0;
+  /** redact_message: secrets in the chat's messages become blurred markers (agent-orchestrator-workflow.cjs chatRedactTool). */
+  async function redactMessage(entry, given) {
+    if (!canRedact(entry)) return failedCall("Unknown tool: redact_message");
+    if (!entry.aoSession) return failedCall("This chat's session is not ready yet; try again in a moment.");
+    const secrets = Array.isArray(given.secrets) ? given.secrets.filter((secret) => typeof secret === "string" && secret.length <= MAX_SECRET) : [];
+    if (!secrets.length) return failedCall("Give the secrets to hide, exactly as they appear in the user's message");
+    try {
+      const value = await redaction.redact({ workspaceId: entry.workspaceId, session: entry.aoSession, secrets: secrets.slice(0, MAX_SECRETS),
+        label: typeof given.label === "string" ? given.label : "" });
+      // The secrets are never echoed back: only how many were hidden.
+      const note = value.hidden ? `Hid ${value.hidden} occurrence${value.hidden === 1 ? "" : "s"} in the user's messages.`
+        : "Nothing was hidden: none of these strings is in the chat's saved messages (a message still on its way is saved after this turn).";
+      const refused = value.refused ? ` ${value.refused} string${value.refused === 1 ? " was" : "s were"} not hidden: too short or ordinary text, not a secret.` : "";
+      return { content: [{ type: "text", text: `${note}${refused} Do not repeat them in your reply.` }],
+        structuredContent: { hidden: value.hidden, refused: value.refused } };
+    } catch (error) {
+      return failedCall(errorMessage(error));
+    }
+  }
+
   async function callTool(entry, params) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
@@ -1752,6 +1811,7 @@ function createChatAgentTools({
     if (name === "view_app") return viewApp(given);
     if (GOAL_TOOLS.has(name)) return goalCall(entry, name, given);
     if (name === "rename_chat") return renameChat(entry, given);
+    if (name === "redact_message") return redactMessage(entry, given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
       const found = await Promise.resolve().then(() => sessionWorkspace?.(entry.aoSession, entry.workspaceId)).catch(() => null);
@@ -2047,7 +2107,7 @@ function createChatAgentTools({
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
-              wakeups: canWake(entry), renames: canRename(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
+              wakeups: canWake(entry), renames: canRename(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -2533,6 +2593,8 @@ function createChatAgentTools({
     servicePort() { return port; },
     /** Whether agents' commands run in Codex's sandbox (the terminal tools then default on). */
     sandboxed,
+    // What redact_message hides (the user's list, or the defaults), for Settings to show.
+    redactList: redactKinds,
     listen,
     sweep,
     async close() {

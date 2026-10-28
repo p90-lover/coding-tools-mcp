@@ -37,7 +37,7 @@ function tempTree() {
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
-  chatTitles = null } = {}) {
+  chatTitles = null, redaction = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
@@ -46,7 +46,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
-    ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}),
+    ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -1073,6 +1073,42 @@ test("rename_chat names the agent's own chat, is in its instructions, and is off
     const otherInit = await post(other.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, other.auth);
     assert.doesNotMatch(otherInit.body.result.instructions, /rename_chat/);
     assert.equal((await callTool(other.url, other.auth, "rename_chat", { title: "x" })).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
+test("redact_message hides secrets in the agent's own chat, lists the user's kinds, and follows the setting", async () => {
+  // The user: tools "that allow model to edit the message that user sent on chat when it contain secret",
+  // with "a options on settings and with a list that tell ai what input message to blurr".
+  const asked = [];
+  let on = true;
+  const redaction = {
+    enabled: () => on,
+    list: () => ["Stripe secret keys", "Database passwords"],
+    redact: async (request) => { asked.push(request); return { ok: true, hidden: 2, refused: 0 }; },
+  };
+  const { tools } = fixture({ redaction });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "redact-owner" });
+    const list = await post(client.url, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }, client.auth);
+    const tool = list.body.result.tools.find((item) => item.name === "redact_message");
+    assert.ok(tool, "offered while the setting is on");
+    assert.match(tool.description, /- Stripe secret keys\n- Database passwords/, "the user's list is the tool's description");
+    const init = await post(client.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, client.auth);
+    assert.match(init.body.result.instructions, /call redact_message/);
+    const hidden = await callTool(client.url, client.auth, "redact_message", { secrets: ["sk_live_51HxYzAbCdEf"], label: "Stripe key" });
+    assert.equal(hidden.isError, undefined);
+    assert.match(hidden.content[0].text, /Hid 2 occurrences/);
+    assert.doesNotMatch(hidden.content[0].text, /sk_live/, "a secret is never echoed back");
+    assert.deepEqual(asked, [{ workspaceId: "ws1", session: "redact-owner", secrets: ["sk_live_51HxYzAbCdEf"], label: "Stripe key" }],
+      "the session is the server's own, never one the agent names");
+    assert.equal((await callTool(client.url, client.auth, "redact_message", { secrets: [], label: "x" })).isError, true, "secrets are required");
+    on = false;
+    assert.equal((await listed(client.url, client.auth)).includes("redact_message"), false, "turning it off takes it away at once");
+    assert.equal((await callTool(client.url, client.auth, "redact_message", { secrets: ["sk_live_51HxYzAbCdEf"], label: "x" })).isError, true);
+    assert.equal(asked.length, 1);
+    const other = await session(plain.tools, { id: "no-redact" });
+    assert.equal((await listed(other.url, other.auth)).includes("redact_message"), false);
   } finally { await tools.close(); await plain.tools.close(); }
 });
 

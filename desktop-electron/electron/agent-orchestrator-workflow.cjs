@@ -7,6 +7,7 @@ const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAn
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
 const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
+const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
@@ -5204,6 +5205,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, taskId: task, title: name, renamed: true };
   }
 
+  /**
+   * redact_message from a chat agent (chat-agent-tools.cjs): each of `secrets` is replaced in the
+   * chat's messages (its task's description) by a "[hidden: <label>]" marker the chat shows blurred
+   * (chat-redaction.cjs). The message count stays the same, so every run keeps its message. The
+   * description may change under it (a steer, the next message): one stale write is tried again.
+   */
+  async function chatRedactTool({ workspaceId, session, secrets, label } = {}) {
+    const id = clean(workspaceId, 128);
+    const { latest } = await sessionChat(id, clean(session, 256), "hide text in its chat");
+    const task = latest.project_id;
+    for (let attempt = 0; ; attempt += 1) {
+      const detail = await board({ workspaceId: id, taskId: task });
+      if (!detail.task || detail.task.id !== task) throw new Error("This chat's task no longer exists");
+      const { description, hidden, refused } = chatDescriptionRedacted(detail.task.description || "", secrets, label);
+      if (!hidden) return { ok: true, taskId: task, hidden: 0, refused };
+      try {
+        await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+        return { ok: true, taskId: task, hidden, refused };
+      } catch (error) {
+        if (attempt >= 1) throw error;
+      }
+    }
+  }
+
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
 
   // A wake-up that could not fire (AO not ready yet after a restart) is tried again a while later.
@@ -6252,7 +6277,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
