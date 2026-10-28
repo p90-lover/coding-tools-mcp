@@ -301,6 +301,13 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   // In v8 api-keys is the upstream provider map; legacy arrays are client keys, now managed above.
   if (Object.prototype.toString.call(saved["api-keys"]) === "[object Object]") merged["api-keys"] = saved["api-keys"];
   if (saved.oauth) merged.oauth = { ...saved.oauth, "auth-dir": authDirectory };
+  // CPA 8 saves the route as requests.proxy-url. Kept beside the managed one above, an old route
+  // outlived every change (and a removed one stayed on).
+  if (Object.prototype.toString.call(merged.requests) === "[object Object]" && "proxy-url" in merged.requests) {
+    const { "proxy-url": _route, ...requests } = merged.requests;
+    if (Object.keys(requests).length) merged.requests = requests;
+    else delete merged.requests;
+  }
   return (yaml.stringify ?? yaml.dump)(merged);
 }
 

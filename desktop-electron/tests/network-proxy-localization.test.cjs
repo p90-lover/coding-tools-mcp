@@ -12,20 +12,20 @@ const source = fs.readFileSync(
 
 test("Network Proxy routes all visible controls through localization", () => {
   const rawEnglishControls = [
-    />\+ New profile</,
-    />Proxy profiles</,
-    />No proxy profiles\.</,
-    /\{draft\.id \? "Edit proxy" : "New proxy"\}/,
-    /<span>Name<\/span>/,
+    />Proxies</,
+    />Rules</,
+    />Applications</,
+    />Connections</,
+    />Start routing</,
+    />Stop routing</,
     /<span>Protocol<\/span>/,
     /<span>Host<\/span>/,
     /<span>Port<\/span>/,
     /<span>Username<\/span>/,
     /<span>Password<\/span>/,
-    /<span>Bypass<\/span>/,
-    /<span>Enabled<\/span>/,
-    />Test connection</,
+    />Check</,
     />Save proxy</,
+    />Save rules</,
     />Provider routing</,
     />Account routing</,
   ];
@@ -35,44 +35,34 @@ test("Network Proxy routes all visible controls through localization", () => {
   }
 
   for (const phrase of [
-    "新增設定檔",
-    "代理設定檔",
-    "未有代理設定檔。",
-    "編輯代理",
-    "新增代理",
-    "名稱",
+    "代理",
+    "規則",
+    "應用程式",
+    "連線",
+    "啟用路由",
+    "停止路由",
+    "安裝路由",
+    "啟動 ProxyBridge Nova",
     "通訊協定",
     "主機",
     "連接埠",
     "使用者名稱",
     "密碼",
-    "略過位址",
-    "已啟用",
-    "測試連線",
     "儲存代理",
+    "儲存規則",
     "供應商路由",
     "帳戶路由",
   ]) {
     assert.match(source, new RegExp(phrase), `missing Traditional Chinese copy: ${phrase}`);
   }
 
-  assert.match(source, /scopeLabel\(language, scope\)/);
+  assert.match(source, /routingLabel\(language, routing\?\.state\)/);
   assert.match(source, /policyModeLabel\(language, item\)/);
-  assert.match(source, /statusLabel\(language,/);
+  assert.match(source, /appStateLabel\(language, app\.state\)/);
 });
 
-test("Network Proxy exposes and localizes the typed subagent routing scope", () => {
-  assert.match(source, /const SCOPES:[\s\S]*"subagent"/);
-  assert.match(source, /case "subagent":/);
-  assert.match(
-    source,
-    /localText\(language, "Subagents", "子代理", "子代理", "サブエージェント"\)/,
-  );
-  assert.match(
-    source,
-    /scopes: \[[^\]]*"oauth", "subagent", "mcp"[^\]]*\]/,
-  );
-  assert.match(source, /"mcp"/);
-  assert.match(source, /17891/);
-  assert.match(source, /PROXY_PATH_PROVIDERS/);
+test("Network Proxy keeps Claude traffic on a proxy and offers Nova's protocols", () => {
+  assert.match(source, /PROXY_PATH_PROVIDERS = new Set\(\["claude-oauth", "anthropic-api"\]\)/);
+  assert.match(source, /<option value="socks5">socks5<\/option><option value="http">http<\/option><option value="https">https<\/option>/);
+  assert.doesNotMatch(source, /socks4/, "Nova has no SOCKS4 proxies");
 });

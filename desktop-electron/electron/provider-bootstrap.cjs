@@ -5,6 +5,16 @@ const {
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { resolveLauncherProfile } = require("./profile.cjs");
 const { retireProxyGateway } = require("./proxy-gateway-retire.cjs");
+const { createNovaManager } = require("./proxybridge-nova.cjs");
+
+// Nova's profile carries proxy passwords; the page gets whether one is saved, never the value.
+function redactNovaProfile(profile) {
+  if (!profile || typeof profile !== "object") return profile;
+  return {
+    ...profile,
+    proxies: (profile.proxies ?? []).map(({ password, ...proxy }) => ({ ...proxy, hasPassword: Boolean(password) })),
+  };
+}
 
 let providerNetworkControllerPromise = null;
 let providerBrowserHostGetter = () => null;
@@ -65,6 +75,7 @@ function installProviderNetwork({
   shell,
 }) {
   let controller = null;
+  let nova = null;
 
   const logger = Object.freeze({
     info(event, detail = {}) {
@@ -75,12 +86,16 @@ function installProviderNetwork({
     },
   });
 
-  function publish(snapshot) {
+  function sendAll(channel, payload) {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
-        window.webContents.send("launcher:provider-network-changed", snapshot);
+        window.webContents.send(channel, payload);
       }
     }
+  }
+
+  function publish(snapshot) {
+    sendAll("launcher:provider-network-changed", snapshot);
     return snapshot;
   }
 
@@ -120,6 +135,21 @@ function installProviderNetwork({
         });
       });
     }
+    // Nova supplies the proxies the routes pick from. It starts (or is adopted) in the background:
+    // the saved route above already works, and Nova's start can take seconds.
+    nova = createNovaManager({
+      userData: app.getPath("userData"),
+      safeStorage,
+      store: controller.store,
+      applyGlobalRouting: () => controller.applyGlobalRouting(),
+      publish: (state, providerSnapshot) => {
+        if (state) sendAll("launcher:nova-changed", state);
+        if (providerSnapshot) publish(providerSnapshot);
+      },
+      logger,
+    });
+    void nova.start();
+    app.once("will-quit", () => nova?.stopPolling());
     return controller;
   });
   const controllerPromise = providerNetworkControllerPromise;
@@ -217,6 +247,37 @@ function installProviderNetwork({
     active,
     () => active.store.setAccountPolicy(input),
   ), "network");
+
+  // ProxyBridge Nova (the Proxy page). Reads need the app's own page; changes also need it focused.
+  const novaRead = (channel, read) => handle(channel, (_active, _event, ...args) => read(...args));
+  const novaWrite = (channel, write) => handle(channel, (_active, _event, ...args) => write(...args), "network");
+  novaRead("launcher:nova-state", () => nova.state());
+  novaRead("launcher:nova-profile", async () => redactNovaProfile(await nova.profile()));
+  novaRead("launcher:nova-apps", () => nova.apps());
+  novaRead("launcher:nova-connections", () => nova.connections());
+  novaRead("launcher:nova-log", (after) => nova.log(after));
+  novaRead("launcher:nova-decodo", () => nova.decodo());
+  novaWrite("launcher:nova-start", async () => { await nova.ensureRunning(); await nova.sync(); return nova.state(); });
+  novaWrite("launcher:nova-shutdown", () => nova.shutdown());
+  novaWrite("launcher:nova-set-exe", (exePath) => nova.setExecutable(exePath));
+  // Linked proxies come from Nova's linked profile and can't be sent back; a password left out
+  // (null) keeps the saved one.
+  novaWrite("launcher:nova-save-proxies", async (input) => redactNovaProfile(await nova.saveProxies({
+    etag: String(input?.etag ?? ""),
+    proxies: (Array.isArray(input?.proxies) ? input.proxies : []).filter((proxy) => !proxy?.linked).map((proxy) => ({
+      key: String(proxy.key ?? ""), protocol: proxy.protocol, host: String(proxy.host ?? "").trim(), port: Number(proxy.port),
+      username: String(proxy.username ?? ""), password: typeof proxy.password === "string" ? proxy.password : null,
+      linked: false, upstreamEligible: proxy.upstreamEligible !== false, provider: proxy.provider ?? null,
+    })),
+  })));
+  novaWrite("launcher:nova-save-rules", async (input) => redactNovaProfile(await nova.saveRules(input)));
+  novaWrite("launcher:nova-check", (key) => nova.checkProxy(key));
+  novaWrite("launcher:nova-routing", (action) => nova.routing(action));
+  novaWrite("launcher:nova-save-decodo", (input) => nova.saveDecodo(input));
+  novaWrite("launcher:nova-sync-decodo", async () => {
+    const result = await nova.syncDecodo();
+    return { ...result, profile: redactNovaProfile(result.profile) };
+  });
 
   return Object.freeze({
     ready: providerNetworkReady,
