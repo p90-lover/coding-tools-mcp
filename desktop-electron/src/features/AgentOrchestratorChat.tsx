@@ -307,14 +307,17 @@ function EditItem({ item }: { item: ChatLiveItem }) {
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
     <span className="cx-live-text" title={files.map((file) => file.path).join("\n")}>{files.length === 1 ? fileName(files[0].path) : `${files.length} files`}</span>
     <DiffCount additions={additions} deletions={deletions} /><ApprovedMark text={item.approval} /></>;
+  // The numbered lines are drawn once the row is first opened (as DshRow does): a folded edit kept
+  // four cells a line in the page, ~50k of a long chat's 85k elements, and every restyle walked them.
+  const [opened, setOpened] = useState(false);
   if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
-  return <details className={`cx-tool cx-edit tone-${tone}`}><summary>{head}</summary>
-    <div className="cx-tool-body">
+  return <details className={`cx-tool cx-edit tone-${tone}`} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}><summary>{head}</summary>
+    {opened ? <div className="cx-tool-body">
       {files.map((file) => <section key={file.path} className="cx-edit-file">
         {files.length > 1 ? <header><span title={file.path}>{fileName(file.path)}</span><DiffCount additions={file.additions} deletions={file.deletions} /></header> : null}
         {file.diff ? <EditDiff diff={file.diff} /> : null}
       </section>)}
-    </div></details>;
+    </div> : null}</details>;
 }
 
 /** What a turn's work did, as Claude Code heads it: "Edited 2 files, ran a command" and the line counts. */
