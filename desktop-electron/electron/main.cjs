@@ -2102,7 +2102,7 @@ function registerIpc({ logger, stateStore }) {
   // Runtime -> Email. Reads require the trusted main renderer; mutations require it focused.
   handle("launcher:email-status", (event) => {
     assertFocusedMainWindow(event, false);
-    return getEmailHost(logger).status();
+    return getEmailHost(logger).currentStatus();
   });
   handle("launcher:email-connect", (event, input) => {
     assertFocusedMainWindow(event, true);
