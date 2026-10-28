@@ -141,6 +141,8 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
     const area = root.current;
     const api = highlightApi();
     if (!area || !api) return;
+    // A chat with no annotation, and none drawn before, has no highlight to redraw on each render.
+    if (!annotations.length && !LIVE_RANGES.get(highlightOwner.current)?.length) return;
     LIVE_RANGES.set(highlightOwner.current, annotations.map((item) => rangeFor(area, item)).filter((range): range is Range => Boolean(range)));
     paintHighlights();
   });
@@ -168,7 +170,10 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
   useEffect(() => () => { LIVE_RANGES.delete(highlightOwner.current); paintHighlights(); }, []);
 
   const area = root.current;
-  if (!area) return null;
+  // Nothing to place, nothing read: the chat renders on every poll, each just after it changed the
+  // transcript, so a bounds read here laid out the whole window each time (82k elements across five
+  // panes: 7.4 s of the renderer's 10 s, with not one annotation).
+  if (!area || (!annotations.length && !offer && !editing)) return null;
   const bounds = area.getBoundingClientRect();
   const visible = (rect: DOMRect) => rect.bottom > bounds.top && rect.top < bounds.bottom && (rect.width > 0 || rect.height > 0);
 
