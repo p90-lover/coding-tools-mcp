@@ -533,7 +533,12 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     const username = typeof input.username === "string" ? input.username : undefined;
     const password = typeof input.password === "string" ? input.password : undefined;
     if (username !== undefined || password !== undefined) {
-      state.secrets.proxies[id] = codec.encrypt({ username: username || "", password: password || "" });
+      // A field left out keeps the saved one: a new password alone keeps the username, and back.
+      const saved = codec.decrypt(state.secrets.proxies[id]) ?? {};
+      state.secrets.proxies[id] = codec.encrypt({
+        username: username ?? saved.username ?? "",
+        password: password ?? saved.password ?? "",
+      });
     }
     const profile = normalizeProxyProfile({
       id,
@@ -591,6 +596,38 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     for (const account of state.accounts) {
       if (account.proxyProfileId === fromId) account.proxyProfileId = toId;
     }
+  }
+
+  /**
+   * Makes a source app's proxies the app's own, so they work without that app running: each keeps
+   * its id, endpoint, saved credentials and routes, and can be edited here. Nova's own gateway (its
+   * gateway profile, and any proxy on that same local port) works only while Nova runs: it is
+   * archived and its routes move to the first other adopted proxy. A proxy on another local port
+   * belongs to some other program and is kept. Writes only on a change.
+   */
+  function adoptSourceProfiles(source) {
+    if (source !== "nova") throw new Error("Unknown proxy source");
+    const owned = state.proxyProfiles.filter((profile) => profile.source === source && !profile.archivedAt);
+    if (!owned.length) return { changed: false, snapshot: publicSnapshot() };
+    const loopback = (host) => /^(127\.\d+\.\d+\.\d+|localhost|::1|\[::1\])$/i.test(host);
+    const gatewayPorts = new Set(owned.filter((profile) => profile.sourceKey === "gateway").map((profile) => profile.endpoint.port));
+    const gateway = (profile) => profile.sourceKey === "gateway"
+      || (loopback(profile.endpoint.host) && gatewayPorts.has(profile.endpoint.port));
+    const fallback = owned.find((profile) => !gateway(profile) && !loopback(profile.endpoint.host))
+      ?? owned.find((profile) => !gateway(profile)) ?? null;
+    const now = new Date().toISOString();
+    for (const profile of owned) {
+      const retire = gateway(profile);
+      delete profile.source;
+      delete profile.sourceKey;
+      profile.updatedAt = now;
+      if (!retire) continue;
+      if (fallback) moveProxyReferences(profile.id, fallback.id);
+      else dropProxyReferences(profile.id);
+      Object.assign(profile, { enabled: false, archivedAt: now });
+    }
+    write();
+    return { changed: true, snapshot: publicSnapshot() };
   }
 
   function retargetProxyReferences(fromId, toId) {
@@ -788,6 +825,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     removeProxyProfile,
     retargetProxyReferences,
     syncSourceProfiles,
+    adoptSourceProfiles,
     setGlobalRouting,
     setProviderPolicy,
     setAccountPolicy,

@@ -128,6 +128,13 @@ function installProviderNetwork({
       logger.warn("proxy_gateway.retire_failed", { error: error instanceof Error ? error.message : String(error) });
     }
 
+    // Proxies work inside the app on their own: ProxyBridge Nova is no longer started, and the
+    // proxies it supplied become the app's own (credentials and routes kept) before the route applies.
+    try {
+      if (controller.store.adoptSourceProfiles("nova").changed) logger.info("proxy.nova_profiles_adopted", {});
+    } catch (error) {
+      logger.warn("proxy.nova_adopt_failed", { error: error instanceof Error ? error.message : String(error) });
+    }
     const snapshot = controller.store.snapshot();
     if (snapshot.routing.globalEnabled && snapshot.routing.globalProfileId) {
       void controller.applyGlobalRouting().catch((error) => {
@@ -136,8 +143,8 @@ function installProviderNetwork({
         });
       });
     }
-    // Nova supplies the proxies the routes pick from. It starts (or is adopted) in the background:
-    // the saved route above already works, and Nova's start can take seconds.
+    // Kept for its IPC (Nova's state reads as not running); app start no longer starts it. A quit
+    // shuts down only a Nova this manager started, never one the user runs for other programs.
     nova = createNovaManager({
       userData: app.getPath("userData"),
       safeStorage,
@@ -150,7 +157,6 @@ function installProviderNetwork({
       logger,
     });
     novaManager = nova;
-    void nova.start();
     app.once("will-quit", () => nova?.stopPolling());
     return controller;
   });

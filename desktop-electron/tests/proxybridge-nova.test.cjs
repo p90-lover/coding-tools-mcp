@@ -176,6 +176,57 @@ test("a Nova started by something else, or one that will not start, says why", a
   assert.doesNotMatch(JSON.stringify(saved), new RegExp(spawned[0].env.PROXYBRIDGE_NOVA_API_TOKEN), "the token is saved only encrypted");
 });
 
+test("Nova's proxies become the app's own, with the gateway's route moved to a real proxy", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nova-adopt-"));
+  const store = createProviderNetworkStore({
+    filePath: path.join(root, "providers", "provider-network.json"),
+    keyPath: path.join(root, "providers", "provider-network.key"), safeStorage,
+  });
+  store.syncSourceProfiles("nova", profileEntries({ proxies: [
+    socks("p1", "proxy.example"),
+    socks("mirror", "127.0.0.1", { port: 17891, username: "", password: "" }),
+    socks("clash", "127.0.0.1", { port: 7890, username: "", password: "" }),
+  ] }, STATUS));
+  const byHost = (host, port) => store.snapshot().proxyProfiles.find((profile) => profile.endpoint.host === host && profile.endpoint.port === port);
+  const remote = byHost("proxy.example", 1080);
+  const clash = byHost("127.0.0.1", 7890);
+  const mirror = store.snapshot().proxyProfiles.find((profile) => profile.sourceKey === "mirror");
+  store.setGlobalRouting({ enabled: true, profileId: GATEWAY_PROFILE_ID });
+  store.setProviderPolicy({ providerId: "cpa", mode: "profile", profileId: clash.id });
+  store.setProviderPolicy({ providerId: "other", mode: "profile", profileId: mirror.id });
+
+  assert.equal(store.adoptSourceProfiles("nova").changed, true);
+  const snapshot = store.snapshot();
+  const adopted = snapshot.proxyProfiles.find((profile) => profile.id === remote.id);
+  assert.equal(adopted.source, undefined, "an adopted proxy is the app's to edit");
+  assert.equal(adopted.archivedAt, undefined);
+  assert.deepEqual(store.proxySecret(remote.id), { username: "user", password: "secret" }, "its sign-in is kept");
+  assert.ok(snapshot.proxyProfiles.find((profile) => profile.id === GATEWAY_PROFILE_ID).archivedAt, "Nova's local gateway is retired");
+  assert.equal(snapshot.routing.globalProfileId, remote.id, "the app route goes straight to the proxy");
+  assert.ok(snapshot.proxyProfiles.find((profile) => profile.id === mirror.id).archivedAt, "a proxy on the gateway's port is Nova's too");
+  assert.equal(snapshot.routing.providers.find((policy) => policy.providerId === "other").profileId, remote.id);
+  assert.equal(snapshot.proxyProfiles.find((profile) => profile.id === clash.id).archivedAt, undefined, "another program's local proxy is kept");
+  assert.equal(snapshot.routing.providers.find((policy) => policy.providerId === "cpa").profileId, clash.id, "with its route");
+  assert.equal(store.adoptSourceProfiles("nova").changed, false, "a second start changes nothing");
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("editing one half of a proxy sign-in keeps the other half", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "proxy-auth-"));
+  const store = createProviderNetworkStore({
+    filePath: path.join(root, "providers", "provider-network.json"),
+    keyPath: path.join(root, "providers", "provider-network.key"), safeStorage,
+  });
+  const endpoint = { protocol: "http", host: "proxy.example", port: 8080 };
+  const id = store.saveProxyProfile({ name: "p", endpoint, username: "user", password: "old" }).proxyProfiles[0].id;
+  store.saveProxyProfile({ id, name: "p", endpoint, password: "new" });
+  assert.deepEqual(store.proxySecret(id), { username: "user", password: "new" });
+  store.saveProxyProfile({ id, name: "p", endpoint, username: "other" });
+  assert.deepEqual(store.proxySecret(id), { username: "other", password: "new" });
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// Nova's manager on its own: the app no longer starts it, but a start (the Proxy page IPC) still works so.
 /** A Nova manager whose launches start the fake Nova (or exit with `exitCode`), counting each one. */
 function launching(t, nova, { exitCode = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-nova-"));
@@ -248,4 +299,12 @@ test("an executable without managed mode is not launched again at app start", as
   await again.start();
   again.stopPolling();
   assert.match(again.state().error, /no managed mode/, "the next app start remembers it and doesn't open Nova's window");
+});
+
+test("a quit leaves alone a Nova this app never started", async (t) => {
+  const nova = fakeNova([]);
+  const { manager } = launching(t, nova);
+  await manager.stop();
+  assert.equal(nova.up, true, "the user's own Nova keeps routing their other apps");
+  assert.deepEqual(nova.calls, [], "not even asked");
 });
