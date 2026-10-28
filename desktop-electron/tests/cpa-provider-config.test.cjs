@@ -51,6 +51,18 @@ test("managed restarts preserve legacy API providers alongside OAuth aliases and
   assert.deepEqual(parse(runtimeConfiguration(root, "managed-management", "managed-api", "http://127.0.0.1:17894")), parsed);
 });
 
+test("a route CPA 8 saved as requests.proxy-url is replaced, not kept beside the managed one", (t) => {
+  const root = fixture(t, { "config-version": 8,
+    requests: { "proxy-url": "http://old.invalid:1234", "request-retry": 3 } });
+  const parsed = parse(runtimeConfiguration(root, "managed-management", "managed-api", "http://127.0.0.1:17891"));
+  assert.equal(parsed["proxy-url"], "http://127.0.0.1:17891");
+  assert.deepEqual(parsed.requests, { "request-retry": 3 }, "other request settings stay");
+  const onlyRoute = fixture(t, { "config-version": 8, requests: { "proxy-url": "http://old.invalid:1234" } });
+  const direct = parse(runtimeConfiguration(onlyRoute, "managed-management", "managed-api", ""));
+  assert.equal(direct.requests, undefined, "a removed route leaves no grouped one behind");
+  assert.equal(direct["proxy-url"], undefined);
+});
+
 test("v8 provider groups, catalogs and OAuth options survive while managed auth and security stay authoritative", (t) => {
   const saved = {
     "config-version": 8,

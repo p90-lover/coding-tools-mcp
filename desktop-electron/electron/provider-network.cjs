@@ -176,6 +176,9 @@ function normalizeProxyProfile(profile) {
         : undefined,
       lastError: optionalText(profile.lastError, 500),
       archivedAt: profile.archivedAt ? timestamp(profile.archivedAt, undefined) : undefined,
+      // Set on a proxy another app owns (ProxyBridge Nova): it is kept in step with that app and
+      // only changed there.
+      ...(profile.source === "nova" ? { source: "nova", sourceKey: optionalText(profile.sourceKey, 160) } : {}),
     };
   } catch {
     return null;
@@ -526,6 +529,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     const id = optionalText(input.id, 160) || crypto.randomUUID();
     const index = state.proxyProfiles.findIndex((profile) => profile.id === id);
     const previous = index >= 0 ? state.proxyProfiles[index] : null;
+    if (previous?.source) throw new Error("This proxy belongs to ProxyBridge Nova; change it on the Proxy page");
     const username = typeof input.username === "string" ? input.username : undefined;
     const password = typeof input.password === "string" ? input.password : undefined;
     if (username !== undefined || password !== undefined) {
@@ -556,6 +560,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   function archiveProxyProfile(profileId) {
     const profile = findProxy(profileId);
     if (!profile) throw new Error("Proxy profile was not found");
+    if (profile.source) throw new Error("This proxy belongs to ProxyBridge Nova; remove it on the Proxy page");
     const now = new Date().toISOString();
     Object.assign(profile, { enabled: false, archivedAt: now, updatedAt: now });
     dropProxyReferences(profileId);
@@ -571,6 +576,77 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     dropProxyReferences(profileId);
     write();
     return publicSnapshot();
+  }
+
+  // Points every route that uses one profile at another (a migration, or a source proxy that went
+  // away), keeping each route's mode.
+  function moveProxyReferences(fromId, toId) {
+    if (state.routing.globalProfileId === fromId) state.routing.globalProfileId = toId;
+    state.routing.providers = state.routing.providers.map((policy) => (
+      policy.profileId === fromId ? { ...policy, profileId: toId } : policy
+    ));
+    state.routing.accounts = state.routing.accounts.map((policy) => (
+      policy.profileId === fromId ? { ...policy, profileId: toId } : policy
+    ));
+    for (const account of state.accounts) {
+      if (account.proxyProfileId === fromId) account.proxyProfileId = toId;
+    }
+  }
+
+  function retargetProxyReferences(fromId, toId) {
+    if (!activeProxy(toId)) throw new Error("Proxy profile was not found");
+    moveProxyReferences(fromId, toId);
+    write();
+    return publicSnapshot();
+  }
+
+  /**
+   * Makes the profiles of one source app match its list: each entry is { id, name, endpoint,
+   * username, password, sourceKey }. A source profile the list no longer has is removed, and its
+   * routes move to `fallbackId` (when that is in the list) or are dropped. Writes only on a change.
+   */
+  function syncSourceProfiles(source, entries, { fallbackId = null } = {}) {
+    if (source !== "nova") throw new Error("Unknown proxy source");
+    const now = new Date().toISOString();
+    let changed = false;
+    const seen = new Set();
+    for (const entry of entries) {
+      const index = state.proxyProfiles.findIndex((profile) => profile.id === entry.id);
+      const previous = index >= 0 ? state.proxyProfiles[index] : null;
+      if (previous && !previous.source) throw new Error(`Proxy profile ${entry.id} is not a ${source} proxy`);
+      const credentials = entry.username || entry.password ? { username: entry.username || "", password: entry.password || "" } : null;
+      const saved = codec.decrypt(state.secrets.proxies[entry.id]);
+      if (JSON.stringify(saved ?? null) !== JSON.stringify(credentials)) {
+        if (credentials) state.secrets.proxies[entry.id] = codec.encrypt(credentials);
+        else delete state.secrets.proxies[entry.id];
+        changed = true;
+      }
+      const profile = normalizeProxyProfile({
+        id: entry.id, name: entry.name, enabled: true, endpoint: entry.endpoint,
+        scopes: previous?.scopes ?? ["all"], bypass: previous?.bypass ?? DEFAULT_BYPASS,
+        hasAuthentication: Boolean(credentials), createdAt: previous?.createdAt ?? now,
+        updatedAt: previous?.updatedAt ?? now, lastCheckedAt: previous?.lastCheckedAt,
+        latencyMs: previous?.latencyMs, lastError: previous?.lastError,
+        source, sourceKey: entry.sourceKey,
+      });
+      if (!profile) throw new Error(`Proxy ${entry.name} is invalid`);
+      seen.add(profile.id);
+      const same = previous && JSON.stringify({ ...previous, updatedAt: 0 }) === JSON.stringify({ ...profile, updatedAt: 0 });
+      if (same) continue;
+      profile.updatedAt = now;
+      if (index >= 0) state.proxyProfiles[index] = profile;
+      else state.proxyProfiles.push(profile);
+      changed = true;
+    }
+    for (const gone of state.proxyProfiles.filter((profile) => profile.source === source && !seen.has(profile.id))) {
+      state.proxyProfiles = state.proxyProfiles.filter((profile) => profile.id !== gone.id);
+      delete state.secrets.proxies[gone.id];
+      if (fallbackId && seen.has(fallbackId)) moveProxyReferences(gone.id, fallbackId);
+      else dropProxyReferences(gone.id);
+      changed = true;
+    }
+    if (changed) write();
+    return { changed, snapshot: publicSnapshot() };
   }
 
   function dropProxyReferences(profileId) {
@@ -710,6 +786,8 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     saveProxyProfile,
     archiveProxyProfile,
     removeProxyProfile,
+    retargetProxyReferences,
+    syncSourceProfiles,
     setGlobalRouting,
     setProviderPolicy,
     setAccountPolicy,

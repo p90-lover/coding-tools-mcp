@@ -1,74 +1,48 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   ExternalServiceSnapshot,
   Language,
+  NovaApp,
+  NovaConnection,
+  NovaDecodo,
+  NovaLogEntry,
+  NovaProfile,
+  NovaProxy,
+  NovaProxyProtocol,
+  NovaRule,
+  NovaState,
   ProviderAccountRecord,
   ProviderNetworkSnapshot,
   ProxyPolicyMode,
-  ProxyProfileInput,
-  ProxyProfileRecord,
-  ProxyProtocol,
-  ProxyScope,
 } from "../types";
 import { localText, messageOf } from "./execution-surface-utils";
 import "./orchestration-control.css";
 import "./network-proxy.css";
 
-const SCOPES: readonly ProxyScope[] = [
-  "all",
-  "browser",
-  "provider",
-  "oauth",
-  "subagent",
-  "mcp",
-  "websocket",
-  "http",
-  "update",
-];
+// The Proxy page is ProxyBridge Nova's dashboard. Nova owns the proxies, rules and system routing;
+// Coding Tools' routes (app-wide, CPA, provider, account) pick from Nova's proxies and its gateway.
+
 const MODES: readonly ProxyPolicyMode[] = ["inherit", "global", "direct", "profile"];
-const LOOPBACK_BYPASS = "localhost,127.0.0.1,::1";
 const PROXY_PATH_PROVIDERS = new Set(["claude-oauth", "anthropic-api"]);
+const LIVE_REFRESH_MS = 2_000;
 
-type ProxyStatus = "error" | "enabled" | "disabled";
+type NovaTab = "proxies" | "rules" | "apps" | "connections" | "log" | "decodo";
 
-interface ProfileDraft {
-  id?: string;
-  name: string;
-  enabled: boolean;
-  protocol: ProxyProtocol;
+interface ProxyDraft {
+  key: string;
+  protocol: NovaProxyProtocol;
   host: string;
   port: string;
-  scopes: ProxyScope[];
-  bypass: string;
   username: string;
   password: string;
+  upstreamEligible: boolean;
 }
 
-function scopeLabel(language: Language, scope: ProxyScope): string {
-  switch (scope) {
-    case "all":
-      return localText(language, "All application traffic", "所有應用程式流量", "所有应用程序流量", "すべてのアプリ通信");
-    case "browser":
-      return localText(language, "Browser", "瀏覽器", "浏览器", "ブラウザー");
-    case "provider":
-      return localText(language, "Provider", "供應商", "供应商", "プロバイダー");
-    case "oauth":
-      return "OAuth";
-    case "subagent":
-      return localText(language, "Subagents", "子代理", "子代理", "サブエージェント");
-    case "paseo":
-      return "Paseo";
-    case "anneal":
-      return "Anneal";
-    case "mcp":
-      return "MCP";
-    case "websocket":
-      return "WebSocket";
-    case "http":
-      return "HTTP";
-    case "update":
-      return localText(language, "Updates", "更新服務", "更新服务", "更新");
-  }
+interface RuleDraft {
+  name: string;
+  executables: string;
+  action: NovaRule["action"];
+  proxyKey: string;
 }
 
 function policyModeLabel(language: Language, mode: ProxyPolicyMode): string {
@@ -84,44 +58,47 @@ function policyModeLabel(language: Language, mode: ProxyPolicyMode): string {
   }
 }
 
-function statusLabel(language: Language, status: ProxyStatus): string {
-  switch (status) {
+function routingLabel(language: Language, state: string | undefined): string {
+  switch (state) {
+    case "active":
+      return localText(language, "Routing on", "路由已啟用", "路由已启用", "ルーティング中");
+    case "direct":
+      return localText(language, "Routing off (direct)", "路由已停用（直接連線）", "路由已停用（直接连接）", "ルーティング停止（直接接続）");
+    case "starting":
+      return localText(language, "Starting routing…", "正在啟用路由…", "正在启用路由…", "ルーティングを開始中…");
+    case "stopping":
+      return localText(language, "Stopping routing…", "正在停止路由…", "正在停止路由…", "ルーティングを停止中…");
+    case "setupRequired":
+      return localText(language, "Routing needs a one-time setup", "路由需要一次性安裝", "路由需要一次性安装", "ルーティングの初回セットアップが必要");
+    case "disabled":
+      return localText(language, "Routing disabled", "路由已停用", "路由已停用", "ルーティング無効");
     case "error":
-      return localText(language, "Error", "錯誤", "错误", "エラー");
-    case "enabled":
-      return localText(language, "Enabled", "已啟用", "已启用", "有効");
+      return localText(language, "Routing error", "路由錯誤", "路由错误", "ルーティングエラー");
+    default:
+      return "—";
+  }
+}
+
+function appStateLabel(language: Language, state: NovaApp["state"]): string {
+  switch (state) {
+    case "connected":
+      return localText(language, "Connected", "已連線", "已连接", "接続中");
+    case "idle":
+      return localText(language, "Running, idle", "執行中・閒置", "运行中・空闲", "実行中・待機");
+    case "notRunning":
+      return localText(language, "Not running", "未執行", "未运行", "未実行");
     case "disabled":
       return localText(language, "Disabled", "已停用", "已停用", "無効");
   }
 }
 
-function emptyDraft(language: Language): ProfileDraft {
-  return {
-    name: localText(language, "Global proxy", "全域代理", "全局代理", "グローバルプロキシ"),
-    enabled: true,
-    protocol: "http",
-    host: "127.0.0.1",
-    port: "17891",
-    scopes: ["all", "browser", "provider", "oauth", "subagent", "mcp", "websocket", "http", "update"],
-    bypass: LOOPBACK_BYPASS,
-    username: "",
-    password: "",
-  };
+function proxyLabel(proxy: Pick<NovaProxy, "protocol" | "host" | "port" | "provider">): string {
+  const where = `${proxy.protocol.toUpperCase()} ${proxy.host}:${proxy.port}`;
+  return proxy.provider ? `${proxy.provider} · ${where}` : where;
 }
 
-function fromProfile(profile: ProxyProfileRecord): ProfileDraft {
-  return {
-    id: profile.id,
-    name: profile.name,
-    enabled: profile.enabled,
-    protocol: profile.endpoint.protocol,
-    host: profile.endpoint.host,
-    port: String(profile.endpoint.port),
-    scopes: [...profile.scopes],
-    bypass: profile.bypass.join(","),
-    username: "",
-    password: "",
-  };
+function emptyProxy(): ProxyDraft {
+  return { key: "", protocol: "socks5", host: "", port: "", username: "", password: "", upstreamEligible: true };
 }
 
 function policyMode(profileId: string | undefined, inheritGlobal: boolean): ProxyPolicyMode {
@@ -149,26 +126,50 @@ export function NetworkProxySurface({
 }) {
   const [snapshot, setSnapshot] = useState<ProviderNetworkSnapshot | null>(null);
   const [cpa, setCpa] = useState<ExternalServiceSnapshot | null>(null);
-  const [selectedId, setSelectedId] = useState("");
-  const [draft, setDraft] = useState<ProfileDraft>(() => emptyDraft(language));
+  const [nova, setNova] = useState<NovaState | null>(null);
+  const [profile, setProfile] = useState<NovaProfile | null>(null);
+  const [tab, setTab] = useState<NovaTab>("proxies");
+  const [proxyDraft, setProxyDraft] = useState<ProxyDraft>(emptyProxy);
+  const [rules, setRules] = useState<NovaRule[] | null>(null);
+  const [ruleDraft, setRuleDraft] = useState<RuleDraft>({ name: "", executables: "", action: "proxy", proxyKey: "" });
+  const [apps, setApps] = useState<NovaApp[]>([]);
+  const [connections, setConnections] = useState<NovaConnection[]>([]);
+  const [log, setLog] = useState<NovaLogEntry[]>([]);
+  const [decodo, setDecodo] = useState<NovaDecodo | null>(null);
+  const [decodoPassword, setDecodoPassword] = useState("");
+  const [exePath, setExePath] = useState("");
+  const [checks, setChecks] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
 
-  const profiles = snapshot?.proxyProfiles.filter((profile) => !profile.archivedAt) ?? [];
-  const selected = profiles.find((profile) => profile.id === selectedId);
+  const profiles = snapshot?.proxyProfiles.filter((item) => !item.archivedAt) ?? [];
   const providers = useMemo(
     () => [...new Set(["cpa", ...(snapshot?.accounts ?? []).filter((account) => !account.archivedAt).map((account) => account.providerId)])],
     [snapshot],
   );
+  const running = nova?.running === true;
+  const routing = nova?.status?.routing;
+  const eligible = (profile?.proxies ?? []).filter((proxy) => proxy.upstreamEligible);
+
+  const loadProfile = useCallback(async () => {
+    const api = window.codexWebLauncher;
+    if (!api) return;
+    const next = await api.novaProfile();
+    setProfile(next);
+    setRules(null);
+  }, []);
 
   useEffect(() => {
     const api = window.codexWebLauncher;
     if (!api) return;
     let cancelled = false;
-    void Promise.all([api.providerSnapshot(), api.externalServicesSnapshot()]).then(([next, services]) => {
+    void Promise.all([api.providerSnapshot(), api.externalServicesSnapshot(), api.novaState()]).then(([next, services, state]) => {
       if (cancelled) return;
       setSnapshot(next);
       setCpa(services.services.find((service) => service.id === "cpa") ?? null);
+      setNova(state);
+      setExePath(state.executable);
+      if (state.running) void loadProfile().catch((cause) => setError(messageOf(cause)));
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribe = api.onProviderNetworkChanged((next) => {
       if (!cancelled) setSnapshot(next);
@@ -176,16 +177,173 @@ export function NetworkProxySurface({
     const unsubscribeServices = api.onExternalServicesChanged((next) => {
       if (!cancelled) setCpa(next.services.find((service) => service.id === "cpa") ?? null);
     });
+    const unsubscribeNova = api.onNovaChanged((state) => {
+      if (cancelled) return;
+      setNova((previous) => {
+        if (state.running && previous?.status?.profile.etag !== state.status?.profile.etag) {
+          void loadProfile().catch(() => {});
+        }
+        return state;
+      });
+    });
     return () => {
       cancelled = true;
       unsubscribe();
       unsubscribeServices();
+      unsubscribeNova();
     };
-  }, [setError]);
+  }, [loadProfile, setError]);
+
+  // Applications, connections and the log change by the second: read only while their tab shows.
+  useEffect(() => {
+    const api = window.codexWebLauncher;
+    if (!api || !running || !["apps", "connections", "log"].includes(tab)) return;
+    let cancelled = false;
+    let after = 0;
+    const read = async () => {
+      if (document.hidden) return;
+      try {
+        if (tab === "apps") {
+          const result = await api.novaApps();
+          if (!cancelled) setApps(result.apps);
+        } else if (tab === "connections") {
+          const result = await api.novaConnections();
+          if (!cancelled) setConnections(result.connections);
+        } else {
+          const result = await api.novaLog(after);
+          if (cancelled || !result.entries.length) return;
+          after = result.entries.at(-1)!.seq;
+          setLog((current) => [...current, ...result.entries].slice(-300));
+        }
+      } catch (cause) {
+        if (!cancelled) setError(messageOf(cause));
+      }
+    };
+    setLog([]);
+    void read();
+    const timer = window.setInterval(() => void read(), LIVE_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [running, setError, tab]);
 
   useEffect(() => {
-    if (selected) setDraft(fromProfile(selected));
-  }, [selected?.id, selected?.updatedAt]);
+    const api = window.codexWebLauncher;
+    if (!api || !running || tab !== "decodo") return;
+    void api.novaDecodo().then(setDecodo).catch((cause) => setError(messageOf(cause)));
+  }, [running, setError, tab]);
+
+  const act = async (operation: () => Promise<unknown>, success: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await operation();
+      if (success) setNotice(success);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startNova = () => act(async () => {
+    const api = window.codexWebLauncher!;
+    if (exePath.trim() && exePath.trim() !== nova?.executable) setNova(await api.novaSetExecutable(exePath.trim()));
+    setNova(await api.novaStart());
+    await loadProfile();
+  }, localText(language, "ProxyBridge Nova is running.", "ProxyBridge Nova 已執行。", "ProxyBridge Nova 已运行。", "ProxyBridge Nova を起動しました。"));
+
+  const routingAction = (action: "start" | "stop" | "install") => act(
+    () => window.codexWebLauncher!.novaRouting(action),
+    action === "stop"
+      ? localText(language, "Stopping routing.", "正在停止路由。", "正在停止路由。", "ルーティングを停止しています。")
+      : action === "install"
+        ? localText(language, "Approve the Windows prompt to finish the setup.", "請喺 Windows 提示中允許以完成安裝。", "请在 Windows 提示中允许以完成安装。", "Windows の確認画面で許可してセットアップを完了してください。")
+        : localText(language, "Starting routing.", "正在啟用路由。", "正在启用路由。", "ルーティングを開始しています。"),
+  );
+
+  const saveProxies = (proxies: NovaProxy[], success: string) => act(async () => {
+    const next = await window.codexWebLauncher!.novaSaveProxies({ etag: profile?.etag ?? "", proxies });
+    setProfile(next);
+  }, success);
+
+  const ownProxies = (profile?.proxies ?? []).filter((proxy) => !proxy.linked).map((proxy) => ({ ...proxy, password: null }));
+
+  const saveProxyDraft = () => {
+    const port = Number(proxyDraft.port);
+    if (!proxyDraft.host.trim() || !Number.isInteger(port) || port < 1 || port > 65535) {
+      setError(localText(language, "Enter a valid host and port.", "請輸入有效嘅主機同連接埠。", "请输入有效的主机和端口。", "有効なホストとポートを入力してください。"));
+      return;
+    }
+    const entry: NovaProxy = {
+      key: proxyDraft.key, protocol: proxyDraft.protocol, host: proxyDraft.host.trim(), port,
+      username: proxyDraft.username, password: proxyDraft.password || (proxyDraft.key ? null : ""),
+      linked: false, upstreamEligible: proxyDraft.upstreamEligible,
+      provider: ownProxies.find((proxy) => proxy.key === proxyDraft.key)?.provider ?? null,
+    };
+    const proxies = proxyDraft.key
+      ? ownProxies.map((proxy) => (proxy.key === proxyDraft.key ? entry : proxy))
+      : [...ownProxies, entry];
+    void saveProxies(proxies, localText(language, "Proxy saved in Nova.", "代理已儲存到 Nova。", "代理已保存到 Nova。", "プロキシを Nova に保存しました。"))
+      .then(() => setProxyDraft(emptyProxy()));
+  };
+
+  const removeProxy = (key: string) => void saveProxies(
+    ownProxies.filter((proxy) => proxy.key !== key),
+    localText(language, "Proxy removed from Nova.", "已從 Nova 移除代理。", "已从 Nova 移除代理。", "Nova からプロキシを削除しました。"),
+  );
+
+  const checkProxy = (key: string) => act(async () => {
+    setChecks((current) => ({ ...current, [key]: "…" }));
+    const result = await window.codexWebLauncher!.novaCheckProxy(key);
+    setChecks((current) => ({ ...current, [key]: result.ok ? `${result.latencyMs ?? 0} ms` : result.error ?? "failed" }));
+  }, localText(language, "Proxy checked.", "已檢查代理。", "已检查代理。", "プロキシを確認しました。"));
+
+  const editedRules = rules ?? profile?.rules ?? [];
+  const editRule = (ruleId: number, patch: Partial<NovaRule>) => {
+    setRules(editedRules.map((rule) => (rule.ruleId === ruleId ? { ...rule, ...patch } : rule)));
+  };
+
+  const addRule = () => {
+    const executables = ruleDraft.executables.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!ruleDraft.name.trim() || !executables.length) {
+      setError(localText(language, "Name the rule and list at least one program.", "請為規則命名並列出至少一個程式。", "请为规则命名并列出至少一个程序。", "規則名と少なくとも 1 つのプログラムを入力してください。"));
+      return;
+    }
+    const used = new Set(editedRules.map((rule) => rule.ruleId));
+    let ruleId = 2;
+    while (used.has(ruleId) && ruleId < 127) ruleId += 1;
+    const rule: NovaRule = {
+      ruleId, name: ruleDraft.name.trim(), enabled: true,
+      applications: executables.map((executablePath) => ({ executablePath, packageFamily: null, packageSid: null, knownFamily: "none", requiresVerifiedLineage: false })),
+      targetHosts: "*", targetPorts: "*", protocol: "any", action: ruleDraft.action,
+      proxyKey: ruleDraft.action === "proxy" ? ruleDraft.proxyKey || eligible[0]?.key || null : null, immutable: false,
+    };
+    // Localhost stays first and Default last; new rules go just before Default.
+    const last = editedRules.at(-1);
+    setRules(last?.immutable ? [...editedRules.slice(0, -1), rule, last] : [...editedRules, rule]);
+    setRuleDraft({ name: "", executables: "", action: "proxy", proxyKey: "" });
+  };
+
+  const saveRules = () => act(async () => {
+    const next = await window.codexWebLauncher!.novaSaveRules({ etag: profile?.etag ?? "", rules: editedRules });
+    setProfile(next);
+    setRules(null);
+  }, localText(language, "Rules saved in Nova.", "規則已儲存到 Nova。", "规则已保存到 Nova。", "規則を Nova に保存しました。"));
+
+  const saveDecodo = () => act(async () => {
+    if (!decodo) return;
+    const next = await window.codexWebLauncher!.novaSaveDecodo({ ...decodo, password: decodoPassword || null });
+    setDecodo(next);
+    setDecodoPassword("");
+  }, localText(language, "Decodo settings saved.", "Decodo 設定已儲存。", "Decodo 设置已保存。", "Decodo の設定を保存しました。"));
+
+  const syncDecodo = () => act(async () => {
+    const result = await window.codexWebLauncher!.novaSyncDecodo();
+    setProfile(result.profile);
+    setNotice(`Decodo: +${result.added} ~${result.updated} −${result.removed}`);
+  }, "");
 
   const run = async (operation: () => Promise<ProviderNetworkSnapshot>, success: string) => {
     setBusy(true);
@@ -195,71 +353,6 @@ export function NetworkProxySurface({
       const services = await window.codexWebLauncher?.externalServicesSnapshot().catch(() => null);
       if (services) setCpa(services.services.find((service) => service.id === "cpa") ?? null);
       setNotice(success);
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const save = async () => {
-    const api = window.codexWebLauncher;
-    if (!api) return;
-    const port = Number(draft.port);
-    if (!draft.name.trim() || !draft.host.trim() || !Number.isInteger(port) || port < 1 || port > 65535) {
-      setError(localText(
-        language,
-        "Enter a valid proxy name, host and port.",
-        "請輸入有效嘅代理名稱、主機同連接埠。",
-        "请输入有效的代理名称、主机和端口。",
-        "有効なプロキシ名、ホスト、ポートを入力してください。",
-      ));
-      return;
-    }
-    const input: ProxyProfileInput = {
-      ...(draft.id ? { id: draft.id } : {}),
-      name: draft.name.trim(),
-      enabled: draft.enabled,
-      endpoint: { protocol: draft.protocol, host: draft.host.trim(), port },
-      scopes: draft.scopes,
-      bypass: draft.bypass.split(",").map((item) => item.trim()).filter(Boolean),
-      ...(draft.username ? { username: draft.username } : {}),
-      ...(draft.password ? { password: draft.password } : {}),
-    };
-    await run(async () => {
-      const next = await api.saveProxyProfile(input);
-      const profile = next.proxyProfiles.find((candidate) => (
-        candidate.id === draft.id || candidate.name === input.name
-      ));
-      if (profile) setSelectedId(profile.id);
-      setDraft((current) => ({ ...current, username: "", password: "" }));
-      return next;
-    }, localText(language, "Proxy profile saved.", "代理設定檔已儲存。", "代理配置已保存。", "プロキシを保存しました。"));
-  };
-
-  const testProfile = async () => {
-    const api = window.codexWebLauncher;
-    if (!api || !selectedId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await api.testProxyProfile(selectedId);
-      setSnapshot(result.snapshot);
-      setNotice(result.reachable
-        ? localText(
-            language,
-            `Proxy reachable in ${result.latencyMs ?? 0} ms.`,
-            `代理可連線，延遲 ${result.latencyMs ?? 0} 毫秒。`,
-            `代理可连接，延迟 ${result.latencyMs ?? 0} 毫秒。`,
-            `プロキシに接続できました（${result.latencyMs ?? 0} ms）。`,
-          )
-        : localText(
-            language,
-            `Proxy test failed: ${result.error ?? "unknown"}`,
-            `代理測試失敗：${result.error ?? "未知"}`,
-            `代理测试失败：${result.error ?? "未知"}`,
-            `プロキシテストに失敗しました：${result.error ?? "不明"}`,
-          ));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -305,19 +398,19 @@ export function NetworkProxySurface({
     }
   };
 
+  const proxyPathNotice = () => setNotice(localText(
+    language,
+    "Claude and Anthropic traffic always uses the proxy, never Direct.",
+    "Claude 同 Anthropic 流量必須走代理／SOCKS，唔會改成 Direct。",
+    "Claude 和 Anthropic 流量必须走代理／SOCKS，不会改为 Direct。",
+    "Claude / Anthropic の通信はプロキシ/SOCKS 経路のままです。Direct にはしません。",
+  ));
+
   const setProviderPolicy = async (providerId: string, mode: ProxyPolicyMode, profileId?: string) => {
     const api = window.codexWebLauncher;
     if (!api) return;
     const nextMode = mode === "direct" && PROXY_PATH_PROVIDERS.has(providerId) ? "inherit" : mode;
-    if (nextMode !== mode) {
-      setNotice(localText(
-        language,
-        "Claude and Anthropic traffic always uses the proxy, never Direct.",
-        "Claude 同 Anthropic 流量必須走代理／SOCKS，唔會改成 Direct。",
-        "Claude 和 Anthropic 流量必须走代理／SOCKS，不会改为 Direct。",
-        "Claude / Anthropic の通信はプロキシ/SOCKS 経路のままです。Direct にはしません。",
-      ));
-    }
+    if (nextMode !== mode) proxyPathNotice();
     await run(
       () => api.setProviderProxyPolicy({ providerId, mode: nextMode, ...(profileId ? { profileId } : {}) }),
       `${providerId}: ${policyModeLabel(language, nextMode)}`,
@@ -328,39 +421,32 @@ export function NetworkProxySurface({
     const api = window.codexWebLauncher;
     if (!api) return;
     const account = snapshot?.accounts.find((candidate) => candidate.id === accountId);
-    const nextMode = mode === "direct" && account && PROXY_PATH_PROVIDERS.has(account.providerId)
-      ? "inherit"
-      : mode;
-    if (nextMode !== mode) {
-      setNotice(localText(
-        language,
-        "Claude and Anthropic traffic always uses the proxy, never Direct.",
-        "Claude 同 Anthropic 流量必須走代理／SOCKS，唔會改成 Direct。",
-        "Claude 和 Anthropic 流量必须走代理／SOCKS，不会改为 Direct。",
-        "Claude / Anthropic の通信はプロキシ/SOCKS 経路のままです。Direct にはしません。",
-      ));
-    }
+    const nextMode = mode === "direct" && account && PROXY_PATH_PROVIDERS.has(account.providerId) ? "inherit" : mode;
+    if (nextMode !== mode) proxyPathNotice();
     await run(
       () => api.setAccountProxyPolicy({ accountId, mode: nextMode, ...(profileId ? { profileId } : {}) }),
       `${accountId}: ${policyModeLabel(language, nextMode)}`,
     );
   };
 
-  const toggleScope = (scope: ProxyScope) => {
-    setDraft((current) => ({
-      ...current,
-      scopes: current.scopes.includes(scope)
-        ? current.scopes.filter((candidate) => candidate !== scope)
-        : [...current.scopes, scope],
-    }));
-  };
-
   const globalProfileId = snapshot?.routing.globalProfileId ?? "";
-  const globalProfile = profiles.find((profile) => profile.id === globalProfileId);
+  const globalProfile = profiles.find((item) => item.id === globalProfileId);
   const globalEnabled = snapshot?.routing.globalEnabled === true;
   const cpaConfigured = cpa?.status === "ready" && cpa.outboundProxy?.configMatches === true;
   const customRuleCount = (snapshot?.routing.providers.filter((rule) => rule.profileId || rule.inheritGlobal === false).length ?? 0)
     + (snapshot?.routing.accounts.filter((rule) => rule.profileId || rule.inheritGlobal === false || rule.inheritProvider === false).length ?? 0);
+  const tabs: { id: NovaTab; label: string }[] = [
+    { id: "proxies", label: localText(language, "Proxies", "代理", "代理", "プロキシ") },
+    { id: "rules", label: localText(language, "Rules", "規則", "规则", "規則") },
+    { id: "apps", label: localText(language, "Applications", "應用程式", "应用程序", "アプリ") },
+    { id: "connections", label: localText(language, "Connections", "連線", "连接", "接続") },
+    { id: "log", label: localText(language, "Log", "記錄", "日志", "ログ") },
+    { id: "decodo", label: "Decodo" },
+  ];
+  const proxyOption = (key: string | null) => {
+    const proxy = profile?.proxies.find((item) => item.key === key);
+    return proxy ? proxyLabel(proxy) : "—";
+  };
 
   return (
     <section className="control-surface network-proxy-surface">
@@ -370,35 +456,90 @@ export function NetworkProxySurface({
           <h1>{localText(language, "Proxy", "代理", "代理", "プロキシ")}</h1>
           <p>{localText(
             language,
-            "Set the proxy for the browser and CPA. Provider and account rules are below.",
-            "喺同一頁管理瀏覽器同 CPA 嘅外連代理。供應商及帳戶規則喺下方。",
-            "在同一页管理浏览器和 CPA 的出站代理。供应商和账户规则在下方。",
-            "ブラウザーと CPA の送信プロキシをまとめて管理します。プロバイダーとアカウントの規則は下にあります。",
+            "ProxyBridge Nova manages the proxies and which programs use them. The routes below pick one of its proxies for the browser, CPA, providers and accounts.",
+            "ProxyBridge Nova 管理代理同邊啲程式使用佢哋。下方路由為瀏覽器、CPA、供應商同帳戶揀選 Nova 嘅代理。",
+            "ProxyBridge Nova 管理代理以及哪些程序使用它们。下方路由为浏览器、CPA、供应商和账户选择 Nova 的代理。",
+            "ProxyBridge Nova がプロキシと使用するプログラムを管理します。下の経路でブラウザー、CPA、プロバイダー、アカウントが使う Nova のプロキシを選びます。",
           )}</p>
         </div>
-        <button className="secondary-button" disabled={busy} onClick={() => setDraft(emptyDraft(language))} type="button">
-          + {localText(language, "New profile", "新增設定檔", "新增配置", "新規プロファイル")}
-        </button>
+        <span className={`proxy-route-badge${running ? " is-ready" : ""}`}>
+          {running
+            ? `ProxyBridge Nova ${nova?.status?.version ?? ""}`.trim()
+            : localText(language, "Nova not running", "Nova 未執行", "Nova 未运行", "Nova 停止中")}
+        </span>
       </header>
+
+      <section className="proxy-route-overview nova-status" aria-labelledby="nova-status-heading">
+        <div className="proxy-route-header">
+          <div>
+            <span className="surface-kicker">PROXYBRIDGE NOVA</span>
+            <h2 id="nova-status-heading">{running ? routingLabel(language, routing?.state) : localText(language, "Not running", "未執行", "未运行", "停止中")}</h2>
+          </div>
+          <div className="nova-actions">
+            {running ? (
+              <>
+                {routing?.state === "setupRequired" ? (
+                  <button className="primary-button compact" disabled={busy || routing.busy} onClick={() => void routingAction("install")} type="button">
+                    {localText(language, "Set up routing", "安裝路由", "安装路由", "ルーティングをセットアップ")}
+                  </button>
+                ) : routing?.state === "active" ? (
+                  <button className="secondary-button" disabled={busy || routing.busy} onClick={() => void routingAction("stop")} type="button">
+                    {localText(language, "Stop routing", "停止路由", "停止路由", "ルーティングを停止")}
+                  </button>
+                ) : (
+                  <button className="primary-button compact" disabled={busy || routing?.busy || routing?.state === "disabled"} onClick={() => void routingAction("start")} type="button">
+                    {localText(language, "Start routing", "啟用路由", "启用路由", "ルーティングを開始")}
+                  </button>
+                )}
+              </>
+            ) : (
+              <button className="primary-button compact" disabled={busy} onClick={() => void startNova()} type="button">
+                {localText(language, "Start ProxyBridge Nova", "啟動 ProxyBridge Nova", "启动 ProxyBridge Nova", "ProxyBridge Nova を起動")}
+              </button>
+            )}
+          </div>
+        </div>
+        <dl className="proxy-route-list nova-facts">
+          <div><dt>{localText(language, "Gateway", "閘道", "网关", "ゲートウェイ")}</dt><dd>{nova?.status
+            ? `${nova.status.gateway.host}:${nova.status.gateway.port} · ${nova.status.gateway.running
+              ? localText(language, "listening", "監聽中", "监听中", "待受中")
+              : nova.status.gateway.error ?? localText(language, "stopped", "已停止", "已停止", "停止")}`
+            : "—"}</dd></div>
+          <div><dt>{localText(language, "Proxies and rules", "代理同規則", "代理和规则", "プロキシと規則")}</dt><dd>{nova?.status
+            ? `${nova.status.profile.proxyCount} · ${nova.status.profile.ruleCount}`
+            : "—"}</dd></div>
+          {routing?.error || nova?.error ? <div className="full-row"><dt>{localText(language, "Problem", "問題", "问题", "問題")}</dt><dd>{routing?.error ?? nova?.error}</dd></div> : null}
+        </dl>
+        {!running ? (
+          <div className="control-fields nova-exe">
+            <label className="full-row"><span>ProxyBridgeRewrite.exe</span><input value={exePath} onChange={(event) => setExePath(event.target.value)} placeholder="C:\\…\\ProxyBridgeRewrite.exe" /></label>
+            <small className="proxy-secret-help">{localText(language,
+              "Coding Tools runs Nova without its tray and takes over a tray that is open. Routing keeps running while it switches.",
+              "Coding Tools 會喺冇系統匣嘅情況下執行 Nova，並接手已開啟嘅系統匣。切換期間路由會繼續運作。",
+              "Coding Tools 会在没有托盘的情况下运行 Nova，并接管已打开的托盘。切换期间路由继续运行。",
+              "Coding Tools はトレイなしで Nova を実行し、開いているトレイを引き継ぎます。切り替え中もルーティングは続きます。")}</small>
+          </div>
+        ) : null}
+      </section>
 
       <section className="global-proxy-banner">
         <label className="check-row">
           <input
-            checked={snapshot?.routing.globalEnabled === true}
+            checked={globalEnabled}
             disabled={busy || profiles.length === 0}
             onChange={(event) => void setGlobal(event.target.checked)}
             type="checkbox"
           />
-          <span>{localText(language, "Use the global proxy", "使用全域代理設定檔", "使用全局代理配置", "グローバルプロキシを使用")}</span>
+          <span>{localText(language, "Use an app-wide proxy", "使用全應用程式代理", "使用全应用程序代理", "アプリ全体のプロキシを使用")}</span>
         </label>
         <select
-          aria-label={localText(language, "Global proxy profile", "全域代理設定檔", "全局代理配置", "グローバルプロキシ設定")}
+          aria-label={localText(language, "App-wide proxy", "全應用程式代理", "全应用程序代理", "アプリ全体のプロキシ")}
           disabled={busy || profiles.length === 0}
           value={globalProfileId}
-          onChange={(event) => void setGlobal(snapshot?.routing.globalEnabled === true, event.target.value)}
+          onChange={(event) => void setGlobal(globalEnabled, event.target.value)}
         >
           <option value="">—</option>
-          {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+          {profiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
         </select>
         <small>{localText(
           language,
@@ -429,7 +570,7 @@ export function NetworkProxySurface({
             || (cpa?.managedInstall.state !== "installed"
               ? localText(language, "Install CPA first", "請先安裝 CPA", "请先安装 CPA", "先に CPA をインストール")
               : cpaConfigured
-                ? (profiles.find((profile) => profile.id === cpa?.outboundProxy?.profileId)?.name ?? policyModeLabel(language, "direct"))
+                ? (profiles.find((item) => item.id === cpa?.outboundProxy?.profileId)?.name ?? policyModeLabel(language, "direct"))
                 : localText(language, "Restart to apply the saved route", "重新啟動以套用已儲存路由", "重启以应用已保存路由", "再起動して保存済みの経路を適用"))}</dd></div>
         </dl>
         <div className="proxy-route-actions">
@@ -444,60 +585,215 @@ export function NetworkProxySurface({
         </div>
       </section>
 
-      <div className="control-grid proxy-grid">
-        <aside className="control-panel proxy-list">
-          <h2>{localText(language, "Proxy profiles", "代理設定檔", "代理配置", "プロキシ設定")}</h2>
-          {profiles.map((profile) => (
-            <button className={`proxy-row${profile.id === selectedId ? " is-selected" : ""}`} key={profile.id} onClick={() => setSelectedId(profile.id)} type="button">
-              <div><strong>{profile.name}</strong><small>{profile.endpoint.protocol}://{profile.endpoint.host}:{profile.endpoint.port}</small></div>
-              <span>{statusLabel(language, profile.lastError ? "error" : profile.enabled ? "enabled" : "disabled")}</span>
-            </button>
-          ))}
-          {!profiles.length ? (
-            <p className="empty-copy">{localText(language, "No proxy profiles.", "未有代理設定檔。", "没有代理配置。", "プロキシ設定はありません。")}</p>
-          ) : null}
-        </aside>
+      {running ? (
+        <section className="control-panel nova-panel">
+          <div className="nova-tabs" role="tablist">
+            {tabs.map((item) => (
+              <button aria-selected={tab === item.id} className={`nova-tab${tab === item.id ? " is-selected" : ""}`} key={item.id} onClick={() => setTab(item.id)} role="tab" type="button">{item.label}</button>
+            ))}
+          </div>
 
-        <section className="control-panel proxy-editor">
-          <h2>{draft.id
-            ? localText(language, "Edit proxy", "編輯代理", "编辑代理", "プロキシを編集")
-            : localText(language, "New proxy", "新增代理", "新增代理", "新規プロキシ")}</h2>
-          <div className="control-fields proxy-fields">
-            <label><span>{localText(language, "Name", "名稱", "名称", "名前")}</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-            <label><span>{localText(language, "Protocol", "通訊協定", "协议", "プロトコル")}</span><select value={draft.protocol} onChange={(event) => setDraft({ ...draft, protocol: event.target.value as ProxyProtocol })}><option value="http">http</option><option value="https">https</option><option value="socks4">socks4</option><option value="socks5">socks5</option></select></label>
-            <label><span>{localText(language, "Host", "主機", "主机", "ホスト")}</span><input value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} /></label>
-            <label><span>{localText(language, "Port", "連接埠", "端口", "ポート")}</span><input inputMode="numeric" value={draft.port} onChange={(event) => setDraft({ ...draft, port: event.target.value })} /></label>
-            <label><span>{localText(language, "Username", "使用者名稱", "用户名", "ユーザー名")}</span><input autoComplete="off" value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></label>
-            <label><span>{localText(language, "Password", "密碼", "密码", "パスワード")}</span><input autoComplete="off" type="password" value={draft.password} onChange={(event) => setDraft({ ...draft, password: event.target.value })} /></label>
-            <label className="full-row"><span>{localText(language, "Bypass", "略過位址", "绕过地址", "除外アドレス")}</span><input value={draft.bypass} onChange={(event) => setDraft({ ...draft, bypass: event.target.value })} /></label>
-            <label className="check-row"><input checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} type="checkbox" /><span>{localText(language, "Enabled", "已啟用", "已启用", "有効")}</span></label>
-          </div>
-          <p className="proxy-secret-help">{localText(language,
-            "Leave username and password blank to keep saved credentials.",
-            "使用者名稱同密碼留空會保留已儲存憑證。",
-            "用户名和密码留空会保留已保存凭据。",
-            "ユーザー名とパスワードを空欄にすると保存済みの認証情報を維持します。")}</p>
-          <details className="proxy-detail-group">
-            <summary>{localText(language, "Traffic categories for this profile", "此設定檔嘅流量類別", "此配置的流量类别", "このプロキシの通信区分")} <span>{draft.scopes.length}</span></summary>
-            <p className="proxy-secret-help">{localText(language,
-              "Categories limit provider work only. The browser and CPA use the global proxy in every case.",
-              "呢啲類別限制供應商任務路由。全域瀏覽器同 CPA 路由仍會使用所選設定檔。",
-              "这些类别限制供应商任务路由。全局浏览器和 CPA 路由仍使用所选配置。",
-              "この区分はプロバイダーの作業経路を制限します。ブラウザーと CPA のグローバル経路は選択した設定を使用します。")}</p>
-            <div className="scope-grid">
-              {SCOPES.map((scope) => <label className="check-row" key={scope}><input checked={draft.scopes.includes(scope)} onChange={() => toggleScope(scope)} type="checkbox" /><span>{scopeLabel(language, scope)}</span></label>)}
+          {tab === "proxies" ? (
+            <div className="nova-section">
+              <table className="nova-table">
+                <thead><tr>
+                  <th>{localText(language, "Proxy", "代理", "代理", "プロキシ")}</th>
+                  <th>{localText(language, "Sign-in", "登入", "登录", "認証")}</th>
+                  <th>{localText(language, "Check", "檢查", "检查", "確認")}</th>
+                  <th />
+                </tr></thead>
+                <tbody>
+                  {(profile?.proxies ?? []).map((proxy) => (
+                    <tr key={proxy.key}>
+                      <td><strong>{proxyLabel(proxy)}</strong>{proxy.linked ? <small> · {localText(language, "linked, read-only", "已連結・唯讀", "已链接・只读", "リンク・読み取り専用")}</small> : null}{!proxy.upstreamEligible ? <small> · {localText(language, "not for routes", "唔用於路由", "不用于路由", "経路に使わない")}</small> : null}</td>
+                      <td>{proxy.username ? `${proxy.username}${proxy.hasPassword ? " · ••••" : ""}` : "—"}</td>
+                      <td>{checks[proxy.key] ?? ""}</td>
+                      <td className="nova-row-actions">
+                        <button className="secondary-button" disabled={busy} onClick={() => void checkProxy(proxy.key)} type="button">{localText(language, "Check", "檢查", "检查", "確認")}</button>
+                        {!proxy.linked ? (
+                          <>
+                            <button className="secondary-button" disabled={busy} onClick={() => setProxyDraft({ key: proxy.key, protocol: proxy.protocol, host: proxy.host, port: String(proxy.port), username: proxy.username, password: "", upstreamEligible: proxy.upstreamEligible })} type="button">{localText(language, "Edit", "編輯", "编辑", "編集")}</button>
+                            <button className="secondary-button" disabled={busy} onClick={() => removeProxy(proxy.key)} type="button">{localText(language, "Remove", "移除", "移除", "削除")}</button>
+                          </>
+                        ) : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!profile?.proxies.length ? <p className="empty-copy">{localText(language, "Nova has no proxies yet.", "Nova 未有代理。", "Nova 还没有代理。", "Nova にプロキシはありません。")}</p> : null}
+              <h3>{proxyDraft.key
+                ? localText(language, "Edit proxy", "編輯代理", "编辑代理", "プロキシを編集")
+                : localText(language, "Add a proxy", "新增代理", "新增代理", "プロキシを追加")}</h3>
+              <div className="control-fields proxy-fields">
+                <label><span>{localText(language, "Protocol", "通訊協定", "协议", "プロトコル")}</span><select value={proxyDraft.protocol} onChange={(event) => setProxyDraft({ ...proxyDraft, protocol: event.target.value as NovaProxyProtocol })}><option value="socks5">socks5</option><option value="http">http</option><option value="https">https</option></select></label>
+                <label><span>{localText(language, "Host", "主機", "主机", "ホスト")}</span><input value={proxyDraft.host} onChange={(event) => setProxyDraft({ ...proxyDraft, host: event.target.value })} /></label>
+                <label><span>{localText(language, "Port", "連接埠", "端口", "ポート")}</span><input inputMode="numeric" value={proxyDraft.port} onChange={(event) => setProxyDraft({ ...proxyDraft, port: event.target.value })} /></label>
+                <label><span>{localText(language, "Username", "使用者名稱", "用户名", "ユーザー名")}</span><input autoComplete="off" value={proxyDraft.username} onChange={(event) => setProxyDraft({ ...proxyDraft, username: event.target.value })} /></label>
+                <label><span>{localText(language, "Password", "密碼", "密码", "パスワード")}</span><input autoComplete="off" type="password" value={proxyDraft.password} onChange={(event) => setProxyDraft({ ...proxyDraft, password: event.target.value })} /></label>
+                <label className="check-row"><input checked={proxyDraft.upstreamEligible} onChange={(event) => setProxyDraft({ ...proxyDraft, upstreamEligible: event.target.checked })} type="checkbox" /><span>{localText(language, "Use for routes", "用於路由", "用于路由", "経路に使う")}</span></label>
+              </div>
+              {proxyDraft.key ? <p className="proxy-secret-help">{localText(language, "Leave the password blank to keep the saved one.", "密碼留空會保留已儲存密碼。", "密码留空会保留已保存的密码。", "パスワードを空欄にすると保存済みのものを維持します。")}</p> : null}
+              <div className="control-actions">
+                {proxyDraft.key ? <button className="secondary-button" disabled={busy} onClick={() => setProxyDraft(emptyProxy())} type="button">{localText(language, "Cancel", "取消", "取消", "キャンセル")}</button> : null}
+                <button className="primary-button compact" disabled={busy} onClick={saveProxyDraft} type="button">{localText(language, "Save proxy", "儲存代理", "保存代理", "プロキシを保存")}</button>
+              </div>
             </div>
-          </details>
-          <div className="control-actions">
-            <button className="secondary-button" disabled={busy || !selectedId} onClick={() => void testProfile()} type="button">
-              {localText(language, "Test connection", "測試連線", "测试连接", "接続テスト")}
-            </button>
-            <button className="primary-button compact" disabled={busy} onClick={() => void save()} type="button">
-              {localText(language, "Save proxy", "儲存代理", "保存代理", "プロキシを保存")}
-            </button>
-          </div>
+          ) : null}
+
+          {tab === "rules" ? (
+            <div className="nova-section">
+              <table className="nova-table">
+                <thead><tr>
+                  <th>{localText(language, "On", "啟用", "启用", "有効")}</th>
+                  <th>{localText(language, "Rule", "規則", "规则", "規則")}</th>
+                  <th>{localText(language, "Programs", "程式", "程序", "プログラム")}</th>
+                  <th>{localText(language, "Action", "動作", "动作", "動作")}</th>
+                  <th>{localText(language, "Proxy", "代理", "代理", "プロキシ")}</th>
+                  <th />
+                </tr></thead>
+                <tbody>
+                  {editedRules.map((rule) => (
+                    <tr key={rule.ruleId}>
+                      <td><input aria-label={rule.name} checked={rule.enabled} disabled={busy || rule.immutable} onChange={(event) => editRule(rule.ruleId, { enabled: event.target.checked })} type="checkbox" /></td>
+                      <td><strong>{rule.name}</strong></td>
+                      <td className="nova-programs">{rule.applications.length
+                        ? rule.applications.map((app) => app.knownFamily !== "none" ? app.knownFamily : app.executablePath.split(/[\\/]/).pop()).join(", ")
+                        : localText(language, "All programs", "所有程式", "所有程序", "すべてのプログラム")}</td>
+                      <td><select disabled={busy || rule.immutable} value={rule.action} onChange={(event) => editRule(rule.ruleId, { action: event.target.value as NovaRule["action"], proxyKey: event.target.value === "proxy" ? rule.proxyKey ?? eligible[0]?.key ?? null : null })}>
+                        <option value="proxy">{localText(language, "Proxy", "代理", "代理", "プロキシ")}</option>
+                        <option value="direct">{localText(language, "Direct", "直接連線", "直接连接", "直接接続")}</option>
+                        <option value="block">{localText(language, "Block", "封鎖", "阻止", "ブロック")}</option>
+                      </select></td>
+                      <td>{rule.action === "proxy"
+                        ? <select disabled={busy || rule.immutable} value={rule.proxyKey ?? ""} onChange={(event) => editRule(rule.ruleId, { proxyKey: event.target.value || null })}>
+                            {eligible.map((proxy) => <option key={proxy.key} value={proxy.key}>{proxyLabel(proxy)}</option>)}
+                          </select>
+                        : proxyOption(null)}</td>
+                      <td>{!rule.immutable ? <button className="secondary-button" disabled={busy} onClick={() => setRules(editedRules.filter((item) => item.ruleId !== rule.ruleId))} type="button">{localText(language, "Remove", "移除", "移除", "削除")}</button> : null}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <h3>{localText(language, "Add a rule", "新增規則", "新增规则", "規則を追加")}</h3>
+              <div className="control-fields proxy-fields">
+                <label><span>{localText(language, "Name", "名稱", "名称", "名前")}</span><input value={ruleDraft.name} onChange={(event) => setRuleDraft({ ...ruleDraft, name: event.target.value })} /></label>
+                <label><span>{localText(language, "Action", "動作", "动作", "動作")}</span><select value={ruleDraft.action} onChange={(event) => setRuleDraft({ ...ruleDraft, action: event.target.value as NovaRule["action"] })}>
+                  <option value="proxy">{localText(language, "Proxy", "代理", "代理", "プロキシ")}</option>
+                  <option value="direct">{localText(language, "Direct", "直接連線", "直接连接", "直接接続")}</option>
+                  <option value="block">{localText(language, "Block", "封鎖", "阻止", "ブロック")}</option>
+                </select></label>
+                {ruleDraft.action === "proxy" ? <label><span>{localText(language, "Proxy", "代理", "代理", "プロキシ")}</span><select value={ruleDraft.proxyKey} onChange={(event) => setRuleDraft({ ...ruleDraft, proxyKey: event.target.value })}>
+                  {eligible.map((proxy) => <option key={proxy.key} value={proxy.key}>{proxyLabel(proxy)}</option>)}
+                </select></label> : null}
+                <label className="full-row"><span>{localText(language, "Programs (one full .exe path per line)", "程式（每行一個完整 .exe 路徑）", "程序（每行一个完整 .exe 路径）", "プログラム（1 行に 1 つの .exe フルパス）")}</span><textarea rows={3} value={ruleDraft.executables} onChange={(event) => setRuleDraft({ ...ruleDraft, executables: event.target.value })} /></label>
+              </div>
+              <p className="proxy-secret-help">{localText(language,
+                "System routing sends program traffic through SOCKS5 proxies only. Changes apply when you save; routing reloads if it is on.",
+                "系統路由只會經 SOCKS5 代理轉送程式流量。儲存後先生效；如路由已啟用會重新載入。",
+                "系统路由只经 SOCKS5 代理转发程序流量。保存后生效；如路由已启用会重新加载。",
+                "システムルーティングはプログラムの通信を SOCKS5 プロキシ経由でのみ送ります。保存すると適用され、ルーティング中なら再読み込みします。")}</p>
+              <div className="control-actions">
+                <button className="secondary-button" disabled={busy} onClick={addRule} type="button">{localText(language, "Add rule", "新增規則", "新增规则", "規則を追加")}</button>
+                {rules ? <button className="secondary-button" disabled={busy} onClick={() => setRules(null)} type="button">{localText(language, "Discard changes", "放棄變更", "放弃更改", "変更を破棄")}</button> : null}
+                <button className="primary-button compact" disabled={busy || !rules} onClick={() => void saveRules()} type="button">{localText(language, "Save rules", "儲存規則", "保存规则", "規則を保存")}</button>
+              </div>
+            </div>
+          ) : null}
+
+          {tab === "apps" ? (
+            <div className="nova-section">
+              <table className="nova-table">
+                <thead><tr>
+                  <th>{localText(language, "Rule", "規則", "规则", "規則")}</th>
+                  <th>{localText(language, "State", "狀態", "状态", "状態")}</th>
+                  <th>PID</th>
+                  <th>TCP</th>
+                  <th>{localText(language, "Route", "路由", "路由", "経路")}</th>
+                </tr></thead>
+                <tbody>
+                  {apps.map((app) => (
+                    <tr key={app.ruleId}>
+                      <td><strong>{app.ruleName}</strong><small className="nova-programs">{app.executables.map((exe) => exe.split(/[\\/]/).pop()).join(", ")}</small></td>
+                      <td>{appStateLabel(language, app.state)}</td>
+                      <td>{app.pids.join(", ") || "—"}</td>
+                      <td>{app.tcpCount}</td>
+                      <td>{app.proxyLabel}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!apps.length ? <p className="empty-copy">{localText(language, "No rule names a program.", "未有規則指定程式。", "没有规则指定程序。", "プログラムを指定した規則はありません。")}</p> : null}
+            </div>
+          ) : null}
+
+          {tab === "connections" ? (
+            <div className="nova-section">
+              <table className="nova-table">
+                <thead><tr>
+                  <th>{localText(language, "Program", "程式", "程序", "プログラム")}</th>
+                  <th>PID</th>
+                  <th>{localText(language, "Target", "目標", "目标", "接続先")}</th>
+                  <th>{localText(language, "State", "狀態", "状态", "状態")}</th>
+                  <th>{localText(language, "Route", "路由", "路由", "経路")}</th>
+                </tr></thead>
+                <tbody>
+                  {connections.map((connection) => (
+                    <tr key={connection.id}>
+                      <td>{connection.application}</td>
+                      <td>{connection.pid}</td>
+                      <td>{connection.target}</td>
+                      <td>{connection.state}</td>
+                      <td>{connection.route}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!connections.length ? <p className="empty-copy">{localText(language, "No connections from routed programs.", "受路由程式未有連線。", "受路由程序没有连接。", "ルーティング対象のプログラムに接続はありません。")}</p> : null}
+            </div>
+          ) : null}
+
+          {tab === "log" ? (
+            <div className="nova-section">
+              <ol className="nova-log">
+                {log.map((entry) => (
+                  <li className={entry.level === "error" ? "is-error" : undefined} key={entry.seq}>
+                    <time>{new Date(entry.at).toLocaleTimeString()}</time> {entry.text}
+                  </li>
+                ))}
+              </ol>
+              {!log.length ? <p className="empty-copy">{localText(language, "Nothing logged yet.", "未有記錄。", "还没有日志。", "ログはまだありません。")}</p> : null}
+            </div>
+          ) : null}
+
+          {tab === "decodo" ? (
+            <div className="nova-section">
+              {decodo ? (
+                <>
+                  <div className="control-fields proxy-fields">
+                    <label><span>{localText(language, "Username", "使用者名稱", "用户名", "ユーザー名")}</span><input autoComplete="off" value={decodo.username} onChange={(event) => setDecodo({ ...decodo, username: event.target.value })} /></label>
+                    <label><span>{localText(language, "Password", "密碼", "密码", "パスワード")}</span><input autoComplete="off" placeholder={decodo.hasPassword ? "••••" : ""} type="password" value={decodoPassword} onChange={(event) => setDecodoPassword(event.target.value)} /></label>
+                    <label><span>{localText(language, "Country", "國家", "国家", "国")}</span><input value={decodo.country} onChange={(event) => setDecodo({ ...decodo, country: event.target.value })} /></label>
+                    <label><span>{localText(language, "Proxies", "代理數量", "代理数量", "プロキシ数")}</span><input inputMode="numeric" value={String(decodo.count)} onChange={(event) => setDecodo({ ...decodo, count: Number(event.target.value) || 0 })} /></label>
+                    <label><span>{localText(language, "Session (minutes)", "工作階段（分鐘）", "会话（分钟）", "セッション（分）")}</span><input inputMode="numeric" value={String(decodo.sessionMinutes)} onChange={(event) => setDecodo({ ...decodo, sessionMinutes: Number(event.target.value) || 0 })} /></label>
+                    <label><span>{localText(language, "Refresh (minutes)", "重新整理（分鐘）", "刷新（分钟）", "更新（分）")}</span><input inputMode="numeric" value={String(decodo.refreshMinutes)} onChange={(event) => setDecodo({ ...decodo, refreshMinutes: Number(event.target.value) || 0 })} /></label>
+                    <label><span>{localText(language, "Protocol", "通訊協定", "协议", "プロトコル")}</span><select value={decodo.protocol} onChange={(event) => setDecodo({ ...decodo, protocol: event.target.value as NovaProxyProtocol })}><option value="socks5">socks5</option><option value="http">http</option><option value="https">https</option></select></label>
+                    <label className="check-row"><input checked={decodo.autoSync} onChange={(event) => setDecodo({ ...decodo, autoSync: event.target.checked })} type="checkbox" /><span>{localText(language, "Sync automatically", "自動同步", "自动同步", "自動で同期")}</span></label>
+                  </div>
+                  <p className="proxy-secret-help">{decodo.lastError
+                    ?? (decodo.lastSyncAt
+                      ? `${localText(language, "Last synced", "上次同步", "上次同步", "前回の同期")} ${new Date(decodo.lastSyncAt).toLocaleString()}`
+                      : localText(language, "Not synced yet.", "未同步。", "尚未同步。", "未同期です。"))}</p>
+                  <div className="control-actions">
+                    <button className="secondary-button" disabled={busy} onClick={() => void syncDecodo()} type="button">{localText(language, "Sync now", "立即同步", "立即同步", "今すぐ同期")}</button>
+                    <button className="primary-button compact" disabled={busy} onClick={() => void saveDecodo()} type="button">{localText(language, "Save", "儲存", "保存", "保存")}</button>
+                  </div>
+                </>
+              ) : <p className="empty-copy">…</p>}
+            </div>
+          ) : null}
         </section>
-      </div>
+      ) : null}
 
       <details className="proxy-detail-group proxy-advanced">
         <summary>{localText(language, "Provider and account routing", "供應商同帳戶路由", "供应商和账户路由", "プロバイダーとアカウントの経路")}
@@ -509,7 +805,7 @@ export function NetworkProxySurface({
           {providers.map((providerId) => {
             const policy = snapshot?.routing.providers.find((candidate) => candidate.providerId === providerId);
             const mode = policyMode(policy?.profileId, policy?.inheritGlobal !== false);
-            return <div className="policy-row" key={providerId}><strong>{providerId}</strong><select disabled={busy} value={mode} onChange={(event) => void setProviderPolicy(providerId, event.target.value as ProxyPolicyMode, policy?.profileId)}>{MODES.map((item) => <option key={item} value={item}>{policyModeLabel(language, item)}</option>)}</select><select disabled={busy || mode !== "profile"} value={policy?.profileId ?? ""} onChange={(event) => void setProviderPolicy(providerId, "profile", event.target.value)}><option value="">—</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></div>;
+            return <div className="policy-row" key={providerId}><strong>{providerId}</strong><select disabled={busy} value={mode} onChange={(event) => void setProviderPolicy(providerId, event.target.value as ProxyPolicyMode, policy?.profileId)}>{MODES.map((item) => <option key={item} value={item}>{policyModeLabel(language, item)}</option>)}</select><select disabled={busy || mode !== "profile"} value={policy?.profileId ?? ""} onChange={(event) => void setProviderPolicy(providerId, "profile", event.target.value)}><option value="">—</option>{profiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div>;
           })}
         </section>
         <section className="control-panel">
@@ -517,7 +813,7 @@ export function NetworkProxySurface({
           {(snapshot?.accounts ?? []).filter((account) => !account.archivedAt).map((account) => {
             const mode = snapshot ? accountPolicyMode(snapshot, account) : "inherit";
             const policy = snapshot?.routing.accounts.find((candidate) => candidate.accountId === account.id);
-            return <div className="policy-row" key={account.id}><strong>{account.label}<small>{account.providerId}</small></strong><select disabled={busy} value={mode} onChange={(event) => void setAccountPolicy(account.id, event.target.value as ProxyPolicyMode, policy?.profileId)}>{MODES.map((item) => <option key={item} value={item}>{policyModeLabel(language, item)}</option>)}</select><select disabled={busy || mode !== "profile"} value={policy?.profileId ?? account.proxyProfileId ?? ""} onChange={(event) => void setAccountPolicy(account.id, "profile", event.target.value)}><option value="">—</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></div>;
+            return <div className="policy-row" key={account.id}><strong>{account.label}<small>{account.providerId}</small></strong><select disabled={busy} value={mode} onChange={(event) => void setAccountPolicy(account.id, event.target.value as ProxyPolicyMode, policy?.profileId)}>{MODES.map((item) => <option key={item} value={item}>{policyModeLabel(language, item)}</option>)}</select><select disabled={busy || mode !== "profile"} value={policy?.profileId ?? account.proxyProfileId ?? ""} onChange={(event) => void setAccountPolicy(account.id, "profile", event.target.value)}><option value="">—</option>{profiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div>;
           })}
         </section>
       </div>

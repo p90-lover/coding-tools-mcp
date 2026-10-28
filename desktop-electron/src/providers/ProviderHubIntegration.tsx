@@ -40,6 +40,7 @@ const COPY = {
     proxies: "Proxy manager",
     addAccount: "Add account",
     addProxy: "Add proxy",
+    novaManaged: "ProxyBridge Nova manages these proxies. Add or change them on the Proxy page.",
     edit: "Edit",
     connect: "Sign in",
     confirmConnected: "Confirm connected",
@@ -136,6 +137,7 @@ const COPY = {
     proxies: "代理伺服器管理",
     addAccount: "新增帳戶",
     addProxy: "新增代理",
+    novaManaged: "呢啲代理由 ProxyBridge Nova 管理。請喺「代理」頁新增或修改。",
     edit: "編輯",
     connect: "登入／重新整理",
     confirmConnected: "確認已連線",
@@ -863,8 +865,8 @@ export function ProviderManagerSurface({
 
             <div className="proxy-manager-toolbar">
               <h2>{copy.proxies}</h2>
-              <button onClick={() => setProxyDraft(defaultProxyDraft())} type="button">+ {copy.addProxy}</button>
             </div>
+            <p className="proxy-profile-scopes">{copy.novaManaged}</p>
 
             <div className="proxy-profile-grid">
               {activeProfiles.map((profile) => (
@@ -887,7 +889,7 @@ export function ProviderManagerSurface({
                   )).join(" · ")}</p>
                   {profile.lastError ? <p className="proxy-profile-error">{profile.lastError}</p> : null}
                   <footer>
-                    <button onClick={() => openProxyEdit(profile)} type="button">{copy.edit}</button>
+                    {!profile.source ? <button onClick={() => openProxyEdit(profile)} type="button">{copy.edit}</button> : null}
                     <button
                       disabled={busy === `proxy-test:${profile.id}`}
                       onClick={() => api && void run(
@@ -903,15 +905,14 @@ export function ProviderManagerSurface({
                     >
                       {copy.test}
                     </button>
-                    <button className="is-danger" onClick={() => archiveProxy(profile)} type="button">
-                      {copy.archive}
-                    </button>
+                    {!profile.source ? (
+                      <button className="is-danger" onClick={() => archiveProxy(profile)} type="button">
+                        {copy.archive}
+                      </button>
+                    ) : null}
                   </footer>
                 </article>
               ))}
-              <button className="proxy-profile-add" onClick={() => setProxyDraft(defaultProxyDraft())} type="button">
-                <strong>+</strong><span>{copy.addProxy}</span>
-              </button>
             </div>
           </div>
         )}

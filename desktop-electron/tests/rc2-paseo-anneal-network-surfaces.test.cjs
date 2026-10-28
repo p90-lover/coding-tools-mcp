@@ -40,22 +40,31 @@ test("Anneal task menu lists tasks and can dispatch through localized Paseo cont
 test("Network surface manages app-wide and per-provider proxy routing", () => {
   const source = read("desktop-electron/src/features/NetworkProxySurface.tsx");
 
+  // The routes are Coding Tools'; the proxies, rules and system routing are ProxyBridge Nova's.
   for (const api of [
     "providerSnapshot",
-    "saveProxyProfile",
-    "testProxyProfile",
     "setGlobalProxyRouting",
     "setProviderProxyPolicy",
     "setAccountProxyPolicy",
+    "novaState",
+    "novaStart",
+    "novaProfile",
+    "novaSaveProxies",
+    "novaSaveRules",
+    "novaCheckProxy",
+    "novaApps",
+    "novaConnections",
+    "novaLog",
+    "novaRouting",
+    "novaDecodo",
+    "novaSaveDecodo",
+    "novaSyncDecodo",
+    "onNovaChanged",
   ]) {
     assert.match(source, new RegExp(`\\.${api}\\(`), `missing proxy API ${api}`);
   }
 
-  assert.match(source, /All application traffic|所有應用程式流量/);
+  assert.doesNotMatch(source, /\.saveProxyProfile\(/, "proxies are added in Nova, not as Coding Tools profiles");
   assert.match(source, /socks5/);
-  assert.match(source, /websocket/);
-  assert.match(source, /subagent/);
-  assert.match(source, /17891/);
-  assert.match(source, /mcp/);
-  assert.match(source, /localhost|127\.0\.0\.1/);
+  assert.match(source, /restartExternalService\("cpa"\)/);
 });

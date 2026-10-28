@@ -293,12 +293,10 @@ test("retired standalone surfaces cannot navigate or start from Integrations", (
   assert.match(servicesSource, /CommandCode login is available in CPA Accounts/);
 });
 
-test("proxy scope picker omits retired standalone modules", () => {
-  const scopeOptions = proxySource.slice(proxySource.indexOf("const SCOPES"), proxySource.indexOf("const MODES"));
-  assert.doesNotMatch(scopeOptions, /"paseo"|"anneal"/);
-  const defaultDraft = proxySource.slice(proxySource.indexOf("function emptyDraft"), proxySource.indexOf("function fromProfile"));
-  assert.doesNotMatch(defaultDraft, /"paseo"|"anneal"/);
-  assert.match(scopeOptions, /"mcp"/);
+test("the Proxy page offers no retired standalone modules", () => {
+  // Nova's proxies are used by every route; the page has no per-profile scope picker any more.
+  assert.doesNotMatch(proxySource, /"paseo"|"anneal"/);
+  assert.doesNotMatch(proxySource, /const SCOPES/);
 });
 
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
