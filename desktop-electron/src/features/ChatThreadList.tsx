@@ -797,8 +797,12 @@ export function ChatThreadList(props: ThreadListProps) {
                     {git?.warn ? <span className="cx-project-tag is-warn" title={git.line}>{git.tag}</span> : null}
                     {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
                   </button>
-                  {/* Codex's project options are available by both click and right-click. */}
+                  {/* Codex's project options are available by both click and right-click; New chat sits
+                      beside them, as Codex's compose button, so a project's chat is one click away. */}
                   <span className="cx-project-hover">
+                    <button type="button" aria-label={`New chat in ${item.name}`} title={`New chat in ${item.name}`}
+                      onClick={() => { setProjectCard(null); actions.newChatIn(item.id); }}>
+                      <ChatGlyph name="compose" size={16} /></button>
                     <button type="button" aria-label={`More options for ${item.name}`} title={`More options for ${item.name}`}
                       onClick={(event) => openMenu(event, projectMenu(item), item.name)}>
                       <ChatGlyph name="more" size={16} /></button>
@@ -915,6 +919,8 @@ export function ChatThreadList(props: ThreadListProps) {
           })()}
           {item.path ? <span className="cx-project-card-line is-path"><ChatGlyph name="folder" size={13} />{item.path}</span> : null}
           <hr />
+          <button type="button" className="cx-project-card-action" onClick={() => { setProjectCard(null); actions.newChatIn(item.id); }}>
+            <ChatGlyph name="compose" size={13} />New chat</button>
           <button type="button" className="cx-project-card-action" onClick={() => { setProjectCard(null); actions.editProject(item.id); }}>
             <ChatGlyph name="settings" size={13} />Edit project</button>
         </FloatingLayer>;
