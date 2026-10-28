@@ -20,7 +20,7 @@ const SHORT_QUIET_MS = 60_000;
  * @param {object} moment
  * @param {boolean} moment.busy          a chat turn, browser task or bridge connect is running (or that check failed)
  * @param {number} moment.systemIdleSeconds  seconds since the user last touched keyboard or mouse
- * @param {number} moment.componentIdleMs    ms since the component last finished a request (Infinity if never)
+ * @param {number} moment.componentIdleMs    ms since the component last finished a request
  * @param {number} moment.stagedForMs        ms since the update was installed and began waiting
  * @returns {boolean}
  */
@@ -51,9 +51,11 @@ function createComponentUpdater({
   let swapTimer = null;
   let stagedAt = null;
   let working = false;
+  let stopped = false;
+  let swapping = null;
 
   async function check() {
-    if (working || !enabled()) return null;
+    if (stopped || working || !enabled()) return null;
     working = true;
     try {
       const result = await stage(componentId);
@@ -71,40 +73,51 @@ function createComponentUpdater({
   }
 
   async function trySwap() {
-    if (working || stagedAt === null || !enabled()) return null;
+    if (stopped || working || stagedAt === null || !enabled()) return null;
+    // Without a record of the component's last request (no cpa-helper on this platform, or its
+    // usage folder unreadable), its clients' activity is unknown: leave the switch to the next start.
+    const last = lastActivityAt();
+    if (!Number.isFinite(last)) return null;
     // A busy check that cannot answer counts as busy: never restart over work it could not see.
     const busy = await Promise.resolve().then(isBusy).catch(() => true);
-    const last = lastActivityAt();
     const moment = {
       busy: Boolean(busy),
       systemIdleSeconds: Number(idleSeconds()) || 0,
-      componentIdleMs: Number.isFinite(last) ? Math.max(0, now() - last) : Infinity,
+      componentIdleMs: Math.max(0, now() - last),
       stagedForMs: now() - stagedAt,
     };
-    if (!readyToSwap(moment)) return null;
+    if (stopped || !readyToSwap(moment)) return null;
     working = true;
-    try {
-      const result = await swap(componentId);
-      stagedAt = null;
-      logger?.info?.("managed-component.update_swapped", { componentId, ...result });
-      return result;
-    } catch (error) {
-      logger?.warn?.("managed-component.update_swap_failed", { componentId, message: error instanceof Error ? error.message : String(error) });
-      return null;
-    } finally {
-      working = false;
-    }
+    swapping = (async () => {
+      try {
+        const result = await swap(componentId);
+        stagedAt = null;
+        logger?.info?.("managed-component.update_swapped", { componentId, ...result });
+        return result;
+      } catch (error) {
+        logger?.warn?.("managed-component.update_swap_failed", { componentId, message: error instanceof Error ? error.message : String(error) });
+        return null;
+      } finally {
+        working = false;
+        swapping = null;
+      }
+    })();
+    return swapping;
   }
 
+  /** Stops the timers and resolves once a switch already under way has finished. */
   function stop() {
+    stopped = true;
     if (checkTimer) clearTimeout(checkTimer);
     if (swapTimer) clearInterval(swapTimer);
     checkTimer = null;
     swapTimer = null;
+    return swapping ? swapping.then(() => {}) : Promise.resolve();
   }
 
   function start() {
-    stop();
+    void stop();
+    stopped = false;
     const schedule = (delay) => {
       checkTimer = setTimeout(async () => {
         await check();

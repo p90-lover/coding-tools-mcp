@@ -546,10 +546,12 @@ function createManagedComponentController({
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (platform !== "win32") fs.chmodSync(directory, 0o700);
   }
-  // An update installed by an earlier launcher is the one to run, unless this build bundles a newer one.
+  // The last update that passed its health check here runs from the start, unless this build bundles
+  // a newer one. A newer installed update is pending: it runs only through the health-checked switch
+  // (swapManagedComponent), so a bad release cannot leave the component down across restarts.
   for (const id of COMPONENT_IDS) {
-    const staged = stagedManifest(id);
-    if (staged) manifests.set(id, staged);
+    const confirmed = confirmedManifest(id);
+    if (confirmed) manifests.set(id, confirmed);
   }
 
   function updateRecordPath(id) {
@@ -561,17 +563,34 @@ function createManagedComponentController({
     return record?.schemaVersion === 1 ? record : null;
   }
 
-  /** The installed update newer than this build's bundled version, or null. */
-  function stagedManifest(id) {
+  /** The manifest of a recorded update newer than this build's bundled version, or null. */
+  function recordedManifest(id, entry, record) {
     const base = bundledManifests.get(id);
-    const record = readUpdateRecord(id);
-    if (!base.updates || !record || typeof record.version !== "string" || !RELEASE_VERSION.test(record.version)) return null;
-    if ((record.rejected || []).includes(record.version) || compareVersions(record.version, base.version) <= 0) return null;
+    const version = entry?.version;
+    if (!base.updates || typeof version !== "string" || !RELEASE_VERSION.test(version)) return null;
+    if ((record.rejected || []).includes(version) || compareVersions(version, base.version) <= 0) return null;
     try {
-      return updatedManifest(base, record.version, new Map(Object.entries(record.sha256 || {})));
+      return updatedManifest(base, version, new Map(Object.entries(entry.sha256 || {})));
     } catch {
       return null;
     }
+  }
+
+  /** The newest installed update, health-checked or not. */
+  function stagedManifest(id) {
+    const record = readUpdateRecord(id);
+    return record ? recordedManifest(id, record, record) : null;
+  }
+
+  /** The newest update that passed its health check here. */
+  function confirmedManifest(id) {
+    const record = readUpdateRecord(id);
+    return record?.confirmed ? recordedManifest(id, record.confirmed, record) : null;
+  }
+
+  function recordEntry(manifest) {
+    const asset = selectedReleaseAsset(manifest);
+    return { version: manifest.version, sha256: { [asset.fileName]: asset.sha256 } };
   }
 
   function manifestFor(idValue) {
@@ -1538,38 +1557,57 @@ function createManagedComponentController({
     const candidate = updatedManifest(base, check.latest, await releaseChecksums(base, check.tag));
     selectedReleaseAsset(candidate);
     await installComponent(id, { manifest: candidate });
-    const asset = selectedReleaseAsset(candidate);
     const record = readUpdateRecord(id);
     writeJson(updateRecordPath(id), {
       schemaVersion: 1,
-      version: candidate.version,
-      sha256: { [asset.fileName]: asset.sha256 },
+      ...recordEntry(candidate),
       installedAt: now(),
+      ...(record?.confirmed ? { confirmed: record.confirmed } : {}),
       ...(record?.rejected ? { rejected: record.rejected } : {}),
     });
     emit();
     return { ...check, staged: true };
   }
 
-  /** Makes the installed update the active manifest. The caller restarts the component. */
+  /** The installed update the active version should switch to, through the health check. */
+  function pendingComponentUpdate(idValue) {
+    const id = requiredComponentId(idValue);
+    const staged = stagedManifest(id);
+    if (!staged || compareVersions(staged.version, manifestFor(id).version) <= 0) return null;
+    return sourceState(staged).state === "installed" ? staged : null;
+  }
+
+  /** Makes the pending update the active manifest. The caller restarts and health-checks it. */
   function activateComponentUpdate(idValue) {
     const id = requiredComponentId(idValue);
     const active = manifestFor(id);
-    const staged = stagedManifest(id);
-    if (!staged || compareVersions(staged.version, active.version) <= 0) return null;
-    if (sourceState(staged).state !== "installed") return null;
+    const staged = pendingComponentUpdate(id);
+    if (!staged) return null;
     previousManifests.set(id, active);
     manifests.set(id, staged);
     emit();
     return { from: active.version, to: staged.version };
   }
 
-  /** An update that failed after activation: go back to the earlier version and never retry this one. */
+  /** The active update passed its health check: later starts run it directly. */
+  function confirmComponentUpdate(idValue) {
+    const id = requiredComponentId(idValue);
+    const active = manifestFor(id);
+    previousManifests.delete(id);
+    if (!active.updatedFrom) return;
+    const record = readUpdateRecord(id) || { schemaVersion: 1 };
+    writeJson(updateRecordPath(id), { ...record, confirmed: recordEntry(active) });
+  }
+
+  /**
+   * An update that failed after activation: go back to the earlier version and never retry this one.
+   * The record keeps its last confirmed update, so the next start runs that, not the bundled version.
+   */
   function rejectComponentUpdate(idValue, version) {
     const id = requiredComponentId(idValue);
     const record = readUpdateRecord(id) || { schemaVersion: 1 };
     writeJson(updateRecordPath(id), { ...record, rejected: [...new Set([...(record.rejected || []), version])] });
-    manifests.set(id, previousManifests.get(id) || stagedManifest(id) || bundledManifests.get(id));
+    manifests.set(id, previousManifests.get(id) || confirmedManifest(id) || bundledManifests.get(id));
     previousManifests.delete(id);
     emit();
     return project(id);
@@ -1957,7 +1995,9 @@ function createManagedComponentController({
     restartComponent,
     checkComponentUpdate,
     installComponentUpdate,
+    pendingComponentUpdate,
     activateComponentUpdate,
+    confirmComponentUpdate,
     rejectComponentUpdate,
     pruneComponentVersions,
     waitForHealth,

@@ -59,24 +59,27 @@ function cpaManifest() {
   };
 }
 
-/** A GitHub that publishes v1.2.0; `checksum` overrides the published checksum of its asset. */
-function fakeGitHub({ tag = "v1.2.0", checksum = sha256(LATEST) } = {}) {
+/** A GitHub whose latest release is `release.version`; `checksum` overrides its published checksum. */
+function fakeGitHub({ checksum = null } = {}) {
   const calls = [];
+  const release = { version: "1.2.0" };
+  const payload = () => (release.version === "1.2.0" ? LATEST : Buffer.from(`cpa ${release.version}`, "utf8"));
   const fetchImpl = async (url) => {
     const href = String(url);
+    const tag = `v${release.version}`;
     calls.push(href);
     if (href === "https://api.github.com/repos/fixture/cpa/releases/latest") {
       return Response.json({ tag_name: tag });
     }
     if (href === `https://github.com/fixture/cpa/releases/download/${tag}/checksums.txt`) {
-      return new Response(`${checksum}  ${assetName("1.2.0")}\n${"0".repeat(64)}  other.zip\n`);
+      return new Response(`${checksum || sha256(payload())}  ${assetName(release.version)}\n${"0".repeat(64)}  other.zip\n`);
     }
-    if (href === `https://github.com/fixture/cpa/releases/download/v1.2.0/${assetName("1.2.0")}`) {
-      return new Response(LATEST, { headers: { "content-length": String(LATEST.length) } });
+    if (href === `https://github.com/fixture/cpa/releases/download/${tag}/${assetName(release.version)}`) {
+      return new Response(payload(), { headers: { "content-length": String(payload().length) } });
     }
     return new Response("not found", { status: 404 });
   };
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, release };
 }
 
 function fixture(github = fakeGitHub(), dataRoot = temporaryDirectory("coding-tools-cpa-update-data")) {
@@ -164,24 +167,46 @@ test("the running version stays installed while an update downloads beside it", 
   controller.dispose();
 });
 
-test("the next launcher runs an installed update, and a rejected one never comes back", async () => {
+test("a new launcher runs only a confirmed update; an unchecked one waits as pending", async () => {
   const first = fixture();
   await first.controller.installComponent("cpa");
   await first.controller.installComponentUpdate("cpa");
   first.controller.dispose();
 
   const second = fixture(fakeGitHub(), first.dataRoot);
-  assert.equal(second.controller.project("cpa").version, "1.2.0");
-  const rolledBack = second.controller.rejectComponentUpdate("cpa", "1.2.0");
-  assert.equal(rolledBack.version, "1.0.0");
-  const check = await second.controller.checkComponentUpdate("cpa");
-  assert.equal(check.available, false);
-  assert.match(check.reason, /failed its health check/);
+  assert.equal(second.controller.project("cpa").version, "1.0.0", "an update that never passed a health check ran at startup");
+  assert.equal(second.controller.pendingComponentUpdate("cpa").version, "1.2.0");
+  second.controller.activateComponentUpdate("cpa");
+  second.controller.confirmComponentUpdate("cpa");
   second.controller.dispose();
 
   const third = fixture(fakeGitHub(), first.dataRoot);
-  assert.equal(third.controller.project("cpa").version, "1.0.0");
+  assert.equal(third.controller.project("cpa").version, "1.2.0");
+  assert.equal(third.controller.pendingComponentUpdate("cpa"), null);
   third.controller.dispose();
+});
+
+test("a rejected update never comes back, and the last confirmed one survives the rollback", async () => {
+  const github = fakeGitHub();
+  const first = fixture(github);
+  await first.controller.installComponent("cpa");
+  await first.controller.installComponentUpdate("cpa");
+  first.controller.activateComponentUpdate("cpa");
+  first.controller.confirmComponentUpdate("cpa");
+
+  github.release.version = "1.3.0";
+  await first.controller.installComponentUpdate("cpa");
+  assert.deepEqual(first.controller.activateComponentUpdate("cpa"), { from: "1.2.0", to: "1.3.0" });
+  assert.equal(first.controller.rejectComponentUpdate("cpa", "1.3.0").version, "1.2.0");
+  const check = await first.controller.checkComponentUpdate("cpa");
+  assert.equal(check.available, false);
+  assert.match(check.reason, /failed its health check/);
+  first.controller.dispose();
+
+  const next = fixture(github, first.dataRoot);
+  assert.equal(next.controller.project("cpa").version, "1.2.0", "the restart fell back past the last working update");
+  assert.equal(next.controller.pendingComponentUpdate("cpa"), null);
+  next.controller.dispose();
 });
 
 test("an update whose download doesn't match the published checksum is not staged", async () => {
@@ -207,7 +232,6 @@ test("an automatic switch waits for CPA to be quiet and never runs over work", (
   const minute = 60_000;
   const quiet = { busy: false, systemIdleSeconds: 0, componentIdleMs: 6 * minute, stagedForMs: minute };
   assert.equal(readyToSwap(quiet), true);
-  assert.equal(readyToSwap({ ...quiet, componentIdleMs: Infinity }), true, "a CPA that never served a request waited");
   assert.equal(readyToSwap({ ...quiet, busy: true }), false);
   assert.equal(readyToSwap({ ...quiet, busy: true, stagedForMs: 30 * 24 * 60 * minute }), false);
   assert.equal(readyToSwap({ ...quiet, componentIdleMs: 2 * minute }), false);
@@ -253,7 +277,8 @@ test("a busy check that fails counts as busy, and a disabled updater does nothin
     swap: async (id) => { swaps.push(id); return {}; },
     enabled: () => enabled,
     isBusy: async () => { throw new Error("AO unreachable"); },
-    lastActivityAt: () => null,
+    lastActivityAt: () => 0,
+    now: () => 24 * 60 * 60_000,
   });
   await updater.check();
   assert.equal(await updater.trySwap(), null);
@@ -262,13 +287,50 @@ test("a busy check that fails counts as busy, and a disabled updater does nothin
   assert.deepEqual(swaps, []);
 });
 
-function serviceFixture({ healthyVersions }) {
+test("unknown CPA activity defers the switch to the next start", async () => {
+  const swaps = [];
+  const updater = createComponentUpdater({
+    componentId: "cpa",
+    stage: async () => ({ staged: true }),
+    swap: async (id) => { swaps.push(id); return {}; },
+    lastActivityAt: () => null,
+    now: () => 30 * 24 * 60 * 60_000,
+  });
+  await updater.check();
+  assert.equal(await updater.trySwap(), null);
+  assert.deepEqual(swaps, []);
+});
+
+test("stopping the updater waits for a switch under way and blocks new ones", async () => {
+  let finish;
+  const order = [];
+  const updater = createComponentUpdater({
+    componentId: "cpa",
+    stage: async () => ({ staged: true }),
+    swap: () => new Promise((resolve) => { order.push("swap started"); finish = () => { order.push("swap done"); resolve({ swapped: true }); }; }),
+    lastActivityAt: () => 0,
+    now: () => 10 * 60_000,
+  });
+  await updater.check();
+  const swapping = updater.trySwap();
+  await new Promise((resolve) => setImmediate(resolve));
+  const stopped = updater.stop().then(() => order.push("stopped"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["swap started"], "stop resolved before the switch finished");
+  finish();
+  await Promise.all([swapping, stopped]);
+  assert.deepEqual(order, ["swap started", "swap done", "stopped"]);
+  assert.equal(await updater.check(), null);
+  assert.equal(await updater.trySwap(), null);
+});
+
+function serviceFixture({ healthyVersions, dataRoot: existingDataRoot = null }) {
   const manifestRoot = temporaryDirectory("coding-tools-cpa-swap-manifests");
   writeJson(path.join(manifestRoot, "cpa.json"), cpaManifest());
   const bundleRoot = temporaryDirectory("coding-tools-cpa-swap-bundle");
   fs.mkdirSync(path.join(bundleRoot, "cpa"), { recursive: true });
   fs.writeFileSync(path.join(bundleRoot, "cpa", assetName("1.0.0")), BUNDLED);
-  const dataRoot = path.join(temporaryDirectory("coding-tools-cpa-swap-data"), "integrations");
+  const dataRoot = existingDataRoot || path.join(temporaryDirectory("coding-tools-cpa-swap-data"), "integrations");
   // CPA starts only with a network proxy chosen, as in managed-components-runtime.test.cjs.
   const providers = path.join(path.dirname(dataRoot), "providers");
   const store = createProviderNetworkStore({
@@ -344,6 +406,47 @@ test("an update that fails its health check rolls back to the running version", 
     assert.equal((await controller.checkManagedComponentUpdate("cpa")).available, false);
   } finally {
     controller.dispose();
+  }
+});
+
+test("a pending update met at startup goes through the health check and rolls back when it fails", async () => {
+  const first = serviceFixture({ healthyVersions: ["1.0.0"] });
+  await first.controller.start("cpa");
+  assert.equal((await first.controller.updateManagedComponent("cpa", { swap: false })).staged, true);
+  first.controller.dispose();
+
+  const next = serviceFixture({ healthyVersions: ["1.0.0"], dataRoot: first.dataRoot });
+  try {
+    await next.controller.start("cpa");
+    assert.equal(next.running(), "1.0.0", "an unhealthy update kept running after startup");
+    assert.equal(next.controller.managedComponentsSnapshot().components[0].version, "1.0.0");
+    const check = await next.controller.checkManagedComponentUpdate("cpa");
+    assert.equal(check.available, false);
+    assert.match(check.reason, /failed its health check/);
+  } finally {
+    next.controller.dispose();
+  }
+});
+
+test("a healthy pending update met at startup runs and is confirmed for later starts", async () => {
+  const first = serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"] });
+  await first.controller.start("cpa");
+  await first.controller.updateManagedComponent("cpa", { swap: false });
+  first.controller.dispose();
+
+  const second = serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"], dataRoot: first.dataRoot });
+  await second.controller.start("cpa");
+  assert.equal(second.running(), "1.2.0");
+  second.controller.dispose();
+
+  const third = serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"], dataRoot: first.dataRoot });
+  try {
+    assert.equal(third.controller.managedComponentsSnapshot().components[0].version, "1.2.0");
+    await third.controller.start("cpa");
+    assert.deepEqual(third.spawned.length, 1, "a confirmed update was switched again");
+    assert.equal(third.running(), "1.2.0");
+  } finally {
+    third.controller.dispose();
   }
 });
 

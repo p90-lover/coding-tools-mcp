@@ -2721,7 +2721,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
         message: `Quitting without restoring the Codex route: ${message}`,
       });
     }
-    cpaUpdater?.stop();
+    // A CPA switch under way finishes first: disposing the services under it would leave no CPA.
+    await cpaUpdater?.stop();
     managedBootstrapController?.dispose();
     originalUiController?.dispose();
     externalServicesController?.dispose({ keepPersistent: keepBridge });

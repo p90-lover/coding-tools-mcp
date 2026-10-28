@@ -29,8 +29,8 @@ Operations: `inspect`, `start`, `stop`, `restart`, `repair`, `install`, `health`
 CPA follows its upstream releases (`router-for-me/CLIProxyAPI`) instead of staying on the version the installer bundles:
 
 - **Download:** every 6 hours the app downloads the newest release, checks it against the release's `checksums.txt`, and installs it into `components/cpa/<version>/` beside the running CPA.
-- **Switch:** switching restarts CPA, so it waits for a quiet moment. Until then, the next app start runs the new version.
-- **Health check:** a version that fails its health check rolls back and is never tried again.
+- **Switch:** switching restarts CPA, so it waits for a quiet moment: no chat turn running, and CPA idle for 5 minutes by its usage log. Without that log, it waits for the next app start. The next start switches through the same health check.
+- **Health check:** a version that fails its health check rolls back and is never tried again. Starts after that run the last version that passed, which may be an earlier update.
 - **Opting out:** set `automaticComponentUpdates: false` in the launcher state to stop automatic updates.
 
 ```js

@@ -328,6 +328,7 @@ function createManagedExternalServicesController({
       if (!await managedController.waitForHealth(serviceId, { timeoutMs: options.updateHealthTimeoutMs ?? 30_000 })) {
         throw new Error(`${serviceId} ${change.to} didn't pass its health check`);
       }
+      managedController.confirmComponentUpdate(serviceId);
       managedController.pruneComponentVersions(serviceId);
       result = { swapped: true, ...change };
     } catch (error) {
@@ -360,6 +361,12 @@ function createManagedExternalServicesController({
       return installManagedComponent(serviceId);
     }
     if (managed.installState === "installed") {
+      // Not yet started by this launcher, with an update waiting: the start is the switch, health
+      // check and rollback included. A component this launcher already runs keeps running.
+      if (!managed.processes.some((entry) => entry.running) && managedController.pendingComponentUpdate(serviceId)) {
+        await swapManagedComponent(serviceId);
+        return serviceFromSnapshot(serviceId);
+      }
       applyManagedConfiguration(serviceId);
       await managedController.startComponent(serviceId);
       await baseController.inspect(serviceId);
