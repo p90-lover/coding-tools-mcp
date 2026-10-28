@@ -770,3 +770,19 @@ test("the shown page gives a still for the pane to draw while Clawd passes over 
   assert.equal(await service.snapshot("a"), null, "a failed capture shows no still");
   assert.equal(captures, 1);
 });
+
+test("a pane hides only its own agent's page: another split pane's Preview stays shown", async () => {
+  const views = [];
+  const service = createChatPreviews({ createView: () => { const view = fakeView(); views.push(view); return view; }, logger: { warn() {} } });
+  await service.call("a", "preview_open", { url: "http://localhost:3000/" });
+  await service.call("b", "preview_open", { url: "http://localhost:3001/" });
+  service.show("b", { x: 0, y: 0, width: 400, height: 300 });
+  assert.equal(service.hide("a"), false, "pane A's page is not the one shown");
+  assert.equal(service.state("b").shown, true, "pane B keeps its page");
+  assert.equal(await service.snapshot("a"), null, "and pane A gets no still to swap in");
+  assert.equal(service.hide("b"), true);
+  assert.equal(service.state("b").shown, false);
+  service.show("a", { x: 0, y: 0, width: 400, height: 300 });
+  assert.equal(service.hide(), true, "without a key, whichever page is shown");
+  assert.equal(service.state("a").shown, false);
+});

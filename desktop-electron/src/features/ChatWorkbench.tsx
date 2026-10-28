@@ -603,6 +603,9 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
   const [covered, setCovered] = useState(false);
   const [still, setStill] = useState<string | null>(null);
   const coveredNow = useRef(false);
+  // Whether this pane took its page off for the pet. Split panes share one shown page: a pane whose
+  // page is not the one shown gets no still, hides nothing and puts nothing back.
+  const hidForPet = useRef(false);
   const remeasure = useRef<(() => void) | null>(null);
   useEffect(() => petFlight.subscribe((rect) => {
     const element = slot.current;
@@ -616,13 +619,18 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
     if (covered) {
       void paneCall("chat_preview_snapshot", { sessionId }).then((result) => (typeof result.url === "string" ? result.url : null)).catch(() => null)
         .then((url) => {
-          if (!live || !coveredNow.current) return;
+          if (!live || !coveredNow.current || !url) return;
           setStill(url);
-          // Off the screen once the still is painted in its place (without one the pane shows blank, but Clawd shows).
-          requestAnimationFrame(() => { if (coveredNow.current) void paneCall("chat_preview_hide").catch(() => undefined); });
+          // Off the screen once the still is painted in its place.
+          requestAnimationFrame(() => {
+            if (!coveredNow.current) return;
+            hidForPet.current = true;
+            void paneCall("chat_preview_hide", { sessionId }).catch(() => undefined);
+          });
         });
     } else {
-      remeasure.current?.();
+      if (hidForPet.current) remeasure.current?.();
+      hidForPet.current = false;
       // The view is back over the still; it goes once the view has drawn.
       const timer = window.setTimeout(() => { if (live) setStill(null); }, 250);
       return () => { live = false; window.clearTimeout(timer); };
@@ -642,7 +650,7 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
         // The chat page stays mounted behind other pages (hidden): its slot then has no size, and
         // the native view must leave the screen with it, or it stayed drawn over CPA, Settings and
         // every other page with no way to close it. It comes back when the slot does.
-        if (rect.width < 2 || rect.height < 2) { void paneCall("chat_preview_hide").catch(() => undefined); return; }
+        if (rect.width < 2 || rect.height < 2) { void paneCall("chat_preview_hide", { sessionId }).catch(() => undefined); return; }
         void paneCall("chat_preview_show", { sessionId, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }).catch(() => undefined);
       });
     };
@@ -656,7 +664,7 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
       remeasure.current = null;
       observer.disconnect();
       window.removeEventListener("resize", measure);
-      void paneCall("chat_preview_hide").catch(() => undefined);
+      void paneCall("chat_preview_hide", { sessionId }).catch(() => undefined);
     };
   }, [sessionId, hasPage]);
 
