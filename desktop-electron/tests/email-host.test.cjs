@@ -45,10 +45,11 @@ test("positiveId and pageSize enforce bounds", () => {
 test("normalizeMessageListRow drops raw MIME and bounds the preview", () => {
   const row = normalizeMessageListRow({
     id: 7, address: "a@b.com", source: "s@x.com", subject: "Hi",
-    message: "x".repeat(1000), password: "secret", jwt: "token",
+    message: `Subject: Hi\r\nContent-Type: text/plain\r\n\r\n${"x".repeat(1000)}`, password: "secret", jwt: "token",
   });
   assert.equal(row.id, 7);
   assert.equal(row.preview.length, 240);
+  assert.match(row.preview, /^x+$/, "the preview is the body, never the raw headers");
   assert.equal(Object.prototype.hasOwnProperty.call(row, "password"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(row, "jwt"), false);
 });
@@ -102,6 +103,44 @@ test("list rows take subject and sender from the message headers, not the bounce
   const bare = normalizeMessageListRow({ id: 10, source: "s@x.com", subject: "Hi" });
   assert.equal(bare.from, "s@x.com");
   assert.equal(bare.subject, "Hi");
+});
+
+test("a subject a sender broke over lines reads as one line", () => {
+  const row = normalizeMessageListRow({
+    id: 11, raw: "Subject: =?UTF-8?Q?OpenAI_-_Access_Deactivated=0A=0A[C-QN5]?=\r\n\r\nbody",
+  });
+  assert.equal(row.subject, "OpenAI - Access Deactivated [C-QN5]");
+});
+
+test("an HTML-only message previews its text, without markup or styles", () => {
+  const raw = [
+    "Subject: Code", 'Content-Type: multipart/alternative; boundary="b"', "", "--b",
+    "Content-Type: text/html; charset=utf-8", "Content-Transfer-Encoding: quoted-printable", "",
+    "<html><head><style>p{color:red}</style></head><body><p>Your code is <b>482913</b>&nbsp;=E2=80=94 thanks</p></body></html>",
+    "--b--", "",
+  ].join("\r\n");
+  assert.equal(normalizeMessageListRow({ id: 12, raw }).preview, "Your code is 482913 — thanks");
+});
+
+test("after an app restart the Worker's domains are read again, so an address can be created", async () => {
+  const dir = tmp();
+  const calls = [];
+  const fetchNative = async (url, options) => {
+    calls.push([options.method, new URL(url).pathname]);
+    if (url.endsWith("/admin/statistics")) return new Response("{}", { status: 200 });
+    if (url.endsWith("/open_api/settings")) return new Response(JSON.stringify({ version: "v1", domains: ["example.com"] }), { status: 200 });
+    if (url.endsWith("/admin/new_address")) return new Response(JSON.stringify({ address: "otp@example.com" }), { status: 200 });
+    return new Response("null", { status: 200 });
+  };
+  const options = { logger: null, filePath: path.join(dir, "e.json"), keyPath: path.join(dir, "e.key"), safeStorage: noStorage, fetchNative, parseMessage, sanitizeHtml };
+  await createEmailHost(options).connect({ origin: "https://mail.example.com", adminAuth: "k" });
+
+  const restarted = createEmailHost(options);
+  assert.equal(restarted.status().capabilities, null, "a new host knows only the saved credential");
+  assert.deepEqual((await restarted.currentStatus()).capabilities.domains, ["example.com"]);
+  const fresh = createEmailHost(options);
+  assert.deepEqual(await fresh.createAddress({ name: "otp", domain: "example.com" }), { address: "otp@example.com" },
+    "creating works even before the page asked for the status");
 });
 
 test("connect verifies read-only before persisting and never returns the credential", async () => {

@@ -11,7 +11,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
-const { parseHeaderSummary } = require("./email-mime.cjs");
+const { bodyPreview, parseHeaderSummary } = require("./email-mime.cjs");
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 50;
@@ -142,11 +142,12 @@ function normalizeMessageListRow(row) {
   if (!row || typeof row !== "object") return null;
   const id = Number(row.id);
   if (!Number.isInteger(id)) return null;
-  const preview = pickString(row, ["message", "text", "snippet", "preview"]);
   // The Worker's list rows carry the raw MIME but no subject, and `source` is the envelope
-  // sender (often a bounces+… address). The message's own headers are what a reader expects.
+  // sender (often a bounces+… address). The message's own headers are what a reader expects,
+  // and the preview is the start of its body (the raw text's start is only more headers).
   const raw = pickString(row, ["raw", "message", "mail"]);
   const headers = raw ? parseHeaderSummary(raw) : {};
+  const preview = (raw ? bodyPreview(raw, 240) : null) ?? pickString(row, ["text", "snippet", "preview"]);
   return {
     id,
     mailbox: pickString(row, ["address", "mailbox"]),
@@ -261,8 +262,24 @@ function createEmailHost({ logger, filePath, keyPath, safeStorage, fetchNative, 
     return capabilities;
   }
 
+  // The Worker's settings (its domains) were read only at connect, so after an app restart they
+  // were null: the UI had no domain and could not create an address. Read them on first need.
+  async function ensureCapabilities() {
+    if (!connection || capabilities) return capabilities;
+    try { return await refreshCapabilities(); }
+    catch (error) {
+      logger?.warn?.("email.settings_failed", { error: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+  }
+
   return {
     status,
+
+    async currentStatus() {
+      await ensureCapabilities();
+      return status();
+    },
 
     async connect(input) {
       const origin = normalizeOrigin(input?.origin);
@@ -349,7 +366,7 @@ function createEmailHost({ logger, filePath, keyPath, safeStorage, fetchNative, 
       const name = String(input?.name ?? "").trim();
       if (!ADDRESS_NAME_RE.test(name)) throw new Error("Address name may use letters, digits, dot, underscore, hyphen");
       const domain = String(input?.domain ?? "").trim();
-      const allowed = capabilities?.domains ?? [];
+      const allowed = (await ensureCapabilities())?.domains ?? [];
       if (!allowed.includes(domain)) throw new Error("Choose one of the Worker's configured domains");
       const created = await call("/admin/new_address", { method: "POST", body: { name, domain, enablePrefix: false } });
       // Discard any generated mailbox JWT; return only the address the UI needs.

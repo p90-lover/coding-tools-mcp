@@ -75,6 +75,10 @@ function decodeBody(body, headers, charset) {
 // RFC 2047 encoded words, e.g. "=?UTF-8?B?5L2g5aW9?=" or "=?utf-8?Q?caf=C3=A9?=".
 function decodeHeaderWords(value) {
   if (!value) return value ?? null;
+  return decodeEncodedWords(value).replace(/\s+/g, " ").trim(); // a sender's "\n\n" in a subject is one space
+}
+
+function decodeEncodedWords(value) {
   return value
     .replace(/(\?=)\s+(?==\?)/g, "$1") // whitespace between adjacent encoded words is not content
     .replace(/=\?([^?*]+)(?:\*[^?]*)?\?([BbQq])\?([^?]*)\?=/g, (whole, charset, kind, data) => {
@@ -114,6 +118,21 @@ async function parseMessage(raw) {
   Object.assign(out, parseHeaderSummary(raw));
   parseSection(raw, out);
   return out;
+}
+
+// A list row's one-line preview: the body's first words (plain text, else the HTML's text), not its
+// headers. Parses at most the first PREVIEW_SCAN characters, so a large message costs no more.
+const PREVIEW_SCAN = 256 * 1024;
+
+function bodyPreview(raw, max = 200) {
+  const out = { text: null, html: null, attachments: [] };
+  try { parseSection(String(raw ?? "").slice(0, PREVIEW_SCAN), out); } catch { return null; }
+  const text = out.text ?? (out.html
+    ? out.html.replace(/<(style|script|head)\b[\s\S]*?<\/\1\s*>/gi, " ").replace(/<[^>]*>/g, " ")
+      .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&#39;|&apos;/gi, "'").replace(/&quot;/gi, "\"")
+    : "");
+  const line = text.replace(/\s+/g, " ").trim();
+  return line ? line.slice(0, max) : null;
 }
 
 // Headers only — cheap enough to run on every list row without touching a large body.
@@ -178,4 +197,4 @@ function sanitizeHtml(html) {
   return applyAllowlist(stripDangerous(String(html)));
 }
 
-module.exports = { parseMessage, parseHeaderSummary, decodeHeaderWords, sanitizeHtml, stripDangerous };
+module.exports = { parseMessage, parseHeaderSummary, bodyPreview, decodeHeaderWords, sanitizeHtml, stripDangerous };
