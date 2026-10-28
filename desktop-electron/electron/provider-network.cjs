@@ -593,6 +593,32 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     }
   }
 
+  /**
+   * Makes a source app's proxies the app's own, so they work without that app running: each keeps
+   * its id, endpoint, saved credentials and routes, and can be edited here. A proxy on this machine
+   * (the source app's gateway or local port) works only while that app runs: it is archived and its
+   * routes move to the first adopted proxy that is not local. Writes only on a change.
+   */
+  function adoptSourceProfiles(source) {
+    if (source !== "nova") throw new Error("Unknown proxy source");
+    const owned = state.proxyProfiles.filter((profile) => profile.source === source && !profile.archivedAt);
+    if (!owned.length) return { changed: false, snapshot: publicSnapshot() };
+    const local = (profile) => /^(127\.\d+\.\d+\.\d+|localhost|::1)$/i.test(profile.endpoint.host);
+    const fallback = owned.find((profile) => !local(profile)) ?? null;
+    const now = new Date().toISOString();
+    for (const profile of owned) {
+      delete profile.source;
+      delete profile.sourceKey;
+      profile.updatedAt = now;
+      if (!local(profile)) continue;
+      if (fallback) moveProxyReferences(profile.id, fallback.id);
+      else dropProxyReferences(profile.id);
+      Object.assign(profile, { enabled: false, archivedAt: now });
+    }
+    write();
+    return { changed: true, snapshot: publicSnapshot() };
+  }
+
   function retargetProxyReferences(fromId, toId) {
     if (!activeProxy(toId)) throw new Error("Proxy profile was not found");
     moveProxyReferences(fromId, toId);
@@ -788,6 +814,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     removeProxyProfile,
     retargetProxyReferences,
     syncSourceProfiles,
+    adoptSourceProfiles,
     setGlobalRouting,
     setProviderPolicy,
     setAccountPolicy,

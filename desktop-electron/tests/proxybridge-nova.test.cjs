@@ -174,3 +174,25 @@ test("a Nova started by something else, or one that will not start, says why", a
   const saved = JSON.parse(fs.readFileSync(path.join(root, "providers", "proxybridge-nova.json"), "utf8"));
   assert.doesNotMatch(JSON.stringify(saved), new RegExp(spawned[0].env.PROXYBRIDGE_NOVA_API_TOKEN), "the token is saved only encrypted");
 });
+
+test("Nova's proxies become the app's own, with the gateway's route moved to a real proxy", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nova-adopt-"));
+  const store = createProviderNetworkStore({
+    filePath: path.join(root, "providers", "provider-network.json"),
+    keyPath: path.join(root, "providers", "provider-network.key"), safeStorage,
+  });
+  store.syncSourceProfiles("nova", profileEntries({ proxies: [socks("p1", "proxy.example")] }, STATUS));
+  const remote = store.snapshot().proxyProfiles.find((profile) => profile.endpoint.host === "proxy.example");
+  store.setGlobalRouting({ enabled: true, profileId: GATEWAY_PROFILE_ID });
+
+  assert.equal(store.adoptSourceProfiles("nova").changed, true);
+  const snapshot = store.snapshot();
+  const adopted = snapshot.proxyProfiles.find((profile) => profile.id === remote.id);
+  assert.equal(adopted.source, undefined, "an adopted proxy is the app's to edit");
+  assert.equal(adopted.archivedAt, undefined);
+  assert.deepEqual(store.proxySecret(remote.id), { username: "user", password: "secret" }, "its sign-in is kept");
+  assert.ok(snapshot.proxyProfiles.find((profile) => profile.id === GATEWAY_PROFILE_ID).archivedAt, "Nova's local gateway is retired");
+  assert.equal(snapshot.routing.globalProfileId, remote.id, "the app route goes straight to the proxy");
+  assert.equal(store.adoptSourceProfiles("nova").changed, false, "a second start changes nothing");
+  fs.rmSync(root, { recursive: true, force: true });
+});
