@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
-import { CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR } from "../src/chatgpt-session";
+import { CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR, CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR } from "../src/chatgpt-session";
 
 test("an already-ready effort control has no unconditional pre-activation delay", async () => {
   const neverVisible = new Promise<void>(() => {});
@@ -44,6 +44,11 @@ test("an already-ready effort control has no unconditional pre-activation delay"
   };
   const effortMenu = {
     isVisible: async () => menuOpen,
+    // The older picker: no model header row, so effort is set on its slider.
+    locator: (selector: string) => {
+      expect(selector).toBe(CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR);
+      return { count: async () => 0 };
+    },
   };
   const effortControl = {
     last() { return this; },

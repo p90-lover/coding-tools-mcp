@@ -19,6 +19,8 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   'textarea[name="prompt-textarea"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
+  // The current picker's trigger; unlike its aria-label, this attribute is not translated.
+  'button[data-codex-intelligence-trigger="true"][aria-haspopup="menu"]',
   'button[aria-haspopup="menu"][data-tone="neutral"]',
   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
   'button[aria-label="Select ChatGPT model"][aria-haspopup="menu"]',
@@ -32,6 +34,15 @@ export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
 export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider], [data-model-picker-power-slider]';
 export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"], [data-model-picker-power-slider] [role="slider"]';
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
+/** The picker's header row ("6 Sol · 6 High ›"): it swaps the Power slider for the model list. */
+export const CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR = "[data-model-picker-view-toggle]";
+/**
+ * The one model ChatGPT turns run on. On "Default" the Power slider walks across models, and its
+ * upper stops are billed to the account's Codex quota; with GPT-6 Sol chosen in the list, the
+ * slider only sets GPT-6 Sol's own effort (seen live 2026-10-29: 6 stops became 3).
+ */
+export const CHATGPT_TURN_MODEL_NAME = "GPT-6 Sol";
+const MODEL_PICK_STEP_TIMEOUT_MS = 10_000;
 export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], form button[aria-label="Stop"]';
 export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"], .turn-action-controls button[aria-label="Copy"]';
 export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
@@ -144,6 +155,73 @@ export async function activateChatGptEffortMenu(
   throw new Error(
     "ChatGPT effort control did not expose its owned menu or structural slider after click and primary pointerdown",
   );
+}
+
+/** Whether this open picker has a model list (its header row swaps to it). */
+export async function chatGptPickerHasModelList(menu: Locator): Promise<boolean> {
+  return await menu.locator(CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR).count() > 0;
+}
+
+async function waitForPickerState(
+  menu: Locator,
+  check: (root: Element, modelName: string) => boolean,
+  modelName: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await menu.evaluate(check, modelName).catch(() => false)) return true;
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+  }
+  return false;
+}
+
+/**
+ * Picks `modelName` in the open picker as a person would: the header row, then the model's row
+ * in the list, matched by its exact name because the list's order and contents change. Each step
+ * is checked and any surprise throws, so a turn stops instead of running on a model it did not pick.
+ * The Power slider is left alone: with a model chosen it only sets that model's effort.
+ */
+export async function selectChatGptModelFromList(
+  menu: Locator,
+  modelName: string = CHATGPT_TURN_MODEL_NAME,
+  timeoutMs: number = MODEL_PICK_STEP_TIMEOUT_MS,
+): Promise<void> {
+  const toggles = menu.locator(CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR).filter({ visible: true });
+  const toggleCount = await toggles.count();
+  if (toggleCount !== 1) throw new Error(`the model picker shows ${toggleCount} model header rows, not 1`);
+  await toggles.click({ timeout: timeoutMs });
+  const listShown = await waitForPickerState(
+    menu,
+    root => root.querySelector("[data-model-picker-view]")?.getAttribute("data-model-picker-view") === "advanced",
+    modelName,
+    timeoutMs,
+  );
+  if (!listShown) throw new Error("the model list did not open from the picker's header row");
+
+  const rows = await menu.locator('[role="menuitemradio"]').evaluateAll(items => items.map(item => ({
+    name: item.querySelector("[data-menu-row-content]")?.textContent?.trim() ?? "",
+    // A locked or used-up model carries "Locked…" / "Usage limit reached" through aria-describedby.
+    blocked: item.getAttribute("aria-disabled") === "true" || item.hasAttribute("aria-describedby"),
+  })));
+  const matches = rows.flatMap((row, index) => (row.name === modelName ? [index] : []));
+  if (matches.length !== 1) {
+    throw new Error(`the model list has ${matches.length} rows named "${modelName}" (rows: ${rows.map(row => row.name).join(", ")})`);
+  }
+  const index = matches[0]!;
+  if (rows[index]!.blocked) throw new Error(`"${modelName}" is locked or out of usage in the model list`);
+  await menu.locator('[role="menuitemradio"]').nth(index).click({ timeout: timeoutMs });
+
+  // Chosen: the picker returns to its slider view on an explicit model, with that row checked.
+  const chosen = await waitForPickerState(menu, (root, name) => {
+    const view = root.querySelector("[data-model-picker-view]")?.getAttribute("data-model-picker-view");
+    const explicit = root.querySelector("[data-explicit-model]")?.getAttribute("data-explicit-model");
+    const checked = Array.from(root.querySelectorAll('[role="menuitemradio"][aria-checked="true"]'),
+      item => item.querySelector("[data-menu-row-content]")?.textContent?.trim());
+    return view === "simple" && explicit === "true" && checked.length === 1 && checked[0] === name;
+  }, modelName, timeoutMs);
+  // The composer's label is no proof: at Instant it reads "6 Instant", without the model's name.
+  if (!chosen) throw new Error(`"${modelName}" did not become the picker's chosen model`);
 }
 
 function safeIntegerAttribute(value: string | null): number | undefined {
@@ -292,6 +370,9 @@ export async function detectChatGptAccountCapabilities(
   }
   try {
     const { menu, sliderContainer, slider } = await activateChatGptEffortMenu(page, effortButton);
+    // The current picker: turns always run on GPT-6 Sol, picked from its list, so the account has
+    // Sol and Pro is never used. On "Default" its slider spans models (6 stops) and reads as no range.
+    if (await chatGptPickerHasModelList(menu)) return { solAvailable: true, proAvailable: false };
     const timeout = options.selectorTimeoutMs ?? 70_000;
     // Model radio rows can hydrate before the effort control. They carry no evidence
     // of the account's reasoning range, so an absent slider must fail, not cache false.

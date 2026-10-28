@@ -6,8 +6,10 @@ import {
   CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
   CHATGPT_EFFORT_SLIDER_SELECTOR,
+  CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
+  selectChatGptModelFromList,
 } from "../src/chatgpt-session";
 
 test("composer and effort selectors exclude unrelated editable fields and menu buttons", () => {
@@ -24,13 +26,14 @@ test("composer and effort selectors exclude unrelated editable fields and menu b
     <button aria-haspopup="menu" data-tone="neutral" id="effort"></button>
     <button aria-haspopup="menu" data-testid="model-switcher-dropdown-button" id="model"></button>
     <button aria-haspopup="menu" aria-label="Select ChatGPT model" id="current-model"></button>
+    <button aria-haspopup="menu" aria-label="選擇模型" data-codex-intelligence-trigger="true" id="translated-model"></button>
     <div data-model-picker-power-slider id="power-container"><span role="slider" id="power-slider"></span></div>
     <div data-model-reasoning-effort-slider id="legacy-container"><span role="slider" id="legacy-slider"></span></div>
     <span role="slider" id="unrelated-volume-slider"></span>
   </form></body>`);
   const matches = (selector: string) => Array.from(document.querySelectorAll(selector)).map(element => element.id);
   expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer-fallback", "composer-testid", "prompt-textarea", "composer-lexical", "composer-accessible"]);
-  expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model", "current-model"]);
+  expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model", "current-model", "translated-model"]);
   expect(matches(CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR)).toEqual(["power-container", "legacy-container"]);
   expect(matches(CHATGPT_EFFORT_SLIDER_SELECTOR)).toEqual(["power-slider", "legacy-slider"]);
 });
@@ -254,7 +257,10 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
   };
   const composer = { filter() { return this; }, last() { return this; }, locator: () => ({ locator: () => control }) };
   const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
-  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows,
+  // The older picker: no model header row, so effort is set on its slider.
+  const noToggle = { count: async () => 0 };
+  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true,
+    locator: (selector: string) => selector === CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR ? noToggle : modelRows,
     getByText: () => ({ count: async () => options.locked ? 1 : 0 }) };
   const page = {
     locator: (selector: string) => {
@@ -296,4 +302,100 @@ test("Pro selection changes the hidden slider through its visible owner, never t
   await select.call({ activeComposer: async () => fixture.composer }, fixture.page, "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, proAvailable: true });
   expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight"]);
   expect(fixture.value()).toBe(4);
+});
+
+/**
+ * The current picker as captured live on 2026-10-29: a header row that swaps the Power slider for
+ * the model list, and model rows whose order may change. Clicks act as ChatGPT does: the header
+ * opens the list; a row (only in the list) makes that model explicit and returns to the slider.
+ */
+function modelListPicker(options: { models?: string[]; locked?: string; clickIgnored?: boolean } = {}) {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  const models = ["Default", ...(options.models ?? ["GPT-6.1 Sol", "GPT-6 Sol", "GPT-6 Astra", "GPT-5.6 Sol"])];
+  const state = { view: "simple", chosen: "Default", sliderKeys: 0, clicks: [] as string[] };
+  const row = (name: string) => `<div role="menuitemradio" aria-checked="${name === state.chosen}"`
+    + `${name === options.locked ? ' aria-describedby="locked-note"' : ""}><div data-menu-row-content="true">`
+    + (name === "Default" ? "<div><span>Default</span><span><span>Recommended set of models</span></span></div>" : `<span>${name}</span>`)
+    + "</div></div>";
+  const render = () => createDocument(`<body><div role="menu" id="menu"><div data-model-picker-view="${state.view}">`
+    + `<div data-explicit-model="${state.chosen !== "Default"}"><div role="menuitem" aria-label="Select model" data-model-picker-view-toggle="true">`
+    + `<div data-menu-row-content="true"><span>6 Sol</span><span>6 High</span></div></div></div>`
+    + '<div data-model-picker-power-slider=""><span role="slider" aria-valuemin="0" aria-valuemax="5" aria-valuenow="1"></span></div>'
+    + `<div><div data-menu-section-label="true">Select model</div><span id="locked-note">Locked, opens access options</span>${models.map(row).join("")}</div>`
+    + "</div></div></body>").getElementById("menu")!;
+  const locator = (selector: string, index?: number): Record<string, unknown> => {
+    const elements = () => {
+      const found = Array.from(render().querySelectorAll(selector));
+      return index === undefined ? found : found.slice(index, index + 1);
+    };
+    return {
+      filter: () => locator(selector, index),
+      nth: (n: number) => locator(selector, n),
+      count: async () => elements().length,
+      evaluateAll: async (fn: (items: Element[]) => unknown) => fn(elements()),
+      click: async () => {
+        if (selector === CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR) { state.clicks.push("header"); state.view = "advanced"; return; }
+        if (state.view !== "advanced") throw new Error("model rows are inert outside the list");
+        const name = elements()[0]!.querySelector("[data-menu-row-content]")!.textContent!.trim();
+        state.clicks.push(name);
+        if (!options.clickIgnored) { state.chosen = name; state.view = "simple"; }
+      },
+    };
+  };
+  const menu = {
+    filter() { return this; }, last() { return this; }, isVisible: async () => true,
+    locator: (selector: string) => locator(selector),
+    evaluate: async (fn: (root: Element, arg: string) => unknown, arg: string) => fn(render(), arg),
+    getByText: () => ({ count: async () => 0 }),
+  };
+  return { menu, state };
+}
+
+test("GPT-6 Sol is picked by its exact name from the list, wherever it sits, and the slider is not touched", async () => {
+  const picker = modelListPicker();
+  await selectChatGptModelFromList(picker.menu as never);
+  expect(picker.state.clicks).toEqual(["header", "GPT-6 Sol"]);
+  expect(picker.state.chosen).toBe("GPT-6 Sol");
+  expect(picker.state.view).toBe("simple");
+});
+
+test("each failed step stops the pick instead of choosing another model", async () => {
+  const missing = modelListPicker({ models: ["GPT-6.1 Sol", "GPT-6 Astra"] });
+  await expect(selectChatGptModelFromList(missing.menu as never, undefined, 50))
+    .rejects.toThrow('0 rows named "GPT-6 Sol"');
+  expect(missing.state.clicks).toEqual(["header"]);
+
+  const locked = modelListPicker({ locked: "GPT-6 Sol" });
+  await expect(selectChatGptModelFromList(locked.menu as never, undefined, 50))
+    .rejects.toThrow("locked or out of usage");
+  expect(locked.state.chosen).toBe("Default");
+
+  const ignored = modelListPicker({ clickIgnored: true });
+  await expect(selectChatGptModelFromList(ignored.menu as never, undefined, 50))
+    .rejects.toThrow("did not become the picker's chosen model");
+});
+
+test("a picker with a model list reports Sol without Pro, never reading its cross-model slider", async () => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker();
+  const page = { ...fixture.page, locator: (selector: string) => selector === CHATGPT_EFFORT_MENU_SELECTOR ? picker.menu : fixture.page.locator(selector) };
+  await expect(detectChatGptAccountCapabilities(page as never)).resolves.toEqual({ solAvailable: true, proAvailable: false });
+});
+
+test("a turn on the current picker picks GPT-6 Sol and never presses the slider, whatever effort was asked", async () => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker();
+  const pressed: string[] = [];
+  const page = {
+    ...fixture.page,
+    locator: (selector: string) => selector === CHATGPT_EFFORT_MENU_SELECTOR ? picker.menu : fixture.page.locator(selector),
+    keyboard: { press: async (key: string) => { pressed.push(key); } },
+  };
+  const select = (ChatGptBrowserWorker.prototype as unknown as {
+    selectModelAndEffort(...args: unknown[]): Promise<unknown>;
+  }).selectModelAndEffort;
+  await select.call({ activeComposer: async () => fixture.composer }, page, "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, proAvailable: true });
+  expect(picker.state.clicks).toEqual(["header", "GPT-6 Sol"]);
+  expect(fixture.keys).toEqual([]);
+  expect(pressed).toEqual(["Escape"]);
 });

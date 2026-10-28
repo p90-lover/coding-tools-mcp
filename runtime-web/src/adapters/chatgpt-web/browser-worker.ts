@@ -58,6 +58,9 @@ import {
   CHATGPT_STOP_BUTTON_SELECTOR,
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
+  chatGptPickerHasModelList,
+  selectChatGptModelFromList,
+  CHATGPT_TURN_MODEL_NAME,
   detectChatGptAccountCapabilities,
   parseChatGptEffortSliderState,
   readChatGptEffortSnapshot,
@@ -290,6 +293,14 @@ const CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE = "ChatGPT model controls are un
 
 function chatGptModelControlUnavailableError(diagnostic: string): Error {
   return new Error(CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE, { cause: new Error(diagnostic) });
+}
+
+/** Picking GPT-6 Sol failed at a step: the turn stops and is not retried on some other model. */
+function chatGptModelPickError(diagnostic: string): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `ChatGPT could not be switched to ${CHATGPT_TURN_MODEL_NAME}, so the turn stopped instead of running on another model: ${diagnostic}`,
+    { status: 409, errorType: "invalid_request_error", code: "chatgpt_model_pick_failed", retryable: false },
+  );
 }
 
 function chatGptModelControlUnavailableAdapterError(diagnostic: string): ChatGptWebAdapterError {
@@ -2800,6 +2811,21 @@ export class ChatGptBrowserWorker {
       );
     } finally {
       waitAbort.abort();
+    }
+    // The current picker: GPT-6 Sol is picked from its model list and the slider is never moved
+    // (on "Default" its upper stops are other models, billed to Codex quota). A failed step stops
+    // the turn; it is not retried.
+    if (await chatGptPickerHasModelList(activation.menu)) {
+      try {
+        await selectChatGptModelFromList(activation.menu);
+      } catch (error) {
+        await captureDiagnostic?.("model-pick-failed");
+        await page.keyboard.press("Escape").catch(() => {});
+        throw chatGptModelPickError(error instanceof Error ? error.message : String(error));
+      }
+      await captureDiagnostic?.("model-picked");
+      await page.keyboard.press("Escape");
+      return mode;
     }
     let sliderState = parseChatGptEffortSliderState(
       await effortSlider.getAttribute("aria-valuemin"),
