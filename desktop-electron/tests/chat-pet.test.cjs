@@ -112,3 +112,20 @@ test("the stage hands the pet from pane to pane and tells the others what change
   stage1.leave("b");
   assert.equal(stage1.host(), null);
 });
+
+test("the pet's flight tells the Preview pane where it is, once per move, and when it lands", () => {
+  const flight = stage.createPetFlight();
+  const seen = [];
+  const stop = flight.subscribe((rect) => seen.push(rect && rect.left));
+  flight.set({ left: 10, top: 10, right: 82, bottom: 58 });
+  flight.set({ left: 10, top: 10, right: 82, bottom: 58 });
+  flight.set({ left: 20, top: 10, right: 92, bottom: 58 });
+  flight.set(null);
+  stop();
+  flight.set({ left: 30, top: 10, right: 102, bottom: 58 });
+  assert.deepEqual(seen, [10, 20, null], "the same box twice is one move; after unsubscribing nothing");
+  const pane = { left: 200, top: 100, right: 600, bottom: 500 };
+  assert.equal(stage.petOverlaps({ left: 150, top: 120, right: 199, bottom: 160 }, pane), false);
+  assert.equal(stage.petOverlaps({ left: 150, top: 120, right: 199, bottom: 160 }, pane, 48), true, "near enough to swap in the still");
+  assert.equal(stage.petOverlaps({ left: 300, top: 200, right: 372, bottom: 248 }, pane), true);
+});

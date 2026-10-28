@@ -2191,7 +2191,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           if (!bounds || !["x", "y", "width", "height"].every((key) => Number.isFinite(bounds[key]))) throw new Error("bounds must be finite numbers");
           return { ok: agentTools.previewShow(args.sessionId, bounds, Number(args.zoom) || 1) };
         }
-        case "chat_preview_hide": agentTools.previewHide(); return { ok: true };
+        case "chat_preview_hide": return { ok: true, hidden: agentTools.previewHide(typeof args.sessionId === "string" ? args.sessionId : undefined) !== false };
+        // A still of the shown page, drawn in its place while Clawd passes over the pane.
+        case "chat_preview_snapshot": return { ok: true, url: await agentTools.previewSnapshot?.(args.sessionId) ?? null };
         case "chat_preview_navigate": return agentTools.previewNavigate(args.sessionId, {
           ...(typeof args.url === "string" ? { url: args.url } : {}), ...(typeof args.action === "string" ? { action: args.action } : {}),
         });

@@ -987,10 +987,11 @@ type ResumeCandidate = {
 export const RESTART_RESUME_WINDOW_MS = 24 * 60 * 60_000;
 // The main process's own bounds (agent-orchestrator-workflow.cjs): a step a restart interrupted runs
 // until it has this many attempts (RESTART_HISTORY_LIMIT), any other failed step until this many
-// (AUTO_RETRY_LIMIT), and a sign-in or account-pool failure is never retried (POOL_EXHAUSTED).
+// (AUTO_RETRY_LIMIT), and a sign-in, account-pool or used-up quota failure is never retried
+// (POOL_EXHAUSTED, QUOTA_EXHAUSTED).
 const RESTART_ATTEMPT_LIMIT = 8;
 const AUTO_RETRY_ATTEMPT_LIMIT = 8;
-const NEEDS_PERSON = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)/i;
+const NEEDS_PERSON = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)|insufficient_quota|usage_limit_reached|quota[^\n]{0,40}(?:exceed|exhaust|reached|used up)|(?:exceed|reach|hit)(?:ed)? your[^\n]{0,40}(?:quota|limit)/i;
 
 /** The newest time any card of the run started, current receipts and earlier attempts alike (0: none). */
 function newestStart(mission: ResumeCandidate): number {

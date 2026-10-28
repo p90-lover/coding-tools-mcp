@@ -1012,7 +1012,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-preview-errors { flex: 0 0 auto; padding: 2px 8px; border-radius: 10px; background: color-mix(in srgb, var(--ao-red, #c0392b) 14%, transparent);
   color: var(--ao-red, #c0392b); font-size: 11px; }
 /* The page itself is a native view the app draws over this slot. */
-.cx-preview-slot { flex: 1 1 auto; min-height: 0; margin: 0 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; }
+.cx-preview-slot { flex: 1 1 auto; min-height: 0; margin: 0 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; overflow: hidden; }
+/* The page's still, in the native view's place while Clawd passes over the pane (PreviewPane). */
+.cx-preview-still { display: block; width: 100%; height: 100%; object-fit: cover; object-position: left top; pointer-events: none; user-select: none; }
 .cx-terminal { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; gap: 6px; padding-bottom: 10px; }
 /* What runs now leads; the agent's finished tool calls fold away below it (they are in the chat). */
 .cx-terminal-bar { display: flex; align-items: center; gap: 8px; padding: 2px 12px 0; }
