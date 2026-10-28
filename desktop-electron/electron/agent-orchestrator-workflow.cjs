@@ -5165,10 +5165,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       throw new Error("update_goal can only mark the existing goal complete, blocked, or paused at the user's explicit request; resume, budget-limited, and usage-limited status changes are controlled by the user or system");
     }
     const change = objective === undefined ? {} : { objective: cleanObjective(objective) };
-    if (status === "complete") {
+    if (status === "complete" && goal.status === "active") {
       // Keep it active until goalAfterRun independently checks the settled round.
       Object.assign(change, { status: "active", note: "Agent reported completion; awaiting independent goal verification" });
-    } else if (status === "blocked") {
+    } else if (status === "blocked" && goal.status === "active") {
       // Count distinct goal turns, never repeated calls from one model turn.
       const blockedRounds = goal.agentBlockedRunId === latest.id
         ? (goal.agentBlockedRounds ?? 1) : (goal.agentBlockedRounds ?? 0) + 1;
