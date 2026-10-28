@@ -179,6 +179,9 @@ pub struct Receipt {
     /// When the card was reserved (Unix ms), so every view can show how long it has been running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
+    /// When the card's turn ended (Unix ms), so a finished turn can say how long it ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2054,6 +2057,7 @@ pub fn reserve(
         route: node.route.clone(),
         approvals: Vec::new(),
         started_at_ms: Some(grant_now_ms.unwrap_or_else(unix_now_ms)),
+        finished_at_ms: None,
     });
     if grant_now_ms.is_some() {
         run.grant.as_mut().unwrap().turns_started += 1;
@@ -2132,6 +2136,7 @@ pub fn record_failed_submission(
             .and_then(|node| node.receipt.as_mut())
         {
             receipt.error = Some(format!("Launch failed: {reason}"));
+            receipt.finished_at_ms = Some(unix_now_ms());
         }
     }
     Ok(run.clone())
@@ -2287,6 +2292,7 @@ pub fn record_terminal(
     receipt.turn_id = turn_id
         .filter(|id| text(id, 128) && !id.contains('/'))
         .map(str::to_owned);
+    receipt.finished_at_ms = Some(unix_now_ms());
     if completed
         && !failure.is_some_and(|message| message.starts_with("Native approval declined"))
         && turn_id.is_some_and(|id| text(id, 128) && !id.contains('/'))
@@ -3442,6 +3448,12 @@ mod tests {
         )
         .unwrap();
         assert!(parents_finished(&run, "worker"));
+        // The finished card keeps when its turn ended, so the chat can say how long it ran.
+        let planner = run.nodes.iter().find(|node| node.id == "planner").unwrap();
+        let receipt = planner.receipt.as_ref().unwrap();
+        assert!(
+            receipt.finished_at_ms.is_some() && receipt.finished_at_ms >= receipt.started_at_ms
+        );
         assert_eq!(run.assignments["worker"].task, "Write the short answer");
         let worker_prompt = prompt_for_node(&data, &run, "worker").unwrap();
         assert!(worker_prompt
@@ -4184,6 +4196,7 @@ mod tests {
                 route: w2.route.clone(),
                 approvals: vec![],
                 started_at_ms: None,
+                finished_at_ms: None,
             });
         }
         let revision = data.ao_runs[0].revision;

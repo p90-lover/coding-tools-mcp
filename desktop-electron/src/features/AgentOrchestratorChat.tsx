@@ -12,7 +12,7 @@ import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
-import { ChatTurnStats } from "./ChatTurnStats";
+import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SentImage, ToolImages } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
@@ -542,7 +542,7 @@ const sameStep = (a: ChatStep, b: ChatStep) => a === b || (a.key === b.key && a.
  * for both turns, twice a turn on every second's update: work that grew with the length of the chat.
  */
 const sameTurnWork = (a: ChatTurn, b: ChatTurn) => a.runId === b.runId && a.status === b.status
-  && (a.startedAtMs ?? 0) === (b.startedAtMs ?? 0) && a.steps.length === b.steps.length
+  && (a.startedAtMs ?? 0) === (b.startedAtMs ?? 0) && (a.endedAtMs ?? 0) === (b.endedAtMs ?? 0) && a.steps.length === b.steps.length
   && a.steps.every((step, index) => sameStep(step, b.steps[index]))
   && (a.final && b.final ? sameStep(a.final, b.final) : !a.final && !b.final);
 
@@ -1899,6 +1899,9 @@ export function AgentOrchestratorChat({
               {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p>
                 : turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
+              {turn.runId && turn.startedAtMs && !liveTurn(turn)
+                ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={!dsh}
+                  to={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs} /> : null}
             </article></PartErrorBoundary>;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steersByTurn]);
 

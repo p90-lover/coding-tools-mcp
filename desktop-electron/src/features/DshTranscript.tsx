@@ -410,7 +410,8 @@ export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = f
   const work = single
     ? <DshStepWork step={steps[0]} useWork={useWork} answer={answer} />
     : steps.map((step) => <DshAgent key={step.key} step={step} useWork={useWork} answer={step === turn.final ? answer : undefined} />);
-  const ended = ENDED.get(turn.key);
+  // The end its cards kept, or the moment this window saw it end (cards saved before builds that kept one).
+  const ended = turn.endedAtMs ?? ENDED.get(turn.key);
   const label = stopped ? "Stopped" : failed ? "Failed" : ended && turn.startedAtMs ? "Completed in " : "Completed";
   return <div className="dsh-turn-work">
     {!live ? <button type="button" className="dsh-turn-process" data-open={open || undefined} disabled={alwaysOpen}

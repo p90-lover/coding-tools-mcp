@@ -785,6 +785,13 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   background: var(--ao-green, #2e9d5b); content: ""; animation: cx-pulse 1.4s ease-in-out infinite; }
 @keyframes cx-turn-stats-in { from { opacity: 0; transform: translateY(-3px); } }
 @media (prefers-reduced-motion: reduce) { .cx-turn-stats, .cx-turn-stats.is-running span:first-child::before { animation: none; } }
+/* An ended turn's foot (TurnFoot): how long it worked and its own requests, quiet under its answer. */
+.cx-turn-foot { display: flex; flex-wrap: wrap; margin: 6px 0 0; padding: 0; color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cx-turn-foot.is-empty { height: 1px; margin: 0; }
+.cx-turn-foot span { padding: 0 8px; white-space: nowrap; transition: color .15s ease; }
+.cx-turn-foot span:first-child { padding-left: 0; }
+.cx-turn-foot span + span { border-left: 1px solid color-mix(in srgb, var(--ao-muted) 35%, transparent); }
+.cx-turn-foot span:hover { color: var(--color-text-primary); }
 .cx-composer-bar { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .cx-composer-bar .ao-composer-controls { display: flex; flex: 1 1 auto; flex-wrap: nowrap; align-items: center; gap: 2px; min-width: 0; }
 /* Codex's bottom row is plain text: permission and Single|Team on the left, the model (effort dimmed)

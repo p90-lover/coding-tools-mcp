@@ -2116,11 +2116,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!cpaUsage) return { ok: true, available: false, reason: "CPA is not set up in this app" };
       return cpaUsage.read({ range: typeof args.range === "string" ? args.range : undefined });
     }
-    // The line under the chat box: the latest turn's model requests through CPA (cpa-usage.cjs).
+    // The line under the chat box (the latest turn) and each ended turn's foot (`to`: when it
+    // ended): its model requests through CPA (cpa-usage.cjs).
     if (operation === "chat_turn_stats") {
       if (!cpaUsage?.turnStats) return { ok: true, available: false };
       return cpaUsage.turnStats({ model: typeof args.model === "string" ? args.model : "",
-        models: Array.isArray(args.models) ? args.models.filter((value) => typeof value === "string").slice(0, 4) : [], from: Number(args.from) });
+        models: Array.isArray(args.models) ? args.models.filter((value) => typeof value === "string").slice(0, 4) : [], from: Number(args.from),
+        ...(args.to === undefined ? {} : { to: Number(args.to) }) });
     }
     // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
     // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).
