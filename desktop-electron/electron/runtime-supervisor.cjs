@@ -12,6 +12,7 @@ const {
   terminateOwnedProcessTreeAsync,
 } = require("./process-tree.cjs");
 const { runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
+const { runOffThread } = require("./off-thread-run.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
@@ -174,6 +175,18 @@ function conciseTunnelLog(value) {
   const tail = value.trim().split(/\r?\n/).slice(-3).join(" | ");
   const redacted = redactText(tail);
   return redacted.length > 800 ? `…${redacted.slice(-800)}` : redacted;
+}
+
+/** A finished tunnel CLI command as runTunnelCommand returns it; output leads with stderr on failure. */
+function controlResult(code, stdout, stderr) {
+  const stdoutText = stdout.trim();
+  const stderrText = stderr.trim();
+  return {
+    code,
+    stdout: stdoutText,
+    stderr: stderrText,
+    output: code === 0 ? (stdoutText || stderrText) : [stderrText, stdoutText].filter(Boolean).join("\n"),
+  };
 }
 
 function tunnelControlDiagnostic(result) {
@@ -943,6 +956,7 @@ class RuntimeSupervisor {
       ["runtimes", "cleanup", "--json"],
       5_000,
       "Local tunnel inventory probe",
+      { probe: true },
     );
     if (result.code !== 0) {
       return {
@@ -1119,6 +1133,7 @@ class RuntimeSupervisor {
       ["runtimes", "status", tunnel.alias, "--json"],
       5_000,
       "Local tunnel health discovery",
+      { probe: true },
     );
     if (result.code !== 0) {
       throw new Error(`Local tunnel health discovery failed: ${tunnelControlDiagnostic(result)}`);
@@ -1944,9 +1959,21 @@ class RuntimeSupervisor {
     );
   }
 
-  async runTunnelCommand(config, args, timeoutMs, label) {
+  /**
+   * A tunnel CLI command's { code, stdout, stderr, output }. A `probe` (a read-only status call,
+   * made every second while the tunnel starts and on each watchdog check) starts the CLI from a
+   * worker thread: started here, an antivirus scan of the program held every window for seconds
+   * (5.5 s of a 7 s main-process stall, profiled 2026-10-29).
+   */
+  async runTunnelCommand(config, args, timeoutMs, label, { probe = false } = {}) {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
+    if (probe) {
+      const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
+      if (reply.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
+      if (reply.error) throw new Error(reply.error);
+      return controlResult(reply.code, reply.stdout, reply.stderr);
+    }
     return await new Promise((resolve, reject) => {
       const child = spawn(tunnel.binaryPath, args, {
         cwd: tunnel.profileDir,
@@ -2041,17 +2068,7 @@ class RuntimeSupervisor {
           });
           return;
         }
-        const exitCode = code ?? 1;
-        const stdoutText = Buffer.concat(stdout).toString("utf8").trim();
-        const stderrText = Buffer.concat(stderr).toString("utf8").trim();
-        resolve({
-          code: exitCode,
-          stdout: stdoutText,
-          stderr: stderrText,
-          output: exitCode === 0
-            ? (stdoutText || stderrText)
-            : [stderrText, stdoutText].filter(Boolean).join("\n"),
-        });
+        resolve(controlResult(code ?? 1, Buffer.concat(stdout).toString("utf8"), Buffer.concat(stderr).toString("utf8")));
       });
     });
   }
