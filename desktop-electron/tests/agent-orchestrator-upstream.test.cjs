@@ -1498,6 +1498,30 @@ test("a finished turn's work is read back from AO, paging back until it reaches 
   assert.equal((await upstream.timeline("s", "")).length, 0, "no turn, nothing to read");
 });
 
+test("finished turns opened together are read back a few at a time, and a turn asked twice is read once", async () => {
+  // Seen live on 0.8.29: opening a chat read back every finished card at once, each paging through
+  // AO, and the burst filled the headless service's 16 request slots ("admission is full").
+  let inFlight = 0, most = 0;
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      asked.push(endpoint);
+      inFlight += 1; most = Math.max(most, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      inFlight -= 1;
+      const session = /sessions\/([^/]+)\//.exec(endpoint)[1];
+      return { turns: [], messages: [], hasMoreBefore: false, oldestSequence: 1,
+        activities: [{ id: `${session}-1`, turnId: "t", sequence: 1, activityKind: "reasoning", status: "completed", detail: { text: "done" } }] };
+    },
+  });
+  const sessions = Array.from({ length: 20 }, (_, index) => `s${index}`);
+  const reads = await Promise.all([...sessions, "s0"].map(id => upstream.timeline(id, "t")));
+  assert.ok(most <= 3, `at most three reads at once (saw ${most})`);
+  assert.deepEqual(reads.map(items => items[0]?.id), [...sessions, "s0"].map(id => `${id}-1`), "every turn is read back");
+  assert.equal(asked.filter(endpoint => endpoint.includes("/sessions/s0/")).length, 1, "the same turn asked twice shares one read");
+  assert.equal((await upstream.timeline("s0", "t"))[0].id, "s0-1", "a later ask reads it again");
+});
+
 test("a long finished turn keeps its tool calls when a page is over AO's handler limit, past six pages", async () => {
   // Seen live: a 20-minute turn opened on only its last thought. Paging back stopped at the first
   // page over the 900 KB handler limit (a command's long output), and after six pages in any case.
