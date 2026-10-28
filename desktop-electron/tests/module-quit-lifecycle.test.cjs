@@ -20,6 +20,7 @@ visit(file);
 
 function fixture({ active = null, browserActive = null, failCleanup = false, restoreFails = false, quitAnyway = false, registerShutdownFails = false, browserSaveFails = false } = {}) {
   const disposed = [];
+  const chatHosts = [];
   const nativeStops = [];
   const quits = [];
   const order = [], recovered = [];
@@ -42,7 +43,8 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
       recoverAfterCancelledQuit: async () => { recovered.push(context.quitting); } },
     stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} }, autoInstaller: { stop() {} },
     stopBridgeWatchdog() {}, backendBundles: { stopWatching() {} },
-    agentOrchestratorUpstream: { stop: async () => {} }, antigravityReauth: { stop() {} },
+    agentOrchestratorUpstream: { stop: async () => { chatHosts.push("stop-ao"); }, endChatHosts: async () => { chatHosts.push("end-chat-hosts"); } },
+    antigravityReauth: { stop() {} },
     // The docked ChatGPT desktop host (main.cjs `chatgptDesktop`) is shut down on every quit.
     chatgptDesktop: { shutdown: async () => { order.push("stop-chatgpt-desktop"); } },
     managedBootstrapController: controller("bootstrap"), originalUiController: controller("visuals"),
@@ -54,12 +56,12 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
     QUIT_EXIT_GRACE_MS: 0, setTimeout: () => ({ unref() {} }),
     showMainWindow() {}, publishOperation() {}, app: { quit: () => quits.push(true) },
     dialog: { showMessageBox: async () => ({ response: quitAnyway ? 1 : 0 }) },
-    mainWindow: {},
+    mainWindow: { isDestroyed: () => false },
   });
   const quit = vm.runInContext(`(${quitSource})`, context);
   let result;
   context.requestQuit = () => (result = quit());
-  return { disposed, nativeStops, quits, order, recovered, browser: context.browserHost, quit, async beforeQuit() {
+  return { disposed, chatHosts, nativeStops, quits, order, recovered, browser: context.browserHost, quit, async beforeQuit() {
     let prevented = 0;
     for (const listener of listeners) vm.runInContext(`(${listener})`, context)({ preventDefault: () => { prevented += 1; } });
     assert.equal(prevented, 1);
@@ -77,7 +79,7 @@ test("rejected app quit does not dispose integrations before the active-operatio
   assert.deepEqual(f.order, []);
 });
 
-test("updating refuses a live browser turn, then closes once it ends despite a stale running status", async () => {
+test("a keep-bridge restart refuses a live browser turn, then closes once it ends despite a stale running status", async () => {
   const f = fixture({ browserActive: "live-turn" });
   const refused = await f.quit({ keepBridge: true });
   assert.equal(refused.ok, false);
@@ -89,6 +91,31 @@ test("updating refuses a live browser turn, then closes once it ends despite a s
   assert.equal(f.browser.state.status, "running");
   assert.equal((await f.quit({ keepBridge: true })).ok, true, "the refused quit clears its guard so the update can be retried immediately");
   assert.equal(f.quits.length, 1);
+});
+
+// Seen 2026-10-28: "Update to v0.8.30" with a ChatGPT turn running only showed an error toast.
+test("a quit or update with a live ChatGPT turn asks, and Quit anyway goes on", async () => {
+  const cancelled = fixture({ browserActive: "live-turn" });
+  const refused = await cancelled.quit();
+  assert.equal(refused.ok, false);
+  assert.match(refused.message, /ChatGPT turn.*finish before quitting/);
+  assert.deepEqual(cancelled.disposed, []);
+  assert.deepEqual(cancelled.quits, []);
+
+  const accepted = fixture({ browserActive: "live-turn", quitAnyway: true });
+  assert.equal((await accepted.quit()).ok, true);
+  assert.equal(accepted.quits.length, 1);
+});
+
+// Seen 2026-10-28: chat hosts from three earlier runs, the oldest four days old, each with its agent.
+test("a quit ends AO's chat hosts after AO stops; a keep-bridge restart leaves them to be reattached", async () => {
+  const quit = fixture();
+  assert.equal((await quit.quit()).ok, true);
+  assert.deepEqual(quit.chatHosts, ["stop-ao", "end-chat-hosts"]);
+
+  const restart = fixture();
+  assert.equal((await restart.quit({ keepBridge: true })).ok, true);
+  assert.deepEqual(restart.chatHosts, ["stop-ao"]);
 });
 
 test("accepted app quit disposes each integration controller once", async () => {

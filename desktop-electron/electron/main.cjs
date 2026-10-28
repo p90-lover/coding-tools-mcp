@@ -2644,7 +2644,20 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
   try {
     const browserOperation = browserHost?.currentOperation() || (browserHost?.activeTraceId ? "ChatGPT turn" : null);
     if (browserOperation) {
-      throw new Error(`Wait for ${browserOperation} to finish before quitting Coding Tools`);
+      // A quit or update the user asked for stops the turn instead of failing: an update click
+      // only showed an error toast, and the app kept running. Restarts still wait for it.
+      const decision = !keepBridge && mainWindow && !mainWindow.isDestroyed()
+        ? await dialog.showMessageBox(mainWindow, {
+          type: "warning",
+          buttons: ["Cancel", "Quit anyway"],
+          defaultId: 1,
+          cancelId: 0,
+          title: "A ChatGPT turn is still running",
+          message: `Quit Coding Tools and stop the ${browserOperation}?`,
+          detail: "ChatGPT keeps the reply in the conversation; Coding Tools stops waiting for it.",
+        })
+        : { response: 0 };
+      if (decision.response !== 1) throw new Error(`Wait for ${browserOperation} to finish before quitting Coding Tools`);
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
@@ -2700,6 +2713,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     autoInstaller?.stop();
     backendBundles?.stopWatching();
     await step("agent-orchestrator", () => agentOrchestratorUpstream?.stop(), 20_000);
+    // Chat hosts outlive AO so a restart can reattach them; a quit ends them, and their agents.
+    if (!keepBridge) await step("chat-hosts", () => agentOrchestratorUpstream?.endChatHosts(), 20_000);
     antigravityReauth?.stop();
     antigravityAuthBrowser?.closeAll();
     // The embedded ChatGPT instance belongs to this app; its own stop path logs failures.
@@ -2890,7 +2905,9 @@ async function start() {
       logsDirectory: app.getPath("logs"),
       publish: publishUpdateState,
       logger,
-      closeForUpdate: () => requestQuit({ keepBridge: true }),
+      // An update ends everything, as a quit does: kept for the next app to adopt, the bridge, MCP
+      // tunnel and CPA went on running the old version's code (a 0.8.28 bridge under 0.8.29).
+      closeForUpdate: () => requestQuit(),
       closeBlocker: browserCloseBlocker,
     }),
     createGuiUpdateController({
