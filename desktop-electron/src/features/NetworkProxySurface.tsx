@@ -10,7 +10,7 @@ import type {
   ProxyProtocol,
 } from "../types";
 import { localText, messageOf } from "./execution-surface-utils";
-import "./proxy-page.css";
+import "./network-proxy.css";
 
 // The Proxy page: the app's own proxies, applied inside the app (the browser, CPA, providers and
 // accounts). No other program is needed. One switch routes the app, a card picks the proxy.
