@@ -2627,6 +2627,15 @@ function registerIpc({ logger, stateStore }) {
   });
 }
 
+/**
+ * Why the app cannot close now, or null: a ChatGPT turn in the in-app browser would end with it.
+ * The same check requestQuit makes first, asked before an update downloads anything.
+ */
+function browserCloseBlocker() {
+  const operation = browserHost?.currentOperation() || (browserHost?.activeTraceId ? "ChatGPT turn" : null);
+  return operation ? `Wait for ${operation} to finish before quitting Coding Tools` : null;
+}
+
 async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
@@ -2899,6 +2908,7 @@ async function start() {
       // An update ends everything, as a quit does: kept for the next app to adopt, the bridge, MCP
       // tunnel and CPA went on running the old version's code (a 0.8.28 bridge under 0.8.29).
       closeForUpdate: () => requestQuit(),
+      closeBlocker: browserCloseBlocker,
     }),
     createGuiUpdateController({
       currentVersion: app.getVersion(),
