@@ -88,10 +88,11 @@ function proxyRouteFromEnvironment(env = process.env) {
   if (!url) return null;
   let parsed;
   try { parsed = new URL(url); } catch { return null; }
-  // A command line is visible to every local process, so credentials never go on it.
-  if (parsed.username || parsed.password) return null;
+  // A command line is visible to every local process, so credentials never go on it: a signed-in
+  // route (Global Routing puts the sign-in in the environment) is passed as the bare proxy.
+  const route = parsed.username || parsed.password ? `${parsed.protocol}//${parsed.host}` : url;
   const bypass = String(env.NO_PROXY || "").split(",").map((entry) => entry.trim()).filter(Boolean);
-  return { url, bypass };
+  return { url: route, bypass };
 }
 
 function planFromFileName(fileName, email) {

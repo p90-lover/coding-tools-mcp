@@ -1033,7 +1033,11 @@ function createProviderNetworkController({
       proxyBypassRules: bypass,
     })));
     const special = environmentRoute?.(profile) ?? null;
-    const environmentUrl = special?.url || route;
+    // Chromium takes the bare route and answers the proxy's 407 through handleProxyLogin. The
+    // programs the app starts (chat agents and every tool they run) read these variables and have
+    // no such handler: a bare route to a signed-in proxy (Nova's Decodo profiles, adopted in #655)
+    // failed every request of theirs with 407, so the variables carry the saved sign-in, as CPA's do.
+    const environmentUrl = special?.url || proxyUrl(profile, store.proxySecret(profile.id));
     setOwnedEnvironment("HTTP_PROXY", environmentUrl);
     setOwnedEnvironment("HTTPS_PROXY", environmentUrl);
     setOwnedEnvironment("ALL_PROXY", environmentUrl);
