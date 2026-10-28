@@ -400,7 +400,11 @@ a.cx-details-row, p.cx-details-row { box-sizing: border-box; margin: 0; text-dec
 
 /* Never sideways: code, diffs and tables scroll in their own boxes, and a split pane narrower than a
    long line otherwise slid its whole column out of view. */
-.cx-scroll { position: relative; flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+.cx-scroll { position: relative; flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto;
+  /* Its own layout root: a ticking timer or a composer update elsewhere in the window relaid out every
+     transcript (~35k elements a pane), 157-193 ms a pass; contained, a pass took 1 ms (measured live).
+     Overlays drawn from inside a transcript must portal to <body>, as ImageLightbox does. */
+  contain: strict; }
 .cx-column { display: flex; flex-direction: column; gap: 18px; width: 100%; max-width: 780px; margin: 0 auto; padding: 16px 24px 32px; }
 .cx-empty { display: grid; gap: 6px; margin: 18vh auto 0; text-align: center; }
 .cx-empty h1 { margin: 0; font-size: 26px; font-weight: 400; letter-spacing: -0.01em; }
