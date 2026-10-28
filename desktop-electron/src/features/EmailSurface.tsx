@@ -97,13 +97,16 @@ function verificationCode(...parts: (string | null | undefined)[]): string | nul
 }
 
 // Fold the newest page into what's loaded. If none of it overlaps, more than a page of mail
-// arrived since the last look — restart from the top rather than leave a silent gap.
+// arrived since the last look — restart from the top rather than leave a silent gap. The Worker
+// lists newest (highest id) first, so a loaded row inside the page's id range that the page lacks
+// was deleted (here or by another client) and goes too.
 function mergeNewest(current: EmailMessageSummary[], newest: EmailMessageSummary[]): EmailMessageSummary[] {
   if (!current.length) return newest;
   const known = new Set(current.map((m) => m.id));
   if (!newest.some((m) => known.has(m.id))) return newest;
-  const fresh = newest.filter((m) => !known.has(m.id));
-  return fresh.length ? [...fresh, ...current] : current;
+  const onPage = new Set(newest.map((m) => m.id));
+  const oldest = Math.min(...onPage);
+  return [...newest, ...current.filter((m) => m.id < oldest && !onPage.has(m.id))];
 }
 
 // The email preview is the one place untrusted remote HTML enters the app. It renders in a
@@ -167,8 +170,11 @@ function useReadIds(origin: string | null) {
 // Each Worker call takes most of a second (it returns every row's raw mail), so what was loaded is
 // kept for the app's run: going back to a list or a mail shows it at once and refreshes underneath.
 // Memory only, per Worker origin; nothing is written to disk.
+// Message ids are only unique within one Worker, so a reply that started before a switch to
+// another Worker (generation bump) must not land in the new one's cache or reader.
 const cache = {
   origin: null as string | null,
+  generation: 0,
   lists: new Map<string, { messages: EmailMessageSummary[]; count: number }>(),
   messages: new Map<number, EmailMessage>(),
   loading: new Map<number, Promise<EmailMessage | null>>(),
@@ -177,26 +183,47 @@ const cache = {
 function resetCacheFor(origin: string | null) {
   if (cache.origin !== origin) {
     cache.origin = origin;
+    cache.generation += 1;
     cache.lists.clear();
     cache.messages.clear();
     cache.loading.clear();
   }
 }
 
+/** Resolves to null, not to another Worker's mail, when the Worker changed while it loaded. */
 function fetchMessage(api: LauncherApi, id: number): Promise<EmailMessage | null> {
   const known = cache.messages.get(id);
   if (known) return Promise.resolve(known);
   const pending = cache.loading.get(id);
   if (pending) return pending;
+  const generation = cache.generation;
   const request = api.getEmailMessage({ id }).then(({ message }) => {
+    if (generation !== cache.generation) return null;
     if (message) {
       cache.messages.set(id, message);
       if (cache.messages.size > MESSAGE_CACHE_LIMIT) cache.messages.delete(cache.messages.keys().next().value!);
     }
     return message;
-  }).finally(() => cache.loading.delete(id));
+  }).finally(() => {
+    if (cache.loading.get(id) === request) cache.loading.delete(id);
+  });
   cache.loading.set(id, request);
   return request;
+}
+
+/** Drops deleted mail from every cached list (All mail and each address that showed it). */
+function forgetMessage(id: number) {
+  cache.messages.delete(id);
+  for (const [key, list] of cache.lists) {
+    if (!list.messages.some((m) => m.id === id)) continue;
+    cache.lists.set(key, { messages: list.messages.filter((m) => m.id !== id), count: Math.max(0, list.count - 1) });
+  }
+}
+
+/** Drops cached lists that showed an address's mail: its own list and All mail. */
+function forgetAddress(address: string) {
+  cache.lists.delete(address.toLowerCase());
+  cache.lists.delete("*");
 }
 
 /** Calls `onVisible` when the returned element scrolls near view: the list's next page. */
@@ -267,6 +294,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   // The open mail.
   const [openId, setOpenId] = useState<number | null>(null);
   const [openMessage, setOpenMessage] = useState<EmailMessage | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState<"html" | "text">("html");
   const openRef = useRef<number | null>(null);
   const prefetchTimer = useRef<number | null>(null);
@@ -447,14 +475,19 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   const openById = (id: number) => {
     openRef.current = id;
     setOpenId(id);
+    setOpenError(null);
     setPane("message");
     markRead(id);
     const cached = cache.messages.get(id);
     showMessage(cached ?? null);
     if (cached) return;
     void fetchMessage(api, id)
-      .then((message) => { if (openRef.current === id) showMessage(message); })
-      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+      .then((message) => {
+        if (openRef.current !== id) return;
+        if (message) showMessage(message);
+        else setOpenError("This mail is no longer on the Worker.");
+      })
+      .catch((cause) => { if (openRef.current === id) setOpenError(cause instanceof Error ? cause.message : String(cause)); });
   };
 
   // Hovering a row starts loading that mail, so opening it is usually instant.
@@ -467,18 +500,18 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
     if (!confirm) return;
     if (confirm.kind === "delete-message") {
       await api.deleteEmailMessage({ id: confirm.id });
-      cache.messages.delete(confirm.id);
-      if (openId === confirm.id) { setOpenId(null); setOpenMessage(null); setPane("list"); }
+      forgetMessage(confirm.id);
+      if (openId === confirm.id) { openRef.current = null; setOpenId(null); setOpenMessage(null); setPane("list"); }
       setMessages((current) => current.filter((m) => m.id !== confirm.id));
       setMessageCount((count) => Math.max(0, count - 1));
     } else if (confirm.kind === "clear-inbox") {
       await api.clearEmailInbox({ id: confirm.mailbox.id });
-      cache.lists.delete(key);
+      forgetAddress(confirm.mailbox.address);
       setMessages([]);
       setMessageCount(0);
     } else {
       await api.removeEmailMailbox({ id: confirm.mailbox.id });
-      cache.lists.delete(key);
+      forgetAddress(confirm.mailbox.address);
       setView({ kind: "all" });
       await loadAddresses(addressQuery.trim(), 0);
     }
@@ -653,7 +686,15 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
         {openId === null ? (
           <div className="email-empty email-reader-empty"><Icon name="mail" width={30} height={30} /></div>
         ) : !openMessage ? (
-          <div className="email-reader-loading"><div className="email-skeleton is-title" /><div className="email-skeleton" /><div className="email-skeleton is-block" /></div>
+          // Back stays reachable here too: on a narrow window this pane is the only one shown.
+          <div className="email-reader-loading">
+            <button className="email-icon email-only-narrow" aria-label="Back" onClick={() => setPane("list")}><Icon name="back" width={16} height={16} /></button>
+            {openError ? (
+              <div className="email-error-row">{openError}<button onClick={() => openById(openId)}>Retry</button></div>
+            ) : (
+              <><div className="email-skeleton is-title" /><div className="email-skeleton" /><div className="email-skeleton is-block" /></>
+            )}
+          </div>
         ) : (
           <article key={openMessage.id} className="email-article">
             <header className="email-article-head">
