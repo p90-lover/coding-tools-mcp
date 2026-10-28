@@ -128,6 +128,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setZeroRiskPro: (enabled) => ipcRenderer.invoke("launcher:zero-risk-pro", enabled),
   setBrowserInteractionMode: (mode) => ipcRenderer.invoke("launcher:browser-interaction-mode", mode),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
+  setRedactList: (lines) => ipcRenderer.invoke("launcher:set-redact-list", lines),
   rtkStatus: () => ipcRenderer.invoke("rtk:status"),
   rtkGain: () => ipcRenderer.invoke("rtk:gain"),
   rtkInstall: () => ipcRenderer.invoke("rtk:install"),

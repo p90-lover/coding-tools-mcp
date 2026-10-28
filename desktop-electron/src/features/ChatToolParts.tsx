@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { chatMessageReadable, numberedDiff, type ChatStepRound, type SteerReceipt, type ChatSentAttachment } from "./ao-chat";
+import { chatMessageReadable, hiddenSecretParts, numberedDiff, type ChatStepRound, type SteerReceipt, type ChatSentAttachment } from "./ao-chat";
 
 // Parts of a chat turn both transcripts draw: the Claude Code one (AgentOrchestratorChat) and the
 // DeepSeek Harness one (DshTranscript), so a fix to one is a fix to both.
@@ -61,7 +61,19 @@ export function ToolImages({ paths }: { paths: string[] }) {
  * images as thumbnails). A steer in the DeepSeek transcript showed "Attached image: <path>" as text.
  */
 export const SentMessageView = createContext<(text: string) => ReactNode>(
-  (text) => <div className="cx-bubble"><p>{chatMessageReadable(text)}</p></div>);
+  (text) => <div className="cx-bubble"><p><SecretText text={chatMessageReadable(text)} /></p></div>);
+
+/**
+ * A message's text with each secret a chat agent hid (redact_message) drawn as a blurred mark. The
+ * secret itself is gone from the chat: the mark blurs a stand-in, and its tooltip names what it was.
+ */
+export function SecretText({ text }: { text: string }) {
+  const parts = hiddenSecretParts(text);
+  if (parts.length === 1 && typeof parts[0] === "string") return <>{text}</>;
+  return <>{parts.map((part, index) => typeof part === "string" ? part
+    : <span key={index} className="cx-hidden-secret" role="img" aria-label={`Hidden ${part.hidden}`} data-tip={`Hidden by the agent: ${part.hidden}`} tabIndex={0}>
+      <span aria-hidden="true">••••••••••</span></span>)}</>;
+}
 
 /**
  * A stuck turn's Restart (AgentOrchestratorChat's restartTurn), for a running footer drawn inside a

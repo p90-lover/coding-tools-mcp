@@ -974,14 +974,18 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   const turns = { old: [{ state: "completed", completedAt: ago(90) }], recent: [{ state: "completed", completedAt: ago(10) }],
     typed: [{ state: "completed", completedAt: ago(90) }], warm: [] };
   const calls = [], resumeWaits = [];
-  let resumeOk = true, exitOk = true, resumeTimesOut = false;
+  let resumeOk = true, exitOk = true, resumeTimesOut = false, busyAnswers = 0;
   let status = "exited";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise, agentTools: null,
-    exitedReleased: new Set(), logger: null,
+    exitedReleased: new Set(), logger: null, setTimeout: (resolve) => { resolve(); return 0; },
     internalApi: async (method, endpoint, body, options) => {
       calls.push([method, endpoint]);
       if (endpoint.endsWith("/resume-agent")) resumeWaits.push(options?.timeoutMs);
+      if (endpoint.endsWith("/resume-agent") && busyAnswers > 0) {
+        busyAnswers -= 1;
+        throw Object.assign(new Error("The service is momentarily unavailable, please retry."), { status: 503, code: "SERVICE_UNAVAILABLE" });
+      }
       if (endpoint.endsWith("/resume-agent") && resumeTimesOut) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
       if (endpoint === "/api/v1/sessions") return { sessions };
       const id = endpoint.split("/")[4];
@@ -1000,6 +1004,10 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   assert.deepEqual(calls.at(-1), ["POST", "/api/v1/sessions/old/exit-agent"]);
   assert.equal(await upstream.continuable("old"), true, "a released agent is resumed for the next message");
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
+  status = "exited"; busyAnswers = 2; calls.length = 0;
+  assert.equal(await upstream.continuable("old"), true, "AO's database being busy (503) is waited out, not read as an agent that did not come back");
+  assert.deepEqual(calls.filter(([method]) => method === "POST").map(([, endpoint]) => endpoint.split("/").at(-1)),
+    ["resume-agent", "resume-agent", "resume-agent"], "no stop and no fresh agent");
   status = "exited"; resumeOk = false; calls.length = 0;
   assert.equal(await upstream.continuable("old"), false,
     "an agent that cannot be confirmed back is stopped, tried once more, then the message starts a fresh agent");
@@ -1520,6 +1528,48 @@ test("finished turns opened together are read back a few at a time, and a turn a
   assert.deepEqual(reads.map(items => items[0]?.id), [...sessions, "s0"].map(id => `${id}-1`), "every turn is read back");
   assert.equal(asked.filter(endpoint => endpoint.includes("/sessions/s0/")).length, 1, "the same turn asked twice shares one read");
   assert.equal((await upstream.timeline("s0", "t"))[0].id, "s0-1", "a later ask reads it again");
+});
+
+test("a finished turn's read waits out a full service instead of failing with every card queued behind it", async () => {
+  // Seen live on 0.8.30's first start: the chat polls filled the headless service, one chat's shared
+  // tail read was turned away, and all 23 of its cards failed inside 10 ms with empty Worked rows.
+  let refusals = 2;
+  const waits = [];
+  const upstream = observeHarness({
+    setTimeout: (callback, ms) => { waits.push(ms); setImmediate(callback); },
+    internalApi: async () => {
+      if (refusals > 0) { refusals -= 1; throw new Error("HEADLESS_CAPACITY: request admission is full"); }
+      return { turns: [], messages: [], hasMoreBefore: false, oldestSequence: 1,
+        activities: [{ id: "a1", turnId: "t", sequence: 1, activityKind: "reasoning", status: "completed", detail: { text: "done" } }] };
+    },
+  });
+  const reads = await Promise.all(["t", "t"].map(turn => upstream.timeline("s", turn)));
+  assert.deepEqual(reads.map(items => items[0]?.id), ["a1", "a1"], "the read lands once the service has room");
+  assert.deepEqual(waits.slice(0, 2), [1000, 2000], "it backs off between tries");
+  // Any other failure is not waited out.
+  const failing = observeHarness({
+    setTimeout: (callback, ms) => { waits.push(ms); setImmediate(callback); },
+    internalApi: async () => { throw new Error("CHAT_SESSION_NOT_FOUND"); },
+  });
+  waits.length = 0;
+  await assert.rejects(failing.timeline("s", "t"), /CHAT_SESSION_NOT_FOUND/);
+  assert.deepEqual(waits, []);
+});
+
+test("a redact_message row shows its label and a count, never the secrets it hid", async () => {
+  // Codex review of #653: the blurred key stayed readable in the tool row under Worked.
+  const upstream = observeHarness({
+    internalApi: async () => ({ turns: [], messages: [], hasMoreBefore: false, oldestSequence: 1, activities: [{
+      id: "a1", turnId: "t", sequence: 1, activityKind: "mcp_tool", status: "completed",
+      summary: "mcp__coding-tools__redact_message sk-live-0123456789abcdef",
+      detail: { toolName: "mcp__coding-tools__redact_message", input: { secrets: ["sk-live-0123456789abcdef", "hunter2!x"], label: "API key" },
+        output: "Hid 2 occurrences in the user's messages." } }] }),
+  });
+  const [row] = await upstream.timeline("s", "t");
+  const shown = JSON.stringify(row);
+  assert.doesNotMatch(shown, /sk-live-0123456789abcdef|hunter2!x/);
+  assert.match(row.input, /"label": "API key"/);
+  assert.match(row.input, /2 hidden \(not shown\)/);
 });
 
 test("a long finished turn keeps its tool calls when a page is over AO's handler limit, past six pages", async () => {

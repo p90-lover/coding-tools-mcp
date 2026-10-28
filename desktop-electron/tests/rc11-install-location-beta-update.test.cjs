@@ -63,9 +63,25 @@ test("desktop GUI updates reload the renderer without the full-installer quit pa
   const end = mainSource.indexOf('handle("launcher:window-state"', start);
   assert.ok(start >= 0 && end > start);
   const handler = mainSource.slice(start, end);
-  assert.match(handler, /return updateController\.beginInstall\(\)/);
+  assert.match(handler, /return updateController\.beginInstall\(/);
   assert.doesNotMatch(handler, /requestQuit|shutdown|restart|cancelInstall/);
   assert.doesNotMatch(mainSource, /promptForAvailableUpdate|Install and restart/);
+});
+
+test("Update offers to stop a running ChatGPT turn instead of refusing", () => {
+  const start = mainSource.indexOf('handle("launcher:update-install"');
+  const handler = mainSource.slice(start, mainSource.indexOf('handle("launcher:window-state"', start));
+  // The turns stop before a whole-app install starts, so its quit no longer meets a running turn; a
+  // renderer-only update leaves them running (combineUpdateControllers runs the hook on that path only).
+  assert.match(handler, /return updateController\.beginInstall\(\{ beforeAppInstall: stopBrowserTurnsForUpdate \}\)/);
+  const helper = mainSource.slice(mainSource.indexOf("async function stopBrowserTurnsForUpdate"),
+    mainSource.indexOf("async function requestQuit"));
+  assert.match(helper, /!browserHost\?\.activeTraceId\) return;/);
+  assert.match(helper, /buttons: \["Cancel", "Stop it and update"\]/);
+  assert.match(helper, /cancelId: 0/);
+  // Declining keeps the old refusal; agreeing cancels through the runtime, as "Cancel turns" does.
+  assert.match(helper, /if \(decision\.response !== 1\) throw new Error/);
+  assert.match(helper, /await runtimeHost\.cancelActiveTurns\(\)/);
 });
 
 test("current prerelease discovery keeps a newer beta eligible", () => {

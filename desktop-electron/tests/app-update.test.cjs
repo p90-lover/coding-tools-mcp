@@ -328,6 +328,17 @@ test("an app update outranks a GUI-only update, which still installs on its own"
   await combineUpdateControllers(fake("app", "up-to-date"), fake("gui", "available")).beginInstall();
   await combineUpdateControllers(fake("app", "available"), fake("gui", "available")).beginInstall();
   assert.deepEqual(calls, ["gui", "app"]);
+  // Codex review of #653: running ChatGPT turns are stopped only for a whole-app install, which quits.
+  calls.length = 0;
+  const beforeAppInstall = async () => { calls.push("stop turns"); };
+  await combineUpdateControllers(fake("app", "up-to-date"), fake("gui", "available")).beginInstall({ beforeAppInstall });
+  await combineUpdateControllers(fake("app", "available"), fake("gui", "available")).beginInstall({ beforeAppInstall });
+  assert.deepEqual(calls, ["gui", "stop turns", "app"]);
+  // Declining to stop them installs nothing.
+  calls.length = 0;
+  await assert.rejects(combineUpdateControllers(fake("app", "available"), fake("gui", "available"))
+    .beginInstall({ beforeAppInstall: async () => { throw new Error("Wait for ChatGPT turn to finish"); } }), /Wait for ChatGPT turn/);
+  assert.deepEqual(calls, []);
 });
 
 function autoInstallerFixture(overrides = {}) {

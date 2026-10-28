@@ -96,7 +96,8 @@ test("CPA config follows the selected authenticated global profile", () => {
     fs.writeFileSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll"), "old plugin");
     const installed = installBundledCommandCodePlugin(path.join(root, "cpa"));
     // The Go plugins as built with Go 1.26.10/1.27.3 (CVE-2026-111943); cpa-helper is Rust and unchanged.
-    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_895_552, 7_707_648, 14_867_968, 813_568, 24_951_296, 3_346_944]);
+    // The Cline Pass switcher is codingtools.10 (#650: a spent window is a 429).
+    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_893_504, 7_707_648, 14_867_968, 813_568, 24_951_296, 3_346_944]);
     assert.equal(fs.existsSync(path.join(platformDir, "commandcode-go-v0.9.0.dll")), false);
     assert.equal(fs.existsSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll")), false);
     assert.equal(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins")).length, 2);

@@ -1834,6 +1834,23 @@ export function chatAnnotationsSplit(message: string): { annotations: ChatAnnota
 }
 
 /**
+ * A sent message's text cut around the "[hidden: <label>]" marks a chat agent left where it hid a
+ * secret (redact_message, chat-redaction.cjs): plain strings stay strings, each mark becomes its label.
+ */
+export const hasHiddenSecret = (text: string) => /\[hidden: [^\]\n]{1,40}\]/.test(text);
+export function hiddenSecretParts(text: string): Array<string | { hidden: string }> {
+  const parts: Array<string | { hidden: string }> = [];
+  let last = 0;
+  for (const match of text.matchAll(/\[hidden: ([^\]\n]{1,40})\]/g)) {
+    if (match.index > last) parts.push(text.slice(last, match.index));
+    parts.push({ hidden: match[1] });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+/**
  * A sent message as a person reads it: its annotations as quoted lines instead of the block the
  * agent reads. For copying, exporting, and putting a message back in a chat box (rewind, continue).
  */

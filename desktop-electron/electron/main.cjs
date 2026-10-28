@@ -1193,6 +1193,9 @@ function launcherSnapshotPayload(stateStore, logger) {
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured?.() ?? false,
     chatAgentSandbox: safeRead("launcher.chat_sandbox_snapshot", () => chatAgentTools?.sandboxed?.() ?? false, false, logger),
+    // The defaults only: the list in use is state.chatAgentRedactList, which a save updates (a list
+    // here went stale after a save, Codex review of #653).
+    chatAgentRedactDefaults: safeRead("launcher.chat_redact_defaults_snapshot", () => chatAgentTools?.redactDefaults?.() ?? null, null, logger),
     logs: logger.recent(),
     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
     platform: process.platform,
@@ -2559,7 +2562,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
       || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools"
-      || key === "confirmAgentToolRequests" || key === "rtkEnabled";
+      || key === "confirmAgentToolRequests" || key === "rtkEnabled" || key === "chatAgentRedactSecrets";
     if (!ordinary) throw new Error("Unknown preference");
     // Consent: auto-connecting MCP, letting chat agents see and drive the screen or run commands,
     // and dropping the dialog that confirms their tool requests, are the user's.
@@ -2574,6 +2577,16 @@ function registerIpc({ logger, stateStore }) {
       if (state.autoConnectExistingMcp) startCatalogVerificationMonitor({ logger, stateStore });
     }
     return state;
+  });
+  // What chat agents hide in the user's messages (redact_message): one kind per line; an empty
+  // list goes back to the defaults. It is the user's own list, so it is set from the visible app.
+  handle("launcher:set-redact-list", (event, lines) => {
+    assertFocusedMainWindow(event, true);
+    if (!Array.isArray(lines) || lines.length > 100 || lines.some((line) => typeof line !== "string" || line.length > 1000)) {
+      throw new Error("The list must be lines of text");
+    }
+    const kept = lines.map((line) => line.trim().slice(0, 200)).filter(Boolean).slice(0, 30);
+    return stateStore.update({ chatAgentRedactList: kept.length ? kept : null });
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
@@ -2613,7 +2626,7 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
-    return updateController.beginInstall();
+    return updateController.beginInstall({ beforeAppInstall: stopBrowserTurnsForUpdate });
   });
   handle("launcher:window-state", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
@@ -2625,6 +2638,25 @@ function registerIpc({ logger, stateStore }) {
     reason: "ready-path",
     channels: registeredIpcChannels.size,
   });
+}
+
+// The user clicked Update while a ChatGPT turn still runs. A turn whose chat already died keeps its
+// tab running while the bridge heartbeats it, and Update was refused for hours (2026-10-28: a
+// seven-hour-old turn). Ask once and cancel the turns instead of refusing; automatic installs wait.
+async function stopBrowserTurnsForUpdate() {
+  if (IS_DEV_PROFILE || !browserHost?.activeTraceId) return;
+  const decision = await dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    buttons: ["Cancel", "Stop it and update"],
+    defaultId: 0,
+    cancelId: 0,
+    title: "A ChatGPT turn is still running",
+    message: "A ChatGPT turn is still running.",
+    detail: "Updating stops it, and the Codex task waiting on it ends with an error.",
+    noLink: true,
+  });
+  if (decision.response !== 1) throw new Error("Wait for ChatGPT turn to finish before updating Coding Tools");
+  await runtimeHost.cancelActiveTurns();
 }
 
 /**
@@ -3213,6 +3245,17 @@ async function start() {
           rename: (request) => {
             if (!missionWorkflowRuntime?.chatTitleTool) throw new Error("Agent Orchestrator is not ready yet");
             return missionWorkflowRuntime.chatTitleTool(request);
+          },
+        },
+        // redact_message: when the user turned it on, the agent hides the secrets they pasted into
+        // the chat's messages, of the kinds they listed in Settings.
+        redaction: {
+          enabled: () => stateStore.read().chatAgentRedactSecrets === true,
+          list: () => backendBundles.requireModule(backend, "chat-redaction.cjs").redactList(stateStore.read().chatAgentRedactList),
+          defaults: () => [...backendBundles.requireModule(backend, "chat-redaction.cjs").DEFAULT_REDACT_LIST],
+          redact: (request) => {
+            if (!missionWorkflowRuntime?.chatRedactTool) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.chatRedactTool(request);
           },
         },
         // Running agents keep their tools across app restarts (credential hashes and the port only).

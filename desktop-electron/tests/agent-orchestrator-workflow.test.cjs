@@ -4351,6 +4351,32 @@ test("rename_chat names the agent's own chat after its task, and a team chat onl
   assert.equal(task().title, "The person's name", "the person's Rename wins over a waiting one");
 });
 
+test("redact_message hides a secret in the chat's messages, and in a team chat only once its open cards have started", async () => {
+  const { world, workflow, advance } = wakeChat();
+  const task = () => world.tasks.find((entry) => entry.id === "task-1");
+  task().description = "watch CI with token ghp_live0123456789";
+  const redact = (session = "sess-1") => workflow.chatRedactTool({ workspaceId: "ws-1", session, secrets: ["ghp_live0123456789"], label: "GitHub token" });
+  const now = await redact();
+  assert.equal(now.hidden, 1);
+  assert.equal(task().description, "watch CI with token [hidden: GitHub token]");
+  // Codex review of #653: a team round with cards still to reserve would be refused after the edit.
+  task().description = "watch CI with token ghp_live0123456789";
+  const edits = world.edits.length;
+  const team = { id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+    { id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: "sess-2" } },
+    { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+  world.runs.push(team);
+  const waiting = await redact("sess-2");
+  assert.equal(waiting.deferred, true);
+  assert.equal(waiting.hidden, 1);
+  await goalSettle();
+  assert.equal(world.edits.length, edits, "not while a card is still pending");
+  team.nodes[1].state = "running";
+  await advance(20_000);
+  await goalSettle(() => world.edits.length > edits);
+  assert.equal(task().description, "watch CI with token [hidden: GitHub token]", "hidden once nothing is left to reserve");
+});
+
 test("a wake-up sends the chat the agent's note after its minutes, on the same Single model", async () => {
   const { world, workflow, route, advance } = wakeChat();
   const scheduled = await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 10, reason: "see whether CI run 42 passed" });

@@ -2343,6 +2343,19 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        <SettingRow body={copy.chatAgentRedactSecretsBody} label={copy.chatAgentRedactSecrets}>
+          <Switch
+            checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentRedactSecrets === true}
+            disabled={snapshot.state.chatAgentTools === false}
+            onChange={(checked) => void api!.setPreference("chatAgentRedactSecrets", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        {snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentRedactSecrets === true && api?.setRedactList
+          ? <RedactListSetting copy={copy} lines={snapshot.state.chatAgentRedactList ?? snapshot.chatAgentRedactDefaults ?? []}
+            setError={setError} updateState={updateState} />
+          : null}
         <SettingRow body="Give chat agents more tools: add your own STDIO or Streamable HTTP MCP servers under Plugins > MCPs." label="MCP servers">
           <SecondaryButton onClick={openPlugins}>Open Plugins</SecondaryButton>
         </SettingRow>
@@ -3017,6 +3030,33 @@ function SettingRow({
       </div>
       {children}
     </div>
+  );
+}
+
+/**
+ * Settings: what chat agents hide in the person's messages (redact_message), one kind per line. It
+ * is the tool's description, so it is saved when the field loses focus, not on every key; an empty
+ * list goes back to the defaults.
+ */
+function RedactListSetting({ copy, lines, setError, updateState }: {
+  copy: Copy;
+  lines: string[];
+  setError: (error: string | null) => void;
+  updateState: (state: LauncherState) => void;
+}) {
+  const saved = lines.join("\n");
+  const [text, setText] = useState(saved);
+  useEffect(() => setText(saved), [saved]);
+  const save = () => {
+    if (text === saved) return;
+    void api!.setRedactList!(text.split(/\r?\n/)).then(updateState).catch((cause) => setError(messageOf(cause)));
+  };
+  return (
+    <label className="field-row is-stacked">
+      <span>{copy.chatAgentRedactList}</span>
+      <textarea rows={Math.min(10, Math.max(4, lines.length + 1))} value={text} onChange={(event) => setText(event.target.value)} onBlur={save} />
+      <small>{copy.chatAgentRedactListBody}</small>
+    </label>
   );
 }
 

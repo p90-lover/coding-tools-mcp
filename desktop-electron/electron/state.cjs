@@ -73,6 +73,13 @@ function readState(filePath) {
     if (Object.hasOwn(state, "chatAgentTerminalTools") && typeof state.chatAgentTerminalTools !== "boolean") delete state.chatAgentTerminalTools;
     // Their own preview browser unless this is false; absent means on.
     if (Object.hasOwn(state, "chatAgentPreviewTools") && typeof state.chatAgentPreviewTools !== "boolean") delete state.chatAgentPreviewTools;
+    // They hide secrets in the user's messages only when this is true; absent means off. The list
+    // of what to hide is the user's lines; absent means the defaults (chat-redaction.cjs).
+    if (Object.hasOwn(state, "chatAgentRedactSecrets") && state.chatAgentRedactSecrets !== true) delete state.chatAgentRedactSecrets;
+    if (Object.hasOwn(state, "chatAgentRedactList")
+      && !(Array.isArray(state.chatAgentRedactList) && state.chatAgentRedactList.every((line) => typeof line === "string"))) {
+      delete state.chatAgentRedactList;
+    }
     // An agent's tool request answered in the chat is confirmed again in a dialog unless this is
     // false (the dialog's "Don't ask again"); absent means it asks.
     if (Object.hasOwn(state, "confirmAgentToolRequests") && state.confirmAgentToolRequests !== false) delete state.confirmAgentToolRequests;

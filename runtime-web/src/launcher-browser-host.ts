@@ -502,7 +502,8 @@ export type LauncherTurnActivity =
  * on a busy machine, WebGPT compaction handoffs included, while the tab went on loading.
  */
 export const LAUNCHER_TURN_START_TIMEOUT_MS = 125_000;
-export const LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS = 10_000;
+// Four beats inside the launcher's 60 s lease, so three in a row can fail before a turn is reaped.
+export const LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS = 15_000;
 export const LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS = 5_000;
 export const LAUNCHER_TURN_END_TIMEOUT_MS = 15_000;
 

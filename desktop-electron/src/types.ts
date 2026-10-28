@@ -595,6 +595,10 @@ export interface LauncherState {
   chatAgentTerminalTools?: boolean;
   /** Those agents get their own preview browser for pages served on this machine; absent means on. */
   chatAgentPreviewTools?: boolean;
+  /** Those agents may hide secrets in the user's chat messages (redact_message); absent means off. */
+  chatAgentRedactSecrets?: boolean;
+  /** What they hide, one kind per line; absent means the defaults (snapshot.chatAgentRedactDefaults). */
+  chatAgentRedactList?: string[];
   /** An agent's tool request answered in the chat is confirmed again in a dialog unless false. */
   confirmAgentToolRequests?: boolean;
   /** Runtime > RTK: agents' commands go through the installed rtk unless false. */
@@ -697,6 +701,8 @@ export interface LauncherSnapshot {
   mcpCredentialsConfigured: boolean;
   /** Agents' commands run in Codex's Windows sandbox (installed), so the terminal tools default on. */
   chatAgentSandbox?: boolean;
+  /** What chat agents hide when the user has no list of their own (state.chatAgentRedactList). */
+  chatAgentRedactDefaults?: string[] | null;
   logs: LogRecord[];
   urls: {
     github: string;
@@ -964,9 +970,11 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "confirmAgentToolRequests" | "rtkEnabled",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "confirmAgentToolRequests" | "rtkEnabled" | "chatAgentRedactSecrets",
     value: boolean,
   ): Promise<LauncherState>;
+  /** What chat agents hide in the user's messages, one kind per line; empty restores the defaults. */
+  setRedactList?(lines: string[]): Promise<LauncherState>;
   rtkStatus(): Promise<RtkStatus>;
   rtkGain(): Promise<RtkGain>;
   rtkInstall(): Promise<{ code: number | null; output: string; status: RtkStatus }>;
