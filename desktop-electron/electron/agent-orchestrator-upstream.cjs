@@ -1279,9 +1279,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!continuing.has(key)) continuing.set(key, (async () => {
         const uncertain = cause => Object.assign(new Error("Couldn't confirm the agent was restored. Retry this chat. No new agent was started."),
           { code: "AO_SESSION_RESTORE_UNCONFIRMED", cause });
+        // AO answers 503 SERVICE_UNAVAILABLE while its database is momentarily busy (its one writer),
+        // and asks to be retried. Read as "not confirmed", it stopped the agent, resumed it again and
+        // then started a fresh one with a summary of the chat (seen live 2026-10-28: a follow-up after a
+        // finished chat sat on "reconnecting to the chat's agent" for minutes). It is retried instead.
+        const busy = error => error?.status === 503 && error?.code === "SERVICE_UNAVAILABLE";
+        const patiently = async call => {
+          for (const wait of [500, 1000, 2000, 4000, 8000, null]) {
+            try { return await call(); }
+            catch (error) { if (!busy(error) || wait === null) throw error; await new Promise(resolve => setTimeout(resolve, wait)); }
+          }
+        };
         const read = async () => {
           try {
-            const record = await internalApi("GET", `/api/v1/sessions/${key}`);
+            const record = await patiently(() => internalApi("GET", `/api/v1/sessions/${key}`));
             if (!record?.session) throw uncertain();
             return record.session;
           } catch (error) { if (error.status === 404 && error.code === "SESSION_NOT_FOUND") return null; throw uncertain(error); }
@@ -1313,11 +1324,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           const resumeWait = { timeoutMs: 90_000 };
           try {
             let resumed;
-            try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body, resumeWait); }
+            try { resumed = await patiently(() => internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body, resumeWait)); }
             catch (error) {
               // Only the known old-schema rejection may retry without the optional servers.
               if (!body.mcpServers || !/unknown field [\\"']?mcpServers/.test(String(error?.message))) throw error;
-              resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, {}, resumeWait);
+              resumed = await patiently(() => internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, {}, resumeWait));
             }
             if (resumed?.ok !== true) throw uncertain();
           } catch (error) {

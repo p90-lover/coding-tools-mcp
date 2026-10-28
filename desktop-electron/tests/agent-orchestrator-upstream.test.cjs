@@ -974,14 +974,18 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   const turns = { old: [{ state: "completed", completedAt: ago(90) }], recent: [{ state: "completed", completedAt: ago(10) }],
     typed: [{ state: "completed", completedAt: ago(90) }], warm: [] };
   const calls = [], resumeWaits = [];
-  let resumeOk = true, exitOk = true, resumeTimesOut = false;
+  let resumeOk = true, exitOk = true, resumeTimesOut = false, busyAnswers = 0;
   let status = "exited";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise, agentTools: null,
-    exitedReleased: new Set(), logger: null,
+    exitedReleased: new Set(), logger: null, setTimeout: (resolve) => { resolve(); return 0; },
     internalApi: async (method, endpoint, body, options) => {
       calls.push([method, endpoint]);
       if (endpoint.endsWith("/resume-agent")) resumeWaits.push(options?.timeoutMs);
+      if (endpoint.endsWith("/resume-agent") && busyAnswers > 0) {
+        busyAnswers -= 1;
+        throw Object.assign(new Error("The service is momentarily unavailable, please retry."), { status: 503, code: "SERVICE_UNAVAILABLE" });
+      }
       if (endpoint.endsWith("/resume-agent") && resumeTimesOut) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
       if (endpoint === "/api/v1/sessions") return { sessions };
       const id = endpoint.split("/")[4];
@@ -1000,6 +1004,10 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   assert.deepEqual(calls.at(-1), ["POST", "/api/v1/sessions/old/exit-agent"]);
   assert.equal(await upstream.continuable("old"), true, "a released agent is resumed for the next message");
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
+  status = "exited"; busyAnswers = 2; calls.length = 0;
+  assert.equal(await upstream.continuable("old"), true, "AO's database being busy (503) is waited out, not read as an agent that did not come back");
+  assert.deepEqual(calls.filter(([method]) => method === "POST").map(([, endpoint]) => endpoint.split("/").at(-1)),
+    ["resume-agent", "resume-agent", "resume-agent"], "no stop and no fresh agent");
   status = "exited"; resumeOk = false; calls.length = 0;
   assert.equal(await upstream.continuable("old"), false,
     "an agent that cannot be confirmed back is stopped, tried once more, then the message starts a fresh agent");
