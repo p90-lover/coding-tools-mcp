@@ -223,6 +223,19 @@ function aoWebCatalogForModel(catalog, model) {
   return { models: [{ ...template, slug: model, display_name }] };
 }
 
+/**
+ * A model's quota used up: what a turn ends on once CPA has retried and rerouted it across every
+ * account it has (seen 2026-10-28: "API Error: 502 Error 429: You have reached your monthly
+ * Clinepass limit. The limit resets in 5d 8h", ten tries each). A retry, or the goal's next round,
+ * only fails the same way until it resets, so nothing retries it and a goal pauses on it.
+ */
+const QUOTA_EXHAUSTED = /\b(?:HTTP|Error|status(?: code)?)[ :]+(?:429|402)\b|insufficient_quota|usage_limit_reached|resource_exhausted|quota[^\n]{0,40}(?:exceed|exhaust|reached|used up)|(?:exceed|reach|hit)(?:ed)? your[^\n]{0,40}(?:quota|limit)/i;
+/** " (it resets in 5d 8h)" from a quota error, for a note (empty when it says nothing). */
+function quotaResets(error) {
+  const when = /resets? (in [0-9][0-9dhms ]*[dhms]|at [^.\n]{1,40})/i.exec(String(error || ""))?.[1];
+  return when ? ` (it resets ${when.trim()})` : "";
+}
+
 const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
 const REVIEW_SCRIPT_BYTES = 4000;
 // Each name a command mentions costs a disk lookup; a grep listing a dozen .ts files is not a script.
@@ -3442,7 +3455,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { action: decision.action, reason: String(decision.reason || "").slice(0, 300), model };
   }
 
-  const POOL_EXHAUSTED = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)/i;
+  // A failure a retry cannot fix: a sign-in, the account pool, or the model's quota used up.
+  const POOL_EXHAUSTED = new RegExp(`auth_unavailable|invalid[_ -]?auth|account[^\\n]*(?:exhaust|unavail)|pool[^\\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)|${QUOTA_EXHAUSTED.source}`, "i");
   // CPA answers "unknown provider for model X" when nothing serves X at all: a model it retired
   // (gpt-5.5, 2026-10-22), not one cooling down (that one is still routed, and gets a 429). Kept from
   // memory for 30 days, it stayed in the menu and each try spent a full launch (65 s) to fail again;
@@ -3478,6 +3492,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const node = held.find(entry => entry.role !== "retry") ?? held[0];
     if (!node) return null;
     const error = String(node.receipt?.error || "");
+    if (QUOTA_EXHAUSTED.test(error)) return { detail: `The model's quota is used up${quotaResets(error)}. Choose another model, or retry once it resets.` };
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
     if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
     const attempt = (node.history?.length ?? 0) + 1;
@@ -4939,6 +4954,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // retried after it was the chat's live turn, and its settling was never judged.
       const latest = saved.runs.filter(run => run.project_id === task && (!run.cancelled || run.id === runId)).at(-1);
       if (latest?.id !== runId) return;
+      // The model's quota used up, after CPA's own retries across every account: the next round
+      // would fail the same way (rounds of three failed attempts each, seen 2026-10-28), so the goal
+      // pauses until the person switches model or the quota resets.
+      const spent = outcome === "stopped" ? "" : mission.nodes.map(node => String(node.receipt?.error || "")).find(error => QUOTA_EXHAUSTED.test(error));
+      if (spent) {
+        goals.update(workspaceId, task, { status: "paused", evaluatedRunId: runId, evaluatedAs: "stalled",
+          note: `Paused: the model's quota is used up${quotaResets(spent)}. Switch model, then /goal resume` });
+        return;
+      }
       // A round held only because the app restarted under it, or one "Retry automatically" runs
       // again, is not the person's turn: its step runs again and the goal is judged when the round
       // settles. It was marked stalled ("needs you") after every app restart, where Codex's /goal
@@ -6255,4 +6279,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
 }
 
-module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
