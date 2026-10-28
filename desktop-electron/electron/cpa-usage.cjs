@@ -36,6 +36,9 @@ const RANGES = Object.freeze({ "24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_
 const DEFAULT_RANGE = "30d";
 /** A turn's request stats are read again after this; the line polls while the chat is open. */
 const TURN_CACHE_MS = 3_000;
+/** An ended turn's numbers are final this long after it ended (the helper logs a request as it ends), and kept 10 min. */
+const TURN_SETTLE_MS = 30_000;
+const ENDED_TURN_CACHE_MS = 10 * 60_000;
 // A turn's records are read 500 at a time, up to 40 pages (20,000 model requests) per model.
 const TURN_PAGE_SIZE = 500;
 const TURN_RECORD_PAGES = 40;
@@ -402,12 +405,13 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
    * at a page that brings nothing new, so a helper that ignores `page` is read once, never twice.
    * Null when the first page cannot be read.
    */
-  async function turnRecords(target, name, start) {
+  async function turnRecords(target, name, start, end) {
     const items = [];
     const seen = new Set();
     for (let page = 1; page <= TURN_RECORD_PAGES; page += 1) {
       const listing = await optional(target, `/cpa-helper/records?${new URLSearchParams({
-        model: name, from: String(Math.floor(start)), page_size: String(TURN_PAGE_SIZE), page: String(page),
+        model: name, from: String(Math.floor(start)), ...(end ? { to: String(Math.ceil(end)) } : {}),
+        page_size: String(TURN_PAGE_SIZE), page: String(page),
       })}`);
       if (!Array.isArray(listing?.items)) return page === 1 ? null : items;
       let fresh = 0;
@@ -423,7 +427,11 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
     return items;
   }
 
-  async function turnStats({ model, models, from } = {}) {
+  /**
+   * `to`: a turn that ended, read up to then (CPA Helper's `to`, and filtered here for a helper
+   * that ignores it). Its numbers no longer change, so they are kept for ENDED_TURN_CACHE_MS.
+   */
+  async function turnStats({ model, models, from, to } = {}) {
     const target = connection();
     const clean = (value) => String(value ?? "").replace(/^cpa\//, "").replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "").trim().slice(0, 200);
     // A turn retried on another model (a failed or stopped attempt, then a new run) counts every
@@ -431,15 +439,22 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
     const names = [...new Set([model, ...(Array.isArray(models) ? models : [])].map(clean).filter(Boolean))].slice(0, 4);
     const start = Number(from);
     if (!target || !names.length || !Number.isFinite(start) || start <= 0) return { ok: true, available: false };
-    const key = `turn:${names.join("|")}:${start}`;
+    const end = Number(to) > start ? Number(to) : 0;
+    // Settled once the helper has logged the turn's last request; until then it is read like a live one.
+    const settled = end && now() - end > TURN_SETTLE_MS;
+    const key = `turn:${names.join("|")}:${start}:${end}`;
     const hit = cache.get(key);
-    if (hit && now() - hit.at < TURN_CACHE_MS) return hit.value;
-    const listings = await Promise.all(names.map((name) => turnRecords(target, name, start)));
+    if (hit && now() - hit.at < (settled ? ENDED_TURN_CACHE_MS : TURN_CACHE_MS)) return hit.value;
+    const listings = await Promise.all(names.map((name) => turnRecords(target, name, start, end)));
+    const records = listings.flatMap((items) => items ?? []).filter((item) => !end || !(recordTime(item) > end));
     const value = listings.some(Boolean)
-      ? { ok: true, available: true, ...summarizeRecords(listings.flatMap((items) => items ?? [])) }
+      ? { ok: true, available: true, ...summarizeRecords(records) }
       : { ok: true, available: false };
     cache.set(key, { at: now(), value });
-    for (const stale of cache.keys()) if (stale.startsWith("turn:") && now() - cache.get(stale).at > 60_000) cache.delete(stale);
+    for (const stale of cache.keys()) {
+      const { at } = cache.get(stale);
+      if (stale.startsWith("turn:") && now() - at > (stale.endsWith(":0") ? 60_000 : ENDED_TURN_CACHE_MS)) cache.delete(stale);
+    }
     return value;
   }
 
@@ -505,6 +520,8 @@ function summarizeRecords(items) {
     tokensPerSecond: speedMs ? Math.round((speedTokens / speedMs) * 1000) : null,
     cacheHit: inputTokens ? Math.min(1, cachedTokens / inputTokens) : null,
     inputTokens, outputTokens, cachedTokens,
+    // When the newest request was logged: how long a turn ran when nothing else kept its end.
+    lastAt: items.reduce((latest, item) => Math.max(latest, recordTime(item) ?? 0), 0) || null,
     refusal: refusalOf(items),
   };
 }

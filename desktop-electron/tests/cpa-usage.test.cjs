@@ -293,7 +293,7 @@ test("a turn's model requests sum to its steps, model time, first-token time, sp
   assert.equal(stats.tokensPerSecond, Math.round((400 / 3200) * 1000), "speed is output over the streaming part");
   assert.equal(stats.cacheHit, 6000 / 15700);
   assert.deepEqual([stats.inputTokens, stats.outputTokens], [15700, 400]);
-  assert.deepEqual(summarizeRecords([]), { steps: 0, failed: 0, latencyMs: 0, ttftMs: null, tokensPerSecond: null, cacheHit: null, inputTokens: 0, outputTokens: 0, cachedTokens: 0, refusal: null });
+  assert.deepEqual(summarizeRecords([]), { steps: 0, failed: 0, latencyMs: 0, ttftMs: null, tokensPerSecond: null, cacheHit: null, inputTokens: 0, outputTokens: 0, cachedTokens: 0, lastAt: null, refusal: null });
 });
 
 test("a turn's refusal is the run of failed requests since its model last answered, with their HTTP status", () => {
@@ -339,6 +339,34 @@ test("a turn's stats read CPA Helper's records for its model since it started, w
   await usage.turnStats({ model: "cpa/cline-pass/deepseek-v4.1-flash(high)", from: NOW - 5000 });
   assert.equal(urls.length, 1, "read again only after a few seconds");
   assert.deepEqual(await usage.turnStats({ model: "", from: NOW }), { ok: true, available: false });
+});
+
+test("an ended turn's stats stop at its end, say when its last request was, and are kept once settled", async () => {
+  const urls = [];
+  const usage = createCpaUsage({
+    now: () => NOW,
+    getConnection: () => ({ baseUrl: "http://127.0.0.1:8317", managementKey: KEY }),
+    // A helper that ignores `to`: the request after the turn's end is left out here instead.
+    fetchImpl: async (url) => {
+      urls.push(String(url));
+      return { ok: true, status: 200, json: async () => ({ items: [
+        { ts: NOW - 50_000, latency_ms: 4000, output_tokens: 10 },
+        { ts: NOW - 70_000, latency_ms: 1000, output_tokens: 10 },
+        { ts: NOW - 90_000, latency_ms: 2000, output_tokens: 10 },
+      ] }) };
+    },
+  });
+  const ended = { model: "cpa/glm", from: NOW - 100_000, to: NOW - 60_000 };
+  const stats = await usage.turnStats(ended);
+  assert.equal(new URL(urls[0]).searchParams.get("to"), String(NOW - 60_000));
+  assert.equal(stats.steps, 2, "the request after the turn ended is another turn's");
+  assert.equal(stats.latencyMs, 3000);
+  assert.equal(stats.lastAt, NOW - 70_000);
+  await usage.turnStats(ended);
+  assert.equal(urls.length, 1, "an ended turn's numbers are not read again");
+  const open = await usage.turnStats({ model: "cpa/glm", from: NOW - 100_000 });
+  assert.equal(open.steps, 3, "without an end every request since the start counts");
+  assert.equal(new URL(urls[1]).searchParams.get("to"), null);
 });
 
 test("a long turn's stats read every page of records instead of stopping at the first 500", async () => {

@@ -14,7 +14,7 @@ export type ChatNode = {
   settings?: { name?: string; role_name?: string };
   route?: { harness_id: string; model: string; effort?: string; context_window?: number };
   /** `thread_id` is the card's AO session id when its harness is an AO agent ("ao:…"). */
-  receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; thread_id?: string };
+  receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; finished_at_ms?: number; thread_id?: string };
   /** Earlier attempts' receipts, oldest first (a retry moves the last receipt here). */
   history?: { answer?: string; verdict?: string; error?: string; started_at_ms?: number }[];
 };
@@ -939,6 +939,8 @@ export type ChatStep = {
   /** For a working card: runtime, current step and when it was last heard. */
   working?: { detail: string; stalled: boolean; activity?: string; timeline?: ChatLiveItem[]; heardAtMs?: number };
   startedAtMs?: number;
+  /** When the card's turn ended (Unix ms); cards saved before builds that kept it have none. */
+  finishedAtMs?: number;
   /** The card ran in an AO session, so its finished work can be read back (turn_timeline). */
   hasWork?: boolean;
   /** Its earlier rounds (a reviewer's cycles, a retried card's attempts), oldest first, shown folded. */
@@ -960,6 +962,10 @@ export type ChatTurn = {
   solo: boolean;
   /** When the earliest card of this run started (Unix ms). */
   startedAtMs?: number;
+  /** When its last card ended (Unix ms), once the run is not working; absent when no card kept it. */
+  endedAtMs?: number;
+  /** The "cpa/…" models its cards ran on, whose request log holds the turn's numbers. */
+  cpaModels?: string[];
   /** A saved message no run ever answered: its send failed after the message was written. */
   unsent?: boolean;
 };
@@ -1061,6 +1067,7 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     name: (run.execution_mode === "single" && node.route?.model && options.modelName?.(node.route.model)) || chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
     ...(node.route?.model ? { reader: modelReader(node.route.model, options.modelName) } : {}),
     ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
+    ...(node.receipt?.finished_at_ms ? { finishedAtMs: node.receipt.finished_at_ms } : {}),
     ...(node.receipt?.thread_id && node.route?.harness_id?.startsWith("ao:") && node.state !== "running" && node.state !== "reserved"
       ? { hasWork: true } : {}),
   };
@@ -1514,13 +1521,19 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
       ? steps.find((step) => step.role === "planner" && step.state === "finished" && step.text)
       : [...steps].reverse().find((step) => step.role === "reviewer" && step.state === "finished" && step.text);
     const starts = steps.map((step) => step.startedAtMs).filter((value): value is number => Boolean(value));
+    const status = chatRunStatus(run);
+    const ends = steps.map((step) => step.finishedAtMs).filter((value): value is number => Boolean(value));
+    const cpaModels = [...new Set(run.nodes.map((node) => node.route?.model ?? "").filter((model) => model.startsWith("cpa/")))];
     turns.push({
       key: run.id, runId: run.id,
       ...(said[index] ? { user: said[index], messageIndex: index } : {}),
       steps: closing ? steps.filter((step) => step !== closing) : steps,
       ...(closing ? { final: closing } : {}),
-      status: chatRunStatus(run), solo: Boolean(run.solo),
+      status, solo: Boolean(run.solo),
       ...(starts.length ? { startedAtMs: Math.min(...starts) } : {}),
+      // A run still working (or queued for more) has not ended, whatever its finished cards say.
+      ...(ends.length && !["running", "queued", "scheduled"].includes(status) ? { endedAtMs: Math.max(...ends) } : {}),
+      ...(cpaModels.length ? { cpaModels } : {}),
     });
   }
   for (let index = messageIndex; index < said.length; index += 1) {
