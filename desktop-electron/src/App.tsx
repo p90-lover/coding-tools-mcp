@@ -2353,7 +2353,7 @@ function SettingsSurface({
           />
         </SettingRow>
         {snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentRedactSecrets === true && api?.setRedactList
-          ? <RedactListSetting copy={copy} lines={snapshot.chatAgentRedactList ?? snapshot.state.chatAgentRedactList ?? []}
+          ? <RedactListSetting copy={copy} lines={snapshot.state.chatAgentRedactList ?? snapshot.chatAgentRedactDefaults ?? []}
             setError={setError} updateState={updateState} />
           : null}
         <SettingRow body="Give chat agents more tools: add your own STDIO or Streamable HTTP MCP servers under Plugins > MCPs." label="MCP servers">

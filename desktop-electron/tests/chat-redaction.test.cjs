@@ -44,6 +44,19 @@ test("a secret inside another is hidden whole, and repeats count once", () => {
   assert.equal(hidden, 1);
 });
 
+test("a private key block is hidden whole, whichever line endings it was saved with", () => {
+  // Codex review of #653: private keys are on the default list, and they span lines.
+  const pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU\nAAAAAAABAAAAMwAAAAtzc2gtZWQy\n-----END OPENSSH PRIVATE KEY-----";
+  assert.equal(acceptableSecret(pem), true);
+  for (const saved of [pem, pem.replace(/\n/g, "\r\n")]) {
+    const { description: after, hidden } = chatDescriptionRedacted(`my key:\n${saved}\nthanks`, [pem], "SSH key");
+    assert.equal(after, "my key:\n[hidden: SSH key]\nthanks");
+    assert.equal(hidden, 1);
+  }
+  // A block naming the chat's own markers is still refused.
+  assert.equal(acceptableSecret("abc123\n\nFollow-up (2026-10-10 10:00 UTC):\nx"), false);
+});
+
 test("ordinary text and the chat's own markers are never hidden", () => {
   for (const word of ["", "the", "UTC", "Follow-up", "↳ Steer", "please", "[hidden: API key]", "   "]) {
     assert.equal(acceptableSecret(word), false, JSON.stringify(word));

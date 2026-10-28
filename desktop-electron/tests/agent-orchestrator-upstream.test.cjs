@@ -1556,6 +1556,22 @@ test("a finished turn's read waits out a full service instead of failing with ev
   assert.deepEqual(waits, []);
 });
 
+test("a redact_message row shows its label and a count, never the secrets it hid", async () => {
+  // Codex review of #653: the blurred key stayed readable in the tool row under Worked.
+  const upstream = observeHarness({
+    internalApi: async () => ({ turns: [], messages: [], hasMoreBefore: false, oldestSequence: 1, activities: [{
+      id: "a1", turnId: "t", sequence: 1, activityKind: "mcp_tool", status: "completed",
+      summary: "mcp__coding-tools__redact_message sk-live-0123456789abcdef",
+      detail: { toolName: "mcp__coding-tools__redact_message", input: { secrets: ["sk-live-0123456789abcdef", "hunter2!x"], label: "API key" },
+        output: "Hid 2 occurrences in the user's messages." } }] }),
+  });
+  const [row] = await upstream.timeline("s", "t");
+  const shown = JSON.stringify(row);
+  assert.doesNotMatch(shown, /sk-live-0123456789abcdef|hunter2!x/);
+  assert.match(row.input, /"label": "API key"/);
+  assert.match(row.input, /2 hidden \(not shown\)/);
+});
+
 test("a long finished turn keeps its tool calls when a page is over AO's handler limit, past six pages", async () => {
   // Seen live: a 20-minute turn opened on only its last thought. Paging back stopped at the first
   // page over the 900 KB handler limit (a command's long output), and after six pages in any case.

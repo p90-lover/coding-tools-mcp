@@ -2856,6 +2856,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
     if (short === "rename_chat") return "Names this chat after the task it works on; it runs nothing";
+    if (short === "redact_message") return "Hides secrets you pasted in this chat's messages; it runs nothing and changes no files";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
     if (short === "view_app") return "An image of the Coding Tools window you see; nothing else on the screen";
@@ -5242,23 +5243,36 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * chat's messages (its task's description) by a "[hidden: <label>]" marker the chat shows blurred
    * (chat-redaction.cjs). The message count stays the same, so every run keeps its message. The
    * description may change under it (a steer, the next message): one stale write is tried again.
+   * A team run with cards still to reserve would refuse them after the edit (grantAtRisk), so the
+   * marks wait for them, as a rename does (Codex review of #653).
    */
   async function chatRedactTool({ workspaceId, session, secrets, label } = {}) {
     const id = clean(workspaceId, 128);
     const { latest } = await sessionChat(id, clean(session, 256), "hide text in its chat");
     const task = latest.project_id;
-    for (let attempt = 0; ; attempt += 1) {
+    const redact = async () => {
+      for (let attempt = 0; ; attempt += 1) {
+        const detail = await board({ workspaceId: id, taskId: task });
+        if (!detail.task || detail.task.id !== task) throw new Error("This chat's task no longer exists");
+        const { description, hidden, refused } = chatDescriptionRedacted(detail.task.description || "", secrets, label);
+        if (!hidden) return { hidden: 0, refused };
+        try {
+          await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+          return { hidden, refused };
+        } catch (error) {
+          if (attempt >= 1) throw error;
+        }
+      }
+    };
+    const saved = await runs({ workspaceId: id });
+    if (saved.runs.some(run => run.project_id === task && grantAtRisk(run))) {
       const detail = await board({ workspaceId: id, taskId: task });
       if (!detail.task || detail.task.id !== task) throw new Error("This chat's task no longer exists");
-      const { description, hidden, refused } = chatDescriptionRedacted(detail.task.description || "", secrets, label);
-      if (!hidden) return { ok: true, taskId: task, hidden: 0, refused };
-      try {
-        await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
-        return { ok: true, taskId: task, hidden, refused };
-      } catch (error) {
-        if (attempt >= 1) throw error;
-      }
+      const { hidden, refused } = chatDescriptionRedacted(detail.task.description || "", secrets, label);
+      if (hidden) whenTaskIdle(id, task, redact);
+      return { ok: true, taskId: task, hidden, refused, deferred: hidden > 0 };
     }
+    return { ok: true, taskId: task, ...await redact() };
   }
 
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----

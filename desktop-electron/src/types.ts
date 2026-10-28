@@ -597,7 +597,7 @@ export interface LauncherState {
   chatAgentPreviewTools?: boolean;
   /** Those agents may hide secrets in the user's chat messages (redact_message); absent means off. */
   chatAgentRedactSecrets?: boolean;
-  /** What they hide, one kind per line; absent means the defaults (snapshot.chatAgentRedactList). */
+  /** What they hide, one kind per line; absent means the defaults (snapshot.chatAgentRedactDefaults). */
   chatAgentRedactList?: string[];
   /** An agent's tool request answered in the chat is confirmed again in a dialog unless false. */
   confirmAgentToolRequests?: boolean;
@@ -701,8 +701,8 @@ export interface LauncherSnapshot {
   mcpCredentialsConfigured: boolean;
   /** Agents' commands run in Codex's Windows sandbox (installed), so the terminal tools default on. */
   chatAgentSandbox?: boolean;
-  /** What chat agents hide in the user's messages: the user's list, or the defaults. */
-  chatAgentRedactList?: string[] | null;
+  /** What chat agents hide when the user has no list of their own (state.chatAgentRedactList). */
+  chatAgentRedactDefaults?: string[] | null;
   logs: LogRecord[];
   urls: {
     github: string;

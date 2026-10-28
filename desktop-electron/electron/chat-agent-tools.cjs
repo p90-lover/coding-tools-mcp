@@ -225,7 +225,7 @@ function redactToolDefs(list) {
       + "chat: each exact occurrence of every string in `secrets` is replaced by \"[hidden: <label>]\", which the user sees "
       + "blurred. Call it as soon as one of the user's messages contains any of these (the user's own list):" + kinds
       + "\nPass each secret exactly as it appears in the message, only the secret itself (the key, not the sentence around "
-      + "it). Hide nothing else: ordinary words, file paths, code and names stay. It changes only the user's messages, never "
+      + "it; a private key block whole, all its lines). Hide nothing else: ordinary words, file paths, code and names stay. It changes only the user's messages, never "
       + "files. You may still use a secret the task needs, but never repeat it in your replies.",
     inputSchema: {
       type: "object", additionalProperties: false, required: ["secrets", "label"],
@@ -1785,11 +1785,13 @@ function createChatAgentTools({
       const value = await redaction.redact({ workspaceId: entry.workspaceId, session: entry.aoSession, secrets: secrets.slice(0, MAX_SECRETS),
         label: typeof given.label === "string" ? given.label : "" });
       // The secrets are never echoed back: only how many were hidden.
-      const note = value.hidden ? `Hid ${value.hidden} occurrence${value.hidden === 1 ? "" : "s"} in the user's messages.`
+      const occurrences = `${value.hidden} occurrence${value.hidden === 1 ? "" : "s"}`;
+      const note = value.deferred ? `Will hide ${occurrences} in the user's messages once the team's open cards have started.`
+        : value.hidden ? `Hid ${occurrences} in the user's messages.`
         : "Nothing was hidden: none of these strings is in the chat's saved messages (a message still on its way is saved after this turn).";
       const refused = value.refused ? ` ${value.refused} string${value.refused === 1 ? " was" : "s were"} not hidden: too short or ordinary text, not a secret.` : "";
       return { content: [{ type: "text", text: `${note}${refused} Do not repeat them in your reply.` }],
-        structuredContent: { hidden: value.hidden, refused: value.refused } };
+        structuredContent: { hidden: value.hidden, refused: value.refused, deferred: value.deferred === true } };
     } catch (error) {
       return failedCall(errorMessage(error));
     }
@@ -2604,6 +2606,7 @@ function createChatAgentTools({
     sandboxed,
     // What redact_message hides (the user's list, or the defaults), for Settings to show.
     redactList: redactKinds,
+    redactDefaults: () => { try { return redaction?.defaults?.() ?? null; } catch { return null; } },
     listen,
     sweep,
     async close() {

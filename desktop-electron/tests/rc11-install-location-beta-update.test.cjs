@@ -63,7 +63,7 @@ test("desktop GUI updates reload the renderer without the full-installer quit pa
   const end = mainSource.indexOf('handle("launcher:window-state"', start);
   assert.ok(start >= 0 && end > start);
   const handler = mainSource.slice(start, end);
-  assert.match(handler, /return updateController\.beginInstall\(\)/);
+  assert.match(handler, /return updateController\.beginInstall\(/);
   assert.doesNotMatch(handler, /requestQuit|shutdown|restart|cancelInstall/);
   assert.doesNotMatch(mainSource, /promptForAvailableUpdate|Install and restart/);
 });
@@ -71,8 +71,9 @@ test("desktop GUI updates reload the renderer without the full-installer quit pa
 test("Update offers to stop a running ChatGPT turn instead of refusing", () => {
   const start = mainSource.indexOf('handle("launcher:update-install"');
   const handler = mainSource.slice(start, mainSource.indexOf('handle("launcher:window-state"', start));
-  // The turns stop before the install starts, so its quit no longer meets a running turn.
-  assert.match(handler, /await stopBrowserTurnsForUpdate\(\);\s*return updateController\.beginInstall\(\)/);
+  // The turns stop before a whole-app install starts, so its quit no longer meets a running turn; a
+  // renderer-only update leaves them running (combineUpdateControllers runs the hook on that path only).
+  assert.match(handler, /return updateController\.beginInstall\(\{ beforeAppInstall: stopBrowserTurnsForUpdate \}\)/);
   const helper = mainSource.slice(mainSource.indexOf("async function stopBrowserTurnsForUpdate"),
     mainSource.indexOf("async function requestQuit"));
   assert.match(helper, /!browserHost\?\.activeTraceId\) return;/);

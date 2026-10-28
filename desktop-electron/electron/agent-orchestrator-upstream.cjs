@@ -833,11 +833,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const created = changes.every(change => change.before === null);
     return { label: created ? "Created" : "Edited", files: [...byPath.values()].map(file => file.diff ? file : { path: file.path, additions: file.additions, deletions: file.deletions }) };
   }
+  // redact_message's arguments are the secrets it hides: its row shows the label and how many,
+  // never the strings, or the key the message no longer shows stayed readable under Worked (Codex
+  // review of #653). Live polls and finished-turn reads both build their rows here.
+  const REDACT_TOOL = /(^|__)redact_message$/;
+  function hiddenSecretsInput(input) {
+    const count = Array.isArray(input.secrets) ? input.secrets.length : 0;
+    return { ...(typeof input.label === "string" ? { label: input.label.slice(0, 40) } : {}),
+      secrets: `${count} hidden (not shown)` };
+  }
   function timelineActivity(activity) {
-    const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
-    const input = detail.input && typeof detail.input === "object" ? detail.input : {};
+    const given = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
+    const redacting = activity.activityKind === "mcp_tool" && REDACT_TOOL.test(String(given.toolName || ""));
+    const givenInput = given.input && typeof given.input === "object" ? given.input : {};
+    const input = redacting ? hiddenSecretsInput(givenInput) : givenInput;
+    const detail = redacting ? { ...given, input } : given;
     const base = { id: String(activity.id), sequence: Number(activity.sequence) || 0, status: String(activity.status || "").slice(0, 32) };
-    const summary = String(activity.summary || "");
+    const summary = redacting ? "Hide secrets in the user's messages" : String(activity.summary || "");
     // The timeout a tool call states for itself (Claude Code's Bash/PowerShell `timeout`), so the run
     // loop can tell a long call still within it from one whose result never came back.
     const stated = Number(input.timeout);
@@ -923,6 +935,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // summary (seen live: subjectKind "mcp_tool", toolKind "other"). Without it the input was
         // dropped, so the reviewer saw an exec_command with no command and answered "ask".
         const toolName = String(detail.toolName || activity.summary || "");
+        // Its card and the reviewer get the label and a count, never the secrets it hides.
+        if (REDACT_TOOL.test(toolName)) input = hiddenSecretsInput(input);
         const arguments_ = Object.keys(input).length ? JSON.stringify(input) : "";
         const rawToolInput = /^mcp__/.test(toolName) ? arguments_ : "";
         // The harness's own tools (Claude Code's Monitor, WebFetch, Skill, and each one it adds later)

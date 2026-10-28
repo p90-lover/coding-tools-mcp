@@ -49,8 +49,10 @@ function hiddenMarker(label) {
  */
 function acceptableSecret(secret) {
   if (typeof secret !== "string" || secret.length < 6 || secret.length > MAX_SECRET) return false;
-  // Exactly as quoted: no padding around it, and never across lines.
-  if (secret !== secret.trim() || /[\r\n]/.test(secret)) return false;
+  // Exactly as quoted, with no padding around it. It may span lines (a PEM, SSH or PGP private key
+  // block, Codex review of #653): only one message's text is searched, never a follow-up header, and
+  // a secret naming the chat's own markers is refused below.
+  if (secret !== secret.trim()) return false;
   if (HIDDEN.test(secret) || /Follow-up|↳ Steer|\bUTC\b/.test(secret)) return false;
   // A key or password has a digit or a symbol, or is a long passphrase; one plain word ("please") never is.
   return /[\d\W_]/.test(secret) || secret.length >= 20;
@@ -73,9 +75,15 @@ function chatDescriptionRedacted(description, secrets, label) {
     if (index % 2 === 1) return part;
     let text = part;
     for (const secret of wanted) {
-      const pieces = text.split(secret);
-      hidden += pieces.length - 1;
-      text = pieces.join(marker);
+      // A key pasted on Windows may be saved with CRLF while the agent quotes it with LF, or back.
+      const forms = /\n/.test(secret)
+        ? [...new Set([secret, secret.replace(/\r\n/g, "\n"), secret.replace(/\r?\n/g, "\r\n")])]
+        : [secret];
+      for (const form of forms) {
+        const pieces = text.split(form);
+        hidden += pieces.length - 1;
+        text = pieces.join(marker);
+      }
     }
     return text;
   });

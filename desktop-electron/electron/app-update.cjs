@@ -519,11 +519,14 @@ function combineUpdateControllers(appUpdates, guiUpdates) {
       if (!ACTIVE.includes(appState.status)) await guiUpdates.checkOnce();
       return state();
     },
-    async beginInstall() {
+    // `beforeAppInstall` runs only when the whole app is replaced (it quits): a renderer-only update
+    // reloads in place and leaves running ChatGPT turns alone (Codex review of #653).
+    async beginInstall({ beforeAppInstall } = {}) {
       if (appUpdates.getState().status !== "available") {
         const appState = await appUpdates.checkNow({ force: true });
         if (appState.status !== "available") return guiUpdates.beginInstall();
       }
+      await beforeAppInstall?.();
       return appUpdates.beginInstall();
     },
     startPeriodicChecks(options) {

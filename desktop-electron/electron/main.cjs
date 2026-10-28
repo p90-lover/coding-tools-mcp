@@ -1193,7 +1193,9 @@ function launcherSnapshotPayload(stateStore, logger) {
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured?.() ?? false,
     chatAgentSandbox: safeRead("launcher.chat_sandbox_snapshot", () => chatAgentTools?.sandboxed?.() ?? false, false, logger),
-    chatAgentRedactList: safeRead("launcher.chat_redact_list_snapshot", () => chatAgentTools?.redactList?.() ?? null, null, logger),
+    // The defaults only: the list in use is state.chatAgentRedactList, which a save updates (a list
+    // here went stale after a save, Codex review of #653).
+    chatAgentRedactDefaults: safeRead("launcher.chat_redact_defaults_snapshot", () => chatAgentTools?.redactDefaults?.() ?? null, null, logger),
     logs: logger.recent(),
     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
     platform: process.platform,
@@ -2624,8 +2626,7 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
-    await stopBrowserTurnsForUpdate();
-    return updateController.beginInstall();
+    return updateController.beginInstall({ beforeAppInstall: stopBrowserTurnsForUpdate });
   });
   handle("launcher:window-state", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
@@ -3251,6 +3252,7 @@ async function start() {
         redaction: {
           enabled: () => stateStore.read().chatAgentRedactSecrets === true,
           list: () => backendBundles.requireModule(backend, "chat-redaction.cjs").redactList(stateStore.read().chatAgentRedactList),
+          defaults: () => [...backendBundles.requireModule(backend, "chat-redaction.cjs").DEFAULT_REDACT_LIST],
           redact: (request) => {
             if (!missionWorkflowRuntime?.chatRedactTool) throw new Error("Agent Orchestrator is not ready yet");
             return missionWorkflowRuntime.chatRedactTool(request);
