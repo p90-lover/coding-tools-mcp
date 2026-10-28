@@ -4249,8 +4249,6 @@ test("the agent's goal tools keep completion provisional and do not stall on one
   assert.equal((await saved()).lastRunId, "r1", "the turn that set it is round 1, judged when it settles");
   await assert.rejects(tool({ action: "create", objective: "something else" }), /unfinished goal; complete the existing goal first/);
   assert.equal((await tool({ action: "update", objective: "make CI and lint green" })).goal.objective, "make CI and lint green");
-  assert.equal((await tool({ action: "update", status: "paused" })).goal.status, "paused");
-  assert.equal((await saved()).status, "paused");
   await assert.rejects(tool({ action: "update", status: "active" }), /controlled by the user or system/);
   await assert.rejects(tool({ action: "update" }), /a status or an objective/);
   assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "active");
@@ -4263,6 +4261,10 @@ test("the agent's goal tools keep completion provisional and do not stall on one
   assert.equal(done.completionBudgetReport, null);
   assert.match((await saved()).note, /awaiting independent goal verification/);
   await assert.rejects(tool({ action: "create", objective: "ship the release" }), /unfinished goal/);
+  assert.equal((await tool({ action: "update", status: "paused" })).goal.status, "paused");
+  assert.equal((await saved()).status, "paused");
+  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "paused",
+    "the agent cannot override a user-paused goal");
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" });
   assert.equal((await tool({ action: "create", objective: "ship the release" })).goal.objective, "ship the release");
   await assert.rejects(workflow.goalTool({ workspaceId: "ws-1", session: "someone-else", action: "get" }), /not one of this project's chats/);
