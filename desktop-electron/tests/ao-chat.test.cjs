@@ -167,6 +167,22 @@ test("the stats line counts the latest turn and the failed or stopped attempts r
   assert.deepEqual(plain(chat.chatStatsSpan([], [])), { models: [] });
 });
 
+test("an ended turn keeps when its last card ended and the CPA models it ran on; a running one has no end", () => {
+  const card = (id, state, model, started, finished) => node(id, id === "p" ? "planner" : "worker", state,
+    { route: { harness_id: "ao:claude-code", model }, receipt: { started_at_ms: started, ...(finished ? { finished_at_ms: finished } : {}) } });
+  const runs = [
+    run("r1", "t", [card("p", "finished", "cpa/glm", 100, 400), card("w", "finished", "codex/gpt", 150, 900)]),
+    run("r2", "t", [card("p", "finished", "cpa/glm", 1000, 1200), card("w", "running", "cpa/glm", 1300)]),
+    run("r3", "t", [card("p", "finished", "cpa/glm", 2000)], { execution_mode: "single" }),
+  ];
+  const [done, working, older] = plain(chat.chatTurns(runs, "a\n\nFollow-up (x):\nb\n\nFollow-up (y):\nc"));
+  assert.equal(done.endedAtMs, 900, "the last card's end, whichever card it was");
+  assert.deepEqual(done.cpaModels, ["cpa/glm"], "only models that go through CPA");
+  assert.equal(working.endedAtMs, undefined, "a card still running: the turn has not ended");
+  assert.equal(older.endedAtMs, undefined, "saved before cards kept their end");
+  assert.equal(older.steps.length + (older.final ? 1 : 0), 1);
+});
+
 test("a message no run answered shows as not sent, and every later run stays under its own message", () => {
   // Seen live 2026-10-23: the 07:41 "keep going" was saved, then its send timed out with no run. Paired
   // by place, each later reply sat under the message before its own and the newest read "Starting…".
@@ -245,7 +261,8 @@ test("with Retry automatically on, a single chat's failed step that nothing retr
   assert.equal(chat.restartResume(single(failed()), Date.now()), null, "switch off: it waits for the person, as before");
   assert.equal(chat.restartResume(single(failed()), Date.now(), on), "retry");
   assert.equal(chat.restartResume(single(failed({ history: [{}, {}] })), Date.now(), on), "retry", "a third attempt");
-  assert.equal(chat.restartResume(single(failed({ history: [{}, {}, {}] })), Date.now(), on), null, "three attempts: the person decides");
+  assert.equal(chat.restartResume(single(failed({ history: [{}, {}, {}] })), Date.now(), on), "retry", "a fourth attempt: three quick tries are not the end");
+  assert.equal(chat.restartResume(single(failed({ history: Array.from({ length: 8 }, () => ({})) })), Date.now(), on), null, "eight attempts: the person decides");
   assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: { error: "API error 401: auth_unavailable" } })), Date.now(), on), null,
     "a sign-in or account-pool failure is never retried by itself");
   assert.equal(chat.restartResume(run("r", "t", [failed()], { execution_mode: "single", paused: true }), Date.now(), on), null, "a paused chat stays paused");

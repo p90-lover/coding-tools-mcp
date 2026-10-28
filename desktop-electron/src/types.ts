@@ -115,6 +115,127 @@ export interface ProxyProfileRecord {
   latencyMs?: number;
   lastError?: string;
   archivedAt?: string;
+  /** Set on a ProxyBridge Nova proxy (or its gateway): read-only here, changed on the Proxy page. */
+  source?: "nova";
+  sourceKey?: string;
+}
+
+export type NovaRoutingState = "direct" | "starting" | "active" | "stopping" | "setupRequired" | "disabled" | "error";
+
+export interface NovaStatus {
+  product: string;
+  version: string;
+  managed: boolean;
+  pid: number;
+  apiPort: number;
+  gateway: { host: string; port: number; running: boolean; error: string | null };
+  routing: {
+    state: NovaRoutingState;
+    installed: boolean;
+    runtimeReady: boolean;
+    busy: boolean;
+    services: Record<string, string>;
+    error: string | null;
+  };
+  profile: { etag: string; proxyCount: number; ruleCount: number };
+  decodo: { configured: boolean; autoSync: boolean; lastSyncAt: string | null; nextSyncAt: string | null; lastError: string | null };
+}
+
+export interface NovaState {
+  running: boolean;
+  executable: string;
+  apiPort: number;
+  status: NovaStatus | null;
+  error: string | null;
+  migratedAt: string | null;
+}
+
+export type NovaProxyProtocol = "http" | "https" | "socks5";
+
+export interface NovaProxy {
+  key: string;
+  protocol: NovaProxyProtocol;
+  host: string;
+  port: number;
+  username: string;
+  /** Only sent when saving: a new password, or null to keep the saved one. */
+  password?: string | null;
+  hasPassword?: boolean;
+  linked: boolean;
+  upstreamEligible: boolean;
+  provider: string | null;
+}
+
+export interface NovaRuleApplication {
+  executablePath: string;
+  packageFamily: string | null;
+  packageSid: string | null;
+  knownFamily: "none" | "chatGptCodex" | "gptClassic" | "claude";
+  requiresVerifiedLineage: boolean;
+}
+
+export interface NovaRule {
+  ruleId: number;
+  name: string;
+  enabled: boolean;
+  applications: NovaRuleApplication[];
+  targetHosts: string;
+  targetPorts: string;
+  protocol: "any" | "tcp" | "udp";
+  action: "proxy" | "direct" | "block";
+  proxyKey: string | null;
+  immutable: boolean;
+}
+
+export interface NovaProfile {
+  etag: string;
+  linkedProfilePath: string | null;
+  proxies: NovaProxy[];
+  rules: NovaRule[];
+}
+
+export interface NovaApp {
+  ruleId: number;
+  ruleName: string;
+  enabled: boolean;
+  state: "connected" | "idle" | "notRunning" | "disabled";
+  pids: number[];
+  tcpCount: number;
+  executables: string[];
+  proxyKey: string | null;
+  proxyLabel: string;
+}
+
+export interface NovaConnection {
+  id: string;
+  pid: number;
+  application: string;
+  target: string;
+  state: string;
+  ruleId: number | null;
+  local: boolean;
+  route: string;
+}
+
+export interface NovaLogEntry {
+  seq: number;
+  at: string;
+  level: "info" | "error";
+  text: string;
+}
+
+export interface NovaDecodo {
+  username: string;
+  hasPassword: boolean;
+  password?: string | null;
+  country: string;
+  count: number;
+  sessionMinutes: number;
+  refreshMinutes: number;
+  protocol: NovaProxyProtocol;
+  autoSync: boolean;
+  lastSyncAt?: string | null;
+  lastError?: string | null;
 }
 
 export interface ProxyProfileInput {
@@ -926,6 +1047,22 @@ export interface LauncherApi {
     mode: ProxyPolicyMode;
     profileId?: string;
   }): Promise<ProviderNetworkSnapshot>;
+  novaState(): Promise<NovaState>;
+  novaStart(): Promise<NovaState>;
+  novaShutdown(): Promise<NovaState>;
+  novaSetExecutable(exePath: string): Promise<NovaState>;
+  novaProfile(): Promise<NovaProfile>;
+  novaSaveProxies(input: { etag: string; proxies: NovaProxy[] }): Promise<NovaProfile>;
+  novaSaveRules(input: { etag: string; rules: NovaRule[] }): Promise<NovaProfile>;
+  novaCheckProxy(key: string): Promise<{ key: string; ok: boolean; latencyMs: number | null; error: string | null }>;
+  novaApps(): Promise<{ capturedAt: string; error: string | null; apps: NovaApp[] }>;
+  novaConnections(): Promise<{ capturedAt: string; error: string | null; connections: NovaConnection[] }>;
+  novaLog(after?: number): Promise<{ entries: NovaLogEntry[] }>;
+  novaRouting(action: "start" | "stop" | "reload" | "install"): Promise<{ routing: NovaStatus["routing"] }>;
+  novaDecodo(): Promise<NovaDecodo>;
+  novaSaveDecodo(input: NovaDecodo): Promise<NovaDecodo>;
+  novaSyncDecodo(): Promise<{ added: number; updated: number; removed: number; profile: NovaProfile }>;
+  onNovaChanged(listener: (state: NovaState) => void): () => void;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   checkForUpdates(): Promise<UpdateState>;

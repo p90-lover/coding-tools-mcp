@@ -5,6 +5,7 @@ import type { JsonObject } from "../api/contracts";
 import { Caret, Icon } from "../icons";
 import { chatSubagents, contextFraction, subagentActive, subagentTitle, tokensShort, type ChatAgentSession, type ChatLiveItem, type ChatSubagent } from "./ao-chat";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { petFlight, petOverlaps } from "./chat-pet-stage";
 import { costLabel, costSourceLabel, readCpaUsage, type CpaUsage, type CpaUsageRange } from "./cpa-usage";
 import { onWindowFocus, windowUnfocused } from "./page-visibility";
 
@@ -220,6 +221,8 @@ const subagentState = (run: ChatSubagent) => `${run.stopping ? "Stopping" : SUBA
 export type RenderWork = (items: ChatLiveItem[], live: boolean, reply?: string) => ReactNode;
 
 const PREVIEW_POLL_MS = 1500;
+/** How near the pet comes (px) before the Preview swaps in its still: the capture takes a frame or two. */
+const PET_MARGIN = 48;
 const COMMANDS_POLL_MS = 2000;
 const OUTPUT_POLL_MS = 1000;
 const MAX_OUTPUT_CHARS = 200_000;
@@ -595,6 +598,45 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
 
   // The page is a native view: keep it on the slot while the pane shows, and take it off after.
   const hasPage = Boolean(state);
+  // A native view is drawn over the whole app page, so Clawd carried, riding or leaping across the
+  // pane vanished under it. While the pet comes near, the pane shows a still of its page instead.
+  const [covered, setCovered] = useState(false);
+  const [still, setStill] = useState<string | null>(null);
+  const coveredNow = useRef(false);
+  // Whether this pane took its page off for the pet. Split panes share one shown page: a pane whose
+  // page is not the one shown gets no still, hides nothing and puts nothing back.
+  const hidForPet = useRef(false);
+  const remeasure = useRef<(() => void) | null>(null);
+  useEffect(() => petFlight.subscribe((rect) => {
+    const element = slot.current;
+    setCovered(Boolean(rect && element && petOverlaps(rect, element.getBoundingClientRect(), PET_MARGIN)));
+  }), []);
+  useEffect(() => {
+    const was = coveredNow.current;
+    coveredNow.current = covered;
+    if (!hasPage || covered === was) return undefined;
+    let live = true;
+    if (covered) {
+      void paneCall("chat_preview_snapshot", { sessionId }).then((result) => (typeof result.url === "string" ? result.url : null)).catch(() => null)
+        .then((url) => {
+          if (!live || !coveredNow.current || !url) return;
+          setStill(url);
+          // Off the screen once the still is painted in its place.
+          requestAnimationFrame(() => {
+            if (!coveredNow.current) return;
+            hidForPet.current = true;
+            void paneCall("chat_preview_hide", { sessionId }).catch(() => undefined);
+          });
+        });
+    } else {
+      if (hidForPet.current) remeasure.current?.();
+      hidForPet.current = false;
+      // The view is back over the still; it goes once the view has drawn.
+      const timer = window.setTimeout(() => { if (live) setStill(null); }, 250);
+      return () => { live = false; window.clearTimeout(timer); };
+    }
+    return () => { live = false; };
+  }, [covered, hasPage, sessionId]);
   useLayoutEffect(() => {
     const element = slot.current;
     if (!element || !hasPage) return undefined;
@@ -602,23 +644,27 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
     const measure = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
+        // Covered by the pet: the still stands in for the view until it has gone by.
+        if (coveredNow.current) return;
         const rect = element.getBoundingClientRect();
         // The chat page stays mounted behind other pages (hidden): its slot then has no size, and
         // the native view must leave the screen with it, or it stayed drawn over CPA, Settings and
         // every other page with no way to close it. It comes back when the slot does.
-        if (rect.width < 2 || rect.height < 2) { void paneCall("chat_preview_hide").catch(() => undefined); return; }
+        if (rect.width < 2 || rect.height < 2) { void paneCall("chat_preview_hide", { sessionId }).catch(() => undefined); return; }
         void paneCall("chat_preview_show", { sessionId, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }).catch(() => undefined);
       });
     };
     measure();
+    remeasure.current = measure;
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     window.addEventListener("resize", measure);
     return () => {
       cancelAnimationFrame(frame);
+      remeasure.current = null;
       observer.disconnect();
       window.removeEventListener("resize", measure);
-      void paneCall("chat_preview_hide").catch(() => undefined);
+      void paneCall("chat_preview_hide", { sessionId }).catch(() => undefined);
     };
   }, [sessionId, hasPage]);
 
@@ -646,7 +692,9 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
       {state?.errors ? <span className="cx-preview-errors" title="Console errors and failed requests">{state.errors} errors</span> : null}
     </form>
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
-    {state ? <div ref={slot} className="cx-preview-slot" aria-label={state.title || state.url} />
+    {state ? <div ref={slot} className="cx-preview-slot" aria-label={state.title || state.url}>
+      {still ? <img className="cx-preview-still" src={still} alt="" draggable={false} /> : null}
+    </div>
       : <p className="cx-workbench-empty">No page open yet. The agent opens its dev server here, or you can enter a localhost address above.</p>}
   </div>;
 }

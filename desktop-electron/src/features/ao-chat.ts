@@ -14,7 +14,7 @@ export type ChatNode = {
   settings?: { name?: string; role_name?: string };
   route?: { harness_id: string; model: string; effort?: string; context_window?: number };
   /** `thread_id` is the card's AO session id when its harness is an AO agent ("ao:…"). */
-  receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; thread_id?: string };
+  receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; finished_at_ms?: number; thread_id?: string };
   /** Earlier attempts' receipts, oldest first (a retry moves the last receipt here). */
   history?: { answer?: string; verdict?: string; error?: string; started_at_ms?: number }[];
 };
@@ -939,6 +939,8 @@ export type ChatStep = {
   /** For a working card: runtime, current step and when it was last heard. */
   working?: { detail: string; stalled: boolean; activity?: string; timeline?: ChatLiveItem[]; heardAtMs?: number };
   startedAtMs?: number;
+  /** When the card's turn ended (Unix ms); cards saved before builds that kept it have none. */
+  finishedAtMs?: number;
   /** The card ran in an AO session, so its finished work can be read back (turn_timeline). */
   hasWork?: boolean;
   /** Its earlier rounds (a reviewer's cycles, a retried card's attempts), oldest first, shown folded. */
@@ -960,6 +962,10 @@ export type ChatTurn = {
   solo: boolean;
   /** When the earliest card of this run started (Unix ms). */
   startedAtMs?: number;
+  /** When its last card ended (Unix ms), once the run is not working; absent when no card kept it. */
+  endedAtMs?: number;
+  /** The "cpa/…" models its cards ran on, whose request log holds the turn's numbers. */
+  cpaModels?: string[];
   /** A saved message no run ever answered: its send failed after the message was written. */
   unsent?: boolean;
 };
@@ -981,10 +987,11 @@ type ResumeCandidate = {
 export const RESTART_RESUME_WINDOW_MS = 24 * 60 * 60_000;
 // The main process's own bounds (agent-orchestrator-workflow.cjs): a step a restart interrupted runs
 // until it has this many attempts (RESTART_HISTORY_LIMIT), any other failed step until this many
-// (AUTO_RETRY_LIMIT), and a sign-in or account-pool failure is never retried (POOL_EXHAUSTED).
+// (AUTO_RETRY_LIMIT), and a sign-in, account-pool or used-up quota failure is never retried
+// (POOL_EXHAUSTED, QUOTA_EXHAUSTED).
 const RESTART_ATTEMPT_LIMIT = 8;
-const AUTO_RETRY_ATTEMPT_LIMIT = 3;
-const NEEDS_PERSON = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)/i;
+const AUTO_RETRY_ATTEMPT_LIMIT = 8;
+const NEEDS_PERSON = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)|insufficient_quota|usage_limit_reached|quota[^\n]{0,40}(?:exceed|exhaust|reached|used up)|(?:exceed|reach|hit)(?:ed)? your[^\n]{0,40}(?:quota|limit)/i;
 
 /** The newest time any card of the run started, current receipts and earlier attempts alike (0: none). */
 function newestStart(mission: ResumeCandidate): number {
@@ -1018,7 +1025,7 @@ export function restartResume(mission: ResumeCandidate, now = Date.now(), { auto
   // With "Retry automatically" on, a single chat's failed step is retried whether or not a loop of
   // this app session saw it fail: its loop had ended (an app restart, or a launch that failed past
   // it) and the card sat "held" for hours with the switch on. The same budget and exception as the
-  // loop's own retry: three attempts, and a sign-in or account-pool failure waits for the person.
+  // loop's own retry: eight attempts, and a sign-in or account-pool failure waits for the person.
   const autoRetried = autoRetry && mission.execution_mode === "single" ? mission.nodes.filter(node => node.state === "held"
     && !restarted.includes(node) && !NEEDS_PERSON.test(String(node.receipt?.error || ""))) : [];
   // Held for any other reason (an approval, a failure to inspect) is the person's call; a reserved
@@ -1061,6 +1068,7 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     name: (run.execution_mode === "single" && node.route?.model && options.modelName?.(node.route.model)) || chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
     ...(node.route?.model ? { reader: modelReader(node.route.model, options.modelName) } : {}),
     ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
+    ...(node.receipt?.finished_at_ms ? { finishedAtMs: node.receipt.finished_at_ms } : {}),
     ...(node.receipt?.thread_id && node.route?.harness_id?.startsWith("ao:") && node.state !== "running" && node.state !== "reserved"
       ? { hasWork: true } : {}),
   };
@@ -1514,13 +1522,19 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
       ? steps.find((step) => step.role === "planner" && step.state === "finished" && step.text)
       : [...steps].reverse().find((step) => step.role === "reviewer" && step.state === "finished" && step.text);
     const starts = steps.map((step) => step.startedAtMs).filter((value): value is number => Boolean(value));
+    const status = chatRunStatus(run);
+    const ends = steps.map((step) => step.finishedAtMs).filter((value): value is number => Boolean(value));
+    const cpaModels = [...new Set(run.nodes.map((node) => node.route?.model ?? "").filter((model) => model.startsWith("cpa/")))];
     turns.push({
       key: run.id, runId: run.id,
       ...(said[index] ? { user: said[index], messageIndex: index } : {}),
       steps: closing ? steps.filter((step) => step !== closing) : steps,
       ...(closing ? { final: closing } : {}),
-      status: chatRunStatus(run), solo: Boolean(run.solo),
+      status, solo: Boolean(run.solo),
       ...(starts.length ? { startedAtMs: Math.min(...starts) } : {}),
+      // A run still working (or queued for more) has not ended, whatever its finished cards say.
+      ...(ends.length && !["running", "queued", "scheduled"].includes(status) ? { endedAtMs: Math.max(...ends) } : {}),
+      ...(cpaModels.length ? { cpaModels } : {}),
     });
   }
   for (let index = messageIndex; index < said.length; index += 1) {

@@ -36,7 +36,7 @@ const pluginID = "cline-pass-switcher"
 const apiPrefix = "/v0/management/" + pluginID
 const resourcePrefix = "/v0/resource/plugins/" + pluginID
 
-var pluginVersion = "0.1.0-codingtools.7"
+var pluginVersion = "0.1.0-codingtools.10"
 var hostAvailable atomic.Bool
 
 type envelope struct {
@@ -64,9 +64,19 @@ func errorEnvelope(code, msg string) []byte { return upstreamErrorEnvelope(code,
 // no longer serves with 502 {"error":"model not found"}: as a 5xx, Claude Code retried it for about
 // four minutes (seen 2026-10-22 on glm-5.2, kimi-k2.6, kimi-k2.7-code, mimo-v2.5, mimo-v2.5-pro), so a
 // chat on one looked stuck launching. It is a 404, which no client retries.
+//
+// A spent ClinePass window comes back the same way, as 502 {"error":"Error 429: You have reached
+// your weekly Clinepass limit..."}. As a 5xx, Claude Code retried each turn ten times, the whole
+// context through CPA each time, and the switcher tried every key each time (seen 2026-10-28: 910
+// such errors in one chat, CPA at two cores). As a 429, CPA puts the model on its quota cooldown
+// and answers the retries itself until the window opens.
 func upstreamStatus(status int, body []byte) int {
-	if status >= 500 && bytes.Contains(bytes.ToLower(body), []byte("model not found")) {
+	lower := bytes.ToLower(body)
+	if status >= 500 && bytes.Contains(lower, []byte("model not found")) {
 		return http.StatusNotFound
+	}
+	if status >= 500 && bytes.Contains(lower, []byte("error 429")) {
+		return http.StatusTooManyRequests
 	}
 	return status
 }

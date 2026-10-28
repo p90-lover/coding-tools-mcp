@@ -973,14 +973,16 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   ];
   const turns = { old: [{ state: "completed", completedAt: ago(90) }], recent: [{ state: "completed", completedAt: ago(10) }],
     typed: [{ state: "completed", completedAt: ago(90) }], warm: [] };
-  const calls = [];
-  let resumeOk = true, exitOk = true;
+  const calls = [], resumeWaits = [];
+  let resumeOk = true, exitOk = true, resumeTimesOut = false;
   let status = "exited";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise, agentTools: null,
     exitedReleased: new Set(), logger: null,
-    internalApi: async (method, endpoint) => {
+    internalApi: async (method, endpoint, body, options) => {
       calls.push([method, endpoint]);
+      if (endpoint.endsWith("/resume-agent")) resumeWaits.push(options?.timeoutMs);
+      if (endpoint.endsWith("/resume-agent") && resumeTimesOut) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
       if (endpoint === "/api/v1/sessions") return { sessions };
       const id = endpoint.split("/")[4];
       if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
@@ -1003,6 +1005,13 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
     "an agent that cannot be confirmed back is stopped, tried once more, then the message starts a fresh agent");
   const posts = calls.filter(([method]) => method === "POST").map(([, endpoint]) => endpoint.split("/").at(-1));
   assert.deepEqual(posts, ["resume-agent", "exit-agent", "resume-agent", "exit-agent"]);
+  assert.ok(resumeWaits.every(ms => ms === 90_000), "a resume waits 90 s, not the 180 s POST default");
+  status = "exited"; resumeOk = true; resumeTimesOut = true; calls.length = 0;
+  assert.equal(await upstream.continuable("old"), false,
+    "a resume that timed out is stopped and the message starts a fresh agent without a second 90 s wait");
+  assert.deepEqual(calls.filter(([method]) => method === "POST").map(([, endpoint]) => endpoint.split("/").at(-1)),
+    ["resume-agent", "exit-agent"]);
+  resumeTimesOut = false; resumeOk = false;
   exitOk = false;
   await assert.rejects(upstream.continuable("old"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED",
     "one that cannot be stopped either may still come back, so no second agent is started beside it");
@@ -1487,6 +1496,30 @@ test("a finished turn's work is read back from AO, paging back until it reaches 
   assert.deepEqual(items.map(item => item.id), ["3", "4", "5"], "only this turn's items, oldest first, across three pages");
   assert.equal(requests.filter(endpoint => endpoint.includes("beforeSequence")).length, 2, "it stops once a page reaches the turn before");
   assert.equal((await upstream.timeline("s", "")).length, 0, "no turn, nothing to read");
+});
+
+test("finished turns opened together are read back a few at a time, and a turn asked twice is read once", async () => {
+  // Seen live on 0.8.29: opening a chat read back every finished card at once, each paging through
+  // AO, and the burst filled the headless service's 16 request slots ("admission is full").
+  let inFlight = 0, most = 0;
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      asked.push(endpoint);
+      inFlight += 1; most = Math.max(most, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      inFlight -= 1;
+      const session = /sessions\/([^/]+)\//.exec(endpoint)[1];
+      return { turns: [], messages: [], hasMoreBefore: false, oldestSequence: 1,
+        activities: [{ id: `${session}-1`, turnId: "t", sequence: 1, activityKind: "reasoning", status: "completed", detail: { text: "done" } }] };
+    },
+  });
+  const sessions = Array.from({ length: 20 }, (_, index) => `s${index}`);
+  const reads = await Promise.all([...sessions, "s0"].map(id => upstream.timeline(id, "t")));
+  assert.ok(most <= 3, `at most three reads at once (saw ${most})`);
+  assert.deepEqual(reads.map(items => items[0]?.id), [...sessions, "s0"].map(id => `${id}-1`), "every turn is read back");
+  assert.equal(asked.filter(endpoint => endpoint.includes("/sessions/s0/")).length, 1, "the same turn asked twice shares one read");
+  assert.equal((await upstream.timeline("s0", "t"))[0].id, "s0-1", "a later ask reads it again");
 });
 
 test("a long finished turn keeps its tool calls when a page is over AO's handler limit, past six pages", async () => {

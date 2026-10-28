@@ -80,7 +80,79 @@
   outline-offset: 2px;
 }
 
+/* ProxyBridge Nova: status, then its proxies, rules, applications, connections, log and Decodo. */
+.nova-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.nova-facts .full-row { grid-column: 1 / -1; }
+.nova-exe { margin-top: 4px; }
+.nova-exe small { display: block; }
+
+.nova-panel {
+  box-sizing: border-box;
+  margin: 0 auto 18px;
+  max-width: 1280px;
+  padding: 0 20px 20px;
+}
+
+.nova-tabs {
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 -20px 16px;
+  padding: 0 12px;
+}
+
+.nova-tab {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  padding: 0 12px;
+}
+
+.nova-tab.is-selected { border-bottom-color: var(--accent); color: var(--text-primary); font-weight: 600; }
+.nova-section h3 { font-size: 14px; margin: 20px 0 10px; }
+
+.nova-table { border-collapse: collapse; font-size: 13px; width: 100%; }
+.nova-table th {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0 10px 8px 0;
+  text-align: left;
+}
+.nova-table td {
+  border-top: 1px solid var(--border-subtle);
+  overflow-wrap: anywhere;
+  padding: 8px 10px 8px 0;
+  vertical-align: middle;
+}
+.nova-table td small { color: var(--text-secondary); }
+.nova-table select { max-width: 260px; }
+.nova-programs { color: var(--text-secondary); display: block; font-size: 12px; }
+.nova-row-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.nova-row-actions button { min-height: 32px; }
+.nova-section textarea { font: inherit; resize: vertical; }
+
+.nova-log {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  list-style: none;
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  padding: 0;
+}
+.nova-log li { padding: 2px 0; white-space: pre-wrap; }
+.nova-log li.is-error { color: var(--danger, #c2410c); }
+.nova-log time { color: var(--text-secondary); }
+
 @media (max-width: 720px) {
   .proxy-route-list { grid-template-columns: 1fr; gap: 12px; }
   .proxy-route-overview { padding: 16px; }
+  .nova-panel { padding: 0 16px 16px; }
+  .nova-tabs { margin: 0 -16px 12px; }
+  .nova-table { display: block; overflow-x: auto; }
 }

@@ -22,7 +22,7 @@ import { createPortal } from "react-dom";
 // again to the pane you are in. Drop it over another pane's box and it lands there.
 
 import type { PetMood } from "./ao-chat";
-import { petCall, petStage, type PetArrival } from "./chat-pet-stage";
+import { petCall, petFlight, petStage, type PetArrival } from "./chat-pet-stage";
 import { advancePetWalk, petToolSide } from "./chat-pet-motion";
 import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, ROWS, pickOne, useClawdPlayer,
   type AnimationName, type Arms as ClawdArms, type Eyes, type Feet, type Frame } from "./Clawd";
@@ -1122,6 +1122,21 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   }, []);
 
   const shown: PetMood = mood === "done" && !cheering ? "idle" : mood;
+
+  // Off its box (carried, riding the pointer, leaping), where it is on the screen each frame: a
+  // native view it passes over (the chat's Preview) swaps in a still of its page, or it covered Clawd.
+  const airborne = Boolean(held || ride || leap);
+  useEffect(() => {
+    if (!airborne) return undefined;
+    let frame = 0;
+    const follow = () => {
+      const rect = box.current?.getBoundingClientRect();
+      if (rect) petFlight.set({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
+      frame = requestAnimationFrame(follow);
+    };
+    follow();
+    return () => { cancelAnimationFrame(frame); petFlight.set(null); };
+  }, [airborne]);
 
   /** Picked up and moved: it follows the pointer anywhere on the screen, held by its middle. */
   const dragMove = (clientX: number, clientY: number) => {

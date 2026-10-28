@@ -16,6 +16,7 @@ const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
+const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -197,6 +198,58 @@ async function allocatePort() {
   const port = reservation.address().port;
   await new Promise((resolve) => reservation.close(resolve));
   return port;
+}
+
+/** A Windows command line split into its arguments (double quotes group, as the C runtime reads it). */
+function commandLineArgs(line) {
+  const args = [];
+  let current = "", quoted = false, started = false;
+  for (const character of String(line ?? "")) {
+    if (character === "\"") { quoted = !quoted; started = true; }
+    else if (!quoted && /\s/.test(character)) { if (started) args.push(current); current = ""; started = false; }
+    else { current += character; started = true; }
+  }
+  if (started) args.push(current);
+  return args;
+}
+
+/**
+ * The session a process serves when it is a chat host of this data root (`ao-daemon chat-host
+ * <session> <dataRoot> ...`), else null. Only these are ended at quit: the data root in the
+ * command line keeps another install's or a development AO's hosts out.
+ */
+function chatHostSession(commandLine, dataRoot) {
+  const [, mode, session, root] = commandLineArgs(commandLine);
+  if (mode !== "chat-host" || !session || !root) return null;
+  const same = (left, right) => {
+    const plain = (value) => path.resolve(value).toLowerCase();
+    if (plain(left) === plain(right)) return true;
+    try { return plain(fs.realpathSync.native(left)) === plain(fs.realpathSync.native(right)); } catch { return false; }
+  };
+  return same(root, dataRoot) ? session : null;
+}
+
+/**
+ * AO's chat hosts for a data root, as { pid, session }. Windows only (elsewhere none). One
+ * PowerShell call, run as a child process the main thread does not wait on.
+ */
+function chatHostProcesses(dataRoot) {
+  if (process.platform !== "win32") return Promise.resolve([]);
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  const powershell = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const script = "@(Get-CimInstance Win32_Process -Filter \"Name='ao-daemon.exe'\" | ForEach-Object { "
+    + "[pscustomobject]@{ pid = [int]$_.ProcessId; commandLine = [string]$_.CommandLine } }) | ConvertTo-Json -Compress";
+  return new Promise((resolve) => {
+    execFile(powershell, ["-NoProfile", "-NonInteractive", "-Command", script],
+      { encoding: "utf8", windowsHide: true, timeout: 15_000, maxBuffer: 8 << 20 }, (error, stdout) => {
+        let rows = [];
+        try { if (!error && String(stdout).trim()) rows = [].concat(JSON.parse(String(stdout).trim())); } catch {}
+        resolve(rows.flatMap((row) => {
+          const session = chatHostSession(row?.commandLine, dataRoot);
+          return session && Number.isInteger(row.pid) && row.pid > 0 ? [{ pid: row.pid, session }] : [];
+        }));
+      });
+  });
 }
 
 function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, cpaQuota = null, cpaUsage = null, logger = console,
@@ -420,6 +473,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     }));
     return answers.filter(Boolean).length;
   }
+  /**
+   * Ends every chat host of this data root, each with its agent (the ACP runtime and the model
+   * CLI). Hosts outlive AO by design, for a restart to reattach, so quitting the app left every
+   * chat's agent running: three from earlier runs, the oldest four days old, on 2026-10-28.
+   */
+  async function endChatHosts() {
+    const hosts = (await chatHostProcesses(dataRoot)).filter(host => host.pid !== child?.pid);
+    const outcomes = await Promise.allSettled(hosts.map(host =>
+      terminateOwnedProcessTreeAsync({ pid: host.pid, exitCode: null, signalCode: null })));
+    const ended = outcomes.filter(outcome => outcome.status === "fulfilled").length;
+    if (hosts.length) logger?.info?.("ao.chat_hosts_ended", { ended, failed: hosts.length - ended });
+    return ended;
+  }
   // continuable() checks in flight, by session (see there).
   const continuing = new Map();
   // "exited" chat sessions already exited again this run to stop a leftover host (idleChatSessions).
@@ -618,6 +684,33 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     }
     // An earlier turn has ended; a message AO left flagged as streaming is its final text.
     return turnTimeline(merged, turnId, true);
+  }
+  // Finished turns are read back PAST_TURN_READS at a time, and a turn asked again while its read is
+  // in flight shares it. Opening a chat opens every finished card's work at once, and each read
+  // pages back through AO one request after another: a burst of them took all 16 of the headless
+  // service's request slots, and every chat poll in that moment failed "HEADLESS_CAPACITY: request
+  // admission is full" (seen live on 0.8.29, 12 failures in two seconds).
+  const PAST_TURN_READS = 3;
+  const pastTurnReads = new Map(); // `${id}|${turnId}` -> read in flight
+  const pastTurnWaiting = [];
+  let pastTurnActive = 0;
+  const pastTurnSlot = () => {
+    if (pastTurnActive < PAST_TURN_READS) { pastTurnActive += 1; return Promise.resolve(); }
+    return new Promise(resolve => pastTurnWaiting.push(resolve));
+  };
+  // A freed slot passes straight to the next read waiting, oldest first.
+  const releasePastTurnSlot = () => {
+    const next = pastTurnWaiting.shift();
+    if (next) next(); else pastTurnActive -= 1;
+  };
+  function queuedPastTurnTimeline(id, turnId) {
+    const key = `${id}|${turnId}`;
+    const known = pastTurnReads.get(key);
+    if (known) return known;
+    const read = pastTurnSlot().then(() => pastTurnTimeline(id, turnId).finally(releasePastTurnSlot));
+    pastTurnReads.set(key, read);
+    read.finally(() => pastTurnReads.delete(key)).catch(() => undefined);
+    return read;
   }
   // claude-agent-acp reports every tool call, its own Read/Grep/PowerShell included, as AO's
   // "mcp_tool"; the ACP tool kind says what it did. A real MCP server's tool is named mcp__<server>__.
@@ -1307,13 +1400,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           const servers = [...(renewed?.servers ?? [])];
           servers.push(...userServers(session.harness, servers));
           let body = servers.length ? { mcpServers: servers } : {};
+          // AO answers only once the agent is up. On a busy disk that took 150-180 s (seen live
+          // 2026-10-27), and two attempts at the 180 s POST default kept a message "starting" for
+          // up to 6 min; past 90 s a fresh agent is quicker.
+          const resumeWait = { timeoutMs: 90_000 };
           try {
             let resumed;
-            try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body); }
+            try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body, resumeWait); }
             catch (error) {
               // Only the known old-schema rejection may retry without the optional servers.
               if (!body.mcpServers || !/unknown field [\\"']?mcpServers/.test(String(error?.message))) throw error;
-              resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, {});
+              resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, {}, resumeWait);
             }
             if (resumed?.ok !== true) throw uncertain();
           } catch (error) {
@@ -1353,6 +1450,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             // One that could not be stopped may still come back: a second agent beside it would
             // split the chat, so the message fails as before.
             if (!stopped) throw error;
+            // A resume that ran out of time would only run out again: start the fresh agent now.
+            if (error.cause?.name === "TimeoutError") return refuse("restore_timed_out", null, { attempts: attempt });
             if (attempt >= 2) return refuse("restore_unconfirmed_stopped", null, { attempts: attempt });
             session = await read();
             if (invalid(session)) return refuse(session ? "invalid_after_stop" : "not_found_after_stop", session);
@@ -1541,7 +1640,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     /** A finished turn's reasoning, tool calls and messages (the chat's "Worked" row, opened). */
     async timeline(id, turnId) {
       if (typeof turnId !== "string" || !turnId) return [];
-      return pastTurnTimeline(id, turnId);
+      return queuedPastTurnTimeline(id, turnId);
     },
     async interrupt(id) {
       agentTools?.cancelSessionCalls?.(id);
@@ -2110,11 +2209,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!cpaUsage) return { ok: true, available: false, reason: "CPA is not set up in this app" };
       return cpaUsage.read({ range: typeof args.range === "string" ? args.range : undefined });
     }
-    // The line under the chat box: the latest turn's model requests through CPA (cpa-usage.cjs).
+    // The line under the chat box (the latest turn) and each ended turn's foot (`to`: when it
+    // ended): its model requests through CPA (cpa-usage.cjs).
     if (operation === "chat_turn_stats") {
       if (!cpaUsage?.turnStats) return { ok: true, available: false };
       return cpaUsage.turnStats({ model: typeof args.model === "string" ? args.model : "",
-        models: Array.isArray(args.models) ? args.models.filter((value) => typeof value === "string").slice(0, 4) : [], from: Number(args.from) });
+        models: Array.isArray(args.models) ? args.models.filter((value) => typeof value === "string").slice(0, 4) : [], from: Number(args.from),
+        ...(args.to === undefined ? {} : { to: Number(args.to) }) });
     }
     // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
     // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).
@@ -2156,7 +2257,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           if (!bounds || !["x", "y", "width", "height"].every((key) => Number.isFinite(bounds[key]))) throw new Error("bounds must be finite numbers");
           return { ok: agentTools.previewShow(args.sessionId, bounds, Number(args.zoom) || 1) };
         }
-        case "chat_preview_hide": agentTools.previewHide(); return { ok: true };
+        case "chat_preview_hide": return { ok: true, hidden: agentTools.previewHide(typeof args.sessionId === "string" ? args.sessionId : undefined) !== false };
+        // A still of the shown page, drawn in its place while Clawd passes over the pane.
+        case "chat_preview_snapshot": return { ok: true, url: await agentTools.previewSnapshot?.(args.sessionId) ?? null };
         case "chat_preview_navigate": return agentTools.previewNavigate(args.sessionId, {
           ...(typeof args.url === "string" ? { url: args.url } : {}), ...(typeof args.action === "string" ? { action: args.action } : {}),
         });
@@ -2192,7 +2295,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return fs.existsSync(path.join(folder, process.platform === "win32" ? "ao.cmd" : "ao")) ? folder : null;
   }
 
-  return { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, aoShimFolder };
+  return { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder };
 }
 
 /**
@@ -2238,4 +2341,4 @@ function steadyContext(readings, id, usage, compactedAt) {
   return steady;
 }
 
-module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS, dropInlineBlobs };
+module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS, dropInlineBlobs, chatHostSession, chatHostProcesses };

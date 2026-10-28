@@ -15,8 +15,6 @@ on:
     paths:
       - .github/workflows/electron-windows-release.yml
       - desktop-electron/package.json
-      - desktop-electron/electron/agent-orchestrator-workflow.cjs
-      - desktop-electron/tests/agent-orchestrator-workflow.test.cjs
   push:
     branches: [main]
     paths:

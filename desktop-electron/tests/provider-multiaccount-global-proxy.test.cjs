@@ -138,6 +138,7 @@ test("the global proxy login handler leaves owned Antigravity authentication to 
     "./provider-execution-router.cjs": {},
     "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test" }) },
     "./proxy-gateway-retire.cjs": { retireProxyGateway: async () => ({ retired: false }) },
+    "./proxybridge-nova.cjs": { createNovaManager: () => ({ start: async () => {}, stopPolling() {} }) },
   };
   require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/provider-bootstrap.cjs"), "utf8"), {
     module: loaded, require: name => dependencies[name], console,
@@ -194,6 +195,7 @@ test("provider and proxy IPC answer only a Coding Tools window's own page; netwo
     "./provider-execution-router.cjs": { createProviderExecutionPlan: () => ({}) },
     "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test" }) },
     "./proxy-gateway-retire.cjs": { retireProxyGateway: async () => ({ retired: false }) },
+    "./proxybridge-nova.cjs": { createNovaManager: () => ({ start: async () => {}, stopPolling() {}, state: () => ({ running: false }), routing: async (action) => ({ action }) }) },
   };
   require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/provider-bootstrap.cjs"), "utf8"), {
     module: loaded, require: name => dependencies[name], console,
@@ -222,4 +224,9 @@ test("provider and proxy IPC answer only a Coding Tools window's own page; netwo
   await call("launcher:provider-account-save", own, {});
   await call("launcher:provider-snapshot", own);
   assert.equal(routed.length, 1, "account saves and reads still work while a login holds the focus");
+  // Nova's routing changes the whole machine's traffic: the same focus rule as the routes.
+  await assert.rejects(call("launcher:nova-routing", own, "start"), /focused Coding Tools window/);
+  assert.deepEqual(await call("launcher:nova-state", own), { running: false }, "reading Nova's state needs only the window's page");
+  focused = true;
+  assert.deepEqual(await call("launcher:nova-routing", own, "start"), { action: "start" });
 });

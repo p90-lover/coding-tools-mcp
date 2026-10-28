@@ -257,6 +257,8 @@ function autoReviewSignInScript(marker) {
  * - It adds a Cline Pass card under the page header with each key's 5-hour, weekly and monthly
  *   windows, read from the Cline switcher with the marker (the header hook swaps in the key), and
  *   kept the same way.
+ * - On the Auth Files page (#/auth-files) it puts the same Cline Pass windows inside the switcher's
+ *   card, and each Codex account's credit balance on its card's plan line, paced and kept likewise.
  * "running" when the page already has it, "unseeded" before the panel session is seeded.
  */
 function quotaPageScript(marker) {
@@ -373,6 +375,134 @@ function quotaPageScript(marker) {
         render();
       }
     }
+    // Auth Files page (#/auth-files): CPA's own cards show each OAuth account's quota, but not the
+    // Cline Pass switcher's windows, nor a Codex account's credit balance (wham/usage has it under
+    // \`credits\`). Both are added inside the cards with the page's own quota classes, and kept and
+    // paced like the quota page's answers.
+    const CREDITS_SAVED = 'coding-tools-quota-credits';
+    const onAuthFiles = () => location.hash.split('?')[0] === '#/auth-files';
+    let credits = read(CREDITS_SAVED) || {};
+    let creditsTriedAt = Math.max(0, ...Object.values(credits).map((entry) => Number(entry?.at) || 0));
+    let creditsLoading = false;
+    const authorized = (extra) => ({ Authorization: 'Bearer ' + marker, ...extra });
+    async function loadCredits() {
+      if (creditsLoading) return;
+      creditsLoading = true;
+      try {
+        const listed = await fetch('/v0/management/auth-files', { headers: authorized(), cache: 'no-store' });
+        if (!listed.ok) return;
+        const files = ((await listed.json())?.files || [])
+          .filter((file) => (file.type || file.provider) === 'codex' && file.disabled !== true && (file.auth_index ?? file.authIndex));
+        const next = {};
+        for (const file of files) {
+          const index = file.auth_index ?? file.authIndex;
+          const name = String(file.name || '').replace(/[.]json$/, '');
+          try {
+            const response = await fetch('/v0/management/api-call', { method: 'POST', headers: authorized({ 'content-type': 'application/json' }),
+              body: JSON.stringify({ authIndex: index, method: 'GET', url: 'https://chatgpt.com/backend-api/wham/usage', header: { Authorization: 'Bearer $TOKEN$' } }) });
+            const reply = response.ok ? await response.json() : null;
+            const upstream = Number(reply?.status_code) || 0;
+            if (upstream === 429 || response.status === 429) noteLimited();
+            const body = typeof reply?.body === 'string' ? JSON.parse(reply.body) : reply?.body;
+            // An account that fails keeps its last good balance on screen.
+            if (upstream >= 200 && upstream < 300 && body?.credits) next[index] = { at: Date.now(), name, ...body.credits };
+            else if (credits[index]) next[index] = credits[index];
+          } catch {
+            if (credits[index]) next[index] = credits[index];
+          }
+        }
+        credits = next;
+        write(CREDITS_SAVED, credits);
+      } catch {
+        // offline or CPA restarting: keep what is shown
+      } finally {
+        creditsLoading = false;
+        creditsTriedAt = Date.now();
+      }
+    }
+    // The page's CSS-module class for one of AuthFileQuota's names (hashed per build), or '' when no
+    // card on the page has one yet.
+    function quotaClass(name) {
+      const prefix = 'AuthFileQuota-module__' + name + '___';
+      const node = document.querySelector('[class*="' + prefix + '"]');
+      return node ? String(node.className).split(' ').find((value) => value.startsWith(prefix)) || '' : '';
+    }
+    function quotaRow(limit) {
+      if (!quotaClass('quotaRow')) return windowRow(limit);
+      const left = limit.percentUsed === null ? null : Math.round(100 - limit.percentUsed);
+      const row = el('div');
+      row.className = quotaClass('quotaRow');
+      const head = el('div');
+      head.className = quotaClass('quotaRowHeader');
+      const label = el('span', '', (LABELS[limit.type] || limit.type) + ' limit');
+      label.className = quotaClass('quotaModel');
+      const meta = el('div', '', (left === null ? 'unknown' : left + '% left') + (limit.resetsAt ? ' · ' + until(limit.resetsAt) : ''));
+      meta.className = quotaClass('quotaMeta');
+      head.append(label, meta);
+      const bar = el('div');
+      bar.className = quotaClass('quotaBar');
+      const level = left === null ? '' : left >= 50 ? 'quotaBarFillHigh' : left >= 20 ? 'quotaBarFillMedium' : 'quotaBarFillLow';
+      const fill = el('div', 'width:' + (left === null ? 0 : Math.max(0, Math.min(100, left))) + '%' + (level && !quotaClass(level) ? ';background:var(--quota-medium-color, var(--amber-color))' : ''));
+      fill.className = [quotaClass('quotaBarFill'), level && quotaClass(level)].filter(Boolean).join(' ');
+      bar.append(fill);
+      row.append(head, bar);
+      return row;
+    }
+    let clineBlock = null;
+    let clineBlockFor = '';
+    function clineAuthBlock() {
+      const accounts = (usage && Array.isArray(usage.accounts) ? usage.accounts : []).filter((account) => account.enabled);
+      if (!accounts.length) return null;
+      const stamp = usageAt + ':' + Math.floor(Date.now() / 60e3) + ':' + Boolean(quotaClass('quotaRow'));
+      if (clineBlock && clineBlockFor === stamp) return clineBlock;
+      const section = el('div', quotaClass('quotaSection') ? '' : 'display:flex;flex-direction:column;gap:10px;margin:0 16px 12px');
+      section.className = quotaClass('quotaSection');
+      section.dataset.codingTools = 'cline-auth-quota';
+      for (const account of accounts) {
+        if (accounts.length > 1) section.append(el('div', 'color:var(--text-primary);font-size:12px;font-weight:600', account.name));
+        if (account.error) section.append(el('div', 'color:var(--viz-failure);font-size:11.5px', account.error));
+        else if (!account.limits.length) section.append(el('div', 'color:var(--text-tertiary);font-size:11.5px', 'No usage windows on this key'));
+        else section.append(...account.limits.map(quotaRow));
+      }
+      section.append(el('div', 'color:var(--text-tertiary);font-size:11px', ago(usageAt)));
+      clineBlock?.remove();
+      clineBlock = section;
+      clineBlockFor = stamp;
+      return section;
+    }
+    function creditsItem(entry) {
+      const item = el('span');
+      item.className = quotaClass('codexPlanItem');
+      item.dataset.codingTools = 'codex-credits';
+      item.dataset.at = String(entry.at);
+      const label = el('span', '', 'Credits');
+      label.className = quotaClass('codexPlanLabel');
+      const balance = Number(entry.balance);
+      const value = el('span', '', entry.unlimited ? 'Unlimited' : !entry.has_credits ? 'None'
+        : Number.isFinite(balance) ? Math.floor(balance).toLocaleString('en-US') : String(entry.balance));
+      value.className = quotaClass('codexPlanValue');
+      item.append(label, value);
+      return item;
+    }
+    // React redraws the cards and drops nodes it does not own, so each tick puts them back.
+    function decorateAuthFiles() {
+      const cards = [...document.querySelectorAll('article[class*="AuthFileCard-module__card"]')];
+      const clineCard = cards.find((card) => (card.textContent || '').includes('cline-pass-switcher'));
+      const block = clineCard && clineAuthBlock();
+      if (block) {
+        const footer = clineCard.querySelector('footer');
+        if (block.parentElement !== clineCard || block.nextElementSibling !== footer) clineCard.insertBefore(block, footer);
+      }
+      for (const entry of Object.values(credits)) {
+        const card = entry?.name && cards.find((candidate) => (candidate.textContent || '').includes(entry.name));
+        const plan = card?.querySelector('[class*="AuthFileQuota-module__codexPlan___"]');
+        if (!plan) continue;
+        const shown = plan.querySelector('[data-coding-tools="codex-credits"]');
+        if (shown?.dataset.at === String(entry.at) && shown.parentElement === plan) continue;
+        shown?.remove();
+        plan.append(creditsItem(entry));
+      }
+    }
     // CPA's quota page asks each account through POST /v0/management/api-call ({authIndex, method,
     // url, header, data}); CPA answers 200 with the upstream's status_code and body. On this page the
     // script answers those requests itself: from the saved answer while it is fresh, else from the
@@ -439,6 +569,11 @@ function quotaPageScript(marker) {
       };
     }
     function tick() {
+      if (onAuthFiles() && shown()) {
+        if (Date.now() - usageTriedAt > refreshEvery()) loadUsage(false);
+        if (Date.now() - creditsTriedAt > refreshEvery()) loadCredits();
+        decorateAuthFiles();
+      }
       if (!onQuotaPage()) { refreshedThisVisit = false; place(); return; }
       if (!shown()) return;
       const button = refreshButton();

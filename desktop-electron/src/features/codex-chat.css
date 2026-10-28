@@ -400,7 +400,11 @@ a.cx-details-row, p.cx-details-row { box-sizing: border-box; margin: 0; text-dec
 
 /* Never sideways: code, diffs and tables scroll in their own boxes, and a split pane narrower than a
    long line otherwise slid its whole column out of view. */
-.cx-scroll { position: relative; flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+.cx-scroll { position: relative; flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto;
+  /* Its own layout root: a ticking timer or a composer update elsewhere in the window relaid out every
+     transcript (~35k elements a pane), 157-193 ms a pass; contained, a pass took 1 ms (measured live).
+     Overlays drawn from inside a transcript must portal to <body>, as ImageLightbox does. */
+  contain: strict; }
 .cx-column { display: flex; flex-direction: column; gap: 18px; width: 100%; max-width: 780px; margin: 0 auto; padding: 16px 24px 32px; }
 .cx-empty { display: grid; gap: 6px; margin: 18vh auto 0; text-align: center; }
 .cx-empty h1 { margin: 0; font-size: 26px; font-weight: 400; letter-spacing: -0.01em; }
@@ -781,6 +785,13 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   background: var(--ao-green, #2e9d5b); content: ""; animation: cx-pulse 1.4s ease-in-out infinite; }
 @keyframes cx-turn-stats-in { from { opacity: 0; transform: translateY(-3px); } }
 @media (prefers-reduced-motion: reduce) { .cx-turn-stats, .cx-turn-stats.is-running span:first-child::before { animation: none; } }
+/* An ended turn's foot (TurnFoot): how long it worked and its own requests, quiet under its answer. */
+.cx-turn-foot { display: flex; flex-wrap: wrap; margin: 6px 0 0; padding: 0; color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cx-turn-foot.is-empty { height: 1px; margin: 0; }
+.cx-turn-foot span { padding: 0 8px; white-space: nowrap; transition: color .15s ease; }
+.cx-turn-foot span:first-child { padding-left: 0; }
+.cx-turn-foot span + span { border-left: 1px solid color-mix(in srgb, var(--ao-muted) 35%, transparent); }
+.cx-turn-foot span:hover { color: var(--color-text-primary); }
 .cx-composer-bar { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .cx-composer-bar .ao-composer-controls { display: flex; flex: 1 1 auto; flex-wrap: nowrap; align-items: center; gap: 2px; min-width: 0; }
 /* Codex's bottom row is plain text: permission and Single|Team on the left, the model (effort dimmed)
@@ -1001,7 +1012,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-preview-errors { flex: 0 0 auto; padding: 2px 8px; border-radius: 10px; background: color-mix(in srgb, var(--ao-red, #c0392b) 14%, transparent);
   color: var(--ao-red, #c0392b); font-size: 11px; }
 /* The page itself is a native view the app draws over this slot. */
-.cx-preview-slot { flex: 1 1 auto; min-height: 0; margin: 0 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; }
+.cx-preview-slot { flex: 1 1 auto; min-height: 0; margin: 0 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; overflow: hidden; }
+/* The page's still, in the native view's place while Clawd passes over the pane (PreviewPane). */
+.cx-preview-still { display: block; width: 100%; height: 100%; object-fit: cover; object-position: left top; pointer-events: none; user-select: none; }
 .cx-terminal { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; gap: 6px; padding-bottom: 10px; }
 /* What runs now leads; the agent's finished tool calls fold away below it (they are in the chat). */
 .cx-terminal-bar { display: flex; align-items: center; gap: 8px; padding: 2px 12px 0; }

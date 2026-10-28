@@ -167,8 +167,11 @@ function createManagedExternalServicesController({
       let configured = false;
       try {
         const config = fs.readFileSync(path.join(dataRoot, "state", "cpa", "config.yaml"), "utf8");
-        const line = config.match(/^proxy-url:\s*(.+)$/m);
-        const written = line ? JSON.parse(line[1]) : "";
+        // CPA 8 saves the route grouped (requests.proxy-url); a config it hasn't rewritten yet has
+        // it at the top level. Matching only the top level read every running CPA as unrouted.
+        const yaml = require("js-yaml");
+        const parsed = yaml.load(config) ?? {};
+        const written = parsed.requests?.["proxy-url"] ?? parsed["proxy-url"] ?? "";
         configured = service.status === "ready" && written === route.url;
       } catch {}
       return { profileId: route.profileId, configMatches: configured, error: null };
