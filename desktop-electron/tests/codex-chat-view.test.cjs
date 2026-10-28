@@ -168,9 +168,32 @@ test("the reviewer's answer closes the turn in full, with Retry on the latest se
   const answer = walk(view).find((element) => element.props?.className === "cx-answer has-verdict");
   assert.ok(answer);
   assert.equal(walk(answer).find((element) => element.type === "Markdown").props.text, "APPROVED — **done**");
-  assert.equal(text(walk(view).find((element) => element.props?.className === "cx-work-head")), "Worked · 1 step");
+  assert.equal(text(walk(view).find((element) => element.props?.className === "cx-work-head")), "Worked · 2 steps");
   walk(answer).find((element) => element.props?.["aria-label"] === "Retry this mission").props.onClick();
   assert.deepEqual(calls, [["restart", "r1"]]);
+});
+
+// Seen 2026-10-28: once a mission ended, the reviewer's row (its thinking and tool calls) left
+// "Worked" when its reply became the answer, instead of folding with the other cards' rows.
+test("the agent whose reply closes the turn keeps its row under Worked, without repeating the answer", () => {
+  const { props } = base({
+    selectedTaskId: "t",
+    runs: [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "plan" } }),
+      node("w", "worker", "finished", { receipt: { answer: "built it" } }),
+      node("rev", "reviewer", "finished", { route: { harness_id: "ao:codex" }, receipt: { answer: "APPROVED — shipped", verdict: "APPROVED", thread_id: "th" } })])],
+  });
+  const chatView = mount(props);
+  let view = chatView.render();
+  const head = walk(view).find((element) => element.props?.className === "cx-work-head");
+  assert.equal(text(head), "Worked · 3 steps");
+  head.props.onClick();
+  view = chatView.render();
+  const work = walk(view).find((element) => element.props?.className === "cx-work");
+  const rows = walk(work).filter((element) => element.props?.className === "cx-step-name").map(text);
+  assert.equal(rows.length, 3, "planner, worker and the reviewer that answered");
+  const reviewer = walk(work).filter((element) => element.props?.className === "cx-step-head").at(-1);
+  assert.ok(!reviewer.props.disabled, "its work opens from its row");
+  assert.ok(!walk(work).some((element) => element.type === "Markdown" && /shipped/.test(element.props.text)), "the answer shows once, below");
 });
 
 test("slash commands open a menu and run on Enter; attachments are sent with the message", async () => {

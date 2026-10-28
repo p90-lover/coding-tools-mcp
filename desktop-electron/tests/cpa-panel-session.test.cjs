@@ -349,15 +349,28 @@ class FakeNode {
   remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; }
   after(node) { node.remove(); this.parent.children.splice(this.parent.children.indexOf(this) + 1, 0, node); node.parent = this.parent; }
   get nextElementSibling() { return this.parent?.children[this.parent.children.indexOf(this) + 1] ?? null; }
-  descendants() { return this.children.flatMap((child) => [child, ...child.descendants()]); }
-  querySelector(selector) {
-    const name = selector.match(/^\[class\*="(.+)"\]$/)[1];
-    return this.descendants().find((node) => node.className.includes(name)) ?? null;
+  get parentElement() { return this.parent; }
+  insertBefore(node, before) {
+    node.remove();
+    const at = before ? this.children.indexOf(before) : -1;
+    this.children.splice(at < 0 ? this.children.length : at, 0, node);
+    node.parent = this;
   }
+  descendants() { return this.children.flatMap((child) => [child, ...child.descendants()]); }
+  // Selectors the script uses: `tag`, `[class*="x"]`, `tag[class*="x"]` and `[data-coding-tools="x"]`.
+  matches(selector) {
+    const [, tag, kind, value] = selector.match(/^(\w*)(?:\[(class\*|data-coding-tools)="(.+)"\])?$/);
+    if (tag && this.tag !== tag) return false;
+    if (kind === "class*") return this.className.includes(value);
+    if (kind) return this.dataset.codingTools === value;
+    return true;
+  }
+  querySelectorAll(selector) { return this.descendants().filter((node) => node.matches(selector)); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
   click() { this.clicks += 1; }
 }
 
-function quotaPage({ hash = "#/quota", loaded = false, usage, usageStatus = 200, localStorage = storage() } = {}) {
+function quotaPage({ hash = "#/quota", loaded = false, usage, usageStatus = 200, localStorage = storage(), routes = {} } = {}) {
   const marker = `coding-tools-${"c".repeat(48)}`;
   const sessionStorage = storage();
   sessionStorage.setItem("coding-tools-cpa-session", marker);
@@ -399,6 +412,8 @@ function quotaPage({ hash = "#/quota", loaded = false, usage, usageStatus = 200,
     addEventListener: () => {},
     fetch: async (url, options) => {
       fetches.push({ url, authorization: options.headers.Authorization });
+      const route = routes[url.split("?")[0]];
+      if (route) return { ok: true, status: 200, json: async () => route(options) };
       return { ok: usageStatus === 200, status: usageStatus, json: async () => usage };
     },
   });
@@ -412,7 +427,7 @@ function quotaPage({ hash = "#/quota", loaded = false, usage, usageStatus = 200,
     return result;
   };
   return {
-    marker, header, button, clock, fetches, sessionStorage, localStorage, context, network, answer, ask,
+    marker, header, button, clock, fetches, sessionStorage, localStorage, context, network, answer, ask, page,
     run: () => vm.runInContext(quotaPageScript(marker), context),
     settle: () => new Promise((resolve) => setImmediate(resolve)),
     tick: () => ticks[0](),
@@ -430,6 +445,87 @@ const USAGE = {
     { name: "switched off", enabled: false, limits: [] },
   ],
 };
+
+// One of CPA's Auth Files cards: a header with the file's name, an optional Codex quota section, the
+// footer of actions.
+function authCard(name, { codex = false } = {}) {
+  const card = new FakeNode("article", "AuthFileCard-module__card___uGYSU AuthFileCard-module__cardEnter___sxjp9");
+  const head = new FakeNode("header", "AuthFileCard-module__head___v8x8N");
+  head.text = name;
+  const footer = new FakeNode("footer", "AuthFileCard-module__actions___Ab12c");
+  card.append(head);
+  let plan = null;
+  if (codex) {
+    const section = new FakeNode("div", "AuthFileQuota-module__quotaSection___B1NkU");
+    plan = new FakeNode("div", "AuthFileQuota-module__codexPlan___Pl4n1");
+    plan.append(new FakeNode("span", "AuthFileQuota-module__codexPlanItem___It3m1"));
+    section.append(plan, new FakeNode("div", "AuthFileQuota-module__quotaRow___Rw0q1"));
+    card.append(section);
+  }
+  card.append(footer);
+  return { card, footer, plan };
+}
+
+test("Auth Files cards get the Cline Pass windows and each Codex account's credit balance", async () => {
+  const calls = [];
+  const files = { files: [
+    { name: "codex-1-a@example.com-plus.json", type: "codex", auth_index: "c1" },
+    { name: "codex-2-off.json", type: "codex", auth_index: "c2", disabled: true },
+    { name: "cline-pass-switcher.json", type: "cline", auth_index: "k1" },
+  ] };
+  const credits = { has_credits: true, unlimited: false, balance: "47757.3601015000" };
+  const routes = {
+    "/v0/management/auth-files": () => files,
+    "/v0/management/api-call": (options) => {
+      calls.push(JSON.parse(options.body));
+      return { status_code: 200, header: {}, body: JSON.stringify({ plan_type: "plus", credits }) };
+    },
+  };
+  const q = quotaPage({ hash: "#/auth-files", usage: USAGE, routes });
+  const cline = authCard("cline-pass-switcher");
+  const codex = authCard("codex-1-a@example.com-plus", { codex: true });
+  q.page.append(cline.card, codex.card);
+  q.run();
+  for (let i = 0; i < 6; i++) await q.settle();
+  q.tick();
+
+  assert.deepEqual(calls.map((call) => [call.authIndex, call.method, call.url]), [["c1", "GET", "https://chatgpt.com/backend-api/wham/usage"]],
+    "one usage read per enabled Codex account, made through CPA with the account's own token");
+  const block = cline.footer.parentElement.children.at(-2);
+  assert.equal(block.dataset.codingTools, "cline-auth-quota", "the windows sit just above the card's actions");
+  assert.match(block.textContent, /5-hour limit[\s\S]*58% left · resets in 2h 30m[\s\S]*Weekly limit[\s\S]*10% left/);
+  assert.match(block.textContent, /spare key[\s\S]*Cline answered HTTP 401/);
+  assert.equal(block.descendants().find((node) => node.dataset.codingTools === undefined && node.className.startsWith("AuthFileQuota-module__quotaRow___"))?.className,
+    "AuthFileQuota-module__quotaRow___Rw0q1", "rows use the page's own quota classes");
+  const item = codex.plan.children.at(-1);
+  assert.equal(item.dataset.codingTools, "codex-credits");
+  assert.equal(item.className, "AuthFileQuota-module__codexPlanItem___It3m1");
+  assert.match(item.textContent, /Credits[\s\S]*47,757/);
+
+  // React drops both on a re-render; the next tick puts them back.
+  block.remove();
+  item.remove();
+  q.tick();
+  assert.equal(cline.card.children.at(-2), block);
+  assert.match(codex.plan.children.at(-1).textContent, /47,757/);
+
+  const reads = q.fetches.length;
+  q.clock.now += 60e3;
+  q.tick();
+  assert.equal(q.fetches.length, reads, "fresh for two minutes");
+  q.clock.now += 60e3 + 1;
+  q.tick();
+  for (let i = 0; i < 6; i++) await q.settle();
+  assert.ok(q.fetches.length > reads, "then read again");
+
+  // A restart shows the saved balance at once, before any read.
+  const again = quotaPage({ hash: "#/auth-files", usage: USAGE, routes, localStorage: q.localStorage });
+  again.clock.now = q.clock.now;
+  const card = authCard("codex-1-a@example.com-plus", { codex: true });
+  again.page.append(card.card);
+  again.run();
+  assert.match(card.plan.children.at(-1).textContent, /Credits[\s\S]*47,757/);
+});
 
 test("the quota page loads every provider's quota on open, once, and again after two minutes", () => {
   const q = quotaPage({ usage: USAGE });

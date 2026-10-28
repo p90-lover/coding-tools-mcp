@@ -102,3 +102,34 @@ export function createPetStage<K>(now: () => number = Date.now) {
 export type PetStage<K> = ReturnType<typeof createPetStage<K>>;
 /** The window's one stage: panes are the split grid's pane elements. */
 export const petStage = createPetStage<HTMLElement>();
+
+/** A box on the screen (client px), as getBoundingClientRect gives one. */
+export type PetRect = { left: number; top: number; right: number; bottom: number };
+
+/** Whether two boxes come within `margin` px of each other. */
+export function petOverlaps(a: PetRect, b: PetRect, margin = 0): boolean {
+  return a.left < b.right + margin && a.right > b.left - margin && a.top < b.bottom + margin && a.bottom > b.top - margin;
+}
+
+/**
+ * Where the pet is while it is off its box: carried, riding the pointer or leaping (null on its box
+ * or at home). The chat's Preview pane is a native view drawn over the whole page, Clawd included,
+ * so it swaps in a still of its page while the pet passes over it (ChatWorkbench's PreviewPane).
+ */
+export function createPetFlight() {
+  let rect: PetRect | null = null;
+  const listeners = new Set<(rect: PetRect | null) => void>();
+  return {
+    rect: () => rect,
+    set(next: PetRect | null) {
+      if (next === rect || (next && rect && next.left === rect.left && next.top === rect.top && next.right === rect.right && next.bottom === rect.bottom)) return;
+      rect = next;
+      listeners.forEach((listener) => listener(rect));
+    },
+    subscribe(listener: (rect: PetRect | null) => void) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
+}
+export const petFlight = createPetFlight();

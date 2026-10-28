@@ -2582,7 +2582,16 @@ function createChatAgentTools({
       if (!previews || typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return false;
       return previews.show(sessionId, bounds, zoom);
     },
-    previewHide() { previews?.hide(); },
+    /** Without a session, whichever page is shown; with one, only that session's page. */
+    previewHide(sessionId) {
+      if (!previews) return false;
+      if (sessionId === undefined) return previews.hide();
+      return typeof sessionId === "string" && SESSION_ID.test(sessionId) ? previews.hide(sessionId) : false;
+    },
+    async previewSnapshot(sessionId) {
+      if (!previews?.snapshot || typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return null;
+      return previews.snapshot(sessionId);
+    },
     /** The user's own navigation in a session's preview: back, forward, reload or a loopback URL. */
     async previewNavigate(sessionId, request) {
       if (!previews || typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return { ok: false, error: "No preview" };

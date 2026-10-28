@@ -12,7 +12,7 @@ import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
-import { ChatTurnStats } from "./ChatTurnStats";
+import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
@@ -52,7 +52,7 @@ function AutoRetryToggle({ disabled, onRetryNow }: { disabled: boolean; onRetryN
     return () => { live = false; };
   }, []);
   // A switch, not a checkbox: the box and its words wrapped onto two lines beside the button.
-  return <label className="cx-auto-retry" title="Retries a failed step up to 3 times. Sign-in errors still wait for you">
+  return <label className="cx-auto-retry" title="Retries a failed step up to 8 times over about half an hour. Sign-in errors still wait for you">
     <input type="checkbox" role="switch" checked={on === true} disabled={disabled || on === null} onChange={(event) => {
       const next = event.target.checked;
       setOn(next);
@@ -542,7 +542,7 @@ const sameStep = (a: ChatStep, b: ChatStep) => a === b || (a.key === b.key && a.
  * for both turns, twice a turn on every second's update: work that grew with the length of the chat.
  */
 const sameTurnWork = (a: ChatTurn, b: ChatTurn) => a.runId === b.runId && a.status === b.status
-  && (a.startedAtMs ?? 0) === (b.startedAtMs ?? 0) && a.steps.length === b.steps.length
+  && (a.startedAtMs ?? 0) === (b.startedAtMs ?? 0) && (a.endedAtMs ?? 0) === (b.endedAtMs ?? 0) && a.steps.length === b.steps.length
   && a.steps.every((step, index) => sameStep(step, b.steps[index]))
   && (a.final && b.final ? sameStep(a.final, b.final) : !a.final && !b.final);
 
@@ -574,15 +574,19 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
+  // The card whose reply closes the turn (a team's reviewer) keeps its row with the others, folded
+  // like them: its row left "Worked" the moment its reply became the answer, taking its thinking
+  // and tool calls with it. Its reply and earlier rounds show in the answer, so the row holds its work.
+  const rows = turn.final ? [...turn.steps, { ...turn.final, text: undefined, earlier: undefined }] : turn.steps;
   // While it works the turn has no head of its own: its steps start at their dots, and how long it
   // has worked and on what is said once, at the turn's foot (TurnRunning, whose verb alone shimmers).
   // Once done it folds under "Worked · N steps".
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     {working ? null : <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span>{`Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`}</span>
+      <span>{`Worked · ${rows.length} ${rows.length === 1 ? "step" : "steps"}`}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>}
-    {open || working ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
+    {open || working ? <ol className="cx-steps">{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
   </div>;
 }
 
@@ -1895,6 +1899,9 @@ export function AgentOrchestratorChat({
               {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p>
                 : turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
+              {turn.runId && turn.startedAtMs && !liveTurn(turn)
+                ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={!dsh}
+                  to={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs} /> : null}
             </article></PartErrorBoundary>;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steersByTurn]);
 

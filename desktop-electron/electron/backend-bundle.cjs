@@ -56,6 +56,8 @@ const BACKEND_MODULES = Object.freeze([
   "ao-daemon-log.cjs",
   "ao-db-maintenance.cjs",
   "ao-dependency-links.cjs",
+  // agent-orchestrator-upstream.cjs ends chat hosts at quit with its process-tree kill.
+  "process-tree.cjs",
   // Codex's Auto-review policy, which agent-orchestrator-workflow.cjs reviews requests by.
   "codex-guardian-policy.cjs",
   "ao-context-breakdown.cjs",

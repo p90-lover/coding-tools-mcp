@@ -78,12 +78,13 @@ const SPECS = Object.freeze({
   chat_preview_state: { readOnly: true, description: "Read what each of a chat's agents shows in its preview browser (URL, title, errors)." },
   chat_preview_show: { readOnly: false, description: "Draw one chat agent's preview browser in the chat's Preview pane at the given bounds." },
   chat_preview_hide: { readOnly: false, description: "Take the chat's preview browser out of the Preview pane; it keeps running for the agent." },
+  chat_preview_snapshot: { readOnly: true, description: "Read a still of the page shown in the chat's Preview pane, drawn in its place while the chat pet passes over it." },
   chat_preview_navigate: { readOnly: false, description: "The user's own navigation in a chat agent's preview: back, forward, reload or a localhost URL." },
   workspace_mode: { readOnly: false, description: "Read or set where a project's chats work: each in its own git worktree, one shared worktree, or the project folder itself (the Edit project dialog)." },
   chat_context: { readOnly: true, description: "Read how full each of a chat's agent sessions' context is, its token spend, rate limits and tool servers (the composer's context meter)." },
   cpa_quota: { readOnly: true, description: "Read each CPA Codex account's 5-hour and weekly usage limits, as CPA Helper last checked them (the context meter's plan usage limits)." },
   cpa_usage: { readOnly: true, description: "Read each CPA account's tokens, requests and estimated cost over a range (24h, 7d, 30d or all) from CPA Helper's usage log, with its quota where one is known (Codex windows; Cline Pass key activity)." },
-  chat_turn_stats: { readOnly: true, description: "Read the latest chat turn's model requests through CPA from CPA Helper's log: steps, model time, time to first token, output speed, cache hits and tokens (the line under the chat box)." },
+  chat_turn_stats: { readOnly: true, description: "Read a chat turn's model requests through CPA from CPA Helper's log: steps, model time, time to first token, output speed, cache hits and tokens (the line under the chat box, and each ended turn's foot)." },
   chat_terminal_start: { readOnly: false, description: "Start the user's own shell in a chat agent's worktree (the side panel's Terminal tab)." },
   chat_changes: { readOnly: true, description: "Read a chat agent's worktree changes: git status with new files and the diff (the side panel's Changes tab)." },
   chat_files: { readOnly: true, description: "List one folder of a chat agent's worktree (the side panel's Files tab)." },
@@ -100,7 +101,7 @@ const SPECS = Object.freeze({
 
 // Operations served by the AO runtime service although their names do not start with "upstream_".
 const UPSTREAM_OPERATIONS = new Set(["dependency_link_info", "workspace_mode", "chat_processes", "chat_process_output", "chat_process_stop",
-  "chat_process_input", "chat_preview_state", "chat_preview_show", "chat_preview_hide", "chat_preview_navigate", "chat_context",
+  "chat_process_input", "chat_preview_state", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "chat_preview_navigate", "chat_context",
   "cpa_quota", "cpa_usage", "chat_turn_stats", "chat_terminal_start", "chat_changes", "chat_files", "chat_file", "chat_branches", "chat_switch_branch"]);
 
 module.exports = Object.freeze({

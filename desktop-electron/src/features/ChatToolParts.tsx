@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { chatMessageReadable, hiddenSecretParts, numberedDiff, type ChatStepRound, type SteerReceipt, type ChatSentAttachment } from "./ao-chat";
 
@@ -35,10 +36,12 @@ export function ImageLightbox({ url, onClose }: { url: string; onClose: () => vo
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [onClose]);
-  return <div className="cx-lightbox" role="dialog" aria-label="Image preview" onClick={onClose}>
+  // On <body>: it opens from inside a transcript, whose contained scroll box would otherwise hold
+  // this full-window overlay to the pane.
+  return createPortal(<div className="cx-lightbox" role="dialog" aria-label="Image preview" onClick={onClose}>
     <img src={url} alt="" onClick={(event) => event.stopPropagation()} />
     <button type="button" className="cx-lightbox-close" aria-label="Close image preview" onClick={onClose}>×</button>
-  </div>;
+  </div>, document.body);
 }
 
 /**
