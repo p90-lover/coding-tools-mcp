@@ -276,6 +276,20 @@ test("a retried step shows its failed attempt above the attempt now running, not
   assert.ok(earlier < now, "the failed attempt comes first");
 });
 
+test("a folded edit draws its numbered lines only once it is opened", () => {
+  // Seen live: 298 folded edits held 51k of a long chat's 83k elements, every one restyled with the page.
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single", nodes: [{ id: "lead", role: "planner", state: "running",
+    route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-4", started_at_ms: Date.now() - 5_000 } }] }],
+    activity: { "run:lead": { activity: "working", timeline: [{ id: "e1", kind: "edit", status: "completed", text: "",
+      files: [{ path: "src/app.ts", additions: 1, deletions: 1, diff: "@@ -1 +1 @@\n-old line\n+new line" }] }] } },
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  assert.match(html, /<details class="cx-tool cx-edit tone-ok"><summary>.*app\.ts.*<\/summary><\/details>/, "the row and its counts show, folded");
+  assert.equal(html.includes("cx-edit-num"), false, "no numbered lines until it opens");
+  assert.equal(html.includes("new line"), false, "nor the changed text");
+});
+
 test("an image steered into a running turn shows as the image, not as its path", () => {
   // Seen live (before #457 reached the app): "Attached image: G:\AppData\Coding Tools\chat-attachments\…png"
   // printed as text in the steer's bubble inside the turn's work.
