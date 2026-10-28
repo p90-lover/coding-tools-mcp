@@ -1530,6 +1530,32 @@ test("finished turns opened together are read back a few at a time, and a turn a
   assert.equal((await upstream.timeline("s0", "t"))[0].id, "s0-1", "a later ask reads it again");
 });
 
+test("a finished turn's read waits out a full service instead of failing with every card queued behind it", async () => {
+  // Seen live on 0.8.30's first start: the chat polls filled the headless service, one chat's shared
+  // tail read was turned away, and all 23 of its cards failed inside 10 ms with empty Worked rows.
+  let refusals = 2;
+  const waits = [];
+  const upstream = observeHarness({
+    setTimeout: (callback, ms) => { waits.push(ms); setImmediate(callback); },
+    internalApi: async () => {
+      if (refusals > 0) { refusals -= 1; throw new Error("HEADLESS_CAPACITY: request admission is full"); }
+      return { turns: [], messages: [], hasMoreBefore: false, oldestSequence: 1,
+        activities: [{ id: "a1", turnId: "t", sequence: 1, activityKind: "reasoning", status: "completed", detail: { text: "done" } }] };
+    },
+  });
+  const reads = await Promise.all(["t", "t"].map(turn => upstream.timeline("s", turn)));
+  assert.deepEqual(reads.map(items => items[0]?.id), ["a1", "a1"], "the read lands once the service has room");
+  assert.deepEqual(waits.slice(0, 2), [1000, 2000], "it backs off between tries");
+  // Any other failure is not waited out.
+  const failing = observeHarness({
+    setTimeout: (callback, ms) => { waits.push(ms); setImmediate(callback); },
+    internalApi: async () => { throw new Error("CHAT_SESSION_NOT_FOUND"); },
+  });
+  waits.length = 0;
+  await assert.rejects(failing.timeline("s", "t"), /CHAT_SESSION_NOT_FOUND/);
+  assert.deepEqual(waits, []);
+});
+
 test("a long finished turn keeps its tool calls when a page is over AO's handler limit, past six pages", async () => {
   // Seen live: a 20-minute turn opened on only its last thought. Paging back stopped at the first
   // page over the 900 KB handler limit (a command's long output), and after six pages in any case.

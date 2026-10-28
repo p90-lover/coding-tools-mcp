@@ -703,11 +703,27 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const next = pastTurnWaiting.shift();
     if (next) next(); else pastTurnActive -= 1;
   };
+  // A full service is waited out, keeping the slot. On 0.8.30's first start (2026-10-28) the chat
+  // polls filled the headless service, one chat's shared tail read was turned away, and all 23 of
+  // its queued cards failed with it inside 10 ms; the chat never asks again, so their Worked rows
+  // stayed empty.
+  const PAST_TURN_RETRY_MS = [1000, 2000, 4000];
+  const serviceFull = error => error?.status === 503
+    || /HEADLESS_CAPACITY|SERVICE_UNAVAILABLE/.test(String(error?.message));
+  async function patientPastTurnTimeline(id, turnId) {
+    for (const wait of [...PAST_TURN_RETRY_MS, null]) {
+      try { return await pastTurnTimeline(id, turnId); }
+      catch (error) {
+        if (wait === null || !serviceFull(error)) throw error;
+        await new Promise(resolve => setTimeout(resolve, wait));
+      }
+    }
+  }
   function queuedPastTurnTimeline(id, turnId) {
     const key = `${id}|${turnId}`;
     const known = pastTurnReads.get(key);
     if (known) return known;
-    const read = pastTurnSlot().then(() => pastTurnTimeline(id, turnId).finally(releasePastTurnSlot));
+    const read = pastTurnSlot().then(() => patientPastTurnTimeline(id, turnId).finally(releasePastTurnSlot));
     pastTurnReads.set(key, read);
     read.finally(() => pastTurnReads.delete(key)).catch(() => undefined);
     return read;
