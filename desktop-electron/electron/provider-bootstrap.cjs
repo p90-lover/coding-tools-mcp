@@ -17,6 +17,7 @@ function redactNovaProfile(profile) {
 }
 
 let providerNetworkControllerPromise = null;
+let novaManager = null;
 let providerBrowserHostGetter = () => null;
 let providerCpaConnectionGetter = () => null;
 // The launcher's own log (launcher.jsonl, which redacts proxy credentials and bearer tokens) once
@@ -142,7 +143,8 @@ function installProviderNetwork({
         });
       });
     }
-    // Kept for its IPC (Nova's state reads as not running); nothing starts it any more.
+    // Kept for its IPC (Nova's state reads as not running); app start no longer starts it. A quit
+    // shuts down only a Nova this manager started, never one the user runs for other programs.
     nova = createNovaManager({
       userData: app.getPath("userData"),
       safeStorage,
@@ -154,6 +156,7 @@ function installProviderNetwork({
       },
       logger,
     });
+    novaManager = nova;
     app.once("will-quit", () => nova?.stopPolling());
     return controller;
   });
@@ -291,9 +294,15 @@ function installProviderNetwork({
   });
 }
 
+/** A full quit ends ProxyBridge Nova with the app; a relaunch leaves it for the next app to adopt. */
+function stopProxyBridgeNova() {
+  return novaManager?.stop() ?? Promise.resolve();
+}
+
 module.exports = {
   installProviderNetwork,
   providerNetworkReady,
+  stopProxyBridgeNova,
   setProviderLogger,
   setProviderBrowserHost,
   setProviderCpaConnection,

@@ -36,6 +36,7 @@ function fakeNova(proxies, { tokenOk = true } = {}) {
     if (!nova.up) throw new TypeError("fetch failed");
     const reply = (status, body) => ({ ok: status < 300, status, text: async () => JSON.stringify(body) });
     if (!tokenOk) return reply(401, { error: "Unauthorized" });
+    if (pathname === "/v1/shutdown" && init.method === "POST") { nova.up = false; return reply(200, { ok: true }); }
     if (pathname === "/v1/status") return reply(200, { ...STATUS, profile: { ...STATUS.profile, etag: nova.etag } });
     if (pathname === "/v1/profile") return reply(200, { etag: nova.etag, linkedProfilePath: null, proxies: nova.proxies, rules: [] });
     if (pathname === "/v1/profile/proxies" && init.method === "PUT") {
@@ -165,9 +166,9 @@ test("a Nova started by something else, or one that will not start, says why", a
   });
   await manager.start();
   manager.stopPolling();
-  assert.equal(spawned.length, 0, "app start never launches a Nova that was never started managed");
+  assert.equal(spawned.length, 1, "app start launches Nova itself");
   assert.equal(manager.state().running, false);
-  await assert.rejects(manager.ensureRunning(), /Another ProxyBridge Nova is running and did not hand over/);
+  assert.match(manager.state().error, /Another ProxyBridge Nova is running and did not hand over/);
   assert.equal(spawned[0].file, exe);
   assert.deepEqual(spawned[0].args, ["--managed", "--takeover", "--api-port", "17894"]);
   assert.match(spawned[0].env.PROXYBRIDGE_NOVA_API_TOKEN, /^[A-Za-z0-9_-]{32,}$/);
@@ -223,4 +224,87 @@ test("editing one half of a proxy sign-in keeps the other half", () => {
   store.saveProxyProfile({ id, name: "p", endpoint, username: "other" });
   assert.deepEqual(store.proxySecret(id), { username: "other", password: "new" });
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+// Nova's manager on its own: the app no longer starts it, but a start (the Proxy page IPC) still works so.
+/** A Nova manager whose launches start the fake Nova (or exit with `exitCode`), counting each one. */
+function launching(t, nova, { exitCode = null } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-nova-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const exe = path.join(root, "ProxyBridgeRewrite.exe");
+  fs.writeFileSync(exe, "");
+  const spawned = [];
+  const store = createProviderNetworkStore({
+    filePath: path.join(root, "providers", "provider-network.json"),
+    keyPath: path.join(root, "providers", "provider-network.key"), safeStorage,
+  });
+  const options = {
+    userData: root, safeStorage, store, env: { CODING_TOOLS_NOVA_EXE: exe },
+    applyGlobalRouting: async () => {}, fetchImpl: nova.fetch, sleep: () => new Promise((resolve) => setImmediate(resolve)),
+    spawnImpl: () => {
+      spawned.push(Date.now());
+      const child = new EventEmitter();
+      child.unref = () => {};
+      if (exitCode === null) nova.up = true;
+      else setImmediate(() => child.emit("exit", exitCode));
+      return child;
+    },
+  };
+  return { spawned, options, manager: createNovaManager(options) };
+}
+
+async function settle() {
+  for (let index = 0; index < 20; index += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+test("Nova starts with the app, is started again when it stops, and stops with a quit", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 1_000_000 });
+  const nova = fakeNova([]);
+  nova.up = false;
+  const { spawned, manager } = launching(t, nova);
+  await manager.start();
+  assert.equal(spawned.length, 1, "launched at app start, with no Start click");
+  assert.equal(manager.state().running, true);
+
+  nova.up = false;
+  t.mock.timers.tick(5_000);
+  await settle();
+  assert.equal(manager.state().running, true, "a Nova that stopped is started again");
+  assert.equal(spawned.length, 2);
+
+  await manager.shutdown();
+  t.mock.timers.tick(60_000);
+  await settle();
+  assert.equal(spawned.length, 2, "one stopped on the Proxy page stays stopped");
+
+  await manager.ensureRunning();
+  assert.equal(spawned.length, 3);
+  await manager.stop();
+  assert.equal(nova.up, false, "a quit shuts Nova down");
+  t.mock.timers.tick(60_000);
+  await settle();
+  assert.equal(spawned.length, 3, "and nothing starts it again");
+});
+
+test("an executable without managed mode is not launched again at app start", async (t) => {
+  const nova = fakeNova([]);
+  nova.up = false;
+  const first = launching(t, nova, { exitCode: 0 });
+  await first.manager.start();
+  first.manager.stopPolling();
+  assert.equal(first.spawned.length, 1);
+  assert.match(first.manager.state().error, /no managed mode/);
+
+  const again = createNovaManager({ ...first.options, spawnImpl: () => { throw new Error("launched again"); } });
+  await again.start();
+  again.stopPolling();
+  assert.match(again.state().error, /no managed mode/, "the next app start remembers it and doesn't open Nova's window");
+});
+
+test("a quit leaves alone a Nova this app never started", async (t) => {
+  const nova = fakeNova([]);
+  const { manager } = launching(t, nova);
+  await manager.stop();
+  assert.equal(nova.up, true, "the user's own Nova keeps routing their other apps");
+  assert.deepEqual(nova.calls, [], "not even asked");
 });
