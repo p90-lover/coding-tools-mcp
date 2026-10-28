@@ -2523,6 +2523,10 @@ function createChatAgentTools({
       return previews.show(sessionId, bounds, zoom);
     },
     previewHide() { previews?.hide(); },
+    async previewSnapshot(sessionId) {
+      if (!previews?.snapshot || typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return null;
+      return previews.snapshot(sessionId);
+    },
     /** The user's own navigation in a session's preview: back, forward, reload or a loopback URL. */
     async previewNavigate(sessionId, request) {
       if (!previews || typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return { ok: false, error: "No preview" };

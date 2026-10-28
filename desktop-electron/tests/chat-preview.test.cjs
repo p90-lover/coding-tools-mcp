@@ -756,3 +756,17 @@ test("the side panel reaches a session the app holds no lease for through the ch
   const [listing] = await env.tools.processes(["ao-old"], "ws1");
   assert.deepEqual(listing.commands, []);
 });
+test("the shown page gives a still for the pane to draw while Clawd passes over it; a page not shown gives none", async () => {
+  const view = fakeView();
+  let captures = 0;
+  view.webContents.capturePage = async () => { captures += 1; return { isEmpty: () => false, toJPEG: (quality) => Buffer.from(`jpeg ${quality}`) }; };
+  const service = createChatPreviews({ createView: () => view, logger: { warn() {} } });
+  await service.call("a", "preview_open", { url: "http://localhost:3000/" });
+  assert.equal(await service.snapshot("a"), null, "not in the pane yet");
+  service.show("a", { x: 0, y: 0, width: 400, height: 300 });
+  assert.equal(await service.snapshot("a"), `data:image/jpeg;base64,${Buffer.from("jpeg 80").toString("base64")}`);
+  assert.equal(await service.snapshot("b"), null, "another agent's page is not the one shown");
+  view.webContents.capturePage = async () => { throw new Error("gone"); };
+  assert.equal(await service.snapshot("a"), null, "a failed capture shows no still");
+  assert.equal(captures, 1);
+});

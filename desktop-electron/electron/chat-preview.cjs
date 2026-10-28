@@ -635,6 +635,20 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
       place(preview);
       return true;
     },
+    /**
+     * A still of the page shown in the pane, as a JPEG data URL (null when none is shown). The pane
+     * draws it in the view's place while something of the app page passes over it (Clawd carried
+     * across): the native view is drawn above the whole page and would cover it.
+     */
+    async snapshot(key) {
+      const preview = shown?.key === key ? previews.get(key) : null;
+      const contents = preview?.view.webContents;
+      if (!contents || contents.isDestroyed()) return null;
+      try {
+        const image = await contents.capturePage();
+        return image.isEmpty() ? null : `data:image/jpeg;base64,${image.toJPEG(80).toString("base64")}`;
+      } catch { return null; }
+    },
     /** Takes the shown preview out of the pane; it keeps running in the background host. */
     hide() {
       const preview = shown ? previews.get(shown.key) : null;
