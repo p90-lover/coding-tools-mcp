@@ -229,6 +229,25 @@ func TestAModelClineNoLongerServesIsANotFoundNoClientRetries(t *testing.T) {
 	}
 }
 
+// Seen 2026-10-28: the switcher answered a spent ClinePass window with 502, so Claude Code retried
+// every turn ten times; 910 such errors in one chat.
+func TestASpentClinePassWindowIsA429(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		body   string
+		want   int
+	}{
+		{502, `{"error":{"message":"Error 429: You have reached your weekly Clinepass limit. The limit resets on Monday.","type":"upstream_error"}}`, 429},
+		{502, `{"error":"Error 429: You have reached your monthly Clinepass limit."}`, 429},
+		{502, `{"error":"upstream fetch failed: ECONNREFUSED"}`, 502},
+		{400, `{"error":"Error 429 mentioned in a bad request"}`, 400},
+	} {
+		if got := upstreamStatus(c.status, []byte(c.body)); got != c.want {
+			t.Errorf("upstreamStatus(%d, %s) = %d, want %d", c.status, c.body, got, c.want)
+		}
+	}
+}
+
 func TestTakenEffortFitsEveryLevelToTheModel(t *testing.T) {
 	deepseek := []string{"none", "low", "high", "max"}
 	for _, c := range []struct{ in, want string }{
