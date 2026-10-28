@@ -4265,7 +4265,7 @@ function wakeChat({ goal = false, hold = false, loopsFile = null } = {}) {
 }
 const wakeupOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).wakeups["task-1"];
 
-test("the agent's goal tools work as Codex's: it creates, completes, blocks, pauses or edits; resuming stays the user's", async () => {
+test("the agent's goal tools keep completion provisional and do not stall on one blocked report", async () => {
   const { workflow } = wakeChat();
   const tool = (args) => workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", ...args });
   const saved = async () => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
@@ -4279,17 +4279,24 @@ test("the agent's goal tools work as Codex's: it creates, completes, blocks, pau
   assert.equal((await saved()).lastRunId, "r1", "the turn that set it is round 1, judged when it settles");
   await assert.rejects(tool({ action: "create", objective: "something else" }), /unfinished goal; complete the existing goal first/);
   assert.equal((await tool({ action: "update", objective: "make CI and lint green" })).goal.objective, "make CI and lint green");
-  assert.equal((await tool({ action: "update", status: "paused" })).goal.status, "paused");
-  assert.equal((await saved()).status, "paused");
   await assert.rejects(tool({ action: "update", status: "active" }), /controlled by the user or system/);
   await assert.rejects(tool({ action: "update" }), /a status or an objective/);
-  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "blocked");
-  assert.equal((await saved()).status, "stalled");
+  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "active");
+  assert.equal((await saved()).agentBlockedRounds, 1);
+  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "active",
+    "two reports from one turn still count as one blocked round");
+  assert.equal((await saved()).agentBlockedRounds, 1);
   const done = await tool({ action: "update", status: "complete" });
-  assert.equal(done.goal.status, "complete");
-  assert.match(done.completionBudgetReport, /^Goal achieved\. Report final usage/);
-  assert.equal((await saved()).status, "achieved");
-  assert.equal((await tool({ action: "create", objective: "ship the release" })).goal.objective, "ship the release", "a complete goal is replaced");
+  assert.equal(done.goal.status, "active", "a self-declared completion waits for the independent evaluator");
+  assert.equal(done.completionBudgetReport, null);
+  assert.match((await saved()).note, /awaiting independent goal verification/);
+  await assert.rejects(tool({ action: "create", objective: "ship the release" }), /unfinished goal/);
+  assert.equal((await tool({ action: "update", status: "paused" })).goal.status, "paused");
+  assert.equal((await saved()).status, "paused");
+  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "paused",
+    "the agent cannot override a user-paused goal");
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" });
+  assert.equal((await tool({ action: "create", objective: "ship the release" })).goal.objective, "ship the release");
   await assert.rejects(workflow.goalTool({ workspaceId: "ws-1", session: "someone-else", action: "get" }), /not one of this project's chats/);
 });
 
