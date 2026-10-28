@@ -16,6 +16,7 @@ const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
+const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -197,6 +198,58 @@ async function allocatePort() {
   const port = reservation.address().port;
   await new Promise((resolve) => reservation.close(resolve));
   return port;
+}
+
+/** A Windows command line split into its arguments (double quotes group, as the C runtime reads it). */
+function commandLineArgs(line) {
+  const args = [];
+  let current = "", quoted = false, started = false;
+  for (const character of String(line ?? "")) {
+    if (character === "\"") { quoted = !quoted; started = true; }
+    else if (!quoted && /\s/.test(character)) { if (started) args.push(current); current = ""; started = false; }
+    else { current += character; started = true; }
+  }
+  if (started) args.push(current);
+  return args;
+}
+
+/**
+ * The session a process serves when it is a chat host of this data root (`ao-daemon chat-host
+ * <session> <dataRoot> ...`), else null. Only these are ended at quit: the data root in the
+ * command line keeps another install's or a development AO's hosts out.
+ */
+function chatHostSession(commandLine, dataRoot) {
+  const [, mode, session, root] = commandLineArgs(commandLine);
+  if (mode !== "chat-host" || !session || !root) return null;
+  const same = (left, right) => {
+    const plain = (value) => path.resolve(value).toLowerCase();
+    if (plain(left) === plain(right)) return true;
+    try { return plain(fs.realpathSync.native(left)) === plain(fs.realpathSync.native(right)); } catch { return false; }
+  };
+  return same(root, dataRoot) ? session : null;
+}
+
+/**
+ * AO's chat hosts for a data root, as { pid, session }. Windows only (elsewhere none). One
+ * PowerShell call, run as a child process the main thread does not wait on.
+ */
+function chatHostProcesses(dataRoot) {
+  if (process.platform !== "win32") return Promise.resolve([]);
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  const powershell = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const script = "@(Get-CimInstance Win32_Process -Filter \"Name='ao-daemon.exe'\" | ForEach-Object { "
+    + "[pscustomobject]@{ pid = [int]$_.ProcessId; commandLine = [string]$_.CommandLine } }) | ConvertTo-Json -Compress";
+  return new Promise((resolve) => {
+    execFile(powershell, ["-NoProfile", "-NonInteractive", "-Command", script],
+      { encoding: "utf8", windowsHide: true, timeout: 15_000, maxBuffer: 8 << 20 }, (error, stdout) => {
+        let rows = [];
+        try { if (!error && String(stdout).trim()) rows = [].concat(JSON.parse(String(stdout).trim())); } catch {}
+        resolve(rows.flatMap((row) => {
+          const session = chatHostSession(row?.commandLine, dataRoot);
+          return session && Number.isInteger(row.pid) && row.pid > 0 ? [{ pid: row.pid, session }] : [];
+        }));
+      });
+  });
 }
 
 function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, cpaQuota = null, cpaUsage = null, logger = console,
@@ -419,6 +472,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       });
     }));
     return answers.filter(Boolean).length;
+  }
+  /**
+   * Ends every chat host of this data root, each with its agent (the ACP runtime and the model
+   * CLI). Hosts outlive AO by design, for a restart to reattach, so quitting the app left every
+   * chat's agent running: three from earlier runs, the oldest four days old, on 2026-10-28.
+   */
+  async function endChatHosts() {
+    const hosts = (await chatHostProcesses(dataRoot)).filter(host => host.pid !== child?.pid);
+    const outcomes = await Promise.allSettled(hosts.map(host =>
+      terminateOwnedProcessTreeAsync({ pid: host.pid, exitCode: null, signalCode: null })));
+    const ended = outcomes.filter(outcome => outcome.status === "fulfilled").length;
+    if (hosts.length) logger?.info?.("ao.chat_hosts_ended", { ended, failed: hosts.length - ended });
+    return ended;
   }
   // continuable() checks in flight, by session (see there).
   const continuing = new Map();
@@ -2227,7 +2293,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return fs.existsSync(path.join(folder, process.platform === "win32" ? "ao.cmd" : "ao")) ? folder : null;
   }
 
-  return { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, aoShimFolder };
+  return { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder };
 }
 
 /**
@@ -2273,4 +2339,4 @@ function steadyContext(readings, id, usage, compactedAt) {
   return steady;
 }
 
-module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS, dropInlineBlobs };
+module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS, dropInlineBlobs, chatHostSession, chatHostProcesses };
