@@ -52,7 +52,7 @@ function AutoRetryToggle({ disabled, onRetryNow }: { disabled: boolean; onRetryN
     return () => { live = false; };
   }, []);
   // A switch, not a checkbox: the box and its words wrapped onto two lines beside the button.
-  return <label className="cx-auto-retry" title="Retries a failed step up to 3 times. Sign-in errors still wait for you">
+  return <label className="cx-auto-retry" title="Retries a failed step up to 8 times over about half an hour. Sign-in errors still wait for you">
     <input type="checkbox" role="switch" checked={on === true} disabled={disabled || on === null} onChange={(event) => {
       const next = event.target.checked;
       setOn(next);
