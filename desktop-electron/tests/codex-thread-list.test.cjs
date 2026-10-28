@@ -542,7 +542,10 @@ test("Codex's compose icon and project ellipsis open their working actions", () 
   header.props.onContextMenu({ preventDefault() {}, clientX: 5, clientY: 9 });
   menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
   menu.items.find((item) => item.label === "Edit").run();
-  assert.deepEqual(calls, [["newChat"], ["newChatIn", "b"], ["editProject", "a"]]);
+  // Hovering a project shows Codex's compose button beside the ellipsis: a new chat in that project.
+  assert.equal(walk(button("New chat in Alpha")).find((element) => element.type === "ChatGlyph").props.name, "compose");
+  button("New chat in Alpha").props.onClick();
+  assert.deepEqual(calls, [["newChat"], ["newChatIn", "b"], ["editProject", "a"], ["newChatIn", "a"]]);
 });
 
 test("archived chats sit in their own section and can be restored", () => {
