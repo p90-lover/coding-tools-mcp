@@ -488,8 +488,9 @@ class BrowserControlServer {
         return;
       } else if (request.url === "/v1/turn/heartbeat") {
         host.heartbeatTurn(body.traceId, body.helperPid, body.refreshViewport === true);
+        // Not logged: a turn beats every 15 s, and one stuck for seven hours filled Activity with
+        // ~2,500 identical rows (2026-10-28). Its start, end and reaping are logged.
         this.reportTurnEvent({ type: "heartbeat", traceId: body.traceId });
-        this.logger.debug?.("browser.turn_heartbeat", { traceId: body.traceId });
         writeJson(response, 200, { ok: true });
         return;
       } else {
@@ -712,7 +713,10 @@ class BrowserControlServer {
     live.catch(() => undefined);
     const cached = await saved;
     const serveCache = (reason) => {
-      this.logger.info("browser.native_models_cache_served", { reason });
+      // Codex asks for its catalog every ~30 s; while the network is down each answer is the
+      // cache. Log when serving from it starts or its reason changes, not on every poll.
+      if (this.modelsCacheReason !== reason) this.logger.info("browser.native_models_cache_served", { reason });
+      this.modelsCacheReason = reason;
       response.writeHead(200, { "content-type": cached.contentType, "x-coding-tools-models-cache": reason });
       response.end(cached.body);
     };
@@ -738,6 +742,7 @@ class BrowserControlServer {
     if (response.destroyed) return;
     if (outcome === "late") { serveCache("late"); return; }
     if (outcome.status !== 200 && cached) { serveCache(`http_${outcome.status}`); return; }
+    this.modelsCacheReason = null;
     this.reportTurnEvent({ type: "native_fetch_ok" });
     const dropped = new Set(["content-length", "content-encoding", "set-cookie", "connection", "transfer-encoding",
       "keep-alive", "te", "trailer", "upgrade", "proxy-authenticate", "proxy-authorization"]);
