@@ -79,6 +79,9 @@ const SHELL_COMMANDS = new Set(["bash", "cmd", "powershell", "pwsh", "sh"]);
 const DESTRUCTIVE_SHELL_PATTERN = /(?:^|[;&|\s])(?:del|erase|rd|remove-item|rmdir|rm|shred|unlink)(?:$|[;&|\s])/iu;
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMMIT_SHA = /^[a-f0-9]{40}$/;
+const RELEASE_VERSION = /^\d+\.\d+\.\d+$/;
+const GITHUB_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const MAX_CHECKSUMS_BYTES = 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 const DEFAULT_DOWNLOAD_ATTEMPTS = 4;
 const DEFAULT_DOWNLOAD_RETRY_BASE_MS = 250;
@@ -214,6 +217,15 @@ function assertSafeManifest(manifest, expectedId) {
   for (const stopEntry of manifest.launch.stop || []) {
     assertSafeCommand({ ...stopEntry, kind: "command" }, `${expectedId} stop process`);
   }
+  if (manifest.updates !== undefined) {
+    if (manifest.strategy !== "release-binary" || manifest.updates?.source !== "github-release") {
+      throw new Error(`${expectedId} updates must come from GitHub releases of a release binary`);
+    }
+    if (!GITHUB_REPOSITORY.test(String(manifest.repository || ""))) {
+      throw new Error(`${expectedId} updates need a GitHub owner/name repository`);
+    }
+    assertSafeRelativePath(manifest.updates.checksums, `${expectedId} update checksums file`);
+  }
   if (PINNED_SOURCE_STRATEGIES.has(manifest.strategy)) {
     if (manifest.strategy === "bundled-source" && BUNDLED_COMPONENT_IDS.includes(manifest.id)) {
       if (typeof manifest.bundle?.entrypoint !== "string" || !manifest.bundle.entrypoint.trim()) {
@@ -248,6 +260,56 @@ function loadManagedManifest(componentId, manifestRoot) {
   const filePath = path.join(manifestRoot, `${id}.json`);
   const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
   return assertSafeManifest(parsed, id);
+}
+
+/** Compares two x.y.z release versions numerically: negative, zero or positive. */
+function compareVersions(left, right) {
+  const a = String(left).split(".").map(Number);
+  const b = String(right).split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return 0;
+}
+
+/** Reads a goreleaser checksums.txt ("<sha256>  <file>" per line) into a file → sha256 map. */
+function parseChecksums(text) {
+  const checksums = new Map();
+  for (const line of String(text || "").split(/\r?\n/u)) {
+    const match = /^([a-f0-9]{64})\s+\*?(\S+)$/iu.exec(line.trim());
+    if (match) checksums.set(match[2], match[1].toLowerCase());
+  }
+  return checksums;
+}
+
+/**
+ * The pinned manifest moved to a newer release: each asset's name and URL carry the new version,
+ * and its checksum comes from that release's checksums file. Assets the release lacks are dropped.
+ * The result downloads its asset, since the installer only bundles the pinned version.
+ */
+function updatedManifest(base, version, checksums) {
+  if (!RELEASE_VERSION.test(version)) throw new Error(`${base.name} update version ${version} is invalid`);
+  const clone = JSON.parse(JSON.stringify(base));
+  const platforms = {};
+  for (const [platformId, architectures] of Object.entries(clone.platforms || {})) {
+    for (const [archId, asset] of Object.entries(architectures || {})) {
+      const fileName = asset.fileName.replaceAll(base.version, version);
+      const sha256 = checksums.get(fileName);
+      if (!sha256 || fileName === asset.fileName) continue;
+      (platforms[platformId] ||= {})[archId] = {
+        url: asset.url.replaceAll(base.version, version),
+        sha256,
+        fileName,
+      };
+    }
+  }
+  return assertSafeManifest({
+    ...clone,
+    version,
+    platforms,
+    bundle: { ...(clone.bundle || {}), required: false },
+    updatedFrom: base.version,
+  }, base.id);
 }
 
 function pathInside(root, candidate) {
@@ -461,7 +523,11 @@ function createManagedComponentController({
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
   const downloadFetch = typeof fetchImpl === "function" ? fetchImpl : null;
 
-  const manifests = new Map(COMPONENT_IDS.map((id) => [id, loadManagedManifest(id, manifestRoot)]));
+  // The manifests this build ships; `manifests` holds the active ones, which an installed update replaces.
+  const bundledManifests = new Map(COMPONENT_IDS.map((id) => [id, loadManagedManifest(id, manifestRoot)]));
+  const manifests = new Map(bundledManifests);
+  const updateChecks = new Map();
+  const previousManifests = new Map();
   const componentsRoot = path.join(dataRoot, "components");
   const stateRoot = path.join(dataRoot, "state");
   const aiTempRoot = path.join(dataRoot, "aiTemp", "managed-components");
@@ -479,6 +545,33 @@ function createManagedComponentController({
   for (const directory of [componentsRoot, stateRoot, aiTempRoot, trashRoot]) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (platform !== "win32") fs.chmodSync(directory, 0o700);
+  }
+  // An update installed by an earlier launcher is the one to run, unless this build bundles a newer one.
+  for (const id of COMPONENT_IDS) {
+    const staged = stagedManifest(id);
+    if (staged) manifests.set(id, staged);
+  }
+
+  function updateRecordPath(id) {
+    return path.join(stateRoot, `${id}.update.json`);
+  }
+
+  function readUpdateRecord(id) {
+    const record = readJson(updateRecordPath(id));
+    return record?.schemaVersion === 1 ? record : null;
+  }
+
+  /** The installed update newer than this build's bundled version, or null. */
+  function stagedManifest(id) {
+    const base = bundledManifests.get(id);
+    const record = readUpdateRecord(id);
+    if (!base.updates || !record || typeof record.version !== "string" || !RELEASE_VERSION.test(record.version)) return null;
+    if ((record.rejected || []).includes(record.version) || compareVersions(record.version, base.version) <= 0) return null;
+    try {
+      return updatedManifest(base, record.version, new Map(Object.entries(record.sha256 || {})));
+    } catch {
+      return null;
+    }
   }
 
   function manifestFor(idValue) {
@@ -555,6 +648,12 @@ function createManagedComponentController({
 
   function operationState(id) {
     return operations.get(id) || null;
+  }
+
+  // An update installing beside the running version reports its progress apart from it: the running
+  // component stays "installed", so its connection and start paths keep working meanwhile.
+  function operationKey(manifest) {
+    return manifest.updatedFrom && manifests.get(manifest.id) !== manifest ? `${manifest.id}:update` : manifest.id;
   }
 
   function secretFor(id) {
@@ -658,6 +757,9 @@ function createManagedComponentController({
       secretConfigured: Object.keys(secretFor(id)).length > 0,
       missingCredentials: missingCredentials(manifest),
       bundledRuntime: hasBundledRuntime(manifest),
+      bundledVersion: bundledManifests.get(id).version,
+      update: updateChecks.get(id) || null,
+      updateOperation: operationState(`${id}:update`),
     };
   }
 
@@ -1127,16 +1229,17 @@ function createManagedComponentController({
     const artifact = path.join(stagingHome, assertSafeRelativePath(asset.fileName, `${manifest.id} filename`));
     const bundledAsset = bundledReleaseAssetPath(manifest, asset);
     if (bundledAsset) {
-      setOperation(manifest.id, { state: "installing", step: "copy-bundled-release", error: null });
+      setOperation(operationKey(manifest), { state: "installing", step: "copy-bundled-release", error: null });
       fs.copyFileSync(bundledAsset, artifact);
       writeBundledMarker(stagingHome, manifest);
-    } else if (bundleRequired(manifest) || !allowNetworkInstall) {
+    } else if ((bundleRequired(manifest) || !allowNetworkInstall) && !manifest.updatedFrom) {
       throw missingBundleError(manifest);
     } else {
-      setOperation(manifest.id, { state: "installing", step: "download-release", error: null });
+      // A newer release than the bundled one (an update) is fetched from its pinned GitHub URL.
+      setOperation(operationKey(manifest), { state: "installing", step: "download-release", error: null });
       await downloadAsset(asset.url, artifact, manifest);
     }
-    setOperation(manifest.id, { state: "installing", step: "verify-sha256", error: null });
+    setOperation(operationKey(manifest), { state: "installing", step: "verify-sha256", error: null });
     verifySha256(artifact, asset.sha256);
     if (platform !== "win32") fs.chmodSync(artifact, 0o700);
     return { artifact };
@@ -1255,7 +1358,7 @@ function createManagedComponentController({
         assertWithin(stagingHome, probe, "Managed component skipIfExists");
         if (fs.existsSync(probe)) continue;
       }
-      setOperation(manifest.id, { state: "installing", step: step.id, error: null });
+      setOperation(operationKey(manifest), { state: "installing", step: step.id, error: null });
       if (step.skipIfFile) {
         const skipPath = path.join(stagingHome, assertSafeRelativePath(step.skipIfFile, `${step.id} skipIfFile`));
         assertWithin(stagingHome, skipPath, "Managed component skip path");
@@ -1283,18 +1386,20 @@ function createManagedComponentController({
     return path.relative(stagingHome, artifact).replaceAll("\\", "/");
   }
 
-  async function installComponent(idValue, { repair = false } = {}) {
+  async function installComponent(idValue, { repair = false, manifest: explicit = null } = {}) {
     const id = requiredComponentId(idValue);
-    const manifest = manifestFor(id);
+    // An update installs beside the running version, so the active manifest stays in place meanwhile.
+    const manifest = explicit || manifestFor(id);
     const source = sourceState(manifest);
     if (source.state === "installed" && !repair) return project(id);
-    if (operationState(id)?.state === "installing") throw new Error(`${manifest.name} installation is already running`);
+    const key = operationKey(manifest);
+    if (operationState(key)?.state === "installing") throw new Error(`${manifest.name} installation is already running`);
     const missing = missingCredentials(manifest);
     if (missing.length > 0) throw new Error(`${manifest.name} needs these credentials first: ${missing.join(", ")}`);
     fs.mkdirSync(componentState(manifest), { recursive: true, mode: 0o700 });
     if (platform !== "win32") fs.chmodSync(componentState(manifest), 0o700);
 
-    setOperation(id, { state: "installing", step: "prepare", error: null });
+    setOperation(key, { state: "installing", step: "prepare", error: null });
     const stagingRoot = path.join(
       aiTempRoot,
       `${id}-${timestampSegment(now())}-${crypto.randomUUID()}`,
@@ -1342,7 +1447,7 @@ function createManagedComponentController({
         completedAt: now(),
         target,
       });
-      setOperation(id, { state: "installed", step: null, error: null });
+      setOperation(key, { state: "installed", step: null, error: null });
       return project(id);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1352,13 +1457,142 @@ function createManagedComponentController({
         failedAt: now(),
         error: message,
       });
-      setOperation(id, { state: "error", step: null, error: message });
+      setOperation(key, { state: "error", step: null, error: message });
       throw error;
     }
   }
 
   function repairComponent(id) {
     return installComponent(id, { repair: true });
+  }
+
+  async function fetchFromGitHub(url, accept) {
+    if (!downloadFetch) throw new Error("Update checks need network access");
+    const response = await downloadFetch(url, {
+      redirect: "follow",
+      headers: { Accept: accept, "User-Agent": "Coding-Tools" },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) throw new Error(`GitHub returned HTTP ${response.status} for ${new URL(url).pathname}`);
+    return response;
+  }
+
+  async function latestRelease(base) {
+    const response = await fetchFromGitHub(
+      `https://api.github.com/repos/${base.repository}/releases/latest`,
+      "application/vnd.github+json",
+    );
+    const tag = String((await response.json())?.tag_name || "");
+    const version = tag.replace(/^v/u, "");
+    if (!RELEASE_VERSION.test(version)) throw new Error(`${base.name}'s latest release tag ${tag || "(none)"} isn't a version`);
+    return { tag, version };
+  }
+
+  async function releaseChecksums(base, tag) {
+    const response = await fetchFromGitHub(
+      `https://github.com/${base.repository}/releases/download/${encodeURIComponent(tag)}/${base.updates.checksums}`,
+      "text/plain",
+    );
+    const text = await response.text();
+    if (text.length > MAX_CHECKSUMS_BYTES) throw new Error(`${base.name} release checksums are too large`);
+    return parseChecksums(text);
+  }
+
+  /** Asks GitHub for the component's newest release; never throws, the result carries the error. */
+  async function checkComponentUpdate(idValue) {
+    const id = requiredComponentId(idValue);
+    const base = bundledManifests.get(id);
+    const current = manifestFor(id).version;
+    if (!base.updates) return { id, current, latest: current, available: false, reason: "pinned" };
+    let result;
+    try {
+      const { tag, version } = await latestRelease(base);
+      const rejected = readUpdateRecord(id)?.rejected || [];
+      result = {
+        id,
+        current,
+        latest: version,
+        tag,
+        available: compareVersions(version, current) > 0 && !rejected.includes(version),
+        ...(rejected.includes(version) ? { reason: `${version} failed its health check here before` } : {}),
+        checkedAt: now(),
+      };
+    } catch (error) {
+      result = { id, current, latest: null, available: false, checkedAt: now(), error: error instanceof Error ? error.message : String(error) };
+    }
+    updateChecks.set(id, result);
+    emit();
+    return result;
+  }
+
+  /**
+   * Downloads, verifies and installs the newest release into its own version folder, beside the
+   * running one, and records it so the next start (or activateComponentUpdate) runs it.
+   */
+  async function installComponentUpdate(idValue) {
+    const id = requiredComponentId(idValue);
+    const check = await checkComponentUpdate(id);
+    if (check.error) throw new Error(check.error);
+    if (!check.available) return { ...check, staged: false };
+    const base = bundledManifests.get(id);
+    const candidate = updatedManifest(base, check.latest, await releaseChecksums(base, check.tag));
+    selectedReleaseAsset(candidate);
+    await installComponent(id, { manifest: candidate });
+    const asset = selectedReleaseAsset(candidate);
+    const record = readUpdateRecord(id);
+    writeJson(updateRecordPath(id), {
+      schemaVersion: 1,
+      version: candidate.version,
+      sha256: { [asset.fileName]: asset.sha256 },
+      installedAt: now(),
+      ...(record?.rejected ? { rejected: record.rejected } : {}),
+    });
+    emit();
+    return { ...check, staged: true };
+  }
+
+  /** Makes the installed update the active manifest. The caller restarts the component. */
+  function activateComponentUpdate(idValue) {
+    const id = requiredComponentId(idValue);
+    const active = manifestFor(id);
+    const staged = stagedManifest(id);
+    if (!staged || compareVersions(staged.version, active.version) <= 0) return null;
+    if (sourceState(staged).state !== "installed") return null;
+    previousManifests.set(id, active);
+    manifests.set(id, staged);
+    emit();
+    return { from: active.version, to: staged.version };
+  }
+
+  /** An update that failed after activation: go back to the earlier version and never retry this one. */
+  function rejectComponentUpdate(idValue, version) {
+    const id = requiredComponentId(idValue);
+    const record = readUpdateRecord(id) || { schemaVersion: 1 };
+    writeJson(updateRecordPath(id), { ...record, rejected: [...new Set([...(record.rejected || []), version])] });
+    manifests.set(id, previousManifests.get(id) || stagedManifest(id) || bundledManifests.get(id));
+    previousManifests.delete(id);
+    emit();
+    return project(id);
+  }
+
+  /** Moves version folders other than the active and bundled ones to Trash. */
+  function pruneComponentVersions(idValue) {
+    const id = requiredComponentId(idValue);
+    const keep = new Set([manifestFor(id).version, bundledManifests.get(id).version].map(safeSegment));
+    const root = path.join(componentsRoot, id);
+    let entries = [];
+    try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch {}
+    for (const entry of entries) {
+      if (!entry.isDirectory() || keep.has(entry.name)) continue;
+      try { moveToTrash(path.join(root, entry.name), manifestFor(id), `version-${entry.name}-pruned`); }
+      catch (error) {
+        logger?.warn?.("managed-component.prune-failed", {
+          componentId: id,
+          version: entry.name,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   function launchContext(manifest) {
@@ -1424,6 +1658,16 @@ function createManagedComponentController({
       return (health.acceptStatus || [200]).includes(response.status);
     } catch {
       return false;
+    }
+  }
+
+  async function waitForHealth(idValue, { timeoutMs = 30_000, intervalMs = 500 } = {}) {
+    const id = requiredComponentId(idValue);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (await probeHealth(id)) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }
 
@@ -1711,6 +1955,12 @@ function createManagedComponentController({
     startComponent,
     stopComponent,
     restartComponent,
+    checkComponentUpdate,
+    installComponentUpdate,
+    activateComponentUpdate,
+    rejectComponentUpdate,
+    pruneComponentVersions,
+    waitForHealth,
     runtimeConfiguration,
     runtimeSecrets,
     healthHeaders,
@@ -1723,6 +1973,9 @@ module.exports = {
   COMPONENT_IDS,
   INSTALL_STATES,
   assertSafeManifest,
+  compareVersions,
+  parseChecksums,
+  updatedManifest,
   bundledSourceHome,
   copyBundledTree,
   createManagedComponentController,

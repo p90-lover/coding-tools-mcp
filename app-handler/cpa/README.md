@@ -22,7 +22,25 @@ await codingTools.apps.call({
 
 Loopback HTTP is started by Coding Tools as a managed child, never at UI bootstrap, and is **not** the product surface. There is no apps HTTP listener.
 
-Operations: `inspect`, `start`, `stop`, `restart`, `repair`, `install`, `health`, `models`, `chatCompletions`, `managementHealth`, `listProviders` (`providers`), `linkProvider`, `unlinkProvider`, `providerStatus`.
+Operations: `inspect`, `start`, `stop`, `restart`, `repair`, `install`, `health`, `models`, `chatCompletions`, `managementHealth`, `listProviders` (`providers`), `linkProvider`, `unlinkProvider`, `providerStatus`, `checkUpdate`, `update`.
+
+## Updates
+
+CPA follows its upstream releases (`router-for-me/CLIProxyAPI`) instead of staying on the version the installer bundles:
+
+- **Download:** every 6 hours the app downloads the newest release, checks it against the release's `checksums.txt`, and installs it into `components/cpa/<version>/` beside the running CPA.
+- **Switch:** switching restarts CPA, so it waits for a quiet moment. Until then, the next app start runs the new version.
+- **Health check:** a version that fails its health check rolls back and is never tried again.
+- **Opting out:** set `automaticComponentUpdates: false` in the launcher state to stop automatic updates.
+
+```js
+await codingTools.apps.call({ moduleId: "cpa", operation: "checkUpdate" });
+// → { current: "8.0.32", latest: "8.0.46", available: true, ... }
+await codingTools.apps.call({ moduleId: "cpa", operation: "update" });
+// → { staged: true, swapped: true, from: "8.0.32", to: "8.0.46" } (or rolledBack: true, error)
+await codingTools.apps.call({ moduleId: "cpa", operation: "update", arguments: { swap: false } });
+// installs only; the next start (or a quiet moment) switches
+```
 
 `models` uses the in-process handler with the managed CPA proxy API key. When the auth-dir is empty or provider-network accounts are disabled/archived it returns `{ ok: false, models: [], reason }` instead of a fake catalog. After a provider is linked and connected, `/v1/models` (via the handler) returns that catalog.
 
