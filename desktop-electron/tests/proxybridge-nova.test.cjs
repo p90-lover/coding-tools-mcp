@@ -181,9 +181,18 @@ test("Nova's proxies become the app's own, with the gateway's route moved to a r
     filePath: path.join(root, "providers", "provider-network.json"),
     keyPath: path.join(root, "providers", "provider-network.key"), safeStorage,
   });
-  store.syncSourceProfiles("nova", profileEntries({ proxies: [socks("p1", "proxy.example")] }, STATUS));
-  const remote = store.snapshot().proxyProfiles.find((profile) => profile.endpoint.host === "proxy.example");
+  store.syncSourceProfiles("nova", profileEntries({ proxies: [
+    socks("p1", "proxy.example"),
+    socks("mirror", "127.0.0.1", { port: 17891, username: "", password: "" }),
+    socks("clash", "127.0.0.1", { port: 7890, username: "", password: "" }),
+  ] }, STATUS));
+  const byHost = (host, port) => store.snapshot().proxyProfiles.find((profile) => profile.endpoint.host === host && profile.endpoint.port === port);
+  const remote = byHost("proxy.example", 1080);
+  const clash = byHost("127.0.0.1", 7890);
+  const mirror = store.snapshot().proxyProfiles.find((profile) => profile.sourceKey === "mirror");
   store.setGlobalRouting({ enabled: true, profileId: GATEWAY_PROFILE_ID });
+  store.setProviderPolicy({ providerId: "cpa", mode: "profile", profileId: clash.id });
+  store.setProviderPolicy({ providerId: "other", mode: "profile", profileId: mirror.id });
 
   assert.equal(store.adoptSourceProfiles("nova").changed, true);
   const snapshot = store.snapshot();
@@ -193,6 +202,25 @@ test("Nova's proxies become the app's own, with the gateway's route moved to a r
   assert.deepEqual(store.proxySecret(remote.id), { username: "user", password: "secret" }, "its sign-in is kept");
   assert.ok(snapshot.proxyProfiles.find((profile) => profile.id === GATEWAY_PROFILE_ID).archivedAt, "Nova's local gateway is retired");
   assert.equal(snapshot.routing.globalProfileId, remote.id, "the app route goes straight to the proxy");
+  assert.ok(snapshot.proxyProfiles.find((profile) => profile.id === mirror.id).archivedAt, "a proxy on the gateway's port is Nova's too");
+  assert.equal(snapshot.routing.providers.find((policy) => policy.providerId === "other").profileId, remote.id);
+  assert.equal(snapshot.proxyProfiles.find((profile) => profile.id === clash.id).archivedAt, undefined, "another program's local proxy is kept");
+  assert.equal(snapshot.routing.providers.find((policy) => policy.providerId === "cpa").profileId, clash.id, "with its route");
   assert.equal(store.adoptSourceProfiles("nova").changed, false, "a second start changes nothing");
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("editing one half of a proxy sign-in keeps the other half", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "proxy-auth-"));
+  const store = createProviderNetworkStore({
+    filePath: path.join(root, "providers", "provider-network.json"),
+    keyPath: path.join(root, "providers", "provider-network.key"), safeStorage,
+  });
+  const endpoint = { protocol: "http", host: "proxy.example", port: 8080 };
+  const id = store.saveProxyProfile({ name: "p", endpoint, username: "user", password: "old" }).proxyProfiles[0].id;
+  store.saveProxyProfile({ id, name: "p", endpoint, password: "new" });
+  assert.deepEqual(store.proxySecret(id), { username: "user", password: "new" });
+  store.saveProxyProfile({ id, name: "p", endpoint, username: "other" });
+  assert.deepEqual(store.proxySecret(id), { username: "other", password: "new" });
   fs.rmSync(root, { recursive: true, force: true });
 });

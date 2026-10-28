@@ -262,7 +262,8 @@ export function NetworkProxySurface({
           onChange={(event) => setDraft(pastedProxy(event.target.value, draft) ?? { ...draft, host: event.target.value })} />
         <input aria-label={t("Port", "連接埠", "端口", "ポート")} className="px-port" inputMode="numeric" placeholder="port" value={draft.port}
           onChange={(event) => setDraft({ ...draft, port: event.target.value.replace(/\D/g, "").slice(0, 5) })} />
-        <input aria-label={t("Username", "使用者名稱", "用户名", "ユーザー名")} autoComplete="off" placeholder={t("username", "使用者名稱", "用户名", "ユーザー名")}
+        <input aria-label={t("Username", "使用者名稱", "用户名", "ユーザー名")} autoComplete="off"
+          placeholder={draft.hasAuthentication ? "••••••••" : t("username", "使用者名稱", "用户名", "ユーザー名")}
           value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} />
         <input aria-label={t("Password", "密碼", "密码", "パスワード")} autoComplete="off" type="password"
           placeholder={draft.hasAuthentication ? "••••••••" : t("password", "密碼", "密码", "パスワード")}
