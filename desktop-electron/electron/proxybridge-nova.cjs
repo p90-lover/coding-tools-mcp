@@ -25,6 +25,7 @@ const EXIT_REASONS = {
   2:"ProxyBridge Nova refused its start arguments or API token",
   3: "Another ProxyBridge Nova is running and did not hand over; close it, then start it here",
   4: "The ProxyBridge Nova API port is in use by another program",
+  5: "ProxyBridge Nova could not read its config.json or saved profile",
 };
 
 function profileIdFor(key) {

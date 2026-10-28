@@ -317,7 +317,7 @@ export function NetworkProxySurface({
     const rule: NovaRule = {
       ruleId, name: ruleDraft.name.trim(), enabled: true,
       applications: executables.map((executablePath) => ({ executablePath, packageFamily: null, packageSid: null, knownFamily: "none", requiresVerifiedLineage: false })),
-      targetHosts: "*", targetPorts: "*", protocol: "any", action: ruleDraft.action,
+      targetHosts: "Any", targetPorts: "Any", protocol: "any", action: ruleDraft.action,
       proxyKey: ruleDraft.action === "proxy" ? ruleDraft.proxyKey || eligible[0]?.key || null : null, immutable: false,
     };
     // Localhost stays first and Default last; new rules go just before Default.
