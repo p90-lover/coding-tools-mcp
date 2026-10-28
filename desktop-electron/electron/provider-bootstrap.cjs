@@ -17,6 +17,7 @@ function redactNovaProfile(profile) {
 }
 
 let providerNetworkControllerPromise = null;
+let novaManager = null;
 let providerBrowserHostGetter = () => null;
 let providerCpaConnectionGetter = () => null;
 // The launcher's own log (launcher.jsonl, which redacts proxy credentials and bearer tokens) once
@@ -148,6 +149,7 @@ function installProviderNetwork({
       },
       logger,
     });
+    novaManager = nova;
     void nova.start();
     app.once("will-quit", () => nova?.stopPolling());
     return controller;
@@ -286,9 +288,15 @@ function installProviderNetwork({
   });
 }
 
+/** A full quit ends ProxyBridge Nova with the app; a relaunch leaves it for the next app to adopt. */
+function stopProxyBridgeNova() {
+  return novaManager?.stop() ?? Promise.resolve();
+}
+
 module.exports = {
   installProviderNetwork,
   providerNetworkReady,
+  stopProxyBridgeNova,
   setProviderLogger,
   setProviderBrowserHost,
   setProviderCpaConnection,

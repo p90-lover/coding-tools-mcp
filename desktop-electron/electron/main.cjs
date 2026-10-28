@@ -62,6 +62,7 @@ const {
   setProviderBrowserHost,
   setProviderCpaConnection,
   setProviderLogger,
+  stopProxyBridgeNova,
 } = require("./provider-bootstrap.cjs");
 
 const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
@@ -2714,6 +2715,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     await step("browser-session", () => browserHost?.persistSession(), 30_000);
     browserHost?.destroy();
     await step("browser-control", () => browserControl?.close(), 5_000);
+    // Last: everything above may still reach the network through Nova's gateway.
+    if (!keepBridge) await step("proxybridge-nova", () => stopProxyBridgeNova(), 5_000);
     exitCommitted = true;
     if (relaunch) app.relaunch();
     app.quit();

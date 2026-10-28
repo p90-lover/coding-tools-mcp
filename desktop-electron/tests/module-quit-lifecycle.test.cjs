@@ -45,6 +45,8 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
     stopBridgeWatchdog() {}, backendBundles: { stopWatching() {} },
     agentOrchestratorUpstream: { stop: async () => { chatHosts.push("stop-ao"); }, endChatHosts: async () => { chatHosts.push("end-chat-hosts"); } },
     antigravityReauth: { stop() {} },
+    // ProxyBridge Nova (provider-bootstrap.cjs) ends with a full quit, after everything that may use its gateway.
+    stopProxyBridgeNova: async () => { chatHosts.push("stop-nova"); },
     // The docked ChatGPT desktop host (main.cjs `chatgptDesktop`) is shut down on every quit.
     chatgptDesktop: { shutdown: async () => { order.push("stop-chatgpt-desktop"); } },
     managedBootstrapController: controller("bootstrap"), originalUiController: controller("visuals"),
@@ -108,10 +110,10 @@ test("a quit or update with a live ChatGPT turn asks, and Quit anyway goes on", 
 });
 
 // Seen 2026-10-28: chat hosts from three earlier runs, the oldest four days old, each with its agent.
-test("a quit ends AO's chat hosts after AO stops; a keep-bridge restart leaves them to be reattached", async () => {
+test("a quit ends AO's chat hosts after AO stops, then Nova; a keep-bridge restart leaves them to be reattached", async () => {
   const quit = fixture();
   assert.equal((await quit.quit()).ok, true);
-  assert.deepEqual(quit.chatHosts, ["stop-ao", "end-chat-hosts"]);
+  assert.deepEqual(quit.chatHosts, ["stop-ao", "end-chat-hosts", "stop-nova"]);
 
   const restart = fixture();
   assert.equal((await restart.quit({ keepBridge: true })).ok, true);
