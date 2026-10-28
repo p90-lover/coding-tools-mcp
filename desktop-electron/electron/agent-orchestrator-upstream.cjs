@@ -619,6 +619,33 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // An earlier turn has ended; a message AO left flagged as streaming is its final text.
     return turnTimeline(merged, turnId, true);
   }
+  // Finished turns are read back PAST_TURN_READS at a time, and a turn asked again while its read is
+  // in flight shares it. Opening a chat opens every finished card's work at once, and each read
+  // pages back through AO one request after another: a burst of them took all 16 of the headless
+  // service's request slots, and every chat poll in that moment failed "HEADLESS_CAPACITY: request
+  // admission is full" (seen live on 0.8.29, 12 failures in two seconds).
+  const PAST_TURN_READS = 3;
+  const pastTurnReads = new Map(); // `${id}|${turnId}` -> read in flight
+  const pastTurnWaiting = [];
+  let pastTurnActive = 0;
+  const pastTurnSlot = () => {
+    if (pastTurnActive < PAST_TURN_READS) { pastTurnActive += 1; return Promise.resolve(); }
+    return new Promise(resolve => pastTurnWaiting.push(resolve));
+  };
+  // A freed slot passes straight to the next read waiting, oldest first.
+  const releasePastTurnSlot = () => {
+    const next = pastTurnWaiting.shift();
+    if (next) next(); else pastTurnActive -= 1;
+  };
+  function queuedPastTurnTimeline(id, turnId) {
+    const key = `${id}|${turnId}`;
+    const known = pastTurnReads.get(key);
+    if (known) return known;
+    const read = pastTurnSlot().then(() => pastTurnTimeline(id, turnId).finally(releasePastTurnSlot));
+    pastTurnReads.set(key, read);
+    read.finally(() => pastTurnReads.delete(key)).catch(() => undefined);
+    return read;
+  }
   // claude-agent-acp reports every tool call, its own Read/Grep/PowerShell included, as AO's
   // "mcp_tool"; the ACP tool kind says what it did. A real MCP server's tool is named mcp__<server>__.
   const TOOL_LABELS = { read: "Read", search: "Search", edit: "Edit", delete: "Delete", move: "Move", fetch: "Fetch",
@@ -1547,7 +1574,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     /** A finished turn's reasoning, tool calls and messages (the chat's "Worked" row, opened). */
     async timeline(id, turnId) {
       if (typeof turnId !== "string" || !turnId) return [];
-      return pastTurnTimeline(id, turnId);
+      return queuedPastTurnTimeline(id, turnId);
     },
     async interrupt(id) {
       agentTools?.cancelSessionCalls?.(id);

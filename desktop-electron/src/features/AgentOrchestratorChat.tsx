@@ -574,15 +574,19 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
+  // The card whose reply closes the turn (a team's reviewer) keeps its row with the others, folded
+  // like them: its row left "Worked" the moment its reply became the answer, taking its thinking
+  // and tool calls with it. Its reply and earlier rounds show in the answer, so the row holds its work.
+  const rows = turn.final ? [...turn.steps, { ...turn.final, text: undefined, earlier: undefined }] : turn.steps;
   // While it works the turn has no head of its own: its steps start at their dots, and how long it
   // has worked and on what is said once, at the turn's foot (TurnRunning, whose verb alone shimmers).
   // Once done it folds under "Worked · N steps".
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     {working ? null : <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span>{`Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`}</span>
+      <span>{`Worked · ${rows.length} ${rows.length === 1 ? "step" : "steps"}`}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>}
-    {open || working ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
+    {open || working ? <ol className="cx-steps">{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
   </div>;
 }
 
