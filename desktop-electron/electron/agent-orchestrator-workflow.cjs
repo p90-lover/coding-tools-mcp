@@ -3471,8 +3471,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // "Retry automatically" (the chat's failed-step card): a failed single-model step runs again by
   // itself, a few times with a growing pause, unless its failure is one a retry cannot fix (the
   // account pool or a sign-in). The user: a launch that timed out waited for a click.
-  const AUTO_RETRY_LIMIT = 3;
-  const AUTO_RETRY_PAUSE_MS = 10_000;
+  // The pause before each attempt. Three quick tries spent a minute and then waited for a click,
+  // which worked (the user: "it doesnt auto retry, but it can auto retry when clicking the button"):
+  // a model cooling down or a slow launch outlasts a minute, so later tries wait minutes apart,
+  // about 34 minutes in all before the step waits for the person.
+  const AUTO_RETRY_PAUSES_MS = [10_000, 20_000, 30_000, 60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
+  const AUTO_RETRY_LIMIT = AUTO_RETRY_PAUSES_MS.length;
+  const autoRetryPause = attempt => AUTO_RETRY_PAUSES_MS[Math.min(Math.max(attempt, 1), AUTO_RETRY_LIMIT) - 1];
+  const countdown = ms => ms >= 120_000 ? `${Math.ceil(ms / 60_000)} min` : `${Math.ceil(ms / 1000)}s`;
   const autoRetrySeen = new Map(); // `${runId}:${nodeId}:${attempt}` -> when this failure was first seen
   function autoRetryStep(mission, held) {
     const node = held.find(entry => entry.role !== "retry") ?? held[0];
@@ -3487,9 +3493,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       autoRetrySeen.set(key, now());
       if (autoRetrySeen.size > 500) autoRetrySeen.delete(autoRetrySeen.keys().next().value);
     }
-    const wait = AUTO_RETRY_PAUSE_MS * attempt - (now() - autoRetrySeen.get(key));
+    const wait = autoRetryPause(attempt) - (now() - autoRetrySeen.get(key));
     // `waiting`: the run must keep going until the pause is over (driveRun), or nothing retries it.
-    if (wait > 0) return { waiting: true, detail: `Retrying automatically in ${Math.ceil(wait / 1000)}s (attempt ${attempt} of ${AUTO_RETRY_LIMIT})` };
+    if (wait > 0) return { waiting: true, detail: `Retrying automatically in ${countdown(wait)} (attempt ${attempt} of ${AUTO_RETRY_LIMIT})` };
     autoRetrySeen.delete(key);
     return { retry: true, attempt };
   }
@@ -3899,7 +3905,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     void (async () => {
       const failed = await mission();
       if (!current() || !autoRetryAllowed(failed)) return;
-      // The same growing pause as autoRetryStep: 10 s before the second try, 20 s before the third.
+      // The same growing pause as autoRetryStep: 10 s before the first try, 20 s before the second.
       const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
       const attempt = (held?.history?.length ?? 0) + 1;
       const timer = setTimer(() => {
@@ -3910,7 +3916,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           logger?.info?.("ao.auto_retry_restart", { attempt });
           await startRun({ workspaceId, runId, executable });
         })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
-      }, AUTO_RETRY_PAUSE_MS * attempt);
+      }, autoRetryPause(attempt));
       timer?.unref?.();
       autoRetryTimers.add(timer);
     })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));

@@ -7649,7 +7649,7 @@ test("\"Retry automatically\" retries a failed step by itself once its pause is 
       await new Promise(resolve => setTimeout(resolve, 20));
       detail = String((await status()).detail ?? "");
     }
-    assert.match(detail, /Retrying automatically in \d+s \(attempt 1 of 3\)/);
+    assert.match(detail, /Retrying automatically in \d+s \(attempt 1 of 8\)/);
     await new Promise(resolve => setTimeout(resolve, 600));
     assert.deepEqual(controls, [], "nothing is retried before the pause is over");
     clock += 11_000;
@@ -7725,8 +7725,8 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
     const controls = [], timers = [];
     let lost = false;
     const workflow = createAgentOrchestratorWorkflow({
-      // Only the auto-retry pauses (10 s per attempt); other timers are not this test's.
-      setTimer: (fn, ms) => { if ([10_000, 20_000, 30_000].includes(ms)) timers.push({ fn, ms }); return { unref() {} }; },
+      // Only the auto-retry pauses; other timers are not this test's.
+      setTimer: (fn, ms) => { if ([10_000, 20_000, 30_000, 60_000, 15 * 60_000].includes(ms)) timers.push({ fn, ms }); return { unref() {} }; },
       findCodexExecutable: () => process.execPath,
       resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
       cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
@@ -7789,8 +7789,31 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
   assert.deepEqual(replaced.controls, [], "a disposed backend starts nothing");
   replaced.mission.nodes[0].state = "finished";
 
-  // Its third retry already used: the limit holds, and the step waits for the person.
-  const spent = setup([{}, {}, {}]);
+  // Three quick tries spent: it still retries by itself, a minute later. Before, the step waited
+  // for a click here, and the click worked.
+  const fourth = setup([{}, {}, {}]);
+  await fourth.workflow.call("chat_auto_retry", { enabled: true });
+  await fourth.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  fourth.fail();
+  for (let tries = 0; tries < 200 && !fourth.timers.length; tries++) await settle(10);
+  assert.deepEqual(fourth.timers.map(timer => timer.ms), [60_000], "a fourth try, after a minute");
+  fourth.timers[0].fn();
+  for (let tries = 0; tries < 200 && !fourth.controls.length; tries++) await settle(10);
+  assert.deepEqual(fourth.controls, ["retry"]);
+
+  // The last try waits 15 minutes.
+  const last = setup(Array.from({ length: 7 }, () => ({})));
+  await last.workflow.call("chat_auto_retry", { enabled: true });
+  await last.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  last.fail();
+  for (let tries = 0; tries < 200 && !last.timers.length; tries++) await settle(10);
+  assert.deepEqual(last.timers.map(timer => timer.ms), [15 * 60_000]);
+  last.mission.nodes[0].state = "finished";
+
+  // Its eighth retry already used: the limit holds, and the step waits for the person.
+  const spent = setup(Array.from({ length: 8 }, () => ({})));
   await spent.workflow.call("chat_auto_retry", { enabled: true });
   await spent.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
   await settle(100);
