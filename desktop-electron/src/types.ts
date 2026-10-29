@@ -753,6 +753,14 @@ export interface GptBrowserStatus {
   page: { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean } | null;
 }
 
+/** The Browser tab's ChatGPT accounts; the active one is also the Codex bridge's (WebGPT turns). */
+export interface BrowserAccountsStatus {
+  accounts: GptBrowserAccount[];
+  activeId: string;
+  maxAccounts: number;
+  switching: boolean;
+}
+
 export interface ChatGptDesktopStatus {
   supported: boolean;
   installed: boolean;
@@ -933,6 +941,12 @@ export interface LauncherApi {
   zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
   createBrowserTab(): Promise<BrowserState>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
+  browserAccounts(): Promise<BrowserAccountsStatus>;
+  addBrowserAccount(): Promise<BrowserAccountsStatus>;
+  switchBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
+  renameBrowserAccount(id: string, label: string): Promise<BrowserAccountsStatus>;
+  removeBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
+  onBrowserAccountsChanged(listener: (status: BrowserAccountsStatus) => void): () => void;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
   copyManualPrompt(tabId: string): Promise<BrowserState>;
   confirmManualSent(tabId: string): Promise<BrowserState>;
