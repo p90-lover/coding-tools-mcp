@@ -1158,6 +1158,59 @@ test("launcher stops an unhealthy managed runtime before reconnecting the alias"
   }
 });
 
+test("a connect that gives up while its tunnel still starts is waited out, not torn down and restarted", async () => {
+  // Seen live: on a loaded machine connect exited non-zero with state=starting, the app stopped the
+  // tunnel, and the watchdog started it again every two minutes for 20 minutes.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-slow-connect-"));
+  const binaryPath = path.join(root, "tunnel-client");
+  const runtimeKeyFile = path.join(root, "runtime.key");
+  const profileDir = path.join(root, "profiles");
+  fs.mkdirSync(profileDir, { recursive: true });
+  fs.writeFileSync(binaryPath, "binary");
+  fs.writeFileSync(runtimeKeyFile, "runtime-key");
+  fs.writeFileSync(path.join(profileDir, "codex-chatgpt-web.yaml"), "profile");
+  const config = { mode: "full", tunnel: { binaryPath, runtimeKeyFile, profileDir, profileName: "codex-chatgpt-web" } };
+  const run = async (connectState) => {
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: path.join(root, "launcher.json"),
+    });
+    const events = [];
+    let reads = 0;
+    supervisor.readTunnelHealth = async () => {
+      reads += 1;
+      // The first read is the known-status check before connecting; the tunnel is ready on the next.
+      return reads === 1
+        ? { ready: false, pid: null, statusKnown: true, absent: true, detail: "alias is not known" }
+        : { ready: true, pid: 123_456_775, statusKnown: true, detail: "state=ready" };
+    };
+    supervisor.runTunnelStopCommand = async () => { events.push("stop"); return { code: 0, output: "{}" }; };
+    supervisor.waitForTunnelStopped = async () => { events.push("stopped"); };
+    supervisor.runTunnelConnectCommand = async () => {
+      events.push("connect");
+      const stdout = JSON.stringify({ state: connectState, process_running: connectState !== "stopped", healthy: false, ready: false });
+      return { code: 1, stdout, stderr: "", output: stdout };
+    };
+    supervisor.waitForTunnelMcpTransport = async () => { events.push("mcp"); };
+    supervisor.startTunnelMonitor = () => { events.push("monitor"); };
+    const outcome = await supervisor.startTunnel(config).then(() => "started", (error) => error.message);
+    return { outcome, events, pid: supervisor.tunnel?.pid };
+  };
+  try {
+    const slow = await run("starting");
+    assert.equal(slow.outcome, "started");
+    assert.deepEqual(slow.events, ["stop", "stopped", "connect", "mcp", "monitor"], "never stopped again after connect");
+    assert.equal(slow.pid, 123_456_775, "the running tunnel is adopted");
+    const dead = await run("stopped");
+    assert.match(dead.outcome, /refused managed startup: state=stopped/, "a tunnel whose process is gone still fails at once");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("failed tunnel startup accepts an absent alias only after its recorded process has exited", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-dead-cleanup-"));
   const binaryPath = path.join(root, "tunnel-client");
