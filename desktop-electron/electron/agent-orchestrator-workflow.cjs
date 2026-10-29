@@ -2987,10 +2987,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // answered 502 for every model, and each goal check spent its three places on three of them.
   const providerDown = new Map(); // "cline-pass" -> until
   const modelProvider = model => /^([^/]+)\//.exec(String(model))?.[1] ?? "";
+  // A model whose quota is used up stays out until its stated reset, or MODEL_GONE_MS when none is
+  // given: seen live 2026-10-29, the Anthropic API key behind "Claude Haiku 4.5/5.5" answered 400
+  // "You have reached your specified API usage limits. You will regain access on 2026-11-01", and
+  // every goal check tried both first again ten minutes later. Never past a week.
+  const QUOTA_BENCH_MAX_MS = 7 * 86_400_000;
   const reviewerFailed = (model, error) => {
-    reviewerDown.set(model, now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
-    if (error?.status !== 404 && modelProvider(model)) providerDown.set(modelProvider(model), now() + REVIEWER_DOWN_MS);
+    const until = error?.quotaResetAt > now() ? Math.min(error.quotaResetAt, now() + QUOTA_BENCH_MAX_MS) : now() + MODEL_GONE_MS;
+    reviewerDown.set(model, error?.quota ? until : now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
+    if (error?.status !== 404 && !error?.quota && modelProvider(model)) providerDown.set(modelProvider(model), now() + REVIEWER_DOWN_MS);
   };
+  /**
+   * The error for a model call CPA refused: its status, and whether the answer says the model's
+   * quota is used up (an API key's spend limit comes back as 400, not 429) with the reset it names.
+   */
+  async function modelCallFailure(response, message) {
+    // A 429 alone may be a short rate limit; only the answer's words say the quota is gone.
+    const text = typeof response.text === "function" ? await response.text().then(body => String(body).slice(0, 2000), () => "") : "";
+    const quota = QUOTA_EXHAUSTED.test(text);
+    const reset = /regain access on (\d{4}-\d{2}-\d{2})(?: at (\d{2}:\d{2}) UTC)?/i.exec(text);
+    const quotaResetAt = reset ? Date.parse(`${reset[1]}T${reset[2] ?? "00:00"}:00Z`) : 0;
+    return Object.assign(new Error(quota ? `${message} (its quota is used up${reset ? ` until ${reset[1]}` : ""})` : message),
+      { status: response.status, quota, quotaResetAt });
+  }
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
   // request goes to the person: one 502 from the card's model put a routine command in front of
   // them while the very next review answered.
@@ -3146,7 +3165,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }),
           signal: AbortSignal.timeout(left),
         });
-        if (!response.ok) throw Object.assign(new Error(`Command approver ${model} returned HTTP ${response.status}`), { status: response.status });
+        if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
@@ -4852,7 +4871,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         });
         // A model CPA lists can still refuse (seen live 2026-10-23: HTTP 404, and the goal stalled);
         // the note names it.
-        if (!response.ok) throw Object.assign(new Error(`the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`), { status: response.status });
+        if (!response.ok) throw await modelCallFailure(response, `the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
         const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
         logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
         return { ...check, model };
