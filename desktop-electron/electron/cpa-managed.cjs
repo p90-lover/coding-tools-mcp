@@ -98,19 +98,45 @@ function findRuntimeBinary(directory) {
   return matches[0];
 }
 
+// Whether anything holds the port, by trying to bind it in a child (this check is synchronous):
+// under half a second, and unlike netstat it misses no listener. Owners are looked up only when it
+// is taken; a probe that cannot tell (exit other than 0) counts as taken.
+const BIND_PROBE = "const s=require(\"node:net\").createServer();"
+  + "s.once(\"error\",(e)=>{process.exitCode=e.code===\"EADDRINUSE\"?3:4});"
+  + "s.listen(Number(process.argv.at(-1)),\"127.0.0.1\",()=>s.close())";
+function portTaken(port, { runSync, options }) {
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: "1" };
+  return runSync(process.execPath, ["-e", BIND_PROBE, "--", String(Number(port))], { ...options, env }).status !== 0;
+}
+
+// The processes owning a socket on the port, from two sources. netstat can leave listeners out: on
+// 2026-10-29 it listed 12 listeners in all and never CPA's on 8317, so a stale CPA was seen only
+// through its clients' connections; with none (the old app had quit) it was missed, and the new CPA
+// failed "address in use". Get-NetTCPConnection lists that listener (state 0) with its owner.
+function portOwners(port, { runSync, system32, options }) {
+  const owners = new Set();
+  const powershell = path.join(system32, "WindowsPowerShell", "v1.0", "powershell.exe");
+  const query = `Get-NetTCPConnection -LocalPort ${Number(port)} -ErrorAction SilentlyContinue | ForEach-Object { $_.OwningProcess }`;
+  const sockets = runSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", query], options);
+  if (sockets.status === 0) {
+    for (const line of String(sockets.stdout || "").split(/\r?\n/u)) owners.add(Number(line.trim()));
+  }
+  const listing = runSync(path.join(system32, "NETSTAT.EXE"), ["-ano", "-p", "TCP"], options);
+  for (const columns of String(listing.stdout || "").split(/\r?\n/u).map((line) => line.trim().split(/\s+/u))) {
+    if (columns[0] === "TCP" && /:(\d+)$/u.exec(columns[1] || "")?.[1] === String(port)) owners.add(Number(columns[4]));
+  }
+  return [...owners].filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid);
+}
+
 // The pid of a CPA runtime holding the CPA port, else null (Windows only). Any socket on the port
 // counts, not only the listener: a CPA that lost its listener still served the clients whose
 // keep-alive connections it held (the 0.8.31 CPA on 2026-10-29, firewall-blocked, did exactly this).
 function cpaOnPort(port, { runSync = spawnSync, platform = process.platform } = {}) {
   if (platform !== "win32") return null;
   const system32 = path.join(process.env.SystemRoot || "C:\\Windows", "System32");
-  const options = { encoding: "utf8", windowsHide: true, timeout: 10_000 };
-  const listing = runSync(path.join(system32, "NETSTAT.EXE"), ["-ano", "-p", "TCP"], options);
-  const pids = new Set(String(listing.stdout || "").split(/\r?\n/u).map((line) => line.trim().split(/\s+/u))
-    .filter((columns) => columns[0] === "TCP" && /:(\d+)$/u.exec(columns[1] || "")?.[1] === String(port))
-    .map((columns) => Number(columns[4]))
-    .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid));
-  for (const pid of pids) {
+  const options = { encoding: "utf8", windowsHide: true, timeout: 15_000 };
+  if (!portTaken(port, { runSync, options })) return null;
+  for (const pid of portOwners(port, { runSync, system32, options })) {
     const task = runSync(path.join(system32, "tasklist.exe"), ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], options);
     const image = /^"([^"]+)"/u.exec(String(task.stdout || "").trim())?.[1];
     if (image?.toLowerCase() === "cli-proxy-api.exe") return pid;
@@ -126,11 +152,20 @@ function endStaleCpa(port, { runSync = spawnSync, platform = process.platform, w
   const stale = cpaOnPort(port, { runSync, platform });
   if (!stale) return null;
   const taskkill = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe");
-  runSync(taskkill, ["/PID", String(stale), "/T", "/F"], { windowsHide: true, timeout: 10_000 });
-  for (const deadline = Date.now() + waitMs; Date.now() < deadline && cpaOnPort(port, { runSync, platform });) {
+  const killed = runSync(taskkill, ["/PID", String(stale), "/T", "/F"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+  if (killed.status !== 0) {
+    // Said, not thrown: the new CPA still starts, and its "address in use" follows this line.
+    const reason = String(killed.stderr || killed.error?.message || `exit ${killed.status}`).trim();
+    console.error(`Could not end the earlier CPA (pid ${stale}) on port ${port}: ${reason}`);
+    return null;
+  }
+  let holder = stale;
+  for (const deadline = Date.now() + waitMs; Date.now() < deadline && (holder = cpaOnPort(port, { runSync, platform }));) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
   }
-  console.error(`Ended the earlier CPA (pid ${stale}) that still held port ${port}`);
+  console.error(holder
+    ? `Ended the earlier CPA (pid ${stale}), but pid ${holder} still holds port ${port}`
+    : `Ended the earlier CPA (pid ${stale}) that still held port ${port}`);
   return stale;
 }
 
