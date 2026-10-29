@@ -158,6 +158,24 @@ test("a turn shows the user bubble, the live work line and a stop button; Esc st
   assert.deepEqual(calls, [["stop", "r1"], ["stop", "r1"]]);
 });
 
+test("a chat waiting out an automatic retry still shows Stop, and Send once something is typed", () => {
+  // 2026-10-29: a held step retried for half an hour; the chat took messages, so Send stood in
+  // for Stop the whole time and nothing on screen could stop the retries.
+  const { props, calls } = base({
+    selectedTaskId: "t", working: false,
+    runs: [run("r1", "t", [node("p", "planner", "held", { receipt: { error: "API Error: 503" } })], { execution_mode: "single" })],
+  });
+  const chatView = mount(props);
+  const stop = walk(chatView.render()).find((element) => element.props?.["aria-label"] === "Stop (Esc)");
+  assert.ok(stop, "a held run is still open: Stop shows while nothing is typed");
+  stop.props.onClick();
+  assert.deepEqual(calls, [["stop", "r1"]]);
+  walk(chatView.render()).find((element) => element.type === "textarea").props.onChange({ target: { value: "try again" } });
+  const view = chatView.render();
+  assert.equal(walk(view).find((element) => element.props?.["aria-label"] === "Stop (Esc)"), undefined);
+  assert.ok(walk(view).find((element) => element.props?.["aria-label"] === "Send message"), "a typed message is sent, which stops the held run");
+});
+
 test("the reviewer's answer closes the turn in full, with Retry on the latest settled run", () => {
   const { props, calls } = base({
     selectedTaskId: "t",

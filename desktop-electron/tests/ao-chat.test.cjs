@@ -260,6 +260,8 @@ test("with Retry automatically on, a single chat's failed step that nothing retr
   const on = { autoRetry: true };
   assert.equal(chat.restartResume(single(failed()), Date.now()), null, "switch off: it waits for the person, as before");
   assert.equal(chat.restartResume(single(failed()), Date.now(), on), "retry");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: { error: "API Error: 400 This Go model requires Global regions" } })), Date.now(), on), null,
+    "a request the provider refuses is refused again: it waits for the person");
   assert.equal(chat.restartResume(single(failed({ history: [{}, {}] })), Date.now(), on), "retry", "a third attempt");
   assert.equal(chat.restartResume(single(failed({ history: [{}, {}, {}] })), Date.now(), on), "retry", "a fourth attempt: three quick tries are not the end");
   assert.equal(chat.restartResume(single(failed({ history: Array.from({ length: 8 }, () => ({})) })), Date.now(), on), null, "eight attempts: the person decides");
