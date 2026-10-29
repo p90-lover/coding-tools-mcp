@@ -30,8 +30,9 @@ const ROLES = Object.freeze([
   [/^git(\.exe)?$/i, "git"],
   [/^python\d*(\.exe)?$/i, "Python"],
 ]);
-// Background services: more than one of each usually means one was left behind.
-const SINGLETONS = Object.freeze(["AO daemon", "headless service", "runtime bridge", "CPA", "tunnel"]);
+// Background services: more than one of each usually means one was left behind. Not tunnels: each
+// MCP tunnel (one per ChatGPT account) runs its own tunnel client.
+const SINGLETONS = Object.freeze(["AO daemon", "headless service", "runtime bridge", "CPA"]);
 const ELECTRON_TYPES = Object.freeze({ Browser: "app (main)", Tab: "app (window)", GPU: "app (GPU)", Utility: "app (utility)" });
 
 const SAMPLE_MS = Object.freeze({ min: 250, default: 1000, max: 5000 });
@@ -118,7 +119,7 @@ function selectOwn(rows, { roots = [], own = [] } = {}) {
   const picked = new Map();
   const seeds = rows.filter((row) => own.includes(row.pid)
     || (row.exe && prefixes.some((prefix) => norm(row.exe).startsWith(prefix)))
-    || SINGLETONS.includes(roleOf(row.name)) && roleOf(row.name) !== "runtime bridge" && roleOf(row.name) !== "tunnel");
+    || SINGLETONS.includes(roleOf(row.name)) && roleOf(row.name) !== "runtime bridge");
   const queue = [...seeds];
   while (queue.length) {
     const row = queue.shift();

@@ -18,6 +18,7 @@ import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { SurfaceHiddenContext } from "./features/page-visibility";
 import { PartErrorBoundary } from "./PartErrorBoundary";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
+import { McpTunnelsPanel } from "./features/McpTunnelsPanel";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
 import { WorkspacePanel } from "./features/WorkspacePanel";
@@ -1921,6 +1922,9 @@ function McpSurface({
                   >
                     {copy.replaceCredentials}
                   </button>
+                  {!devProfile && !configuringInactiveMode ? (
+                    <McpTunnelsPanel api={api!} initial={snapshot.mcpTunnels ?? []} setError={setError} />
+                  ) : null}
                 </div>
               ) : (
                 <div className="field-list">

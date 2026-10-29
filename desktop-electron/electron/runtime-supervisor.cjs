@@ -13,6 +13,7 @@ const {
 } = require("./process-tree.cjs");
 const { runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
 const { runOffThread } = require("./off-thread-run.cjs");
+const { ExtraTunnels } = require("./extra-tunnels.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
@@ -435,6 +436,7 @@ class RuntimeSupervisor {
     getRuntimeEnvironment = () => ({}),
     persistentBridge = false,
     processInfo = windowsProcessInfo,
+    onExtraTunnelsChange,
   }) {
     this.app = app;
     this.logger = logger;
@@ -479,6 +481,28 @@ class RuntimeSupervisor {
     this.persistentBridge = persistentBridge === true && launcherProfile === "production";
     // Where an older build kept that output; removed when a persistent daemon starts.
     this.daemonLogPath = path.join(coreHome, "runtime", "daemon.log");
+    // Tunnels for further ChatGPT accounts; each runs beside the main tunnel and stops with it.
+    this.extraTunnels = new ExtraTunnels({
+      coreHome,
+      logger,
+      runTunnel: (tunnel, args, timeoutMs, label, options) => this.runTunnelCommand({ tunnel }, args, timeoutMs, label, options),
+      connectArgs: (config, tunnel) => managedTunnelConnectArgs({ ...config, tunnel }, this.tunnelMcpInvocation(config)),
+      diagnostic: tunnelControlDiagnostic,
+      absent: tunnelRuntimeAbsent,
+      onChange: onExtraTunnelsChange,
+    });
+  }
+
+  /** Starts the extra tunnels in the background; a failing one never holds up the bridge. */
+  startExtraTunnels(config) {
+    if (config?.mode !== "full" || this.launcherProfile !== "production") return;
+    void this.extraTunnels.start(config);
+  }
+
+  async stopExtraTunnels(config) {
+    const failures = await this.extraTunnels.stopAll(config);
+    if (failures.length) this.logger.warn("runtime.extra_tunnels_stop_failed", { failures });
+    return failures;
   }
 
   /**
@@ -836,6 +860,7 @@ class RuntimeSupervisor {
     const daemon = this.daemon;
     this.stopping = true;
     this.stopTunnelMonitor();
+    this.extraTunnels.detach();
     for (const name of ["daemon", "tunnel"]) {
       if (this.restartTimers[name]) {
         clearTimeout(this.restartTimers[name]);
@@ -1377,18 +1402,21 @@ class RuntimeSupervisor {
     }
   }
 
-  async runTunnelConnectCommand(config) {
+  tunnelMcpInvocation(config) {
     const contract = config.browserInteractionMode === "manual" ? "safe" : "native";
-    const invocation = this.runtimeCommand([
+    return this.runtimeCommand([
       "mcp",
       "--contract",
       contract,
       "--broker-socket",
       config.brokerSocketPath,
     ]);
+  }
+
+  async runTunnelConnectCommand(config) {
     return await this.runTunnelCommand(
       config,
-      managedTunnelConnectArgs(config, invocation),
+      managedTunnelConnectArgs(config, this.tunnelMcpInvocation(config)),
       TUNNEL_START_TIMEOUT_MS,
       "Tunnel managed startup",
     );
@@ -1618,6 +1646,7 @@ class RuntimeSupervisor {
           this.tryWriteState("degraded", detail);
           this.logger.warn("runtime.tunnel_deferred", { detail });
           this.publishOperation?.({ name: "runtime-start", status: "warning", message: detail });
+          this.startExtraTunnels(config);
           return { status: "degraded", daemonPid: this.daemon?.pid, tunnelPid: null, detail };
         }
       } else {
@@ -1632,6 +1661,7 @@ class RuntimeSupervisor {
         status: "completed",
         message: tunnelOnly ? "Isolated DEV MCP runtime is ready" : "Local runtime is ready",
       });
+      this.startExtraTunnels(config);
       return { status: "ready", daemonPid: this.daemon?.pid, tunnelPid: this.tunnel?.pid };
     } catch (error) {
       this.stopping = true;
@@ -2393,6 +2423,8 @@ class RuntimeSupervisor {
     if (this.recoveryTasks.size > 0) {
       await Promise.allSettled([...this.recoveryTasks]);
     }
+    // A failure here leaves that tunnel up; the next start adopts or restarts it.
+    if (config) await this.stopExtraTunnels(config);
     let drained = false;
     let tunnelStopped = false;
     try {
@@ -2473,6 +2505,7 @@ class RuntimeSupervisor {
         }
       }
       this.tryWriteState(restoredReady ? "ready" : "failed", message);
+      if (restoredReady) this.startExtraTunnels(config);
       throw new Error(message);
     } finally {
       this.stopping = false;
@@ -2497,6 +2530,12 @@ class RuntimeSupervisor {
     try {
       if (this.recoveryTasks.size > 0) await Promise.allSettled([...this.recoveryTasks]);
       const failures = [];
+      try {
+        const config = this.readConfig();
+        if (config) failures.push(...(await this.stopExtraTunnels(config)).map(failure => `extra tunnel ${failure}`));
+      } catch (error) {
+        failures.push(`extra tunnels: ${errorMessage(error)}`);
+      }
       if (this.tunnel) {
         try {
           const config = this.readConfig();
