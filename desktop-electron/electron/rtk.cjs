@@ -14,6 +14,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync, spawn } = require("node:child_process");
+const { runOffThread } = require("./off-thread-run.cjs");
 
 /** `rtk rewrite` landed in 0.23.0. */
 const MIN_VERSION = [0, 23, 0];
@@ -98,29 +99,16 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
    * spawnSync on the app's main process for every command an agent ran, and starting a process on a
    * busy Windows machine took up to the 3 s timeout: the whole app froze meanwhile (seen on 0.8.5:
    * a 2.1 s stall, CPU idle, beside an agent's command). A `run` given for tests is used as it is.
+   * Even an asynchronous spawn creates the process on the calling thread, so it starts from a worker
+   * (off-thread-run.cjs): 0.8.35's first start logged rtk's spawn holding main for 1.6 s.
    */
   const runAsync = run === spawnSync
-    ? (file, args, { timeout = 10_000, env: childEnv = env } = {}) => new Promise((resolve) => {
-      let stdout = "", settled = false, child = null, timer = null;
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(result);
-      };
-      try {
-        // stderr unread would fill its pipe and stall rtk until the timeout killed it.
-        child = spawn(file, args, { windowsHide: true, env: childEnv, stdio: ["ignore", "pipe", "ignore"] });
-      } catch (error) {
-        finish({ error });
-        return;
-      }
-      timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } finish({ error: new Error("timed out") }); }, timeout);
-      child.stdout?.setEncoding?.("utf8");
-      child.stdout?.on("data", (chunk) => { stdout += chunk; });
-      child.on("error", (error) => finish({ error }));
-      child.on("close", (status) => finish({ status, stdout }));
-    })
+    ? async (file, args, { timeout = 10_000, env: childEnv = env } = {}) => {
+      const reply = await runOffThread({ file, args, env: childEnv, timeoutMs: timeout, maxBytes: 256 * 1024 });
+      if (reply.timedOut) return { error: new Error("timed out") };
+      if (reply.error) return { error: new Error(reply.error) };
+      return { status: reply.code, stdout: reply.stdout };
+    }
     : async (...args) => run(...args);
 
   // locate() for the command path: the cached answer, refreshed without blocking when it is stale

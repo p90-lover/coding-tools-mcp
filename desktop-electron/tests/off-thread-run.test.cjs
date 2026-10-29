@@ -34,6 +34,15 @@ test("a program starts from a worker thread, never on the calling thread", async
   } finally { restore(); }
 });
 
+test("a given environment reaches the program (rtk's rewrite passes its own)", async () => {
+  const { module, restore } = load();
+  try {
+    const env = { ...process.env, CT_OFF_THREAD_PROBE: "seen" };
+    const reply = await module.runOffThread({ file: process.execPath, args: ["-e", "process.stdout.write(process.env.CT_OFF_THREAD_PROBE || 'none')"], env, timeoutMs: 10_000 });
+    assert.equal(reply.stdout, "seen");
+  } finally { restore(); }
+});
+
 test("it still runs when no worker thread can be started", async () => {
   const { module, calls, restore } = load({ Worker: function Unavailable() { throw new Error("no workers here"); } });
   try {
