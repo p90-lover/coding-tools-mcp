@@ -238,6 +238,20 @@ function quotaResets(error) {
   const when = /resets? (in [0-9][0-9dhms ]*[dhms]|at [^.\n]{1,40})/i.exec(String(error || ""))?.[1];
   return when ? ` (it resets ${when.trim()})` : "";
 }
+/**
+ * The provider refused the request itself (Claude Code's "API Error: 400 …", or 404 / 422): a region
+ * or privacy setting, a model the account may not use, a request it cannot take. The same request
+ * gets the same answer (seen 2026-10-29: OpenCode Go's "This Go model requires Global regions. Select
+ * Global in your workspace's Privacy settings" was retried eight times a round, round after round,
+ * and the chat counted over a thousand refused requests), so nothing retries it and a goal pauses on
+ * it. A 429 (a model cooling down) and a 5xx are not refusals: a later retry gets through those.
+ */
+const REQUEST_REFUSED = /API Error: (?:400|404|422)\b/i;
+/** The provider's own reason from a refused request ("400: This Go model requires …"), for a note. */
+function refusedReason(error) {
+  const text = String(error || "").replace(/^[\s\S]*?API Error: (\d{3})\s*/i, "$1: ").replace(/Upstream request failed:\s*/i, "");
+  return text.replace(/\s+/g, " ").trim().slice(0, 200);
+}
 
 const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
 const REVIEW_SCRIPT_BYTES = 4000;
@@ -3505,6 +3519,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (QUOTA_EXHAUSTED.test(error)) return { detail: `The model's quota is used up${quotaResets(error)}. Choose another model, or retry once it resets.` };
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
     if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
+    if (REQUEST_REFUSED.test(error)) return { detail: `The provider refused this request (${refusedReason(error)}). Change that, or choose another model, since retrying won't fix it.` };
     const attempt = (node.history?.length ?? 0) + 1;
     if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried ${AUTO_RETRY_LIMIT} times. Check the saved answer, then retry.` };
     const key = `${mission.id}:${node.id}:${attempt}`;
@@ -3528,7 +3543,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
     const error = String(node?.receipt?.error || "");
-    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && !REQUEST_REFUSED.test(error)
+      && !pickedModelSince(mission) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+  }
+  /**
+   * The model the person picked for the chat's goal (chat_goal "route") since this single-model round
+   * started on another one, or "". A retry runs the round's card again on the model it started with,
+   * so a chat moved off a spent Cline Pass kept asking Cline for each of the round's eight automatic
+   * attempts (seen 2026-10-29). Such a round is not retried: the goal's next round runs on the pick.
+   */
+  function pickedModelSince(mission) {
+    if (!mission?.project_id || mission.execution_mode !== "single" || mission.cancelled) return "";
+    const goal = goals.get(mission.workspace_id, mission.project_id);
+    const picked = goal?.status === "active" && !goal.team?.id ? String(goal.route?.model || "") : "";
+    const card = mission.nodes?.find(node => node.role !== "retry");
+    return picked && card?.route?.model && card.route.model !== picked ? picked : "";
   }
   // A step that failed because the way out was down for a moment: the local proxy every CPA model
   // and the ChatGPT browser go through (seen live: ProxyBridge restarted, and for three minutes CPA
@@ -3587,6 +3616,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const retired = forgetRetiredModel(String(node.receipt?.error || ""));
       if (retired) logger?.info?.("cpa.model_retired", { model: retired });
     }
+    // Another model was picked for the goal since this round started: no retry of any kind runs the
+    // old one again. The round settles here, and its goal starts the next round on the pick.
+    const picked = pickedModelSince(mission);
+    if (picked) return { detail: `Moved to ${picked}; the goal's next round runs on it` };
     // A sign-in or account-pool failure (some arrive as a 5xx) is the person's, never a lost connection.
     const outage = chatPreferences.get().autoRetry
       ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))
@@ -4964,13 +4997,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // retried after it was the chat's live turn, and its settling was never judged.
       const latest = saved.runs.filter(run => run.project_id === task && (!run.cancelled || run.id === runId)).at(-1);
       if (latest?.id !== runId) return;
+      // A round that failed (or was held) on a model the person has since moved the goal off: its
+      // failure is the old model's, so it is not counted or judged, and the next round starts now on
+      // the pick (recoverHeld stopped retrying it). It kept failing on Cline Pass otherwise.
+      if (outcome !== "stopped" && outcome !== "finished" && pickedModelSince(mission)) {
+        goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "stalled", note: "" });
+        await continueGoal(workspaceId, task, goals.get(workspaceId, task), mission);
+        return;
+      }
       // The model's quota used up, after CPA's own retries across every account: the next round
       // would fail the same way (rounds of three failed attempts each, seen 2026-10-28), so the goal
-      // pauses until the person switches model or the quota resets.
-      const spent = outcome === "stopped" ? "" : mission.nodes.map(node => String(node.receipt?.error || "")).find(error => QUOTA_EXHAUSTED.test(error));
+      // pauses until the person switches model or the quota resets. A request the provider refused
+      // (a region or privacy setting, see REQUEST_REFUSED) pauses it the same way.
+      const errors = outcome === "stopped" ? [] : mission.nodes.map(node => String(node.receipt?.error || ""));
+      const spent = errors.find(error => QUOTA_EXHAUSTED.test(error));
       if (spent) {
         goals.update(workspaceId, task, { status: "paused", evaluatedRunId: runId, evaluatedAs: "stalled",
           note: `Paused: the model's quota is used up${quotaResets(spent)}. Switch model, then /goal resume` });
+        return;
+      }
+      const refused = errors.find(error => REQUEST_REFUSED.test(error));
+      if (refused) {
+        goals.update(workspaceId, task, { status: "paused", evaluatedRunId: runId, evaluatedAs: "stalled",
+          note: `Paused: the provider refused the request (${refusedReason(refused)}). Fix that or switch model, then /goal resume` });
         return;
       }
       // A round held only because the app restarted under it, or one "Retry automatically" runs
@@ -6340,4 +6389,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
