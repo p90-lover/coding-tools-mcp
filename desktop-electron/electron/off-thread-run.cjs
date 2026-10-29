@@ -17,11 +17,11 @@ const { Worker } = require("node:worker_threads");
  * once with { code, stdout, stderr }, { timedOut: true } or { error }; each stream keeps at most
  * `maxBytes`. A timeout ends the whole process tree.
  */
-function runChild({ file, args, cwd, timeoutMs, maxBytes }, spawn, execFile, done) {
+function runChild({ file, args, cwd, env, timeoutMs, maxBytes }, spawn, execFile, done) {
   const windows = process.platform === "win32";
   let child;
   try {
-    child = spawn(file, args, { cwd, detached: !windows, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    child = spawn(file, args, { cwd, env, detached: !windows, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   } catch (error) {
     done({ error: String((error && error.message) || error) });
     return;
@@ -104,10 +104,10 @@ function startWorker() {
 
 /**
  * Runs `file` with `args` and resolves { code, stdout, stderr }, { timedOut: true } or { error };
- * it never rejects.
+ * it never rejects. `env`, when given, replaces the program's environment.
  */
-function runOffThread({ file, args = [], cwd, timeoutMs, maxBytes = 1024 * 1024 }) {
-  const request = { file, args, cwd, timeoutMs, maxBytes };
+function runOffThread({ file, args = [], cwd, env, timeoutMs, maxBytes = 1024 * 1024 }) {
+  const request = { file, args, cwd, env, timeoutMs, maxBytes };
   if (workerBroken) return runHere(request);
   try {
     worker ??= startWorker();
