@@ -7734,6 +7734,36 @@ test("a CPA model's picked effort goes in the request body, never as a model suf
   workflow.dispose();
 });
 
+test("a saved effort a plugin model's reported levels lack runs at its nearest one, not CPA's 400", async (t) => {
+  // CPA refuses an unlisted level up front (2026-10-29, Provider Manager 0.2.1): "level \"medium\"
+  // not supported, valid levels: low, high, max" on OpenCode Go's GLM 5.3 Flash.
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "known-efforts-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const knownModelsFile = path.join(dir, "cpa-known-models.json");
+  const seen = Date.now();
+  fs.writeFileSync(knownModelsFile, JSON.stringify({ models: {
+    "opencode-go/glm-5.3-flash": { seen, capability: { efforts: ["low", "high", "max"] } },
+    "opencode-go/kimi-k3": { seen, capability: { efforts: ["max"] } },
+    "opencode-go/qwen3.7-plus": { seen, capability: { efforts: [] } },
+  } }));
+  const spawned = [];
+  const workflow = createAgentOrchestratorWorkflow({ knownModelsFile, requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
+    aoHarness: { spawn: async input => { spawned.push({ model: input.model, effort: input.effort }); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
+  const warm = async (model, effort) => {
+    const before = spawned.length;
+    await workflow.call("chat_prewarm", { workspaceId: `ws-${model}-${effort}`, executionMode: "single",
+      singleRoute: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model, effort } });
+    for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    return spawned.at(-1);
+  };
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "medium"), { model: "opencode-go/glm-5.3-flash", effort: "high" });
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "low"), { model: "opencode-go/glm-5.3-flash", effort: "low" });
+  assert.deepEqual(await warm("cpa/opencode-go/kimi-k3", "low"), { model: "opencode-go/kimi-k3", effort: "max" });
+  // No levels reported (it only switches reasoning on and off): the model's own effort.
+  assert.deepEqual(await warm("cpa/opencode-go/qwen3.7-plus", "high"), { model: "opencode-go/qwen3.7-plus", effort: undefined });
+  workflow.dispose();
+});
+
 test("\"Retry automatically\" retries a failed step by itself once its pause is over, with no click", async () => {
   // The run stopped on the first pass after the failure ("No card is ready"), so the countdown it
   // showed never ended and the failed step waited for a click after all.

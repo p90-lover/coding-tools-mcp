@@ -489,7 +489,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // A level the model does not take runs at its nearest one instead of failing every request: one
     // kept from another model ("medium" moved to DeepSeek V4.1 Flash, which takes none/low/high/max;
     // "none" to MiMo or GLM) was refused with a 400, and the chat's launch looked stuck.
-    const takes = viaCpa && CLINE_EFFORTS.get(baseModel);
+    // Any CPA model whose levels the catalog reported counts too (CPA refuses an unlisted level up
+    // front: "level \"medium\" not supported" on OpenCode Go's GLM 5.3 Flash, which takes low/high/max);
+    // one that reported none runs at its own effort.
+    const reported = viaCpa ? knownModels[baseModel]?.capability?.efforts : null;
+    const takes = viaCpa && (CLINE_EFFORTS.get(baseModel) ?? (Array.isArray(reported) ? reported : null));
     if (effort && takes && !takes.includes(effort)) {
       const fitted = nearestEffort(effort, takes);
       logger?.info?.("ao.effort_fitted", { model: baseModel.slice(0, 120), effort, fitted: fitted || "auto" });
