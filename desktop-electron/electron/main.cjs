@@ -1602,6 +1602,7 @@ function launcherSnapshotPayload(stateStore, logger) {
       manual: "Codex Zero Risk",
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured?.() ?? false,
+    mcpTunnels: safeRead("launcher.mcp_tunnels_snapshot", () => runtimeSupervisor?.extraTunnels.status() ?? [], [], logger),
     chatAgentSandbox: safeRead("launcher.chat_sandbox_snapshot", () => chatAgentTools?.sandboxed?.() ?? false, false, logger),
     // The defaults only: the list in use is state.chatAgentRedactList, which a save updates (a list
     // here went stale after a save, Codex review of #653).
@@ -2922,6 +2923,55 @@ function registerIpc({ logger, stateStore }) {
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
     return { ok: true, stdout: result.stdout };
   });
+  // Extra MCP tunnels, one per further ChatGPT account. Status is read-only; changes need the focused window.
+  handle("launcher:mcp-tunnels", () => runtimeSupervisor?.extraTunnels.status() ?? []);
+  handle("launcher:mcp-tunnel-add", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (IS_DEV_PROFILE) throw new Error("Extra MCP tunnels are available in the production profile only");
+    const accountId = typeof input?.accountId === "string" && input.accountId ? input.accountId : null;
+    if (accountId) browserAccounts.partitionOf(accountId); // throws for an unknown account
+    publishOperation({ name: "mcp-tunnel-add", status: "running", message: "Connecting the tunnel" });
+    try {
+      const tunnel = await runtimeSupervisor.extraTunnels.add({
+        label: input?.label,
+        tunnelId: input?.tunnelId,
+        runtimeKey: input?.runtimeKey,
+        accountId,
+      });
+      publishOperation({ name: "mcp-tunnel-add", status: "completed", message: `${tunnel.label} is connected` });
+      return tunnel;
+    } catch (error) {
+      publishOperation({ name: "mcp-tunnel-add", status: "failed", message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+  });
+  handle("launcher:mcp-tunnel-remove", (event, id) => {
+    assertFocusedMainWindow(event, true);
+    return runtimeSupervisor.extraTunnels.remove(id);
+  });
+  handle("launcher:mcp-tunnel-reconnect", (event, id) => {
+    assertFocusedMainWindow(event, true);
+    return runtimeSupervisor.extraTunnels.reconnect(id);
+  });
+  handle("launcher:mcp-tunnel-connector", async (event, id) => {
+    assertFocusedMainWindow(event, true);
+    const tunnel = runtimeSupervisor.extraTunnels.status().find(candidate => candidate.id === id);
+    if (!tunnel) throw new Error("That tunnel is not configured.");
+    if (!tunnel.accountId) throw new Error("Choose the ChatGPT account this tunnel belongs to first.");
+    publishOperation({ name: "mcp-connector-create", status: "running", message: `Creating the ChatGPT connector for ${tunnel.label}` });
+    try {
+      const result = await createConfiguredConnector({
+        app, BrowserWindow, browserHost, runtimeHost,
+        target: { tunnelId: tunnel.tunnelId, partition: browserAccounts.partitionOf(tunnel.accountId) },
+      });
+      runtimeSupervisor.extraTunnels.setConnector(id, result.href);
+      publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
+      return result;
+    } catch (error) {
+      publishOperation({ name: "mcp-connector-create", status: "failed", message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+  });
   handle("launcher:set-mcp-step", (_event, step) => {
     if (!Number.isInteger(step) || step < 0 || step > 2) throw new Error("Invalid MCP guide step");
     return stateStore.update({ mcpGuideStep: step });
@@ -4139,6 +4189,7 @@ async function start() {
     getRuntimeEnvironment: () => externalServicesController.runtimeEnvironment(),
     // The Codex bridge and MCP tunnel outlive launcher restarts and updates; the next launcher adopts them.
     persistentBridge: !IS_DEV_PROFILE,
+    onExtraTunnelsChange: tunnels => send("launcher:mcp-tunnels-changed", tunnels),
   });
   runtimeHost = new RuntimeHost({
     app,

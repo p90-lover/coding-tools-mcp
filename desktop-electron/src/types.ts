@@ -715,6 +715,8 @@ export interface LauncherSnapshot {
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
+  /** Tunnels beside the main one, one per further ChatGPT account. */
+  mcpTunnels?: McpTunnel[];
   /** Agents' commands run in Codex's Windows sandbox (installed), so the terminal tools default on. */
   chatAgentSandbox?: boolean;
   /** What chat agents hide when the user has no list of their own (state.chatAgentRedactList). */
@@ -798,6 +800,22 @@ export interface BrowserAccountsStatus {
   maxTabsPerAccount: number;
   settings: BrowserAccountsSettings;
   switching: boolean;
+}
+
+/**
+ * An MCP tunnel beside the main one: its own OpenAI tunnel and MCP process, for the ChatGPT account
+ * that owns the tunnel. Every tunnel reaches the same bridge, so each account's connector works.
+ */
+export interface McpTunnel {
+  id: string;
+  label: string;
+  tunnelId: string;
+  /** The Browser-tab account whose ChatGPT holds this tunnel's connector. */
+  accountId: string | null;
+  connectorHref: string | null;
+  state: "stopped" | "starting" | "ready" | "failed";
+  detail: string;
+  pid: number | null;
 }
 
 /** A Codex thread bound to the ChatGPT account its turns run on, with the saved chats it wrote there. */
@@ -1037,6 +1055,12 @@ export interface LauncherApi {
     interactionMode?: BrowserInteractionMode;
   }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;
+  mcpTunnels(): Promise<McpTunnel[]>;
+  addMcpTunnel(input: { label: string; tunnelId: string; runtimeKey: string; accountId: string | null }): Promise<McpTunnel>;
+  removeMcpTunnel(id: string): Promise<{ removed: boolean }>;
+  reconnectMcpTunnel(id: string): Promise<McpTunnel>;
+  createMcpTunnelConnector(id: string): Promise<{ created: boolean; name: string; href: string }>;
+  onMcpTunnelsChanged(listener: (tunnels: McpTunnel[]) => void): () => void;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setUseSavedChats(enabled: boolean): Promise<LauncherState>;
