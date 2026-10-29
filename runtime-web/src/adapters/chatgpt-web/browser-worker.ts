@@ -60,7 +60,8 @@ import {
   activateChatGptEffortMenu,
   chatGptPickerHasModelList,
   selectChatGptModelFromList,
-  CHATGPT_TURN_MODEL_NAME,
+  selectChatGptPickerStop,
+  CHATGPT_TURN_STOP_PREFIX,
   detectChatGptAccountCapabilities,
   parseChatGptEffortSliderState,
   readChatGptEffortSnapshot,
@@ -295,10 +296,10 @@ function chatGptModelControlUnavailableError(diagnostic: string): Error {
   return new Error(CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE, { cause: new Error(diagnostic) });
 }
 
-/** Picking GPT-6 Sol failed at a step: the turn stops and is not retried on some other model. */
-function chatGptModelPickError(diagnostic: string): ChatGptWebAdapterError {
+/** Picking GPT-6 or its effort failed at a step: the turn stops and is not retried on some other model or effort. */
+function chatGptModelPickError(stopLabel: string, diagnostic: string): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
-    `ChatGPT could not be switched to ${CHATGPT_TURN_MODEL_NAME}, so the turn stopped instead of running on another model: ${diagnostic}`,
+    `ChatGPT could not be set to GPT-6 at "${stopLabel}", so the turn stopped instead of running on another model or effort: ${diagnostic}`,
     { status: 409, errorType: "invalid_request_error", code: "chatgpt_model_pick_failed", retryable: false },
   );
 }
@@ -2812,18 +2813,22 @@ export class ChatGptBrowserWorker {
     } finally {
       waitAbort.abort();
     }
-    // The current picker: GPT-6 Sol is picked from its model list and the slider is never moved
-    // (on "Default" its upper stops are other models, billed to Codex quota). A failed step stops
-    // the turn; it is not retried.
+    // The current picker: GPT-6 is picked from its model list ("GPT-6 Sol" on Plus, "6" on Team
+    // and Pro), then its own slider is moved to the stop labelled "6 <effort>". Stops are matched by
+    // label, never position: on "Default" the upper positions are other models, billed on top.
+    // A failed step stops the turn; it is not retried.
     if (await chatGptPickerHasModelList(activation.menu)) {
+      const stopLabel = `${CHATGPT_TURN_STOP_PREFIX} ${mode.displayLabel}`;
       try {
         await selectChatGptModelFromList(activation.menu);
+        await captureDiagnostic?.("model-picked");
+        await selectChatGptPickerStop(activation.menu, effortSlider, stopLabel);
       } catch (error) {
         await captureDiagnostic?.("model-pick-failed");
         await page.keyboard.press("Escape").catch(() => {});
-        throw chatGptModelPickError(error instanceof Error ? error.message : String(error));
+        throw chatGptModelPickError(stopLabel, error instanceof Error ? error.message : String(error));
       }
-      await captureDiagnostic?.("model-picked");
+      await captureDiagnostic?.("effort-selected");
       await page.keyboard.press("Escape");
       return mode;
     }
