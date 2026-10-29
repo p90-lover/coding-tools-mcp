@@ -660,6 +660,19 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (!sessionStops.has(session)) return usable;
     }
   }
+  // A pre-warm's check, which brings back an agent released while idle, runs one at a time. Several
+  // chats opening together (split panes, restored tabs) resumed each one's agent at once: AO answers
+  // a resume only when the agent is up, all through its one database writer, and on the busy disk
+  // all four hit the 90 s limit together and stayed half-restored (seen live 2026-10-29, four chats
+  // at 12:29:01, four "restore unconfirmed" at 12:30:31). A message sent meanwhile still checks its
+  // own chat at once; the queued pre-warm then finds that agent live.
+  let prewarmChecks = Promise.resolve();
+  function prewarmCheck(session) {
+    const check = () => continuableSession(session);
+    const turn = prewarmChecks.then(check, check);
+    prewarmChecks = turn.catch(() => undefined);
+    return turn;
+  }
   /** Hands the ready warm session for this route to a launch, or null. */
   async function takeWarm(workspaceId, route, plain) {
     const key = warmKey(workspaceId, route, plain);
@@ -766,7 +779,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // the launch on a busy machine, and the launch timed out while the spare one came up.
       if (previous && !previous.cancelled && !runSettled(previous)) return { ok: true, warmed: false, reason: "The chat's run is starting" };
       const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
-      if (live && await continuableSession(live.receipt.thread_id)) {
+      if (live && await prewarmCheck(live.receipt.thread_id)) {
         return { ok: true, warmed: false, continues: true };
       }
       return chatPrewarmRoute(id, singleRoute, true);

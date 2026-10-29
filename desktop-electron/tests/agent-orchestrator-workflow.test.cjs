@@ -6533,6 +6533,38 @@ test("an open chat pre-warms only when its next message cannot continue its agen
   assert.deepEqual(killed, ["warm-1"], "the oldest waiting agent is ended once a third is warmed");
 });
 
+test("chats opened together bring back their released agents one at a time", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const ids = ["task-1", "task-2", "task-3", "task-4"];
+  const tasks = ids.map(id => ({ id, title: id, description: "ask", state: "in_progress", clauses: [] }));
+  const runs = ids.map((id, index) => ({ id: `r${index}`, project_id: id, execution_mode: "single", cancelled: true,
+    nodes: [{ id: "one", role: "planner", state: "cancelled", parents: [], route, receipt: { thread_id: `sess-${index}` } }] }));
+  const world = chatWorld({ tasks, runs });
+  let inFlight = 0, most = 0;
+  const order = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: {
+      spawn: async () => "warm",
+      // A resume answers only once the agent is up; the first one fails as a timed-out one does.
+      continuable: async id => {
+        inFlight += 1; most = Math.max(most, inFlight); order.push(id);
+        await new Promise(resolve => setTimeout(resolve, 15));
+        inFlight -= 1;
+        if (id === "sess-0") throw Object.assign(new Error("Couldn't confirm the agent was restored."), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
+        return true;
+      },
+      kill: async () => ({ ok: true }),
+      warmSessions: async () => [],
+    } });
+  const results = await Promise.allSettled(ids.map(taskId =>
+    workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId })));
+  assert.equal(most, 1, "never two resumes at once");
+  assert.deepEqual(order, ["sess-0", "sess-1", "sess-2", "sess-3"]);
+  assert.equal(results[0].status, "rejected", "the failed one still reports its failure");
+  assert.deepEqual(results.slice(1).map(result => result.value?.continues), [true, true, true], "and does not hold up the rest");
+  workflow.dispose();
+});
+
 // A launch's world for one new chat: the run it creates, its grant, reservation and submission.
 function launchWorld(route) {
   const world = chatWorld();
