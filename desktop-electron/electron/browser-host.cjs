@@ -58,7 +58,9 @@ const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 /** The primary view's idle-document windows at startup: a timed-out load is retried with the next. */
 const PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS = Object.freeze([PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS, 30_000, 60_000]);
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
+// Tabs one ChatGPT account may hold (its setting may lower it), and every account's together.
 const MAX_BROWSER_TABS = 5;
+const MAX_TOTAL_BROWSER_TABS = 15;
 const MAX_CANCELLED_TURN_TRACES = 256;
 const MANUAL_SUBMIT_TIMEOUT_MS = 30_000;
 const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
@@ -76,6 +78,44 @@ const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 // task, then let go and the chat deleted. 30 minutes left finished task chats in the user's ChatGPT
 // history for half an hour; a later round simply starts a new chat with the task's context.
 const RETAINED_TURN_TAB_TTL_MS = 10 * 60 * 1000;
+
+/** How long a finished turn's tab stays open for the next turn: the setting, or ten minutes. */
+function retainedTabTtl(host) {
+  const ms = typeof host.retainedTabTtlMs === "function" ? host.retainedTabTtlMs() : null;
+  return Number.isFinite(ms) && ms > 0 ? ms : RETAINED_TURN_TAB_TTL_MS;
+}
+
+/** The tabs one account may hold: its setting, or the most. */
+function tabLimitOf(host, partition) {
+  const setting = typeof host.tabLimitFor === "function" ? host.tabLimitFor(partition) : null;
+  return Number.isInteger(setting) && setting >= 1 && setting <= MAX_BROWSER_TABS ? setting : MAX_BROWSER_TABS;
+}
+
+/** The tabs on one account's partition: its Codex turns' tabs, and the Browser tab's own pages. */
+function tabsOnPartition(host, partition) {
+  const ownPages = partition === host.partition ? (host.userTabs?.size ?? 0) : 0;
+  return ownPages + [...host.turnTabs.values()].filter((tab) => (tab.partition ?? host.partition) === partition).length;
+}
+
+/**
+ * Makes room for one more tab on an account: frees that account's oldest reclaimable tab while it
+ * is at its limit, then any account's while all of them together are at the ceiling. Returns null,
+ * or the limit that still holds (`evict` false: nothing is freed).
+ */
+function makeTabRoom(host, partition, evict = true) {
+  const limit = tabLimitOf(host, partition);
+  while (tabsOnPartition(host, partition) >= limit) {
+    if (!evict || !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(host, partition)) return limit;
+  }
+  while (host.turnTabs.size + (host.userTabs?.size ?? 0) >= MAX_TOTAL_BROWSER_TABS) {
+    if (!evict || !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(host)) return MAX_TOTAL_BROWSER_TABS;
+  }
+  return null;
+}
+
+const fullTabsError = (limit) => new Error(
+  `ChatGPT Web already has ${limit} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
+);
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
 // The open page's own session request (the fallback when Cloudflare answers the app's request)
@@ -531,6 +571,14 @@ class BrowserHost {
     // The ChatGPT account a Codex thread is bound to (codex-thread-accounts.cjs), as
     // { accountId, partition, chatLifecycleSync }; null or none: this host's own account.
     resolveTurnAccount = null,
+    // Settings (browser-accounts.cjs): the tabs an account's partition may hold, and how long a
+    // finished turn's tab stays open.
+    tabLimitFor = null,
+    retainedTabTtlMs = null,
+    // What this host learns about an account: its plan from an inspection with capabilities, and
+    // whether its ChatGPT connector bound in a Codex turn ({ bound } or { error }).
+    onSessionInspected = null,
+    onConnectorObserved = null,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -554,6 +602,10 @@ class BrowserHost {
     }
     this.partition = resolvedPartition;
     this.resolveTurnAccount = resolveTurnAccount;
+    this.tabLimitFor = tabLimitFor;
+    this.retainedTabTtlMs = retainedTabTtlMs;
+    this.onSessionInspected = onSessionInspected;
+    this.onConnectorObserved = onConnectorObserved;
     this.profile = profile;
     this.publishState = publishState;
     this.showWindow = showWindow;
@@ -726,6 +778,11 @@ class BrowserHost {
     return null;
   }
 
+  /** The tabs an account's partition holds here (browser-accounts.cjs spreads sessions by it). */
+  tabCount(partition) {
+    return tabsOnPartition(this, partition);
+  }
+
   /** Whether a turn of this Codex thread is running in one of this host's tabs. */
   threadRunning(threadId) {
     const id = String(threadId ?? "").toLowerCase();
@@ -785,19 +842,15 @@ class BrowserHost {
   }
 
   async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account = null) {
-    if (this.turnTabs.size + (this.userTabs?.size ?? 0) >= MAX_BROWSER_TABS
-      && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
-      throw new Error(
-        `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
-      );
-    }
-    const id = randomBytes(12).toString("base64url");
-    const surfaceId = randomBytes(24).toString("base64url");
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
-      .find(candidate => ![...this.turnTabs.values(), ...(this.userTabs?.values() ?? [])].some(tab => tab.ordinal === candidate));
-    if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     // A Codex thread's turns run on the account it is bound to, which need not be this host's.
     const partition = account?.partition ?? this.partition;
+    const full = makeTabRoom(this, partition);
+    if (full) throw fullTabsError(full);
+    const id = randomBytes(12).toString("base64url");
+    const surfaceId = randomBytes(24).toString("base64url");
+    const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
+      .find(candidate => ![...this.turnTabs.values(), ...(this.userTabs?.values() ?? [])].some(tab => tab.ordinal === candidate));
+    if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     const view = new WebContentsView({
       webPreferences: {
         partition,
@@ -875,15 +928,14 @@ class BrowserHost {
   }
 
   createUserTab() {
-    if (this.turnTabs.size + this.userTabs.size >= MAX_BROWSER_TABS) {
-      throw new Error(`ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before opening another`);
-    }
+    const full = makeTabRoom(this, this.partition, false);
+    if (full) throw new Error(`ChatGPT Web already has ${full} browser tabs; close one before opening another`);
     if (!this.surfaceActive) throw new Error("Open the Browser before creating a tab");
     if (this.manualOperation) throw new Error(`Browser tabs cannot open during ${this.manualOperation}`);
     if (browserInteractionModeFor(this) === "automatic" && this.state.authenticated !== true) {
       throw new Error("Sign in to ChatGPT before opening another tab");
     }
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
+    const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values(), ...this.userTabs.values()]
         .some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
@@ -933,14 +985,10 @@ class BrowserHost {
   }
 
   createManualTurnTab(traceId, helperPid, conversationKey, prompt, manualSubmitTimeoutMs) {
-    if (this.turnTabs.size + (this.userTabs?.size ?? 0) >= MAX_BROWSER_TABS
-      && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
-      throw new Error(
-        `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
-      );
-    }
+    const full = makeTabRoom(this, this.partition);
+    if (full) throw fullTabsError(full);
     const id = randomBytes(12).toString("base64url");
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
+    const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values(), ...(this.userTabs?.values() ?? [])].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     const view = new WebContentsView({
@@ -1035,18 +1083,20 @@ class BrowserHost {
     }
   }
 
-  evictOldestRetainedTurnTab() {
+  /** `partition`: only that account's tabs. */
+  evictOldestRetainedTurnTab(partition = null) {
     const retained = [...this.turnTabs.values()]
-      .filter(tab => tab.status === "ready")
+      .filter(tab => tab.status === "ready" && (!partition || (tab.partition ?? this.partition) === partition))
       .sort((left, right) => (left.lastHeartbeatAt ?? 0) - (right.lastHeartbeatAt ?? 0))[0];
     if (!retained) return false;
     this.removeTurnTab(retained, false);
     return true;
   }
 
-  evictOldestReclaimableTurnTab() {
+  evictOldestReclaimableTurnTab(partition = null) {
     const terminalManual = [...this.turnTabs.values()]
       .filter(tab => tab.interactionMode === "manual"
+        && (!partition || (tab.partition ?? this.partition) === partition)
         && tab.status === "error"
         && ["timed-out", "failed", "cancelled"].includes(tab.manualState))
       .sort((left, right) => (left.lastHeartbeatAt ?? 0) - (right.lastHeartbeatAt ?? 0))[0];
@@ -1054,7 +1104,7 @@ class BrowserHost {
       this.removeTurnTab(terminalManual, false);
       return true;
     }
-    return BrowserHost.prototype.evictOldestRetainedTurnTab.call(this);
+    return BrowserHost.prototype.evictOldestRetainedTurnTab.call(this, partition);
   }
 
   zoomShell(action) {
@@ -1711,7 +1761,9 @@ class BrowserHost {
             ...[...(this.userTabs?.values() ?? [])].map((tab) => this.tabSnapshot(tab)),
           ]
         : [homeTab],
-      maxTabs: MAX_BROWSER_TABS,
+      // The shown account's limit and the tabs it holds; tabs of sessions on other accounts show too.
+      maxTabs: tabLimitOf(this, this.partition),
+      accountTabs: tabsOnPartition(this, this.partition),
     };
   }
 
@@ -1787,7 +1839,7 @@ class BrowserHost {
     for (const tab of [...this.turnTabs.values()]) {
       if (tab.interactionMode === "manual") {
         if (tab.status === "ready") {
-          if (now - (tab.lastHeartbeatAt ?? 0) < RETAINED_TURN_TAB_TTL_MS) continue;
+          if (now - (tab.lastHeartbeatAt ?? 0) < retainedTabTtl(this)) continue;
           this.logger.info("browser.retained_tab_expired", { tabId: tab.id, traceId: tab.traceId });
           this.removeTurnTab(tab, false);
           continue;
@@ -1805,7 +1857,7 @@ class BrowserHost {
         continue;
       }
       if (tab.status === "ready") {
-        if (now - (tab.lastHeartbeatAt ?? 0) < RETAINED_TURN_TAB_TTL_MS) continue;
+        if (now - (tab.lastHeartbeatAt ?? 0) < retainedTabTtl(this)) continue;
         this.logger.info("browser.retained_tab_expired", { tabId: tab.id, traceId: tab.traceId });
         this.removeTurnTab(tab, false);
         continue;
@@ -2953,6 +3005,14 @@ class BrowserHost {
       );
     }
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
+    // A connector turn tells whether the account's ChatGPT connector works: it bound, or it failed.
+    if (tab.connectorIdentity && tab.interactionMode === "automatic") {
+      const observed = connectorBound === true ? { bound: true }
+        : status === "error" && /connector/i.test(String(message ?? "")) ? { error: String(message) } : null;
+      if (observed) {
+        try { this.onConnectorObserved?.(tab.partition ?? this.partition, observed); } catch {}
+      }
+    }
     tab.status = status === "completed" || status === "superseded" ? "ready" : status === "aborted" ? "aborted" : "error";
     this.syncPowerSaveBlocker();
     tab.message = status === "completed" ? "Task completed"
@@ -3565,6 +3625,9 @@ class BrowserHost {
     if (detectCapabilities && inspected.proAvailable && !inspected.solAvailable) {
       throw new Error("Browser helper returned contradictory ChatGPT capability evidence");
     }
+    if (detectCapabilities) {
+      try { this.onSessionInspected?.(inspected); } catch {}
+    }
     if (startedIdle) await this.returnToIdle();
     return inspected;
   }
@@ -3717,6 +3780,7 @@ module.exports = {
   BrowserTurnCancelledError,
   CHATGPT_VIEWPORT_CSS,
   deleteConversationScript,
+  makeTabRoom,
   ownedSavedConversationId,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,

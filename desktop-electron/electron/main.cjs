@@ -873,7 +873,29 @@ function refreshBrowserAccountSignIns(logger) {
   return browserAccountSignInRefresh;
 }
 
-const browserAccountExists = (accountId) => browserAccounts.status().accounts.some((entry) => entry.id === accountId);
+const browserAccountExists = (accountId) => browserAccounts.has(accountId);
+
+// Where a new Codex session starts (the setting): the account in use, a chosen account, or the
+// least busy account that takes new sessions: fewest tabs open, then fewest sessions used in the
+// last day, then the account in use.
+function newSessionAccount() {
+  const { accounts, activeId, settings } = browserAccounts.status();
+  if (settings.newSessions !== "balance") return browserAccountExists(settings.newSessions) ? settings.newSessions : activeId;
+  const open = accounts.filter((entry) => entry.acceptsNewSessions);
+  if (!open.length) return activeId;
+  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const recent = new Map();
+  for (const entry of threadAccounts?.list() ?? []) {
+    if (entry.lastUsedAt >= dayAgo) recent.set(entry.accountId, (recent.get(entry.accountId) ?? 0) + 1);
+  }
+  const load = (entry) => [
+    browserHost?.tabCount?.(browserAccounts.partitionOf(entry.id)) ?? 0,
+    recent.get(entry.id) ?? 0,
+    entry.id === activeId ? 0 : 1,
+  ];
+  return open.map((entry) => ({ id: entry.id, load: load(entry) }))
+    .sort((a, b) => a.load[0] - b.load[0] || a.load[1] - b.load[1] || a.load[2] - b.load[2])[0].id;
+}
 
 // Routes an account's partition only while none of the host's pages use it: routing drops open
 // connections, and a live partition is kept current by Global Routing and its proxy binding.
@@ -909,11 +931,11 @@ function lifecycleSyncFor(accountId, logger) {
 }
 
 // The account a Codex thread's turn runs on: the one it is bound to, or (first turn, or its account
-// was removed) the account in use, which it is then bound to.
+// was removed) the one new sessions start on, which it is then bound to.
 async function resolveThreadAccount(threadId, logger) {
   if (!threadAccounts || !isThreadId(threadId)) return null;
   const bound = threadAccounts.accountFor(threadId);
-  const accountId = bound && browserAccountExists(bound) ? bound : browserAccounts.activeId();
+  const accountId = bound && browserAccountExists(bound) ? bound : newSessionAccount();
   threadAccounts.bind(threadId, accountId);
   const partition = browserAccounts.partitionOf(accountId);
   await routeIdleAccountPartition(partition, logger);
@@ -2350,6 +2372,32 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-account-remove", (event, id) => {
     assertFocusedMainWindow(event, true);
     return removeBrowserAccount(id, { logger, stateStore });
+  });
+  // Browser settings: one account's (tab limit, new sessions), every account's, and a fresh look at
+  // the account in use's plan. Every change needs the focused main window.
+  handle("launcher:browser-account-settings", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    browserAccounts.setAccountSettings(input?.id, {
+      ...(input?.maxTabs !== undefined ? { maxTabs: input.maxTabs } : {}),
+      ...(input?.acceptsNewSessions !== undefined ? { acceptsNewSessions: input.acceptsNewSessions } : {}),
+    });
+    publishBrowserAccounts();
+    browserHost?.publishState?.(browserHost.snapshot());
+    return browserAccountsStatus();
+  });
+  handle("launcher:browser-accounts-settings", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    browserAccounts.setSettings({
+      ...(input?.newSessions !== undefined ? { newSessions: input.newSessions } : {}),
+      ...(input?.keepFinishedTabsMinutes !== undefined ? { keepFinishedTabsMinutes: input.keepFinishedTabsMinutes } : {}),
+    });
+    publishBrowserAccounts();
+    return browserAccountsStatus();
+  });
+  handle("launcher:browser-account-inspect", async (event) => {
+    assertFocusedMainWindow(event, true);
+    await browserHost.inspectSession(true);
+    return browserAccountsStatus();
   });
   // Codex threads bound to ChatGPT accounts. Every change needs the focused main window.
   handle("launcher:codex-threads", () => codexThreadsStatus(logger));
@@ -4183,6 +4231,16 @@ async function start() {
       getUseSavedChats: () => savedChatsInUse(),
       // Each Codex thread runs on the ChatGPT account it is bound to, whichever one this host shows.
       resolveTurnAccount: (threadId) => resolveThreadAccount(threadId, logger),
+      tabLimitFor: (partition) => browserAccounts.tabLimitForPartition(partition),
+      retainedTabTtlMs: () => browserAccounts.settings().keepFinishedTabsMinutes * 60_000,
+      // What turns and inspections show about each account, for ChatGPT browser management.
+      onSessionInspected: (inspected) => {
+        if (browserAccounts.recordPlan(accountId, inspected)) publishBrowserAccounts();
+      },
+      onConnectorObserved: (partition, observed) => {
+        const owner = browserAccounts.accountIdOfPartition(partition);
+        if (owner && browserAccounts.recordConnector(owner, observed)) publishBrowserAccounts();
+      },
     });
     // Verified ChatGPT conversation ownership, kept across launcher restarts per account: a
     // conversation belongs to the account that holds it. A turn with no thread uses this one.
