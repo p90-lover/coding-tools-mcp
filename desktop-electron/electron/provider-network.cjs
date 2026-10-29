@@ -1015,8 +1015,15 @@ function createProviderNetworkController({
     const profile = snapshot.routing.globalEnabled
       ? store.activeProxy(snapshot.routing.globalProfileId)
       : null;
-    const targets = [session.defaultSession, session.fromPartition(browserPartition)]
-      .filter((value, index, list) => value && list.indexOf(value) === index);
+    // The Browser tab's active account may have its own partition (browser-accounts.cjs).
+    const activeBrowserPartition = getBrowserHost?.()?.partition;
+    const targets = [
+      session.defaultSession,
+      session.fromPartition(browserPartition),
+      ...(typeof activeBrowserPartition === "string" && activeBrowserPartition !== browserPartition
+        ? [session.fromPartition(activeBrowserPartition)]
+        : []),
+    ].filter((value, index, list) => value && list.indexOf(value) === index);
     clearOwnedEnvironment();
 
     if (!profile) {

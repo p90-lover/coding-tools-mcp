@@ -16,6 +16,17 @@ export function expectedLauncherBrowserPartition(profile: LauncherBrowserHostPro
     : LAUNCHER_BROWSER_PARTITION_PRODUCTION;
 }
 
+/**
+ * The Browser tab's accounts (desktop-electron profile.cjs): the profile's own partition, or that
+ * partition plus "-" and a 12-character account id. Turns run on whichever account is active.
+ */
+export function isLauncherBrowserPartition(profile: LauncherBrowserHostProfile, partition: unknown): partition is string {
+  const base = expectedLauncherBrowserPartition(profile);
+  if (partition === base) return true;
+  return typeof partition === "string" && partition.startsWith(`${base}-`)
+    && /^[a-z0-9]{12}$/.test(partition.slice(base.length + 1));
+}
+
 export class LauncherBrowserTurnCancelledError extends Error {
   constructor(message: string) {
     super(message);
@@ -119,8 +130,7 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   if (!helperScript || !existsSync(helperScript)) {
     throw new Error("Launcher browser descriptor helper script does not exist");
   }
-  const expectedPartition = expectedLauncherBrowserPartition(descriptor.profile);
-  if (descriptor.partition !== expectedPartition) {
+  if (!isLauncherBrowserPartition(descriptor.profile, descriptor.partition)) {
     throw new Error("Launcher browser descriptor identifies an unexpected browser partition");
   }
   if (descriptor.idleUrl !== LAUNCHER_BROWSER_IDLE_URL) {
