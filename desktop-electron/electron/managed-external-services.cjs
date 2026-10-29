@@ -121,6 +121,7 @@ function createManagedExternalServicesController({
     safeStorage: options.safeStorage,
     env: options.env,
     logger: options.logger,
+    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     spawnProcess: options.spawnProcess,
     terminateProcessTree: options.terminateProcessTree,
     persistentComponents: options.persistentComponents,
@@ -304,6 +305,52 @@ function createManagedExternalServicesController({
     return serviceFromSnapshot(serviceId);
   }
 
+  function checkManagedComponentUpdate(serviceId) {
+    if (RETIRED_SERVICE_IDS.has(serviceId)) throw new Error(`${serviceId} service is retired`);
+    return managedController.checkComponentUpdate(serviceId);
+  }
+
+  /**
+   * Switches a running component to its installed update: stop, start the new version, and wait
+   * for its health check. A version that fails goes back to the earlier one and is never retried.
+   */
+  async function swapManagedComponent(serviceId) {
+    const change = managedController.activateComponentUpdate(serviceId);
+    if (!change) return { swapped: false, current: managedController.project(serviceId).version };
+    const relaunch = async () => {
+      try { await managedController.stopComponent(serviceId); } catch {}
+      applyManagedConfiguration(serviceId);
+      await managedController.startComponent(serviceId);
+    };
+    let result;
+    try {
+      await relaunch();
+      if (!await managedController.waitForHealth(serviceId, { timeoutMs: options.updateHealthTimeoutMs ?? 30_000 })) {
+        throw new Error(`${serviceId} ${change.to} didn't pass its health check`);
+      }
+      managedController.confirmComponentUpdate(serviceId);
+      managedController.pruneComponentVersions(serviceId);
+      result = { swapped: true, ...change };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      options.logger?.warn?.("managed-component.update_rolled_back", { componentId: serviceId, ...change, message });
+      managedController.rejectComponentUpdate(serviceId, change.to);
+      await relaunch();
+      result = { swapped: false, rolledBack: true, ...change, error: message };
+    }
+    await baseController.inspect(serviceId);
+    publishCombined();
+    return result;
+  }
+
+  /** Installs the newest release beside the running one; with swap (the default) switches to it now. */
+  async function updateManagedComponent(serviceId, { swap = true } = {}) {
+    if (RETIRED_SERVICE_IDS.has(serviceId)) throw new Error(`${serviceId} service is retired`);
+    const staged = await managedController.installComponentUpdate(serviceId);
+    if (!swap) return { ...staged, swapped: false };
+    return { ...staged, ...await swapManagedComponent(serviceId) };
+  }
+
   async function start(serviceId) {
     if (RETIRED_SERVICE_IDS.has(serviceId)) throw new Error(`${serviceId} service is retired`);
     const managed = managedController.project(serviceId);
@@ -314,6 +361,12 @@ function createManagedExternalServicesController({
       return installManagedComponent(serviceId);
     }
     if (managed.installState === "installed") {
+      // Not yet started by this launcher, with an update waiting: the start is the switch, health
+      // check and rollback included. A component this launcher already runs keeps running.
+      if (!managed.processes.some((entry) => entry.running) && managedController.pendingComponentUpdate(serviceId)) {
+        await swapManagedComponent(serviceId);
+        return serviceFromSnapshot(serviceId);
+      }
       applyManagedConfiguration(serviceId);
       await managedController.startComponent(serviceId);
       await baseController.inspect(serviceId);
@@ -483,6 +536,9 @@ function createManagedExternalServicesController({
     loopbackRequest,
     installManagedComponent: forgettingCpaConnection(installManagedComponent),
     repairManagedComponent: forgettingCpaConnection(repairManagedComponent),
+    checkManagedComponentUpdate,
+    updateManagedComponent: forgettingCpaConnection(updateManagedComponent),
+    swapManagedComponent: forgettingCpaConnection(swapManagedComponent),
     setManagedComponentCredential: forgettingCpaConnection(setManagedComponentCredential),
     managedComponentsSnapshot: () => {
       const snapshot = managedController.snapshot();

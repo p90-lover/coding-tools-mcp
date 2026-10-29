@@ -41,7 +41,7 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
     headlessHost: { shutdown: async () => {} }, browserControl: { close: async () => {} },
     registerHost: { shutdown: async () => { order.push("stop-register"); if (registerShutdownFails) throw new Error("Register stop failed"); },
       recoverAfterCancelledQuit: async () => { recovered.push(context.quitting); } },
-    stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} }, autoInstaller: { stop() {} },
+    stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} }, autoInstaller: { stop() {} }, cpaUpdater: { stop() {} },
     stopBridgeWatchdog() {}, backendBundles: { stopWatching() {} },
     agentOrchestratorUpstream: { stop: async () => { chatHosts.push("stop-ao"); }, endChatHosts: async () => { chatHosts.push("end-chat-hosts"); } },
     antigravityReauth: { stop() {} },

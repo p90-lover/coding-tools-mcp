@@ -55,6 +55,7 @@ const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs")
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers, waitForUpdateApply } = require("./app-update.cjs");
+const { createComponentUpdater } = require("./component-updates.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
@@ -187,6 +188,7 @@ let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
 let updateController = null;
 let autoInstaller = null;
+let cpaUpdater = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
@@ -2719,6 +2721,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
         message: `Quitting without restoring the Codex route: ${message}`,
       });
     }
+    // A CPA switch under way finishes first: disposing the services under it would leave no CPA.
+    await cpaUpdater?.stop();
     managedBootstrapController?.dispose();
     originalUiController?.dispose();
     externalServicesController?.dispose({ keepPersistent: keepBridge });
@@ -2958,13 +2962,14 @@ async function start() {
   );
   // With automatic updates on, a found update installs itself while the user is away and no
   // browser, bridge or AO turn is running; the sidebar's "Update to" button still works any time.
+  const appBusy = async () => Boolean(browserHost?.currentOperation() || runtimeHost?.currentOperation()
+    || runtimeStartupInFlight || codexBridgeConnectInFlight
+    || await agentOrchestratorUpstream?.harness.anySessionWorking());
   autoInstaller = createAutoInstaller({
     controller: updateController,
     enabled: () => stateStore.read().automaticUpdates === true,
     idleSeconds: () => powerMonitor.getSystemIdleTime(),
-    isBusy: async () => Boolean(browserHost?.currentOperation() || runtimeHost?.currentOperation()
-      || runtimeStartupInFlight || codexBridgeConnectInFlight
-      || await agentOrchestratorUpstream?.harness.anySessionWorking()),
+    isBusy: appBusy,
     logger,
   });
   registerMinimalPreRendererIpc({ logger, stateStore });
@@ -2989,6 +2994,28 @@ async function start() {
     publish: (value) => send("launcher:external-services-changed", value),
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
+  // CPA follows its upstream releases: each one installs beside the running CPA, and the switch
+  // waits for a quiet moment (or the next start). Off when automaticComponentUpdates is false.
+  const cpaUsageRoot = path.join(app.getPath("userData"), "integrations", "state", "cpa", "cpa-helper-data", "usage");
+  cpaUpdater = createComponentUpdater({
+    componentId: "cpa",
+    stage: (id) => externalServicesController.updateManagedComponent(id, { swap: false }),
+    swap: (id) => externalServicesController.swapManagedComponent(id),
+    enabled: () => stateStore.read().automaticComponentUpdates !== false,
+    isBusy: appBusy,
+    idleSeconds: () => powerMonitor.getSystemIdleTime(),
+    // cpa-helper appends each finished request to a monthly usage file.
+    lastActivityAt: () => {
+      try {
+        return Math.max(0, ...fs.readdirSync(cpaUsageRoot)
+          .filter((name) => name.endsWith(".jsonl"))
+          .map((name) => fs.statSync(path.join(cpaUsageRoot, name)).mtimeMs)) || null;
+      } catch {
+        return null;
+      }
+    },
+    logger,
+  });
   managedBootstrapController = createManagedBootstrap({
     snapshot: () => externalServicesController.snapshot(),
     install: (serviceId) => externalServicesController.installManagedComponent(serviceId),
@@ -3487,6 +3514,8 @@ async function start() {
         stop: (id) => externalServicesController.stop(id),
         restart: (id) => externalServicesController.restart(id),
         repair: (id) => externalServicesController.repairManagedComponent(id),
+        cpaCheckUpdate: () => externalServicesController.checkManagedComponentUpdate("cpa"),
+        cpaUpdate: ({ swap } = {}) => externalServicesController.updateManagedComponent("cpa", { swap: swap !== false }),
         loopbackRequest: (id) => externalServicesController.loopbackRequest?.(id) || null,
         listProviders: (input) => providerServices.listProviders(input),
         linkProvider: (input) => providerServices.linkProvider(input),
@@ -3749,6 +3778,7 @@ async function start() {
     });
     if (stateStore.read().automaticUpdates) updateController.startPeriodicChecks();
     autoInstaller.start();
+    if (!IS_DEV_PROFILE) cpaUpdater.start();
   }
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();

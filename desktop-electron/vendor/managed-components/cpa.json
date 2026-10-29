@@ -9,6 +9,7 @@
   "version": "8.0.46",
   "strategy": "release-binary",
   "bundle": { "required": true },
+  "updates": { "source": "github-release", "checksums": "checksums.txt" },
   "license": "MIT",
   "licenseFile": "LICENSE",
   "credentials": {
