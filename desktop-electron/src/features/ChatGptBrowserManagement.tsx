@@ -6,6 +6,7 @@ import type {
   CodexThreadAction,
   CodexThreadBinding,
   LauncherApi,
+  McpTunnel,
   ProviderNetworkSnapshot,
   ProxyProfileRecord,
 } from "../types";
@@ -40,6 +41,9 @@ function planText(plan: BrowserAccount["plan"]) {
   return { label: "No GPT-6 Sol", detail: `Checked ${ago(plan.checkedAt)}` };
 }
 
+const TUNNEL_TONE: Record<McpTunnel["state"], string> = { ready: "ok", starting: "idle", stopped: "warn", failed: "error" };
+const TUNNEL_LABEL: Record<McpTunnel["state"], string> = { ready: "Ready", starting: "Starting", stopped: "Stopped", failed: "Failed" };
+
 function connectorText(connector: BrowserAccount["connector"]) {
   if (!connector) return { tone: "idle", label: "Not used yet", detail: "Shown after a Codex turn uses it" };
   if (connector.error && (connector.errorAt ?? 0) >= (connector.okAt ?? 0)) {
@@ -67,18 +71,22 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
   const [accounts, setAccounts] = useState<BrowserAccountsStatus | null>(null);
   const [network, setNetwork] = useState<ProviderNetworkSnapshot | null>(null);
   const [threads, setThreads] = useState<CodexThreadBinding[]>([]);
+  const [tunnels, setTunnels] = useState<McpTunnel[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     void api.browserAccounts().then(next => { if (live) setAccounts(next); }).catch(() => {});
     void api.providerSnapshot().then(next => { if (live) setNetwork(next); }).catch(() => {});
+    void api.mcpTunnels().then(next => { if (live) setTunnels(next); }).catch(() => {});
     const offAccounts = api.onBrowserAccountsChanged(next => setAccounts(next));
     const offNetwork = api.onProviderNetworkChanged(next => setNetwork(next));
+    const offTunnels = api.onMcpTunnelsChanged(next => setTunnels(next));
     return () => {
       live = false;
       offAccounts();
       offNetwork();
+      offTunnels();
     };
   }, [api]);
 
@@ -144,7 +152,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
           label="MCP connector"
           value={setup.mcpReady ? "Ready" : "Not set up"}
           tone={setup.mcpReady ? "ok" : "warn"}
-          detail={setup.bridgeReady ? "Codex bridge set up" : "Codex bridge not set up"}
+          detail={`${1 + tunnels.length} tunnel${tunnels.length ? "s" : ""} · ${setup.bridgeReady ? "Codex bridge set up" : "Codex bridge not set up"}`}
         />
         <Stat label="Proxies" value={`${bound}/${accounts.accounts.length}`} detail={`accounts bound · ${decodoCount} from Decodo`} />
       </div>
@@ -162,11 +170,13 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
             key={account.id}
             locked={locked}
             maxTabs={accounts.maxTabsPerAccount}
+            mainTunnelReady={setup.mcpReady}
             proxies={proxies}
             holders={accounts.accounts}
             run={run}
             sessions={sessionsOf(account.id)}
             tabs={tabsOf(account.id)}
+            tunnel={tunnels.find(entry => entry.accountId === account.id)}
           />
         ))}
       </div>
@@ -197,7 +207,8 @@ function Stat({ label, value, detail, tone }: { label: string; value: string | n
 }
 
 function AccountCard({
-  account, api, authenticated, busy, chatRunning, canRemove, inUse, locked, maxTabs, proxies, holders, run, sessions, tabs,
+  account, api, authenticated, busy, chatRunning, canRemove, inUse, locked, mainTunnelReady, maxTabs, proxies, holders, run, sessions, tabs,
+  tunnel,
 }: {
   account: BrowserAccount;
   api: LauncherApi;
@@ -207,12 +218,16 @@ function AccountCard({
   canRemove: boolean;
   inUse: boolean;
   locked: boolean;
+  /** The main MCP tunnel is set up (it serves the accounts without a tunnel of their own). */
+  mainTunnelReady: boolean;
   maxTabs: number;
   proxies: ProxyProfileRecord[];
   holders: BrowserAccount[];
   run: (key: string, action: () => Promise<unknown>) => Promise<void>;
   sessions: number;
   tabs: BrowserState["tabs"];
+  /** This account's own MCP tunnel (#674), if it has one. */
+  tunnel: McpTunnel | undefined;
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const confirmTimer = useRef<number | undefined>(undefined);
@@ -270,6 +285,29 @@ function AccountCard({
                 {busy === `plan:${account.id}` ? "Checking…" : "Refresh"}
               </button>
             ) : null}
+          </dd>
+        </div>
+        <div>
+          <dt>MCP</dt>
+          <dd>
+            {tunnel ? (
+              <>
+                <span className={`cbm-tone is-${TUNNEL_TONE[tunnel.state]}`}>{TUNNEL_LABEL[tunnel.state]}</span>
+                <span className={`cbm-muted${tunnel.state === "failed" ? " is-error" : ""}`} title={tunnel.detail}>
+                  {" "}· {tunnel.label}{tunnel.detail ? ` · ${tunnel.detail}` : ""}
+                </span>
+                {tunnel.state === "failed" || tunnel.state === "stopped" ? (
+                  <button className="cbm-link" disabled={locked} onClick={() => void run(`tunnel:${tunnel.id}`, () => api.reconnectMcpTunnel(tunnel.id))} type="button">
+                    {busy === `tunnel:${tunnel.id}` ? "Reconnecting…" : "Reconnect"}
+                  </button>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <span className={`cbm-tone is-${mainTunnelReady ? "idle" : "warn"}`}>Main tunnel</span>
+                <span className="cbm-muted"> · {mainTunnelReady ? "no tunnel of its own" : "not set up"}</span>
+              </>
+            )}
           </dd>
         </div>
         <div>
