@@ -2086,23 +2086,6 @@ export function AgentOrchestratorChat({
           onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
           // Queued commands and goals show in the bar too now, so Clear all clears all of them.
           onClearAll={() => setQueue(selectedTaskId, [])} />
-        {card ? <section className="cx-command-card" role="status" aria-label={card.title}>
-          <header><strong>{card.title}</strong>
-            <button type="button" className="cx-icon-button" aria-label="Close" onClick={() => setCard(null)}><Icon name="close" width="12" height="12" /></button></header>
-          {card.quote ? <blockquote className="cx-command-quote">{card.quote.length > 280 ? `${card.quote.slice(0, 279)}…` : card.quote}</blockquote> : null}
-          {card.rows?.length ? <dl>{card.rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl> : null}
-          {card.text ? card.mono ? <pre>{card.text}</pre> : <p>{card.text}</p> : null}
-          {card.items?.length ? <ul>{card.items.map((item, index) => <li key={`${item.label}:${index}`}>
-            <button type="button" onClick={() => { setCard(null); item.run(); }}><span>{item.label}</span>{item.detail ? <small>{item.detail}</small> : null}</button></li>)}</ul> : null}
-        </section> : null}
-        {deleting !== null ? <section className="cx-command-card cx-delete-confirm" role="alertdialog" aria-label="Delete message">
-          <header><strong>Delete message</strong>
-            <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setDeleting(null)}><Icon name="close" width="12" height="12" /></button></header>
-          <p>Delete this message and its reply? Files on disk don't change.</p>
-          {deleteBlocked ? <p className="cx-delete-reason">{deleteBlocked}.</p> : null}
-          <footer><button type="button" className="cx-text-button" onClick={() => setDeleting(null)}>Cancel</button>
-            <button type="button" className="cx-primary-button" disabled={Boolean(deleteBlocked) || deletingBusy} onClick={() => void confirmDelete()}>Delete</button></footer>
-        </section> : null}
         {goalEditing !== null && commands?.goal ? (() => {
           // The goal bar opened for editing: its target and "Edit goal", the objective in a box that
           // grows with it, then how long it may be, Cancel and Save. Ctrl+Enter saves, Esc cancels.
@@ -2196,17 +2179,6 @@ export function AgentOrchestratorChat({
           <span className="cx-shimmer">{subagentLine}</span>
         </button> : null}
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
-        {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
-            Harness shows its approval panel: in the thread it took the thread's own margins and sat
-            out of line with the box, scrolled away with the transcript. */}
-        {approvals.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
-          {approvals.map(approval => {
-            // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
-            const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;
-            const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
-            return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
-          })}
-        </div> : null}
         {/* Outside the chat box's form: its comment box submits on Enter, and that must not send the message. */}
         {selectedTaskId ? <SelectionAnnotator root={scroller} annotations={annotations} onAdd={addAnnotation} onComment={commentAnnotation} /> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
@@ -2251,7 +2223,7 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above. New messages send after it"
+            placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request below. New messages send after it"
               : queueing ? "Running. New messages send when it finishes" : !accepts ? "Running. Send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
@@ -2296,6 +2268,34 @@ export function AgentOrchestratorChat({
         </form>
         {selectedTaskId ? <ChatTurnStats model={agentSessions[0]?.model} rounds={turns.filter((turn) => turn.runId).length}
           from={statsSpan.from} models={statsSpan.models} running={runOpen} onRefusal={setCpaRefusal} /> : null}
+        {/* Every box that asks the person something sits below the chat box, as wide as it: a
+            command's card (its choices), the delete confirmation, and the agent's questions and
+            requests. Above the box they pushed it up the pane and away from where the person types. */}
+        {card ? <section className="cx-command-card" role="status" aria-label={card.title}>
+          <header><strong>{card.title}</strong>
+            <button type="button" className="cx-icon-button" aria-label="Close" onClick={() => setCard(null)}><Icon name="close" width="12" height="12" /></button></header>
+          {card.quote ? <blockquote className="cx-command-quote">{card.quote.length > 280 ? `${card.quote.slice(0, 279)}…` : card.quote}</blockquote> : null}
+          {card.rows?.length ? <dl>{card.rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl> : null}
+          {card.text ? card.mono ? <pre>{card.text}</pre> : <p>{card.text}</p> : null}
+          {card.items?.length ? <ul>{card.items.map((item, index) => <li key={`${item.label}:${index}`}>
+            <button type="button" onClick={() => { setCard(null); item.run(); }}><span>{item.label}</span>{item.detail ? <small>{item.detail}</small> : null}</button></li>)}</ul> : null}
+        </section> : null}
+        {deleting !== null ? <section className="cx-command-card cx-delete-confirm" role="alertdialog" aria-label="Delete message">
+          <header><strong>Delete message</strong>
+            <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setDeleting(null)}><Icon name="close" width="12" height="12" /></button></header>
+          <p>Delete this message and its reply? Files on disk don't change.</p>
+          {deleteBlocked ? <p className="cx-delete-reason">{deleteBlocked}.</p> : null}
+          <footer><button type="button" className="cx-text-button" onClick={() => setDeleting(null)}>Cancel</button>
+            <button type="button" className="cx-primary-button" disabled={Boolean(deleteBlocked) || deletingBusy} onClick={() => void confirmDelete()}>Delete</button></footer>
+        </section> : null}
+        {approvals.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+          {approvals.map(approval => {
+            // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
+            const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;
+            const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
+            return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
+          })}
+        </div> : null}
       </section>
       {showStructure && structure ? <aside className="cx-structure" aria-label="Cards" style={cardsWidth ? { flexBasis: cardsWidth } : undefined}>
         <div className="cx-structure-resize" role="separator" aria-orientation="vertical" aria-label="Resize the cards panel" tabIndex={0}
