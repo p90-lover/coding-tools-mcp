@@ -133,3 +133,39 @@ test("CPA config follows the selected authenticated global profile", () => {
   fs.writeFileSync(savedFile, `${JSON.stringify(broken)}\n`);
   assert.throws(() => resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage), /saved sign-in, so CPA didn't start/);
 });
+
+test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets the bare route", async (t) => {
+  const { createProviderNetworkController } = require("../electron/provider-network.cjs");
+  const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/global-env-proxy-"));
+  const saved = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"].map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const applied = [];
+  const target = { setProxy: async (config) => { applied.push(config); } };
+  const controller = createProviderNetworkController({
+    app: {}, browserPartition: "persist:env-proxy-test", getBrowserHost: () => null,
+    logger: { info() {}, warn() {} }, safeStorage: { isEncryptionAvailable: () => false },
+    session: { defaultSession: target, fromPartition: () => target }, shell: {}, userData: root,
+    fetchImpl: async () => { throw new Error("no network in this test"); },
+  });
+  controller.store.saveProxyProfile({ id: "decodo", name: "HTTP decodo", enabled: true,
+    endpoint: { protocol: "http", host: "proxy.example.test", port: 10000 },
+    username: "account", password: "p@ss:word", scopes: ["all"] });
+  controller.store.setGlobalRouting({ enabled: true, profileId: "decodo" });
+  await controller.applyGlobalRouting();
+
+  // Without the sign-in every agent, curl and git call through this proxy was refused with 407.
+  const environment = new URL(process.env.HTTPS_PROXY);
+  assert.equal(environment.host, "proxy.example.test:10000");
+  assert.equal(decodeURIComponent(environment.username), "account");
+  assert.equal(decodeURIComponent(environment.password), "p@ss:word");
+  assert.equal(process.env.HTTP_PROXY, process.env.HTTPS_PROXY);
+  assert.equal(process.env.ALL_PROXY, process.env.HTTPS_PROXY);
+  assert.deepEqual(applied.map((config) => config.proxyRules), ["http://proxy.example.test:10000"]);
+
+  controller.store.setGlobalRouting({ enabled: false, profileId: null });
+  await controller.applyGlobalRouting();
+  assert.equal(process.env.HTTPS_PROXY, undefined);
+});
