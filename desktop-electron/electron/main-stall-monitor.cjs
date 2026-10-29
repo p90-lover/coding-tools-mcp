@@ -14,7 +14,7 @@ const STALL_MS = 2_000;
 
 function createMainStallMonitor({ logger, tickMs = TICK_MS, stallMs = STALL_MS, now = () => performance.now(),
   cpuUsage = () => process.cpuUsage(), memoryUsage = () => process.memoryUsage(),
-  setRepeat = setInterval, clearRepeat = clearInterval } = {}) {
+  setRepeat = setInterval, clearRepeat = clearInterval, blockingCalls = null, clock = () => Date.now() } = {}) {
   let timer = null;
   let last = 0;
   let lastCpu = null;
@@ -24,10 +24,14 @@ function createMainStallMonitor({ logger, tickMs = TICK_MS, stallMs = STALL_MS, 
     const lateMs = at - last - tickMs;
     if (lateMs >= stallMs) {
       const cpuMs = Math.round(((cpu.user - lastCpu.user) + (cpu.system - lastCpu.system)) / 1000);
+      // The synchronous call that held main during the gap, when one did (main-blocking-calls.cjs);
+      // none with little CPU means main waited elsewhere, or the whole machine stalled.
+      const blockedBy = blockingCalls?.latestSince(clock() - lateMs - tickMs) ?? null;
       logger?.warn?.("launcher.main_stalled", {
         ms: Math.round(lateMs),
         cpuMs,
         heapMb: Math.round(memoryUsage().heapUsed / 1_048_576),
+        ...(blockedBy ? { blockedBy } : {}),
       });
     }
     last = at;

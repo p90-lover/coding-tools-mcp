@@ -1,3 +1,5 @@
+// First, before any other module: every slow synchronous call on the main thread is named from here on.
+const blockingCalls = require("./main-blocking-calls.cjs").installBlockingCallWatch();
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
@@ -4557,7 +4559,8 @@ async function start() {
   // coalesces a watchdog start with any launch-time start that is still in flight.
   startBridgeWatchdog(logger, stateStore);
   // A blocked main loop freezes every window; this is the only thing that can tell afterwards.
-  createMainStallMonitor({ logger }).start();
+  blockingCalls.attach((entry) => logger.warn("launcher.main_blocked", entry));
+  createMainStallMonitor({ logger, blockingCalls }).start();
 
   app.on("activate", () => showMainWindow());
   app.on("will-quit", () => missionWorkflowRuntime?.dispose());
