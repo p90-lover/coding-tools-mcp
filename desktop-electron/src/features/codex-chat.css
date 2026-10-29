@@ -1266,9 +1266,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-clawd-glyphs { display: block; }
 .cx-clawd-mark { position: absolute; width: 8px; height: 16px; color: var(--ao-muted, #8a8986);
   font: 700 13px/16px ui-monospace, "Cascadia Mono", Consolas, monospace; text-align: center; white-space: pre; pointer-events: none; }
-/* Its tool (laptop, magnifier, hammer, mug, book) stands on the ground at its right hand; a carried
-   file box rides over its raised arms. */
-.cx-pet-body svg.cx-pet-prop { position: absolute; left: 70px; bottom: 0; pointer-events: none; }
+/* Its tool sits at the hand on its side: the laptop on the ground, the magnifier, hammer, mug and book
+   in its raised hand (column 0 of the prop touches the hand); a carried file box rides over its raised arms. */
+.cx-pet-body svg.cx-pet-prop { position: absolute; left: 72px; bottom: 0; pointer-events: none; }
 /* Keep the keyboard next to Clawd's claw, not off-screen beyond the chat field. */
 .cx-pet-body.is-tool-left svg.cx-pet-prop { left: auto; right: 68px; transform: scaleX(-1); }
 .cx-pet-body svg.cx-pet-box { position: absolute; left: 20px; top: -16px; }
