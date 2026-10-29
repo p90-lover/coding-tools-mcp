@@ -646,7 +646,9 @@ export interface BrowserState {
   canGoForward: boolean;
   zoomFactor: number;
   activeTabId: string;
+  /** The shown account's tab limit, and the tabs it holds (tabs of sessions on other accounts show too). */
   maxTabs: number;
+  accountTabs?: number;
   tabs: BrowserTabState[];
 }
 
@@ -654,6 +656,8 @@ export interface BrowserTabState {
   id: string;
   traceId: string | null;
   threadId?: string;
+  /** The ChatGPT account the tab's Codex session runs on (absent: the shown account). */
+  accountId?: string;
   conversationUrl?: string;
   title: string;
   status: "idle" | "loading" | "signed-out" | "ready" | "testing" | "running" | "error" | "aborted";
@@ -768,6 +772,20 @@ export interface GptBrowserStatus {
 /** A Browser-tab account: its own sign-in, and optionally its own proxy (one proxy per account). */
 export interface BrowserAccount extends GptBrowserAccount {
   proxyProfileId: string | null;
+  /** Tabs this account may hold at once (1 to maxTabsPerAccount). */
+  maxTabs: number;
+  /** Whether new Codex sessions may start on it when they are spread across accounts. */
+  acceptsNewSessions: boolean;
+  /** The last inspection of its ChatGPT session: Plus stops at 6 High; Team and Pro add Extra High and Pro. */
+  plan: { solAvailable: boolean; proAvailable: boolean; checkedAt: number | null } | null;
+  /** What its Codex turns showed about its ChatGPT connector. */
+  connector: { okAt: number | null; error: string | null; errorAt: number | null } | null;
+}
+
+export interface BrowserAccountsSettings {
+  /** Where a new Codex session starts: the account in use, the least busy one, or an account id. */
+  newSessions: "active" | "balance" | string;
+  keepFinishedTabsMinutes: number;
 }
 
 /** The Browser tab's ChatGPT accounts; the active one is also the Codex bridge's (WebGPT turns). */
@@ -775,6 +793,8 @@ export interface BrowserAccountsStatus {
   accounts: BrowserAccount[];
   activeId: string;
   maxAccounts: number;
+  maxTabsPerAccount: number;
+  settings: BrowserAccountsSettings;
   switching: boolean;
 }
 
@@ -981,6 +1001,9 @@ export interface LauncherApi {
   onBrowserAccountsChanged(listener: (status: BrowserAccountsStatus) => void): () => void;
   setBrowserAccountProxy(id: string, profileId: string | null): Promise<BrowserAccountsStatus>;
   assignBrowserAccountProxies(): Promise<BrowserAccountsStatus & { assigned: number }>;
+  setBrowserAccountSettings(id: string, input: { maxTabs?: number; acceptsNewSessions?: boolean }): Promise<BrowserAccountsStatus>;
+  setBrowserAccountsSettings(input: Partial<BrowserAccountsSettings>): Promise<BrowserAccountsStatus>;
+  inspectBrowserAccount(): Promise<BrowserAccountsStatus>;
   codexThreads(): Promise<{ threads: CodexThreadBinding[] }>;
   codexThreadAction(input: CodexThreadAction): Promise<{ threads: CodexThreadBinding[] }>;
   saveDecodo(input: Partial<DecodoSettings> & { password?: string }): Promise<ProviderNetworkSnapshot>;
