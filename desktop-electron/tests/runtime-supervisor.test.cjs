@@ -485,6 +485,14 @@ test("tunnel control failures preserve stderr even when stdout is also present",
     assert.equal(result.stdout, "machine-readable output");
     assert.equal(result.stderr, "root failure");
     assert.equal(result.output, "root failure\nmachine-readable output");
+    // A read-only probe runs from a worker thread and answers the same way, or times out by its label.
+    const tunnel = { binaryPath: process.execPath, profileDir: root };
+    assert.deepEqual(await supervisor.runTunnelCommand({ tunnel }, [
+      "-e",
+      "process.stdout.write('machine-readable output'); process.stderr.write('root failure'); process.exit(9)",
+    ], 5_000, "Synthetic tunnel probe", { probe: true }), result);
+    await assert.rejects(supervisor.runTunnelCommand({ tunnel }, ["-e", "setInterval(() => {}, 1000)"], 300, "Synthetic tunnel probe", { probe: true }),
+      /Synthetic tunnel probe timed out after 300ms/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
