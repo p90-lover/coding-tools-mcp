@@ -754,7 +754,7 @@ pub fn control_selected(
                 .nodes
                 .iter()
                 .any(|node| node.role == Role::Worker && node.state == State::Held);
-            let mut retried = false;
+            let mut retried = 0u8;
             for node in &mut run.nodes {
                 if node_id.is_some_and(|id| node.id != id) {
                     continue;
@@ -768,10 +768,19 @@ pub fn control_selected(
                     continue;
                 }
                 requeue(node, run.team.as_ref());
-                retried = true;
+                retried = retried.saturating_add(1);
             }
-            if !retried {
+            if retried == 0 {
                 return Err(fail("This mission has no failed card to retry"));
+            }
+            // A single chat's retried card gets back the turn its failed attempt spent. Its grant
+            // has one turn, so its first retry was refused ("no turns left") and the chat sat
+            // queued until the person sent it again; its retries are bounded by their callers. A
+            // team's grant already counts its workers' retries (WORKER_RETRY_LIMIT).
+            if run.execution_mode == ao::ExecutionMode::Single {
+                if let Some(grant) = run.grant.as_mut() {
+                    grant.turns_started = grant.turns_started.saturating_sub(retried);
+                }
             }
             // Only attempt state changed; the signed graph and healthy receipts are unchanged.
             run.paused = false;
@@ -1321,6 +1330,84 @@ pub fn queue_rework(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retrying_a_single_chat_card_gives_back_its_turn() {
+        // A single chat's grant has one turn; its failed attempt spent it, and the retried card
+        // was refused "no turns left" (2026-10-30), so the chat sat queued with nothing running.
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aiTemp")
+            .canonicalize()
+            .unwrap();
+        let mut data: AppData = serde_json::from_value(json!({
+            "profiles":[{"id":"qa","name":"QA","path":workspace.to_string_lossy(),"tunnel":{},"auth":{"type":"bearer"},"runtime":{},"actions":{}}],
+            "control_board":{"revision":1,"tasks":[{"id":"task","workspace_id":"qa","title":"Task","description":"Direct task","state":"pending","step":0,"created_at":0,"updated_at":0,"clauses":[],"evidence":[]}]}
+        })).unwrap();
+        let route: ao::Route = serde_json::from_value(json!({"harness_id":"ao:claude-code","provider_id":"agent-orchestrator","account_id":"ao-local","model":"cpa/gpt-6-luna","permission_profile":":ao-default","native_permission_profile":":workspace","approval_policy":"on-request","approvals_reviewer":"user"})).unwrap();
+        let created = create_selected_run(
+            &mut data,
+            "qa",
+            "one".into(),
+            "task".into(),
+            1,
+            1,
+            CreateSelection {
+                execution_mode: Some(ao::ExecutionMode::Single),
+                single_route: Some(route),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = created.nodes[0].id.clone();
+        let sha = "a".repeat(64);
+        let granted = ao::grant_run(&mut data, "qa", "one", created.revision, &sha, 100).unwrap();
+        assert_eq!(granted.grant.as_ref().unwrap().max_turns, 1);
+        let mut revision = granted.revision;
+        for attempt in 0..3 {
+            let reserved = ao::reserve(
+                &mut data,
+                "qa",
+                "one",
+                &id,
+                revision,
+                format!("request-{attempt}"),
+                Some(101 + attempt),
+            )
+            .unwrap_or_else(|error| panic!("attempt {attempt} was refused: {error}"));
+            assert_eq!(reserved.grant.as_ref().unwrap().turns_started, 1);
+            ao::record_submission(
+                &mut data,
+                "qa",
+                "one",
+                &id,
+                &format!("request-{attempt}"),
+                Some("thread"),
+            )
+            .unwrap();
+            let held = ao::record_terminal(
+                &mut data,
+                "qa",
+                "one",
+                &id,
+                "thread",
+                Some("turn"),
+                None,
+                false,
+                Some("API Error: 503"),
+            )
+            .unwrap();
+            assert_eq!(held.nodes[0].state, State::Held);
+            let retried = control(&mut data, "qa", "one", "retry").unwrap();
+            assert_eq!(retried.nodes[0].state, State::Pending);
+            assert_eq!(
+                retried.grant.as_ref().unwrap().turns_started,
+                0,
+                "the retried card has its turn back"
+            );
+            assert!(ao::grant_valid(&data, &retried, 102 + attempt, &sha).is_ok());
+            revision = retried.revision;
+        }
+    }
 
     #[test]
     fn selected_models_and_saved_team_ids_do_not_substitute_or_mutate_running_work() {
