@@ -127,6 +127,13 @@ function installProviderNetwork({
       shell,
       userData: app.getPath("userData"),
     });
+    // Before anything awaits: this runs ahead of main's own whenReady code, so every program main
+    // starts (AO, the Codex bridge, the MCP tunnel, chat agents) inherits the saved route.
+    try {
+      controller.applyGlobalEnvironment();
+    } catch (error) {
+      logger.warn("proxy.global_environment_failed", { error: error instanceof Error ? error.message : String(error) });
+    }
 
     // Before the saved route is applied: a route left on the removed gateway goes back to the
     // route it replaced, and an older version's gateway helper is stopped.
