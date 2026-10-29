@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { createBrowserAccounts, FIRST_ACCOUNT_ID, MAX_ACCOUNTS } = require("../electron/browser-accounts.cjs");
+const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID, MAX_ACCOUNTS } = require("../electron/browser-accounts.cjs");
 const { browserAccountPartition, isBrowserAccountPartition } = require("../electron/profile.cjs");
 const { BrowserHost } = require("../electron/browser-host.cjs");
 
@@ -84,4 +84,18 @@ test("a running turn, a manual operation or a sign-in blocks an account switch",
   assert.match(blocker({ turnTabs: new Map([["t", { status: "running", traceId: "a" }]]) }), /chat turn is running/);
   assert.match(blocker({ manualOperation: "session inspection" }), /session inspection is running/);
   assert.match(blocker({ loginOperation: Promise.resolve() }), /sign-in/);
+});
+
+test("an account counts as signed in while its own partition holds an unexpired ChatGPT session token", () => {
+  const now = 1_800_000_000;
+  const token = (name, fields = {}) => ({ name, domain: ".chatgpt.com", session: false, expirationDate: now + 90 * 86_400, ...fields });
+  // ChatGPT splits the token into .0/.1; either part, or the unsplit name, is a sign-in.
+  assert.equal(signedInFromCookies([token("__Secure-next-auth.session-token.0"), token("__Secure-next-auth.session-token.1")], now), true);
+  assert.equal(signedInFromCookies([token("__Secure-next-auth.session-token")], now), true);
+  // Expired, or only the other NextAuth cookies (CSRF, callback URL): not signed in.
+  assert.equal(signedInFromCookies([token("__Secure-next-auth.session-token.0", { expirationDate: now - 1 })], now), false);
+  assert.equal(signedInFromCookies([token("__Host-next-auth.csrf-token", { session: true }), token("__Secure-next-auth.callback-url")], now), false);
+  assert.equal(signedInFromCookies([token("__Secure-next-auth.session-tokenx")], now), false);
+  assert.equal(signedInFromCookies([], now), false);
+  assert.equal(signedInFromCookies(undefined, now), false);
 });
