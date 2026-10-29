@@ -30,6 +30,7 @@ const { CodexChatLifecycleSync } = require("./codex-chat-lifecycle-sync.cjs");
 const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createBrowserAccounts, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
+const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createRegisterHost } = require("./register-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
@@ -62,6 +63,7 @@ const { useNativeUpdateTransport } = require("./update.cjs");
 const {
   providerNetworkReady,
   setProviderBrowserHost,
+  setProviderBrowserProxyBinding,
   setProviderCpaConnection,
   setProviderLogger,
   stopProxyBridgeNova,
@@ -876,8 +878,8 @@ async function switchBrowserAccount(accountId, { logger, stateStore }) {
     await previous?.persistSession().catch((error) => logger.warn("browser_accounts.persist_failed", {
       message: error instanceof Error ? error.message : String(error),
     }));
-    // A new partition starts on the system route; give it Global Routing's before its first page.
-    if (partition !== LAUNCHER_PROFILE.browserPartition) await routeGptBrowserSession(session.fromPartition(partition));
+    // The account's bound proxy (else Global Routing's) before its first page.
+    await routeBrowserAccountPartition(partition, logger);
     // A turn may have begun while the session was flushed; from here to the new host is synchronous.
     const lateBlocker = blockerMessage();
     if (lateBlocker) throw new Error(lateBlocker);
@@ -911,6 +913,58 @@ async function switchBrowserAccount(accountId, { logger, stateStore }) {
     publishBrowserAccounts();
   }
   return browserAccountsStatus();
+}
+
+// An account's partition takes its bound proxy, else Global Routing's (provider-network.cjs). A route
+// that cannot be applied leaves the partition as it was; the page then shows the network error.
+async function routeBrowserAccountPartition(partition, logger) {
+  let timer;
+  try {
+    // Startup awaits this before the browser exists; a provider network that never gets ready must
+    // not hold the app, so after 5 s the partition keeps the route it has.
+    return await Promise.race([
+      providerNetworkReady().then(network => network.routeBrowserPartition(partition)),
+      new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error("proxy routing did not answer in 5 s")), 5_000); }),
+    ]);
+  } catch (error) {
+    logger.warn("browser_accounts.route_failed", { message: error instanceof Error ? error.message : String(error) });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Binds a proxy to an account. The active account's page takes it at once, so a running turn
+// (which would lose its connection) blocks a change to the active account.
+async function setBrowserAccountProxy(accountId, profileId, { logger }) {
+  if (profileId) {
+    const profile = (await providerNetworkReady()).store.activeProxy(profileId);
+    if (!profile) throw new Error("That proxy was not found or is turned off");
+  }
+  const active = accountId === browserAccounts.activeId();
+  const blocker = active ? browserHost?.accountSwitchBlocker() : null;
+  if (blocker) throw new Error(`The proxy of the account in use cannot change while ${blocker}. Try again when it is done.`);
+  browserAccounts.setProxy(accountId, profileId || null);
+  if (active) await routeBrowserAccountPartition(browserAccounts.partitionOf(accountId), logger);
+  logger.info("browser_accounts.proxy_bound", { accountId, bound: Boolean(profileId) });
+  publishBrowserAccounts();
+  return browserAccountsStatus();
+}
+
+// One proxy per account: each account without one gets an enabled Decodo proxy no other account
+// holds, in list order. Accounts left over when the proxies run out stay on Global Routing.
+async function assignBrowserAccountProxies({ logger }) {
+  const { proxyProfiles } = (await providerNetworkReady()).store.snapshot();
+  const { accounts } = browserAccounts.status();
+  const taken = new Set(accounts.map((entry) => entry.proxyProfileId).filter(Boolean));
+  const free = proxyProfiles.filter((profile) => isDecodoProfile(profile.id) && profile.enabled && !profile.archivedAt && !taken.has(profile.id));
+  let assigned = 0;
+  for (const entry of accounts) {
+    if (entry.proxyProfileId || free.length === 0) continue;
+    await setBrowserAccountProxy(entry.id, free.shift().id, { logger });
+    assigned += 1;
+  }
+  return { ...browserAccountsStatus(), assigned };
 }
 
 async function addBrowserAccount(context) {
@@ -2100,6 +2154,14 @@ function registerIpc({ logger, stateStore }) {
     browserAccounts.rename(input?.id, input?.label);
     publishBrowserAccounts();
     return browserAccountsStatus();
+  });
+  handle("launcher:browser-account-proxy", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    return setBrowserAccountProxy(input?.id, input?.profileId ?? null, { logger });
+  });
+  handle("launcher:browser-account-proxies-assign", (event) => {
+    assertFocusedMainWindow(event, true);
+    return assignBrowserAccountProxies({ logger });
   });
   handle("launcher:browser-account-remove", (event, id) => {
     assertFocusedMainWindow(event, true);
@@ -3921,6 +3983,8 @@ async function start() {
     });
     return host;
   };
+  setProviderBrowserProxyBinding((partition) => browserAccounts.proxyForPartition(partition));
+  await routeBrowserAccountPartition(browserAccounts.activePartition(), logger);
   browserHost = createBrowserHostForAccount(browserAccounts.activeId());
   setProviderBrowserHost(() => browserHost);
   registerIpc({ logger, stateStore });

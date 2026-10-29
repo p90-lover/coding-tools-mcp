@@ -33,6 +33,7 @@ import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
 import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
+import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
 import { RegisterSurface } from "./features/RegisterSurface";
 
 import type {
@@ -769,6 +770,12 @@ function LauncherShell({
                   onClick={() => navigateSurface("browser")}
                 />
                 <SidebarItem
+                  active={surface === "chatgpt-browser-management"}
+                  icon="browser"
+                  label="ChatGPT browser management"
+                  onClick={() => navigateSurface("chatgpt-browser-management")}
+                />
+                <SidebarItem
                   active={surface === "gpt-browser"}
                   icon="browser"
                   label="GPT Browser"
@@ -905,6 +912,9 @@ function LauncherShell({
                 platform={snapshot.platform}
                 setError={setError}
               />
+            ))}
+            {keepAlive("chatgpt-browser-management", () => (
+              <ChatGptBrowserManagement api={api!} browser={browser} setError={setError} />
             ))}
             {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
             {(nativeChatOpen || surface === "gpt-browser" || visitedSurfaces.has("gpt-browser")) ? <GptBrowserDock

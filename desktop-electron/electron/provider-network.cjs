@@ -8,6 +8,7 @@ const {
   inspectCpaAccount,
   startCpaAccountLogin,
 } = require("./cpa-oauth-adapter.cjs");
+const { fetchDecodoEndpoints, normalizeDecodoSettings } = require("./decodo-proxies.cjs");
 
 const STORE_VERSION = 1;
 const ACCOUNT_AUTH = new Set(["oauth", "api_key", "browser_session", "local_proxy"]);
@@ -53,9 +54,12 @@ function defaultState() {
       providers: [],
       accounts: [],
     },
+    // Decodo's sticky proxy list (decodo-proxies.cjs); its password lives in secrets.decodo.
+    decodo: { ...normalizeDecodoSettings(), lastSyncAt: null, lastError: null },
     secrets: {
       accounts: {},
       proxies: {},
+      decodo: null,
     },
   };
 }
@@ -213,6 +217,16 @@ function normalizeAccountPolicy(policy) {
   }
 }
 
+function normalizeDecodoState(value) {
+  let settings;
+  try { settings = normalizeDecodoSettings(value && typeof value === "object" ? value : {}); } catch { settings = normalizeDecodoSettings(); }
+  return {
+    ...settings,
+    lastSyncAt: typeof value?.lastSyncAt === "string" ? timestamp(value.lastSyncAt, null) : null,
+    lastError: optionalText(value?.lastError, 500) ?? null,
+  };
+}
+
 function normalizeState(parsed) {
   const fallback = defaultState();
   if (!parsed || parsed.version !== STORE_VERSION) return fallback;
@@ -240,9 +254,11 @@ function normalizeState(parsed) {
         ? routing.accounts.map(normalizeAccountPolicy).filter(Boolean)
         : [],
     },
+    decodo: normalizeDecodoState(parsed.decodo),
     secrets: {
       accounts: secrets.accounts && typeof secrets.accounts === "object" ? secrets.accounts : {},
       proxies: secrets.proxies && typeof secrets.proxies === "object" ? secrets.proxies : {},
+      decodo: secrets.decodo && typeof secrets.decodo === "object" ? secrets.decodo : null,
     },
   };
 }
@@ -367,6 +383,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       })),
       proxyProfiles: state.proxyProfiles.map((profile) => ({ ...clone(profile) })),
       routing: clone(state.routing),
+      decodo: { ...clone(state.decodo), hasPassword: Boolean(state.secrets.decodo) },
     };
   }
 
@@ -813,6 +830,27 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     return codec.decrypt(state.secrets.proxies[profileId]);
   }
 
+  // Decodo: a password left out keeps the saved one; an empty one clears it.
+  function saveDecodoSettings(input = {}) {
+    state.decodo = { ...state.decodo, ...normalizeDecodoSettings(input, state.decodo) };
+    if (typeof input.password === "string") {
+      state.secrets.decodo = input.password ? codec.encrypt({ password: input.password }) : null;
+    }
+    write();
+    return publicSnapshot();
+  }
+
+  function decodoSettings() {
+    return { ...clone(state.decodo), password: codec.decrypt(state.secrets.decodo)?.password ?? "" };
+  }
+
+  function recordDecodoSync(error = null) {
+    state.decodo = { ...state.decodo, lastError: error ? String(error).slice(0, 500) : null,
+      ...(error ? {} : { lastSyncAt: new Date().toISOString() }) };
+    write();
+    return publicSnapshot();
+  }
+
   return {
     snapshot: publicSnapshot,
     saveAccount,
@@ -834,6 +872,9 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     mergeAccountSecret,
     proxySecret,
     activeProxy,
+    saveDecodoSettings,
+    decodoSettings,
+    recordDecodoSync,
   };
 }
 
@@ -972,6 +1013,7 @@ function createProviderNetworkController({
   app,
   browserPartition,
   getBrowserHost,
+  getBrowserProxyBinding = null,
   getCpaConnection = null,
   logger,
   safeStorage,
@@ -1010,21 +1052,65 @@ function createProviderNetworkController({
     ownedEnvironment.add(name);
   }
 
+  // The profile's own partition and the Browser tab's active account's (browser-accounts.cjs).
+  function liveBrowserPartitions() {
+    return [browserPartition, getBrowserHost?.()?.partition]
+      .filter((value, index, list) => typeof value === "string" && list.indexOf(value) === index);
+  }
+
+  // The proxy a Browser-tab account is bound to, while it exists and is enabled.
+  function boundBrowserProxy(partition) {
+    const profileId = getBrowserProxyBinding?.(partition) ?? null;
+    return profileId ? store.activeProxy(profileId) : null;
+  }
+
+  /** Routes a Browser-tab account's partition: its bound proxy, else Global Routing's, else direct. */
+  async function routeBrowserPartition(partition) {
+    const target = session.fromPartition(partition);
+    const snapshot = store.snapshot();
+    const profile = boundBrowserProxy(partition)
+      ?? (snapshot.routing.globalEnabled ? store.activeProxy(snapshot.routing.globalProfileId) : null);
+    if (!profile) await target.setProxy({ mode: "direct" });
+    else await target.setProxy({ mode: "fixed_servers", proxyRules: proxyUrl(profile), proxyBypassRules: profile.bypass.join(",") });
+    // Open connections keep the route they were made on; drop them so every request takes this one.
+    if (typeof target.closeAllConnections === "function") await target.closeAllConnections().catch(() => {});
+    return profile?.id ?? null;
+  }
+
+  /** Decodo's sticky proxies become proxy profiles; a later sync updates them in place. */
+  async function syncDecodo() {
+    const settings = store.decodoSettings();
+    try {
+      const endpoints = await fetchDecodoEndpoints(settings, settings.password, fetchImpl);
+      const existing = new Set(store.snapshot().proxyProfiles.map((profile) => profile.id));
+      for (const endpoint of endpoints) store.saveProxyProfile(endpoint);
+      const added = endpoints.filter((endpoint) => !existing.has(endpoint.id)).length;
+      logger.info("proxy.decodo_synced", { count: endpoints.length, added });
+      return { added, updated: endpoints.length - added, snapshot: store.recordDecodoSync(null) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      store.recordDecodoSync(message);
+      logger.warn("proxy.decodo_sync_failed", { message });
+      throw error;
+    }
+  }
+
   async function applyGlobalRouting() {
     const snapshot = store.snapshot();
     const profile = snapshot.routing.globalEnabled
       ? store.activeProxy(snapshot.routing.globalProfileId)
       : null;
-    // The Browser tab's active account may have its own partition (browser-accounts.cjs).
-    const activeBrowserPartition = getBrowserHost?.()?.partition;
+    // The Browser tab's active account may have its own partition (browser-accounts.cjs); one bound
+    // to a proxy of its own keeps that proxy (routeBrowserPartition) instead of this route.
+    const browserPartitions = liveBrowserPartitions();
+    const boundPartitions = browserPartitions.filter((partition) => boundBrowserProxy(partition));
     const targets = [
       session.defaultSession,
-      session.fromPartition(browserPartition),
-      ...(typeof activeBrowserPartition === "string" && activeBrowserPartition !== browserPartition
-        ? [session.fromPartition(activeBrowserPartition)]
-        : []),
+      ...browserPartitions.filter((partition) => !boundPartitions.includes(partition))
+        .map((partition) => session.fromPartition(partition)),
     ].filter((value, index, list) => value && list.indexOf(value) === index);
     clearOwnedEnvironment();
+    await Promise.all(boundPartitions.map((partition) => routeBrowserPartition(partition)));
 
     if (!profile) {
       await Promise.all(targets.map((target) => target.setProxy({ mode: "direct" })));
@@ -1509,18 +1595,23 @@ function createProviderNetworkController({
     return { ...result, snapshot };
   }
 
-  function handleProxyLogin(event, authInfo, callback) {
+  function handleProxyLogin(event, authInfo, callback, webContents = null) {
     if (!authInfo?.isProxy) return false;
+    // A Browser-tab account bound to its own proxy answers with that proxy's sign-in, on its own
+    // pages only; it never takes the global route's.
+    const asking = webContents?.session;
+    const boundPartition = asking ? liveBrowserPartitions().find((partition) => session.fromPartition(partition) === asking) : null;
+    const bound = boundPartition ? boundBrowserProxy(boundPartition) : null;
     const snapshot = store.snapshot();
-    if (!snapshot.routing.globalEnabled || !snapshot.routing.globalProfileId) return false;
+    if (!bound && (!snapshot.routing.globalEnabled || !snapshot.routing.globalProfileId)) return false;
     // Answer only the proxy the route names: anything else on another host or port (a squatter
     // on a loopback port, for one) never receives the saved credentials.
-    const profile = store.activeProxy(snapshot.routing.globalProfileId);
+    const profile = bound ?? store.activeProxy(snapshot.routing.globalProfileId);
     const bare = (value) => String(value ?? "").trim().replace(/^\[|\]$/g, "").toLowerCase();
     if (!profile || bare(authInfo.host) !== bare(profile.endpoint.host) || Number(authInfo.port) !== profile.endpoint.port) {
       return false;
     }
-    const secret = store.proxySecret(snapshot.routing.globalProfileId);
+    const secret = store.proxySecret(profile.id);
     if (!secret || (!secret.username && !secret.password)) return false;
     event.preventDefault();
     callback(secret.username || "", secret.password || "");
@@ -1530,6 +1621,8 @@ function createProviderNetworkController({
   return {
     store,
     applyGlobalRouting,
+    routeBrowserPartition,
+    syncDecodo,
     setEnvironmentRoute,
     openProviderLogin,
     probeProviderAccount,

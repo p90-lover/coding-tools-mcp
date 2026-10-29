@@ -19,6 +19,8 @@ function redactNovaProfile(profile) {
 let providerNetworkControllerPromise = null;
 let novaManager = null;
 let providerBrowserHostGetter = () => null;
+// Which proxy profile a Browser-tab account's partition is bound to (main's browser-accounts.cjs).
+let providerBrowserProxyBinding = () => null;
 let providerCpaConnectionGetter = () => null;
 // The launcher's own log (launcher.jsonl, which redacts proxy credentials and bearer tokens) once
 // main has created it. Provider Network starts first: its events until then are kept and written
@@ -51,6 +53,11 @@ function setProviderBrowserHost(getter) {
     throw new Error("Provider BrowserHost getter must be a function");
   }
   providerBrowserHostGetter = getter;
+}
+
+function setProviderBrowserProxyBinding(resolver) {
+  if (typeof resolver !== "function") throw new Error("Browser proxy binding resolver must be a function");
+  providerBrowserProxyBinding = resolver;
 }
 
 function setProviderCpaConnection(getter) {
@@ -106,6 +113,7 @@ function installProviderNetwork({
       app,
       browserPartition: launcherProfile.browserPartition,
       getBrowserHost: () => providerBrowserHostGetter?.() ?? null,
+      getBrowserProxyBinding: (partition) => providerBrowserProxyBinding?.(partition) ?? null,
       getCpaConnection: () => {
         try {
           return providerCpaConnectionGetter?.() ?? null;
@@ -164,7 +172,7 @@ function installProviderNetwork({
 
   app.on("login", (event, _webContents, _authenticationDetails, authInfo, callback) => {
     if (_webContents?.__codingToolsAntigravityAuth === true) return;
-    controller?.handleProxyLogin(event, authInfo, callback);
+    controller?.handleProxyLogin(event, authInfo, callback, _webContents);
   });
 
   // Who may call: every channel answers only a Coding Tools window's own page, never web content
@@ -242,6 +250,18 @@ function installProviderNetwork({
     publish(result.snapshot);
     return result;
   }, "network");
+  // Decodo's sticky proxy list (decodo-proxies.cjs), read in-app instead of through Nova.
+  handle("launcher:decodo-save", (active, _event, input) => publish(active.store.saveDecodoSettings(input)), "network");
+  handle("launcher:decodo-sync", async (active) => {
+    try {
+      const result = await active.syncDecodo();
+      publish(result.snapshot);
+      return result;
+    } catch (error) {
+      publish(active.store.snapshot());
+      throw error;
+    }
+  }, "network");
   handle("launcher:proxy-global-routing", (active, _event, input) => publishMutation(
     active,
     () => active.store.setGlobalRouting(input),
@@ -305,5 +325,6 @@ module.exports = {
   stopProxyBridgeNova,
   setProviderLogger,
   setProviderBrowserHost,
+  setProviderBrowserProxyBinding,
   setProviderCpaConnection,
 };

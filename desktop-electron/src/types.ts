@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "chatgpt-browser-management" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 /** Plugins > MCPs (chat-mcp-servers.cjs): one of the person's own MCP servers for chat agents. */
 export interface McpServerEntry {
@@ -273,6 +273,18 @@ export interface ProviderNetworkSnapshot {
     providers: ProviderProxyPolicyRecord[];
     accounts: AccountProxyPolicyRecord[];
   };
+  decodo?: DecodoSettings;
+}
+
+/** Decodo's sticky proxy list, read in-app (decodo-proxies.cjs); the password never comes back. */
+export interface DecodoSettings {
+  username: string;
+  country: string;
+  count: number;
+  sessionMinutes: number;
+  hasPassword: boolean;
+  lastSyncAt: string | null;
+  lastError: string | null;
 }
 
 export type ProviderExecutionWorkload ="subagent" | "paseo" | "anneal";
@@ -753,9 +765,14 @@ export interface GptBrowserStatus {
   page: { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean } | null;
 }
 
+/** A Browser-tab account: its own sign-in, and optionally its own proxy (one proxy per account). */
+export interface BrowserAccount extends GptBrowserAccount {
+  proxyProfileId: string | null;
+}
+
 /** The Browser tab's ChatGPT accounts; the active one is also the Codex bridge's (WebGPT turns). */
 export interface BrowserAccountsStatus {
-  accounts: GptBrowserAccount[];
+  accounts: BrowserAccount[];
   activeId: string;
   maxAccounts: number;
   switching: boolean;
@@ -947,6 +964,10 @@ export interface LauncherApi {
   renameBrowserAccount(id: string, label: string): Promise<BrowserAccountsStatus>;
   removeBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
   onBrowserAccountsChanged(listener: (status: BrowserAccountsStatus) => void): () => void;
+  setBrowserAccountProxy(id: string, profileId: string | null): Promise<BrowserAccountsStatus>;
+  assignBrowserAccountProxies(): Promise<BrowserAccountsStatus & { assigned: number }>;
+  saveDecodo(input: Partial<DecodoSettings> & { password?: string }): Promise<ProviderNetworkSnapshot>;
+  syncDecodo(): Promise<{ added: number; updated: number; snapshot: ProviderNetworkSnapshot }>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
   copyManualPrompt(tabId: string): Promise<BrowserState>;
   confirmManualSent(tabId: string): Promise<BrowserState>;

@@ -57,7 +57,7 @@ test("the store holds at most MAX_ACCOUNTS and ignores entries it did not write"
     accounts: [{ id: "../escape", label: "x" }, { id: "abcdefghijkl", label: "  Work  " }, { id: "abcdefghijkl", label: "dup" }],
   }));
   const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
-  assert.deepEqual(accounts.status().accounts, [{ id: "abcdefghijkl", label: "Work", email: null }]);
+  assert.deepEqual(accounts.status().accounts, [{ id: "abcdefghijkl", label: "Work", email: null, proxyProfileId: null }]);
   assert.equal(accounts.activeId(), "abcdefghijkl");
   while (accounts.status().accounts.length < MAX_ACCOUNTS) accounts.add();
   assert.throws(() => accounts.add(), /up to 12 accounts/);
