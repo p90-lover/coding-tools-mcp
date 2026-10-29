@@ -1043,8 +1043,15 @@ function createProviderNetworkController({
   async function applyGlobalRouting() {
     const snapshot = store.snapshot();
     const profile = applyGlobalEnvironment();
-    const targets = [session.defaultSession, session.fromPartition(browserPartition)]
-      .filter((value, index, list) => value && list.indexOf(value) === index);
+    // The Browser tab's active account may have its own partition (browser-accounts.cjs).
+    const activeBrowserPartition = getBrowserHost?.()?.partition;
+    const targets = [
+      session.defaultSession,
+      session.fromPartition(browserPartition),
+      ...(typeof activeBrowserPartition === "string" && activeBrowserPartition !== browserPartition
+        ? [session.fromPartition(activeBrowserPartition)]
+        : []),
+    ].filter((value, index, list) => value && list.indexOf(value) === index);
 
     if (!profile) {
       await Promise.all(targets.map((target) => target.setProxy({ mode: "direct" })));

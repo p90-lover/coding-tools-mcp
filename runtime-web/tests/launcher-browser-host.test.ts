@@ -489,6 +489,25 @@ test("launcher descriptor rejects legacy Codex browser partitions", () => {
   expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
 });
 
+test("launcher descriptor accepts a Browser-tab account's partition and nothing that only resembles one", () => {
+  const path = descriptorFile();
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  value.partition = `${LAUNCHER_BROWSER_PARTITION_PRODUCTION}-a1b2c3d4e5f6`;
+  writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  expect(readLauncherBrowserHostDescriptor(path).partition).toBe(`${LAUNCHER_BROWSER_PARTITION_PRODUCTION}-a1b2c3d4e5f6`);
+  for (const partition of [
+    `${LAUNCHER_BROWSER_PARTITION_PRODUCTION}-A1B2C3D4E5F6`,
+    `${LAUNCHER_BROWSER_PARTITION_PRODUCTION}-a1b2c3`,
+    `${LAUNCHER_BROWSER_PARTITION_PRODUCTION}-a1b2c3d4e5f6-x`,
+    `${LAUNCHER_BROWSER_PARTITION_PRODUCTION}a1b2c3d4e5f6`,
+    "persist:coding-tools-dev-chatgpt-a1b2c3d4e5f6",
+  ]) {
+    value.partition = partition;
+    writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+    expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
+  }
+});
+
 test("launcher profile checks reject cross-profile browser ownership", async () => {
   const path = descriptorFile("http://127.0.0.1:39111", "development");
   expect(readLauncherBrowserHostDescriptor(path)).toMatchObject({

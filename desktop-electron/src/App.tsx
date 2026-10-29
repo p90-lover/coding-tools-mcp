@@ -32,6 +32,7 @@ import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
 import { GptBrowserDock } from "./features/GptBrowserDock";
+import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
 import { RegisterSurface } from "./features/RegisterSurface";
 
 import type {
@@ -1394,6 +1395,7 @@ function BrowserSurface({
           />
           <IconButton disabled={navigationLocked || !visible} icon="reload" label={copy.reload} onClick={() => void navigate("reload")} />
         </div>
+        <BrowserAccountSwitcher api={api!} busy={navigationLocked} copy={copy} setError={setError} />
         <div className="browser-address" title={browser?.url || copy.browserAddress}>
           <Icon name="globe" />
           <span>{formatBrowserAddress(browser?.url, copy)}</span>
