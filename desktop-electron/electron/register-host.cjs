@@ -9,6 +9,8 @@ const { DETACH_OWNED_CHILD, terminateOwnedProcessTreeAsync } = require("./proces
 const { browserViewVisible } = require("./browser-state.cjs");
 
 const PARTITION = "persist:coding-tools-register";
+// Status checks in a row that may time out before a ready Register service counts as down.
+const MAX_SLOW_CHECKS = 3;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function createRegisterHost({
@@ -44,7 +46,7 @@ function createRegisterHost({
   let ready = false, starting = false, active = false, bounds = null, disposed = false;
   let owned = null, view = null, attached = false, viewPending = null, viewToken = null;
   let generation = 0, startPending = null, stopPending = null, statusPending = null;
-  let shutdownPending = null, recoveryPending = null, recoveryRequested = false;
+  let shutdownPending = null, recoveryPending = null, recoveryRequested = false, slowChecks = 0;
   const requests = new Set();
 
   const snapshot = () => ({
@@ -64,7 +66,10 @@ function createRegisterHost({
         requests.delete(request);
         resolve(kind);
       };
-      const timer = setTimeout(() => { finish("conflict"); request?.destroy(); }, Math.max(1, timeout));
+      // A late timer is no verdict: after a main-process stall the timer runs before the answer
+      // that arrived meanwhile is read. Decide after pending I/O (setImmediate follows the poll
+      // phase), so a service that answered is ready and only a real hang times out.
+      const timer = setTimeout(() => setImmediate(() => { finish("timeout"); request?.destroy(); }), Math.max(1, timeout));
       request = http.get(new URL("/api/health", origin), { agent: false }, response => {
         let body = "", bytes = 0;
         response.on("data", chunk => {
@@ -183,9 +188,15 @@ function createRegisterHost({
     const token = generation;
     const pending = health().then(kind => {
       if (current(token) && !starting) {
-        ready = kind === "ready";
-        error = kind === "conflict" ? "The Register port belongs to a different or unresponsive service." : null;
-        syncView(); emit();
+        // A ready service that is slow to answer (a busy machine) keeps its page: only
+        // MAX_SLOW_CHECKS timeouts in a row take it down, where one used to detach the view.
+        slowChecks = kind === "timeout" ? slowChecks + 1 : 0;
+        if (kind !== "timeout" || !ready || slowChecks >= MAX_SLOW_CHECKS) {
+          ready = kind === "ready";
+          error = kind === "conflict" ? "The Register port belongs to a different service."
+            : kind === "timeout" ? "The Register service is not answering." : null;
+          syncView(); emit();
+        }
       }
       return snapshot();
     }).finally(() => { if (statusPending === pending) statusPending = null; });
@@ -363,8 +374,9 @@ function createRegisterHost({
     const token = ++generation;
     const pending = health().then(kind => {
       if (token !== generation || isQuitting() || !recoveryRequested || owned || startPending || stopPending || shutdownPending) return snapshot();
-      disposed = false; recoveryRequested = false; ready = kind === "ready";
-      error = kind === "conflict" ? "The Register port belongs to a different or unresponsive service." : null;
+      disposed = false; recoveryRequested = false; ready = kind === "ready"; slowChecks = 0;
+      error = kind === "conflict" ? "The Register port belongs to a different service."
+        : kind === "timeout" ? "The Register service is not answering." : null;
       emit();
       if (ready && active) void ensureView(token);
       return snapshot();
