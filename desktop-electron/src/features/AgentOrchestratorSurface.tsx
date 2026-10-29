@@ -1073,10 +1073,13 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // The chats' loops (/loop), per chat.
   const [loops, setLoops] = useState<Record<string, ChatLoop>>({});
   // A model picked while the open chat's goal runs is used from its next round on (the running
-  // round keeps the model it started with; the composer says so).
+  // round keeps the model it started with; the composer says so). A round that fails on the old
+  // model is not retried on it: the next round starts on the pick.
   // A team picked the same way runs the next rounds as that team (its current revision then).
-  const goalActive = Boolean(chatTaskId && goals[chatTaskId]?.status === "active");
-  const goalRouteKey = !goalActive ? ""
+  // A paused or stalled goal takes the pick too, so Resume runs on it: a goal paused because its
+  // model's provider refused the request resumed on that same model after the person switched.
+  const goalPursued = Boolean(chatTaskId && goals[chatTaskId] && goals[chatTaskId].status !== "achieved");
+  const goalRouteKey = !goalPursued ? ""
     : composerMode === "single" ? JSON.stringify([workspaceId, chatTaskId, "single", singleRoute])
     : composerTeamId ? JSON.stringify([workspaceId, chatTaskId, "team", composerTeamId]) : "";
   useEffect(() => {

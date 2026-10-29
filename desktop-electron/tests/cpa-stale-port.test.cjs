@@ -16,18 +16,34 @@ const NETSTAT = [
   "  TCP    127.0.0.1:83170        0.0.0.0:0              LISTENING       4444",
 ].join("\r\n");
 
-function fakeSystem({ netstat = NETSTAT, images = { 33052: "cli-proxy-api.exe" }, freedAfterKill = true } = {}) {
+// sockets: what Get-NetTCPConnection reports as the port's owners, one pid per line; null when
+// PowerShell is unavailable (netstat alone then). kill: taskkill's result.
+function fakeSystem({
+  netstat = NETSTAT, sockets = null, images = { 33052: "cli-proxy-api.exe" }, freedAfterKill = true, kill = { status: 0 },
+  bound = null,
+} = {}) {
   const calls = [];
   let killed = false;
   const runSync = (file, args) => {
     const name = path.basename(file).toLowerCase();
     calls.push([name, ...args]);
+    if (file === process.execPath) {
+      // The bind probe: the port is taken while either source lists a local socket on it, or while
+      // `bound` says so (a listener neither source shows).
+      const freed = killed && freedAfterKill;
+      const listed = bound ?? (/^\s*TCP\s+\S+:8317\s/mu.test(netstat) || /^\s*[1-9]\d*\s*$/mu.test(sockets ?? ""));
+      return { status: !freed && listed ? 3 : 0 };
+    }
+    if (name === "powershell.exe") {
+      if (sockets === null) return { status: 1, stdout: "", stderr: "Get-NetTCPConnection is not recognized" };
+      return { status: 0, stdout: killed && freedAfterKill ? "" : sockets };
+    }
     if (name === "netstat.exe") return { status: 0, stdout: killed && freedAfterKill ? "" : netstat };
     if (name === "tasklist.exe") {
       const pid = Number(args[1].replace("PID eq ", ""));
       return { status: 0, stdout: images[pid] ? `"${images[pid]}","${pid}","Console","1","120,000 K"\r\n` : "INFO: No tasks are running" };
     }
-    if (name === "taskkill.exe") { killed = true; return { status: 0 }; }
+    if (name === "taskkill.exe") { killed = kill.status === 0; return kill; }
     throw new Error(`unexpected ${file}`);
   };
   return { runSync, calls };
@@ -53,11 +69,37 @@ test("starting CPA ends an earlier CPA that still holds the port, and waits for 
   assert.equal(endStaleCpa(8317, { ...system, platform: "win32", waitMs: 1_000 }), 33052);
   const kill = system.calls.find(([name]) => name === "taskkill.exe");
   assert.deepEqual(kill, ["taskkill.exe", "/PID", "33052", "/T", "/F"]);
-  assert.equal(system.calls.at(-1)[0], "netstat.exe", "the port is checked again after the kill");
+  assert.equal(system.calls.at(-1)[0], path.basename(process.execPath).toLowerCase(), "the port is probed again after the kill");
 
-  const free = fakeSystem({ netstat: "" });
+  const free = fakeSystem({ netstat: "", sockets: "" });
   assert.equal(endStaleCpa(8317, { ...free, platform: "win32" }), null);
   assert.equal(free.calls.some(([name]) => name === "taskkill.exe"), false, "nothing is ended when the port is free");
+  // A free port costs one bind probe: PowerShell and netstat (seconds on a busy disk) are not run.
+  assert.deepEqual(free.calls.map(([name]) => name), [path.basename(process.execPath).toLowerCase()]);
+});
+
+test("a CPA whose listener netstat leaves out, with no clients connected, is still found and ended", () => {
+  // 2026-10-29, 0.8.34's first start: netstat listed no socket on 8317 at all (CPA's listener is one
+  // it leaves out, and the old app had quit), so the 0.8.31 CPA was missed and the new one exited.
+  // Get-NetTCPConnection lists the listener (state 0) and its owner.
+  const unseen = "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1200";
+  assert.equal(cpaOnPort(8317, { ...fakeSystem({ netstat: unseen, bound: true }), platform: "win32" }), null, "netstat alone misses it");
+  const system = fakeSystem({ netstat: unseen, sockets: "33052\r\n0\r\n", bound: true });
+  assert.equal(endStaleCpa(8317, { ...system, platform: "win32", waitMs: 1_000 }), 33052);
+  assert.deepEqual(system.calls.find(([name]) => name === "taskkill.exe"), ["taskkill.exe", "/PID", "33052", "/T", "/F"]);
+  // Another program owning the port is still never ended.
+  const other = fakeSystem({ netstat: unseen, sockets: "4444\r\n", images: { 4444: "node.exe" }, bound: true });
+  assert.equal(endStaleCpa(8317, { ...other, platform: "win32" }), null);
+  assert.equal(other.calls.some(([name]) => name === "taskkill.exe"), false);
+});
+
+test("a CPA that cannot be ended is reported, not waited on", (t) => {
+  const said = [];
+  t.mock.method(console, "error", (line) => said.push(line));
+  const system = fakeSystem({ kill: { status: 1, stderr: "ERROR: Access is denied.\r\n" } });
+  assert.equal(endStaleCpa(8317, { ...system, platform: "win32", waitMs: 1_000 }), null);
+  assert.deepEqual(said, ["Could not end the earlier CPA (pid 33052) on port 8317: ERROR: Access is denied."]);
+  assert.equal(system.calls.at(-1)[0], "taskkill.exe", "the port is not polled after a failed kill");
 });
 
 test("the CPA archive is unpacked with Windows' own tar, never the first tar on PATH", () => {
