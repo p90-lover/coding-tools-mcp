@@ -1010,11 +1010,39 @@ function createProviderNetworkController({
     ownedEnvironment.add(name);
   }
 
-  async function applyGlobalRouting() {
+  // The variables every program the app starts inherits. Synchronous, so app start sets them before
+  // main spawns anything: applied only after the Chromium route's await, AO, the Codex bridge and
+  // the MCP tunnel could start in between and run without the proxy until the next restart.
+  function applyGlobalEnvironment() {
     const snapshot = store.snapshot();
     const profile = snapshot.routing.globalEnabled
       ? store.activeProxy(snapshot.routing.globalProfileId)
       : null;
+    clearOwnedEnvironment();
+    if (!profile) return null;
+    const special = environmentRoute?.(profile) ?? null;
+    // Chromium takes the bare route and answers the proxy's 407 through handleProxyLogin. The
+    // programs the app starts (chat agents and every tool they run) read these variables and have
+    // no such handler: a bare route to a signed-in proxy (Nova's Decodo profiles, adopted in #655)
+    // failed every request of theirs with 407, so the variables carry the saved sign-in, as CPA's do.
+    const environmentUrl = special?.url || proxyUrl(profile, store.proxySecret(profile.id));
+    setOwnedEnvironment("HTTP_PROXY", environmentUrl);
+    setOwnedEnvironment("HTTPS_PROXY", environmentUrl);
+    setOwnedEnvironment("ALL_PROXY", environmentUrl);
+    // Loopback always stays direct for programs: AO, the bridge and CPA talk to each other on it.
+    setOwnedEnvironment("NO_PROXY", [...new Set([...profile.bypass, ...DEFAULT_BYPASS])].join(","));
+    // Node ignores the variables above unless this is set; Node programs (MCP servers, CLIs and the
+    // tunnel's codex.js) went direct. Node's own proxy support takes HTTP(S) proxies only.
+    if (/^https?:/i.test(environmentUrl)) setOwnedEnvironment("NODE_USE_ENV_PROXY", "1");
+    for (const [name, value] of Object.entries(special?.extra ?? {})) {
+      if (typeof value === "string" && value) setOwnedEnvironment(name, value);
+    }
+    return profile;
+  }
+
+  async function applyGlobalRouting() {
+    const snapshot = store.snapshot();
+    const profile = applyGlobalEnvironment();
     // The Browser tab's active account may have its own partition (browser-accounts.cjs).
     const activeBrowserPartition = getBrowserHost?.()?.partition;
     const targets = [
@@ -1024,7 +1052,6 @@ function createProviderNetworkController({
         ? [session.fromPartition(activeBrowserPartition)]
         : []),
     ].filter((value, index, list) => value && list.indexOf(value) === index);
-    clearOwnedEnvironment();
 
     if (!profile) {
       await Promise.all(targets.map((target) => target.setProxy({ mode: "direct" })));
@@ -1039,19 +1066,6 @@ function createProviderNetworkController({
       proxyRules: route,
       proxyBypassRules: bypass,
     })));
-    const special = environmentRoute?.(profile) ?? null;
-    // Chromium takes the bare route and answers the proxy's 407 through handleProxyLogin. The
-    // programs the app starts (chat agents and every tool they run) read these variables and have
-    // no such handler: a bare route to a signed-in proxy (Nova's Decodo profiles, adopted in #655)
-    // failed every request of theirs with 407, so the variables carry the saved sign-in, as CPA's do.
-    const environmentUrl = special?.url || proxyUrl(profile, store.proxySecret(profile.id));
-    setOwnedEnvironment("HTTP_PROXY", environmentUrl);
-    setOwnedEnvironment("HTTPS_PROXY", environmentUrl);
-    setOwnedEnvironment("ALL_PROXY", environmentUrl);
-    setOwnedEnvironment("NO_PROXY", profile.bypass.join(","));
-    for (const [name, value] of Object.entries(special?.extra ?? {})) {
-      if (typeof value === "string" && value) setOwnedEnvironment(name, value);
-    }
     logger.info("proxy.global_routing_applied", {
       profileId: profile.id,
       protocol: profile.endpoint.protocol,
@@ -1529,6 +1543,7 @@ function createProviderNetworkController({
 
   return {
     store,
+    applyGlobalEnvironment,
     applyGlobalRouting,
     setEnvironmentRoute,
     openProviderLogin,
