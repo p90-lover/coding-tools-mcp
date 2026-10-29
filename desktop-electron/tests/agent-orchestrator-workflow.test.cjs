@@ -4828,11 +4828,11 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
-  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"] } = {}) {
+  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"], empty = [] } = {}) {
     const request = { approval_id: "write", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions };
     const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
       { id: "one", role: "planner", state: "running", parents: [], route: { ...route, model }, receipt: { thread_id: "session-1", request_key: "k" } }] };
-    const asked = [], resolved = [];
+    const asked = [], resolved = [], caps = [];
     let detail = "";
     const workflow = createAgentOrchestratorWorkflow({
       findCodexExecutable: () => process.execPath,
@@ -4842,7 +4842,10 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
         if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: catalog.map((id) => ({ id })) }) };
         const model = JSON.parse(init.body).model;
         asked.push(model);
+        caps.push(JSON.parse(init.body).max_tokens);
         if (failing.includes(model)) return { ok: false, status: 503, json: async () => ({}) };
+        // A reasoning model that spent its whole output on thinking: a 200 with no answer in it.
+        if (empty.includes(model)) return { ok: true, json: async () => ({ choices: [{ message: { content: "" }, finish_reason: "length" }] }) };
         return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"fixture"}' } }] }) };
       },
       requestHeadless: async (endpoint, body) => {
@@ -4866,11 +4869,21 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
       detail ||= JSON.stringify(status);
       await new Promise(resolve => setTimeout(resolve, 10));
     }
-    return { asked, resolved, detail };
+    return { asked, resolved, detail, caps };
   }
   const healthy = await review([]);
   assert.deepEqual(healthy.asked, ["codex-auto-review"], "Codex's reviewer, not the worker reviewing itself");
   assert.deepEqual(healthy.resolved, ["yes"]);
+  // At 400 output tokens a reasoning reviewer could think its whole budget away and answer nothing.
+  assert.ok(healthy.caps.every((cap) => cap >= 2000), `room to think before answering (max_tokens ${healthy.caps.join(", ")})`);
+  // An empty answer is a failed review like any other: the next model answers and the request is
+  // answered for the person, not handed to them.
+  const thoughtOut = await review([], { empty: ["codex-auto-review"] });
+  assert.deepEqual(thoughtOut.asked, ["codex-auto-review", "test-model"]);
+  assert.deepEqual(thoughtOut.resolved, ["yes"]);
+  const allEmpty = await review([], { empty: ["codex-auto-review", "test-model"] });
+  assert.deepEqual(allEmpty.resolved, []);
+  assert.match(allEmpty.detail, /gave no answer \(it ran out of tokens\)/, "and the person sees why, not a JSON parse error");
   const signedOut = await review(["codex-auto-review"]);
   assert.deepEqual(signedOut.asked, ["codex-auto-review", "test-model"], "the card's own model takes over");
   assert.deepEqual(signedOut.resolved, ["yes"]);

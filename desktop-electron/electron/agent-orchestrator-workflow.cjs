@@ -3160,12 +3160,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
           // Codex's policy first, then this request (Codex puts the policy in the session's developer message).
-          body: JSON.stringify({ model, temperature: 0, max_tokens: 400,
+          // Room for a reasoning model to think first: at 400 a fallback reviewer (OpenCode Go's GPT-6
+          // Luna spends ~250 tokens thinking on a short request) ran out before its answer and
+          // returned nothing, "Unexpected end of JSON input" three times over, and the request went
+          // to the person. The answer itself is one short JSON line.
+          body: JSON.stringify({ model, temperature: 0, max_tokens: 2000,
             messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }),
           signal: AbortSignal.timeout(left),
         });
         if (!response.ok) throw Object.assign(new Error(`Command approver ${model} returned HTTP ${response.status}`), { status: response.status });
-        const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
+        const choice = (await response.json())?.choices?.[0];
+        const text = String(choice?.message?.content ?? "");
+        if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
         const decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
