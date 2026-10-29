@@ -1846,6 +1846,45 @@ test("stale ownership recovery stops a managed tmux runtime even though it has n
   }
 });
 
+test("a ready tunnel whose health discovery times out once is still verified, not torn down", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  // As on 2026-10-30 04:50: connect reported ready, then one 5 s discovery call timed out.
+  let discoveries = 0;
+  supervisor.discoverTunnelHealthBaseUrl = async () => {
+    discoveries += 1;
+    if (discoveries === 1) throw new Error("Local tunnel health discovery timed out after 5000ms");
+    supervisor.tunnelHealthBaseUrl = "http://127.0.0.1:43123";
+    return supervisor.tunnelHealthBaseUrl;
+  };
+  supervisor.probeTunnelMcpTransport = async () => ({ observed: true, ok: true, fatal: false, detail: "ok" });
+  const health = await supervisor.waitForTunnelMcpTransport({ tunnel: { alias: "codex-chatgpt-web" } });
+  assert.equal(health.ok, true);
+  assert.equal(discoveries, 2);
+});
+
+test("health discovery that never answers still fails with its own reason", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  supervisor.discoverTunnelHealthBaseUrl = async () => {
+    throw new Error("Local tunnel health discovery timed out after 5000ms");
+  };
+  await assert.rejects(
+    supervisor.waitForTunnelMcpTransport({ tunnel: { alias: "codex-chatgpt-web" } }, 1_500),
+    /Local tunnel health discovery timed out after 5000ms/,
+  );
+});
+
 test("one timed-out inventory probe is polled again, not taken as an external owner", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-slow-inventory-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

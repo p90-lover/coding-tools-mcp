@@ -1210,7 +1210,18 @@ class RuntimeSupervisor {
   }
 
   async waitForTunnelMcpTransport(config, timeoutMs = 10_000) {
-    if (!this.tunnelHealthBaseUrl) await this.discoverTunnelHealthBaseUrl(config);
+    // Discovery is a 5 s CLI call; on a loaded machine one call can time out right after the
+    // tunnel reported ready. Thrown at once, that tore a healthy tunnel down and the watchdog
+    // started it again two minutes later (seen live 2026-10-30 04:50). It gets its own window.
+    const discoveryDeadline = Date.now() + timeoutMs;
+    while (!this.tunnelHealthBaseUrl) {
+      try {
+        await this.discoverTunnelHealthBaseUrl(config);
+      } catch (error) {
+        if (Date.now() >= discoveryDeadline) throw error;
+        await sleep(TUNNEL_HEALTH_POLL_INTERVAL_MS);
+      }
+    }
     const deadline = Date.now() + timeoutMs;
     let health;
     do {
@@ -2015,7 +2026,8 @@ class RuntimeSupervisor {
     return await this.runTunnelCommand(
       config,
       ["runtimes", "stop", tunnel.alias, "--json"],
-      10_000,
+      // A graceful stop outlasted 10 s while restarts loaded the machine (2026-10-30 04:42).
+      30_000,
       "Tunnel shutdown",
     );
   }
