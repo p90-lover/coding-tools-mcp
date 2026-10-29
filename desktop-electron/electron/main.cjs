@@ -58,7 +58,10 @@ const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smok
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
-const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers, waitForUpdateApply } = require("./app-update.cjs");
+const {
+  combineUpdateControllers, commitAppliedUpdate, createAppUpdateController, createAutoInstaller, handOffUpdateRecovery,
+  sweepUpdateLeftovers, waitForUpdateApply,
+} = require("./app-update.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
@@ -3323,8 +3326,17 @@ async function start() {
     showMainWindow();
   });
 
-  // An update still swapping files in is waited out first (app-update-worker.cjs).
-  if (app.isPackaged) await waitForUpdateApply(path.dirname(process.execPath)).catch(() => false);
+  // An update still swapping files in is waited out first (app-update-worker.cjs). One cut off
+  // midway, or a new version that keeps failing to start, goes to a worker that finishes or undoes
+  // it once this process exits, and starts the app again (handOffUpdateRecovery).
+  if (app.isPackaged) {
+    const installRoot = path.dirname(process.execPath);
+    await waitForUpdateApply(installRoot).catch(() => false);
+    if (handOffUpdateRecovery(installRoot, { currentVersion: app.getVersion() })) {
+      app.exit(0);
+      return;
+    }
+  }
   let runtimeSourceFallback = null;
   await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath, coreHome: CORE_HOME,
     onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); } });
@@ -3412,6 +3424,13 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  // This version reached whenReady: an update that just placed it is kept, and the old copies the
+  // worker held for a rollback go (commitAppliedUpdate).
+  if (app.isPackaged) {
+    void commitAppliedUpdate(path.dirname(process.execPath), app.getVersion())
+      .then((committed) => { if (committed) logger.info("launcher.app_update_committed", committed); })
+      .catch((error) => logger.warn("launcher.app_update_commit_failed", { message: error instanceof Error ? error.message : String(error) }));
+  }
   // A throw in a timer or an event handler, or a promise nobody awaits, used to reach Electron's
   // default handler: a modal "A JavaScript error occurred in the main process" box that holds the
   // whole app until clicked (with the window in the tray it simply looked hung). It is logged
@@ -4574,6 +4593,13 @@ void start().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   try {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
+  } catch {}
+  // A version an update just placed that cannot start is undone: the previous one starts instead.
+  try {
+    if (app.isPackaged && handOffUpdateRecovery(path.dirname(process.execPath), { currentVersion: app.getVersion(), startFailed: message })) {
+      app.exit(1);
+      return;
+    }
   } catch {}
   try {
     if (!LAUNCHER_SMOKE_TEST) {

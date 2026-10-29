@@ -10,9 +10,10 @@ const { createHash } = require("node:crypto");
 const {
   combineUpdateControllers, combinedUpdateState, createAppUpdateController, createAutoInstaller, extractPack,
   manifestAssetName, packAssetName, parseManifest, planUpdate, safeInstallPath, selectAppRelease,
-  STAGE_DIRECTORY, sweepUpdateLeftovers,
+  STAGE_DIRECTORY, sweepUpdateLeftovers, commitAppliedUpdate, handOffUpdateRecovery, readJournal, waitForUpdateApply,
+  AUTO_INSTALL_FAILURE_LIMIT,
 } = require("../electron/app-update.cjs");
-const { swapIn } = require("../electron/app-update-worker.cjs");
+const { createJournal, recordResult, rollBack, rollForward, swapIn, writeJsonDurable } = require("../electron/app-update-worker.cjs");
 const { waitForPackagedRuntimeSource } = require("../electron/runtime-install.cjs");
 const { buildAppUpdate, packFor } = require("../scripts/package-app-update.cjs");
 
@@ -198,33 +199,237 @@ test("a failed swap puts every file back", async () => {
   }
 });
 
-test("the worker applies the update after the app has closed and starts it again", () => {
+const sha = (content) => createHash("sha256").update(content).digest("hex");
+const runtimeManifest = (version) => JSON.stringify({ appVersion: version });
+const deadPid = () => spawnSync(process.execPath, ["-e", "0"]).pid;
+const exists = (root, rel) => fs.existsSync(path.join(root, ...rel.split("/")));
+const readResult = (installRoot) => JSON.parse(read(installRoot, "_update/last-result.json"));
+
+/** An install at v1 with v2 staged: app.asar and the runtime manifest change, old.js goes. */
+function updateFixture(root, { version = "0.8.0", stagedRuntime = version } = {}) {
+  const installRoot = path.join(root, "install");
+  const stageRoot = path.join(installRoot, "_update", "stage-x");
+  const filesRoot = path.join(stageRoot, "files");
+  writeTree(installRoot, {
+    "resources/app.asar": "v1", "resources/runtime/manifest.json": runtimeManifest("0.7.0"), "resources/old.js": "old",
+  });
+  const staged = { "resources/app.asar": "v2", "resources/runtime/manifest.json": runtimeManifest(stagedRuntime), "resources/new.js": "new" };
+  writeTree(filesRoot, staged);
+  const job = {
+    version, parentPid: deadPid(), installRoot, stageRoot, filesRoot, executable: process.execPath,
+    changed: Object.keys(staged), obsolete: ["resources/old.js"],
+    installedManifest: { version, files: Object.entries(staged).map(([rel, content]) => ({ path: rel, size: content.length, sha256: sha(content) })) },
+    logPath: path.join(root, "worker.log"),
+  };
+  const jobPath = path.join(stageRoot, "job.json");
+  fs.writeFileSync(jobPath, JSON.stringify(job));
+  return { installRoot, stageRoot, filesRoot, job, jobPath, journalPath: path.join(installRoot, "_update", "journal.json") };
+}
+
+function runWorker(args, script = workerPath) {
+  const result = spawnSync(process.execPath, [script, ...args], {
+    encoding: "utf8", timeout: 30_000, env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+test("the worker applies the update after the app has closed, keeps the old files until the new version starts, and starts it", async () => {
   const root = tempRoot();
   try {
-    const installRoot = path.join(root, "install");
-    const stageRoot = path.join(installRoot, "_update", "stage-x");
-
-    writeTree(installRoot, { "resources/app.asar": "v1" });
-    writeTree(stageRoot, { "files/resources/app.asar": "v2" });
-
-    const dead = spawnSync(process.execPath, ["-e", "0"]).pid;
-    const job = {
-      version: "0.8.0", parentPid: dead, installRoot, stageRoot, filesRoot: path.join(stageRoot, "files"),
-      executable: process.execPath, changed: ["resources/app.asar"], obsolete: [],
-      installedManifest: { version: "0.8.0", files: [{ path: "resources/app.asar", size: 2, sha256: "x" }] },
-      logPath: path.join(root, "worker.log"),
-    };
-    fs.writeFileSync(path.join(stageRoot, "job.json"), JSON.stringify(job));
-    const result = spawnSync(process.execPath, [workerPath, path.join(stageRoot, "job.json")], {
-      encoding: "utf8", timeout: 30_000, env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-    });
-    assert.equal(result.status, 0, result.stderr);
+    const { installRoot, stageRoot, job, jobPath, journalPath } = updateFixture(root);
+    runWorker([jobPath]);
     assert.equal(read(installRoot, "resources/app.asar"), "v2");
-    assert.equal(fs.existsSync(path.join(installRoot, "resources", "app.asar.old-1")), false);
+    assert.equal(read(installRoot, "resources/new.js"), "new");
+    assert.equal(exists(installRoot, "resources/old.js"), false);
     assert.equal(JSON.parse(read(installRoot, "_update/installed.json")).version, "0.8.0");
-    assert.equal(fs.existsSync(stageRoot), false, "the stage folder is removed");
-    assert.match(fs.readFileSync(job.logPath, "utf8"), /v0\.8\.0 applied: 1 file\(s\) replaced/);
+    assert.match(fs.readFileSync(job.logPath, "utf8"), /v0\.8\.0 applied: 3 file\(s\) replaced, 1 removed/);
+    const journal = JSON.parse(fs.readFileSync(journalPath, "utf8"));
+    assert.equal(journal.state, "placed");
+    assert.equal(read(installRoot, `resources/app.asar.old-${journal.stamp}`), "v1", "the last good copy is kept");
+    assert.ok(fs.existsSync(stageRoot), "the stage stays until the new version commits");
+    assert.deepEqual([readResult(installRoot).ok, readResult(installRoot).stage], [true, "placed"]);
+    assert.equal(exists(installRoot, "_update/applying.json"), false);
 
+    // The new version reached whenReady: the old copies and the stage go.
+    assert.equal(await commitAppliedUpdate(installRoot, "0.7.9"), null, "another version commits nothing");
+    assert.deepEqual(await commitAppliedUpdate(installRoot, "0.8.0"), { version: "0.8.0", removed: 3, leftover: 0 });
+    assert.equal(exists(installRoot, `resources/app.asar.old-${journal.stamp}`), false);
+    assert.equal(exists(installRoot, `resources/old.js.old-${journal.stamp}`), false);
+    assert.equal(fs.existsSync(journalPath), false);
+    assert.equal(fs.existsSync(stageRoot), false);
+    assert.equal(readResult(installRoot).stage, "started");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the worker undoes an update whose runtime is another version, and records the failure", () => {
+  const root = tempRoot();
+  try {
+    const { installRoot, jobPath, journalPath } = updateFixture(root, { stagedRuntime: "0.7.5" });
+    runWorker([jobPath]);
+    assert.equal(read(installRoot, "resources/app.asar"), "v1");
+    assert.equal(read(installRoot, "resources/old.js"), "old");
+    assert.equal(exists(installRoot, "resources/new.js"), false, "a file the update added is taken out again");
+    assert.equal(JSON.parse(read(installRoot, "resources/runtime/manifest.json")).appVersion, "0.7.0");
+    assert.equal(fs.existsSync(journalPath), false);
+    const result = readResult(installRoot);
+    assert.deepEqual([result.ok, result.stage, result.failures], [false, "apply", 1]);
+    assert.match(result.message, /runtime is v0\.7\.5, not v0\.8\.0/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** The swap as a worker killed after placing new.js and setting app.asar aside left it. */
+function cutOffSwap(fixture) {
+  const { installRoot, filesRoot, job, jobPath, journalPath } = fixture;
+  const journal = createJournal(job, jobPath, 77);
+  writeJsonDurable(journalPath, journal);
+  fs.renameSync(path.join(filesRoot, "resources", "new.js"), path.join(installRoot, "resources", "new.js"));
+  fs.renameSync(path.join(installRoot, "resources", "app.asar"), path.join(installRoot, "resources", "app.asar.old-77"));
+  fs.writeFileSync(path.join(installRoot, "_update", "applying.json"), JSON.stringify({ pid: job.parentPid, at: 1, jobPath, journal: journalPath }));
+  return journal;
+}
+
+test("a swap cut off midway is handed to a worker at the next start, which finishes it from the staged files", async () => {
+  const root = tempRoot();
+  try {
+    const fixture = updateFixture(root);
+    const { installRoot, journalPath } = fixture;
+    cutOffSwap(fixture);
+    assert.equal(await waitForUpdateApply(installRoot, { alive: () => false }), true);
+    const spawned = [];
+    const spawnWorker = (runtime, args) => { spawned.push(args); return { pid: 4243, unref() {} }; };
+    assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", executable: process.execPath, spawnWorker }), true);
+    const [workerScript, mode, handedJournal] = spawned[0];
+    assert.deepEqual([mode, handedJournal], ["--recover", journalPath]);
+    assert.ok(fs.existsSync(workerScript), "the worker is written from the running app, not taken from the stage");
+
+    runWorker(["--recover", journalPath, String(deadPid())], workerScript);
+    assert.equal(read(installRoot, "resources/app.asar"), "v2");
+    assert.equal(read(installRoot, "resources/new.js"), "new");
+    assert.equal(exists(installRoot, "resources/old.js"), false);
+    assert.equal(JSON.parse(read(installRoot, "resources/runtime/manifest.json")).appVersion, "0.8.0");
+    assert.equal(read(installRoot, "resources/app.asar.old-77"), "v1", "kept for a rollback until the new version starts");
+    assert.equal(JSON.parse(fs.readFileSync(journalPath, "utf8")).state, "placed");
+    assert.equal(readResult(installRoot).ok, true);
+    assert.equal(exists(installRoot, "_update/applying.json"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cut-off swap whose staged files are gone is undone, and a worker that keeps dying is given up on", () => {
+  const root = tempRoot();
+  try {
+    const fixture = updateFixture(root);
+    const { installRoot, stageRoot, journalPath } = fixture;
+    cutOffSwap(fixture);
+    fs.rmSync(path.join(stageRoot, "files", "resources", "app.asar"));
+    runWorker(["--recover", journalPath, String(deadPid())]);
+    assert.equal(read(installRoot, "resources/app.asar"), "v1");
+    assert.equal(read(installRoot, "resources/old.js"), "old");
+    assert.equal(exists(installRoot, "resources/new.js"), false);
+    assert.equal(exists(installRoot, "resources/app.asar.old-77"), false);
+    assert.equal(fs.existsSync(journalPath), false);
+    assert.equal(fs.existsSync(stageRoot), false);
+    const result = readResult(installRoot);
+    assert.deepEqual([result.ok, result.stage, result.failures], [false, "recover", 1]);
+
+    // A recovery worker that never finishes is started twice, then the app starts as it is.
+    writeJsonDurable(journalPath, { ...createJournal(fixture.job, fixture.jobPath, 78), installRoot });
+    const spawnWorker = () => ({ pid: 4244, unref() {} });
+    assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", spawnWorker }), true);
+    assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", spawnWorker }), true);
+    assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", spawnWorker }), false);
+    assert.equal(fs.existsSync(journalPath), false);
+    // A refused worker start lets the app go on starting.
+    writeJsonDurable(journalPath, { ...createJournal(fixture.job, fixture.jobPath, 79), installRoot });
+    assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", spawnWorker: () => ({}) }), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a new version that fails to start, or keeps crashing before whenReady, is undone and the old one starts", () => {
+  const root = tempRoot();
+  try {
+    const fixture = updateFixture(root);
+    const { installRoot, jobPath, journalPath } = fixture;
+    runWorker([jobPath]);
+    const spawned = [];
+    const spawnWorker = (_runtime, args) => { spawned.push(args); return { pid: 4245, unref() {} }; };
+    // Starts that reach whenReady commit; a start that has not yet is no reason to undo anything.
+    assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.8.0", spawnWorker }), false);
+    assert.equal(JSON.parse(fs.readFileSync(journalPath, "utf8")).launches, 1);
+    assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.8.0", spawnWorker, startFailed: "Runtime bundle file is missing: x" }), true);
+    assert.equal(JSON.parse(fs.readFileSync(journalPath, "utf8")).state, "restoring");
+    let result = readResult(installRoot);
+    assert.deepEqual([result.ok, result.stage, result.failures, result.message], [false, "start", 1, "Runtime bundle file is missing: x"]);
+
+    runWorker(["--recover", journalPath, String(deadPid())]);
+    assert.equal(read(installRoot, "resources/app.asar"), "v1");
+    assert.equal(read(installRoot, "resources/old.js"), "old");
+    assert.equal(exists(installRoot, "resources/new.js"), false);
+    assert.equal(fs.existsSync(journalPath), false);
+    assert.equal(readResult(installRoot).failures, 1, "the restore itself is not another failure");
+    recordResult(installRoot, { version: "0.8.0", ok: true, stage: "placed" });
+    assert.equal(readResult(installRoot).failures, 1, "placing the files again does not clear the count");
+    recordResult(installRoot, { version: "0.8.0", ok: false, stage: "start" });
+    assert.equal(readResult(installRoot).failures, 2);
+    recordResult(installRoot, { version: "0.8.0", ok: true, stage: "started" });
+    assert.equal(readResult(installRoot).failures, 0, "a start that reached whenReady clears it");
+
+    // Native crashes skip start()'s catch: the fourth start without a commit undoes the update.
+    const again = updateFixture(path.join(root, "again"));
+    runWorker([again.jobPath]);
+    for (let start = 1; start <= 3; start += 1) {
+      assert.equal(handOffUpdateRecovery(again.installRoot, { currentVersion: "0.8.0", spawnWorker }), false, `start ${start}`);
+    }
+    assert.equal(handOffUpdateRecovery(again.installRoot, { currentVersion: "0.8.0", spawnWorker }), true);
+    result = readResult(again.installRoot);
+    assert.deepEqual([result.stage, result.failures], ["start", 1]);
+    assert.match(result.message, /did not finish starting 3 times/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a swap killed between keeping the old copy and placing the new one is finished or undone either way", async () => {
+  const root = tempRoot();
+  try {
+    for (const direction of ["forward", "back"]) {
+      const fixture = updateFixture(path.join(root, direction));
+      const { installRoot, job, jobPath } = fixture;
+      const journal = createJournal(job, jobPath, 88);
+      // The hard link is made; the rename over app.asar never ran.
+      fs.linkSync(path.join(installRoot, "resources", "app.asar"), path.join(installRoot, "resources", "app.asar.old-88"));
+      if (direction === "forward") {
+        assert.equal(await rollForward(journal), true);
+        assert.equal(read(installRoot, "resources/app.asar"), "v2");
+        assert.equal(read(installRoot, "resources/app.asar.old-88"), "v1");
+      } else {
+        assert.deepEqual(await rollBack(journal), []);
+        assert.equal(read(installRoot, "resources/app.asar"), "v1");
+        assert.equal(exists(installRoot, "resources/app.asar.old-88"), false);
+        assert.equal(read(installRoot, "_update/stage-x/files/resources/app.asar"), "v2", "the staged file is left as it was");
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a journal pointing outside the install is ignored", () => {
+  const root = tempRoot();
+  try {
+    const fixture = updateFixture(root);
+    const journal = createJournal(fixture.job, fixture.jobPath, 5);
+    for (const bad of [{ filesRoot: root }, { installRoot: root }, { changed: [{ rel: "../evil" }] }, { schema: 2 }]) {
+      writeJsonDurable(fixture.journalPath, { ...journal, ...bad });
+      assert.equal(readJournal(fixture.installRoot), null, JSON.stringify(bad));
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -349,7 +554,7 @@ function autoInstallerFixture(overrides = {}) {
     ...overrides,
   };
   const installer = createAutoInstaller({
-    controller: { getState: () => ({ status: options.status, version: "9.9.9", kind: "app" }), beginInstall: () => options.install() },
+    controller: { getState: () => ({ status: options.status, version: "9.9.9", kind: "app", ...options.state }), beginInstall: () => options.install() },
     enabled: () => options.enabled,
     idleSeconds: () => options.idle,
     isBusy: async () => {
@@ -394,6 +599,46 @@ test("a failed automatic update waits an hour before trying again", async () => 
   options.install = async () => { calls.install += 1; return true; };
   assert.equal(await installer.tick(), true);
   assert.equal(calls.install, 2);
+});
+
+test("a version that failed to apply waits twice as long after each failure, and after three only installs by a click", async () => {
+  const hour = 60 * 60 * 1000;
+  const { installer, calls, options } = autoInstallerFixture({ state: { failedAttempts: 1, failedAt: 0 } });
+  options.clock = 2 * hour - 1;
+  assert.equal(await installer.tick(), false);
+  options.clock = 2 * hour;
+  assert.equal(await installer.tick(), true);
+  options.state = { failedAttempts: 2, failedAt: 2 * hour };
+  options.clock = 5 * hour;
+  assert.equal(await installer.tick(), false, "four hours after the second failure, not three");
+  options.clock = 6 * hour;
+  assert.equal(await installer.tick(), true);
+  options.state = { failedAttempts: AUTO_INSTALL_FAILURE_LIMIT, failedAt: 0 };
+  options.clock = 1000 * hour;
+  assert.equal(await installer.tick(), false);
+  assert.equal(calls.install, 2);
+});
+
+test("the controller reports how often the available version failed to apply", async () => {
+  const root = tempRoot();
+  try {
+    const installRoot = path.join(root, "install");
+    writeTree(installRoot, {
+      "resources/app.asar": "v1",
+      "_update/last-result.json": JSON.stringify({ version: "0.8.0", ok: false, stage: "apply", message: "EPERM", failures: 2, at: 1234 }),
+    });
+    const controller = createAppUpdateController({
+      currentVersion: "0.7.0", electronVersion: "41.10.7", platform: "win32", arch: "x64", packaged: true,
+      executablePath: path.join(installRoot, "Coding Tools.exe"), logsDirectory: path.join(root, "logs"),
+      dependencies: { fetchRelease: async () => [release("0.8.0", [manifestAssetName("0.8.0", "win_x64"), "SHA256SUMS.txt"])] },
+    });
+    const state = await controller.checkNow();
+    assert.deepEqual([state.status, state.failedAttempts, state.failedAt, state.failureMessage], ["available", 2, 1234, "EPERM"]);
+    fs.writeFileSync(path.join(installRoot, "_update", "last-result.json"), JSON.stringify({ version: "0.7.9", ok: false, failures: 5 }));
+    assert.equal((await controller.checkNow()).failedAttempts, undefined, "another version's failures do not count");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a launch during an update's file swap waits for it; a marker whose worker is gone is cleared", async () => {
