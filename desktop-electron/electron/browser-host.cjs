@@ -3,6 +3,7 @@ const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
 const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { conversationPatchScript } = require("./chatgpt-conversation-actions.cjs");
 const {
   runBrowserHelperOperation,
   verifyConnectorWithBrowserHelper,
@@ -324,18 +325,7 @@ const CONVERSATION_DELETE_TIMEOUT_MS = 8_000;
  * never returned. Only a /c/<uuid> id the bridge recorded for its own turn is ever passed here.
  */
 function deleteConversationScript(conversationId) {
-  if (!/^[0-9a-f-]{36}$/.test(conversationId)) throw new Error("Not a ChatGPT conversation id");
-  return `(async (id) => {
-    const session = await fetch("/api/auth/session", { credentials: "include" }).then((r) => r.ok ? r.json() : null).catch(() => null);
-    const token = session && typeof session.accessToken === "string" ? session.accessToken : "";
-    if (!token) return { ok: false, reason: "no ChatGPT session" };
-    const response = await fetch("/backend-api/conversation/" + id, {
-      method: "PATCH", credentials: "include",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-      body: JSON.stringify({ is_visible: false }),
-    });
-    return { ok: response.ok, status: response.status };
-  })(${JSON.stringify(conversationId)})`;
+  return conversationPatchScript(conversationId, "delete");
 }
 
 function retainedConversationLocation(value, useSavedChats) {
@@ -538,6 +528,9 @@ class BrowserHost {
     getBrowserInteractionMode = () => "automatic",
     // Task chats are saved by default: ChatGPT refuses connectors in Temporary Chat.
     getUseSavedChats = () => true,
+    // The ChatGPT account a Codex thread is bound to (codex-thread-accounts.cjs), as
+    // { accountId, partition, chatLifecycleSync }; null or none: this host's own account.
+    resolveTurnAccount = null,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -560,6 +553,7 @@ class BrowserHost {
       throw new Error("Browser host partition does not match its profile");
     }
     this.partition = resolvedPartition;
+    this.resolveTurnAccount = resolveTurnAccount;
     this.profile = profile;
     this.publishState = publishState;
     this.showWindow = showWindow;
@@ -732,11 +726,36 @@ class BrowserHost {
     return null;
   }
 
+  /** Whether a turn of this Codex thread is running in one of this host's tabs. */
+  threadRunning(threadId) {
+    const id = String(threadId ?? "").toLowerCase();
+    return [...this.turnTabs.values()].some((tab) => tab.status === "running" && tab.nativeThreadId?.toLowerCase() === id);
+  }
+
+  /** Closes a Codex thread's retained turn tabs (never a running one), before its chats move or go. */
+  releaseThreadTabs(threadId) {
+    const id = String(threadId ?? "").toLowerCase();
+    const tabs = [...this.turnTabs.values()].filter((tab) => tab.interactionMode === "automatic"
+      && tab.status !== "running" && tab.nativeThreadId?.toLowerCase() === id);
+    for (const tab of tabs) this.removeTurnTab(tab, false);
+    if (tabs.length) {
+      this.publishState?.(this.snapshot());
+      this.writeDescriptor();
+    }
+    return tabs.length;
+  }
+
+  /** Every partition this host's pages use: its own and those of the accounts its turn tabs run on. */
+  livePartitions() {
+    return [...new Set([this.partition, ...[...this.turnTabs.values()].map((tab) => tab.partition)].filter(Boolean))];
+  }
+
   tabSnapshot(tab) {
     const conversationUrl = liveConversationUrl(tab);
     const snapshot = {
       id: tab.id,
       traceId: tab.traceId,
+      ...(tab.accountId ? { accountId: tab.accountId } : {}),
       ...(tab.nativeThreadId ? { threadId: tab.nativeThreadId } : {}),
       ...(conversationUrl ? { conversationUrl } : {}),
       title: tab.label,
@@ -765,7 +784,7 @@ class BrowserHost {
     return this.userTabs?.get(this.selectedTabId) || null;
   }
 
-  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId) {
+  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account = null) {
     if (this.turnTabs.size + (this.userTabs?.size ?? 0) >= MAX_BROWSER_TABS
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
@@ -777,9 +796,11 @@ class BrowserHost {
     const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values(), ...(this.userTabs?.values() ?? [])].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
+    // A Codex thread's turns run on the account it is bound to, which need not be this host's.
+    const partition = account?.partition ?? this.partition;
     const view = new WebContentsView({
       webPreferences: {
-        partition: this.partition,
+        partition,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -793,6 +814,9 @@ class BrowserHost {
       surfaceId,
       traceId,
       nativeThreadId,
+      partition,
+      accountId: account?.accountId ?? null,
+      chatLifecycleSync: account?.chatLifecycleSync ?? this.chatLifecycleSync,
       conversationKey,
       connectorIdentity,
       connectorBound: false,
@@ -2011,7 +2035,9 @@ class BrowserHost {
     if (!tab.view.webContents.isDestroyed()) {
       // A saved chat the bridge wrote in is deleted when its tab is let go, so saved chats leave no
       // history behind; the hidden page closes once ChatGPT answered (or after a bounded wait).
-      if (tab.ownedConversation && tab.interactionMode !== "manual" && useSavedChatsFor(this)) {
+      // A chat recorded for its Codex thread is kept: the thread's later turns reopen it, and it is
+      // archived or deleted with the thread (codex-chat-lifecycle-sync.cjs).
+      if (tab.ownedConversation && !tab.persistedConversation && tab.interactionMode !== "manual" && useSavedChatsFor(this)) {
         this.deleteOwnedConversation(tab);
       } else {
         tab.view.webContents.close();
@@ -2741,6 +2767,15 @@ class BrowserHost {
     if (sameTrace && sameTrace.interactionMode !== "automatic") {
       throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
     }
+    // The ChatGPT account this Codex thread is bound to; a turn with no thread runs on this host's.
+    const account = nativeThreadId && typeof this.resolveTurnAccount === "function"
+      ? await this.resolveTurnAccount(nativeThreadId)
+      : null;
+    if (account && !isBrowserAccountPartition(this.profile, account.partition)) {
+      throw new Error("The Codex thread's ChatGPT account partition does not match this profile");
+    }
+    const turnPartition = account?.partition ?? this.partition;
+    const lifecycleSync = account?.chatLifecycleSync ?? this.chatLifecycleSync;
     if (sameTrace && (sameTrace.conversationKey !== conversationKey
       || sameTrace.connectorIdentity !== connectorIdentity
       || (nativeThreadId && sameTrace.nativeThreadId && sameTrace.nativeThreadId !== nativeThreadId))) {
@@ -2764,6 +2799,7 @@ class BrowserHost {
       && (!nativeThreadId || !tab.nativeThreadId || tab.nativeThreadId === nativeThreadId)
       && tab.connectorIdentity === connectorIdentity
       && (!connectorIdentity || tab.connectorBound === true)
+      && (tab.partition ?? this.partition) === turnPartition
     )) : [];
     if (retainedMatches.length > 1) {
       throw new Error(`ChatGPT retained conversation ${conversationKey} owns multiple browser tabs`);
@@ -2836,10 +2872,10 @@ class BrowserHost {
     // The original tab is in memory only. Recover its persisted, verified saved-chat URL
     // when the exact native thread, retained epoch and connector identity still agree.
     const savedUrl = useSavedChatsFor(this) && nativeThreadId && conversationKey
-      ? this.chatLifecycleSync?.findRetainedConversation?.(nativeThreadId, conversationKey, connectorIdentity)
+      ? lifecycleSync?.findRetainedConversation?.(nativeThreadId, conversationKey, connectorIdentity)
       : undefined;
     if (savedUrl) {
-      const restored = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId);
+      const restored = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account);
       try {
         await loadCommittedBrowserSurface(restored.view.webContents, savedUrl, 60_000);
         const location = retainedConversationLocation(restored.view.webContents.getURL(), true);
@@ -2851,6 +2887,7 @@ class BrowserHost {
         restored.retainedLocation = location;
         restored.conversationUrl = savedUrl;
         restored.connectorBound = Boolean(connectorIdentity);
+        restored.persistedConversation = true;
         restored.startRequest = startRequest;
         this.selectedTabId = restored.id;
         if (reveal) this.show();
@@ -2874,7 +2911,7 @@ class BrowserHost {
       error.code = "retained_conversation_unavailable";
       throw error;
     }
-    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId);
+    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account);
     tab.startRequest = startRequest;
     this.selectedTabId = tab.id;
     if (reveal) this.show();
@@ -2950,9 +2987,10 @@ class BrowserHost {
       tab.connectorBound = connectorBound === true;
       if (tab.nativeThreadId && tab.conversationUrl && tab.connectorBound) {
         try {
-          this.chatLifecycleSync?.register?.(
+          const registered = (tab.chatLifecycleSync ?? this.chatLifecycleSync)?.register?.(
             tab.nativeThreadId, tab.conversationUrl, tab.conversationKey, tab.connectorIdentity,
           );
+          if (registered === true) tab.persistedConversation = true;
         } catch (error) {
           this.logger.warn("browser.conversation_persistence_failed", {
             tabId: tab.id, errorType: error instanceof Error ? error.name : "Error",

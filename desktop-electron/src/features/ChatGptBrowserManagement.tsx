@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } f
 import type {
   BrowserAccount,
   BrowserAccountsStatus,
+  CodexThreadAction,
+  CodexThreadBinding,
   BrowserState,
   LauncherApi,
   ProviderNetworkSnapshot,
@@ -62,6 +64,20 @@ export function ChatGptBrowserManagement({ api, browser, setError }: {
     .sort((a, b) => Number(b.id.startsWith(DECODO_PREFIX)) - Number(a.id.startsWith(DECODO_PREFIX)) || a.name.localeCompare(b.name)),
   [network]);
   const proxyById = useMemo(() => new Map(proxies.map(profile => [profile.id, profile])), [proxies]);
+  const [threads, setThreads] = useState<CodexThreadBinding[]>([]);
+  // Threads change when turns start and end: re-read them whenever a tab's status changes.
+  const tabSignature = (browser?.tabs ?? []).map(tab => `${tab.id}:${tab.status}`).join(",");
+  useEffect(() => {
+    let live = true;
+    void api.codexThreads().then(next => { if (live) setThreads(next.threads); }).catch(() => {});
+    return () => { live = false; };
+  }, [api, tabSignature, accounts?.accounts.length]);
+  const sessionsOf = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const thread of threads) counts.set(thread.accountId, (counts.get(thread.accountId) ?? 0) + 1);
+    return counts;
+  }, [threads]);
+
   const holderOf = useMemo(() => new Map((accounts?.accounts ?? [])
     .filter(account => account.proxyProfileId)
     .map(account => [account.proxyProfileId!, account])), [accounts]);
@@ -122,6 +138,7 @@ export function ChatGptBrowserManagement({ api, browser, setError }: {
                   <strong title={account.label}>{accountName(account)}</strong>
                   <span className="cbm-muted">
                     {inUse ? (browser?.authenticated ? "In use · signed in" : "In use · not signed in") : "Not in use"}
+                    {sessionsOf.get(account.id) ? ` · ${sessionsOf.get(account.id)} session${sessionsOf.get(account.id) === 1 ? "" : "s"}` : ""}
                   </span>
                 </div>
               </div>
@@ -207,7 +224,121 @@ export function ChatGptBrowserManagement({ api, browser, setError }: {
         </div>
       ) : null}
 
+      <SessionsPanel
+        accounts={accounts.accounts}
+        busy={busy}
+        locked={locked}
+        onAction={(input) => run(`thread:${input.threadId}`, async () => setThreads((await api.codexThreadAction(input)).threads))}
+        threads={threads}
+      />
+
       <DecodoPanel api={api} network={network} locked={locked} run={run} busy={busy} />
+    </section>
+  );
+}
+
+/**
+ * Codex sessions and the account each one runs on. A session keeps its account and reopens its saved
+ * chat there; archiving or deleting it in Codex does the same to that chat (and so do these buttons).
+ */
+function SessionsPanel({ accounts, threads, locked, busy, onAction }: {
+  accounts: BrowserAccount[];
+  threads: CodexThreadBinding[];
+  locked: boolean;
+  busy: string | null;
+  onAction: (input: CodexThreadAction) => Promise<void>;
+}) {
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const confirmTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(confirmTimer.current), []);
+  const accountLabel = (id: string) => {
+    const account = accounts.find(entry => entry.id === id);
+    return account ? accountName(account) : "Removed account";
+  };
+  const remove = (threadId: string) => {
+    if (confirmDelete !== threadId) {
+      setConfirmDelete(threadId);
+      window.clearTimeout(confirmTimer.current);
+      confirmTimer.current = window.setTimeout(() => setConfirmDelete(null), CONFIRM_WINDOW_MS);
+      return;
+    }
+    window.clearTimeout(confirmTimer.current);
+    setConfirmDelete(null);
+    void onAction({ threadId, action: "delete" });
+  };
+
+  return (
+    <section className="cbm-sessions" aria-label="Codex sessions">
+      <div>
+        <h2>Codex sessions</h2>
+        <p className="cbm-muted">
+          {threads.length
+            ? "Each session stays on its account and reopens its own chat there."
+            : "A Codex session joins the account in use on its first turn."}
+        </p>
+      </div>
+      {threads.length ? (
+        <div className="cbm-list cbm-session-list" role="table" aria-label="Codex sessions">
+          {threads.map(thread => {
+            const archived = thread.chats.length > 0 && thread.chats.every(chat => chat.archived);
+            const disabled = locked || thread.running;
+            return (
+              <div className="cbm-row" key={thread.threadId} role="row">
+                <div className="cbm-account" role="cell">
+                  <i className={`cbm-dot${thread.running ? " is-on" : ""}`} aria-hidden />
+                  <div>
+                    <strong title={thread.threadId}>{thread.title ?? `Session ${thread.threadId.slice(0, 8)}`}</strong>
+                    <span className="cbm-muted">
+                      {thread.running ? "Running" : `Last used ${new Date(thread.lastUsedAt).toLocaleString()}`}
+                    </span>
+                  </div>
+                </div>
+                <div className="cbm-tabs" role="cell">
+                  <strong>{thread.chats.length}</strong>
+                  <span className="cbm-muted">{archived ? "archived" : thread.chats.length === 1 ? "chat" : "chats"}</span>
+                </div>
+                <div className="cbm-proxy" role="cell">
+                  <select
+                    aria-label={`Account for ${thread.title ?? thread.threadId}`}
+                    disabled={disabled}
+                    onChange={event => void onAction({ threadId: thread.threadId, action: "move", accountId: event.target.value })}
+                    value={thread.accountId}
+                  >
+                    {accounts.some(entry => entry.id === thread.accountId)
+                      ? null
+                      : <option value={thread.accountId}>{accountLabel(thread.accountId)}</option>}
+                    {accounts.map(entry => <option key={entry.id} value={entry.id}>{accountName(entry)}</option>)}
+                  </select>
+                  <span className="cbm-muted">
+                    {busy === `thread:${thread.threadId}` ? "Working…" : "Moving starts a new chat on that account"}
+                  </span>
+                </div>
+                <div className="cbm-actions" role="cell">
+                  {thread.chats.length ? (
+                    <button
+                      className="cbm-link"
+                      disabled={disabled}
+                      onClick={() => void onAction({ threadId: thread.threadId, action: archived ? "unarchive" : "archive" })}
+                      type="button"
+                    >
+                      {archived ? "Unarchive" : "Archive"}
+                    </button>
+                  ) : null}
+                  <button
+                    className={`cbm-link${confirmDelete === thread.threadId ? " is-danger" : ""}`}
+                    disabled={disabled}
+                    onClick={() => thread.chats.length ? remove(thread.threadId) : void onAction({ threadId: thread.threadId, action: "forget" })}
+                    title={thread.chats.length ? "Deletes this session's chats on ChatGPT" : "Forgets this session's account"}
+                    type="button"
+                  >
+                    {thread.chats.length ? (confirmDelete === thread.threadId ? "Click again" : "Delete") : "Forget"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </section>
   );
 }

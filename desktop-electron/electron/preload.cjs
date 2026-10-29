@@ -64,6 +64,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onBrowserAccountsChanged: (listener) => subscription("launcher:browser-accounts-changed", listener),
   setBrowserAccountProxy: (id, profileId) => ipcRenderer.invoke("launcher:browser-account-proxy", { id, profileId }),
   assignBrowserAccountProxies: () => ipcRenderer.invoke("launcher:browser-account-proxies-assign"),
+  codexThreads: () => ipcRenderer.invoke("launcher:codex-threads"),
+  codexThreadAction: (input) => ipcRenderer.invoke("launcher:codex-thread-action", input),
   saveDecodo: (input) => ipcRenderer.invoke("launcher:decodo-save", input),
   syncDecodo: () => ipcRenderer.invoke("launcher:decodo-sync"),
   closeBrowserTab: (tabId) => ipcRenderer.invoke("launcher:browser-tab-close", tabId),

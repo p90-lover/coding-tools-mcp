@@ -778,6 +778,21 @@ export interface BrowserAccountsStatus {
   switching: boolean;
 }
 
+/** A Codex thread bound to the ChatGPT account its turns run on, with the saved chats it wrote there. */
+export interface CodexThreadBinding {
+  threadId: string;
+  accountId: string;
+  boundAt: number;
+  lastUsedAt: number;
+  title: string | null;
+  running: boolean;
+  chats: Array<{ url: string; archived: boolean }>;
+}
+
+export type CodexThreadAction =
+  | { threadId: string; action: "archive" | "unarchive" | "delete" | "forget" }
+  | { threadId: string; action: "move"; accountId: string };
+
 export interface ChatGptDesktopStatus {
   supported: boolean;
   installed: boolean;
@@ -966,6 +981,8 @@ export interface LauncherApi {
   onBrowserAccountsChanged(listener: (status: BrowserAccountsStatus) => void): () => void;
   setBrowserAccountProxy(id: string, profileId: string | null): Promise<BrowserAccountsStatus>;
   assignBrowserAccountProxies(): Promise<BrowserAccountsStatus & { assigned: number }>;
+  codexThreads(): Promise<{ threads: CodexThreadBinding[] }>;
+  codexThreadAction(input: CodexThreadAction): Promise<{ threads: CodexThreadBinding[] }>;
   saveDecodo(input: Partial<DecodoSettings> & { password?: string }): Promise<ProviderNetworkSnapshot>;
   syncDecodo(): Promise<{ added: number; updated: number; snapshot: ProviderNetworkSnapshot }>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
