@@ -69,6 +69,13 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 
 <!-- gitnexus:end -->
 
+## Storage: never the C: drive
+
+- Do not use the C: drive for storage: no builds, caches, scratch, test fixtures, downloads, backups, logs, installer temp or rollback copies. The project, its worktrees and the app's data live on G:; the installed app lives on H:.
+- Never fall back to C:. `os.tmpdir()`, `%TEMP%`, `%TMP%` and `%LOCALAPPDATA%` point at C: on this machine, so code and scripts must not default to them. Use an explicit root on the project's or the app's drive (the repo's `aiTemp/`, the app's data root) and fail loudly when none is set.
+- A silent install (`/S /D=H:\Apps\Coding Tools`) copies the old install to `%TEMP%` as a rollback: set `TEMP`/`TMP` to a folder on H: (outside the install folder) before running it.
+- Keep scratch, backups and Trash out of `H:\Apps\Coding Tools`: every update copies that whole folder.
+
 ## xyTom 0.3 integration invariants
 
 - `old/` is a lossless source snapshot pinned by `old/UPSTREAM_SNAPSHOT.md` to `xyTom/coding-tools-mcp` 0.3.0. Never delete prior snapshot files: move replaced or upstream-removed content under `old/Trash/` and use `aiTemp/` for synchronization/build artifacts.
