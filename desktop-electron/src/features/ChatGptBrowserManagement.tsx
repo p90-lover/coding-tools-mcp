@@ -130,14 +130,18 @@ export function ChatGptBrowserManagement({ api, browser, setError }: {
           const inUse = account.id === accounts.activeId;
           const proxy = account.proxyProfileId ? proxyById.get(account.proxyProfileId) : undefined;
           const proxyMissing = Boolean(account.proxyProfileId) && (!proxy || !proxy.enabled);
+          // Every account keeps its own sign-in: the one in use from its live page, the others from
+          // their own saved session (null until read).
+          const signedIn = inUse ? browser?.authenticated === true : account.signedIn;
+          const signIn = signedIn === null ? "" : signedIn ? " · signed in" : " · not signed in";
           return (
             <div className={`cbm-row${inUse ? " is-active" : ""}`} key={account.id} role="row">
               <div className="cbm-account" role="cell">
-                <i className={`cbm-dot${inUse ? (browser?.authenticated ? " is-on" : " is-warn") : ""}`} aria-hidden />
+                <i className={`cbm-dot${signedIn === null ? "" : signedIn ? " is-on" : " is-warn"}`} aria-hidden />
                 <div>
                   <strong title={account.label}>{accountName(account)}</strong>
                   <span className="cbm-muted">
-                    {inUse ? (browser?.authenticated ? "In use · signed in" : "In use · not signed in") : "Not in use"}
+                    {`${inUse ? "In use" : "Not in use"}${signIn}`}
                     {sessionsOf.get(account.id) ? ` · ${sessionsOf.get(account.id)} session${sessionsOf.get(account.id) === 1 ? "" : "s"}` : ""}
                   </span>
                 </div>

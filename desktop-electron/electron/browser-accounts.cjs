@@ -12,6 +12,15 @@ const { BROWSER_ACCOUNT_ID, browserAccountPartition } = require("./profile.cjs")
 const MAX_ACCOUNTS = 12;
 const MAX_LABEL = 60;
 const FIRST_ACCOUNT_ID = "main";
+// ChatGPT's sign-in: NextAuth's session token, split into .0/.1, kept 90 days from the last visit.
+const CHATGPT_SESSION_COOKIE = "__Secure-next-auth.session-token";
+
+/** Whether an account's chatgpt.com cookies (Electron's cookies.get) hold an unexpired sign-in. */
+function signedInFromCookies(cookies, nowSeconds = Date.now() / 1000) {
+  return (Array.isArray(cookies) ? cookies : []).some((cookie) => typeof cookie?.name === "string"
+    && (cookie.name === CHATGPT_SESSION_COOKIE || cookie.name.startsWith(`${CHATGPT_SESSION_COOKIE}.`))
+    && (cookie.session === true || !cookie.expirationDate || cookie.expirationDate > nowSeconds));
+}
 
 function createBrowserAccounts({ dataRoot, profile, logger }) {
   const statePath = path.join(dataRoot, "accounts.json");
@@ -123,4 +132,4 @@ function createBrowserAccounts({ dataRoot, profile, logger }) {
   };
 }
 
-module.exports = { createBrowserAccounts, FIRST_ACCOUNT_ID, MAX_ACCOUNTS };
+module.exports = { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID, MAX_ACCOUNTS };

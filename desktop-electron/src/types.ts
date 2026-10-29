@@ -768,6 +768,8 @@ export interface GptBrowserStatus {
 /** A Browser-tab account: its own sign-in, and optionally its own proxy (one proxy per account). */
 export interface BrowserAccount extends GptBrowserAccount {
   proxyProfileId: string | null;
+  /** Its own partition holds a ChatGPT sign-in (read locally); null until first read. */
+  signedIn: boolean | null;
 }
 
 /** The Browser tab's ChatGPT accounts; the active one is also the Codex bridge's (WebGPT turns). */
