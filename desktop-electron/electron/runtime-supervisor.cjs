@@ -190,6 +190,24 @@ function controlResult(code, stdout, stderr) {
   };
 }
 
+/**
+ * A connect that gave up while its tunnel process still runs (still starting, or even ready by the
+ * time it reported): the tunnel client's own wait is shorter than a loaded machine needs. Seen live
+ * 2026-10-28 and -29: connect exited non-zero with state=starting (once state=ready, healthy=true),
+ * the app tore the tunnel down, and the watchdog started it again two minutes later, for 20 minutes.
+ */
+function tunnelStillStarting(result) {
+  const stdout = typeof result?.stdout === "string" ? result.stdout.trim() : "";
+  if (!stdout) return false;
+  try {
+    const parsed = JSON.parse(stdout);
+    const state = String(parsed.runtime_state ?? parsed.state ?? parsed.status ?? "");
+    return parsed.process_running === true && ["starting", "ready"].includes(state);
+  } catch {
+    return false;
+  }
+}
+
 function tunnelControlDiagnostic(result) {
   const stdout = typeof result?.stdout === "string" ? result.stdout.trim() : "";
   const stderr = typeof result?.stderr === "string" ? result.stderr.trim() : "";
@@ -1371,9 +1389,14 @@ class RuntimeSupervisor {
       this.tunnelHealthBaseUrl = null;
       const connected = await this.runTunnelConnectCommand(config);
       if (connected.code !== 0) {
-        throw new Error(
-          `tunnel runtime refused managed startup: ${tunnelControlDiagnostic(connected)}`,
-        );
+        if (!tunnelStillStarting(connected)) {
+          throw new Error(
+            `tunnel runtime refused managed startup: ${tunnelControlDiagnostic(connected)}`,
+          );
+        }
+        // Its process runs: wait for it here (waitForTunnel fails at once if it stops) instead of
+        // tearing down a tunnel that is about to be ready.
+        this.logger.info("runtime.tunnel_connect_slow", { detail: tunnelControlDiagnostic(connected) });
       }
       await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, operationName);
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
