@@ -3920,6 +3920,36 @@ test("a failed goal round does not stall the goal: the next round starts after a
   assert.equal((await goalOf(workflow)).status, "active");
 });
 
+test("a goal round that ends on a used-up quota pauses the goal: no retry and no next round, and it says when it resets", async () => {
+  // Seen 2026-10-28: CPA retried each request ten times across the Cline Pass keys and still answered
+  // 429; every goal round then failed three attempts and the next round started anyway.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4.1-flash", permission_profile: ":ao-default" };
+  const error = "API Error: 502 Error 429: You have reached your monthly Clinepass limit. The limit resets in 5d 8h, please try again later.";
+  for (const [state, outcome] of [["failed", "failed"], ["held", "held"]]) {
+    const timers = [];
+    const { world, workflow, checks } = await goalChat({ timers, now: () => 1_000_000 });
+    world.runs.push({ id: "q1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state, route, receipt: { error } }] });
+    const before = world.updates.length;
+    await workflow.goalAfterRun("ws-1", "q1", outcome);
+    const goal = await goalOf(workflow);
+    assert.equal(goal.status, "paused", `a ${state} round on a spent quota pauses the goal`);
+    assert.match(goal.note, /quota is used up \(it resets in 5d 8h\)\. Switch model, then \/goal resume/);
+    assert.equal(checks.length, 0, "not sent to the evaluator");
+    assert.equal(timers.length, 0, "no next round is scheduled");
+    assert.equal(world.updates.length, before, "and nothing is retried");
+  }
+  const { QUOTA_EXHAUSTED } = require("../electron/agent-orchestrator-workflow.cjs");
+  for (const quota of [error, "HTTP 402: You exceeded your current quota", "usage_limit_reached", "RESOURCE_EXHAUSTED: Quota exceeded for metric"]) {
+    assert.equal(QUOTA_EXHAUSTED.test(quota), true, quota);
+  }
+  // A model cooling down is a 429 too, and "Retry automatically" gets through it minutes later.
+  for (const other of ["upstream 500 from the model", "exceeded the context window limit", "Error 503 service unavailable", "read line 429 of the log",
+    "API Error: 429 all credentials for model glm-5.3 are cooling down", "HTTP 429 Too Many Requests"]) {
+    assert.equal(QUOTA_EXHAUSTED.test(other), false, other);
+  }
+});
+
 test("a judged goal round that runs again (the app restarted, Retry) is judged again when it settles", async () => {
   // Seen live 2026-10-24: after an app restart three chats showed "Pursuing goal" with nothing
   // driving them. Each goal had marked its round judged; the round then ran again under the same
@@ -4235,7 +4265,7 @@ function wakeChat({ goal = false, hold = false, loopsFile = null } = {}) {
 }
 const wakeupOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).wakeups["task-1"];
 
-test("the agent's goal tools work as Codex's: it creates, completes, blocks, pauses or edits; resuming stays the user's", async () => {
+test("the agent's goal tools keep completion provisional and do not stall on one blocked report", async () => {
   const { workflow } = wakeChat();
   const tool = (args) => workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", ...args });
   const saved = async () => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
@@ -4249,17 +4279,24 @@ test("the agent's goal tools work as Codex's: it creates, completes, blocks, pau
   assert.equal((await saved()).lastRunId, "r1", "the turn that set it is round 1, judged when it settles");
   await assert.rejects(tool({ action: "create", objective: "something else" }), /unfinished goal; complete the existing goal first/);
   assert.equal((await tool({ action: "update", objective: "make CI and lint green" })).goal.objective, "make CI and lint green");
-  assert.equal((await tool({ action: "update", status: "paused" })).goal.status, "paused");
-  assert.equal((await saved()).status, "paused");
   await assert.rejects(tool({ action: "update", status: "active" }), /controlled by the user or system/);
   await assert.rejects(tool({ action: "update" }), /a status or an objective/);
-  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "blocked");
-  assert.equal((await saved()).status, "stalled");
+  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "active");
+  assert.equal((await saved()).agentBlockedRounds, 1);
+  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "active",
+    "two reports from one turn still count as one blocked round");
+  assert.equal((await saved()).agentBlockedRounds, 1);
   const done = await tool({ action: "update", status: "complete" });
-  assert.equal(done.goal.status, "complete");
-  assert.match(done.completionBudgetReport, /^Goal achieved\. Report final usage/);
-  assert.equal((await saved()).status, "achieved");
-  assert.equal((await tool({ action: "create", objective: "ship the release" })).goal.objective, "ship the release", "a complete goal is replaced");
+  assert.equal(done.goal.status, "active", "a self-declared completion waits for the independent evaluator");
+  assert.equal(done.completionBudgetReport, null);
+  assert.match((await saved()).note, /awaiting independent goal verification/);
+  await assert.rejects(tool({ action: "create", objective: "ship the release" }), /unfinished goal/);
+  assert.equal((await tool({ action: "update", status: "paused" })).goal.status, "paused");
+  assert.equal((await saved()).status, "paused");
+  assert.equal((await tool({ action: "update", status: "blocked" })).goal.status, "paused",
+    "the agent cannot override a user-paused goal");
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" });
+  assert.equal((await tool({ action: "create", objective: "ship the release" })).goal.objective, "ship the release");
   await assert.rejects(workflow.goalTool({ workspaceId: "ws-1", session: "someone-else", action: "get" }), /not one of this project's chats/);
 });
 
@@ -4319,6 +4356,32 @@ test("rename_chat names the agent's own chat after its task, and a team chat onl
   await advance(20_000);
   await goalSettle();
   assert.equal(task().title, "The person's name", "the person's Rename wins over a waiting one");
+});
+
+test("redact_message hides a secret in the chat's messages, and in a team chat only once its open cards have started", async () => {
+  const { world, workflow, advance } = wakeChat();
+  const task = () => world.tasks.find((entry) => entry.id === "task-1");
+  task().description = "watch CI with token ghp_live0123456789";
+  const redact = (session = "sess-1") => workflow.chatRedactTool({ workspaceId: "ws-1", session, secrets: ["ghp_live0123456789"], label: "GitHub token" });
+  const now = await redact();
+  assert.equal(now.hidden, 1);
+  assert.equal(task().description, "watch CI with token [hidden: GitHub token]");
+  // Codex review of #653: a team round with cards still to reserve would be refused after the edit.
+  task().description = "watch CI with token ghp_live0123456789";
+  const edits = world.edits.length;
+  const team = { id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+    { id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: "sess-2" } },
+    { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+  world.runs.push(team);
+  const waiting = await redact("sess-2");
+  assert.equal(waiting.deferred, true);
+  assert.equal(waiting.hidden, 1);
+  await goalSettle();
+  assert.equal(world.edits.length, edits, "not while a card is still pending");
+  team.nodes[1].state = "running";
+  await advance(20_000);
+  await goalSettle(() => world.edits.length > edits);
+  assert.equal(task().description, "watch CI with token [hidden: GitHub token]", "hidden once nothing is left to reserve");
 });
 
 test("a wake-up sends the chat the agent's note after its minutes, on the same Single model", async () => {
@@ -7649,7 +7712,7 @@ test("\"Retry automatically\" retries a failed step by itself once its pause is 
       await new Promise(resolve => setTimeout(resolve, 20));
       detail = String((await status()).detail ?? "");
     }
-    assert.match(detail, /Retrying automatically in \d+s \(attempt 1 of 3\)/);
+    assert.match(detail, /Retrying automatically in \d+s \(attempt 1 of 8\)/);
     await new Promise(resolve => setTimeout(resolve, 600));
     assert.deepEqual(controls, [], "nothing is retried before the pause is over");
     clock += 11_000;
@@ -7725,8 +7788,8 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
     const controls = [], timers = [];
     let lost = false;
     const workflow = createAgentOrchestratorWorkflow({
-      // Only the auto-retry pauses (10 s per attempt); other timers are not this test's.
-      setTimer: (fn, ms) => { if ([10_000, 20_000, 30_000].includes(ms)) timers.push({ fn, ms }); return { unref() {} }; },
+      // Only the auto-retry pauses; other timers are not this test's.
+      setTimer: (fn, ms) => { if ([10_000, 20_000, 30_000, 60_000, 15 * 60_000].includes(ms)) timers.push({ fn, ms }); return { unref() {} }; },
       findCodexExecutable: () => process.execPath,
       resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
       cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
@@ -7789,8 +7852,31 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
   assert.deepEqual(replaced.controls, [], "a disposed backend starts nothing");
   replaced.mission.nodes[0].state = "finished";
 
-  // Its third retry already used: the limit holds, and the step waits for the person.
-  const spent = setup([{}, {}, {}]);
+  // Three quick tries spent: it still retries by itself, a minute later. Before, the step waited
+  // for a click here, and the click worked.
+  const fourth = setup([{}, {}, {}]);
+  await fourth.workflow.call("chat_auto_retry", { enabled: true });
+  await fourth.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  fourth.fail();
+  for (let tries = 0; tries < 200 && !fourth.timers.length; tries++) await settle(10);
+  assert.deepEqual(fourth.timers.map(timer => timer.ms), [60_000], "a fourth try, after a minute");
+  fourth.timers[0].fn();
+  for (let tries = 0; tries < 200 && !fourth.controls.length; tries++) await settle(10);
+  assert.deepEqual(fourth.controls, ["retry"]);
+
+  // The last try waits 15 minutes.
+  const last = setup(Array.from({ length: 7 }, () => ({})));
+  await last.workflow.call("chat_auto_retry", { enabled: true });
+  await last.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  last.fail();
+  for (let tries = 0; tries < 200 && !last.timers.length; tries++) await settle(10);
+  assert.deepEqual(last.timers.map(timer => timer.ms), [15 * 60_000]);
+  last.mission.nodes[0].state = "finished";
+
+  // Its eighth retry already used: the limit holds, and the step waits for the person.
+  const spent = setup(Array.from({ length: 8 }, () => ({})));
   await spent.workflow.call("chat_auto_retry", { enabled: true });
   await spent.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
   await settle(100);

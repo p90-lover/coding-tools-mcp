@@ -143,7 +143,8 @@ test("the proxy route is read from the environment and never carries credentials
     { url: "http://127.0.0.1:17891", bypass: ["localhost", "127.0.0.1", "::1"] },
   );
   assert.equal(proxyRouteFromEnvironment({}), null);
-  assert.equal(proxyRouteFromEnvironment({ HTTPS_PROXY: "http://user:pw@proxy:8080" }), null);
+  // The sign-in never reaches the command line; the bare proxy does.
+  assert.deepEqual(proxyRouteFromEnvironment({ HTTPS_PROXY: "http://user:pw@proxy:8080" }), { url: "http://proxy:8080", bypass: [] });
 });
 
 test("a launched ChatGPT instance inherits Coding Tools' proxy route", async () => {

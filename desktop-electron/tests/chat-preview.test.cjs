@@ -867,3 +867,33 @@ test("the side panel reaches a session the app holds no lease for through the ch
   const [listing] = await env.tools.processes(["ao-old"], "ws1");
   assert.deepEqual(listing.commands, []);
 });
+test("the shown page gives a still for the pane to draw while Clawd passes over it; a page not shown gives none", async () => {
+  const view = fakeView();
+  let captures = 0;
+  view.webContents.capturePage = async () => { captures += 1; return { isEmpty: () => false, toJPEG: (quality) => Buffer.from(`jpeg ${quality}`) }; };
+  const service = createChatPreviews({ createView: () => view, logger: { warn() {} } });
+  await service.call("a", "preview_open", { url: "http://localhost:3000/" });
+  assert.equal(await service.snapshot("a"), null, "not in the pane yet");
+  service.show("a", { x: 0, y: 0, width: 400, height: 300 });
+  assert.equal(await service.snapshot("a"), `data:image/jpeg;base64,${Buffer.from("jpeg 80").toString("base64")}`);
+  assert.equal(await service.snapshot("b"), null, "another agent's page is not the one shown");
+  view.webContents.capturePage = async () => { throw new Error("gone"); };
+  assert.equal(await service.snapshot("a"), null, "a failed capture shows no still");
+  assert.equal(captures, 1);
+});
+
+test("a pane hides only its own agent's page: another split pane's Preview stays shown", async () => {
+  const views = [];
+  const service = createChatPreviews({ createView: () => { const view = fakeView(); views.push(view); return view; }, logger: { warn() {} } });
+  await service.call("a", "preview_open", { url: "http://localhost:3000/" });
+  await service.call("b", "preview_open", { url: "http://localhost:3001/" });
+  service.show("b", { x: 0, y: 0, width: 400, height: 300 });
+  assert.equal(service.hide("a"), false, "pane A's page is not the one shown");
+  assert.equal(service.state("b").shown, true, "pane B keeps its page");
+  assert.equal(await service.snapshot("a"), null, "and pane A gets no still to swap in");
+  assert.equal(service.hide("b"), true);
+  assert.equal(service.state("b").shown, false);
+  service.show("a", { x: 0, y: 0, width: 400, height: 300 });
+  assert.equal(service.hide(), true, "without a key, whichever page is shown");
+  assert.equal(service.state("a").shown, false);
+});

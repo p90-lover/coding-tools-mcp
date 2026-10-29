@@ -63,7 +63,7 @@ function mount(props) {
           : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [] }
             // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
-              SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox",
+              SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox", SecretText: "SecretText",
               SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
   return {

@@ -442,6 +442,15 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-empty p { margin: 0; color: var(--ao-muted); font-size: 13px; }
 .cx-turn { display: flex; flex-direction: column; gap: 10px; }
 .cx-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+/* A secret a chat agent hid in the person's message (redact_message): a blurred stand-in on a faint
+   chip, never selectable; its tooltip (data-tip) names what was there. */
+.cx-hidden-secret { position: relative; display: inline-block; padding: 0 4px; border-radius: 4px; vertical-align: baseline;
+  background: color-mix(in srgb, currentColor 10%, transparent); user-select: none; cursor: default; }
+.cx-hidden-secret > span { filter: blur(3.5px); letter-spacing: 1px; }
+.cx-hidden-secret[data-tip]::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  padding: 4px 8px; border-radius: 6px; background: #1f1f1f; color: #fff; font-size: 12px; font-weight: 500; line-height: 16px; white-space: nowrap;
+  pointer-events: none; opacity: 0; z-index: 5; }
+.cx-hidden-secret[data-tip]:is(:hover, :focus-visible)::after { opacity: 1; }
 /* Claude Code's queued-message bar (the Claude desktop app 3.1623 Code tab's QueuedMessageBar, compact
    density), right above the branch bar at the composer's width. A band 40 px high with 10 px corners
    (rounded-card) on 5% ink (bg-alpha-1), 8 px by 12 px padding and 5 px gaps: "1 message queued" in
@@ -1012,7 +1021,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-preview-errors { flex: 0 0 auto; padding: 2px 8px; border-radius: 10px; background: color-mix(in srgb, var(--ao-red, #c0392b) 14%, transparent);
   color: var(--ao-red, #c0392b); font-size: 11px; }
 /* The page itself is a native view the app draws over this slot. */
-.cx-preview-slot { flex: 1 1 auto; min-height: 0; margin: 0 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; }
+.cx-preview-slot { flex: 1 1 auto; min-height: 0; margin: 0 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; overflow: hidden; }
+/* The page's still, in the native view's place while Clawd passes over the pane (PreviewPane). */
+.cx-preview-still { display: block; width: 100%; height: 100%; object-fit: cover; object-position: left top; pointer-events: none; user-select: none; }
 .cx-terminal { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; gap: 6px; padding-bottom: 10px; }
 /* What runs now leads; the agent's finished tool calls fold away below it (they are in the chat). */
 .cx-terminal-bar { display: flex; align-items: center; gap: 8px; padding: 2px 12px 0; }

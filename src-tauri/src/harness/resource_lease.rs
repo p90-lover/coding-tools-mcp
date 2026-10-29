@@ -172,11 +172,10 @@ mod tests {
         let sibling = root.with_file_name("other-project");
         fs::create_dir_all(&sibling).expect("sibling");
         let _held = ResourceLease::acquire(&store, &root).expect("first lease");
-        let started = Instant::now();
-        ResourceLease::acquire(&store, &sibling).expect("an independent project is not blocked");
-        assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "no retry wait for a free project"
-        );
+        // No patience at all: the first attempt must take it, so there was no retry wait. A 100 ms
+        // wall-clock bound also counted the spawn gate's wait behind sibling tests' spawns and
+        // failed on a loaded Windows runner.
+        ResourceLease::acquire_within(&store, &sibling, Duration::ZERO)
+            .expect("an independent project is not blocked");
     }
 }

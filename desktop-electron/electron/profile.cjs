@@ -11,6 +11,24 @@ function browserPartitionForLauncherProfile(profile) {
   throw new Error("Launcher profile is invalid");
 }
 
+// Browser-tab accounts: the first keeps the profile's own partition (its sign-in predates
+// accounts), each added one gets "<partition>-<id>". The Codex bridge accepts exactly these.
+const BROWSER_ACCOUNT_ID = /^[a-z0-9]{12}$/;
+
+function browserAccountPartition(profile, accountId = null) {
+  const base = browserPartitionForLauncherProfile(profile);
+  if (accountId === null) return base;
+  if (!BROWSER_ACCOUNT_ID.test(accountId)) throw new Error("Browser account id is invalid");
+  return `${base}-${accountId}`;
+}
+
+function isBrowserAccountPartition(profile, partition) {
+  const base = browserPartitionForLauncherProfile(profile);
+  if (partition === base) return true;
+  return typeof partition === "string" && partition.startsWith(`${base}-`)
+    && BROWSER_ACCOUNT_ID.test(partition.slice(base.length + 1));
+}
+
 function resolveUserPath(value, homeDir = os.homedir()) {
   if (value === "~") return homeDir;
   if (value.startsWith("~/") || value.startsWith("~\\")) {
@@ -76,6 +94,9 @@ function resolveLauncherProfile({
 module.exports = {
   DEVELOPMENT_PROFILE,
   PRODUCTION_PROFILE,
+  BROWSER_ACCOUNT_ID,
+  browserAccountPartition,
   browserPartitionForLauncherProfile,
+  isBrowserAccountPartition,
   resolveLauncherProfile,
 };

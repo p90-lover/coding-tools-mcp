@@ -14,12 +14,12 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SentImage, ToolImages } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
@@ -52,7 +52,7 @@ function AutoRetryToggle({ disabled, onRetryNow }: { disabled: boolean; onRetryN
     return () => { live = false; };
   }, []);
   // A switch, not a checkbox: the box and its words wrapped onto two lines beside the button.
-  return <label className="cx-auto-retry" title="Retries a failed step up to 3 times. Sign-in errors still wait for you">
+  return <label className="cx-auto-retry" title="Retries a failed step up to 8 times over about half an hour. Sign-in errors still wait for you">
     <input type="checkbox" role="switch" checked={on === true} disabled={disabled || on === null} onChange={(event) => {
       const next = event.target.checked;
       setOn(next);
@@ -307,14 +307,17 @@ function EditItem({ item }: { item: ChatLiveItem }) {
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
     <span className="cx-live-text" title={files.map((file) => file.path).join("\n")}>{files.length === 1 ? fileName(files[0].path) : `${files.length} files`}</span>
     <DiffCount additions={additions} deletions={deletions} /><ApprovedMark text={item.approval} /></>;
+  // The numbered lines are drawn once the row is first opened (as DshRow does): a folded edit kept
+  // four cells a line in the page, ~50k of a long chat's 85k elements, and every restyle walked them.
+  const [opened, setOpened] = useState(false);
   if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
-  return <details className={`cx-tool cx-edit tone-${tone}`}><summary>{head}</summary>
-    <div className="cx-tool-body">
+  return <details className={`cx-tool cx-edit tone-${tone}`} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}><summary>{head}</summary>
+    {opened ? <div className="cx-tool-body">
       {files.map((file) => <section key={file.path} className="cx-edit-file">
         {files.length > 1 ? <header><span title={file.path}>{fileName(file.path)}</span><DiffCount additions={file.additions} deletions={file.deletions} /></header> : null}
         {file.diff ? <EditDiff diff={file.diff} /> : null}
       </section>)}
-    </div></details>;
+    </div> : null}</details>;
 }
 
 /** What a turn's work did, as Claude Code heads it: "Edited 2 files, ran a command" and the line counts. */
@@ -613,7 +616,7 @@ function SentMessage({ text }: { text: string }) {
         </button>)}
     </div> : null}
     {parts.annotations?.length ? <SentAnnotations annotations={parts.annotations} /> : null}
-    {parts.text ? <div className="cx-bubble"><p>{parts.text}</p></div> : null}
+    {parts.text ? <div className="cx-bubble"><p>{hasHiddenSecret(parts.text) ? <SecretText text={parts.text} /> : parts.text}</p></div> : null}
     {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
   </>;
 }

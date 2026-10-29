@@ -10,7 +10,7 @@ const { createHash } = require("node:crypto");
 const {
   combineUpdateControllers, combinedUpdateState, createAppUpdateController, createAutoInstaller, extractPack,
   manifestAssetName, packAssetName, parseManifest, planUpdate, safeInstallPath, selectAppRelease,
-  sweepUpdateLeftovers,
+  STAGE_DIRECTORY, sweepUpdateLeftovers,
 } = require("../electron/app-update.cjs");
 const { swapIn } = require("../electron/app-update-worker.cjs");
 const { waitForPackagedRuntimeSource } = require("../electron/runtime-install.cjs");
@@ -276,12 +276,14 @@ test("the controller stages the update, starts the worker and closes the app kee
     const downloads = [];
     let workerJob = null;
     let closed = 0;
+    let turnRunning = true;
     const states = [];
     const controller = createAppUpdateController({
       currentVersion: "0.7.0", electronVersion: "41.10.7", platform: "win32", arch: "x64", packaged: true,
       executablePath: path.join(installRoot, "Coding Tools.exe"), logsDirectory: path.join(root, "logs"),
       publish: (state) => states.push(state), logger: null,
       closeForUpdate: async () => { closed += 1; return { ok: true }; },
+      closeBlocker: () => (turnRunning ? "Wait for ChatGPT turn to finish before quitting Coding Tools" : null),
       dependencies: {
         fetchRelease: async () => [release("0.8.0", names)],
         downloadText: async (url) => fs.readFileSync(fromUrl(url), "utf8"),
@@ -290,6 +292,13 @@ test("the controller stages the update, starts the worker and closes the app kee
       },
     });
     assert.equal((await controller.checkNow()).status, "available");
+    // While a ChatGPT turn keeps the app open, a click is refused before anything downloads.
+    await assert.rejects(controller.beginInstall(), /Wait for ChatGPT turn to finish/);
+    assert.deepEqual(downloads, []);
+    assert.equal(closed, 0);
+    assert.equal(controller.getState().status, "available");
+    assert.equal(fs.existsSync(path.join(installRoot, STAGE_DIRECTORY)), false, "nothing staged");
+    turnRunning = false;
     assert.equal(await controller.beginInstall(), true);
     assert.equal(closed, 1);
     assert.deepEqual(downloads, [packAssetName("0.8.0", "win_x64", "app")], "only the pack holding app.asar is downloaded");
@@ -319,6 +328,17 @@ test("an app update outranks a GUI-only update, which still installs on its own"
   await combineUpdateControllers(fake("app", "up-to-date"), fake("gui", "available")).beginInstall();
   await combineUpdateControllers(fake("app", "available"), fake("gui", "available")).beginInstall();
   assert.deepEqual(calls, ["gui", "app"]);
+  // Codex review of #653: running ChatGPT turns are stopped only for a whole-app install, which quits.
+  calls.length = 0;
+  const beforeAppInstall = async () => { calls.push("stop turns"); };
+  await combineUpdateControllers(fake("app", "up-to-date"), fake("gui", "available")).beginInstall({ beforeAppInstall });
+  await combineUpdateControllers(fake("app", "available"), fake("gui", "available")).beginInstall({ beforeAppInstall });
+  assert.deepEqual(calls, ["gui", "stop turns", "app"]);
+  // Declining to stop them installs nothing.
+  calls.length = 0;
+  await assert.rejects(combineUpdateControllers(fake("app", "available"), fake("gui", "available"))
+    .beginInstall({ beforeAppInstall: async () => { throw new Error("Wait for ChatGPT turn to finish"); } }), /Wait for ChatGPT turn/);
+  assert.deepEqual(calls, []);
 });
 
 function autoInstallerFixture(overrides = {}) {

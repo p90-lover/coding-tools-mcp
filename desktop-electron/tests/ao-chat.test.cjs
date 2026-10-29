@@ -261,7 +261,8 @@ test("with Retry automatically on, a single chat's failed step that nothing retr
   assert.equal(chat.restartResume(single(failed()), Date.now()), null, "switch off: it waits for the person, as before");
   assert.equal(chat.restartResume(single(failed()), Date.now(), on), "retry");
   assert.equal(chat.restartResume(single(failed({ history: [{}, {}] })), Date.now(), on), "retry", "a third attempt");
-  assert.equal(chat.restartResume(single(failed({ history: [{}, {}, {}] })), Date.now(), on), null, "three attempts: the person decides");
+  assert.equal(chat.restartResume(single(failed({ history: [{}, {}, {}] })), Date.now(), on), "retry", "a fourth attempt: three quick tries are not the end");
+  assert.equal(chat.restartResume(single(failed({ history: Array.from({ length: 8 }, () => ({})) })), Date.now(), on), null, "eight attempts: the person decides");
   assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: { error: "API error 401: auth_unavailable" } })), Date.now(), on), null,
     "a sign-in or account-pool failure is never retried by itself");
   assert.equal(chat.restartResume(run("r", "t", [failed()], { execution_mode: "single", paused: true }), Date.now(), on), null, "a paused chat stays paused");

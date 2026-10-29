@@ -301,7 +301,7 @@ async function waitForUpdateApply(installRoot, { now = Date.now, sleep = (ms) =>
 
 function createAppUpdateController({
   currentVersion, electronVersion, platform = process.platform, arch = process.arch,
-  packaged, executablePath, logsDirectory, publish, logger, closeForUpdate, dependencies = {},
+  packaged, executablePath, logsDirectory, publish, logger, closeForUpdate, closeBlocker, dependencies = {},
 }) {
   const tag = platformTag(platform, arch);
   const installRoot = executablePath ? path.dirname(executablePath) : null;
@@ -442,6 +442,13 @@ function createAppUpdateController({
     if (pending) return pending;
     pending = (async () => {
       if (state.status !== "available" || !candidate) throw new Error("No app update is available");
+      // Refused before anything downloads: a click while a ChatGPT turn ran staged the whole update
+      // on disk, then the app would not close and the stage was deleted again.
+      const blocked = closeBlocker?.();
+      if (blocked) {
+        logger?.warn("launcher.app_update_failed", { message: blocked });
+        throw new Error(blocked);
+      }
       const available = candidate;
       transition({ status: "downloading", version: available.version, progress: 0 });
       let staged = null;
@@ -512,11 +519,14 @@ function combineUpdateControllers(appUpdates, guiUpdates) {
       if (!ACTIVE.includes(appState.status)) await guiUpdates.checkOnce();
       return state();
     },
-    async beginInstall() {
+    // `beforeAppInstall` runs only when the whole app is replaced (it quits): a renderer-only update
+    // reloads in place and leaves running ChatGPT turns alone (Codex review of #653).
+    async beginInstall({ beforeAppInstall } = {}) {
       if (appUpdates.getState().status !== "available") {
         const appState = await appUpdates.checkNow({ force: true });
         if (appState.status !== "available") return guiUpdates.beginInstall();
       }
+      await beforeAppInstall?.();
       return appUpdates.beginInstall();
     },
     startPeriodicChecks(options) {

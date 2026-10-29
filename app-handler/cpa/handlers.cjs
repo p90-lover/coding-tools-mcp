@@ -149,6 +149,16 @@ function createModule() {
       description: "Probe a linked provider account or summarize provider-network status.",
       run: (args, context) => callProvider(context, "providerStatus", args, "Provider status"),
     },
+    checkUpdate: {
+      readOnly: true,
+      description: "Check GitHub for a CPA release newer than the one running.",
+      run: (_args, context) => callProvider(context, "cpaCheckUpdate", {}, "CPA update check"),
+    },
+    update: {
+      readOnly: false,
+      description: "Install the newest CPA release beside the running one and switch to it; a version that fails its health check rolls back. Pass {\"swap\": false} to run it from the next start instead.",
+      run: (args, context) => callProvider(context, "cpaUpdate", { swap: args?.swap !== false }, "CPA update"),
+    },
   };
   extraOperations.providers = extraOperations.listProviders;
   return defineModule({

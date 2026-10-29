@@ -9,7 +9,7 @@ const {
 } = require("./browser-helper-verifier.cjs");
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
-const { browserPartitionForLauncherProfile } = require("./profile.cjs");
+const { browserPartitionForLauncherProfile, isBrowserAccountPartition } = require("./profile.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
@@ -554,9 +554,9 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.loginWithPasskey = loginWithPasskey;
-    const expectedPartition = browserPartitionForLauncherProfile(profile);
-    const resolvedPartition = partition ?? expectedPartition;
-    if (resolvedPartition !== expectedPartition) {
+    // The profile's partition or one of its browser-tab accounts' (profile.cjs); nothing else.
+    const resolvedPartition = partition ?? browserPartitionForLauncherProfile(profile);
+    if (!isBrowserAccountPartition(profile, resolvedPartition)) {
       throw new Error("Browser host partition does not match its profile");
     }
     this.partition = resolvedPartition;
@@ -722,6 +722,14 @@ class BrowserHost {
 
   get activeTraceId() {
     return [...this.turnTabs.values()].find((tab) => tab.status === "running")?.traceId || null;
+  }
+
+  /** Why the browser cannot change account right now, or null: a running turn or sign-in owns its session. */
+  accountSwitchBlocker() {
+    if (this.activeTraceId) return "a ChatGPT chat turn is running";
+    if (this.manualOperation) return `${this.manualOperation} is running`;
+    if (this.loginOperation) return "sign-in is in progress";
+    return null;
   }
 
   tabSnapshot(tab) {

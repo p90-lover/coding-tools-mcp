@@ -696,11 +696,31 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
       place(preview);
       return true;
     },
-    /** Takes the shown preview out of the pane; it keeps running in the background host. */
-    hide() {
+    /**
+     * A still of the page shown in the pane, as a JPEG data URL (null when none is shown). The pane
+     * draws it in the view's place while something of the app page passes over it (Clawd carried
+     * across): the native view is drawn above the whole page and would cover it.
+     */
+    async snapshot(key) {
+      const preview = shown?.key === key ? previews.get(key) : null;
+      const contents = preview?.view.webContents;
+      if (!contents || contents.isDestroyed()) return null;
+      try {
+        const image = await contents.capturePage();
+        return image.isEmpty() ? null : `data:image/jpeg;base64,${image.toJPEG(80).toString("base64")}`;
+      } catch { return null; }
+    },
+    /**
+     * Takes the shown preview out of the pane; it keeps running in the background host. With `key`,
+     * only when that agent's page is the one shown: split panes each have a Preview, and one pane
+     * hiding its page (Clawd passing over it, its tab closing) took another pane's page off too.
+     */
+    hide(key) {
+      if (key !== undefined && shown?.key !== key) return false;
       const preview = shown ? previews.get(shown.key) : null;
       shown = null;
       if (preview) place(preview);
+      return true;
     },
     /** The user's own navigation from the pane: back, forward, reload or a loopback URL. */
     async navigate(key, { action, url } = {}) {

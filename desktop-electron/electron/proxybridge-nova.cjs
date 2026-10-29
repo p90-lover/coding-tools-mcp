@@ -16,6 +16,9 @@ const DEFAULT_API_PORT = 17894;
 const GATEWAY_PROFILE_ID = "nova:gateway";
 const STATUS_POLL_MS = 5_000;
 const START_WAIT_MS = 20_000;
+// A Nova that stopped is started again, first after one poll, then at doubling waits up to 5 min.
+const RESTART_BACKOFF_MS = [5_000, 15_000, 60_000, 300_000];
+const QUIT_SHUTDOWN_MS = 3_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 // Routing actions answer 202 at once; a proxy check and a Decodo sync take up to a few seconds.
 const SLOW_REQUEST_TIMEOUT_MS = 45_000;
@@ -94,6 +97,11 @@ function createNovaManager({
   let starting = null;
   let timer = null;
   let syncing = Promise.resolve();
+  // Nova runs as part of Coding Tools: wanted from app start until the page stops it or the app quits.
+  let wanted = false;
+  let child = null;
+  let restarts = 0;
+  let restartAt = 0;
 
   function saveSettings() {
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
@@ -175,26 +183,40 @@ function createNovaManager({
     return status;
   }
 
+  // Which executable answered a launch without managed mode, so app start doesn't open its window again.
+  function exeStamp(exe) {
+    try { return `${exe}|${fs.statSync(exe).mtimeMs}`; } catch { return exe; }
+  }
+
   async function launch() {
     const exe = executable();
     if (!exe) throw new Error("ProxyBridge Nova was not found. Choose ProxyBridgeRewrite.exe on the Proxy page");
-    const child = spawnImpl(exe, ["--managed", "--takeover", "--api-port", String(apiPort())], {
+    const process_ = spawnImpl(exe, ["--managed", "--takeover", "--api-port", String(apiPort())], {
       cwd: path.dirname(exe),
       detached: true,
       stdio: "ignore",
       windowsHide: true,
       env: { ...env, PROXYBRIDGE_NOVA_API_TOKEN: apiToken() },
     });
-    let exited = null;
-    child.once?.("exit", (code) => { exited = code ?? -1; });
-    child.once?.("error", (error) => { exited = error; });
-    child.unref?.();
-    logger?.info?.("nova.launched", { pid: child.pid ?? null, apiPort: apiPort() });
+    const launched = { exited: null, at: Date.now(), answered: false };
+    child = launched;
+    process_.once?.("exit", (code) => { launched.exited = code ?? -1; });
+    process_.once?.("error", (error) => { launched.exited = error; });
+    process_.unref?.();
+    logger?.info?.("nova.launched", { pid: process_.pid ?? null, apiPort: apiPort() });
     const deadline = Date.now() + START_WAIT_MS;
     while (Date.now() < deadline) {
       await sleep(400);
-      if (await refreshStatus()) return status;
+      if (await refreshStatus()) {
+        launched.answered = true;
+        return status;
+      }
+      const { exited } = launched;
       if (exited !== null) {
+        if (exited === 0) {
+          settings.unmanagedExe = exeStamp(exe);
+          saveSettings();
+        }
         throw new Error(exited instanceof Error ? `ProxyBridge Nova could not start: ${exited.message}`
           : EXIT_REASONS[exited] ?? `ProxyBridge Nova stopped while starting (exit code ${exited})`);
       }
@@ -204,22 +226,21 @@ function createNovaManager({
 
   /**
    * Adopts the Nova this app started earlier, else starts one (taking over a running tray). At app
-   * start (`launchAllowed` false) it only adopts until one managed start has worked: a Nova build
-   * without managed mode would treat the launch as a second tray, opening its dashboard and
-   * starting routing on every app start.
+   * start and on a restart (`launchAllowed` false) it skips an executable that already showed it
+   * has no managed mode: that build would open its own window and start routing on every launch.
    */
   function ensureRunning({ launchAllowed = true } = {}) {
     if (!starting) {
       starting = (async () => {
         if (await refreshStatus()) return status;
-        if (!launchAllowed && !settings.managedStarted) {
-          lastError = "ProxyBridge Nova is not running here yet";
+        if (!launchAllowed && settings.unmanagedExe && settings.unmanagedExe === exeStamp(executable())) {
+          lastError = EXIT_REASONS[0];
           return null;
         }
         try {
           const started = await launch();
-          if (!settings.managedStarted) {
-            settings.managedStarted = true;
+          if (settings.unmanagedExe) {
+            delete settings.unmanagedExe;
             saveSettings();
           }
           return started;
@@ -227,6 +248,18 @@ function createNovaManager({
       })().finally(() => { starting = null; announce(); });
     }
     return starting;
+  }
+
+  /** Starts Nova again when it stopped, unless the Nova this app launched within a minute is still starting. */
+  function restartIfStopped() {
+    if (!wanted || status || starting || Date.now() < restartAt) return;
+    if (child && child.exited === null && !child.answered && Date.now() - child.at < 60_000) return;
+    restartAt = Date.now() + RESTART_BACKOFF_MS[Math.min(restarts, RESTART_BACKOFF_MS.length - 1)];
+    restarts += 1;
+    logger?.warn?.("nova.restarting", { attempt: restarts, error: lastError });
+    void ensureRunning({ launchAllowed: false })
+      .then((started) => (started ? sync() : null))
+      .catch((error) => { logger?.warn?.("nova.restart_failed", { attempt: restarts, error: error.message }); });
   }
 
   /** Mirrors Nova's proxies into the store; re-applies the app-wide route when it uses one that changed. */
@@ -296,11 +329,14 @@ function createNovaManager({
   async function tick() {
     const previous = status;
     await refreshStatus();
+    if (status) restarts = 0;
     if (status && status.profile?.etag !== etag) await sync().catch((error) => { lastError = error.message; });
     if (Boolean(previous) !== Boolean(status) || JSON.stringify(previous) !== JSON.stringify(status)) announce();
+    restartIfStopped();
   }
 
   async function start() {
+    wanted = true;
     try {
       if (await ensureRunning({ launchAllowed: false })) await sync();
     } catch (error) {
@@ -316,6 +352,16 @@ function createNovaManager({
     timer = null;
   }
 
+  /** On quit: Nova belongs to this app, so it stops with it (briefly bounded; a relaunch keeps it). */
+  async function stop() {
+    wanted = false;
+    stopPolling();
+    if (!status) return;
+    try { await api("POST", "/v1/shutdown", undefined, { timeoutMs: QUIT_SHUTDOWN_MS }); }
+    catch (error) { logger?.warn?.("nova.quit_shutdown_failed", { error: error.message }); }
+    status = null;
+  }
+
   // Each write answers with Nova's new profile; the store follows at once rather than at the next poll.
   async function afterProfileWrite(profile) {
     etag = null;
@@ -326,8 +372,13 @@ function createNovaManager({
   return {
     state,
     start,
+    stop,
     stopPolling,
-    ensureRunning,
+    async ensureRunning(options) {
+      wanted = true;
+      restarts = 0;
+      return ensureRunning(options);
+    },
     sync,
     async setExecutable(exePath) {
       const value = String(exePath ?? "").trim();
@@ -339,6 +390,7 @@ function createNovaManager({
     },
     async shutdown() {
       await api("POST", "/v1/shutdown");
+      wanted = false;
       status = null;
       announce();
       return state();

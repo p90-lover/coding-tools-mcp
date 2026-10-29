@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "chatgpt-browser-management" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 /** Plugins > MCPs (chat-mcp-servers.cjs): one of the person's own MCP servers for chat agents. */
 export interface McpServerEntry {
@@ -273,6 +273,18 @@ export interface ProviderNetworkSnapshot {
     providers: ProviderProxyPolicyRecord[];
     accounts: AccountProxyPolicyRecord[];
   };
+  decodo?: DecodoSettings;
+}
+
+/** Decodo's sticky proxy list, read in-app (decodo-proxies.cjs); the password never comes back. */
+export interface DecodoSettings {
+  username: string;
+  country: string;
+  count: number;
+  sessionMinutes: number;
+  hasPassword: boolean;
+  lastSyncAt: string | null;
+  lastError: string | null;
 }
 
 export type ProviderExecutionWorkload ="subagent" | "paseo" | "anneal";
@@ -595,6 +607,10 @@ export interface LauncherState {
   chatAgentTerminalTools?: boolean;
   /** Those agents get their own preview browser for pages served on this machine; absent means on. */
   chatAgentPreviewTools?: boolean;
+  /** Those agents may hide secrets in the user's chat messages (redact_message); absent means off. */
+  chatAgentRedactSecrets?: boolean;
+  /** What they hide, one kind per line; absent means the defaults (snapshot.chatAgentRedactDefaults). */
+  chatAgentRedactList?: string[];
   /** An agent's tool request answered in the chat is confirmed again in a dialog unless false. */
   confirmAgentToolRequests?: boolean;
   /** Runtime > RTK: agents' commands go through the installed rtk unless false. */
@@ -697,6 +713,8 @@ export interface LauncherSnapshot {
   mcpCredentialsConfigured: boolean;
   /** Agents' commands run in Codex's Windows sandbox (installed), so the terminal tools default on. */
   chatAgentSandbox?: boolean;
+  /** What chat agents hide when the user has no list of their own (state.chatAgentRedactList). */
+  chatAgentRedactDefaults?: string[] | null;
   logs: LogRecord[];
   urls: {
     github: string;
@@ -745,6 +763,19 @@ export interface GptBrowserStatus {
   accounts: GptBrowserAccount[];
   activeId: string | null;
   page: { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean } | null;
+}
+
+/** A Browser-tab account: its own sign-in, and optionally its own proxy (one proxy per account). */
+export interface BrowserAccount extends GptBrowserAccount {
+  proxyProfileId: string | null;
+}
+
+/** The Browser tab's ChatGPT accounts; the active one is also the Codex bridge's (WebGPT turns). */
+export interface BrowserAccountsStatus {
+  accounts: BrowserAccount[];
+  activeId: string;
+  maxAccounts: number;
+  switching: boolean;
 }
 
 export interface ChatGptDesktopStatus {
@@ -927,6 +958,16 @@ export interface LauncherApi {
   zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
   createBrowserTab(): Promise<BrowserState>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
+  browserAccounts(): Promise<BrowserAccountsStatus>;
+  addBrowserAccount(): Promise<BrowserAccountsStatus>;
+  switchBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
+  renameBrowserAccount(id: string, label: string): Promise<BrowserAccountsStatus>;
+  removeBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
+  onBrowserAccountsChanged(listener: (status: BrowserAccountsStatus) => void): () => void;
+  setBrowserAccountProxy(id: string, profileId: string | null): Promise<BrowserAccountsStatus>;
+  assignBrowserAccountProxies(): Promise<BrowserAccountsStatus & { assigned: number }>;
+  saveDecodo(input: Partial<DecodoSettings> & { password?: string }): Promise<ProviderNetworkSnapshot>;
+  syncDecodo(): Promise<{ added: number; updated: number; snapshot: ProviderNetworkSnapshot }>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
   copyManualPrompt(tabId: string): Promise<BrowserState>;
   confirmManualSent(tabId: string): Promise<BrowserState>;
@@ -964,9 +1005,11 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "confirmAgentToolRequests" | "rtkEnabled",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "confirmAgentToolRequests" | "rtkEnabled" | "chatAgentRedactSecrets",
     value: boolean,
   ): Promise<LauncherState>;
+  /** What chat agents hide in the user's messages, one kind per line; empty restores the defaults. */
+  setRedactList?(lines: string[]): Promise<LauncherState>;
   rtkStatus(): Promise<RtkStatus>;
   rtkGain(): Promise<RtkGain>;
   rtkInstall(): Promise<{ code: number | null; output: string; status: RtkStatus }>;

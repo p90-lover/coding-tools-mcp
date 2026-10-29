@@ -206,6 +206,8 @@ function createHarness(hooks = {}) {
     "./ao-db-maintenance.cjs": { compactAoDatabase: async () => ({ action: "none" }) },
     // The IPC size limits are plain constants, used as they are.
     "./ipc-schema.cjs": require("../electron/ipc-schema.cjs"),
+    // Ending chat hosts at quit has its own tests (ao-chat-hosts.test.cjs); no fixture kills a process.
+    "./process-tree.cjs": { terminateOwnedProcessTreeAsync: async () => { throw new Error("No process is killed in a fixture"); } },
   };
   const loadedModule = { exports: {} };
   vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), {

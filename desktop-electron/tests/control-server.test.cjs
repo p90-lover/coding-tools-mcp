@@ -713,8 +713,9 @@ test("the Codex model catalog is served from the last good copy when the live re
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-models-"));
   let mode = "ok";
   let release;
+  const served = [];
   const server = await new BrowserControlServer({
-    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    logger: { info(event, detail) { if (event === "browser.native_models_cache_served") served.push(detail.reason); }, warn() {}, error() {}, debug() {} },
     getBrowserHost: () => null,
     getPreferences: () => ({}),
     modelsCacheDir: dir,
@@ -755,6 +756,15 @@ test("the Codex model catalog is served from the last good copy when the live re
     await new Promise((resolve) => setTimeout(resolve, 50));
     mode = "fail";
     assert.deepEqual(await (await ask()).json(), { models: ["slow"] });
+    // Repeated polls on the cache log once per reason, not once per poll; a live answer resets it.
+    await ask();
+    await ask();
+    assert.deepEqual(served, ["failed", "late", "failed"]);
+    mode = "ok";
+    await ask();
+    mode = "fail";
+    await ask();
+    assert.deepEqual(served, ["failed", "late", "failed", "failed"]);
     // Each account has its own copy.
     assert.equal((await ask("Bearer account-b")).status, 502);
   } finally {

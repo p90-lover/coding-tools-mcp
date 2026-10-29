@@ -96,7 +96,8 @@ test("CPA config follows the selected authenticated global profile", () => {
     fs.writeFileSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll"), "old plugin");
     const installed = installBundledCommandCodePlugin(path.join(root, "cpa"));
     // The Go plugins as built with Go 1.26.10/1.27.3 (CVE-2026-111943); cpa-helper is Rust and unchanged.
-    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_895_552, 7_707_648, 14_867_968, 813_568, 24_951_296, 3_346_944]);
+    // The Cline Pass switcher is codingtools.10 (#650: a spent window is a 429).
+    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_893_504, 7_707_648, 14_867_968, 813_568, 24_951_296, 3_346_944]);
     assert.equal(fs.existsSync(path.join(platformDir, "commandcode-go-v0.9.0.dll")), false);
     assert.equal(fs.existsSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll")), false);
     assert.equal(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins")).length, 2);
@@ -131,4 +132,49 @@ test("CPA config follows the selected authenticated global profile", () => {
   delete broken.secrets.proxies.owned;
   fs.writeFileSync(savedFile, `${JSON.stringify(broken)}\n`);
   assert.throws(() => resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage), /saved sign-in, so CPA didn't start/);
+});
+
+test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets the bare route", async (t) => {
+  const { createProviderNetworkController } = require("../electron/provider-network.cjs");
+  const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/global-env-proxy-"));
+  const saved = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"].map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const applied = [];
+  const target = { setProxy: async (config) => { applied.push(config); } };
+  const controller = createProviderNetworkController({
+    app: {}, browserPartition: "persist:env-proxy-test", getBrowserHost: () => null,
+    logger: { info() {}, warn() {} }, safeStorage: { isEncryptionAvailable: () => false },
+    session: { defaultSession: target, fromPartition: () => target }, shell: {}, userData: root,
+    fetchImpl: async () => { throw new Error("no network in this test"); },
+  });
+  controller.store.saveProxyProfile({ id: "decodo", name: "HTTP decodo", enabled: true,
+    endpoint: { protocol: "http", host: "proxy.example.test", port: 10000 },
+    username: "account", password: "p@ss:word", scopes: ["all"] });
+  controller.store.setGlobalRouting({ enabled: true, profileId: "decodo" });
+  // App start sets the variables before anything awaits, so programs main starts next inherit them.
+  controller.applyGlobalEnvironment();
+  assert.equal(new URL(process.env.HTTPS_PROXY).host, "proxy.example.test:10000");
+  assert.equal(applied.length, 0);
+  // Node programs follow the variables only with this set; loopback stays direct even when the
+  // profile's own bypass list leaves it out.
+  assert.equal(process.env.NODE_USE_ENV_PROXY, "1");
+  for (const host of ["localhost", "127.0.0.1", "::1"]) assert.ok(process.env.NO_PROXY.split(",").includes(host), host);
+  await controller.applyGlobalRouting();
+
+  // Without the sign-in every agent, curl and git call through this proxy was refused with 407.
+  const environment = new URL(process.env.HTTPS_PROXY);
+  assert.equal(environment.host, "proxy.example.test:10000");
+  assert.equal(decodeURIComponent(environment.username), "account");
+  assert.equal(decodeURIComponent(environment.password), "p@ss:word");
+  assert.equal(process.env.HTTP_PROXY, process.env.HTTPS_PROXY);
+  assert.equal(process.env.ALL_PROXY, process.env.HTTPS_PROXY);
+  assert.deepEqual(applied.map((config) => config.proxyRules), ["http://proxy.example.test:10000"]);
+
+  controller.store.setGlobalRouting({ enabled: false, profileId: null });
+  await controller.applyGlobalRouting();
+  assert.equal(process.env.HTTPS_PROXY, undefined);
+  assert.equal(process.env.NODE_USE_ENV_PROXY, undefined);
 });
