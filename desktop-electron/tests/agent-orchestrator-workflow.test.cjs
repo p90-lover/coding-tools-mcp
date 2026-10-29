@@ -3536,7 +3536,12 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
       if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: models.map((id) => ({ id })) }) };
       const body = JSON.parse(init.body);
       checks.push(body);
-      if (refuse(body.model)) return { ok: false, status: refuse(body.model), json: async () => ({}) };
+      // `refuse` gives a status, or { status, text } for an answer with words (a spent API key).
+      const refused = refuse(body.model);
+      if (refused) {
+        const { status, text = "" } = typeof refused === "object" ? refused : { status: refused };
+        return { ok: false, status, json: async () => ({}), text: async () => text };
+      }
       const verdict = evaluator(body.messages[0].content);
       if (verdict instanceof Error) return { ok: false, status: 503, json: async () => ({}) };
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
@@ -3611,6 +3616,33 @@ test("a model the evaluator gets a 404 for sits out for hours; one that was down
     await workflow.goalAfterRun("ws-1", next, "finished", null);
     assert.equal(checks[2].model, sitsOut ? "deepseek-v4" : "gemini-3-flash", `HTTP ${status}, half an hour on`);
   }
+});
+
+test("a model whose quota is used up sits out until the reset its answer names", async () => {
+  // Seen live 2026-10-29: the Anthropic API key behind Claude Haiku answered 400 with its spend limit,
+  // and every goal check tried it first again ten minutes later.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const round = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "not yet" } }] });
+  const clock = { at: Date.parse("2026-10-24T08:00:00Z") };
+  const spent = { status: 400, text: JSON.stringify({ type: "error", error: { type: "invalid_request_error",
+    message: "You have reached your specified API usage limits. You will regain access on 2026-10-26 at 00:00 UTC." } }) };
+  const { world, workflow, checks } = await goalChat({ refuse: (model) => model === "gemini-3-flash" ? spent : 0, now: () => clock.at });
+  const judged = async () => {
+    const next = (await goalOf(workflow)).lastRunId || "r1";
+    world.runs.push(round(next));
+    await workflow.goalAfterRun("ws-1", next, "finished", null);
+    return checks.at(-1).model;
+  };
+  assert.equal(await judged(), "deepseek-v4");
+  assert.equal(checks.at(-2).model, "gemini-3-flash", "tried once");
+  clock.at += 6 * 3_600_000;
+  const before = checks.length;
+  assert.equal(await judged(), "deepseek-v4");
+  assert.equal(checks.length, before + 1, "six hours on, the spent model is not asked at all");
+  clock.at = Date.parse("2026-10-26T00:01:00Z");
+  await judged();
+  assert.equal(checks.at(-2).model, "gemini-3-flash", "asked again once its quota is back");
 });
 
 test("a provider that is down for every model costs a goal check one request, not all three", async () => {

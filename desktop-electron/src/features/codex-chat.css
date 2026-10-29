@@ -656,9 +656,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-edit-file > header { display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px; color: var(--color-text-secondary); font-size: 12px; }
 .cx-diff { max-height: 320px; margin: 0; padding: 6px 0; overflow: auto; border: 1px solid var(--ao-line); border-radius: 8px;
   background: var(--cx-tray, rgb(127 127 127 / 6%)); font-size: 12px; line-height: 1.5; }
-/* Requests waiting on the person, right above the chat box and exactly as wide (see .cx-composer). */
+/* Requests waiting on the person, right below the chat box and exactly as wide (see .cx-composer). */
 .cx-approval-dock { flex: 0 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: calc(100% - 48px); max-width: 780px; max-height: min(45vh, 420px);
   margin: 0 auto 8px; overflow-y: auto; }
+/* The last box under the chat box keeps the gap the box itself keeps from the pane's bottom. */
+.cx-composer ~ .cx-approval-dock:last-child, .cx-composer ~ .cx-command-card:last-child { margin-bottom: 16px; }
 .cx-approval-dock .ao-msg { max-width: none; margin: 0; }
 /* dsh's ApprovalPanel: a 20px card with an amber hairline and an amber "Waiting for approval" strip. */
 .cx-approval-dock.is-dsh .ao-msg-approval { padding: 0 16px 14px; overflow: hidden; border: 1px solid #f59e0b; border-radius: 20px; }
