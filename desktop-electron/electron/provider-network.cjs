@@ -1052,9 +1052,12 @@ function createProviderNetworkController({
     ownedEnvironment.add(name);
   }
 
-  // The profile's own partition and the Browser tab's active account's (browser-accounts.cjs).
+  // The profile's own partition, the Browser tab's active account's (browser-accounts.cjs), and the
+  // accounts its Codex threads' turn tabs run on (BrowserHost.livePartitions).
   function liveBrowserPartitions() {
-    return [browserPartition, getBrowserHost?.()?.partition]
+    const host = getBrowserHost?.();
+    const hostPartitions = typeof host?.livePartitions === "function" ? host.livePartitions() : [host?.partition];
+    return [browserPartition, ...hostPartitions]
       .filter((value, index, list) => typeof value === "string" && list.indexOf(value) === index);
   }
 

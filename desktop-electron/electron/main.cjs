@@ -26,7 +26,9 @@ const {
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
-const { CodexChatLifecycleSync } = require("./codex-chat-lifecycle-sync.cjs");
+const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
+const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
+const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createBrowserAccounts, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
@@ -168,6 +170,14 @@ let createBrowserHostForAccount = null;
 let browserAccountSwitch = null;
 let bridgeAccountRefreshPending = null;
 let lastBrowserBounds = null;
+// Codex threads bound to ChatGPT accounts (codex-thread-accounts.cjs), each account's saved-chat
+// registry (shared by every BrowserHost: a thread's tab may run on an account the Browser tab does
+// not show), the hidden pages that archive or delete chats, and the one scan that follows Codex.
+let threadAccounts = null;
+const accountLifecycleSyncs = new Map();
+let conversationActions = null;
+let lifecycleScan = null;
+let savedChatsInUse = () => true;
 let lastBrowserSurfaceActive = true;
 let chatgptDesktop = null;
 let gptBrowser = null;
@@ -819,6 +829,117 @@ function browserAccountsStatus() {
   return { ...browserAccounts.status(), switching: browserAccountSwitch !== null };
 }
 
+const browserAccountExists = (accountId) => browserAccounts.status().accounts.some((entry) => entry.id === accountId);
+
+// Routes an account's partition only while none of the host's pages use it: routing drops open
+// connections, and a live partition is kept current by Global Routing and its proxy binding.
+async function routeIdleAccountPartition(partition, logger) {
+  if (!browserHost?.livePartitions?.().includes(partition)) await routeBrowserAccountPartition(partition, logger);
+}
+
+// Archive, unarchive or delete one saved chat on the account that holds it.
+async function runConversationAction(accountId, conversationUrl, action, logger) {
+  const partition = browserAccounts.partitionOf(accountId);
+  await routeIdleAccountPartition(partition, logger);
+  return conversationActions.run(partition, conversationUrl, action);
+}
+
+function lifecycleSyncFor(accountId, logger) {
+  let sync = accountLifecycleSyncs.get(accountId);
+  if (!sync) {
+    sync = new CodexChatLifecycleSync({
+      filePath: browserAccountConversationFile(accountId),
+      codexHome: LAUNCHER_PROFILE.codexHome,
+      logger,
+      // Codex's Archive, Unarchive and Delete of a thread reach its saved chats on its account.
+      enabled: () => savedChatsInUse() && conversationActions !== null,
+      onSync: async ({ threadId, conversationUrl, action }) => {
+        const done = await runConversationAction(accountId, conversationUrl, action, logger);
+        if (done && action === "delete") threadAccounts?.unbind(threadId);
+        return done;
+      },
+    });
+    accountLifecycleSyncs.set(accountId, sync);
+  }
+  return sync;
+}
+
+// The account a Codex thread's turn runs on: the one it is bound to, or (first turn, or its account
+// was removed) the account in use, which it is then bound to.
+async function resolveThreadAccount(threadId, logger) {
+  if (!threadAccounts || !isThreadId(threadId)) return null;
+  const bound = threadAccounts.accountFor(threadId);
+  const accountId = bound && browserAccountExists(bound) ? bound : browserAccounts.activeId();
+  threadAccounts.bind(threadId, accountId);
+  const partition = browserAccounts.partitionOf(accountId);
+  await routeIdleAccountPartition(partition, logger);
+  return { accountId, partition, chatLifecycleSync: lifecycleSyncFor(accountId, logger) };
+}
+
+// Codex thread titles from Codex's own index (one JSON line per rename; the last one wins).
+function codexThreadTitles() {
+  const titles = new Map();
+  let text = "";
+  try { text = fs.readFileSync(path.join(LAUNCHER_PROFILE.codexHome, "session_index.jsonl"), "utf8"); } catch { return titles; }
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      const title = entry?.thread_name ?? entry?.title;
+      if (isThreadId(entry?.id) && typeof title === "string" && title.trim()) titles.set(entry.id.toLowerCase(), title.trim().slice(0, 200));
+    } catch {}
+  }
+  return titles;
+}
+
+function codexThreadsStatus(logger) {
+  if (!threadAccounts) return { threads: [] };
+  const titles = codexThreadTitles();
+  return {
+    threads: threadAccounts.list().map((entry) => ({
+      ...entry,
+      title: titles.get(entry.threadId) ?? null,
+      running: Boolean(browserHost?.threadRunning?.(entry.threadId)),
+      chats: lifecycleSyncFor(entry.accountId, logger).entriesFor(entry.threadId)
+        .map((chat) => ({ url: chat.conversationUrl, archived: chat.remoteArchived })),
+    })),
+  };
+}
+
+// A Codex thread's saved chats on ChatGPT: archive, unarchive or delete them on the account that
+// holds them; move the thread to another account (its next turn starts a new chat there, and the
+// bridge sends the whole task); or forget the binding.
+async function codexThreadAction(input, logger) {
+  const threadId = String(input?.threadId ?? "").toLowerCase();
+  const accountId = threadAccounts?.accountFor(threadId);
+  if (!accountId) throw new Error("That Codex thread is not bound to a ChatGPT account");
+  if (browserHost?.threadRunning?.(threadId)) throw new Error("A turn of this thread is running. Try again when it ends.");
+  const action = input?.action;
+  if (action === "move") {
+    const target = input?.accountId;
+    if (!browserAccountExists(target)) throw new Error("Unknown browser account");
+    if (target !== accountId) {
+      browserHost?.releaseThreadTabs?.(threadId);
+      threadAccounts.bind(threadId, target);
+    }
+  } else if (action === "archive" || action === "unarchive" || action === "delete") {
+    const sync = lifecycleSyncFor(accountId, logger);
+    browserHost?.releaseThreadTabs?.(threadId);
+    for (const chat of sync.entriesFor(threadId)) {
+      await runConversationAction(accountId, chat.conversationUrl, action, logger);
+      if (action === "delete") sync.forget(threadId, chat.conversationUrl);
+      else sync.setArchived(threadId, chat.conversationUrl, action === "archive");
+    }
+    if (action === "delete") threadAccounts.unbind(threadId);
+  } else if (action === "forget") {
+    threadAccounts.unbind(threadId);
+  } else {
+    throw new Error("Unknown Codex thread action");
+  }
+  logger.info("browser_accounts.thread_action", { action, accountId });
+  return codexThreadsStatus(logger);
+}
+
 function publishBrowserAccounts() {
   send("launcher:browser-accounts-changed", browserAccountsStatus());
 }
@@ -941,11 +1062,13 @@ async function setBrowserAccountProxy(accountId, profileId, { logger }) {
     const profile = (await providerNetworkReady()).store.activeProxy(profileId);
     if (!profile) throw new Error("That proxy was not found or is turned off");
   }
-  const active = accountId === browserAccounts.activeId();
-  const blocker = active ? browserHost?.accountSwitchBlocker() : null;
-  if (blocker) throw new Error(`The proxy of the account in use cannot change while ${blocker}. Try again when it is done.`);
+  // The account in use, or one a Codex thread's tab runs on: its pages take the new route now.
+  const partition = browserAccounts.partitionOf(accountId);
+  const live = accountId === browserAccounts.activeId() || Boolean(browserHost?.livePartitions?.().includes(partition));
+  const blocker = live ? browserHost?.accountSwitchBlocker() : null;
+  if (blocker) throw new Error(`The proxy of an account in use cannot change while ${blocker}. Try again when it is done.`);
   browserAccounts.setProxy(accountId, profileId || null);
-  if (active) await routeBrowserAccountPartition(browserAccounts.partitionOf(accountId), logger);
+  if (live) await routeBrowserAccountPartition(partition, logger);
   logger.info("browser_accounts.proxy_bound", { accountId, bound: Boolean(profileId) });
   publishBrowserAccounts();
   return browserAccountsStatus();
@@ -987,6 +1110,16 @@ async function removeBrowserAccount(accountId, context) {
   if (accountId === browserAccounts.activeId()) {
     await switchBrowserAccount(accounts.find((entry) => entry.id !== accountId).id, context);
   }
+  // Its threads' retained tabs close first; the threads start fresh on the account in use.
+  const removing = browserAccounts.partitionOf(accountId);
+  if (browserHost?.livePartitions?.().includes(removing) && browserHost.accountSwitchBlocker()) {
+    throw new Error(`That account cannot be removed while ${browserHost.accountSwitchBlocker()}. Try again when it is done.`);
+  }
+  for (const entry of threadAccounts?.list() ?? []) {
+    if (entry.accountId === accountId) browserHost?.releaseThreadTabs?.(entry.threadId);
+  }
+  threadAccounts?.removeAccount(accountId);
+  accountLifecycleSyncs.delete(accountId);
   const partition = browserAccounts.remove(accountId);
   if (bridgeAccountRefreshPending === accountId) bridgeAccountRefreshPending = null;
   const removed = session.fromPartition(partition);
@@ -2166,6 +2299,12 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-account-remove", (event, id) => {
     assertFocusedMainWindow(event, true);
     return removeBrowserAccount(id, { logger, stateStore });
+  });
+  // Codex threads bound to ChatGPT accounts. Every change needs the focused main window.
+  handle("launcher:codex-threads", () => codexThreadsStatus(logger));
+  handle("launcher:codex-thread-action", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    return codexThreadAction(input, logger);
   });
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
@@ -3930,6 +4069,30 @@ async function start() {
   } catch (error) {
     logger.warn("runtime.config_unreadable", { message: error instanceof Error ? error.message : String(error) });
   }
+  // The runtime config decides the chat kind its turns open; the host must agree with it. An
+  // unreadable config falls back to the synced launcher state rather than failing the turn.
+  savedChatsInUse = () => {
+    try {
+      return runtimeHost.runtimeConfigSnapshot().config?.useSavedChats !== false;
+    } catch {
+      return stateStore.read().useSavedChats !== false;
+    }
+  };
+  threadAccounts = createThreadAccounts({ filePath: path.join(CORE_HOME, "sync", "codex-thread-accounts.json"), logger });
+  conversationActions = createConversationActions({
+    logger,
+    createContents: (partition) => new WebContentsView({
+      webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
+    }).webContents,
+  });
+  // One walk of Codex's rollout folders a minute serves every account's registry.
+  lifecycleScan = createLifecycleScan({
+    syncs: () => browserAccounts.status().accounts.map((entry) => lifecycleSyncFor(entry.id, logger)),
+    codexHome: LAUNCHER_PROFILE.codexHome,
+    intervalMs: 60_000,
+    logger,
+  });
+  lifecycleScan.start();
   // One BrowserHost per Browser-tab account: switching accounts replaces it (switchBrowserAccount).
   createBrowserHostForAccount = (accountId) => {
     let lastPublishedBrowserAuth = false;
@@ -3961,26 +4124,13 @@ async function start() {
       },
       showWindow: showMainWindow,
       getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
-      // The runtime config decides the chat kind its turns open; the host must agree with it. An
-      // unreadable config falls back to the synced launcher state rather than failing the turn.
-      getUseSavedChats: () => {
-        try {
-          return runtimeHost.runtimeConfigSnapshot().config?.useSavedChats !== false;
-        } catch {
-          return stateStore.read().useSavedChats !== false;
-        }
-      },
+      getUseSavedChats: () => savedChatsInUse(),
+      // Each Codex thread runs on the ChatGPT account it is bound to, whichever one this host shows.
+      resolveTurnAccount: (threadId) => resolveThreadAccount(threadId, logger),
     });
-    // Persist verified ChatGPT conversation ownership across launcher restarts, per account: a
-    // conversation belongs to the account that holds it.
-    // Cross-service archive/delete synchronization is outside this recovery feature.
-    host.chatLifecycleSync = new CodexChatLifecycleSync({
-      filePath: browserAccountConversationFile(accountId),
-      codexHome: LAUNCHER_PROFILE.codexHome,
-      logger,
-      enabled: () => false,
-      onSync: async () => false,
-    });
+    // Verified ChatGPT conversation ownership, kept across launcher restarts per account: a
+    // conversation belongs to the account that holds it. A turn with no thread uses this one.
+    host.chatLifecycleSync = lifecycleSyncFor(accountId, logger);
     return host;
   };
   setProviderBrowserProxyBinding((partition) => browserAccounts.proxyForPartition(partition));

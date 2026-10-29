@@ -1950,8 +1950,8 @@ test("a released saved chat is deleted from its own page, as a Temporary Chat wo
   assert.throws(() => deleteConversationScript("../../backend-api/accounts"), /Not a ChatGPT conversation id/);
   const script = deleteConversationScript(SAVED_CONVERSATION_ID);
   assert.match(script, /"PATCH"/);
-  assert.match(script, /is_visible: false/);
-  assert.ok(script.endsWith(`)(${JSON.stringify(SAVED_CONVERSATION_ID)})`));
+  assert.match(script, /"is_visible":false/);
+  assert.ok(script.endsWith(`)(${JSON.stringify(SAVED_CONVERSATION_ID)}, {"is_visible":false}, true)`));
 
   const release = async ({ url = `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, manual = false, savedChats = true } = {}) => {
     const calls = [];
@@ -2642,8 +2642,9 @@ test("a retained conversation is not reused for a different connector identity",
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
     createTurnTab: (...args) => {
-      // The fifth is the native thread id (#583), which this turn has none of.
-      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector", undefined]);
+      // The fifth is the native thread id (#583), which this turn has none of, so the sixth (the
+      // thread's ChatGPT account) is none either: the tab runs on the host's own account.
+      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector", undefined, null]);
       return created;
     },
     writeDescriptor() {},

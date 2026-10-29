@@ -92,6 +92,7 @@ class CodexChatLifecycleSync {
               ? { conversationKey: item.conversationKey } : {}),
             ...(typeof item.connectorIdentity === "string" && item.connectorIdentity.length > 0
               && item.connectorIdentity.length <= 128 ? { connectorIdentity: item.connectorIdentity } : {}),
+            ...(item.heldArchived === true ? { heldArchived: true } : {}),
           });
         }
       } catch (error) {
@@ -151,12 +152,44 @@ class CodexChatLifecycleSync {
     return matches.length === 1 ? matches[0].conversationUrl : undefined;
   }
 
-  async poll() {
+  threadIds() {
+    return new Set([...this.entries.values()].map(entry => entry.threadId));
+  }
+
+  /** The saved chats of one thread (several after automatic compaction), oldest first. */
+  entriesFor(threadId) {
+    const id = String(threadId ?? "").toLowerCase();
+    return [...this.entries.values()].filter(entry => entry.threadId === id)
+      .map(({ threadId: owner, conversationUrl, remoteArchived }) => ({ threadId: owner, conversationUrl, remoteArchived }));
+  }
+
+  /**
+   * Records an archive or unarchive done by hand (the management page). A chat archived by hand
+   * stays archived while its Codex thread is still active: the poll unarchives only what it archived.
+   */
+  setArchived(threadId, conversationUrl, archived) {
+    const entry = this.entries.get(`${String(threadId).toLowerCase()}|${conversationUrl}`);
+    if (!entry) return false;
+    entry.remoteArchived = archived;
+    if (archived) entry.heldArchived = true;
+    else delete entry.heldArchived;
+    this.save();
+    return true;
+  }
+
+  /** Forgets one of a thread's saved chats once it is deleted on ChatGPT. */
+  forget(threadId, conversationUrl) {
+    const removed = this.entries.delete(`${String(threadId).toLowerCase()}|${conversationUrl}`);
+    if (removed) this.save();
+    return removed;
+  }
+
+  /** `scan` is a codexRolloutLocations result shared by every account's registry (one walk). */
+  async poll(scan = null) {
     if (this.registryUnavailable || this.polling || this.entries.size === 0) return;
     this.polling = true;
     try {
-      const { ready, found } = codexRolloutLocations(this.codexHome,
-        new Set([...this.entries.values()].map(entry => entry.threadId)), this.io);
+      const { ready, found } = scan ?? codexRolloutLocations(this.codexHome, this.threadIds(), this.io);
       if (!ready) return;
       for (const entry of this.entries.values()) {
         const location = found.get(entry.threadId);
@@ -176,7 +209,7 @@ class CodexChatLifecycleSync {
         }
         let action;
         if (location === "archived" && !entry.remoteArchived) action = "archive";
-        else if (location === "active" && entry.remoteArchived) action = "unarchive";
+        else if (location === "active" && entry.remoteArchived && !entry.heldArchived) action = "unarchive";
         else if (!location && this.now() - entry.missingSince >= DELETE_GRACE_MS
           && this.indexedThread(this.codexHome, entry.threadId) === "absent") action = "delete";
         if (!action || !this.enabled(action)) continue;
@@ -220,4 +253,41 @@ class CodexChatLifecycleSync {
   }
 }
 
-module.exports = { CodexChatLifecycleSync, codexRolloutLocations, codexThreadIndexState, CHAT_URL };
+/**
+ * Polls every account's registry with one walk of the Codex rollout folders: with several ChatGPT
+ * accounts, a walk per registry read the same folders once per account every interval.
+ */
+function createLifecycleScan({ syncs, codexHome, io = fs, intervalMs = SCAN_INTERVAL_MS, logger = null }) {
+  let timer = null;
+  let running = false;
+  async function tick() {
+    if (running) return;
+    running = true;
+    try {
+      const registries = [...syncs()].filter(sync => !sync.registryUnavailable && sync.entries.size > 0);
+      if (!registries.length) return;
+      const threadIds = new Set(registries.flatMap(sync => [...sync.threadIds()]));
+      const scan = codexRolloutLocations(codexHome, threadIds, io);
+      for (const sync of registries) await sync.poll(scan);
+    } catch (error) {
+      logger?.warn?.("browser.chat_lifecycle_scan_failed", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      running = false;
+    }
+  }
+  return {
+    tick,
+    start() {
+      if (timer) return;
+      timer = setInterval(() => { void tick(); }, intervalMs);
+      timer.unref?.();
+      void tick();
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    },
+  };
+}
+
+module.exports = { CodexChatLifecycleSync, codexRolloutLocations, codexThreadIndexState, createLifecycleScan, CHAT_URL };
