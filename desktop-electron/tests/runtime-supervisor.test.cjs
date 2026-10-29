@@ -1846,6 +1846,60 @@ test("stale ownership recovery stops a managed tmux runtime even though it has n
   }
 });
 
+test("one timed-out inventory probe is polled again, not taken as an external owner", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-slow-inventory-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  fs.writeFileSync(supervisor.statePath, `${JSON.stringify({
+    version: 1,
+    ownerPid: 999_999_999,
+    daemonPid: null,
+    tunnelPid: null,
+    status: "ready",
+    updatedAt: new Date().toISOString(),
+  })}\n`);
+  supervisor.proxyHealthPayload = async () => null;
+  // As on 2026-10-29 00:58: the CLI's cold start on a loaded machine outlasts the 5 s probe once.
+  const probes = [];
+  supervisor.runTunnelCommand = async (_config, args, timeoutMs, label) => {
+    probes.push(args.join(" "));
+    if (probes.length === 1) throw new Error(`${label} timed out after ${timeoutMs}ms`);
+    const inventory = JSON.stringify({ entries: [] });
+    return { code: 0, stdout: inventory, stderr: "", output: inventory };
+  };
+  assert.equal(await supervisor.stopStaleOwnedRuntime({
+    mode: "full",
+    tunnel: { alias: "codex-chatgpt-web" },
+  }), true);
+  assert.deepEqual(probes, ["runtimes cleanup --json", "runtimes cleanup --json"]);
+  assert.equal(fs.existsSync(supervisor.statePath), false);
+});
+
+test("a timed-out inventory probe reads as unknown status with its reason", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  supervisor.runTunnelCommand = async (_config, _args, timeoutMs, label) => {
+    throw new Error(`${label} timed out after ${timeoutMs}ms`);
+  };
+  const health = await supervisor.readTunnelHealth({ tunnel: { alias: "codex-chatgpt-web" } });
+  assert.equal(health.statusKnown, false);
+  assert.equal(health.ready, false);
+  assert.equal(health.absent, false);
+  assert.match(health.detail, /Local tunnel inventory probe timed out after 5000ms/);
+});
+
 for (const [label, content] of [["empty", Buffer.alloc(0)], ["zero-filled", Buffer.alloc(179)]]) {
   test(`launcher recovers a ${label} ownership marker without losing its bytes`, async (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-empty-ownership-"));

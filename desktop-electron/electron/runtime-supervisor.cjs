@@ -994,13 +994,21 @@ class RuntimeSupervisor {
     // `runtimes status` performs an optional control-plane lookup when the saved runtime key is
     // available. The cleanup dry run is the official local-only inventory and never removes
     // entries without `--apply`, so proxy or control-plane failures cannot block supervision.
-    const result = await this.runTunnelCommand(
-      config,
-      ["runtimes", "cleanup", "--json"],
-      5_000,
-      "Local tunnel inventory probe",
-      { probe: true },
-    );
+    let result;
+    try {
+      result = await this.runTunnelCommand(
+        config,
+        ["runtimes", "cleanup", "--json"],
+        5_000,
+        "Local tunnel inventory probe",
+        { probe: true },
+      );
+    } catch (error) {
+      // A probe that timed out (the CLI's cold start on a loaded machine) says nothing about the
+      // tunnel: the status is unknown, so the waits poll again. Thrown, one 5 s timeout made
+      // startup call this app's own runtime external and stop it (seen live 2026-10-29).
+      result = controlResult(null, "", errorMessage(error));
+    }
     if (result.code !== 0) {
       return {
         ready: false,
