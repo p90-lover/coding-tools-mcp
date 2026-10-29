@@ -56,16 +56,37 @@ export type ComposerControlsProps = {
   permissions: ReactNode; busy: boolean;
 };
 
-/** Shared keyboard/outside-click behavior for the three independent composer popovers. */
+/** Margin a menu keeps from its pane's edge. */
+const POPOVER_EDGE = 8;
+
+/** Shifts an absolutely placed menu left until it ends inside its pane (or the window), never past the pane's left edge. */
+function fitInPane(menu: HTMLElement | null) {
+  if (!menu?.getBoundingClientRect || typeof getComputedStyle !== "function") return;
+  const style = getComputedStyle(menu);
+  if (style.position !== "absolute") return;
+  const bounds = (menu.closest(".cx-pane") ?? document.documentElement).getBoundingClientRect();
+  const rect = menu.getBoundingClientRect();
+  const over = rect.right - (bounds.right - POPOVER_EDGE);
+  const room = rect.left - (bounds.left + POPOVER_EDGE);
+  if (over > 0 && room > 0) menu.style.left = `${(Number.parseFloat(style.left) || 0) - Math.min(over, room)}px`;
+}
+
+/**
+ * Shared keyboard/outside-click behavior for the three independent composer popovers. Focus never
+ * scrolls: in a split pane, focusing a menu that reached past the pane's edge scrolled the whole
+ * pane sideways and left it cut off. A menu that would reach past its pane's right edge opens
+ * shifted left to fit.
+ */
 export function useComposerPopover() {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLElement>(null);
-  const close = () => { setOpen(false); trigger.current?.focus(); };
+  const close = () => { setOpen(false); trigger.current?.focus({ preventScroll: true }); };
   useEffect(() => {
     if (!open) return;
-    panel.current?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled)")?.focus();
+    fitInPane(panel.current);
+    panel.current?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled)")?.focus({ preventScroll: true });
     const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
     document.addEventListener("pointerdown", outside);
     return () => document.removeEventListener("pointerdown", outside);
@@ -78,8 +99,8 @@ export function useComposerPopover() {
       const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled), summary, [tabindex='0']") ?? []);
       if (!controls.length) return;
       const first = controls[0], last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus({ preventScroll: true }); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus({ preventScroll: true }); }
     }
   };
   return { open, setOpen, root, trigger, panel, close, onKeyDown };
