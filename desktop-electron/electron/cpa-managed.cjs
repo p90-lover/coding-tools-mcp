@@ -10,6 +10,11 @@ const { cpaLongRunYamlLines } = require("./cpa-codex-long-run.cjs");
 
 const RUNTIME_MARKER = "CPA_RUNTIME.json";
 const MAX_ARCHIVE_LIST_BYTES = 16 * 1024 * 1024;
+// Windows' bundled bsdtar, as antigravity-cli.cjs uses. A GNU tar earlier on PATH (Git's, when the
+// app was started from a Git or Claude Code shell) reads "G:\...\cpa.zip" as host "G": every CPA
+// start failed "tar: Cannot connect to G: resolve failed", so a new CPA never replaced the old one.
+const tarBinary = (platform = process.platform) => (platform === "win32"
+  ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe") : "tar");
 
 function requiredAbsolutePath(value, label) {
   const resolved = path.resolve(String(value || ""));
@@ -46,7 +51,7 @@ function runChecked(executable, args, options = {}) {
 }
 
 function validateArchive(artifact) {
-  const listing = runChecked("tar", ["-tf", artifact]).stdout;
+  const listing = runChecked(tarBinary(), ["-tf", artifact]).stdout;
   const entries = String(listing || "").split(/\r?\n/u).filter(Boolean);
   if (entries.length === 0) throw new Error("CPA release archive is empty");
   for (const entry of entries) {
@@ -60,7 +65,7 @@ function validateArchive(artifact) {
     }
   }
 
-  const verbose = runChecked("tar", ["-tvf", artifact]).stdout;
+  const verbose = runChecked(tarBinary(), ["-tvf", artifact]).stdout;
   for (const line of String(verbose || "").split(/\r?\n/u).filter(Boolean)) {
     const type = line.trimStart()[0];
     if (type === "l" || type === "h") {
@@ -93,6 +98,42 @@ function findRuntimeBinary(directory) {
   return matches[0];
 }
 
+// The pid of a CPA runtime holding the CPA port, else null (Windows only). Any socket on the port
+// counts, not only the listener: a CPA that lost its listener still served the clients whose
+// keep-alive connections it held (the 0.8.31 CPA on 2026-10-29, firewall-blocked, did exactly this).
+function cpaOnPort(port, { runSync = spawnSync, platform = process.platform } = {}) {
+  if (platform !== "win32") return null;
+  const system32 = path.join(process.env.SystemRoot || "C:\\Windows", "System32");
+  const options = { encoding: "utf8", windowsHide: true, timeout: 10_000 };
+  const listing = runSync(path.join(system32, "NETSTAT.EXE"), ["-ano", "-p", "TCP"], options);
+  const pids = new Set(String(listing.stdout || "").split(/\r?\n/u).map((line) => line.trim().split(/\s+/u))
+    .filter((columns) => columns[0] === "TCP" && /:(\d+)$/u.exec(columns[1] || "")?.[1] === String(port))
+    .map((columns) => Number(columns[4]))
+    .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid));
+  for (const pid of pids) {
+    const task = runSync(path.join(system32, "tasklist.exe"), ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], options);
+    const image = /^"([^"]+)"/u.exec(String(task.stdout || "").trim())?.[1];
+    if (image?.toLowerCase() === "cli-proxy-api.exe") return pid;
+  }
+  return null;
+}
+
+// CPA outlives the app, and an update or an older app's own start can leave one on the port. This
+// one then exits at once ("address in use") while the old one keeps serving: on 2026-10-29 a CPA
+// from 0.8.31 (8.0.32, blocked by the firewall, the old proxy route) outlived two updates. Run
+// only starts a CPA the app chose not to adopt, so a CPA still on the port is ended first.
+function endStaleCpa(port, { runSync = spawnSync, platform = process.platform, waitMs = 5_000 } = {}) {
+  const stale = cpaOnPort(port, { runSync, platform });
+  if (!stale) return null;
+  const taskkill = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe");
+  runSync(taskkill, ["/PID", String(stale), "/T", "/F"], { windowsHide: true, timeout: 10_000 });
+  for (const deadline = Date.now() + waitMs; Date.now() < deadline && cpaOnPort(port, { runSync, platform });) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+  }
+  console.error(`Ended the earlier CPA (pid ${stale}) that still held port ${port}`);
+  return stale;
+}
+
 function markerPath(home) {
   return path.join(home, "runtime", RUNTIME_MARKER);
 }
@@ -107,7 +148,7 @@ function prepare(homeValue, stateValue, artifactValue) {
   const runtimeRoot = path.join(home, "runtime");
   fs.mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
   validateArchive(artifact);
-  runChecked("tar", ["-xf", artifact, "-C", runtimeRoot]);
+  runChecked(tarBinary(), ["-xf", artifact, "-C", runtimeRoot]);
 
   const executable = findRuntimeBinary(runtimeRoot);
   assertInside(runtimeRoot, executable, "CPA runtime binary");
@@ -396,6 +437,7 @@ function run(homeValue, stateValue) {
   ));
   if (process.platform !== "win32") fs.chmodSync(configPath, 0o600);
   removeOldMainLogs(state);
+  endStaleCpa(8317);
 
   const child = spawn(executable, ["--config", configPath, "--no-browser"], {
     cwd: state,
@@ -449,6 +491,8 @@ function helperPricesPath(stateRoot) {
 }
 
 module.exports = {
+  cpaOnPort,
+  endStaleCpa,
   helperPricesPath,
   prepare,
   refreshConfiguration,
