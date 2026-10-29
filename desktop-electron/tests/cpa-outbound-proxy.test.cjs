@@ -137,7 +137,7 @@ test("CPA config follows the selected authenticated global profile", () => {
 test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets the bare route", async (t) => {
   const { createProviderNetworkController } = require("../electron/provider-network.cjs");
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/global-env-proxy-"));
-  const saved = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"].map((name) => [name, process.env[name]]));
+  const saved = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"].map((name) => [name, process.env[name]]));
   t.after(() => {
     for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
     fs.rmSync(root, { recursive: true, force: true });
@@ -154,6 +154,14 @@ test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets
     endpoint: { protocol: "http", host: "proxy.example.test", port: 10000 },
     username: "account", password: "p@ss:word", scopes: ["all"] });
   controller.store.setGlobalRouting({ enabled: true, profileId: "decodo" });
+  // App start sets the variables before anything awaits, so programs main starts next inherit them.
+  controller.applyGlobalEnvironment();
+  assert.equal(new URL(process.env.HTTPS_PROXY).host, "proxy.example.test:10000");
+  assert.equal(applied.length, 0);
+  // Node programs follow the variables only with this set; loopback stays direct even when the
+  // profile's own bypass list leaves it out.
+  assert.equal(process.env.NODE_USE_ENV_PROXY, "1");
+  for (const host of ["localhost", "127.0.0.1", "::1"]) assert.ok(process.env.NO_PROXY.split(",").includes(host), host);
   await controller.applyGlobalRouting();
 
   // Without the sign-in every agent, curl and git call through this proxy was refused with 407.
@@ -168,4 +176,5 @@ test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets
   controller.store.setGlobalRouting({ enabled: false, profileId: null });
   await controller.applyGlobalRouting();
   assert.equal(process.env.HTTPS_PROXY, undefined);
+  assert.equal(process.env.NODE_USE_ENV_PROXY, undefined);
 });
