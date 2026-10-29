@@ -15,7 +15,7 @@ const FIRST_ACCOUNT_ID = "main";
 
 function createBrowserAccounts({ dataRoot, profile, logger }) {
   const statePath = path.join(dataRoot, "accounts.json");
-  const firstAccount = () => ({ id: FIRST_ACCOUNT_ID, label: "ChatGPT account 1", email: null });
+  const firstAccount = () => ({ id: FIRST_ACCOUNT_ID, label: "ChatGPT account 1", email: null, proxyProfileId: null });
   let state = { activeId: FIRST_ACCOUNT_ID, accounts: [firstAccount()] };
   try {
     const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
@@ -27,6 +27,7 @@ function createBrowserAccounts({ dataRoot, profile, logger }) {
         id: entry.id,
         label: typeof entry.label === "string" && entry.label.trim() ? entry.label.trim().slice(0, MAX_LABEL) : "ChatGPT account",
         email: typeof entry.email === "string" ? entry.email.slice(0, 200) : null,
+        proxyProfileId: typeof entry.proxyProfileId === "string" && entry.proxyProfileId ? entry.proxyProfileId.slice(0, 160) : null,
       }));
     if (accounts.length) {
       state = { accounts, activeId: accounts.some((entry) => entry.id === saved.activeId) ? saved.activeId : accounts[0].id };
@@ -57,7 +58,7 @@ function createBrowserAccounts({ dataRoot, profile, logger }) {
     status() {
       return {
         activeId: state.activeId,
-        accounts: state.accounts.map(({ id, label, email }) => ({ id, label, email })),
+        accounts: state.accounts.map(({ id, label, email, proxyProfileId }) => ({ id, label, email, proxyProfileId })),
         maxAccounts: MAX_ACCOUNTS,
       };
     },
@@ -70,7 +71,7 @@ function createBrowserAccounts({ dataRoot, profile, logger }) {
       let id;
       do id = randomBytes(9).toString("base64url").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12);
       while (!BROWSER_ACCOUNT_ID.test(id) || state.accounts.some((entry) => entry.id === id));
-      state.accounts.push({ id, label: `ChatGPT account ${state.accounts.length + 1}`, email: null });
+      state.accounts.push({ id, label: `ChatGPT account ${state.accounts.length + 1}`, email: null, proxyProfileId: null });
       save();
       return id;
     },
@@ -93,6 +94,22 @@ function createBrowserAccounts({ dataRoot, profile, logger }) {
       entry.email = next;
       save();
       return true;
+    },
+    /**
+     * Binds one proxy profile to an account (null: follow Global Routing). One proxy per account and
+     * one account per proxy, so two accounts never share an exit.
+     */
+    setProxy(id, profileId) {
+      const entry = account(id);
+      const next = typeof profileId === "string" && profileId ? profileId.slice(0, 160) : null;
+      const holder = next && state.accounts.find((other) => other.id !== id && other.proxyProfileId === next);
+      if (holder) throw new Error(`That proxy is already bound to ${holder.email ?? holder.label}`);
+      entry.proxyProfileId = next;
+      save();
+    },
+    /** The proxy profile bound to the account that owns this partition, or null. */
+    proxyForPartition(partition) {
+      return state.accounts.find((entry) => partitionOf(entry.id) === partition)?.proxyProfileId ?? null;
     },
     /** Forgets an account other than the active one; returns its partition for the caller to erase. */
     remove(id) {
