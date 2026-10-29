@@ -3466,6 +3466,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // memory for 30 days, it stayed in the menu and each try spent a full launch (65 s) to fail again;
   // a retry cannot fix it. The model is forgotten, so the menu drops it until CPA lists it again.
   const MODEL_RETIRED = /unknown provider for model ([^\s"'\\,;]+)/i;
+  // The provider refused the request itself (HTTP 400): the same request is refused again, so a
+  // retry only spends attempts. Seen 2026-10-29: "This Go model requires Global regions" was
+  // retried 8 times over half an hour in two chats (1,025 refused requests).
+  const REQUEST_REFUSED = /API Error: 400\b/i;
   function forgetRetiredModel(error) {
     const id = MODEL_RETIRED.exec(error)?.[1]?.replace(/\([^()]*\)$/, "");
     if (!id || !knownModels[id]) return null;
@@ -3505,6 +3509,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (QUOTA_EXHAUSTED.test(error)) return { detail: `The model's quota is used up${quotaResets(error)}. Choose another model, or retry once it resets.` };
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
     if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
+    if (REQUEST_REFUSED.test(error)) return { detail: "The provider refused this request (HTTP 400), so retrying won't fix it. Change the model or its settings, then retry." };
     const attempt = (node.history?.length ?? 0) + 1;
     if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried ${AUTO_RETRY_LIMIT} times. Check the saved answer, then retry.` };
     const key = `${mission.id}:${node.id}:${attempt}`;
@@ -3528,7 +3533,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
     const error = String(node?.receipt?.error || "");
-    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && !REQUEST_REFUSED.test(error)
+      && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
   }
   // A step that failed because the way out was down for a moment: the local proxy every CPA model
   // and the ChatGPT browser go through (seen live: ProxyBridge restarted, and for three minutes CPA

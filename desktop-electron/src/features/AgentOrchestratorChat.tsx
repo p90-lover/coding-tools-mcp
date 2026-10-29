@@ -2284,7 +2284,10 @@ export function AgentOrchestratorChat({
               canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
-            {latest && runOpen && stop && !accepts && !((steering || queueing) && canSend)
+            {/* A run waiting out an automatic retry (or an answer) takes a message, yet it is still open: with
+                nothing typed, Stop shows instead of a disabled Send. It showed only while a card ran, so a step
+                retrying for half an hour had no Stop between its attempts (2026-10-29). */}
+            {latest && runOpen && stop && (accepts ? !canSend && !sending : !((steering || queueing) && canSend))
               ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
               : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : queueing ? "Queue message" : "Send message"}
                 title={steering ? "Steer now (Enter)" : queueing ? "Queue for after this turn (Enter)" : "Send (Enter)"} disabled={!canSend}>

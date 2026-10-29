@@ -7777,6 +7777,50 @@ test("a model CPA has no provider for is not retried and leaves the picker, thou
     for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   }
 });
+test("a request the provider refuses (HTTP 400) is not retried automatically", async () => {
+  // 2026-10-29: "This Go model requires Global regions" came back on every attempt, and two chats
+  // spent all 8 attempts (half an hour, 1,025 refused requests) on it.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/opencode-go/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const controls = [];
+  let clock = 1_000_000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "opencode-go/test-model" }] }) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint === "/api/v1/ao/control") controls.push(body.action);
+      return { ok: true, run: mission };
+    },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt,
+      error: "API Error: 400 Upstream request failed: This Go model requires Global regions. Select Global in your settings." } };
+    let detail = "";
+    for (let tries = 0; tries < 100 && !/refused this request/.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, /The provider refused this request \(HTTP 400\), so retrying won't fix it/);
+    clock += 60_000;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.deepEqual(controls, [], "nothing is retried");
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+});
 test("\"Retry automatically\" also restarts a chat whose run ended on an error, within the attempt limit", async () => {
   // A launch that timed out threw out of the run before the failed step was looked at, so nothing
   // was left to retry it.
