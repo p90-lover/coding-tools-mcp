@@ -3933,7 +3933,11 @@ async function start() {
   // One BrowserHost per Browser-tab account: switching accounts replaces it (switchBrowserAccount).
   createBrowserHostForAccount = (accountId) => {
     let lastPublishedBrowserAuth = false;
-    const host = new BrowserHost({
+    // Declared before construction: the constructor already publishes its first state while it
+    // loads its view, and reading a `const host` there threw "Cannot access 'host' before
+    // initialization" on every start, failing that first load. A host not yet current is ignored.
+    let host = null;
+    host = new BrowserHost({
       window: mainWindow,
       descriptorPath: BROWSER_DESCRIPTOR_PATH,
       cdpPort,
@@ -3946,7 +3950,7 @@ async function start() {
       partition: browserAccounts.partitionOf(accountId),
       profile: LAUNCHER_PROFILE.kind,
       publishState: (state) => {
-        if (browserHost !== host) return;
+        if (!host || browserHost !== host) return;
         send("launcher:browser-state", state);
         const authenticated = state.authenticated === true;
         if (authenticated && !lastPublishedBrowserAuth) {
