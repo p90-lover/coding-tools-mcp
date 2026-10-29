@@ -447,13 +447,26 @@ const USAGE = {
 };
 
 // One of CPA's Auth Files cards: a header with the file's name, an optional Codex quota section, the
-// footer of actions.
-function authCard(name, { codex = false } = {}) {
+// footer of actions. `badge` adds the provider badge; `idle` the "Click here to refresh quota" button.
+// A plugin's runtime-only card (`runtime`) shows its name on the account line, not as a file name.
+function authCard(name, { codex = false, badge = null, idle = false, runtime = false } = {}) {
   const card = new FakeNode("article", "AuthFileCard-module__card___uGYSU AuthFileCard-module__cardEnter___sxjp9");
   const head = new FakeNode("header", "AuthFileCard-module__head___v8x8N");
-  head.text = name;
+  const file = new FakeNode("span", runtime ? "AuthFileCard-module__account___Rff3G AuthFileCard-module__accountMono___j0kio" : "AuthFileCard-module__fileName___4SoBR");
+  file.text = name;
+  const badgeNode = badge === null ? null : new FakeNode("span", "AuthFileCard-module__providerBadge___6gvmI");
+  if (badgeNode) badgeNode.text = badge;
+  head.append(...[badgeNode, file].filter(Boolean));
   const footer = new FakeNode("footer", "AuthFileCard-module__actions___Ab12c");
   card.append(head);
+  let button = null;
+  if (idle) {
+    const section = new FakeNode("div", "AuthFileQuota-module__quotaSection___B1NkU");
+    button = new FakeNode("button", "AuthFileQuota-module__quotaMessage___cvzkK AuthFileQuota-module__quotaMessageAction___B2326");
+    button.text = "Click here to refresh quota";
+    section.append(button);
+    card.append(section);
+  }
   let plan = null;
   if (codex) {
     const section = new FakeNode("div", "AuthFileQuota-module__quotaSection___B1NkU");
@@ -463,8 +476,58 @@ function authCard(name, { codex = false } = {}) {
     card.append(section);
   }
   card.append(footer);
-  return { card, footer, plan };
+  return { card, footer, plan, badge: badgeNode, button };
 }
+
+test("a Provider Manager card names OpenCode and shows its windows; idle cards load one per tick", async () => {
+  const state = { providers: [
+    { id: "opencode-go", kind: "opencode-go", enabled: true, quota: { windows: {
+      rolling: { percent: 30, resetsAt: "2026-10-24T09:00:00Z", status: "ok" },
+      weekly: { percent: 75, resetsAt: "2026-10-27T08:00:00Z", status: "ok" },
+    } } },
+    { id: "compat", kind: "openai", enabled: true },
+  ] };
+  const routes = {
+    "/v0/management/cpa-provider-manager/api/state": () => state,
+    "/v0/management/auth-files": () => ({ files: [] }),
+  };
+  const q = quotaPage({ hash: "#/auth-files", usage: { accounts: [] }, routes });
+  const go = authCard("cpa-provider-manager-opencode-go", { badge: "Provider-manager", runtime: true });
+  const compat = authCard("cpa-provider-manager-compat", { badge: "Provider-manager", runtime: true });
+  const first = authCard("antigravity-a@example.com", { idle: true });
+  const second = authCard("antigravity-b@example.com", { idle: true });
+  q.page.append(go.card, compat.card, first.card, second.card);
+  q.run();
+  for (let i = 0; i < 6; i++) await q.settle();
+  q.tick();
+
+  assert.equal(go.badge.textContent, "OpenCode", "the badge names the upstream's provider");
+  assert.equal(compat.badge.textContent, "Provider-manager", "an upstream with no own badge keeps CPA's");
+  const block = go.footer.parentElement.children.at(-2);
+  assert.equal(block.dataset.codingTools, "provider-quota-opencode-go");
+  assert.match(block.textContent, /5-hour[\s\S]*70% left · resets in 1h 0m[\s\S]*Weekly[\s\S]*25% left/);
+  assert.equal(compat.card.children.at(-2).tag, "header", "no quota block without windows");
+
+  assert.deepEqual([first.button.clicks, second.button.clicks], [1, 1], "one idle card pressed per tick");
+  q.tick();
+  assert.deepEqual([first.button.clicks, second.button.clicks], [1, 1], "each card once per refresh period");
+
+  // The pressed cards ask CPA as the quota page does, and get the saved answer while it is fresh.
+  q.ask("ag-1");
+  q.answer(0, 200, { models: {} });
+  const saved = q.ask("ag-1");
+  assert.equal(q.network.length, 1, "the second ask is answered from the saved one");
+  assert.equal(saved.body.status_code, 200);
+
+  // A failed quota read keeps the last good windows on screen.
+  state.providers[0].quota = { error: "usage answered HTTP 500" };
+  q.clock.now += 2 * 60e3 + 1;
+  q.tick();
+  for (let i = 0; i < 6; i++) await q.settle();
+  q.tick();
+  assert.match(go.card.children.at(-2).textContent, /70% left/);
+  assert.deepEqual([first.button.clicks, second.button.clicks], [2, 2], "pressed again after the refresh period, one per tick");
+});
 
 test("Auth Files cards get the Cline Pass windows and each Codex account's credit balance", async () => {
   const calls = [];

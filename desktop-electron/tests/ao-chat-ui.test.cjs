@@ -382,6 +382,35 @@ test("an answer's Markdown is parsed once per text, not on every chat re-render"
   assert.equal(parses, 1);
 });
 
+test("an approval card that arrives while the window is hidden takes focus only once it is shown", () => {
+  const { focusWhenShown } = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  const page = (visibilityState) => {
+    const listeners = new Set();
+    return { visibilityState, listeners, addEventListener: (_type, fn) => listeners.add(fn), removeEventListener: (_type, fn) => listeners.delete(fn),
+      show(state = "visible") { this.visibilityState = state; for (const fn of [...listeners]) fn(); } };
+  };
+  let focused = 0;
+  focusWhenShown(page("visible"), () => focused++);
+  assert.equal(focused, 1, "a shown window focuses at once");
+
+  focused = 0;
+  const hidden = page("hidden");
+  focusWhenShown(hidden, () => focused++);
+  assert.equal(focused, 0, "no restyle of a page nobody sees");
+  hidden.show("hidden");
+  assert.equal(focused, 0);
+  hidden.show();
+  hidden.show();
+  assert.equal(focused, 1, "focused once when shown");
+  assert.equal(hidden.listeners.size, 0);
+
+  const gone = page("hidden");
+  const cleanup = focusWhenShown(gone, () => focused++);
+  cleanup();
+  gone.show();
+  assert.equal(focused, 1, "a card answered or removed while hidden never takes focus");
+});
+
 test("an AO agent's question and tool request show as Codex's cards: numbered options; a tool request's answer is one click", () => {
   const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
   const question = { nodeId: "one", approval_id: "ask", source: "ao", kind: "question", message: "Please answer the following questions.",

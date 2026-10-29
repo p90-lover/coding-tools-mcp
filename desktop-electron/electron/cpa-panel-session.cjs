@@ -259,6 +259,9 @@ function autoReviewSignInScript(marker) {
  *   kept the same way.
  * - On the Auth Files page (#/auth-files) it puts the same Cline Pass windows inside the switcher's
  *   card, and each Codex account's credit balance on its card's plan line, paced and kept likewise.
+ *   A Provider Manager upstream's card names its own provider (OpenCode, not "Provider-manager")
+ *   and shows an OpenCode Go key's 5-hour, weekly and monthly windows. Cards that wait at "Click
+ *   here to refresh quota" (Antigravity, Claude, ...) are pressed, one per tick.
  * "running" when the page already has it, "unseeded" before the panel session is seeded.
  */
 function quotaPageScript(marker) {
@@ -271,7 +274,7 @@ function quotaPageScript(marker) {
     const LIMITED = 'coding-tools-quota-limited';
     const SAVED = 'coding-tools-quota-saved';
     const CLINE_SAVED = 'coding-tools-quota-cline';
-    const LABELS = { five_hour: '5-hour', weekly: 'Weekly', monthly: 'Monthly' };
+    const LABELS = { five_hour: '5-hour', rolling: '5-hour', weekly: 'Weekly', monthly: 'Monthly' };
     const MONO = 'ui-monospace,SF Mono,Cascadia Mono,JetBrains Mono,Menlo,Consolas,monospace';
     const read = (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } };
     const write = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} };
@@ -420,6 +423,53 @@ function quotaPageScript(marker) {
         creditsTriedAt = Date.now();
       }
     }
+    // Provider Manager (the user's own CPA plugin) puts each API-key upstream in CPA as an auth file
+    // named cpa-provider-manager-<id>, under the plugin's one provider key, so the card read
+    // "Provider-manager" and had no quota. The plugin's state names each upstream's kind and, for an
+    // OpenCode Go key, its 5-hour ("rolling"), weekly and monthly windows (percent used).
+    const PROVIDERS_SAVED = 'coding-tools-quota-provider-manager';
+    const PROVIDER_BADGES = { 'opencode-go': 'OpenCode' };
+    const PROVIDER_WINDOWS = ['rolling', 'weekly', 'monthly'];
+    let providers = read(PROVIDERS_SAVED) || {};
+    let providersTriedAt = Math.max(0, ...Object.values(providers).map((entry) => Number(entry?.at) || 0));
+    let providersLoading = false;
+    async function loadProviders() {
+      if (providersLoading) return;
+      providersLoading = true;
+      try {
+        const response = await fetch('/v0/management/cpa-provider-manager/api/state', { headers: authorized(), cache: 'no-store' });
+        if (response.status === 429) noteLimited();
+        // Not installed (404) or CPA restarting: keep what is shown.
+        if (!response.ok) return;
+        const next = {};
+        for (const upstream of (await response.json())?.providers || []) {
+          if (!upstream?.id || !upstream.enabled) continue;
+          const windows = upstream.quota?.windows && Object.keys(upstream.quota.windows).length ? upstream.quota.windows : null;
+          const error = upstream.quota?.error || '';
+          if (/\\b429\\b/.test(error)) noteLimited();
+          const kept = providers[upstream.id];
+          // A failed quota read keeps the last good windows on screen.
+          next[upstream.id] = windows ? { at: Date.now(), kind: upstream.kind, windows }
+            : kept?.windows ? { ...kept, kind: upstream.kind }
+            : { at: Date.now(), kind: upstream.kind, error };
+        }
+        providers = next;
+        write(PROVIDERS_SAVED, providers);
+      } catch {
+        // offline or CPA restarting: keep what is shown
+      } finally {
+        providersLoading = false;
+        providersTriedAt = Date.now();
+      }
+    }
+    const providerLimits = (windows) => PROVIDER_WINDOWS.filter((type) => windows[type]).map((type) => {
+      const used = Number(windows[type].percent);
+      return { type, percentUsed: Number.isFinite(used) ? used : null, resetsAt: windows[type].resetsAt || null };
+    });
+    // A card's auth file name: OAuth cards show it as the file name, a plugin's runtime-only card
+    // (Cline, Provider Manager) as the account line.
+    const cardFile = (card) => String((card.querySelector('[class*="AuthFileCard-module__fileName"]')
+      || card.querySelector('[class*="AuthFileCard-module__account"]'))?.textContent || '').trim().replace(/[.]json$/, '');
     // The page's CSS-module class for one of AuthFileQuota's names (hashed per build), or '' when no
     // card on the page has one yet.
     function quotaClass(name) {
@@ -448,27 +498,49 @@ function quotaPageScript(marker) {
       row.append(head, bar);
       return row;
     }
-    let clineBlock = null;
-    let clineBlockFor = '';
-    function clineAuthBlock() {
-      const accounts = (usage && Array.isArray(usage.accounts) ? usage.accounts : []).filter((account) => account.enabled);
-      if (!accounts.length) return null;
-      const stamp = usageAt + ':' + Math.floor(Date.now() / 60e3) + ':' + Boolean(quotaClass('quotaRow'));
-      if (clineBlock && clineBlockFor === stamp) return clineBlock;
+    // One block of window rows per card (key), built again only when its reading changes or a
+    // minute passes (the "resets in" text), so the tick puts the same node back after a re-render.
+    const blocks = new Map();
+    function windowsBlock(key, entries, at) {
+      const stamp = at + ':' + Math.floor(Date.now() / 60e3) + ':' + Boolean(quotaClass('quotaRow'));
+      const held = blocks.get(key);
+      if (held && held.stamp === stamp) return held.node;
       const section = el('div', quotaClass('quotaSection') ? '' : 'display:flex;flex-direction:column;gap:10px;margin:0 16px 12px');
       section.className = quotaClass('quotaSection');
-      section.dataset.codingTools = 'cline-auth-quota';
-      for (const account of accounts) {
-        if (accounts.length > 1) section.append(el('div', 'color:var(--text-primary);font-size:12px;font-weight:600', account.name));
-        if (account.error) section.append(el('div', 'color:var(--viz-failure);font-size:11.5px', account.error));
-        else if (!account.limits.length) section.append(el('div', 'color:var(--text-tertiary);font-size:11.5px', 'No usage windows on this key'));
-        else section.append(...account.limits.map(quotaRow));
+      section.dataset.codingTools = key;
+      for (const entry of entries) {
+        if (entries.length > 1) section.append(el('div', 'color:var(--text-primary);font-size:12px;font-weight:600', entry.name));
+        if (entry.error) section.append(el('div', 'color:var(--viz-failure);font-size:11.5px', entry.error));
+        else if (!entry.limits.length) section.append(el('div', 'color:var(--text-tertiary);font-size:11.5px', 'No usage windows on this key'));
+        else section.append(...entry.limits.map(quotaRow));
       }
-      section.append(el('div', 'color:var(--text-tertiary);font-size:11px', ago(usageAt)));
-      clineBlock?.remove();
-      clineBlock = section;
-      clineBlockFor = stamp;
+      section.append(el('div', 'color:var(--text-tertiary);font-size:11px', ago(at)));
+      held?.node.remove();
+      blocks.set(key, { stamp, node: section });
       return section;
+    }
+    function clineAuthBlock() {
+      const accounts = (usage && Array.isArray(usage.accounts) ? usage.accounts : []).filter((account) => account.enabled);
+      return accounts.length ? windowsBlock('cline-auth-quota', accounts, usageAt) : null;
+    }
+    // Puts a block just above the card's actions, where CPA's own quota sits.
+    function placeBlock(card, block) {
+      const footer = card.querySelector('footer');
+      if (block.parentElement !== card || block.nextElementSibling !== footer) card.insertBefore(block, footer);
+    }
+    // CPA leaves Antigravity, Claude and other cards at "Click here to refresh quota" until each is
+    // pressed. Each tick presses one idle card, each card at most once per refresh period; the
+    // request hook answers from the saved answers while they are fresh.
+    const pressedAt = new Map();
+    function pressIdleQuota(cards) {
+      for (const card of cards) {
+        const button = card.querySelector('[class*="AuthFileQuota-module__quotaMessageAction"]');
+        const name = button && !button.disabled && cardFile(card);
+        if (!name || Date.now() - (pressedAt.get(name) || 0) < refreshEvery()) continue;
+        pressedAt.set(name, Date.now());
+        button.click();
+        return;
+      }
     }
     function creditsItem(entry) {
       const item = el('span');
@@ -489,10 +561,17 @@ function quotaPageScript(marker) {
       const cards = [...document.querySelectorAll('article[class*="AuthFileCard-module__card"]')];
       const clineCard = cards.find((card) => (card.textContent || '').includes('cline-pass-switcher'));
       const block = clineCard && clineAuthBlock();
-      if (block) {
-        const footer = clineCard.querySelector('footer');
-        if (block.parentElement !== clineCard || block.nextElementSibling !== footer) clineCard.insertBefore(block, footer);
+      if (block) placeBlock(clineCard, block);
+      for (const [id, entry] of Object.entries(providers)) {
+        const card = cards.find((candidate) => cardFile(candidate) === 'cpa-provider-manager-' + id);
+        if (!card) continue;
+        const badge = card.querySelector('[class*="AuthFileCard-module__providerBadge"]');
+        const label = PROVIDER_BADGES[entry.kind];
+        if (badge && label && badge.textContent !== label) badge.textContent = label;
+        if (!entry.windows && !entry.error) continue;
+        placeBlock(card, windowsBlock('provider-quota-' + id, [{ error: entry.windows ? '' : entry.error, limits: entry.windows ? providerLimits(entry.windows) : [] }], entry.at));
       }
+      pressIdleQuota(cards);
       for (const entry of Object.values(credits)) {
         const card = entry?.name && cards.find((candidate) => (candidate.textContent || '').includes(entry.name));
         const plan = card?.querySelector('[class*="AuthFileQuota-module__codexPlan___"]');
@@ -510,7 +589,7 @@ function quotaPageScript(marker) {
     const NativeXhr = window.XMLHttpRequest;
     const savedAnswers = () => read(SAVED) || {};
     const answerKey = (request, body) => {
-      if (!onQuotaPage() || request.method.toUpperCase() !== 'POST' || !/\\/v0\\/management\\/api-call$/.test(request.url.split('?')[0])) return null;
+      if (!(onQuotaPage() || onAuthFiles()) || request.method.toUpperCase() !== 'POST' || !/\\/v0\\/management\\/api-call$/.test(request.url.split('?')[0])) return null;
       let call;
       try { call = JSON.parse(body); } catch { return null; }
       if (!call?.url || /consume/i.test(call.url)) return null;
@@ -572,6 +651,7 @@ function quotaPageScript(marker) {
       if (onAuthFiles() && shown()) {
         if (Date.now() - usageTriedAt > refreshEvery()) loadUsage(false);
         if (Date.now() - creditsTriedAt > refreshEvery()) loadCredits();
+        if (Date.now() - providersTriedAt > refreshEvery()) loadProviders();
         decorateAuthFiles();
       }
       if (!onQuotaPage()) { refreshedThisVisit = false; place(); return; }
@@ -596,7 +676,10 @@ function quotaPageScript(marker) {
     // The user's own press: it goes to the network, the clock restarts and the Cline card skips the
     // switcher's cache. Capture phase, so this runs before the page sends its requests.
     document.addEventListener('click', (event) => {
-      if (!event.isTrusted || !event.target?.closest?.('[class*="QuotaHeader-module__primaryAction"]')) return;
+      if (!event.isTrusted) return;
+      // A card's own "Click here to refresh quota", pressed by the user, also skips the saved answer.
+      if (event.target?.closest?.('[class*="AuthFileQuota-module__quotaMessageAction"]')) networkUntil = Date.now() + 30e3;
+      if (!event.target?.closest?.('[class*="QuotaHeader-module__primaryAction"]')) return;
       toNetwork();
       loadUsage(true);
     }, true);

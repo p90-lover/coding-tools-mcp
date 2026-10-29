@@ -188,9 +188,13 @@ function assertJsonValue(value, code, path = "$", ancestors = new Set(), depth =
 /**
  * The UTF-8 length of `text`, as Buffer.byteLength counts it (a lone surrogate is 3 bytes). In the
  * sandboxed preload Buffer is a JavaScript polyfill that first builds an array of every byte, which
- * cost hundreds of milliseconds per large response; this only counts.
+ * cost hundreds of milliseconds per large response; this only counts. Where the native TextEncoder
+ * exists (the renderer, Node) it counts instead: the counting loop still cost ~110 ms per 30 s of a
+ * busy chat. Its count equals the loop's for JSON.stringify output, which has no lone surrogates.
  */
+const textEncoder = typeof TextEncoder === "function" ? new TextEncoder() : null;
 function utf8Length(text) {
+  if (textEncoder) return textEncoder.encode(text).length;
   let bytes = 0;
   for (let index = 0; index < text.length; index += 1) {
     const unit = text.charCodeAt(index);
@@ -227,6 +231,12 @@ function assertSerializedSize(value, limit, sizeCode, valueCode, { validated = f
   if (bytes > limit) throw codedError(sizeCode, `${bytes} bytes exceeds ${limit}`);
 }
 
+/**
+ * Checks a snapshot against its contract. `value` is always a snapshotJsonValue snapshot, already
+ * checked as plain JSON within the depth and size caps, so fields the schema leaves free are not
+ * walked again: that second walk of every response cost ~150 ms per 30 s of a busy chat (profiled
+ * on 0.8.34).
+ */
 function assertSchema(value, schema, code, path = "$") {
   if (schema.nullable === true && value === null) return;
   if (schema.enum && !schema.enum.includes(value)) {
@@ -245,8 +255,6 @@ function assertSchema(value, schema, code, path = "$") {
           assertSchema(item, properties[key], code, `${path}.${key}`);
         } else if (schema.additionalProperties === false) {
           throw codedError(code, `${path}.${key} is not allowed`);
-        } else {
-          assertJsonValue(item, code, `${path}.${key}`);
         }
       }
       return;
