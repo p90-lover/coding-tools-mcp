@@ -17,6 +17,15 @@ const MAX_TABS_PER_ACCOUNT = 5;
 const DEFAULT_SETTINGS = Object.freeze({ newSessions: "active", keepFinishedTabsMinutes: 10 });
 const KEEP_FINISHED_TABS_MINUTES = [5, 10, 20, 30, 60];
 const MAX_ERROR = 300;
+// ChatGPT's sign-in: NextAuth's session token, split into .0/.1, kept 90 days from the last visit.
+const CHATGPT_SESSION_COOKIE = "__Secure-next-auth.session-token";
+
+/** Whether an account's chatgpt.com cookies (Electron's cookies.get) hold an unexpired sign-in. */
+function signedInFromCookies(cookies, nowSeconds = Date.now() / 1000) {
+  return (Array.isArray(cookies) ? cookies : []).some((cookie) => typeof cookie?.name === "string"
+    && (cookie.name === CHATGPT_SESSION_COOKIE || cookie.name.startsWith(`${CHATGPT_SESSION_COOKIE}.`))
+    && (cookie.session === true || !cookie.expirationDate || cookie.expirationDate > nowSeconds));
+}
 
 const clampTabs = (value) => (Number.isInteger(value) && value >= 1 && value <= MAX_TABS_PER_ACCOUNT ? value : MAX_TABS_PER_ACCOUNT);
 const timestamp = (value) => (Number.isFinite(value) && value > 0 ? value : null);
@@ -231,4 +240,6 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
   };
 }
 
-module.exports = { createBrowserAccounts, FIRST_ACCOUNT_ID, MAX_ACCOUNTS, MAX_TABS_PER_ACCOUNT, KEEP_FINISHED_TABS_MINUTES };
+module.exports = {
+  createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID, MAX_ACCOUNTS, MAX_TABS_PER_ACCOUNT, KEEP_FINISHED_TABS_MINUTES,
+};

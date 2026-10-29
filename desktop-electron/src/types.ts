@@ -780,6 +780,8 @@ export interface BrowserAccount extends GptBrowserAccount {
   plan: { solAvailable: boolean; proAvailable: boolean; checkedAt: number | null } | null;
   /** What its Codex turns showed about its ChatGPT connector. */
   connector: { okAt: number | null; error: string | null; errorAt: number | null } | null;
+  /** Its own partition holds a ChatGPT sign-in (read locally); null until first read. */
+  signedIn: boolean | null;
 }
 
 export interface BrowserAccountsSettings {

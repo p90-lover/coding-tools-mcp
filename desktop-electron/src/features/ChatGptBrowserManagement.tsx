@@ -137,7 +137,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
       </header>
 
       <div className="cbm-stats" role="list" aria-label="Overview">
-        <Stat label="Accounts" value={accounts.accounts.length} detail={`${accounts.accounts.filter(a => a.email).length} signed in`} />
+        <Stat label="Accounts" value={accounts.accounts.length} detail={`${accounts.accounts.filter(a => (a.id === activeId ? browser?.authenticated === true : a.signedIn)).length} signed in`} />
         <Stat label="Tabs open" value={pages.length} detail={`of ${TOTAL_TAB_CEILING} · ${running} running`} />
         <Stat label="Codex sessions" value={threads.length} detail={`${threads.filter(t => t.running).length} running · ${CONCURRENT_TURNS} turns at once`} />
         <Stat
@@ -224,9 +224,12 @@ function AccountCard({
   const runningTabs = tabs.filter(tab => tab.status === "running").length;
   const plan = planText(account.plan);
   const connector = connectorText(account.connector);
-  const signIn = inUse
-    ? (authenticated ? { tone: "ok", label: "Signed in" } : { tone: "warn", label: "Not signed in" })
-    : account.email ? { tone: "idle", label: "Signed in" } : { tone: "warn", label: "Not signed in yet" };
+  // Every account keeps its own sign-in: the one in use from its live page, the others from their
+  // own saved session (null until read).
+  const signedIn = inUse ? authenticated : account.signedIn;
+  const signIn = signedIn === null
+    ? { tone: "idle", label: "Checking…" }
+    : signedIn ? { tone: inUse ? "ok" : "idle", label: "Signed in" } : { tone: "warn", label: "Not signed in" };
   const fill = Math.min(100, Math.round((tabs.length / account.maxTabs) * 100));
 
   const remove = () => {
@@ -244,7 +247,7 @@ function AccountCard({
   return (
     <article className={`cbm-card${inUse ? " is-active" : ""}`} aria-label={accountName(account)}>
       <header className="cbm-card-head">
-        <i className={`cbm-dot${inUse ? (authenticated ? " is-on" : " is-warn") : ""}`} aria-hidden />
+        <i className={`cbm-dot${signedIn === null ? "" : signedIn ? " is-on" : " is-warn"}`} aria-hidden />
         <div className="cbm-card-title">
           <strong title={account.label}>{accountName(account)}</strong>
           {account.email ? <span className="cbm-muted">{account.label}</span> : null}

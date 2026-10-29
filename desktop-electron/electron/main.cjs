@@ -31,7 +31,7 @@ const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cj
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
-const { createBrowserAccounts, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
+const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createRegisterHost } = require("./register-host.cjs");
@@ -826,7 +826,51 @@ function browserAccountConversationFile(accountId) {
 }
 
 function browserAccountsStatus() {
-  return { ...browserAccounts.status(), switching: browserAccountSwitch !== null };
+  const status = browserAccounts.status();
+  return {
+    ...status,
+    accounts: status.accounts.map((entry) => ({ ...entry, signedIn: browserAccountSignIns.get(entry.id) ?? null })),
+    switching: browserAccountSwitch !== null,
+  };
+}
+
+// Whether each account is signed in, from its own partition's ChatGPT session cookie
+// (browser-accounts.cjs signedInFromCookies). Read locally: accounts not in use, and their proxies,
+// are never contacted, and every account in the list shows its own sign-in, not only the one in use.
+const browserAccountSignIns = new Map(); // account id -> true | false
+let browserAccountSignInRefresh = null;
+let browserAccountSignInAgain = false; // a change arrived during a read: read once more after it
+
+async function readBrowserAccountSignIn(partition) {
+  return signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
+}
+
+function refreshBrowserAccountSignIns(logger) {
+  if (browserAccountSignInRefresh) {
+    browserAccountSignInAgain = true;
+    return browserAccountSignInRefresh;
+  }
+  browserAccountSignInRefresh = (async () => {
+    do {
+      browserAccountSignInAgain = false;
+      let changed = false;
+      const ids = browserAccounts.status().accounts.map((entry) => entry.id);
+      for (const id of ids) {
+        let signedIn;
+        try { signedIn = await readBrowserAccountSignIn(browserAccounts.partitionOf(id)); }
+        catch (error) {
+          logger?.warn?.("browser_accounts.sign_in_unreadable", { message: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
+        if (browserAccountSignIns.get(id) !== signedIn) { browserAccountSignIns.set(id, signedIn); changed = true; }
+      }
+      for (const id of [...browserAccountSignIns.keys()]) {
+        if (!ids.includes(id)) { browserAccountSignIns.delete(id); changed = true; }
+      }
+      if (changed) publishBrowserAccounts();
+    } while (browserAccountSignInAgain);
+  })().finally(() => { browserAccountSignInRefresh = null; });
+  return browserAccountSignInRefresh;
 }
 
 const browserAccountExists = (accountId) => browserAccounts.has(accountId);
@@ -1054,6 +1098,8 @@ async function switchBrowserAccount(accountId, { logger, stateStore }) {
   } finally {
     browserAccountSwitch = null;
     publishBrowserAccounts();
+    // The account left keeps its sign-in in its partition; the list shows it for every account.
+    void refreshBrowserAccountSignIns(logger);
   }
   return browserAccountsStatus();
 }
@@ -1149,6 +1195,7 @@ async function removeBrowserAccount(accountId, context) {
   await removed.clearCache().catch(() => {});
   fs.rmSync(browserAccountConversationFile(accountId), { force: true });
   publishBrowserAccounts();
+  void refreshBrowserAccountSignIns(context.logger);
   return browserAccountsStatus();
 }
 
@@ -2295,7 +2342,11 @@ function registerIpc({ logger, stateStore }) {
     return browserHost.createUserTab();
   });
   // Browser-tab accounts. Every change needs the focused main window; status is read-only.
-  handle("launcher:browser-accounts", () => browserAccountsStatus());
+  handle("launcher:browser-accounts", () => {
+    // Opening the accounts list reads each account's sign-in again; a change is published.
+    void refreshBrowserAccountSignIns(logger);
+    return browserAccountsStatus();
+  });
   handle("launcher:browser-account-add", (event) => {
     assertFocusedMainWindow(event, true);
     return addBrowserAccount({ logger, stateStore });
@@ -4172,6 +4223,7 @@ async function start() {
           }
           queueMicrotask(() => onBrowserAccountSignedIn(accountId, host, { logger, stateStore }));
         }
+        if (authenticated !== lastPublishedBrowserAuth) void refreshBrowserAccountSignIns(logger);
         lastPublishedBrowserAuth = authenticated;
       },
       showWindow: showMainWindow,
@@ -4198,6 +4250,7 @@ async function start() {
   setProviderBrowserProxyBinding((partition) => browserAccounts.proxyForPartition(partition));
   await routeBrowserAccountPartition(browserAccounts.activePartition(), logger);
   browserHost = createBrowserHostForAccount(browserAccounts.activeId());
+  void refreshBrowserAccountSignIns(logger);
   setProviderBrowserHost(() => browserHost);
   registerIpc({ logger, stateStore });
   const trayAvailable = createTray(logger, stateStore.read().language);
