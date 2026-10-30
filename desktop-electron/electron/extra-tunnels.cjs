@@ -328,6 +328,16 @@ class ExtraTunnels {
     this.onChange(this.status());
   }
 
+  /** A removed ChatGPT account's tunnels stay, unassigned, so a new account can take them. */
+  forgetAccount(accountId) {
+    const entries = this.entries();
+    const owned = entries.filter(entry => entry.accountId === accountId).length;
+    if (!owned) return 0;
+    this.writeEntries(entries.map(entry => (entry.accountId === accountId ? { ...entry, accountId: null } : entry)));
+    this.onChange(this.status());
+    return owned;
+  }
+
   /** Leaves the tunnels running for the next launcher (keep-bridge quit or update). */
   detach() {
     this.config = null;

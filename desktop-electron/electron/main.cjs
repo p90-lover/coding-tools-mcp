@@ -34,6 +34,7 @@ const { createConversationActions } = require("./chatgpt-conversation-actions.cj
 const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
+const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createRegisterHost } = require("./register-host.cjs");
@@ -167,13 +168,11 @@ app.on("session-created", (created) => created.setCertificateVerifyProc(caDistru
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
-// Browser-tab accounts: the store, the BrowserHost factory startup installs, an in-flight switch,
-// the account whose sign-in should refresh the bridge's plan, and the renderer's last layout for
-// the host a switch creates.
+// Browser-tab accounts: the store, the BrowserHost factory startup installs, and the renderer's
+// last layout for the host a switch creates. The account flows (add, switch, remove, sign-ins) are
+// browser-account-service.cjs, created below once everything it reads is declared.
 const browserAccounts = createBrowserAccounts({ dataRoot: path.join(CORE_HOME, "browser-accounts"), profile: LAUNCHER_PROFILE.kind });
 let createBrowserHostForAccount = null;
-let browserAccountSwitch = null;
-let bridgeAccountRefreshPending = null;
 let lastBrowserBounds = null;
 // Codex threads bound to ChatGPT accounts (codex-thread-accounts.cjs), each account's saved-chat
 // registry (shared by every BrowserHost: a thread's tab may run on an account the Browser tab does
@@ -193,6 +192,35 @@ let runtimeHost = null;
 let headlessHost = null;
 let browserControl = null;
 let runtimeSupervisor = null;
+const browserAccountService = createBrowserAccountService({
+  registry: browserAccounts,
+  publish: (status) => send("launcher:browser-accounts-changed", status),
+  host: () => browserHost,
+  setHost: (host) => { browserHost = host; },
+  hostFactory: () => createBrowserHostForAccount,
+  routePartition: (partition, logger) => routeBrowserAccountPartition(partition, logger),
+  readSignIn: async (partition) => signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" })),
+  erasePartition: async (partition) => {
+    const removed = session.fromPartition(partition);
+    const results = await Promise.allSettled([removed.clearStorageData(), removed.clearCache()]);
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+  },
+  forgetAccountData: (accountId) => {
+    accountLifecycleSyncs.delete(accountId);
+    fs.rmSync(browserAccountConversationFile(accountId), { force: true });
+    runtimeSupervisor?.extraTunnels?.forgetAccount?.(accountId);
+  },
+  threads: () => threadAccounts,
+  placeHost: (next) => {
+    if (lastBrowserBounds) next.setBounds(lastBrowserBounds.rect, lastBrowserBounds.zoom);
+    next.setSurfaceActive(lastBrowserSurfaceActive);
+  },
+  afterSwitch: async (next, { wasVisible, stateStore }) => {
+    if (wasVisible) await next.reveal(stateStore.read().browserInteractionMode === "automatic");
+    send("launcher:browser-state", next.snapshot());
+  },
+});
 let tray = null;
 let quitting = false;
 let shutdownInProgress = false;
@@ -830,53 +858,9 @@ function browserAccountConversationFile(accountId) {
     : `codex-chatgpt-conversations-${accountId}.json`);
 }
 
-function browserAccountsStatus() {
-  const status = browserAccounts.status();
-  return {
-    ...status,
-    accounts: status.accounts.map((entry) => ({ ...entry, signedIn: browserAccountSignIns.get(entry.id) ?? null })),
-    switching: browserAccountSwitch !== null,
-  };
-}
-
-// Whether each account is signed in, from its own partition's ChatGPT session cookie
-// (browser-accounts.cjs signedInFromCookies). Read locally: accounts not in use, and their proxies,
-// are never contacted, and every account in the list shows its own sign-in, not only the one in use.
-const browserAccountSignIns = new Map(); // account id -> true | false
-let browserAccountSignInRefresh = null;
-let browserAccountSignInAgain = false; // a change arrived during a read: read once more after it
-
-async function readBrowserAccountSignIn(partition) {
-  return signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
-}
-
-function refreshBrowserAccountSignIns(logger) {
-  if (browserAccountSignInRefresh) {
-    browserAccountSignInAgain = true;
-    return browserAccountSignInRefresh;
-  }
-  browserAccountSignInRefresh = (async () => {
-    do {
-      browserAccountSignInAgain = false;
-      let changed = false;
-      const ids = browserAccounts.status().accounts.map((entry) => entry.id);
-      for (const id of ids) {
-        let signedIn;
-        try { signedIn = await readBrowserAccountSignIn(browserAccounts.partitionOf(id)); }
-        catch (error) {
-          logger?.warn?.("browser_accounts.sign_in_unreadable", { message: error instanceof Error ? error.message : String(error) });
-          continue;
-        }
-        if (browserAccountSignIns.get(id) !== signedIn) { browserAccountSignIns.set(id, signedIn); changed = true; }
-      }
-      for (const id of [...browserAccountSignIns.keys()]) {
-        if (!ids.includes(id)) { browserAccountSignIns.delete(id); changed = true; }
-      }
-      if (changed) publishBrowserAccounts();
-    } while (browserAccountSignInAgain);
-  })().finally(() => { browserAccountSignInRefresh = null; });
-  return browserAccountSignInRefresh;
-}
+// The account flows themselves are browser-account-service.cjs; these names stay for main's callers.
+const browserAccountsStatus = () => browserAccountService.status();
+const refreshBrowserAccountSignIns = (logger) => browserAccountService.refreshSignIns(logger);
 
 const browserAccountExists = (accountId) => browserAccounts.has(accountId);
 
@@ -1012,7 +996,7 @@ async function codexThreadAction(input, logger) {
 }
 
 function publishBrowserAccounts() {
-  send("launcher:browser-accounts-changed", browserAccountsStatus());
+  browserAccountService.publish();
 }
 
 async function readChatGptAccountEmail(partition) {
@@ -1037,8 +1021,7 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   } catch (error) {
     logger.warn("browser_accounts.email_failed", { message: error instanceof Error ? error.message : String(error) });
   }
-  if (bridgeAccountRefreshPending !== accountId || browserHost !== host) return;
-  bridgeAccountRefreshPending = null;
+  if (browserHost !== host || !browserAccountService.takeBridgeRefresh(accountId)) return;
   const setupState = stateStore.read();
   if (IS_DEV_PROFILE || !runtimeHost || quitting || shutdownInProgress
     || setupState.coreSetupComplete !== true || setupState.browserInteractionMode !== "automatic") return;
@@ -1055,58 +1038,8 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   }
 }
 
-async function switchBrowserAccount(accountId, { logger, stateStore }) {
-  const partition = browserAccounts.partitionOf(accountId);
-  if (accountId === browserAccounts.activeId()) return browserAccountsStatus();
-  if (browserAccountSwitch) throw new Error("Another account switch is in progress");
-  if (!createBrowserHostForAccount) throw new Error("The browser is still starting");
-  const blockerMessage = () => {
-    const blocker = browserHost?.accountSwitchBlocker();
-    return blocker ? `The Browser tab cannot change account while ${blocker}. Try again when it is done.` : null;
-  };
-  if (blockerMessage()) throw new Error(blockerMessage());
-  const switching = (async () => {
-    const previous = browserHost;
-    await previous?.persistSession().catch((error) => logger.warn("browser_accounts.persist_failed", {
-      message: error instanceof Error ? error.message : String(error),
-    }));
-    // The account's bound proxy (else Global Routing's) before its first page.
-    await routeBrowserAccountPartition(partition, logger);
-    // A turn may have begun while the session was flushed; from here to the new host is synchronous.
-    const lateBlocker = blockerMessage();
-    if (lateBlocker) throw new Error(lateBlocker);
-    const wasVisible = previous?.visible === true;
-    const previousId = browserAccounts.activeId();
-    previous?.destroy();
-    let next;
-    try {
-      next = createBrowserHostForAccount(accountId);
-      browserAccounts.setActive(accountId);
-    } catch (error) {
-      // Never leave the app without its browser: the account it was on comes back.
-      browserHost = createBrowserHostForAccount(previousId);
-      throw error;
-    }
-    browserHost = next;
-    bridgeAccountRefreshPending = accountId;
-    if (lastBrowserBounds) next.setBounds(lastBrowserBounds.rect, lastBrowserBounds.zoom);
-    next.setSurfaceActive(lastBrowserSurfaceActive);
-    logger.info("browser_accounts.switched", { accountId });
-    await next.ready();
-    if (wasVisible) await next.reveal(stateStore.read().browserInteractionMode === "automatic");
-    send("launcher:browser-state", next.snapshot());
-  })();
-  browserAccountSwitch = switching;
-  publishBrowserAccounts();
-  try {
-    await switching;
-  } finally {
-    browserAccountSwitch = null;
-    publishBrowserAccounts();
-    // The account left keeps its sign-in in its partition; the list shows it for every account.
-    void refreshBrowserAccountSignIns(logger);
-  }
-  return browserAccountsStatus();
+function switchBrowserAccount(accountId, context) {
+  return browserAccountService.switchTo(accountId, context);
 }
 
 // An account's partition takes its bound proxy, else Global Routing's (provider-network.cjs). A route
@@ -1163,56 +1096,14 @@ async function assignBrowserAccountProxies({ logger }) {
   return { ...browserAccountsStatus(), assigned };
 }
 
-async function addBrowserAccount(context) {
-  const id = browserAccounts.add();
-  try {
-    return await switchBrowserAccount(id, context);
-  } catch (error) {
-    // Not switched to (a turn is running): the new account stays listed, ready to pick later.
-    publishBrowserAccounts();
-    throw error;
-  }
+function addBrowserAccount(context) {
+  return browserAccountService.add(context);
 }
 
-// Signs the account out for good: its partition (cookies, storage, cache) and its saved-chat
-// ownership file are erased. Removing the active account first switches to another one.
-async function removeBrowserAccount(accountId, context) {
-  browserAccounts.partitionOf(accountId);
-  const { accounts } = browserAccounts.status();
-  if (accounts.length <= 1) throw new Error("The Browser tab needs at least one account");
-  if (accountId === browserAccounts.activeId()) {
-    await switchBrowserAccount(accounts.find((entry) => entry.id !== accountId).id, context);
-  }
-  // Its threads' retained tabs close first; the threads start fresh on the account in use.
-  const removing = browserAccounts.partitionOf(accountId);
-  if (browserHost?.livePartitions?.().includes(removing) && browserHost.accountSwitchBlocker()) {
-    throw new Error(`That account cannot be removed while ${browserHost.accountSwitchBlocker()}. Try again when it is done.`);
-  }
-  for (const entry of threadAccounts?.list() ?? []) {
-    if (entry.accountId === accountId) browserHost?.releaseThreadTabs?.(entry.threadId);
-  }
-  threadAccounts?.removeAccount(accountId);
-  accountLifecycleSyncs.delete(accountId);
-  const partition = browserAccounts.remove(accountId);
-  if (bridgeAccountRefreshPending === accountId) bridgeAccountRefreshPending = null;
-  fs.rmSync(browserAccountConversationFile(accountId), { force: true });
-  // Every list shows the account gone at once; its session is erased after. Erasing ChatGPT's cache
-  // on the HDD took long enough that the toolbar still offered the removed account ("Unknown browser
-  // account" on picking it) and the removal looked like it never happened (2026-10-30).
-  publishBrowserAccounts();
-  void refreshBrowserAccountSignIns(context.logger);
-  void eraseBrowserPartition(partition, accountId, context.logger);
-  return browserAccountsStatus();
-}
-
-/** Erases a removed account's session (cookies, storage, cache), logged with how long it took. */
-async function eraseBrowserPartition(partition, accountId, logger) {
-  const started = Date.now();
-  const removed = session.fromPartition(partition);
-  const failures = [];
-  await removed.clearStorageData().catch((error) => failures.push(`storage: ${error?.message ?? error}`));
-  await removed.clearCache().catch((error) => failures.push(`cache: ${error?.message ?? error}`));
-  logger?.info?.("browser_accounts.removed", { accountId, eraseMs: Date.now() - started, ...(failures.length ? { failures } : {}) });
+// Signs the account out for good: its partition (cookies, storage, cache), its saved-chat ownership
+// file and its tunnel binding go. Removing the active account first switches to another one.
+function removeBrowserAccount(accountId, context) {
+  return browserAccountService.remove(accountId, context);
 }
 
 function trayImage() {
