@@ -317,6 +317,7 @@ function statusTone(status: ProviderAccountRecord["status"]): string {
 
 export function ProviderHubIntegration({ children }: { children: ReactNode }) {
   const [navigationHost, setNavigationHost] = useState<HTMLElement | null>(null);
+  const [navigationSlot, setNavigationSlot] = useState<HTMLElement | null>(null);
   const [workspaceHost, setWorkspaceHost] = useState<HTMLElement | null>(null);
   const [open, setOpen] = useState(false);
   const [accountCount, setAccountCount] = useState(0);
@@ -342,6 +343,7 @@ export function ProviderHubIntegration({ children }: { children: ReactNode }) {
   useEffect(() => {
     const resolveHosts = () => {
       setNavigationHost(document.querySelector<HTMLElement>(".sidebar-nav"));
+      setNavigationSlot(document.querySelector<HTMLElement>(".sidebar-provider-slot"));
       setWorkspaceHost(document.querySelector<HTMLElement>(".workspace"));
     };
     resolveHosts();
@@ -372,24 +374,30 @@ export function ProviderHubIntegration({ children }: { children: ReactNode }) {
       .catch(() => undefined);
   };
 
+  const navigationButton = (
+    <button
+      aria-current={open ? "page" : undefined}
+      className={`sidebar-item provider-sidebar-item${open ? " is-active" : ""}`}
+      onClick={() => setOpen(true)}
+      type="button"
+    >
+      <span aria-hidden="true" className="provider-nav-icon"><i /><i /><i /></span>
+      <span>{copy.navigationLabel}</span>
+      {accountCount > 0 ? <em className="provider-nav-count">{accountCount}</em> : null}
+    </button>
+  );
+
   return (
     <>
       {children}
-      {navigationHost ? createPortal(
+      {/* The shell's Connections group has a slot for this row; without one it gets a group of its own. */}
+      {navigationSlot ? createPortal(
+        <div className="provider-sidebar-group">{navigationButton}</div>,
+        navigationSlot,
+      ) : navigationHost ? createPortal(
         <section className="sidebar-group provider-sidebar-group">
           <h2>{copy.navigationGroup}</h2>
-          <div>
-            <button
-              aria-current={open ? "page" : undefined}
-              className={`sidebar-item provider-sidebar-item${open ? " is-active" : ""}`}
-              onClick={() => setOpen(true)}
-              type="button"
-            >
-              <span aria-hidden="true" className="provider-nav-icon"><i /><i /><i /></span>
-              <span>{copy.navigationLabel}</span>
-              {accountCount > 0 ? <em className="provider-nav-count">{accountCount}</em> : null}
-            </button>
-          </div>
+          <div>{navigationButton}</div>
         </section>,
         navigationHost,
       ) : null}

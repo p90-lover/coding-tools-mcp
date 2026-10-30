@@ -728,13 +728,22 @@
   font-size: 9px;
 }
 
+/* `.sidebar-item >` outranks `.sidebar-item > span { flex: 1 }`, which is meant for the label. */
+.sidebar-item > .provider-nav-icon,
 .provider-nav-icon {
   position: relative;
   display: inline-flex;
-  width: 18px;
-  height: 18px;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--color-icon-tertiary);
   align-items: center;
   justify-content: center;
+}
+
+.sidebar-item.is-active > .provider-nav-icon,
+.sidebar-item:hover > .provider-nav-icon {
+  color: var(--color-icon-secondary);
 }
 
 .provider-nav-icon i {
