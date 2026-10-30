@@ -874,3 +874,20 @@ test("a reviewer keeps every earlier cycle, oldest first and folded, not only th
   assert.doesNotMatch(html, /<details[^>]* open/, "folded by default");
   assert.match(html, /<summary><span>Cycle 1<\/span><span class="cx-step-round-verdict is-changes_required">CHANGES REQUIRED<\/span><\/summary>/);
 });
+
+test("a CPA model's spend comes from the accounts that served it: its exact id, else its name, else its provider", () => {
+  const { servingAccounts } = load("cpa-usage.ts", { "../api/client": client });
+  const account = (id, provider, models, requests = 5) => ({ id, label: id, provider, requests, models: models.map(model => ({ model })) });
+  const key = account("anthropic-key", "claude", ["claude-opus-5-5", "claude-haiku-5-5"]);
+  const opencode = account("opencode", "provider-manager", ["opencode-go/claude-haiku-5-5", "opencode-go/kimi-k3"]);
+  const quiet = account("quiet-claude", "claude", ["claude-opus-5-5"], 0);
+  const accounts = [key, opencode, quiet];
+  // OpenCode Go reselling Haiku bills OpenCode Go, not the Anthropic key.
+  assert.deepEqual(servingAccounts(accounts, "cpa/opencode-go/claude-haiku-5-5", "opencode-go").map(row => row.id), ["opencode"]);
+  assert.deepEqual(servingAccounts(accounts, "cpa/claude-opus-5-5", "claude").map(row => row.id), ["anthropic-key"]);
+  // CPA's own provider prefix on the chat's id still finds the key by the model's name.
+  assert.deepEqual(servingAccounts(accounts, "cpa/claude/claude-opus-5-5", "claude").map(row => row.id), ["anthropic-key"]);
+  // Too quiet to be among the busiest models: the provider's accounts that sent anything.
+  assert.deepEqual(servingAccounts(accounts, "cpa/claude-sonnet-5-5", "claude").map(row => row.id), ["anthropic-key"]);
+  assert.equal(servingAccounts(accounts, "cpa/step-5-preview", null).length, 0);
+});

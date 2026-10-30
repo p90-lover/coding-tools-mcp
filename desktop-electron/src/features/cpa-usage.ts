@@ -82,3 +82,23 @@ export function clineStateLabel(state: ClineKeyState, zh: boolean): string {
 }
 
 export const isClineModel = (provider: string | null | undefined) => /^cline(-pass)?$/i.test(provider ?? "");
+
+/**
+ * The CPA accounts that served `model` ("cpa/claude-opus-5-5", "cpa/opencode-go/kimi-k3"), from a
+ * usage report: the chat's meter shows their spend. `provider` is cpaProviderOf(model), lowercased.
+ * Each account lists its busiest models over the report's range (`account.models[].model`, CPA
+ * Helper's key: "claude-opus-5-5", "cline-pass/glm-5.3"), at most six; `account.provider` is the
+ * auth file's type or the provider CPA Helper logged ("claude", "provider-manager"), or null.
+ */
+export function servingAccounts(accounts: CpaUsageAccount[], model: string, provider: string | null): CpaUsageAccount[] {
+  const id = (model.startsWith("cpa/") ? model.slice(4) : model).toLowerCase();
+  const name = id.slice(id.lastIndexOf("/") + 1);
+  const used = accounts.filter((account) => account.requests > 0);
+  // The exact id first: "opencode-go/claude-haiku-5-5" is OpenCode Go's, not the Claude key's.
+  const exact = used.filter((account) => account.models.some((row) => row.model.toLowerCase() === id));
+  if (exact.length) return exact;
+  const named = used.filter((account) => account.models.some((row) => row.model.toLowerCase().split("/").pop() === name));
+  if (named.length) return named;
+  // A model too quiet to be among an account's six busiest: the provider's accounts.
+  return provider ? used.filter((account) => account.provider === provider) : [];
+}
