@@ -221,10 +221,16 @@ jobs:
         with:
           bun-version: 1.4.3
 
+      # runtime-web's playwright-core drives the runner's Chrome in the connector tests.
       - name: Install desktop dependencies
-        run: bun install --frozen-lockfile --cwd desktop-electron
+        run: |
+          bun install --frozen-lockfile --cwd desktop-electron
+          bun install --frozen-lockfile --cwd runtime-web
 
       - name: Desktop tests
         working-directory: desktop-electron
         shell: bash
+        env:
+          # runtime-web/launcher's modules are tested without Electron installed there.
+          NODE_PATH: ${{ github.workspace }}/desktop-electron/tests/support/electron-stub
         run: node --test tests/*.test.cjs

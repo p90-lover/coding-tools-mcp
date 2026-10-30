@@ -89,3 +89,19 @@ test("a project folder is told apart as Claude Code does: repository, worktree o
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("a repository opened through a junction or a short name is the repository, not a folder inside it", { skip: !HAS_GIT }, async () => {
+  // git names the repository by its real path, so the folder is compared where it really is.
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "project-git-link-"));
+  try {
+    const repo = path.join(base, "repo");
+    fs.mkdirSync(repo);
+    execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "init", "-q", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init"], { stdio: "ignore" });
+    const link = path.join(base, "link");
+    fs.symlinkSync(repo, link, "junction");
+    assert.equal((await readGitInfo(link))?.kind, "repo");
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});

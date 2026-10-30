@@ -12,7 +12,8 @@ const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8",
   env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" } });
 
 test("the branch bar lists every branch, its worktree, and which one the folder and the chat are on", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-branches-"));
+  // The long, real path: git names worktrees that way, and a CI runner's temp folder is an 8.3 name.
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "chat-branches-")));
   try {
     const repo = path.join(root, "repo");
     fs.mkdirSync(repo);
@@ -86,7 +87,8 @@ test("each branch carries its tip commit and its distance from the default; the 
 });
 
 test("choosing a branch checks it out in the project folder and creates nothing", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-branches-"));
+  // The long, real path: git names worktrees that way, and a CI runner's temp folder is an 8.3 name.
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "chat-branches-")));
   try {
     const repo = path.join(root, "repo");
     fs.mkdirSync(repo);
@@ -156,7 +158,8 @@ test("chat_branches is read-only and chat_switch_branch writes; the app handler 
 test("a project's branches are read once for callers asking together, kept briefly, and read again after a switch", async () => {
   // Seen live: opening a project mounted two branch bars at once, each listing the branches with about
   // a dozen git processes, and starting each held the main process for 100-400 ms.
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-branches-"));
+  // The long, real path: git names worktrees that way, and a CI runner's temp folder is an 8.3 name.
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "chat-branches-")));
   try {
     const repo = path.join(root, "repo");
     fs.mkdirSync(repo);
