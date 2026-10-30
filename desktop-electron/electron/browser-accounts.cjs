@@ -4,11 +4,13 @@
 // active account is the one Codex's WebGPT turns run on. Each account lives in its own partition
 // (profile.cjs): the first keeps the partition every install signed in with before accounts, so
 // that sign-in carries over; each added one gets a new partition, and removing it erases it.
-const fs = require("node:fs");
 const path = require("node:path");
 const { randomBytes } = require("node:crypto");
+const { readStateFile, writeStateFile } = require("./durable-state.cjs");
 const { BROWSER_ACCOUNT_ID, browserAccountPartition } = require("./profile.cjs");
 
+// accounts.json's format; a newer app's file is still read for the fields this one knows.
+const STATE_VERSION = 1;
 const MAX_ACCOUNTS = 12;
 const MAX_LABEL = 60;
 const FIRST_ACCOUNT_ID = "main";
@@ -64,9 +66,20 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
   const statePath = path.join(dataRoot, "accounts.json");
   const firstAccount = () => normalizeEntry({ id: FIRST_ACCOUNT_ID }, 0);
   let state = { activeId: FIRST_ACCOUNT_ID, accounts: [firstAccount()], settings: { ...DEFAULT_SETTINGS } };
-  try {
-    const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    const accounts = (Array.isArray(saved?.accounts) ? saved.accounts : [])
+  // A torn or vanished file is read back from its copy: before, it read as "no file" and every
+  // account but the first was dropped (accounts.json vanished from the failing G: disk, 2026-10-30).
+  const read = readStateFile(statePath, (text) => {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed?.accounts)) throw new Error("accounts.json holds no account list");
+    return parsed;
+  }, { now });
+  if (read.source === "backup") logger?.warn?.("browser_accounts.restored_from_copy", { setAside: read.setAside, message: read.error?.message ?? "missing" });
+  if (read.source === "unreadable") logger?.warn?.("browser_accounts.unreadable", { setAside: read.setAside, message: read.error?.message ?? "unreadable" });
+  const loaded = { source: read.source, setAside: read.setAside, message: read.error?.message ?? null };
+  const saved = read.value;
+  if (saved?.version > STATE_VERSION) logger?.warn?.("browser_accounts.newer_version", { version: saved.version });
+  if (saved) {
+    const accounts = saved.accounts
       .filter((entry) => entry?.id === FIRST_ACCOUNT_ID || BROWSER_ACCOUNT_ID.test(entry?.id))
       .filter((entry, index, list) => list.findIndex((other) => other.id === entry.id) === index)
       .slice(0, MAX_ACCOUNTS)
@@ -83,15 +96,10 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
         state.settings.keepFinishedTabsMinutes = saved.settings.keepFinishedTabsMinutes;
       }
     }
-  } catch (error) {
-    if (error?.code !== "ENOENT") logger?.warn?.("browser_accounts.unreadable", { message: error instanceof Error ? error.message : String(error) });
   }
 
   function save() {
-    fs.mkdirSync(dataRoot, { recursive: true });
-    const temporary = `${statePath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`);
-    fs.renameSync(temporary, statePath);
+    writeStateFile(statePath, `${JSON.stringify({ version: STATE_VERSION, ...state }, null, 2)}\n`, { protectDirectory: false });
   }
 
   function account(id) {
@@ -120,6 +128,8 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
         settings: { ...state.settings },
       };
     },
+    /** Where the account list came from at start: "file", "backup", "none" (first start) or "unreadable". */
+    loadedFrom: () => ({ ...loaded }),
     activeId: () => state.activeId,
     activePartition: () => partitionOf(state.activeId),
     partitionOf,

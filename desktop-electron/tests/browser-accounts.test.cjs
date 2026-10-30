@@ -68,6 +68,35 @@ test("the store holds at most MAX_ACCOUNTS and ignores entries it did not write"
   assert.throws(() => accounts.add(), /up to 12 accounts/);
 });
 
+test("a torn or vanished account list is read back from its copy, not reset to the first account", (t) => {
+  const dataRoot = tempRoot(t);
+  const statePath = path.join(dataRoot, "accounts.json");
+  const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
+  const id = accounts.add();
+  accounts.setActive(id);
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).version, 1);
+
+  const warnings = [];
+  const logger = { warn: (event, fields) => warnings.push({ event, ...fields }) };
+  fs.writeFileSync(statePath, Buffer.alloc(400)); // all NULs, as a power cut or bad sector leaves it
+  const torn = createBrowserAccounts({ dataRoot, profile: "production", logger, now: () => 1234 });
+  assert.equal(torn.activeId(), id);
+  assert.deepEqual(torn.status().accounts.map(entry => entry.id), [FIRST_ACCOUNT_ID, id]);
+  assert.equal(warnings[0].event, "browser_accounts.restored_from_copy");
+  assert.equal(warnings[0].setAside, `${statePath}.corrupt-1234`);
+  assert.ok(fs.existsSync(`${statePath}.corrupt-1234`), "the torn bytes are kept for recovery by hand");
+
+  assert.equal(fs.existsSync(statePath), false, "the torn file was moved aside");
+  assert.equal(createBrowserAccounts({ dataRoot, profile: "production" }).activeId(), id, "a vanished file comes back too");
+
+  fs.writeFileSync(statePath, Buffer.alloc(400));
+  fs.writeFileSync(`${statePath}.bak`, "{\"accounts\":");
+  warnings.length = 0;
+  const lost = createBrowserAccounts({ dataRoot, profile: "production", logger });
+  assert.equal(lost.activeId(), FIRST_ACCOUNT_ID, "with both copies torn only the first account is left");
+  assert.equal(warnings[0].event, "browser_accounts.unreadable");
+});
+
 test("a partition is a browser account's only when it is the base or the base plus a 12-character id", () => {
   assert.equal(browserAccountPartition("development", null), "persist:coding-tools-dev-chatgpt");
   assert.equal(isBrowserAccountPartition("production", BASE), true);

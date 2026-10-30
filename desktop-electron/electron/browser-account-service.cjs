@@ -20,6 +20,7 @@
  * @param {(partition: string) => Promise<void>} deps.erasePartition
  * @param {(accountId: string) => void} deps.forgetAccountData its saved-chat file, lifecycle sync, tunnel binding
  * @param {() => object | null} deps.threads codex-thread-accounts, or null
+ * @param {(partition: string) => boolean} deps.isAccountPartition whether a partition is a Browser-tab account's
  * @param {(next: object, previous: object | null) => void} [deps.placeHost] bounds and surface of a new host
  * @param {(next: object, revealed: { wasVisible: boolean, stateStore: object }) => Promise<void>} [deps.afterSwitch]
  * @param {() => number} [deps.now]
@@ -183,6 +184,33 @@ function createBrowserAccountService(deps) {
     return status();
   }
 
+  // Erases account partitions no account owns: sessions a removal never finished erasing (before
+  // the remove fix, an erase cut short by a quit or a busy disk left the account signed in on disk).
+  // Only when the account list was read from its own file: one read back from its copy, or missing,
+  // may have lost an account whose partition is still its only sign-in.
+  async function sweepOrphans(partitions, logger) {
+    const loaded = deps.registry.loadedFrom();
+    if (loaded.source !== "file") {
+      if (partitions.length) logger?.info?.("browser_accounts.sweep_skipped", { source: loaded.source });
+      return [];
+    }
+    const orphans = partitions.filter((partition) => deps.isAccountPartition(partition)
+      && deps.registry.accountIdOfPartition(partition) === null
+      && !deps.host()?.livePartitions?.().includes(partition));
+    for (const partition of orphans) {
+      const started = now();
+      try {
+        await deps.erasePartition(partition);
+        logger?.info?.("browser_accounts.orphan_erased", { partition, eraseMs: now() - started });
+      } catch (error) {
+        logger?.warn?.("browser_accounts.erase_failed", {
+          partition, eraseMs: now() - started, message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return orphans;
+  }
+
   return {
     status,
     publish,
@@ -190,6 +218,7 @@ function createBrowserAccountService(deps) {
     switchTo,
     add,
     remove,
+    sweepOrphans,
     switching: () => switching !== null,
     /** Whether a switch left this account's plan for the bridge to pick up; true once, then cleared. */
     takeBridgeRefresh(accountId) {

@@ -6,6 +6,9 @@ const path = require("node:path");
 
 const { createBrowserAccounts, FIRST_ACCOUNT_ID } = require("../electron/browser-accounts.cjs");
 const { createBrowserAccountService } = require("../electron/browser-account-service.cjs");
+const { isBrowserAccountPartition } = require("../electron/profile.cjs");
+
+const BASE = "persist:coding-tools-chatgpt";
 
 // Test files stay in the repo's aiTemp, never the system temp folder on C: (AGENTS.md).
 function tempRoot(t) {
@@ -46,7 +49,10 @@ function logger() {
 
 /** A service over a real account registry, with every Electron piece faked and recorded. */
 function setup(t, overrides = {}) {
-  const registry = createBrowserAccounts({ dataRoot: tempRoot(t), profile: "production" });
+  const dataRoot = tempRoot(t);
+  // `saved` writes an account list first, so the registry under test reads it from its own file.
+  overrides.saved?.(createBrowserAccounts({ dataRoot, profile: "production" }));
+  const registry = createBrowserAccounts({ dataRoot, profile: "production" });
   const published = [];
   const forgotten = [];
   const erased = [];
@@ -84,6 +90,7 @@ function setup(t, overrides = {}) {
     },
     forgetAccountData: accountId => forgotten.push(accountId),
     threads: () => threads,
+    isAccountPartition: partition => isBrowserAccountPartition("production", partition),
   });
   return { registry, service, published, forgotten, erased, reads, hosts, threads, signedIn, host: () => host };
 }
@@ -208,6 +215,46 @@ test("an account in a running turn cannot be removed", async (t) => {
   await assert.rejects(service.remove(id, {}), /cannot be removed while a Codex turn is running/);
   assert.equal(registry.has(id), true);
   assert.deepEqual(erased, []);
+});
+
+test("the sweep erases account partitions no account owns, and nothing else", async (t) => {
+  let kept;
+  const log = logger();
+  const { service, erased, registry } = setup(t, {
+    saved: (first) => {
+      kept = first.add();
+      first.setActive(kept);
+      first.remove("main"); // as a removal whose erase never finished left it
+    },
+  });
+  assert.equal(registry.loadedFrom().source, "file");
+  const orphan = `${BASE}-zzzzzzzzzzzz`;
+  const swept = await service.sweepOrphans([BASE, registry.partitionOf(kept), orphan, "persist:gpt-browser", `${BASE}-short`], log);
+  assert.deepEqual(swept, [BASE, orphan]);
+  assert.deepEqual(erased, [BASE, orphan]);
+  assert.deepEqual(log.lines.filter(line => line.event === "browser_accounts.orphan_erased").map(line => line.partition), [BASE, orphan]);
+});
+
+test("the sweep never erases a live partition, and a failed erase is logged", async (t) => {
+  const log = logger();
+  const orphan = `${BASE}-zzzzzzzzzzzz`;
+  const { service, host } = setup(t, {
+    saved: (first) => first.setActive("main"),
+    erase: () => Promise.reject(new Error("EBUSY")),
+  });
+  const live = `${BASE}-yyyyyyyyyyyy`;
+  host().livePartitions = () => [BASE, live];
+  assert.deepEqual(await service.sweepOrphans([live, orphan], log), [orphan]);
+  assert.equal(log.lines.find(line => line.event === "browser_accounts.erase_failed")?.partition, orphan);
+});
+
+test("the sweep is skipped when the account list was not read from its own file", async (t) => {
+  const log = logger();
+  const { service, erased, registry } = setup(t); // nothing saved: a first start, or a list that vanished
+  assert.equal(registry.loadedFrom().source, "none");
+  assert.deepEqual(await service.sweepOrphans([`${BASE}-zzzzzzzzzzzz`], log), []);
+  assert.deepEqual(erased, []);
+  assert.equal(log.lines[0].event, "browser_accounts.sweep_skipped");
 });
 
 test("sign-in reads that arrive during a read coalesce into one more read", async (t) => {

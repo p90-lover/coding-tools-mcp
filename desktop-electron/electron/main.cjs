@@ -58,7 +58,7 @@ const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cj
 const { ensurePackagedRuntime, pruneOldRuntimes, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
-const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
+const { DEVELOPMENT_PROFILE, isBrowserAccountPartition, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
@@ -212,6 +212,7 @@ const browserAccountService = createBrowserAccountService({
     runtimeSupervisor?.extraTunnels?.forgetAccount?.(accountId);
   },
   threads: () => threadAccounts,
+  isAccountPartition: (partition) => isBrowserAccountPartition(LAUNCHER_PROFILE.kind, partition),
   placeHost: (next) => {
     if (lastBrowserBounds) next.setBounds(lastBrowserBounds.rect, lastBrowserBounds.zoom);
     next.setSurfaceActive(lastBrowserSurfaceActive);
@@ -4227,6 +4228,16 @@ async function start() {
   await routeBrowserAccountPartition(browserAccounts.activePartition(), logger);
   browserHost = createBrowserHostForAccount(browserAccounts.activeId());
   void refreshBrowserAccountSignIns(logger);
+  const accountsLoaded = browserAccounts.loadedFrom();
+  if (accountsLoaded.source === "backup" || accountsLoaded.source === "unreadable") {
+    logger.warn(`browser_accounts.loaded_from_${accountsLoaded.source}`, accountsLoaded);
+  }
+  // Sessions no account owns are erased a minute after start, off the launch's busiest disk time.
+  setTimeout(() => {
+    void fs.promises.readdir(path.join(app.getPath("userData"), "Partitions"))
+      .then((names) => browserAccountService.sweepOrphans(names.map((name) => `persist:${name}`), logger))
+      .catch((error) => logger.warn("browser_accounts.sweep_failed", { message: error instanceof Error ? error.message : String(error) }));
+  }, 60_000).unref?.();
   setProviderBrowserHost(() => browserHost);
   registerIpc({ logger, stateStore });
   const trayAvailable = createTray(logger, stateStore.read().language);
