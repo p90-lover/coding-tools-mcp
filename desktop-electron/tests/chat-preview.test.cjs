@@ -18,6 +18,7 @@ function fakeView({ page = {} } = {}) {
     emit(event, ...args) { for (const fn of handlers[event] ?? []) fn(...args); },
     setWindowOpenHandler(fn) { this.openHandler = fn; },
     async loadURL(url) {
+      await page.beforeLoad?.(url);
       if (page.refused?.(url)) throw new Error(`ERR_CONNECTION_REFUSED (-102) loading '${url}'`);
       (this.loads ??= []).push(url);
       const failed = page.fail?.(url);
@@ -105,6 +106,106 @@ test("a preview opens only http(s) pages on this machine, never the app's own se
   }
   assert.match(previewTarget("http://localhost:4000/", { blockedPorts: [4000] }).refused, /belongs to Coding Tools/);
   assert.match(previewTarget("http://localhost/", { blockedPorts: [80] }).refused, /Port 80/, "a default port counts");
+});
+
+test("a live panel renders and updates in the same isolated preview without a dev server", async () => {
+  const { service, views } = previews();
+  try {
+    for (const text of ["First panel", "Updated panel"]) {
+      const result = await service.call("panel", "preview_render", { html: `<button>${text}</button>` });
+      assert.equal(result.isError, false);
+      assert.equal(result.structuredContent.url, "about:blank#live-panel");
+    }
+    assert.equal(views.length, 1, "an update keeps the existing browser and its pane");
+    const pages = views[0].webContents.loads.map(url => Buffer.from(url.split(",")[1], "base64").toString("utf8"));
+    assert.equal(pages.length, 2);
+    assert.ok(pages[0].includes("First panel"));
+    assert.ok(pages[1].includes("Updated panel"));
+    assert.ok(pages[1].includes("connect-src 'none'"));
+    await service.call("panel", "preview_navigate", { action: "reload" });
+    assert.equal(views[0].webContents.loads.length, 3,
+      "reload restores the last AI-supplied panel instead of an empty document");
+    for (const html of ["", 123, "x".repeat(1_048_577)]) {
+      assert.equal((await service.call("other", "preview_render", { html })).isError, true);
+    }
+    assert.equal(views.length, 1, "invalid input never opens another native page");
+  } finally { service.closeAll(); }
+});
+
+test("parallel panel updates stay ordered and an ended owner cannot render queued content", async () => {
+  let started, release;
+  const began = new Promise(resolve => { started = resolve; });
+  const first = new Promise(resolve => { release = resolve; });
+  const { service, views } = previews({ page: { beforeLoad: async url => {
+    if (Buffer.from(url.split(",")[1], "base64").toString("utf8").includes("First panel")) { started(); await first; }
+  } } });
+  try {
+    const one = service.call("panel", "preview_render", { html: "First panel" });
+    await began;
+    const two = service.call("panel", "preview_render", { html: "Second panel" });
+    assert.equal(views[0].webContents.loads, undefined, "the second update waits for the first navigation");
+    service.closeAll();
+    release();
+    assert.equal((await one).isError, true);
+    assert.equal((await two).isError, true);
+    assert.equal(views[0].webContents.loads.some(url => Buffer.from(url.split(",")[1], "base64").toString("utf8").includes("Second panel")), false);
+  } finally { release(); service.closeAll(); }
+});
+
+test("live panels cannot navigate to previously approved origins and can be restored from Recents", async () => {
+  const { service, views } = previews();
+  try {
+    await service.call("panel", "preview_open", { url: "http://localhost:5173/" });
+    await service.call("panel", "preview_render", { html: "<h1>Saved panel</h1>" });
+    let verdict;
+    views[0].session.handlers.before({ url: "http://localhost:5173/collect", resourceType: "mainFrame" }, value => { verdict = value; });
+    assert.equal(verdict.cancel, true);
+    let blocked = false;
+    views[0].webContents.emit("will-navigate", { preventDefault() { blocked = true; } }, "http://localhost:5173/collect");
+    assert.equal(blocked, true);
+    const loads = views[0].webContents.loads.length;
+    views[0].webContents.openHandler({ url: "http://localhost:5173/collect" });
+    assert.equal(views[0].webContents.loads.length, loads);
+    await service.navigate("panel", { url: "http://localhost:5173/project" });
+    assert.equal(service.state("panel").url, "http://localhost:5173/project");
+    assert.equal((await service.navigate("panel", { url: "about:blank#live-panel" })).ok, true);
+    assert.equal(service.state("panel").url, "about:blank#live-panel");
+    assert.ok(Buffer.from(views[0].webContents.loads.at(-1).split(",")[1], "base64").toString("utf8").includes("Saved panel"));
+  } finally { service.closeAll(); }
+});
+
+test("a failed project load clears panel history before enabling project navigation", async () => {
+  const clears = [];
+  let clearedBeforeProject;
+  const { service, views } = previews({ page: {
+    beforeLoad: url => { if (url.includes("/reset")) clearedBeforeProject = clears.length; },
+    fail: url => url.includes("/reset") ? "ERR_CONNECTION_RESET" : null,
+  } });
+  try {
+    await service.call("panel", "preview_render", { html: "<h1>Saved panel</h1>" });
+    views[0].webContents.navigationHistory.clear = () => clears.push(views[0].webContents.getURL());
+    assert.equal((await service.navigate("panel", { url: "http://127.0.0.1:5173/reset" })).ok, false);
+    assert.equal(clearedBeforeProject, 1, "old panel history is gone even if the project never loads");
+    assert.deepEqual(clears, ["about:blank"]);
+    assert.equal((await service.navigate("panel", { url: "about:blank#live-panel" })).ok, true);
+    assert.equal(service.state("panel").url, "about:blank#live-panel");
+  } finally { service.closeAll(); }
+});
+
+test("the native context-menu reload uses the live-panel restoration route", async () => {
+  const view = fakeView();
+  let menu;
+  const service = createChatPreviews({ createView: () => view, openContextMenu: value => { menu = value; } });
+  try {
+    await service.call("panel", "preview_render", { html: "<h1>Panel</h1>" });
+    view.webContents.url += "#details";
+    view.webContents.emit("context-menu", {}, {});
+    const { previewMenuTemplate } = require("../electron/chat-preview.cjs");
+    const items = previewMenuTemplate(menu);
+    await items.find(item => item.label === "Reload").click();
+    assert.equal(view.webContents.loads.length, 2);
+    assert.equal(service.state("panel").url, "about:blank#live-panel");
+  } finally { service.closeAll(); }
 });
 
 test("the agent opens its page once allowed, and reads, screenshots, clicks and types in it through the page's own protocol", async () => {
@@ -478,6 +579,16 @@ async function leased(tools, options = {}) {
   const list = () => post(url, { jsonrpc: "2.0", id: id++, method: "tools/list" }, { authorization: headers.Authorization }).then((reply) => reply.result.tools.map((tool) => tool.name));
   return { lease, call, list };
 }
+
+test("the advertised panel size fits the real MCP transport even with worst-case JSON escaping", async t => {
+  const env = server();
+  t.after(env.cleanup);
+  const { call } = await leased(env.tools);
+  const size = PREVIEW_TOOL_DEFS.find(tool => tool.name === "preview_render").inputSchema.properties.html.maxLength;
+  const result = await call("preview_render", { html: "\u0000".repeat(size) });
+  assert.equal(result.isError, false);
+  assert.equal(env.previewCalls.at(-1)[2].html.length, size);
+});
 
 test("chat agents get the preview tools (on by default, off with the setting) and the user allows each new address once", async (t) => {
   let on = true;
