@@ -26,7 +26,8 @@ const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": me
 const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
 const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const clawd = load("Clawd.tsx");
-const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts") });
+const petHome = load("chat-pet-home.ts");
+const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts"), "./chat-pet-home": petHome });
 const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
@@ -689,7 +690,7 @@ test("Clawd holds its tool up in the hand on the tool's side, never an empty rai
   // air, and the mug's steam and a ✦ rising from every hammer blow looked like fireworks.
   const stand = { look: 0, arms: "down", walking: false, sit: false };
   const frame = (job, toolSide, step = false, mood = "working") => pet.restFrame({ mood, asleep: false, step, pose: stand, blink: false, job, toolSide });
-  for (const job of ["search", "build", "coffee", "read"]) {
+  for (const job of ["search", "build", "coffee", "read", "cook", "snack"]) {
     for (const step of [false, true]) {
       assert.equal(frame(job, "right", step).pose.arms, "one-up", `${job}: the right hand, on the tool's side`);
       assert.equal(frame(job, "left", step).pose.arms, "left-up", `${job}: the left hand, on the tool's side`);
@@ -701,8 +702,9 @@ test("Clawd holds its tool up in the hand on the tool's side, never an empty rai
   const left = clawd.clawdCells({ eyes: "open", arms: "left-up", feet: "both" });
   assert.equal(left.filter((cell) => cell.row === 0 && cell.col < 2).map((cell) => cell.glyph).join(""), "▗▟");
   assert.equal(left.filter((cell) => cell.row === 1 && cell.col >= 7).map((cell) => cell.glyph).join(""), "█▀");
+  assert.equal(frame("serve", "left").pose.arms, "up", "its plate is carried up in both hands");
   // Each held tool fills the cell its hand is in: column 0, row 2 of the prop's grid.
-  for (const job of ["search", "build", "coffee", "read"]) {
+  for (const job of ["search", "build", "coffee", "read", "cook", "snack"]) {
     for (const step of [false, true]) {
       const svg = renderToStaticMarkup(React.createElement(pet.Prop, { job, step, tick: 1 }));
       const rects = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map((m) => m.slice(1).map(Number));
@@ -712,6 +714,60 @@ test("Clawd holds its tool up in the hand on the tool's side, never an empty rai
   }
   const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
   assert.doesNotMatch(source, /float\("✦"/, "no star rises from each hammer blow");
+});
+
+test("at home Clawd climbs into bed, cooks and eats, bathes and works, using the furniture where it stands", () => {
+  // The user (2026-10-30): "the bed clawd can move/jump to it and sleep with it, cooking furniture that
+  // let clawd to cook with eat". Full size Clawd was as tall as a storey and twice as wide as its bed.
+  const { pathBeats, choreBeats, exitBeats, pickChore, ENTRY, LADDER_X, SPOTS, CHORES } = petHome;
+  const bed = { ...SPOTS.sleep };
+  // From bed to the tub upstairs: down off the bed, along to the ladder, up it, along to the tub.
+  const toTub = pathBeats(bed, SPOTS.bath);
+  assert.equal(toTub.map((beat) => beat.doing).join(), "hop,walk,climb,walk");
+  assert.equal(toTub[0].lift, 0);
+  assert.deepEqual([toTub[2].x, toTub[2].storey], [LADDER_X, "up"]);
+  assert.equal(toTub.at(-1).x, SPOTS.bath.x);
+  // Bedtime ends tucked into bed, lifted onto the mattress; a nap is never left standing.
+  const sleep = choreBeats("sleep", ENTRY);
+  assert.equal(sleep.at(-1).doing, "sleep");
+  assert.deepEqual([sleep.at(-1).x, sleep.at(-1).lift], [bed.x, bed.lift]);
+  assert.equal(sleep.at(-2).doing, "hop", "it hops up into bed");
+  // Cooking: at the stove, then the plate to the table, three bites, and down off the chair.
+  const cook = choreBeats("cook", ENTRY);
+  const doing = cook.map((beat) => beat.doing);
+  assert.ok(doing.indexOf("cook") < doing.indexOf("serve") && doing.indexOf("serve") < doing.indexOf("eat"));
+  assert.equal(cook.filter((beat) => beat.doing === "eat").map((beat) => beat.bites).join(), "3,2,1,0");
+  assert.equal(cook.find((beat) => beat.doing === "cook").look, 1, "it faces the stove");
+  // Every chore but sleep ends standing on a floor, ready for the next; leaving ends at the entry.
+  for (const chore of CHORES.filter((name) => name !== "sleep")) {
+    for (const from of [ENTRY, bed, { ...SPOTS.work }]) {
+      const beats = choreBeats(chore, from);
+      assert.equal(beats.at(-1).lift, 0, `${chore} from ${from.x}: back on the floor`);
+      assert.ok(beats.every((beat) => beat.ms > 0), `${chore}: every beat takes time`);
+      const out = exitBeats(beats.at(-1));
+      const last = out.at(-1) ?? beats.at(-1);
+      assert.deepEqual([last.x, last.storey, last.lift], [ENTRY.x, ENTRY.storey, 0], `${chore}: out by the entry`);
+    }
+  }
+  // It picks its own chores while home, never bed (that is the nap's, or a click on the bed).
+  for (let roll = 0; roll < 50; roll += 1) {
+    const memory = { last: CHORES[roll % CHORES.length], sinceMeal: roll % 7, hour: roll % 24 };
+    const next = pickChore(memory, () => (roll * 0.137) % 1);
+    assert.ok(CHORES.includes(next) && next !== "sleep", `picked ${next}`);
+  }
+});
+
+test("the house shows what Clawd is doing in it, and every piece of furniture is a button that sends it there", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  for (const piece of ["bed", "table", "stove", "fridge", "tub", "bookshelf", "desk", "window"]) {
+    assert.match(source, new RegExp(`label: "the ${piece}: Clawd`), `${piece} is clickable`);
+  }
+  assert.match(source, /onClick=\{\(\) => onUse\(piece\.chore\)\}/);
+  // Woken in bed by a click elsewhere, it gets up then and there (homeLife reads the ref right away).
+  const toFurniture = source.slice(source.indexOf("const toFurniture ="), source.indexOf("// Nothing running for a while"));
+  assert.match(toFurniture, /asleepNow\.current = false; setAsleep\(false\)/);
+  const css = fs.readFileSync(path.join(__dirname, "../src/features/codex-chat.css"), "utf8");
+  assert.match(css, /\.cx-pet\.is-home \.cx-pet-body \{ transform: scale\(\.5\);/, "half size at home, as big as its furniture");
 });
 
 test("the pet stays where it stands while the chat box grows and shrinks a line at a time", () => {
