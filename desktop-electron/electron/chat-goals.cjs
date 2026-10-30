@@ -8,7 +8,7 @@
 // evaluator judges it from the round's message and the closing cards' answers.
 
 const fs = require("node:fs");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const OBJECTIVE_LIMIT = 2000;
 const STATUSES = new Set(["active", "paused", "achieved", "stalled", "limited"]);
@@ -153,12 +153,24 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
   // Flushed to disk before it replaces the old file (durable), so a power cut leaves the old goals
-  // or the new ones: a goal carries on after a restart only if its file survives it.
+  // or the new ones: a goal carries on after a restart only if its file survives it. The flush runs
+  // off the main thread (synchronously it held every window up to 1.4 s on the hard disk), and a
+  // burst of changes (a round ending) is one save plus at most one more with the latest goals.
+  let saving = null;
+  let saveAgain = false;
   const persist = () => {
     if (!file) return;
-    writePrivateFileAtomic(file, JSON.stringify(goals, null, 2), { durable: true, protectDirectory: false });
+    if (saving) { saveAgain = true; return; }
+    saving = writePrivateFileAtomicAsync(file, JSON.stringify(goals, null, 2), { durable: true, protectDirectory: false })
+      .catch(() => { /* the old file stays; the next change saves every goal again */ })
+      .finally(() => {
+        saving = null;
+        if (saveAgain) { saveAgain = false; persist(); }
+      });
   };
   return {
+    /** Resolves once every change so far is on disk (tests, and a caller about to exit). */
+    async saved() { while (saving) await saving; },
     get: (workspaceId, taskId) => goals[key(workspaceId, taskId)] ?? null,
     /** Every goal of one project, by chat. */
     forWorkspace(workspaceId) {

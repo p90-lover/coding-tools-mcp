@@ -3144,6 +3144,9 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
+    // A goal change still being saved (off the main thread) lands before the app goes; a disk that
+    // hangs holds the quit 5 s at most, and the goals file keeps the change before.
+    await Promise.race([missionWorkflowRuntime?.goalsSaved(), new Promise((resolve) => setTimeout(resolve, 5_000).unref?.())]);
     const runtimeOperation = runtimeHost?.currentOperation();
     if (runtimeOperation) {
       throw new Error(`Wait for ${runtimeOperation} to finish before quitting Coding Tools`);

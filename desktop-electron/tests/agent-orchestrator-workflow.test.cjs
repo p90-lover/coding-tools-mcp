@@ -3456,12 +3456,13 @@ test("a goal round says what Claude Code's /goal says: the condition first, then
   assert.throws(() => parseGoalCheck('{"met": "yes"}'), /no verdict/);
 });
 
-test("goals are kept per chat in a file and survive a restart", () => {
+test("goals are kept per chat in a file and survive a restart", async () => {
   const file = path.join(require("node:os").tmpdir(), `ct-goals-${crypto.randomUUID()}.json`);
   try {
     const store = createGoalStore({ file, now: () => 1000 });
     store.set("ws-1", "task-1", "  make the build green  ");
     store.update("ws-1", "task-1", { round: 2 });
+    await store.saved();
     const again = createGoalStore({ file });
     assert.equal(again.get("ws-1", "task-1").objective, "make the build green");
     assert.equal(again.get("ws-1", "task-1").round, 2);
@@ -3470,16 +3471,25 @@ test("goals are kept per chat in a file and survive a restart", () => {
     assert.deepEqual(again.forWorkspace("ws-2"), {});
     assert.throws(() => again.set("ws-1", "task-2", "   "), /Describe your goal/);
     assert.equal(again.clear("ws-1", "task-1"), true);
+    await again.saved();
     assert.equal(createGoalStore({ file }).get("ws-1", "task-1"), null);
   } finally { fs.rmSync(file, { force: true }); }
 });
 
-test("a goals file a crash tore is kept aside, not written over, and saves are flushed to disk", () => {
+test("a goals file a crash tore is kept aside, not written over, and saves are flushed to disk off the main thread", async () => {
   const directory = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "ct-goals-torn-"));
   const file = path.join(directory, "chat-goals.json");
   const fsync = fs.fsyncSync;
+  const open = fs.promises.open;
   let flushed = 0;
-  fs.fsyncSync = (descriptor) => { flushed += 1; return fsync(descriptor); };
+  let flushedOnMain = 0;
+  fs.fsyncSync = (descriptor) => { flushedOnMain += 1; return fsync(descriptor); };
+  fs.promises.open = async (...args) => {
+    const handle = await open(...args);
+    const sync = handle.sync.bind(handle);
+    handle.sync = async () => { flushed += 1; return sync(); };
+    return handle;
+  };
   try {
     // What a power cut left of another state file on 2026-10-23: its size, all NUL bytes.
     fs.writeFileSync(file, Buffer.alloc(300));
@@ -3487,10 +3497,18 @@ test("a goals file a crash tore is kept aside, not written over, and saves are f
     assert.equal(store.get("ws-1", "task-1"), null);
     assert.deepEqual(fs.readFileSync(path.join(directory, "chat-goals.json.unreadable-2000")), Buffer.alloc(300), "the torn bytes are kept");
     store.set("ws-1", "task-1", "make the build green");
+    await store.saved();
     assert.equal(flushed, 1, "the save is flushed before it replaces the file");
+    assert.equal(flushedOnMain, 0, "the flush never waits on the main thread");
     assert.equal(createGoalStore({ file }).get("ws-1", "task-1").objective, "make the build green");
+    // A round ending changes a goal several times at once: one save, then one with the latest goals.
+    for (let round = 1; round <= 5; round += 1) store.update("ws-1", "task-1", { round });
+    await store.saved();
+    assert.equal(flushed, 3, "five changes in a row are two saves");
+    assert.equal(createGoalStore({ file }).get("ws-1", "task-1").round, 5, "the last save has the latest goals");
   } finally {
     fs.fsyncSync = fsync;
+    fs.promises.open = open;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -3907,6 +3925,7 @@ test("a goal judged not met whose next round never started goes on at the next r
       await workflow.call("runs", { workspaceId: "ws-1" });
       await goalSettle();
       assert.equal(world.updates.length, before + 1);
+      await workflow.goalsSaved();
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -4128,6 +4147,7 @@ test("a goal waiting out a pause carries on after an app restart, is not judged 
     // The app closes during the pause: its timer goes, and one that fires anyway does nothing.
     const pending = timers[0];
     first.workflow.dispose();
+    await first.workflow.goalsSaved(); // as a quit waits for it
     assert.equal(timers.length, 0, "dispose clears the goal's timer");
     const before = world.updates.length;
     pending.callback();
