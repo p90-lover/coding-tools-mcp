@@ -27,13 +27,13 @@ test("an update sets a running agent's executable aside, then cleans it up once 
       assert.equal(fs.existsSync(idle), true, "an image nothing runs stays put");
       assert.equal(host.exitCode, null, "the running agent keeps going");
       fs.writeFileSync(daemon, "new version");
-      assert.equal(sweepSetAside(agentRuntimeRoots(resources)), 0, "a set-aside image still running is kept");
+      assert.equal(await sweepSetAside(agentRuntimeRoots(resources)), 0, "a set-aside image still running is kept");
     } finally {
       host.kill();
       await new Promise((resolve) => host.once("exit", resolve));
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.equal(sweepSetAside(agentRuntimeRoots(resources)), 1, "once it exited, the leftover is removed");
+    assert.equal(await sweepSetAside(agentRuntimeRoots(resources)), 1, "once it exited, the leftover is removed");
     assert.equal(fs.readFileSync(daemon, "utf8"), "new version");
     fs.rmSync(resources, { recursive: true, force: true });
   });

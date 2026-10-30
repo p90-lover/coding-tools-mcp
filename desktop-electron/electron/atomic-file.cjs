@@ -94,8 +94,10 @@ const pendingAsyncWrites = new Map();
  * system holds (EBUSY/EPERM/EACCES on Windows) is retried on timers instead of Atomics.wait, which
  * blocked the whole app for up to 1.4 s. For writes nothing waits on at once, made while the app
  * is in use (a window being moved); a write that must land before the app exits stays synchronous.
+ * `durable` as in writePrivateFileAtomic; the flush waits on a pool thread, not the main one (the
+ * synchronous flush of chat-goals.json held every window up to 1.4 s on the hard disk, 2026-10-30).
  */
-function writePrivateFileAtomicAsync(filePath, content, { mode = 0o600, protectDirectory = true, platform = process.platform } = {}) {
+function writePrivateFileAtomicAsync(filePath, content, { mode = 0o600, protectDirectory = true, durable = false, platform = process.platform } = {}) {
   const previous = pendingAsyncWrites.get(filePath) ?? Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
     const directory = path.dirname(filePath);
@@ -106,7 +108,17 @@ function writePrivateFileAtomicAsync(filePath, content, { mode = 0o600, protectD
     for (let attempt = 0; temporary === null; attempt += 1) {
       const candidate = `${filePath}.tmp-${process.pid}-${Date.now()}-${++sequence}`;
       try {
-        await fs.promises.writeFile(candidate, payload, { flag: "wx", mode });
+        if (durable) {
+          const handle = await fs.promises.open(candidate, "wx", mode);
+          try {
+            await handle.writeFile(payload);
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+        } else {
+          await fs.promises.writeFile(candidate, payload, { flag: "wx", mode });
+        }
         temporary = candidate;
       } catch (error) {
         if (error?.code !== "EEXIST") {

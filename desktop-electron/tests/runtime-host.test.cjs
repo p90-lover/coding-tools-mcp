@@ -472,6 +472,22 @@ test("production doctor parses its structured unhealthy report from exit status 
   assert.deepEqual(runOptions.acceptedExitCodes, [0, 1]);
 });
 
+test("an operation's program is loaded off the main thread before the operation starts it", async () => {
+  const order = [];
+  const host = new RuntimeHost({
+    app: { getPath: () => os.tmpdir(), getVersion: () => "1.1.3" },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    supervisor: {},
+    warm: async (file, args) => { order.push(["warm", file, args]); },
+  });
+  host.command = (args) => ({ executable: process.execPath, args: ["-e", "process.stdout.write('ran')", ...args], cwd: os.tmpdir() });
+  const result = await host.run("doctor", []);
+  assert.equal(result.stdout.trim(), "ran");
+  assert.deepEqual(order, [["warm", process.execPath, ["--version"]]], "warmed once, the operation's own program");
+});
+
 test("production and DEV setup entrypoints reject the opposite launcher profile", async () => {
   await assert.rejects(hostFor(null).host.setupDevCore(), /isolated DEV launcher/);
   await assert.rejects(devHostFor(null).host.setupCore(), /unavailable in the isolated DEV launcher profile/);
