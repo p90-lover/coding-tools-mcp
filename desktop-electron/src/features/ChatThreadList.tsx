@@ -44,6 +44,8 @@ export type ThreadActions = {
   copy: (taskId: string, what: "title" | "conversation" | "answer" | "id") => void;
   openStructure: (taskId: string) => void;
   openBoard: () => void;
+  /** Opens Settings (the sidebar footer's gear row). */
+  openSettings?: () => void;
   openFolder?: (workspace: ThreadWorkspace) => void;
   /** A new chat in that project (the project row's pencil, as in Codex). */
   newChatIn: (workspaceId: string) => void;
@@ -889,6 +891,13 @@ export function ChatThreadList(props: ThreadListProps) {
       </nav>
       {/* In split view the chat pet's house stands here, under the list (ChatPet draws it in). */}
       <div className="cx-pet-yard" />
+      {/* Codex's sidebar footer: Settings with its gear (also Ctrl+,). */}
+      {actions.openSettings ? <div className="cx-threads-foot">
+        <button type="button" className="cx-settings-link" aria-label="Open settings" title="Settings (Ctrl+,)" onClick={actions.openSettings}>
+          <span className="cx-settings-icon"><ChatGlyph name="gear" size={16} /></span>
+          <span>Settings</span>
+        </button>
+      </div> : null}
       {hover && !menu ? <FloatingLayer className="cx-hover-card" role="tooltip" style={{ top: hover.top, left: hover.left }}>
         <strong>{hover.chat.title}</strong>
         <span>{STATUS_LABEL[hover.chat.status]}{hover.chat.updatedAtMs ? ` · updated ${chatRelativeTime(hover.chat.updatedAtMs, now)} ago`.replace("now ago", "just now") : ""}</span>

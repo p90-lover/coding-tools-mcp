@@ -18,6 +18,7 @@ import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
 import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
+import { ChatSettingsPage } from "./ChatSettingsPage";
 import { createLatestConfigQueue } from "./ao-config";
 import {
   AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings, starterSettings,
@@ -522,6 +523,20 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const paneWanted = useRef(pane ? { workspaceId: pane.workspaceId, taskId: pane.taskId } : null);
   // One project tree switches between the conversation and the selected graph above its workspace board.
   const [view, setView] = useState<"chat" | "overview" | "board">("chat");
+  // Settings covers the chat area as Codex's does (ChatSettingsPage); the chat stays mounted below.
+  // Ctrl+, opens it and, pressed again, closes it. Split panes have no sidebar and no Settings.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => {
+    if (pane) return undefined;
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key === ",") {
+        event.preventDefault();
+        setSettingsOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pane]);
   // null until the workspace's runs load; "" means a new, unsent chat.
   const [chatTaskId, setChatTaskId] = useState<string | null>(null);
   // Why a chat's latest run could not start, by task id; cleared once it starts.
@@ -2450,6 +2465,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           lifecycle: missionAction, archiveAll: archiveAllChats,
           fork: (taskId, from) => forkChat(taskId, from === "first" ? "first" : undefined), copy: copyChat,
           openStructure: (taskId) => selectChat(taskId, "overview"), openBoard: () => { setSheet(""); setView("board"); }, openFolder,
+          openSettings: () => setSettingsOpen(true),
           continueIn: continueInProject, share: shareChat, openWindow: openChatWindow,
           openSplit: (id, taskId) => openInSplit(id || workspaceId, taskId),
           // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
@@ -2733,6 +2749,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
             if (!saved.available || saved.mode !== mode) throw new Error(saved.reason || "Couldn't save where chats work. Try again.");
           }} />;
       })()}
+      {settingsOpen && !pane ? <ChatSettingsPage onClose={() => setSettingsOpen(false)} /> : null}
     </section>
   );
 }
