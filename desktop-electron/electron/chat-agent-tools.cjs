@@ -2382,7 +2382,8 @@ function createChatAgentTools({
           }
         }
         restored = { port: 0, entries: [] };
-        writeLeases();
+        // Off the main thread too: at start the hard disk is busiest, and close() waits for it.
+        writeLeasesSoon();
         sweeper ??= setInterval(() => { void sweep().catch(() => undefined); }, SWEEP_MS);
         sweeper.unref?.();
         logger.info?.("chat_agent_tools.listening", { port });
