@@ -107,6 +107,8 @@ const {
 } = require("./launcher-ready-path.cjs");
 const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
 const { createMainStallMonitor } = require("./main-stall-monitor.cjs");
+const { createDiskHealthMonitor } = require("./disk-health.cjs");
+const { createMemoryWatch } = require("./memory-watch.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
 const {
   UPDATE_SETTINGS,
@@ -4543,6 +4545,14 @@ async function start() {
   // A blocked main loop freezes every window; this is the only thing that can tell afterwards.
   blockingCalls.attach((entry) => logger.warn("launcher.main_blocked", entry));
   createMainStallMonitor({ logger, blockingCalls }).start();
+  const notifyPerson = ({ title, body }) => { if (Notification.isSupported()) new Notification({ title, body }).show(); };
+  // A failing or full disk tears files and freezes the app with nothing else saying why (G:/H:, 2026-10-30).
+  const diskHealth = createDiskHealthMonitor({ paths: [app.getPath("userData"), path.dirname(process.execPath)], logger, notify: notifyPerson });
+  diskHealth.start();
+  // Memory that keeps growing in one of the app's processes (a leak), told before it slows the machine.
+  const memoryWatch = createMemoryWatch({ appMetrics: () => app.getAppMetrics(), logger, notify: notifyPerson });
+  memoryWatch.start();
+  app.on("will-quit", () => { diskHealth.stop(); memoryWatch.stop(); });
 
   app.on("activate", () => showMainWindow());
   app.on("will-quit", () => missionWorkflowRuntime?.dispose());
