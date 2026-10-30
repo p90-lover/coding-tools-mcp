@@ -58,17 +58,17 @@ const BACKEND_MODULES = Object.freeze([
   "ao-dependency-links.cjs",
   // agent-orchestrator-upstream.cjs ends chat hosts at quit with its process-tree kill.
   "process-tree.cjs",
-  // agent-orchestrator-upstream.cjs warms the daemon's program off the main thread.
-  "off-thread-run.cjs",
-  // agent-orchestrator-workflow.cjs scores models on finished Team rounds, kept with durable-state.cjs.
-  "model-scores.cjs",
-  "durable-state.cjs",
   // Codex's Auto-review policy, which agent-orchestrator-workflow.cjs reviews requests by.
   "codex-guardian-policy.cjs",
   "ao-context-breakdown.cjs",
   "cpa-antigravity-reauth.cjs",
   "cpa-oauth-adapter.cjs",
   "headless-host.cjs",
+  // agent-orchestrator-upstream.cjs warms the AO daemon's program off the main thread (#702).
+  "off-thread-run.cjs",
+  // agent-orchestrator-workflow.cjs scores Team rounds (#707), saved as flushed state with a copy (#695).
+  "model-scores.cjs",
+  "durable-state.cjs",
 ]);
 
 function sha256File(filePath) {
