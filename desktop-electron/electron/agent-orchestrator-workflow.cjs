@@ -6514,7 +6514,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
+  /** Resolves once every goal change so far is on disk (saves run off the main thread). */
+  const goalsSaved = () => goals.saved();
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, goalAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

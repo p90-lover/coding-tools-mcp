@@ -64,6 +64,7 @@ const { PREVIEW_TOOL_DEFS, PREVIEW_TOOLS } = require("./chat-preview.cjs");
 const { SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS } = require("./subagents.cjs");
 const { CHAT_HISTORY_TOOL_DEFS, CHAT_HISTORY_TOOLS } = require("./chat-history.cjs");
 const { MAX_SECRET, MAX_SECRETS } = require("./chat-redaction.cjs");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const SERVER_NAME = "coding-tools";
 const PROTOCOL_VERSIONS = Object.freeze(["2025-06-18", "2025-03-26", "2024-11-05"]);
@@ -1276,8 +1277,8 @@ function createChatAgentTools({
   let saveTimer = null;
   let restored = { port: 0, entries: [] };
 
-  function writeLeases() {
-    if (typeof statePath !== "string" || !statePath || !port) return;
+  function leasesText() {
+    if (typeof statePath !== "string" || !statePath || !port) return null;
     const data = {
       version: LEASE_FILE_VERSION, port,
       sessions: [...sessions.values()].filter((entry) => entry.expected).map((entry) => ({
@@ -1286,19 +1287,33 @@ function createChatAgentTools({
         origins: [...entry.origins].slice(0, 50),
       })),
     };
+    return `${JSON.stringify(data)}\n`;
+  }
+  function writeLeases() {
+    const text = leasesText();
+    if (text === null) return;
     try {
       fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
       const temporary = `${statePath}.${process.pid}.tmp`;
-      fs.writeFileSync(temporary, `${JSON.stringify(data)}\n`, { mode: 0o600 });
+      fs.writeFileSync(temporary, text, { mode: 0o600 });
       fs.renameSync(temporary, statePath);
     } catch (error) {
       logger.warn?.("chat_agent_tools.leases_not_saved", { message: errorMessage(error) });
     }
   }
+  // The saves made while agents work run off the main thread: the synchronous rename held every
+  // window 0.8 s on the hard disk (2026-10-30). close() still writes synchronously, after this.
+  let leasesWrite = null;
+  function writeLeasesSoon() {
+    const text = leasesText();
+    if (text === null) return;
+    leasesWrite = writePrivateFileAtomicAsync(statePath, text, { protectDirectory: false })
+      .catch((error) => logger.warn?.("chat_agent_tools.leases_not_saved", { message: errorMessage(error) }));
+  }
   let closing = false;
   function save() {
     if (closing || typeof statePath !== "string" || !statePath || saveTimer) return;
-    saveTimer = setTimeout(() => { saveTimer = null; writeLeases(); }, 200);
+    saveTimer = setTimeout(() => { saveTimer = null; writeLeasesSoon(); }, 200);
     saveTimer.unref?.();
   }
   function readLeases() {
@@ -2612,8 +2627,10 @@ function createChatAgentTools({
     async close() {
       // The leases stay on disk for the next app; closing forgets them only in this process.
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-      writeLeases();
       closing = true;
+      // A save still in flight would otherwise land after this one with older leases.
+      await leasesWrite;
+      writeLeases();
       const current = server;
       server = null; listening = null; port = 0;
       if (sweeper) clearInterval(sweeper);
