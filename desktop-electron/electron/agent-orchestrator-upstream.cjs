@@ -1509,13 +1509,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async exitAgent(id) {
       agentTools?.cancelSessionCalls?.(id);
       let outcome;
-      try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); }
-      catch (error) {
-        if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
-        // AO stopped any host the exited session still had; the idle sweep need not ask again.
-        exitedReleased.add(String(id));
-        if (exitedReleased.size > 2000) exitedReleased.delete(exitedReleased.values().next().value);
-        outcome = { ok: true, ...await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`) };
+      // A stop or start already under way holds the agent for a moment. Failing on the first
+      // "already exiting" failed the launch that asked, and its retries hit the same lock: 23
+      // launches in a row, seen live 2026-10-30. That stop ends in AGENT_EXITED, so wait it out.
+      for (let busy = 0; ; busy++) {
+        try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); break; }
+        catch (error) {
+          if (error?.status === 409 && ["AGENT_EXIT_IN_PROGRESS", "AGENT_RESUME_IN_PROGRESS"].includes(error.code) && busy < 20) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            continue;
+          }
+          if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
+          // AO stopped any host the exited session still had; the idle sweep need not ask again.
+          exitedReleased.add(String(id));
+          if (exitedReleased.size > 2000) exitedReleased.delete(exitedReleased.values().next().value);
+          outcome = { ok: true, ...await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`) };
+          break;
+        }
       }
       if (outcome?.ok !== true || outcome.session?.id !== id || outcome.session?.status !== "exited") {
         throw new Error(`Agent ${id} shutdown is unconfirmed`);
