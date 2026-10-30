@@ -55,7 +55,7 @@ function parseInventory(output) {
 
 class ExtraTunnels {
   /**
-   * runTunnel(tunnel, args, timeoutMs, label, { probe }) runs the tunnel CLI for one tunnel config;
+   * runTunnel(tunnel, args, timeoutMs, label) runs the tunnel CLI for one tunnel config (off the main thread);
    * connectArgs(config, tunnel) builds `runtimes connect` for it with the bridge's MCP command.
    */
   constructor({ coreHome, logger, runTunnel, connectArgs, diagnostic, absent, onChange, timing }) {
@@ -138,7 +138,7 @@ class ExtraTunnels {
   }
 
   async inventory(config) {
-    const result = await this.runTunnel(config.tunnel, ["runtimes", "cleanup", "--json"], 5_000, "Local tunnel inventory probe", { probe: true });
+    const result = await this.runTunnel(config.tunnel, ["runtimes", "cleanup", "--json"], 5_000, "Local tunnel inventory probe");
     if (result.code !== 0) throw new Error(`local tunnel inventory failed: ${this.diagnostic(result)}`);
     return parseInventory(result.output);
   }
