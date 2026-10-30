@@ -8792,3 +8792,167 @@ test("a Team round that settles by itself scores its models once, graded by a fr
   assert.equal((await workflow.call("model_scores", {})).total, 0);
   workflow.dispose();
 });
+
+/** A Single chat whose agent works on run r1, with the clock and timers in the test's hands. */
+function queueChat({ aoHarness = undefined, state = "running" } = {}) {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Ship", description: "fix the build", state: "in_progress", clauses: [] }], runs: [
+    { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state, route, receipt: { thread_id: "sess-1", turn_id: "turn-1" } }] }] });
+  const clock = { at: 1_000_000 };
+  const timers = new Map();
+  let next = 0;
+  // `fail.updates`: how many run creations AO refuses next (a busy runtime).
+  const fail = { updates: 0 };
+  const requestHeadless = async (endpoint, ...rest) => {
+    if (endpoint === "/api/v1/ao/update" && fail.updates > 0) { fail.updates -= 1; throw new Error("AO is busy"); }
+    return world.requestHeadless(endpoint, ...rest);
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/codex.exe", aoHarness,
+    resolveHarness: async () => { throw new Error("stop before the background loop"); }, now: () => clock.at,
+    setTimer: (fn, ms) => { next += 1; timers.set(next, { fn, at: clock.at + ms }); return next; }, clearTimer: (id) => timers.delete(id) });
+  const advance = async (ms) => {
+    clock.at += ms;
+    for (let pass = 0; pass < 10; pass++) {
+      const due = [...timers].filter(([, timer]) => timer.at <= clock.at);
+      if (!due.length) return;
+      for (const [id, timer] of due) { timers.delete(id); timer.fn(); }
+      await goalSettle();
+    }
+  };
+  const queue = async () => (await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "list" })).queue;
+  return { world, workflow, route, advance, queue, fail };
+}
+
+test("a queued message whose send fails is never lost: it stays at the front, saying why, and is tried again", async () => {
+  const { world, workflow, advance, queue, fail } = queueChat({ state: "finished" });
+  fail.updates = 1;
+  await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "keep going" } });
+  await goalSettle();
+  const [kept] = await queue();
+  assert.equal(kept.message, "keep going");
+  assert.match(kept.note, /AO is busy/, "the bar can say why it has not gone yet");
+  assert.equal(world.updates.length, 0);
+  await advance(60_000);
+  assert.equal(world.updates.length, 1, "sent on the next try");
+  assert.deepEqual(await queue(), []);
+  workflow.dispose();
+});
+
+test("a queued message goes as the chat's next turn once its turn ends, with no chat view open", async () => {
+  const { world, workflow, route, advance, queue } = queueChat();
+  const added = await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "now run the tests" } });
+  await goalSettle();
+  assert.equal(world.updates.length, 0, "not while the agent works");
+  // The chat joins a message typed right after it (chatQueueAdd).
+  const joined = await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "update", itemId: added.item.id, message: "now run the tests\n\nand lint" });
+  assert.equal(joined.updated, true);
+  assert.deepEqual(Object.keys((await workflow.call("runs", { workspaceId: "ws-1" })).queues), ["task-1"], "the chat view reads it with the runs");
+  world.runs[0].nodes[0].state = "finished";
+  await workflow.queueAfterRun("ws-1", "r1", "finished");
+  assert.equal(world.updates.length, 1, "one new turn");
+  assert.deepEqual(world.updates[0].single_route, route, "on the chat's own model");
+  assert.match(world.edits.at(-1).description, /now run the tests\n\nand lint$/);
+  assert.deepEqual(await queue(), []);
+  // Missed the settle (the app was closed): the next look at the runs sends it.
+  await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "and deploy" } });
+  await goalSettle();
+  assert.equal(world.updates.length, 2, "a chat that is free sends it at once");
+  assert.equal((await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "clear" })).queue.length, 0);
+  await advance(60_000);
+  workflow.dispose();
+});
+
+test("a queued message refused for now goes back to the front and is tried again; a steer one is steered in", async () => {
+  const steered = [];
+  let take = false;
+  const { world, workflow, advance, queue } = queueChat({ aoHarness: { steer: async (id, text) => { steered.push(text); return take ? { steered: true } : { steered: false, starting: true }; } } });
+  await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "use pnpm", steer: true } });
+  await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "then lint", steer: false } });
+  await goalSettle();
+  assert.deepEqual(steered, [], "the chat view already tried; the app waits 15 s");
+  // The agent is still starting (CHAT_CONTROLLER_NOT_READY): it stays at the front.
+  await advance(15_000);
+  assert.deepEqual(steered, ["use pnpm"]);
+  assert.deepEqual((await queue()).map((item) => item.message), ["use pnpm", "then lint"]);
+  take = true;
+  await advance(30_000);
+  assert.deepEqual(steered, ["use pnpm", "use pnpm"], "tried again after 30 s");
+  assert.deepEqual((await queue()).map((item) => item.message), ["then lint"], "steered in, so it left the queue");
+  assert.equal(world.updates.length, 0, "the plain message still waits for the turn");
+  workflow.dispose();
+});
+
+test("a steer the agent never read (its turn died first) comes back and goes as the next turn", async () => {
+  let timeline = [{ id: "t1", kind: "reasoning", status: "completed", text: "thinking" }, { id: "t2", kind: "steer", status: "completed", text: "keep going" }];
+  const { world, workflow, queue } = queueChat({ aoHarness: { steer: async () => ({ steered: true }), timeline: async () => timeline } });
+  assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" })).steered, true);
+  await goalSettle(() => world.edits.length > 0);
+  // The agent stopped answering and the turn failed: the steer was never read.
+  world.runs[0].nodes[0].state = "failed";
+  await workflow.queueAfterRun("ws-1", "r1", "failed");
+  assert.equal(world.updates.length, 1, "it went as the chat's next turn");
+  assert.match(world.edits.at(-1).description, /Follow-up \([^)]+\):\nkeep going$/);
+  assert.deepEqual(await queue(), []);
+
+  // A steer the agent read (it went on past it) is not sent twice; nor is one in a turn the person stopped.
+  const again = queueChat({ aoHarness: { steer: async () => ({ steered: true }), timeline: async () => timeline } });
+  timeline = [...timeline, { id: "t3", kind: "command", status: "completed", text: "pnpm i" }, { id: "t4", kind: "message", status: "completed", text: "done" }];
+  await again.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  await goalSettle(() => again.world.edits.length > 0);
+  again.world.runs[0].nodes[0].state = "failed";
+  await again.workflow.queueAfterRun("ws-1", "r1", "failed");
+  assert.equal(again.world.updates.length, 0, "read: nothing to send again");
+  const stopped = queueChat({ aoHarness: { steer: async () => ({ steered: true }), timeline: async () => [] } });
+  await stopped.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  stopped.world.runs[0].nodes[0].state = "cancelled";
+  await stopped.workflow.queueAfterRun("ws-1", "r1", "stopped");
+  assert.equal(stopped.world.updates.length, 0, "the person's Stop stands");
+  for (const chat of [{ workflow }, again, stopped]) chat.workflow.dispose();
+});
+
+test("after a restart the app resumes interrupted chats in every project, with no window or chat open", async () => {
+  const now = Date.now();
+  const restarted = "the agent's process ended before it finished (the app restarted)";
+  const route = { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" };
+  const held = (id, task, error, startedAt) => ({ id, workspace_id: "ws-1", project_id: task, execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { error, started_at_ms: startedAt } }] });
+  // A card still running on an agent host that outlived the app, under the grant its run still holds.
+  const surviving = { id: "live", workspace_id: "ws-1", project_id: "task-4", execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), turns_started: 0, max_turns: 1, expires_at_ms: now + 60_000 },
+    nodes: [{ id: "one", role: "planner", parents: [], state: "running", route, history: [], receipt: { started_at_ms: now - 60_000 } }] };
+  const chats = () => [
+    held("r1", "task-1", restarted, now - 60_000),
+    held("old", "task-2", restarted, now - 3 * 24 * 60 * 60_000),
+    held("asks", "task-3", "HTTP 401: sign in again", now - 60_000),
+    structuredClone(surviving),
+  ];
+  const app = ({ autoRetry }) => {
+    const world = chatWorld({ runs: chats() });
+    const controls = [];
+    const started = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async (endpoint, body, options) => {
+        if (endpoint === "/api/v1/ao/control") { controls.push([body.run_id, body.action]); return { ok: true, run: { id: body.run_id, workspace_id: "ws-1", nodes: [] } }; }
+        return world.requestHeadless(endpoint, body, options);
+      },
+      findCodexExecutable: () => "C:/codex.exe",
+      resolveHarness: async (input) => { started.push(input.runId); throw new Error("stop before the background loop"); },
+    });
+    return { workflow, controls, started, ready: autoRetry ? workflow.call("chat_auto_retry", { enabled: true }) : Promise.resolve() };
+  };
+  // Startup recovery takes no new grant by itself: only the chat still running on its own grant goes on.
+  const plain = app({ autoRetry: false });
+  await plain.ready;
+  await plain.workflow.resumeInterrupted(["ws-1"]);
+  assert.deepEqual(plain.controls, [], "an interrupted turn needs a new grant, so it waits for the window");
+  assert.deepEqual(plain.started, ["live"]);
+  plain.workflow.dispose();
+  // With "Retry automatically" on, the interrupted chat is retried too, as that switch's own retries are.
+  const retrying = app({ autoRetry: true });
+  await retrying.ready;
+  await retrying.workflow.resumeInterrupted(["ws-1"]);
+  assert.deepEqual(retrying.controls, [["r1", "retry"]], "not an abandoned chat, nor one whose sign-in failed");
+  assert.deepEqual(retrying.started.sort(), ["live", "r1"]);
+  retrying.workflow.dispose();
+});
