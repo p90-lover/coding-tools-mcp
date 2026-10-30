@@ -55,7 +55,8 @@ test("only git's own answer makes a folder \"not git\"; a slow or failing git le
 });
 
 test("a project folder is told apart as Claude Code does: repository, worktree of one, folder inside one, not git, gone", { skip: !HAS_GIT }, async () => {
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "project-git-")));
+  // .native expands an 8.3 temp folder (a CI runner's RUNNER~1) to the long name git reports.
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "project-git-")));
   const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { stdio: "ignore" });
   try {
     const repo = path.join(base, "repo");
