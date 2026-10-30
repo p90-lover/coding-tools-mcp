@@ -69,6 +69,10 @@ const BACKEND_MODULES = Object.freeze([
   // agent-orchestrator-workflow.cjs scores Team rounds (#707), saved as flushed state with a copy (#695).
   "model-scores.cjs",
   "durable-state.cjs",
+  // agent-orchestrator-workflow.cjs queues a busy chat's messages and resumes chats after a
+  // restart (#706); without them a deployed bundle failed with "Cannot find module './chat-queue.cjs'".
+  "chat-queue.cjs",
+  "chat-resume.cjs",
 ]);
 
 function sha256File(filePath) {
