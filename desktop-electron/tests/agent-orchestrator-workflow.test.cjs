@@ -528,7 +528,8 @@ test("AO WebGPT catalog names a tier the account no longer offers and keeps `ava
 
 test("the desktop main process builds the AO WebGPT catalog through the shared tier helper", () => {
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  assert.match(main, /aoWebCatalogForModel\(JSON\.parse\(result\.stdout\), model\)/);
+  // The runtime's output is shared for a short while (ao-web-readiness.test.cjs) and parsed per call.
+  assert.match(main, /aoWebCatalogForModel\(JSON\.parse\(await aoWebCatalogOutput\(executable\)\), model\)/);
   assert.doesNotMatch(main, /catalog\.models\[0\]\?\.slug !== "chatgpt-web\/high"/);
   const cli = fs.readFileSync(path.join(__dirname, "../../runtime-web/src/cli.ts"), "utf8");
   assert.match(cli, /"chatgpt-web\/luna"/, "a Luna-only account still yields an AO WebGPT template");
