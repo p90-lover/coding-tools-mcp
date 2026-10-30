@@ -3719,6 +3719,29 @@ async function start() {
       : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools");
     // AO keeps every session's worktree here; a chat agent's tools are rooted only inside it.
     const aoWorktreesRoot = path.join(aoDataRoot, "worktrees");
+    // One `catalog ao-web` run answers every caller for 2 minutes. The runtime host runs one
+    // operation at a time, so a second chat connecting (or the context chip asking) meanwhile was
+    // refused, and each connect started the Bun runtime again: on a loaded HDD that took over 20 s
+    // and surfaced as "ao-web-model-catalog timed out" (2026-10-30). Kept short because the row's
+    // `available` tiers follow the signed-in ChatGPT account; a failed run is not kept.
+    const AO_WEB_CATALOG_FRESH_MS = 2 * 60_000;
+    let aoWebCatalogRun = null;
+    const aoWebCatalogOutput = (executable) => {
+      if (aoWebCatalogRun?.executable === executable && Date.now() - aoWebCatalogRun.at < AO_WEB_CATALOG_FRESH_MS) {
+        return aoWebCatalogRun.stdout;
+      }
+      const run = {
+        executable,
+        at: Date.now(),
+        stdout: runtimeHost.run("ao-web-model-catalog", ["catalog", "ao-web", "--codex", executable], {
+          embedded: true, timeoutMs: 45_000, message: "Checking the WebGPT model…",
+          successMessage: "WebGPT model checked",
+        }).then((result) => result.stdout),
+      };
+      run.stdout.catch(() => { if (aoWebCatalogRun === run) aoWebCatalogRun = null; });
+      aoWebCatalogRun = run;
+      return run.stdout;
+    };
     // Chat agents get tools over MCP, each session rooted at its own AO worktree: files, search,
     // patches and git (Settings > "Give chat agents the app's tools", on by default); commands
     // through the app's terminal only when the user opts in (Settings > "Let chat agents run
@@ -4052,12 +4075,9 @@ async function start() {
       // The runtime returns Codex's WebGPT High entry (Luna on a Luna-only account); other tiers
       // reuse it under their own slug (the bridge picks the effort from the slug, not this entry).
       webModelCatalog: async ({ executable, model = "chatgpt-web/high" }) => {
-        const result = await runtimeHost.run("ao-web-model-catalog", ["catalog", "ao-web", "--codex", executable], {
-          embedded: true, timeoutMs: 20_000, message: "Checking the WebGPT model…",
-          successMessage: "WebGPT model checked",
-        });
         if (typeof aoWebCatalogForModel !== "function") throw new Error("Update the Coding Tools backend to use WebGPT models");
-        return aoWebCatalogForModel(JSON.parse(result.stdout), model);
+        // Parsed per call, so no caller can change the shared answer.
+        return aoWebCatalogForModel(JSON.parse(await aoWebCatalogOutput(executable)), model);
       },
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,
