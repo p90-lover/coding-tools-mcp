@@ -3296,7 +3296,7 @@ async function start() {
     setImmediate(() => {
       try {
         const { sweepSetAside, agentRuntimeRoots } = require("./in-use-files.cjs");
-        sweepSetAside(agentRuntimeRoots(process.resourcesPath));
+        sweepSetAside(agentRuntimeRoots(process.resourcesPath)).catch(() => { /* best-effort cleanup */ });
         sweepUpdateLeftovers(path.dirname(process.execPath));
       } catch { /* best-effort cleanup */ }
     });

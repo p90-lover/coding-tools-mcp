@@ -45,21 +45,25 @@ function setAsideInUse(roots, { now = Date.now, log = () => {} } = {}) {
   return moved;
 }
 
-/** Deletes set-aside images nothing runs any more; ones still in use stay for a later start. */
-function sweepSetAside(roots) {
+/**
+ * Deletes set-aside images nothing runs any more; ones still in use stay for a later start. It runs
+ * at every start, so it walks asynchronously: synchronously, the walk of acp-runtime's node_modules
+ * held the main process (every window) 1.15 s on the busy hard disk (2026-10-30).
+ */
+async function sweepSetAside(roots) {
   let removed = 0;
-  const walk = (dir) => {
+  const walk = async (dir) => {
     let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
+      if (entry.isDirectory()) await walk(full);
       else if (SET_ASIDE.test(entry.name)) {
-        try { fs.rmSync(full); removed += 1; } catch { /* still running; a later start removes it */ }
+        try { await fs.promises.rm(full); removed += 1; } catch { /* still running; a later start removes it */ }
       }
     }
   };
-  for (const root of roots) walk(root);
+  for (const root of roots) await walk(root);
   return removed;
 }
 
