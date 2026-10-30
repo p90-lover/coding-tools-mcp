@@ -455,7 +455,13 @@ class RuntimeSupervisor {
     persistentBridge = false,
     processInfo = windowsProcessInfo,
     onExtraTunnelsChange,
+    // Settings → Updates: a running MCP tunnel is adopted only when this app started it with the
+    // same tunnel program it ships now (tunnelOwnerMatches). Off (the default here) adopts any ready
+    // tunnel, as before; main.cjs passes the setting.
+    reuseTunnelOnlyWhenMatching = () => false,
   }) {
+    this.reuseTunnelOnlyWhenMatching = reuseTunnelOnlyWhenMatching;
+    this.tunnelOwnerPath = path.join(coreHome, "runtime", "tunnel-owner.json");
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
@@ -1382,7 +1388,14 @@ class RuntimeSupervisor {
     this.tunnelHealthBaseUrl = null;
     try {
       const existing = await this.waitForKnownTunnelStatus(config);
-      if (existing.ready && !forceRestart) {
+      const matches = !existing.ready || this.reuseTunnelOnlyWhenMatching?.() !== true
+        || this.tunnelOwnerMatches(config, existing.pid);
+      if (existing.ready && !matches) {
+        // Left running by another build (or by a version before this check): restarted, so it runs
+        // the tunnel program this version ships. A 0.8.28 bridge once ran on under 0.8.29.
+        this.logger.info("runtime.tunnel_replaced_mismatch", { pid: existing.pid });
+      }
+      if (existing.ready && matches && !forceRestart) {
         this.tunnel = {
           pid: existing.pid,
           exitCode: null,
@@ -1419,6 +1432,7 @@ class RuntimeSupervisor {
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
       await this.waitForTunnelMcpTransport(config);
       this.startTunnelMonitor(config);
+      this.recordTunnelOwner(config, this.tunnel.pid);
     } catch (error) {
       let cleanupError;
       try {
@@ -1440,6 +1454,34 @@ class RuntimeSupervisor {
       }
       throw error;
     }
+  }
+
+  /** Which tunnel program a started tunnel runs: its size and change time (a release ships a new one). */
+  tunnelProgramSignature(config) {
+    try {
+      const stat = fs.statSync(config.tunnel.binaryPath);
+      return `${stat.size}:${Math.round(stat.mtimeMs)}`;
+    } catch {
+      return null;
+    }
+  }
+
+  recordTunnelOwner(config, pid) {
+    try {
+      writePrivateFileAtomic(this.tunnelOwnerPath, `${JSON.stringify({
+        pid, program: this.tunnelProgramSignature(config), appVersion: this.app?.getVersion?.() ?? null,
+      })}\n`);
+    } catch (error) {
+      this.logger.warn("runtime.tunnel_owner_unrecorded", { message: errorMessage(error) });
+    }
+  }
+
+  /** Whether the running tunnel `pid` is one this app started, with the tunnel program it ships now. */
+  tunnelOwnerMatches(config, pid) {
+    let owner;
+    try { owner = JSON.parse(fs.readFileSync(this.tunnelOwnerPath, "utf8")); } catch { return false; }
+    const program = this.tunnelProgramSignature(config);
+    return Boolean(program) && owner?.pid === pid && owner.program === program;
   }
 
   tunnelMcpInvocation(config) {

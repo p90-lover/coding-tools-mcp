@@ -62,8 +62,9 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   combineUpdateControllers, commitAppliedUpdate, createAppUpdateController, createAutoInstaller, handOffUpdateRecovery,
-  sweepUpdateLeftovers, waitForUpdateApply,
+  pendingAppliedUpdate, sweepUpdateLeftovers, waitForUpdateApply,
 } = require("./app-update.cjs");
+const { createUpdateHealthGate } = require("./update-health-gate.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
@@ -107,9 +108,12 @@ const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
 const { createMainStallMonitor } = require("./main-stall-monitor.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
 const {
+  UPDATE_SETTINGS,
   createStateStore,
   nextSessionRefreshReminderAt,
+  resolveUpdateSettings,
   validateSidebarState,
+  validateUpdateSettingsPatch,
 } = require("./state.cjs");
 const {
   MIN_WINDOW_BOUNDS,
@@ -215,6 +219,8 @@ let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
 let updateController = null;
 let autoInstaller = null;
+// Set once the main window's renderer has loaded (the update health gate's window check).
+let rendererLoaded = false;
 let cpaUpdater = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
@@ -3142,6 +3148,15 @@ function registerIpc({ logger, stateStore }) {
     if (!updateController) throw new Error("Launcher updates are unavailable");
     return updateController.checkNow({ force: true });
   });
+  // Settings → Updates: no patch reads them; a patch (checked in state.cjs) changes them. The answer
+  // carries each setting's limits so the page shows the same ranges this side enforces.
+  handle("launcher:update-settings", (_event, patch) => {
+    if (patch !== undefined && patch !== null) {
+      const state = stateStore.update(validateUpdateSettingsPatch(patch));
+      send("launcher:state-changed", state);
+    }
+    return { values: resolveUpdateSettings(stateStore.read()), limits: UPDATE_SETTINGS };
+  });
   handle("launcher:update-automatic", async (_event, enabled) => {
     const state = stateStore.update({ automaticUpdates: enabled === true });
     send("launcher:state-changed", state);
@@ -3426,12 +3441,45 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
-  // This version reached whenReady: an update that just placed it is kept, and the old copies the
-  // worker held for a rollback go (commitAppliedUpdate).
-  if (app.isPackaged) {
-    void commitAppliedUpdate(path.dirname(process.execPath), app.getVersion())
+  // An update that just placed this version is kept only once it proves it works: its window loaded,
+  // its backend answered and AO, when started, is ready (update-health-gate.cjs). Until then the old
+  // copies the worker held stay; a version still not healthy after Settings' health window goes back
+  // to the previous one. It used to be kept here at whenReady, before any of that was known.
+  // Work that an update, or an update's rollback, must not end: a browser, bridge or AO turn.
+  const appBusy = async () => Boolean(browserHost?.currentOperation() || runtimeHost?.currentOperation()
+    || runtimeStartupInFlight || codexBridgeConnectInFlight
+    || await agentOrchestratorUpstream?.harness.anySessionWorking());
+  if (app.isPackaged && pendingAppliedUpdate(path.dirname(process.execPath), app.getVersion())) {
+    const installRoot = path.dirname(process.execPath);
+    const commit = () => commitAppliedUpdate(installRoot, app.getVersion())
       .then((committed) => { if (committed) logger.info("launcher.app_update_committed", committed); })
       .catch((error) => logger.warn("launcher.app_update_commit_failed", { message: error instanceof Error ? error.message : String(error) }));
+    createUpdateHealthGate({
+      checks: {
+        window: () => {
+          if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isCrashed()) return rendererLoaded ? "fail" : "pending";
+          return rendererLoaded ? "pass" : "pending";
+        },
+        backend: () => (headlessHost?.control ? "pass" : "pending"),
+        // AO starts when a chat needs it: not started yet is no evidence against this version.
+        agentOrchestrator: () => {
+          const aoState = agentOrchestratorUpstream?.snapshot?.().state;
+          if (!aoState || aoState === "stopped" || aoState === "ready") return "pass";
+          return aoState === "error" ? "fail" : "pending";
+        },
+      },
+      timeoutMs: () => resolveUpdateSettings(stateStore.read()).updateHealthMinutes * 60_000,
+      autoRollback: () => resolveUpdateSettings(stateStore.read()).updateAutoRollback,
+      isBusy: () => appBusy(),
+      commit,
+      rollBack: async (reason) => {
+        // The recovery worker waits for this process to exit, puts the previous version back and starts it.
+        if (!handOffUpdateRecovery(installRoot, { currentVersion: app.getVersion(), startFailed: reason, logger })) return;
+        const quit = await requestQuit().catch((error) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
+        if (quit?.ok === false) app.exit(1);
+      },
+      logger,
+    }).start();
   }
   // A throw in a timer or an event handler, or a promise nobody awaits, used to reach Electron's
   // default handler: a modal "A JavaScript error occurred in the main process" box that holds the
@@ -3507,16 +3555,18 @@ async function start() {
       logger,
     }),
   );
-  // With automatic updates on, a found update installs itself while the user is away and no
-  // browser, bridge or AO turn is running; the sidebar's "Update to" button still works any time.
-  const appBusy = async () => Boolean(browserHost?.currentOperation() || runtimeHost?.currentOperation()
-    || runtimeStartupInFlight || codexBridgeConnectInFlight
-    || await agentOrchestratorUpstream?.harness.anySessionWorking());
+  // With automatic updates on, a found update installs itself while the user is away (Settings:
+  // how many idle minutes) and no browser, bridge or AO turn is running (unless Settings says not to
+  // wait for chats; a runtime operation still blocks it, as it blocks any quit). The sidebar's
+  // "Update to" button still works any time.
   autoInstaller = createAutoInstaller({
     controller: updateController,
     enabled: () => stateStore.read().automaticUpdates === true,
     idleSeconds: () => powerMonitor.getSystemIdleTime(),
-    isBusy: appBusy,
+    idleThreshold: () => resolveUpdateSettings(stateStore.read()).updateIdleMinutes * 60,
+    isBusy: () => (resolveUpdateSettings(stateStore.read()).updateWaitForChats
+      ? appBusy()
+      : Boolean(runtimeHost?.currentOperation() || runtimeStartupInFlight)),
     logger,
   });
   registerMinimalPreRendererIpc({ logger, stateStore });
@@ -4152,6 +4202,7 @@ async function start() {
   });
   registerIpc({ logger, stateStore });
   await ensureRendererLoaded(mainWindow, logger);
+  rendererLoaded = true;
   scheduleFullIpcAfterPaint(() => {
     registerIpc({ logger, stateStore });
     if (LAUNCHER_SMOKE_TEST) return;
@@ -4212,6 +4263,8 @@ async function start() {
     getRuntimeEnvironment: () => externalServicesController.runtimeEnvironment(),
     // The Codex bridge and MCP tunnel outlive launcher restarts and updates; the next launcher adopts them.
     persistentBridge: !IS_DEV_PROFILE,
+    // Settings → Updates: a tunnel left running by another build is restarted, not adopted.
+    reuseTunnelOnlyWhenMatching: () => resolveUpdateSettings(stateStore.read()).updateReuseMatchingOnly,
     onExtraTunnelsChange: tunnels => send("launcher:mcp-tunnels-changed", tunnels),
   });
   runtimeHost = new RuntimeHost({
@@ -4332,6 +4385,7 @@ async function start() {
   const launcherSmokeTest = LAUNCHER_SMOKE_TEST;
   let startupAuthenticationRefresh = Promise.resolve(browserHost.snapshot());
   await ensureRendererLoaded(mainWindow, logger);
+  rendererLoaded = true;
   try {
     await browserHost.ready();
   } catch (error) {

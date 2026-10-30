@@ -27,6 +27,52 @@ const DEFAULT_STATE = Object.freeze({
   sessionRefreshReminderAt: null,
 });
 
+// Settings → Updates. Stored only once changed: absent means the default here, so state written
+// before these existed reads the same. Numbers are whole minutes within [min, max].
+const UPDATE_SETTINGS = Object.freeze({
+  // An automatic update waits until no chat, browser turn or bridge work is running.
+  updateWaitForChats: Object.freeze({ type: "boolean", default: true }),
+  // ... and until nobody has used the keyboard or mouse for this long.
+  updateIdleMinutes: Object.freeze({ type: "minutes", default: 10, min: 0, max: 120 }),
+  // A new version that is not healthy within the health window goes back to the previous one.
+  updateAutoRollback: Object.freeze({ type: "boolean", default: true }),
+  updateHealthMinutes: Object.freeze({ type: "minutes", default: 10, min: 2, max: 60 }),
+  // A background service left running by the previous version (the MCP tunnel) is reused only when
+  // it runs the same program this version ships; otherwise it is restarted.
+  updateReuseMatchingOnly: Object.freeze({ type: "boolean", default: true }),
+});
+
+function validUpdateSetting(key, value) {
+  const spec = UPDATE_SETTINGS[key];
+  if (!spec) return false;
+  if (spec.type === "boolean") return typeof value === "boolean";
+  return Number.isInteger(value) && value >= spec.min && value <= spec.max;
+}
+
+/** Every update setting's effective value. */
+function resolveUpdateSettings(state) {
+  return Object.fromEntries(Object.entries(UPDATE_SETTINGS).map(([key, spec]) => [
+    key, validUpdateSetting(key, state?.[key]) ? state[key] : spec.default,
+  ]));
+}
+
+/** A Settings change, checked: throws on an unknown key or a value out of range. */
+function validateUpdateSettingsPatch(patch) {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error("Update settings must be an object");
+  const entries = Object.entries(patch);
+  if (!entries.length) throw new Error("No update setting was given");
+  for (const [key, value] of entries) {
+    const spec = UPDATE_SETTINGS[key];
+    if (!spec) throw new Error(`Unknown update setting: ${key}`);
+    if (!validUpdateSetting(key, value)) {
+      throw new Error(spec.type === "boolean"
+        ? `${key} must be true or false`
+        : `${key} must be a whole number of minutes from ${spec.min} to ${spec.max}`);
+    }
+  }
+  return Object.fromEntries(entries);
+}
+
 function nextSessionRefreshReminderAt(now = Date.now()) {
   if (!Number.isFinite(now)) throw new Error("Session refresh reminder time must be finite");
   return new Date(now + SESSION_REFRESH_REMINDER_INTERVAL_MS).toISOString();
@@ -95,6 +141,9 @@ function normalizeState(parsed) {
     // An agent's tool request answered in the chat is confirmed again in a dialog unless this is
     // false (the dialog's "Don't ask again"); absent means it asks.
     if (Object.hasOwn(state, "confirmAgentToolRequests") && state.confirmAgentToolRequests !== false) delete state.confirmAgentToolRequests;
+    for (const key of Object.keys(UPDATE_SETTINGS)) {
+      if (Object.hasOwn(state, key) && !validUpdateSetting(key, state[key])) delete state[key];
+    }
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
     }
@@ -170,7 +219,10 @@ module.exports = {
   SESSION_REFRESH_REMINDER_INTERVAL_MS,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
+  UPDATE_SETTINGS,
   createStateStore,
   nextSessionRefreshReminderAt,
+  resolveUpdateSettings,
   validateSidebarState,
+  validateUpdateSettingsPatch,
 };
