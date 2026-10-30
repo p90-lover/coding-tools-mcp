@@ -28,6 +28,9 @@ const MAX_WAIT_MS = 10_000;
 const MAX_TEXT = 40_000;
 const MAX_ELEMENTS = 250;
 const MAX_TYPED = 4_000;
+// Worst-case JSON escaping stays below the agent MCP server's 1 MB request budget.
+const MAX_PANEL_BYTES = 128 * 1024;
+const LIVE_PANEL_URL = "about:blank#live-panel";
 // A page script that does not answer within this fails the call.
 const EVALUATE_TIMEOUT_MS = 5_000;
 // A full-page screenshot is cut at this height (CSS pixels).
@@ -136,6 +139,9 @@ const refArgument = { type: "string", description: "An element's ref from previe
 
 /** The preview tools as MCP tool definitions. */
 const PREVIEW_TOOL_DEFS = Object.freeze([
+  { name: "preview_render", title: "Create or update a live panel",
+    description: "Create a live, interactive AI-editable panel in this chat's Preview pane using self-contained HTML, CSS and JavaScript. Call this again to replace the content in the same panel during a later turn. No dev server or file is needed. Use preview_read, preview_click and preview_screenshot to interact and verify it. Network requests, external scripts, app access and downloads are blocked; include everything the panel needs in html. Up to 128 KB of UTF-8 HTML. Use preview_open with a project dev server for larger web apps.",
+    inputSchema: object({ html: { type: "string", minLength: 1, maxLength: MAX_PANEL_BYTES } }, ["html"]) },
   { name: "preview_open", title: "Open a page in the preview",
     description: "The browser for checking any web page, frontend or GUI you build or change: open a page your dev server serves on this machine (http://localhost:<port>/... or http://127.0.0.1:<port>/...) in this chat's own browser, which opens the chat's Preview pane for the user. Use it (then preview_screenshot and preview_read) instead of curl, a headless browser or asking the user to open the page. Waits for the page to load. Only localhost, 127.0.0.1 and [::1] addresses open; the first time this chat opens an address, the user may be asked. The page may only reach addresses this chat opened: another port (an API on :3000, a separate hot-reload port), the other spelling of the host (localhost vs 127.0.0.1) and anything on the internet (CDN scripts, web fonts) are blocked and show in preview_console. Open a second local address with preview_open (then return to the page) if the app needs it.",
     inputSchema: object({ url: { type: "string", description: "e.g. http://localhost:5173/" } }, ["url"]) },
@@ -201,6 +207,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     let url;
     try { url = new URL(raw); } catch { return { allowed: false, why: "not a URL" }; }
     if (["data:", "blob:", "about:", "chrome-error:"].includes(url.protocol)) return { allowed: true };
+    if (preview.panelMode) return { allowed: false, why: "live panels are offline" };
     const web = { "http:": "http:", "https:": "https:", "ws:": "http:", "wss:": "https:" }[url.protocol];
     if (!web) return { allowed: false, why: `${url.protocol} requests are not allowed` };
     const port = Number(url.port || (web === "https:" ? 443 : 80));
@@ -280,12 +287,12 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     });
     contents.setWindowOpenHandler(({ url }) => {
       const allowed = target(url);
-      if (allowed.url && preview.origins.has(allowed.origin)) void contents.loadURL(allowed.url).catch(() => undefined);
+      if (!preview.panelMode && allowed.url && preview.origins.has(allowed.origin)) void contents.loadURL(allowed.url).catch(() => undefined);
       return { action: "deny" };
     });
     const guard = (event, url) => {
       const allowed = target(url);
-      if (allowed.url && preview.origins.has(allowed.origin)) return;
+      if (!preview.panelMode && allowed.url && preview.origins.has(allowed.origin)) return;
       event.preventDefault();
       remember(preview, preview.console, MAX_CONSOLE, { level: "warning", text: `Navigation to ${String(url).slice(0, 200)} was blocked: ${allowed.refused ?? "open it with preview_open first"}`, source: "preview" });
     };
@@ -318,7 +325,8 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
           if (!allowed.url || !preview.origins.has(allowed.origin)) return false;
           void contents.loadURL(allowed.url).catch(() => undefined);
           return true;
-        }, canOpen: (url) => { const allowed = target(url); return Boolean(allowed.url && preview.origins.has(allowed.origin)); } });
+        }, canOpen: (url) => { const allowed = target(url); return Boolean(!preview.panelMode && allowed.url && preview.origins.has(allowed.origin)); },
+          reload: () => run(preview, "preview_navigate", { action: "reload" }).catch(error => logger.warn?.("chat_preview.reload_failed", { message: String(error?.message ?? error) })) });
       } catch { /* a menu that cannot open leaves the page as it is */ }
     });
     contents.on("dom-ready", () => place(preview));
@@ -436,8 +444,48 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
 
   const summary = (preview) => {
     const contents = preview.view.webContents;
-    return { url: contents.getURL(), title: contents.getTitle() };
+    return { url: preview.panelMode ? LIVE_PANEL_URL : contents.getURL(), title: contents.getTitle() };
   };
+
+  // Serialize mode changes too: an old panel must be gone before web-page network access resumes.
+  async function changePage(preview, change, signal) {
+    const current = () => !signal?.aborted && previews.get(preview.key) === preview && !preview.view.webContents.isDestroyed();
+    const render = (preview.changing ?? Promise.resolve()).catch(() => undefined).then(async () => {
+      if (!current()) throw new PreviewError("This chat's panel request ended.");
+      await change(current);
+      if (!current()) throw new PreviewError("This chat's panel request ended.");
+    });
+    preview.changing = render;
+    try { await render; } finally { if (preview.changing === render) preview.changing = null; }
+  }
+
+  async function renderPanel(preview, html, signal) {
+    await changePage(preview, async current => {
+      const source = html ?? preview.html;
+      if (typeof source !== "string") throw new PreviewError("This chat has no live panel to restore.");
+      preview.panelMode = true;
+      const markup = "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Live panel</title><style>:root{color-scheme:light dark}body{margin:0;padding:16px;font:14px system-ui}button,input,select,textarea{font:inherit}</style>" + source;
+      // A fresh opaque origin prevents a panel from inheriting a project's cookies or storage.
+      await load(preview, `data:text/html;base64,${Buffer.from(markup, "utf8").toString("base64")}`);
+      if (!current()) throw new PreviewError("This chat's panel request ended.");
+      preview.view.webContents.navigationHistory?.clear?.();
+      preview.html = source;
+    }, signal);
+  }
+
+  async function openProjectPage(preview, allowed, signal) {
+    await changePage(preview, async current => {
+      const wasPanel = preview.panelMode;
+      if (wasPanel) await load(preview, "about:blank");
+      if (!current()) throw new PreviewError("This chat's preview request ended.");
+      // A failed project load must not leave an offline panel reachable with web access enabled.
+      if (wasPanel) preview.view.webContents.navigationHistory?.clear?.();
+      preview.panelMode = false;
+      preview.origins.add(allowed.origin);
+      await load(preview, allowed.url);
+      if (wasPanel) preview.view.webContents.navigationHistory?.clear?.();
+    }, signal);
+  }
 
   async function point(preview, args, { focus = false, clear = false } = {}) {
     if (args.ref !== undefined) {
@@ -463,7 +511,9 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     switch (name) {
       case "preview_read": {
         const max = Number.isInteger(args.max_chars) ? Math.min(MAX_TEXT, Math.max(500, args.max_chars)) : 12_000;
-        return textResult(await evaluate(preview, snapshotScript(max, MAX_ELEMENTS)));
+        const snapshot = await evaluate(preview, snapshotScript(max, MAX_ELEMENTS));
+        if (preview.panelMode && snapshot) snapshot.url = LIVE_PANEL_URL;
+        return textResult(snapshot);
       }
       case "preview_screenshot": {
         let clip;
@@ -525,7 +575,10 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
         const history = contents.navigationHistory;
         if (args.action === "back") { if (history?.canGoBack?.()) history.goBack(); }
         else if (args.action === "forward") { if (history?.canGoForward?.()) history.goForward(); }
-        else if (args.action === "reload") contents.reload();
+        else if (args.action === "reload") {
+          if (preview.panelMode && preview.html) await renderPanel(preview);
+          else contents.reload();
+        }
         else throw new PreviewError("action must be back, forward or reload");
         await sleep(400);
         return textResult({ ok: true, ...summary(preview) });
@@ -566,6 +619,15 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
       const generation = ownerGeneration;
       if (signal?.aborted) return failure("This chat's preview request was cancelled.");
       try {
+        if (name === "preview_render") {
+          if (typeof args.html !== "string" || !args.html.trim()) return failure("html must contain the panel's HTML.");
+          if (Buffer.byteLength(args.html, "utf8") > MAX_PANEL_BYTES) return failure("The panel HTML is larger than 128 KB.");
+          const preview = previews.get(key) ?? create(key);
+          preview.usedAt = now();
+          place(preview);
+          await renderPanel(preview, args.html, signal);
+          return textResult({ ok: true, ...summary(preview) });
+        }
         if (name === "preview_open") {
           const allowed = target(args.url);
           if (!allowed.url) return failure(allowed.refused);
@@ -578,8 +640,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
           preview = previews.get(key) ?? create(key);
           preview.usedAt = now();
           place(preview);
-          preview.origins.add(allowed.origin);
-          await load(preview, allowed.url);
+          await openProjectPage(preview, allowed, signal);
           return textResult({ ok: true, ...summary(preview) });
         }
         const preview = previews.get(key);
@@ -607,7 +668,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
       if (!preview || preview.view.webContents.isDestroyed()) return null;
       const contents = preview.view.webContents;
       return {
-        url: contents.getURL(), title: contents.getTitle(), loading: preview.loading,
+        url: preview.panelMode ? LIVE_PANEL_URL : contents.getURL(), title: contents.getTitle(), loading: preview.loading,
         canGoBack: Boolean(contents.navigationHistory?.canGoBack?.()), canGoForward: Boolean(contents.navigationHistory?.canGoForward?.()),
         errors: preview.console.filter((entry) => entry.level === "error").length + preview.failures.length,
         shown: shown?.key === key,
@@ -664,11 +725,18 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     /** The user's own navigation from the pane: back, forward, reload or a loopback URL. */
     async navigate(key, { action, url } = {}) {
       if (url !== undefined) {
+        const saved = previews.get(key);
+        if (url === LIVE_PANEL_URL) {
+          if (!saved?.html) return { ok: false, error: "This chat has no live panel to restore." };
+          try { await renderPanel(saved); return { ok: true }; }
+          catch (error) { return { ok: false, error: String(error?.message ?? error) }; }
+        }
         const allowed = target(url);
         if (!allowed.url) return { ok: false, error: allowed.refused };
         const preview = previews.get(key) ?? create(key);
-        preview.origins.add(allowed.origin);
-        try { await load(preview, allowed.url); } catch (error) { return { ok: false, error: String(error?.message ?? error) }; }
+        try {
+          await openProjectPage(preview, allowed);
+        } catch (error) { return { ok: false, error: String(error?.message ?? error) }; }
         return { ok: true };
       }
       const preview = previews.get(key);
@@ -692,7 +760,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
  * chat opened (canOpen), as every other navigation of the preview does; downloads stay off, so
  * there is no "Save as".
  */
-function previewMenuTemplate({ contents, params, openLink, canOpen, clipboard }) {
+function previewMenuTemplate({ contents, params, openLink, canOpen, clipboard, reload = () => contents.reload() }) {
   const flags = params?.editFlags ?? {};
   const history = contents.navigationHistory;
   const sections = [];
@@ -727,7 +795,7 @@ function previewMenuTemplate({ contents, params, openLink, canOpen, clipboard })
     sections.push([
       { label: "Back", accelerator: "Alt+Left", enabled: Boolean(history?.canGoBack?.()), click: () => history?.goBack?.() },
       { label: "Forward", accelerator: "Alt+Right", enabled: Boolean(history?.canGoForward?.()), click: () => history?.goForward?.() },
-      { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => contents.reload() },
+      { label: "Reload", accelerator: "CmdOrCtrl+R", click: reload },
     ], [
       { label: "Select all", accelerator: "CmdOrCtrl+A", click: () => contents.selectAll() },
     ]);
@@ -748,10 +816,10 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, Menu, clipboard
   };
   previews = createChatPreviews({
     ...options,
-    openContextMenu: Menu ? ({ contents, params, openLink, canOpen }) => {
+    openContextMenu: Menu ? ({ contents, params, openLink, canOpen, reload }) => {
       const window = mainWindow();
       if (!window || window.isDestroyed()) return;
-      const template = previewMenuTemplate({ contents, params, openLink, canOpen, clipboard });
+      const template = previewMenuTemplate({ contents, params, openLink, canOpen, clipboard, reload });
       if (template.length) Menu.buildFromTemplate(template).popup({ window });
     } : null,
     createView: (partition) => {

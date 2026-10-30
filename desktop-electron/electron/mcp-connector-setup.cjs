@@ -76,19 +76,51 @@ function extensionHelpersSource() {
       || settings.authentication !== 'none') {
       throw new Error('The current ChatGPT connector settings are invalid.');
     }
+    const personal = await waitFor(() => {
+      const tabs = [...document.querySelectorAll('main [role="tab"]')]
+        .filter(tab => visible(tab) && textMatches(tab, PERSONAL_VIEW_LABELS, true));
+      return tabs.length === 1 ? tabs[0] : null;
+    }, 10_000);
+    if (!personal) throw new Error('ChatGPT did not expose one Personal plugins tab.');
+    // The URL can say view=personal while the rendered directory still selects Public.
+    if (personal.getAttribute('aria-selected') !== 'true') personal.click();
+    if (!await waitFor(() => personalPluginsLoaded(), 10_000)) {
+      throw new Error('The Personal plugins tab did not finish loading.');
+    }
+    await clearPluginSearch();
     const listed = await waitFor(() => {
       if (!personalPluginsLoaded()) return null;
       const card = findManagedAppCard(settings.name);
       if (card) return { card };
       if (pluginCardLinks().length || pluginsPageRenderState(settings.name) === 'empty') return { absent: true };
+      const main = document.querySelector('main');
+      if (/no plugins found/i.test(main?.innerText || '')
+        && allClickable(main).some(el => textMatches(el, ['Add'], true))) return { absent: true };
       return null;
     }, 40_000);
     if (!listed) throw new Error('The Personal plugins list did not finish loading, so the connector was not created.');
     if (listed.card) return { created: false, href: listed.card.getAttribute('href') };
-    if (!await openCreateFormStrict()) throw new Error('ChatGPT did not open its connector form.');
+    const add = allClickable(document.querySelector('main')).filter(el =>
+      !el.closest('[role="dialog"],form') && textMatches(el, ['Add'], true)
+      && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
+    if (add.length > 1) throw new Error('ChatGPT exposed more than one Add action.');
+    if (add.length === 1) {
+      add[0].click();
+      const opened = await waitFor(() => {
+        if (createFormPresent()) return { form: true };
+        const entries = allClickable(document).filter(el => textMatches(el,
+          ['Add MCP server', 'Add custom MCP server', 'Add a custom MCP server'], true));
+        return entries.length === 1 ? { entry: entries[0] } : null;
+      }, 5000);
+      if (opened?.entry) opened.entry.click();
+      if (!opened || !await waitFor(() => createFormPresent(), 7000)) {
+        throw new Error('ChatGPT did not open its custom MCP server form.');
+      }
+    } else if (!await openCreateFormStrict()) throw new Error('ChatGPT did not open its connector form.');
     let form = activeSurface();
     if (form === document) throw new Error('The connector form is not visible.');
-    const tunnelModes = allClickable(form).filter(el => el.getAttribute('role') === 'radio' && textMatches(el, ['Tunnel'], true));
+    const tunnelModes = allClickable(form).filter(el => textMatches(el, ['Tunnel', 'Secure MCP Tunnel'], true)
+      && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
     if (tunnelModes.length !== 1) throw new Error('ChatGPT did not expose one Tunnel option.');
     tunnelModes[0].click();
     const useId = allClickable(activeSurface()).filter(el => textMatches(el, ['Use tunnel ID instead'], true));
@@ -102,20 +134,37 @@ function extensionHelpersSource() {
     setInputValue(tunnelField, settings.tunnelId);
     await chooseAuth(settings.authentication);
     await acknowledgeCustomServerTrust();
+    form = activeSurface();
     const auth = [...form.querySelectorAll('select')].find(select =>
-      [...select.options].some(option => normalize(option.textContent) === 'no auth'));
+      [...select.options].some(option => textMatches(option, STRINGS.noAuth, true)));
     const selectedAuth = auth?.selectedOptions?.[0];
     const trust = form.querySelector('#trust-checkbox,[role="checkbox"]');
     if (nameField.value !== settings.name || tunnelField.value !== settings.tunnelId
-      || !selectedAuth || normalize(selectedAuth.textContent) !== 'no auth'
+      || !selectedAuth || !textMatches(selectedAuth, STRINGS.noAuth, true)
       || (trust && !(trust.checked || trust.getAttribute('aria-checked') === 'true'))) {
       throw new Error('ChatGPT did not retain the configured connector values.');
     }
-    const finalButtons = allClickable(form).filter(el => textMatches(el, ['Create'], true)
-      && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
-    if (finalButtons.length !== 1) throw new Error('ChatGPT did not expose one enabled Create action.');
-    finalButtons[0].click();
+    const create = await waitFor(() => {
+      const buttons = allClickable(activeSurface()).filter(el => textMatches(el, ['Create', 'Create as a plugin'], true)
+        && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
+      if (buttons.length > 1) throw new Error('ChatGPT exposed more than one Create action.');
+      return buttons[0] || null;
+    }, 15_000);
+    if (!create) throw new Error('ChatGPT did not expose one enabled Create action.');
+    const previousErrors = new Set([...form.querySelectorAll('[role="alert"],[data-slot="form-message"]')]
+      .map(el => normalize(el.innerText || el.textContent)));
+    create.click();
     const created = await waitFor(() => {
+      const surface = activeSurface();
+      if (surface !== document && createFormPresent()) {
+        if (/the mcp server denied access/i.test(surface.innerText || '')) {
+          throw new Error('The MCP server denied access. Check your authentication settings and, if using a tunnel, its workspace access.');
+        }
+        const error = [...surface.querySelectorAll('[role="alert"],[data-slot="form-message"]')]
+          .find(el => visible(el) && normalize(el.innerText || el.textContent)
+            && !previousErrors.has(normalize(el.innerText || el.textContent)));
+        if (error) throw new Error('ChatGPT connector creation failed: ' + (error.innerText || error.textContent).trim().slice(0, 600));
+      }
       const card = findManagedAppCard(settings.name);
       if (card) return { created: true, href: card.getAttribute('href') };
       if (location.pathname.startsWith('/plugins/')) {
@@ -131,7 +180,7 @@ function extensionHelpersSource() {
   createFormPresent = () => {
     const surface = activeSurface();
     return Boolean(findInput('name', surface) && (findInput('url', surface)
-      || [...surface.querySelectorAll('select,[role="combobox"],[role="radio"]')].some(element =>
+      || [...surface.querySelectorAll('select,[role="combobox"],[role="radio"],button,[role="button"]')].some(element =>
         /tunnel/i.test([element.id, element.name, element.getAttribute('data-testid'), element.textContent].join(' ')))));
   };
   globalThis.__codingToolsConnectorHelpers = Object.freeze({
