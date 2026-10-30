@@ -69,6 +69,9 @@ const BACKEND_MODULES = Object.freeze([
   // agent-orchestrator-workflow.cjs scores Team rounds (#707), saved as flushed state with a copy (#695).
   "model-scores.cjs",
   "durable-state.cjs",
+  // agent-orchestrator-workflow.cjs keeps chat queues and resumes chats after a restart (#706).
+  "chat-queue.cjs",
+  "chat-resume.cjs",
 ]);
 
 function sha256File(filePath) {
