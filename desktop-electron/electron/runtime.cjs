@@ -16,6 +16,7 @@ const {
 const { embeddedRuntimeInvocation, runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
+const { warmProgram } = require("./off-thread-run.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
@@ -185,7 +186,10 @@ class RuntimeHost {
     // Re-publishes this launcher's browser ownership descriptor (its own control token), for a
     // launcher-control command started before the browser finished initializing.
     refreshBrowserDescriptor = null,
+    // Loads an operation's program off the main thread before it is started there (tests: a stub).
+    warm = warmProgram,
   }) {
+    this.warm = warm;
     this.codexRouteEnabled = codexRouteEnabled;
     this.refreshBrowserDescriptor = refreshBrowserDescriptor;
     this.app = app;
@@ -636,6 +640,11 @@ class RuntimeHost {
       const invocation = options.embedded
         ? embeddedRuntimeInvocation({ app: this.app, sourceRoot: this.sourceRoot, args })
         : this.command(args);
+      // Starting a program blocks the thread that starts it while Windows loads and scans it: the
+      // Bun runtime's start held every window 0.9-2 s (doctor, model catalog, route status;
+      // 2026-10-30). A short run of it off the main thread first leaves the start below quick. The
+      // operation needs its live output and process, so it still starts here.
+      await this.warm(invocation.executable, ["--version"]);
       const result = await new Promise((resolve, reject) => {
         const environment = options.environment
           ? { ...options.environment }
