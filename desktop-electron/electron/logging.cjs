@@ -4,6 +4,9 @@ const { renameAtomicFile } = require("./atomic-file.cjs");
 
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_MEMORY_RECORDS = 300;
+// Enough for MAX_MEMORY_RECORDS ordinary lines. Reading the whole 1.3 MB file synchronously held
+// 0.8.35's first start for 1.3 s on the busy drive.
+const RESTORE_TAIL_BYTES = 512 * 1024;
 const MAX_LOG_STRING_CHARS = 16 * 1024;
 
 function redactText(value) {
@@ -111,9 +114,23 @@ function sanitize(value, seen = new WeakSet()) {
   );
 }
 
-function readRecent(filePath) {
+/** The previous process's last records; only the file's tail is read, never on the main thread's clock. */
+async function readRecent(filePath) {
   try {
-    return fs.readFileSync(filePath, "utf8")
+    const handle = await fs.promises.open(filePath, "r");
+    let text;
+    try {
+      const { size } = await handle.stat();
+      const start = Math.max(0, size - RESTORE_TAIL_BYTES);
+      const buffer = Buffer.alloc(size - start);
+      await handle.read(buffer, 0, buffer.length, start);
+      text = buffer.toString("utf8");
+      // A tail read starts mid-line; that partial line is dropped.
+      if (start > 0) text = text.slice(text.indexOf("\n") + 1);
+    } finally {
+      await handle.close();
+    }
+    return text
       .split(/\r?\n/)
       .filter(Boolean)
       .slice(-MAX_MEMORY_RECORDS)
@@ -145,7 +162,12 @@ function readRecent(filePath) {
 const LOG_FLUSH_MS = 250;
 
 function createLogger({ filePath, publish }) {
-  const records = readRecent(filePath);
+  const records = [];
+  // The previous process's records go in front of whatever this one logged meanwhile.
+  const restored = readRecent(filePath).then((previous) => {
+    records.unshift(...previous);
+    if (records.length > MAX_MEMORY_RECORDS) records.splice(0, records.length - MAX_MEMORY_RECORDS);
+  });
   // Every line used to make, check the size of and append to the file synchronously on the main
   // process's thread. On a saturated hard disk (seen live: a queue of 30-40 requests on the drive
   // holding the app's data) each line held the main process for up to seconds, and every IPC call
@@ -214,6 +236,8 @@ function createLogger({ filePath, publish }) {
     warn: (event, detail) => append("warning", event, detail),
     error: (event, detail) => append("error", event, detail),
     recent: (limit = 150) => records.slice(-Math.max(1, Math.min(300, limit))),
+    /** Settles once the previous process's records are in `recent()`. */
+    restored,
     /** Writes every queued line now (tests, and before a deliberate quit). */
     flush: async () => { if (timer) { clearTimeout(timer); timer = null; } while (flushing || pending.length) { if (flushing) await flushing; else await flush(); } },
     filePath,

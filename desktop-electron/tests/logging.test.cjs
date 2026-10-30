@@ -57,7 +57,7 @@ test("failed launcher IPC calls are written to runtime activity", async () => {
   assert.deepEqual(errors[0].detail, { channel: "launcher:test", message: "visible failure" }, "only plain identifiers are logged");
 });
 
-test("launcher activity restores valid records from the previous process", () => {
+test("launcher activity restores valid records from the previous process", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-logging-"));
   const filePath = path.join(root, "launcher.jsonl");
   try {
@@ -67,7 +67,29 @@ test("launcher activity restores valid records from the previous process", () =>
       "",
     ].join("\n"));
     const logger = createLogger({ filePath });
+    await logger.restored;
     assert.deepEqual(logger.recent().map((record) => record.event), ["previous"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the previous records load off the main thread's clock, from the file's tail, ahead of new ones", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-logging-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  try {
+    // 2 MB of earlier lines, then the last few the restore must find: only the tail is read.
+    const filler = `${JSON.stringify({ at: "2026-07-28T00:00:00.000Z", level: "info", event: "old", detail: { pad: "x".repeat(900) } })}\n`;
+    fs.writeFileSync(filePath, filler.repeat(Math.ceil(2 * 1024 * 1024 / filler.length))
+      + ["last-1", "last-2"].map((event) => JSON.stringify({ at: "2026-07-28T00:00:01.000Z", level: "info", event, detail: {} })).join("\n") + "\n");
+    const logger = createLogger({ filePath });
+    logger.info("new");
+    assert.deepEqual(logger.recent().map((record) => record.event), ["new"], "creating the logger reads nothing synchronously");
+    await logger.restored;
+    const events = logger.recent(300).map((record) => record.event);
+    assert.deepEqual(events.slice(-3), ["last-1", "last-2", "new"]);
+    assert.ok(events.length <= 300);
+    await logger.flush();
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

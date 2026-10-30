@@ -10,7 +10,7 @@ const { createHash } = require("node:crypto");
 const {
   combineUpdateControllers, combinedUpdateState, createAppUpdateController, createAutoInstaller, extractPack,
   manifestAssetName, packAssetName, parseManifest, planUpdate, safeInstallPath, selectAppRelease,
-  STAGE_DIRECTORY, sweepUpdateLeftovers, commitAppliedUpdate, handOffUpdateRecovery, readJournal, waitForUpdateApply,
+  STAGE_DIRECTORY, sweepUpdateLeftovers, commitAppliedUpdate, handOffUpdateRecovery, pendingAppliedUpdate, readJournal, waitForUpdateApply,
   AUTO_INSTALL_FAILURE_LIMIT,
 } = require("../electron/app-update.cjs");
 const { createJournal, recordResult, rollBack, rollForward, swapIn, writeJsonDurable } = require("../electron/app-update-worker.cjs");
@@ -250,7 +250,11 @@ test("the worker applies the update after the app has closed, keeps the old file
     assert.deepEqual([readResult(installRoot).ok, readResult(installRoot).stage], [true, "placed"]);
     assert.equal(exists(installRoot, "_update/applying.json"), false);
 
-    // The new version reached whenReady: the old copies and the stage go.
+    // Placed but not kept yet: the health gate (update-health-gate.cjs) decides, for this version only.
+    assert.equal(pendingAppliedUpdate(installRoot, "0.8.0"), true);
+    assert.equal(pendingAppliedUpdate(installRoot, "0.7.9"), false);
+
+    // The new version proved healthy: the old copies and the stage go.
     assert.equal(await commitAppliedUpdate(installRoot, "0.7.9"), null, "another version commits nothing");
     assert.deepEqual(await commitAppliedUpdate(installRoot, "0.8.0"), { version: "0.8.0", removed: 3, leftover: 0 });
     assert.equal(exists(installRoot, `resources/app.asar.old-${journal.stamp}`), false);
@@ -659,8 +663,13 @@ test("a launch during an update's file swap waits for it; a marker whose worker 
     fsMod.writeFileSync(marker, JSON.stringify({ pid: 4242, at: 1000 }));
     assert.equal(await waitForUpdateApply(root, { now: () => 2000, sleep: async () => {}, alive: () => false }), true);
     assert.equal(fsMod.existsSync(marker), false, "a dead worker's marker is removed");
+    // A live worker past the old 10 min is still waited for: the app used to start over its swap.
     fsMod.writeFileSync(marker, JSON.stringify({ pid: 4242, at: 0 }));
-    assert.equal(await waitForUpdateApply(root, { now: () => 11 * 60_000, sleep: async () => {}, alive: () => true }), true, "never waits past the cap");
+    let slowChecks = 0;
+    const slow = await waitForUpdateApply(root, { now: () => 11 * 60_000, sleep: async () => { if (++slowChecks === 2) fsMod.rmSync(marker); }, alive: () => true });
+    assert.equal(slow, false, "a slow but live worker is waited out");
+    fsMod.writeFileSync(marker, JSON.stringify({ pid: 4242, at: 0 }));
+    assert.equal(await waitForUpdateApply(root, { now: () => 61 * 60_000, sleep: async () => {}, alive: () => true }), true, "never waits past the cap");
   } finally {
     fsMod.rmSync(root, { recursive: true, force: true });
   }

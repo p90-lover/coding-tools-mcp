@@ -1,3 +1,5 @@
+// First, before any other module: every slow synchronous call on the main thread is named from here on.
+const blockingCalls = require("./main-blocking-calls.cjs").installBlockingCallWatch();
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
@@ -32,6 +34,7 @@ const { createConversationActions } = require("./chatgpt-conversation-actions.cj
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
+const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createRegisterHost } = require("./register-host.cjs");
@@ -60,8 +63,9 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   combineUpdateControllers, commitAppliedUpdate, createAppUpdateController, createAutoInstaller, handOffUpdateRecovery,
-  sweepUpdateLeftovers, waitForUpdateApply,
+  pendingAppliedUpdate, sweepUpdateLeftovers, waitForUpdateApply,
 } = require("./app-update.cjs");
+const { createUpdateHealthGate } = require("./update-health-gate.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
@@ -105,9 +109,12 @@ const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
 const { createMainStallMonitor } = require("./main-stall-monitor.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
 const {
+  UPDATE_SETTINGS,
   createStateStore,
   nextSessionRefreshReminderAt,
+  resolveUpdateSettings,
   validateSidebarState,
+  validateUpdateSettingsPatch,
 } = require("./state.cjs");
 const {
   MIN_WINDOW_BOUNDS,
@@ -165,11 +172,11 @@ app.on("session-created", (created) => created.setCertificateVerifyProc(caDistru
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
-// Browser-tab accounts: the store, an in-flight switch, and the account whose sign-in should
-// refresh the bridge's plan.
+// Browser-tab accounts: the store and the BrowserHost factory startup installs. The account flows
+// (add, switch, remove, sign-ins) are browser-account-service.cjs, created below once everything it
+// reads is declared; a switch shows the other account in the one host (BrowserHost.switchAccount).
 const browserAccounts = createBrowserAccounts({ dataRoot: path.join(CORE_HOME, "browser-accounts"), profile: LAUNCHER_PROFILE.kind });
-let browserAccountSwitch = null;
-let bridgeAccountRefreshPending = null;
+let createBrowserHostForAccount = null;
 // Codex threads bound to ChatGPT accounts (codex-thread-accounts.cjs), each account's saved-chat
 // registry (shared by every BrowserHost: a thread's tab may run on an account the Browser tab does
 // not show), the hidden pages that archive or delete chats, and the one scan that follows Codex.
@@ -187,6 +194,33 @@ let runtimeHost = null;
 let headlessHost = null;
 let browserControl = null;
 let runtimeSupervisor = null;
+const browserAccountService = createBrowserAccountService({
+  registry: browserAccounts,
+  publish: (status) => send("launcher:browser-accounts-changed", status),
+  host: () => browserHost,
+  setHost: (host) => { browserHost = host; },
+  hostFactory: () => createBrowserHostForAccount,
+  // A loaded account is already routed; routing it again would drop its open connections.
+  routePartition: (partition, logger) => routeIdleAccountPartition(partition, logger),
+  readSignIn: async (partition) => signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" })),
+  erasePartition: async (partition) => {
+    const removed = session.fromPartition(partition);
+    const results = await Promise.allSettled([removed.clearStorageData(), removed.clearCache()]);
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+  },
+  forgetAccountData: (accountId) => {
+    accountLifecycleSyncs.delete(accountId);
+    fs.rmSync(browserAccountConversationFile(accountId), { force: true });
+    runtimeSupervisor?.extraTunnels?.forgetAccount?.(accountId);
+  },
+  threads: () => threadAccounts,
+  lifecycleSyncFor: (accountId, logger) => lifecycleSyncFor(accountId, logger),
+  afterSwitch: async (next, { wasVisible, stateStore }) => {
+    if (wasVisible) await next.reveal(stateStore.read().browserInteractionMode === "automatic");
+    send("launcher:browser-state", next.snapshot());
+  },
+});
 let tray = null;
 let quitting = false;
 let shutdownInProgress = false;
@@ -209,6 +243,8 @@ let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
 let updateController = null;
 let autoInstaller = null;
+// Set once the main window's renderer has loaded (the update health gate's window check).
+let rendererLoaded = false;
 let cpaUpdater = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
@@ -825,53 +861,9 @@ function browserAccountConversationFile(accountId) {
     : `codex-chatgpt-conversations-${accountId}.json`);
 }
 
-function browserAccountsStatus() {
-  const status = browserAccounts.status();
-  return {
-    ...status,
-    accounts: status.accounts.map((entry) => ({ ...entry, signedIn: browserAccountSignIns.get(entry.id) ?? null })),
-    switching: browserAccountSwitch !== null,
-  };
-}
-
-// Whether each account is signed in, from its own partition's ChatGPT session cookie
-// (browser-accounts.cjs signedInFromCookies). Read locally: accounts not in use, and their proxies,
-// are never contacted, and every account in the list shows its own sign-in, not only the one in use.
-const browserAccountSignIns = new Map(); // account id -> true | false
-let browserAccountSignInRefresh = null;
-let browserAccountSignInAgain = false; // a change arrived during a read: read once more after it
-
-async function readBrowserAccountSignIn(partition) {
-  return signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
-}
-
-function refreshBrowserAccountSignIns(logger) {
-  if (browserAccountSignInRefresh) {
-    browserAccountSignInAgain = true;
-    return browserAccountSignInRefresh;
-  }
-  browserAccountSignInRefresh = (async () => {
-    do {
-      browserAccountSignInAgain = false;
-      let changed = false;
-      const ids = browserAccounts.status().accounts.map((entry) => entry.id);
-      for (const id of ids) {
-        let signedIn;
-        try { signedIn = await readBrowserAccountSignIn(browserAccounts.partitionOf(id)); }
-        catch (error) {
-          logger?.warn?.("browser_accounts.sign_in_unreadable", { message: error instanceof Error ? error.message : String(error) });
-          continue;
-        }
-        if (browserAccountSignIns.get(id) !== signedIn) { browserAccountSignIns.set(id, signedIn); changed = true; }
-      }
-      for (const id of [...browserAccountSignIns.keys()]) {
-        if (!ids.includes(id)) { browserAccountSignIns.delete(id); changed = true; }
-      }
-      if (changed) publishBrowserAccounts();
-    } while (browserAccountSignInAgain);
-  })().finally(() => { browserAccountSignInRefresh = null; });
-  return browserAccountSignInRefresh;
-}
+// The account flows themselves are browser-account-service.cjs; these names stay for main's callers.
+const browserAccountsStatus = () => browserAccountService.status();
+const refreshBrowserAccountSignIns = (logger) => browserAccountService.refreshSignIns(logger);
 
 const browserAccountExists = (accountId) => browserAccounts.has(accountId);
 
@@ -1007,7 +999,7 @@ async function codexThreadAction(input, logger) {
 }
 
 function publishBrowserAccounts() {
-  send("launcher:browser-accounts-changed", browserAccountsStatus());
+  browserAccountService.publish();
 }
 
 async function readChatGptAccountEmail(partition) {
@@ -1041,22 +1033,21 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   } catch (error) {
     logger.warn("browser_accounts.email_failed", { message: error instanceof Error ? error.message : String(error) });
   }
-  if (bridgeAccountRefreshPending !== accountId || browserHost !== host) return;
+  if (browserHost !== host || !browserAccountService.bridgeRefreshPending(accountId)) return;
   // The bridge already lists this plan's models (the last account it was set up on has the same
   // plan): the restart would change nothing, so the switch costs no setup at all.
   const planKey = browserAccountPlanKey(accountId);
   if (planKey && planKey === bridgePlanKey) {
-    bridgeAccountRefreshPending = null;
+    browserAccountService.takeBridgeRefresh(accountId);
     logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "same-plan" });
     return;
   }
   // Setup restarts the bridge, which would end every running turn (a switch no longer waits for
   // them): it waits until none runs, unless another switch takes over meanwhile.
-  while (browserHost === host && host.activeTraceId && bridgeAccountRefreshPending === accountId && !quitting) {
+  while (browserHost === host && host.activeTraceId && browserAccountService.bridgeRefreshPending(accountId) && !quitting) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
   }
-  if (bridgeAccountRefreshPending !== accountId || browserHost !== host) return;
-  bridgeAccountRefreshPending = null;
+  if (browserHost !== host || !browserAccountService.takeBridgeRefresh(accountId)) return;
   const setupState = stateStore.read();
   if (IS_DEV_PROFILE || !runtimeHost || quitting || shutdownInProgress
     || setupState.coreSetupComplete !== true || setupState.browserInteractionMode !== "automatic") return;
@@ -1075,45 +1066,8 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   }
 }
 
-// The Browser tab shows the account in place (BrowserHost.switchAccount): the account left stays
-// loaded, so switching back is instant, and Codex turns on any account keep running meanwhile.
-async function switchBrowserAccount(accountId, { logger, stateStore }) {
-  const partition = browserAccounts.partitionOf(accountId);
-  if (accountId === browserAccounts.activeId()) return browserAccountsStatus();
-  if (browserAccountSwitch) throw new Error("Another account switch is in progress");
-  const host = browserHost;
-  if (!host) throw new Error("The browser is still starting");
-  const blocker = host.homeSwitchBlocker();
-  if (blocker) throw new Error(`The Browser tab cannot change account while ${blocker}. Try again when it is done.`);
-  const switching = (async () => {
-    // The account's bound proxy (else Global Routing's) before its first page; a loaded account
-    // is already routed, and routing again would drop its open connections.
-    await routeIdleAccountPartition(partition, logger);
-    const previousRefresh = bridgeAccountRefreshPending;
-    // Set first: the switch publishes the account's sign-in, which starts the bridge refresh.
-    bridgeAccountRefreshPending = accountId;
-    try {
-      await host.switchAccount(partition, { chatLifecycleSync: lifecycleSyncFor(accountId, logger) });
-    } catch (error) {
-      bridgeAccountRefreshPending = previousRefresh;
-      throw error;
-    }
-    browserAccounts.setActive(accountId);
-    logger.info("browser_accounts.switched", { accountId });
-    if (host.visible) await host.reveal(stateStore.read().browserInteractionMode === "automatic");
-    send("launcher:browser-state", host.snapshot());
-  })();
-  browserAccountSwitch = switching;
-  publishBrowserAccounts();
-  try {
-    await switching;
-  } finally {
-    browserAccountSwitch = null;
-    publishBrowserAccounts();
-    // The account left keeps its sign-in in its partition; the list shows it for every account.
-    void refreshBrowserAccountSignIns(logger);
-  }
-  return browserAccountsStatus();
+function switchBrowserAccount(accountId, context) {
+  return browserAccountService.switchTo(accountId, context);
 }
 
 // An account's partition takes its bound proxy, else Global Routing's (provider-network.cjs). A route
@@ -1206,47 +1160,14 @@ async function syncBrowserAccountsFromCpa(logger) {
   return added;
 }
 
-async function addBrowserAccount(context) {
-  const id = browserAccounts.add();
-  try {
-    return await switchBrowserAccount(id, context);
-  } catch (error) {
-    // Not switched to (a turn is running): the new account stays listed, ready to pick later.
-    publishBrowserAccounts();
-    throw error;
-  }
+function addBrowserAccount(context) {
+  return browserAccountService.add(context);
 }
 
-// Signs the account out for good: its partition (cookies, storage, cache) and its saved-chat
-// ownership file are erased. Removing the active account first switches to another one.
-async function removeBrowserAccount(accountId, context) {
-  browserAccounts.partitionOf(accountId);
-  const { accounts } = browserAccounts.status();
-  if (accounts.length <= 1) throw new Error("The Browser tab needs at least one account");
-  if (accountId === browserAccounts.activeId()) {
-    await switchBrowserAccount(accounts.find((entry) => entry.id !== accountId).id, context);
-  }
-  // Its threads' retained tabs close first; the threads start fresh on the account in use.
-  const removing = browserAccounts.partitionOf(accountId);
-  if (browserHost?.livePartitions?.().includes(removing) && browserHost.accountSwitchBlocker()) {
-    throw new Error(`That account cannot be removed while ${browserHost.accountSwitchBlocker()}. Try again when it is done.`);
-  }
-  for (const entry of threadAccounts?.list() ?? []) {
-    if (entry.accountId === accountId) browserHost?.releaseThreadTabs?.(entry.threadId);
-  }
-  threadAccounts?.removeAccount(accountId);
-  accountLifecycleSyncs.delete(accountId);
-  // Its page, if still loaded from an earlier switch, closes before its partition is erased.
-  browserHost?.releaseAccountHome?.(removing);
-  const partition = browserAccounts.remove(accountId);
-  if (bridgeAccountRefreshPending === accountId) bridgeAccountRefreshPending = null;
-  const removed = session.fromPartition(partition);
-  await removed.clearStorageData().catch(() => {});
-  await removed.clearCache().catch(() => {});
-  fs.rmSync(browserAccountConversationFile(accountId), { force: true });
-  publishBrowserAccounts();
-  void refreshBrowserAccountSignIns(context.logger);
-  return browserAccountsStatus();
+// Signs the account out for good: its partition (cookies, storage, cache), its saved-chat ownership
+// file and its tunnel binding go. Removing the active account first switches to another one.
+function removeBrowserAccount(accountId, context) {
+  return browserAccountService.remove(accountId, context);
 }
 
 function trayImage() {
@@ -3186,6 +3107,15 @@ function registerIpc({ logger, stateStore }) {
     if (!updateController) throw new Error("Launcher updates are unavailable");
     return updateController.checkNow({ force: true });
   });
+  // Settings → Updates: no patch reads them; a patch (checked in state.cjs) changes them. The answer
+  // carries each setting's limits so the page shows the same ranges this side enforces.
+  handle("launcher:update-settings", (_event, patch) => {
+    if (patch !== undefined && patch !== null) {
+      const state = stateStore.update(validateUpdateSettingsPatch(patch));
+      send("launcher:state-changed", state);
+    }
+    return { values: resolveUpdateSettings(stateStore.read()), limits: UPDATE_SETTINGS };
+  });
   handle("launcher:update-automatic", async (_event, enabled) => {
     const state = stateStore.update({ automaticUpdates: enabled === true });
     send("launcher:state-changed", state);
@@ -3470,12 +3400,45 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
-  // This version reached whenReady: an update that just placed it is kept, and the old copies the
-  // worker held for a rollback go (commitAppliedUpdate).
-  if (app.isPackaged) {
-    void commitAppliedUpdate(path.dirname(process.execPath), app.getVersion())
+  // An update that just placed this version is kept only once it proves it works: its window loaded,
+  // its backend answered and AO, when started, is ready (update-health-gate.cjs). Until then the old
+  // copies the worker held stay; a version still not healthy after Settings' health window goes back
+  // to the previous one. It used to be kept here at whenReady, before any of that was known.
+  // Work that an update, or an update's rollback, must not end: a browser, bridge or AO turn.
+  const appBusy = async () => Boolean(browserHost?.currentOperation() || runtimeHost?.currentOperation()
+    || runtimeStartupInFlight || codexBridgeConnectInFlight
+    || await agentOrchestratorUpstream?.harness.anySessionWorking());
+  if (app.isPackaged && pendingAppliedUpdate(path.dirname(process.execPath), app.getVersion())) {
+    const installRoot = path.dirname(process.execPath);
+    const commit = () => commitAppliedUpdate(installRoot, app.getVersion())
       .then((committed) => { if (committed) logger.info("launcher.app_update_committed", committed); })
       .catch((error) => logger.warn("launcher.app_update_commit_failed", { message: error instanceof Error ? error.message : String(error) }));
+    createUpdateHealthGate({
+      checks: {
+        window: () => {
+          if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isCrashed()) return rendererLoaded ? "fail" : "pending";
+          return rendererLoaded ? "pass" : "pending";
+        },
+        backend: () => (headlessHost?.control ? "pass" : "pending"),
+        // AO starts when a chat needs it: not started yet is no evidence against this version.
+        agentOrchestrator: () => {
+          const aoState = agentOrchestratorUpstream?.snapshot?.().state;
+          if (!aoState || aoState === "stopped" || aoState === "ready") return "pass";
+          return aoState === "error" ? "fail" : "pending";
+        },
+      },
+      timeoutMs: () => resolveUpdateSettings(stateStore.read()).updateHealthMinutes * 60_000,
+      autoRollback: () => resolveUpdateSettings(stateStore.read()).updateAutoRollback,
+      isBusy: () => appBusy(),
+      commit,
+      rollBack: async (reason) => {
+        // The recovery worker waits for this process to exit, puts the previous version back and starts it.
+        if (!handOffUpdateRecovery(installRoot, { currentVersion: app.getVersion(), startFailed: reason, logger })) return;
+        const quit = await requestQuit().catch((error) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
+        if (quit?.ok === false) app.exit(1);
+      },
+      logger,
+    }).start();
   }
   // A throw in a timer or an event handler, or a promise nobody awaits, used to reach Electron's
   // default handler: a modal "A JavaScript error occurred in the main process" box that holds the
@@ -3495,6 +3458,8 @@ async function start() {
   process.on("uncaughtException", (error) => reportFault("launcher.uncaught_exception", error));
   process.on("unhandledRejection", (reason) => reportFault("launcher.unhandled_rejection", reason));
   if (runtimeSourceFallback) logger.warn("runtime.packaged_source_damaged", { message: runtimeSourceFallback, using: "installed copy" });
+  // Settings read back from their last good copy (or reset, when that was torn too) after a torn file.
+  if (stateStore.recovery) logger.warn("launcher.state_recovered", stateStore.recovery);
   // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs).
   const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger });
   rtkService = rtk;
@@ -3549,16 +3514,18 @@ async function start() {
       logger,
     }),
   );
-  // With automatic updates on, a found update installs itself while the user is away and no
-  // browser, bridge or AO turn is running; the sidebar's "Update to" button still works any time.
-  const appBusy = async () => Boolean(browserHost?.currentOperation() || runtimeHost?.currentOperation()
-    || runtimeStartupInFlight || codexBridgeConnectInFlight
-    || await agentOrchestratorUpstream?.harness.anySessionWorking());
+  // With automatic updates on, a found update installs itself while the user is away (Settings:
+  // how many idle minutes) and no browser, bridge or AO turn is running (unless Settings says not to
+  // wait for chats; a runtime operation still blocks it, as it blocks any quit). The sidebar's
+  // "Update to" button still works any time.
   autoInstaller = createAutoInstaller({
     controller: updateController,
     enabled: () => stateStore.read().automaticUpdates === true,
     idleSeconds: () => powerMonitor.getSystemIdleTime(),
-    isBusy: appBusy,
+    idleThreshold: () => resolveUpdateSettings(stateStore.read()).updateIdleMinutes * 60,
+    isBusy: () => (resolveUpdateSettings(stateStore.read()).updateWaitForChats
+      ? appBusy()
+      : Boolean(runtimeHost?.currentOperation() || runtimeStartupInFlight)),
     logger,
   });
   registerMinimalPreRendererIpc({ logger, stateStore });
@@ -4194,6 +4161,7 @@ async function start() {
   });
   registerIpc({ logger, stateStore });
   await ensureRendererLoaded(mainWindow, logger);
+  rendererLoaded = true;
   scheduleFullIpcAfterPaint(() => {
     registerIpc({ logger, stateStore });
     if (LAUNCHER_SMOKE_TEST) return;
@@ -4254,6 +4222,8 @@ async function start() {
     getRuntimeEnvironment: () => externalServicesController.runtimeEnvironment(),
     // The Codex bridge and MCP tunnel outlive launcher restarts and updates; the next launcher adopts them.
     persistentBridge: !IS_DEV_PROFILE,
+    // Settings → Updates: a tunnel left running by another build is restarted, not adopted.
+    reuseTunnelOnlyWhenMatching: () => resolveUpdateSettings(stateStore.read()).updateReuseMatchingOnly,
     onExtraTunnelsChange: tunnels => send("launcher:mcp-tunnels-changed", tunnels),
   });
   runtimeHost = new RuntimeHost({
@@ -4310,7 +4280,7 @@ async function start() {
   lifecycleScan.start();
   // One BrowserHost for every Browser-tab account: a switch shows another account's page in it
   // (switchBrowserAccount), so what it reports belongs to the account it shows at that moment.
-  const createBrowserHostForAccount = (accountId) => {
+  createBrowserHostForAccount = (accountId) => {
     const shownAccountId = () => browserAccounts.accountIdOfPartition(host?.partition) ?? accountId;
     // The last sign-in published, per partition: a switch to a signed-in account is its sign-in.
     let lastPublishedBrowserAuth = { partition: null, authenticated: false };
@@ -4384,6 +4354,7 @@ async function start() {
   const launcherSmokeTest = LAUNCHER_SMOKE_TEST;
   let startupAuthenticationRefresh = Promise.resolve(browserHost.snapshot());
   await ensureRendererLoaded(mainWindow, logger);
+  rendererLoaded = true;
   try {
     await browserHost.ready();
   } catch (error) {
@@ -4632,7 +4603,8 @@ async function start() {
   // coalesces a watchdog start with any launch-time start that is still in flight.
   startBridgeWatchdog(logger, stateStore);
   // A blocked main loop freezes every window; this is the only thing that can tell afterwards.
-  createMainStallMonitor({ logger }).start();
+  blockingCalls.attach((entry) => logger.warn("launcher.main_blocked", entry));
+  createMainStallMonitor({ logger, blockingCalls }).start();
 
   app.on("activate", () => showMainWindow());
   app.on("will-quit", () => missionWorkflowRuntime?.dispose());

@@ -184,6 +184,22 @@ test("stopAll stops every tunnel; remove stops one and forgets its key", async (
   assert.equal(tunnels.monitorTimer, null);
 });
 
+test("a removed account's tunnel stays, unassigned, so another account can take it", async () => {
+  const { config, client, tunnels, changes } = setup();
+  await tunnels.start(config);
+  const team = await tunnels.add({ label: "Team", tunnelId: SECOND_ID, runtimeKey: "sk", accountId: "acct-2" });
+  await tunnels.add({ label: "Other", tunnelId: THIRD_ID, runtimeKey: "sk", accountId: "acct-3" });
+  const before = changes.length;
+  assert.equal(tunnels.forgetAccount("acct-2"), 1);
+  assert.equal(changes.length, before + 1, "the change is published");
+  assert.deepEqual(tunnels.status().map(tunnel => tunnel.accountId), [null, "acct-3"]);
+  assert.equal(client.runtimes.get(aliasOf(team.id)), "ready", "the tunnel keeps running");
+  assert.equal(tunnels.forgetAccount("acct-2"), 0);
+  assert.equal(changes.length, before + 1, "nothing to forget publishes nothing");
+  await tunnels.add({ label: "New", tunnelId: `tunnel_${"d".repeat(32)}`, runtimeKey: "sk", accountId: "acct-2" });
+  tunnels.detach();
+});
+
 test("an extra tunnel's connector uses the connector name with that tunnel's ID", () => {
   const { extraConnectorSettings } = require("../electron/mcp-connector-setup.cjs");
   const runtimeHost = { mcpConnectorName: () => "Codex" };

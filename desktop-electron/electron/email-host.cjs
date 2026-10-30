@@ -10,7 +10,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { readStateFile, removeStateFile, writeStateFile } = require("./durable-state.cjs");
 const { bodyPreview, parseHeaderSummary } = require("./email-mime.cjs");
 
 const DEFAULT_PAGE_SIZE = 20;
@@ -30,12 +30,19 @@ function createSecretCodec({ safeStorage, keyPath }) {
   };
   const loadFallbackKey = () => {
     if (fallbackKey) return fallbackKey;
-    try {
-      const existing = Buffer.from(fs.readFileSync(keyPath, "utf8").trim(), "base64");
-      if (existing.length === 32) return (fallbackKey = existing);
-    } catch {}
+    // A torn key file is read from its copy; one with no usable copy is set aside, never written
+    // over, so the credential it encrypted can still be recovered by hand (durable-state.cjs).
+    const read = readStateFile(keyPath, (text) => {
+      const bytes = Buffer.from(text.trim(), "base64");
+      if (bytes.length !== 32) throw new Error("The fallback key is not 32 bytes");
+      return bytes;
+    });
+    if (read.value) {
+      if (read.source === "backup") writeStateFile(keyPath, `${read.value.toString("base64")}\n`);
+      return (fallbackKey = read.value);
+    }
     fallbackKey = crypto.randomBytes(32);
-    writePrivateFileAtomic(keyPath, `${fallbackKey.toString("base64")}\n`);
+    writeStateFile(keyPath, `${fallbackKey.toString("base64")}\n`);
     return fallbackKey;
   };
   return {
@@ -177,8 +184,11 @@ function createEmailHost({ logger, filePath, keyPath, safeStorage, fetchNative, 
 
   function load() {
     try {
-      const saved = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      const decrypted = codec.decrypt(saved?.credential);
+      const read = readStateFile(filePath, (text) => JSON.parse(text));
+      if (read.source === "backup" || read.source === "unreadable") {
+        logger?.warn?.("email.state_recovered", { source: read.source, setAside: read.setAside });
+      }
+      const decrypted = codec.decrypt(read.value?.credential);
       if (decrypted?.origin && decrypted?.adminAuth) connection = decrypted;
     } catch {}
   }
@@ -186,10 +196,10 @@ function createEmailHost({ logger, filePath, keyPath, safeStorage, fetchNative, 
 
   function persist() {
     if (!connection) {
-      try { fs.rmSync(filePath, { force: true }); } catch {}
+      try { removeStateFile(filePath); } catch {}
       return;
     }
-    writePrivateFileAtomic(filePath, `${JSON.stringify({ credential: codec.encrypt(connection) })}\n`);
+    writeStateFile(filePath, `${JSON.stringify({ credential: codec.encrypt(connection) })}\n`);
   }
 
   // Every privileged call funnels through here. The credential is attached in this process only.

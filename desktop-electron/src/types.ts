@@ -697,6 +697,24 @@ export interface OperationState {
   message: string;
 }
 
+/** Settings → Updates (electron/state.cjs UPDATE_SETTINGS). */
+export interface UpdateSettingValues {
+  updateWaitForChats: boolean;
+  updateIdleMinutes: number;
+  updateAutoRollback: boolean;
+  updateHealthMinutes: number;
+  updateReuseMatchingOnly: boolean;
+}
+
+export type UpdateSettingLimit =
+  | { type: "boolean"; default: boolean }
+  | { type: "minutes"; default: number; min: number; max: number };
+
+export interface UpdateSettings {
+  values: UpdateSettingValues;
+  limits: Record<keyof UpdateSettingValues, UpdateSettingLimit>;
+}
+
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
   // kind "app": a whole-app update that restarts the app; otherwise a GUI-only reload.
@@ -1176,6 +1194,8 @@ export interface LauncherApi {
   exportLogs(): Promise<string | null>;
   checkForUpdates(): Promise<UpdateState>;
   setAutomaticUpdates(enabled: boolean): Promise<LauncherState>;
+  /** Settings → Updates: reads them, or changes the given ones (main checks every value). */
+  updateSettings(patch?: Partial<UpdateSettingValues> | null): Promise<UpdateSettings>;
   installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;

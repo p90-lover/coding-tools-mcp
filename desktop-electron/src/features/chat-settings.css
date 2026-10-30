@@ -1,0 +1,290 @@
+/*
+ * Settings, as Codex 26.1016 draws its Settings page (default Codex theme, light: the chat area is
+ * light). Values read from its bundle: sidebar-navigation rows 30px high, 8px cell padding, 12.5px
+ * corners; panel column max-width 768px with 20px panel padding and a 46px toolbar; title 24px/1.2
+ * weight 400; sections 40px apart; cards with a 20px radius, 1px border and rows of 16px x 12px with
+ * dividers inset 16px; label 13px/500, description 12px/16px; switch 32x20 with a 16px thumb.
+ */
+.cxs-root {
+  --cxs-surface: #ffffff;
+  --cxs-surface-under: #f6f6f6;
+  --cxs-panel: #ffffff;
+  --cxs-text: #1a1c1f;
+  --cxs-text-secondary: rgba(26, 28, 31, 0.65);
+  --cxs-text-tertiary: rgba(26, 28, 31, 0.495);
+  --cxs-border: rgba(26, 28, 31, 0.078);
+  --cxs-border-heavy: rgba(26, 28, 31, 0.117);
+  --cxs-ghost-hover: rgba(26, 28, 31, 0.053);
+  --cxs-accent: #339cff;
+  --cxs-control: rgba(255, 255, 255, 0.96);
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  min-height: 0;
+  background: var(--cxs-surface);
+  color: var(--cxs-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  font-weight: 430;
+  line-height: 1.5;
+  color-scheme: light;
+}
+
+/* Navigation: the sidebar's place and width, under the window's title bar like the thread list. */
+.cxs-nav {
+  display: flex;
+  flex: 0 0 288px;
+  flex-direction: column;
+  min-height: 0;
+  padding: calc(env(titlebar-area-height, 36px) + 12px) 8px 6px;
+  background: var(--cxs-surface-under);
+  user-select: none;
+}
+.cxs-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding-top: 4px;
+}
+.cxs-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 12.5px;
+  background: transparent;
+  color: var(--cxs-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  text-align: start;
+  cursor: pointer;
+}
+.cxs-nav-item:hover,
+.cxs-nav-item.is-active {
+  background: var(--cxs-ghost-hover);
+}
+.cxs-nav-back {
+  margin-bottom: 8px;
+}
+.cxs-nav-icon {
+  display: inline-flex;
+  min-width: 16px;
+  color: var(--cxs-text-secondary);
+}
+.cxs-nav-item.is-active .cxs-nav-icon {
+  color: var(--cxs-text);
+}
+.cxs-nav-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Panel. */
+.cxs-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--cxs-surface);
+}
+.cxs-toolbar {
+  flex: 0 0 46px;
+  -webkit-app-region: drag;
+}
+.cxs-scroll {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 20px;
+}
+.cxs-column {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 768px;
+  min-width: min(100%, 320px);
+  margin: 0 auto;
+}
+.cxs-title {
+  margin: 0;
+  padding-bottom: 32px;
+  font-size: 24px;
+  font-weight: 400;
+  line-height: 1.2;
+}
+.cxs-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+.cxs-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cxs-group-title {
+  margin: 0;
+  padding: 0 4px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.cxs-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--cxs-border);
+  border-radius: 20px;
+  background: var(--cxs-panel);
+}
+.cxs-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 12px 16px;
+}
+.cxs-row:not(:last-child)::after {
+  position: absolute;
+  right: 16px;
+  bottom: 0;
+  left: 16px;
+  height: 1px;
+  background: var(--cxs-border);
+  content: "";
+  pointer-events: none;
+}
+.cxs-row-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.cxs-row-label {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18.6px;
+  overflow-wrap: break-word;
+}
+.cxs-row-description {
+  color: var(--cxs-text-secondary);
+  font-size: 12px;
+  line-height: 16px;
+  overflow-wrap: break-word;
+}
+.cxs-row-control {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Switch: track 32x20, accent when on; thumb 16px white, 2px -> 14px. */
+.cxs-toggle {
+  position: relative;
+  flex-shrink: 0;
+  width: 32px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(26, 28, 31, 0.1);
+  cursor: pointer;
+  transition: background-color 0.15s cubic-bezier(0, 0, 0.2, 1);
+}
+.cxs-toggle.is-on {
+  background: var(--cxs-accent);
+}
+.cxs-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.cxs-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--cxs-border);
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  transition: transform 0.15s cubic-bezier(0, 0, 0.2, 1);
+}
+.cxs-toggle.is-on .cxs-toggle-thumb {
+  transform: translateX(12px);
+}
+.cxs-toggle:focus-visible,
+.cxs-select:focus-visible,
+.cxs-button:focus-visible,
+.cxs-nav-item:focus-visible {
+  outline: 2px solid var(--cxs-accent);
+  outline-offset: 2px;
+}
+
+/* Scoped under .cxs-root: the chat area styles every select (7px padding, 12px text). */
+.cxs-root .cxs-select,
+.cxs-root .cxs-button {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 10px;
+  line-height: 26px;
+  border: 1px solid var(--cxs-border-heavy);
+  border-radius: 8px;
+  background: var(--cxs-control);
+  color: var(--cxs-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.cxs-root .cxs-button:hover,
+.cxs-root .cxs-select:hover {
+  background: var(--cxs-ghost-hover);
+}
+.cxs-error {
+  margin: -16px 0 24px;
+  color: #d4292c;
+  font-size: 13px;
+}
+
+/* The chat sidebar's footer row that opens Settings: a Codex sidebar row (30px, 12.5px corners). */
+.cx-threads-foot {
+  flex: 0 0 auto;
+  padding-top: 4px;
+}
+.cx-settings-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 12.5px;
+  background: transparent;
+  color: var(--cc-text, #1a1c1f);
+  font: inherit;
+  font-size: 13px;
+  text-align: start;
+  cursor: pointer;
+}
+.cx-settings-link:hover {
+  background: var(--cc-hover, rgba(26, 28, 31, 0.053));
+}
+.cx-settings-icon {
+  display: inline-flex;
+  min-width: 16px;
+  color: var(--cc-muted, rgba(26, 28, 31, 0.65));
+}

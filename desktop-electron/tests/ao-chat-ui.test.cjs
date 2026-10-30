@@ -704,6 +704,37 @@ test("the pet is Claude Code's Clawd: the CLI's glyphs, poses and frame-by-frame
   assert.match(html, /<svg class="cx-clawd-glyphs" viewBox="0 0 18 12" width="72" height="48"/);
 });
 
+test("Clawd holds its tool up in the hand on the tool's side, never an empty raised arm or a tool by its feet", () => {
+  // The user (2026-10-30): one Clawd "watching its watch", one "playing fireworks". The right arm went
+  // up whatever side the tool was on while the tool stood by its feet, with no tool it "typed" in the
+  // air, and the mug's steam and a ✦ rising from every hammer blow looked like fireworks.
+  const stand = { look: 0, arms: "down", walking: false, sit: false };
+  const frame = (job, toolSide, step = false, mood = "working") => pet.restFrame({ mood, asleep: false, step, pose: stand, blink: false, job, toolSide });
+  for (const job of ["search", "build", "coffee", "read"]) {
+    for (const step of [false, true]) {
+      assert.equal(frame(job, "right", step).pose.arms, "one-up", `${job}: the right hand, on the tool's side`);
+      assert.equal(frame(job, "left", step).pose.arms, "left-up", `${job}: the left hand, on the tool's side`);
+    }
+  }
+  for (const step of [false, true]) assert.equal(frame("none", "right", step).pose.arms, "down", "working with no tool: no air typing");
+  assert.ok("facing" in frame("laptop", "left").pose, "at the laptop it turns to face it");
+  // The left arm raised as the CLI raises it: "▗▟" in the top row, its right arm down.
+  const left = clawd.clawdCells({ eyes: "open", arms: "left-up", feet: "both" });
+  assert.equal(left.filter((cell) => cell.row === 0 && cell.col < 2).map((cell) => cell.glyph).join(""), "▗▟");
+  assert.equal(left.filter((cell) => cell.row === 1 && cell.col >= 7).map((cell) => cell.glyph).join(""), "█▀");
+  // Each held tool fills the cell its hand is in: column 0, row 2 of the prop's grid.
+  for (const job of ["search", "build", "coffee", "read"]) {
+    for (const step of [false, true]) {
+      const svg = renderToStaticMarkup(React.createElement(pet.Prop, { job, step, tick: 1 }));
+      const rects = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map((m) => m.slice(1).map(Number));
+      assert.ok(rects.some(([x, y, w, h]) => x === 0 && y <= 2 && y + h > 2 && w >= 1), `${job}${step ? " (step)" : ""} is in its hand`);
+      assert.ok(rects.every(([, y]) => y <= 6), `${job} stays inside the prop's grid`);
+    }
+  }
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  assert.doesNotMatch(source, /float\("✦"/, "no star rises from each hammer blow");
+});
+
 test("the pet stays where it stands while the chat box grows and shrinks a line at a time", () => {
   const box = (width, height) => ({ width, height, length: 2 * (width + height), beside: true });
   const short = box(740, 87), tall = box(740, 159);

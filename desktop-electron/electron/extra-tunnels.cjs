@@ -55,7 +55,7 @@ function parseInventory(output) {
 
 class ExtraTunnels {
   /**
-   * runTunnel(tunnel, args, timeoutMs, label, { probe }) runs the tunnel CLI for one tunnel config;
+   * runTunnel(tunnel, args, timeoutMs, label) runs the tunnel CLI for one tunnel config (off the main thread);
    * connectArgs(config, tunnel) builds `runtimes connect` for it with the bridge's MCP command.
    */
   constructor({ coreHome, logger, runTunnel, connectArgs, diagnostic, absent, onChange, timing }) {
@@ -138,7 +138,7 @@ class ExtraTunnels {
   }
 
   async inventory(config) {
-    const result = await this.runTunnel(config.tunnel, ["runtimes", "cleanup", "--json"], 5_000, "Local tunnel inventory probe", { probe: true });
+    const result = await this.runTunnel(config.tunnel, ["runtimes", "cleanup", "--json"], 5_000, "Local tunnel inventory probe");
     if (result.code !== 0) throw new Error(`local tunnel inventory failed: ${this.diagnostic(result)}`);
     return parseInventory(result.output);
   }
@@ -326,6 +326,16 @@ class ExtraTunnels {
     if (!entries.some(entry => entry.id === id)) throw new Error("That tunnel is not configured.");
     this.writeEntries(entries.map(entry => (entry.id === id ? { ...entry, connectorHref: href } : entry)));
     this.onChange(this.status());
+  }
+
+  /** A removed ChatGPT account's tunnels stay, unassigned, so a new account can take them. */
+  forgetAccount(accountId) {
+    const entries = this.entries();
+    const owned = entries.filter(entry => entry.accountId === accountId).length;
+    if (!owned) return 0;
+    this.writeEntries(entries.map(entry => (entry.accountId === accountId ? { ...entry, accountId: null } : entry)));
+    this.onChange(this.status());
+    return owned;
   }
 
   /** Leaves the tunnels running for the next launcher (keep-bridge quit or update). */
