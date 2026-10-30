@@ -19,7 +19,7 @@ test("the real main action uses the current account-switch state before creating
   const end = source.indexOf("\n  dispatchMcpConnectorCommand();", start);
   assert(start >= 0 && end > start);
   let run, created = 0, switching = false;
-  const host = { ready: async () => {} };
+  const host = { partition: "persist:primary", ready: async () => {} };
   const context = {
     app: {}, BrowserWindow: function () {}, mcpConnectorCommand: null,
     createMcpConnectorCommand: options => { run = options.run; return {}; },
@@ -40,6 +40,10 @@ test("the real main action uses the current account-switch state before creating
   host.ready = async () => { context.browserHost = { ready: async () => {} }; };
   await assert.rejects(run(), /switch/);
   assert.equal(created, 1, "a replaced account host cannot submit");
+  context.browserHost = host;
+  host.ready = async () => { host.partition = "persist:other-account"; };
+  await assert.rejects(run(), /switch/);
+  assert.equal(created, 1, "an in-place account switch cannot submit");
 });
 
 test("real hidden startup defers maximized/fullscreen restoration and tracking until reveal", () => {

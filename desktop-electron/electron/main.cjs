@@ -2698,8 +2698,10 @@ function registerIpc({ logger, stateStore }) {
       throw new Error("MCP connector setup is busy");
     }
     const operationBrowser = browserHost;
+    const operationPartition = operationBrowser.partition;
     await operationBrowser.ready();
-    if (operationBrowser !== browserHost || browserAccountsStatus().switching || quitting || shutdownInProgress) {
+    if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+      || browserAccountsStatus().switching || quitting || shutdownInProgress) {
       throw new Error("Browser account switching or shutdown is in progress");
     }
     publishOperation({ name: "mcp-connector-create", status: "running", message: "Creating the ChatGPT connector" });
