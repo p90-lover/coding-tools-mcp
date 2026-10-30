@@ -216,7 +216,9 @@ test("a WebGPT model is one ChatGPT effort: the effort chip picks the model and 
   tiers.find(row => text(row.props.children) === "Pro").props.onPick();
   assert.deepEqual([routes.at(-1).model, routes.at(-1).effort], ["chatgpt-web/pro", "ultra"]);
   assert.match(text(menuNamed(tree, "Model").props.label), /^ChatGPT Web High/, "the model chip names the whole WebGPT model");
-  optionsIn(menuNamed(tree, "Model")).find(row => text(row.props.children) === "WebGPT Instant").props.onPick();
+  // The list keeps WebGPT apart under "Web GPT Model", each row its tier alone beside the OpenAI mark.
+  assert.deepEqual(optionsIn(menuNamed(tree, "Model")).map(row => text(row.props.children)), ["Instant", "High", "Pro"]);
+  optionsIn(menuNamed(tree, "Model")).find(row => text(row.props.children) === "Instant").props.onPick();
   assert.deepEqual([routes.at(-1).model, routes.at(-1).effort], ["chatgpt-web/light", "low"]);
 });
 

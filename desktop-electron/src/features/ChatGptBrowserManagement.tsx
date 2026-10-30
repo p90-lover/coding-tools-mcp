@@ -396,7 +396,7 @@ function AccountCard({
 
       <footer className="cbm-card-actions">
         {!inUse ? (
-          <button className="cbm-button" disabled={locked || chatRunning} onClick={() => void run(`use:${account.id}`, () => api.switchBrowserAccount(account.id))} type="button">
+          <button className="cbm-button" disabled={locked} onClick={() => void run(`use:${account.id}`, () => api.switchBrowserAccount(account.id))} type="button">
             {busy === `use:${account.id}` ? "Switching…" : "Use in Browser tab"}
           </button>
         ) : null}

@@ -57,10 +57,10 @@ function mount(props) {
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
-        : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" }
+        : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
           : name === "./AgentOrchestratorRoleEditor" ? { modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
-          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [] }
+          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
             // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
               SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox", SecretText: "SecretText",

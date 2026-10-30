@@ -31,7 +31,7 @@ const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./br
 const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
-const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
+const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
@@ -174,12 +174,11 @@ app.on("session-created", (created) => created.setCertificateVerifyProc(caDistru
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
-// Browser-tab accounts: the store, the BrowserHost factory startup installs, and the renderer's
-// last layout for the host a switch creates. The account flows (add, switch, remove, sign-ins) are
-// browser-account-service.cjs, created below once everything it reads is declared.
+// Browser-tab accounts: the store and the BrowserHost factory startup installs. The account flows
+// (add, switch, remove, sign-ins) are browser-account-service.cjs, created below once everything it
+// reads is declared; a switch shows the other account in the one host (BrowserHost.switchAccount).
 const browserAccounts = createBrowserAccounts({ dataRoot: path.join(CORE_HOME, "browser-accounts"), profile: LAUNCHER_PROFILE.kind });
 let createBrowserHostForAccount = null;
-let lastBrowserBounds = null;
 // Codex threads bound to ChatGPT accounts (codex-thread-accounts.cjs), each account's saved-chat
 // registry (shared by every BrowserHost: a thread's tab may run on an account the Browser tab does
 // not show), the hidden pages that archive or delete chats, and the one scan that follows Codex.
@@ -188,7 +187,6 @@ const accountLifecycleSyncs = new Map();
 let conversationActions = null;
 let lifecycleScan = null;
 let savedChatsInUse = () => true;
-let lastBrowserSurfaceActive = true;
 let chatgptDesktop = null;
 let gptBrowser = null;
 let emailHost = null;
@@ -204,7 +202,8 @@ const browserAccountService = createBrowserAccountService({
   host: () => browserHost,
   setHost: (host) => { browserHost = host; },
   hostFactory: () => createBrowserHostForAccount,
-  routePartition: (partition, logger) => routeBrowserAccountPartition(partition, logger),
+  // A loaded account is already routed; routing it again would drop its open connections.
+  routePartition: (partition, logger) => routeIdleAccountPartition(partition, logger),
   readSignIn: async (partition) => signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" })),
   erasePartition: async (partition) => {
     const removed = session.fromPartition(partition);
@@ -218,10 +217,7 @@ const browserAccountService = createBrowserAccountService({
     runtimeSupervisor?.extraTunnels?.forgetAccount?.(accountId);
   },
   threads: () => threadAccounts,
-  placeHost: (next) => {
-    if (lastBrowserBounds) next.setBounds(lastBrowserBounds.rect, lastBrowserBounds.zoom);
-    next.setSurfaceActive(lastBrowserSurfaceActive);
-  },
+  lifecycleSyncFor: (accountId, logger) => lifecycleSyncFor(accountId, logger),
   afterSwitch: async (next, { wasVisible, stateStore }) => {
     if (wasVisible) await next.reveal(stateStore.read().browserInteractionMode === "automatic");
     send("launcher:browser-state", next.snapshot());
@@ -856,9 +852,10 @@ function scheduleCodexBridgeAutoConnect({ logger, stateStore, reason }) {
 }
 
 // Browser-tab accounts (browser-accounts.cjs). The Browser tab is the Codex bridge's browser, so
-// its active account is the one WebGPT turns run on. A switch replaces the BrowserHost (a page
-// cannot change partition); once the new account is signed in, setup runs again so the bridge
-// re-reads that account's plan (Plus stops at 6 High; Team and Pro have Extra High and Pro).
+// its active account is the one WebGPT turns run on. A switch shows the account's own page in the
+// same BrowserHost (a page cannot change partition, so each account has one); once the new account
+// is signed in, setup runs again so the bridge re-reads that account's plan (Plus stops at 6 High;
+// Team and Pro have Extra High and Pro).
 // The saved conversations an account's turns may reopen; the first account keeps the original file.
 function browserAccountConversationFile(accountId) {
   return path.join(CORE_HOME, "sync", accountId === FIRST_BROWSER_ACCOUNT_ID
@@ -1022,12 +1019,35 @@ async function readChatGptAccountEmail(partition) {
   }
 }
 
+// The bridge's model list depends only on the plan: Plus, or Team/Pro (Extra High), or Pro.
+// Null until this run's first setup, so the first switch always refreshes.
+let bridgePlanKey = null;
+function browserAccountPlanKey(accountId) {
+  const plan = browserAccounts.status().accounts.find((entry) => entry.id === accountId)?.plan;
+  return plan ? `${plan.solAvailable}:${plan.proAvailable}` : null;
+}
+
 async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore }) {
   if (browserHost !== host) return;
   try {
-    if (browserAccounts.setEmail(accountId, await readChatGptAccountEmail(host.partition))) publishBrowserAccounts();
+    // The account's own partition: the host may already show another account.
+    if (browserAccounts.setEmail(accountId, await readChatGptAccountEmail(browserAccounts.partitionOf(accountId)))) publishBrowserAccounts();
   } catch (error) {
     logger.warn("browser_accounts.email_failed", { message: error instanceof Error ? error.message : String(error) });
+  }
+  if (browserHost !== host || !browserAccountService.bridgeRefreshPending(accountId)) return;
+  // The bridge already lists this plan's models (the last account it was set up on has the same
+  // plan): the restart would change nothing, so the switch costs no setup at all.
+  const planKey = browserAccountPlanKey(accountId);
+  if (planKey && planKey === bridgePlanKey) {
+    browserAccountService.takeBridgeRefresh(accountId);
+    logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "same-plan" });
+    return;
+  }
+  // Setup restarts the bridge, which would end every running turn (a switch no longer waits for
+  // them): it waits until none runs, unless another switch takes over meanwhile.
+  while (browserHost === host && host.activeTraceId && browserAccountService.bridgeRefreshPending(accountId) && !quitting) {
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
   }
   if (browserHost !== host || !browserAccountService.takeBridgeRefresh(accountId)) return;
   const setupState = stateStore.read();
@@ -1037,6 +1057,8 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
     await waitForRuntimeHostIdle();
     await runtimeHost.setupCore();
     stateStore.update({ codexCatalogVerified: false, codexRestartRequired: true });
+    // Setup's capability check recorded the plan it installed (onSessionInspected).
+    bridgePlanKey = browserAccountPlanKey(accountId);
     logger.info("browser_accounts.bridge_refreshed", { accountId });
     scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-account" });
   } catch (error) {
@@ -1102,6 +1124,42 @@ async function assignBrowserAccountProxies({ logger }) {
     assigned += 1;
   }
   return { ...browserAccountsStatus(), assigned };
+}
+
+// Every Codex OAuth sign-in in CPA gets a Browser-tab account named after it
+// (browser-accounts.cjs importOauthAccounts), at startup and every 5 minutes. Read off the main
+// thread, and a file whose size and time are unchanged is not read again: synchronous reads of
+// every CPA auth file stalled the app for seconds on a busy hard disk (chatgpt-desktop.cjs).
+const CPA_BROWSER_ACCOUNT_SYNC_MS = 5 * 60_000;
+const cpaBrowserAccountFiles = new Map(); // file -> { size, mtimeMs, account }
+async function syncBrowserAccountsFromCpa(logger) {
+  const directory = cpaAuthDirectory();
+  let names;
+  try { names = await fs.promises.readdir(directory); } catch { return []; }
+  const files = names.filter((name) => /\.json$/i.test(name)).map((name) => [name, path.join(directory, name)]);
+  const accounts = [];
+  for (const [name, file] of files) {
+    let stat;
+    try { stat = await fs.promises.stat(file); } catch { continue; }
+    let known = cpaBrowserAccountFiles.get(file);
+    if (!known || known.size !== stat.size || known.mtimeMs !== stat.mtimeMs) {
+      let raw = null;
+      try { raw = JSON.parse(await fs.promises.readFile(file, "utf8")); } catch { /* being written */ }
+      known = { size: stat.size, mtimeMs: stat.mtimeMs, account: cpaAccountOf(file, name, raw) };
+      cpaBrowserAccountFiles.set(file, known);
+    }
+    if (known.account?.email) accounts.push(known.account);
+  }
+  const present = new Set(files.map(([, file]) => file));
+  for (const file of cpaBrowserAccountFiles.keys()) if (!present.has(file)) cpaBrowserAccountFiles.delete(file);
+  accounts.sort((a, b) => a.email.localeCompare(b.email));
+  const added = browserAccounts.importOauthAccounts(accounts);
+  if (added.length) {
+    logger.info("browser_accounts.imported_from_cpa", { count: added.length });
+    publishBrowserAccounts();
+    void refreshBrowserAccountSignIns(logger);
+  }
+  return added;
 }
 
 function addBrowserAccount(context) {
@@ -2232,13 +2290,10 @@ function registerIpc({ logger, stateStore }) {
 
   handle("launcher:browser-bounds", (event, bounds) => {
     browserHost?.setBounds(validateBounds(bounds), event.sender.getZoomFactor());
-    // Kept for the host an account switch creates (switchBrowserAccount).
-    lastBrowserBounds = { rect: validateBounds(bounds), zoom: event.sender.getZoomFactor() };
     return true;
   });
   handle("launcher:browser-surface-active", (_event, active) => {
     const nextActive = active === true;
-    lastBrowserSurfaceActive = nextActive;
     return deferUiWork(() => {
       browserHost?.setSurfaceActive(nextActive);
     }, {
@@ -2780,6 +2835,8 @@ function registerIpc({ logger, stateStore }) {
     // "Install models" is the explicit install into Codex: it opts back in to Codex's route.
     if (!IS_DEV_PROFILE && setupState.codexRoute === false) stateStore.update({ codexRoute: true });
     const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore();
+    // The models just installed are the shown account's plan's (its capability check recorded it).
+    bridgePlanKey = browserAccountPlanKey(browserAccounts.activeId());
     stateStore.update({
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE ? true : false,
@@ -4228,9 +4285,12 @@ async function start() {
     logger,
   });
   lifecycleScan.start();
-  // One BrowserHost per Browser-tab account: switching accounts replaces it (switchBrowserAccount).
+  // One BrowserHost for every Browser-tab account: a switch shows another account's page in it
+  // (switchBrowserAccount), so what it reports belongs to the account it shows at that moment.
   createBrowserHostForAccount = (accountId) => {
-    let lastPublishedBrowserAuth = false;
+    const shownAccountId = () => browserAccounts.accountIdOfPartition(host?.partition) ?? accountId;
+    // The last sign-in published, per partition: a switch to a signed-in account is its sign-in.
+    let lastPublishedBrowserAuth = { partition: null, authenticated: false };
     // Declared before construction: the constructor already publishes its first state while it
     // loads its view, and reading a `const host` there threw "Cannot access 'host' before
     // initialization" on every start, failing that first load. A host not yet current is ignored.
@@ -4251,16 +4311,18 @@ async function start() {
         if (!host || browserHost !== host) return;
         send("launcher:browser-state", state);
         const authenticated = state.authenticated === true;
-        if (authenticated && !lastPublishedBrowserAuth) {
+        const wasAuthenticated = lastPublishedBrowserAuth.partition === host.partition && lastPublishedBrowserAuth.authenticated;
+        if (authenticated && !wasAuthenticated) {
           if (stateStore.read().codexRestartRequired === true) {
             queueMicrotask(() => scheduleCodexBridgeAutoConnect({
               logger, stateStore, reason: "browser-authenticated",
             }));
           }
-          queueMicrotask(() => onBrowserAccountSignedIn(accountId, host, { logger, stateStore }));
+          const signedIn = shownAccountId();
+          queueMicrotask(() => onBrowserAccountSignedIn(signedIn, host, { logger, stateStore }));
         }
-        if (authenticated !== lastPublishedBrowserAuth) void refreshBrowserAccountSignIns(logger);
-        lastPublishedBrowserAuth = authenticated;
+        if (authenticated !== wasAuthenticated) void refreshBrowserAccountSignIns(logger);
+        lastPublishedBrowserAuth = { partition: host.partition, authenticated };
       },
       showWindow: showMainWindow,
       getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
@@ -4271,7 +4333,7 @@ async function start() {
       retainedTabTtlMs: () => browserAccounts.settings().keepFinishedTabsMinutes * 60_000,
       // What turns and inspections show about each account, for ChatGPT browser management.
       onSessionInspected: (inspected) => {
-        if (browserAccounts.recordPlan(accountId, inspected)) publishBrowserAccounts();
+        if (browserAccounts.recordPlan(shownAccountId(), inspected)) publishBrowserAccounts();
       },
       onConnectorObserved: (partition, observed) => {
         const owner = browserAccounts.accountIdOfPartition(partition);
@@ -4287,6 +4349,11 @@ async function start() {
   await routeBrowserAccountPartition(browserAccounts.activePartition(), logger);
   browserHost = createBrowserHostForAccount(browserAccounts.activeId());
   void refreshBrowserAccountSignIns(logger);
+  const syncCpaAccounts = () => void syncBrowserAccountsFromCpa(logger).catch((error) => logger.warn("browser_accounts.cpa_sync_failed", {
+    message: error instanceof Error ? error.message : String(error),
+  }));
+  syncCpaAccounts();
+  setInterval(syncCpaAccounts, CPA_BROWSER_ACCOUNT_SYNC_MS).unref();
   setProviderBrowserHost(() => browserHost);
   registerIpc({ logger, stateStore });
   const trayAvailable = createTray(logger, stateStore.read().language);

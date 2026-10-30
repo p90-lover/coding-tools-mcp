@@ -550,6 +550,9 @@
 /* The model list names each provider once, above its models, instead of in every row. */
 .ao-workflow .ao-model-group + .ao-model-group { margin-top: 6px; }
 .ao-workflow .ao-model-group > h4 { margin: 6px 8px 2px; color: #7b899e; font-size: 11px; font-weight: 600; letter-spacing: .02em; }
+/* A model row: its maker's mark, then its name (HarnessLogo's ModelLogo). */
+.ao-workflow .ao-model-row { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.ao-workflow .ao-model-row > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-workflow .ao-chip-provider { color: #7b899e; }
 .ao-workflow .ao-permissions-panel { width: min(390px, calc(100vw - 40px)); padding: 8px 6px 6px; border-radius: 14px; }
 .ao-workflow .ao-permissions-panel > header { display: flex; align-items: center; justify-content: space-between; margin: 0 8px 4px; }

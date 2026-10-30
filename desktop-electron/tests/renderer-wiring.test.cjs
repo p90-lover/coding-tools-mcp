@@ -478,10 +478,11 @@ test("Zero Risk setup commits state after the runtime transaction and preserves 
   assert.ok(runtimeMcpCommit >= 0 && runtimeMcpCommit < mcpTransaction);
   assert.ok(mcpTransaction < stateMcpCommit);
   assert.match(browserHostSource, /bindManualTurnContents\(tab\)/);
-  const manualBinding = browserHostSource.slice(
-    browserHostSource.indexOf("bindManualTurnContents(tab)"),
-    browserHostSource.indexOf("bindWebContents()"),
-  );
+  // The method itself, up to the next one (the call site comes first in the file).
+  const manualBindingStart = browserHostSource.indexOf("  bindManualTurnContents(tab) {");
+  const manualBindingEnd = browserHostSource.indexOf("  bindWebContents(", manualBindingStart);
+  assert.ok(manualBindingStart >= 0 && manualBindingEnd > manualBindingStart);
+  const manualBinding = browserHostSource.slice(manualBindingStart, manualBindingEnd);
   assert.doesNotMatch(manualBinding, /executeJavaScript|insertCSS|querySelector|runBrowserHelperOperation|enableDeviceEmulation/);
   assert.match(browserHostSource, /requireAutomaticBrowserInspection\(this, "ChatGPT authentication probe"\)/);
   assert.match(browserHostSource, /requireAutomaticBrowserInspection\(this, "ChatGPT session and capability inspection"\)/);

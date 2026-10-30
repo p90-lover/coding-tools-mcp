@@ -1411,7 +1411,8 @@ function BrowserSurface({
           />
           <IconButton disabled={navigationLocked || !visible} icon="reload" label={copy.reload} onClick={() => void navigate("reload")} />
         </div>
-        <BrowserAccountSwitcher api={api!} busy={navigationLocked} copy={copy} setError={setError} />
+        {/* Turns keep running on their own accounts across a switch; only a check or test of the shown page holds it. */}
+        <BrowserAccountSwitcher api={api!} busy={browser?.status === "testing"} copy={copy} setError={setError} />
         <div className="browser-address" title={browser?.url || copy.browserAddress}>
           <Icon name="globe" />
           <span>{formatBrowserAddress(browser?.url, copy)}</span>

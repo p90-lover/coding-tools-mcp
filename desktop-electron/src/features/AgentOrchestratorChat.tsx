@@ -4,10 +4,11 @@ import { Caret, Icon } from "../icons";
 import { ModelJudgesToggle } from "./ModelJudgesToggle";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
+import { ModelLogo } from "./HarnessLogo";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatWorkbench, navigatePreview, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
@@ -1047,6 +1048,9 @@ export function AgentOrchestratorChat({
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
+  const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
+  const processRows = useMemo(() => detailsOpen ? chatProcessRows(processCommands, livePage) : [], [detailsOpen, processCommands, livePage]);
   // A subagent starting opens the panel on its Subagents tab, as Codex's panel shows a thread's
   // subagents; a Preview, Terminal or diff the person has open stays (the line above the chat box says it).
   const subagents = useChatSubagents(selectedTaskId ? agentSessionIds : [],
@@ -1849,6 +1853,11 @@ export function AgentOrchestratorChat({
     const idle = notStarted && turn.runId === latest?.id;
     // A goal's next round is its Stop hook's feedback, shown as Claude Code shows it, not as a message the person sent.
     const feedback = turn.user ? goalFeedback(turn.user.text) : null;
+    // Who answered, said once and plainly: a single chat's model (its maker's mark and name), or a
+    // team's answering card marked Team. How it ran (harness, provider, effort, window) is the tooltip.
+    const answerRun = chatRuns.find((run) => run.id === turn.runId);
+    const answerModel = turn.final ? answerRun?.nodes.find((node) => node.id === turn.final?.nodeId)?.route?.model : undefined;
+    const teamAnswer = Boolean(answerRun) && answerRun?.execution_mode !== "single";
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
     return <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
@@ -1885,10 +1894,11 @@ export function AgentOrchestratorChat({
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
                 {dsh ? (turn.final.verdict ? <div className="cx-answer-meta"><span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span></div> : null)
-                  : <div className="cx-answer-meta">
-                    <span>{turn.final.name}</span>
+                  : <div className="cx-answer-meta" title={turn.final.detail || undefined}>
+                    {answerModel ? <ModelLogo model={answerModel} label={turn.final.name} size={14} /> : null}
+                    <span className="cx-answer-name">{turn.final.name}</span>
+                    {teamAnswer ? <span className="cx-answer-mode">Team</span> : null}
                     {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
-                    {turn.final.detail ? <span className="cx-answer-detail">{turn.final.detail}</span> : null}
                   </div>}
                 {/* A finished reviewer becomes the answer; its earlier cycles stay above it (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
@@ -1989,6 +1999,16 @@ export function AgentOrchestratorChat({
                 <span className="cx-details-dots" aria-hidden="true">{agents.dots.slice(0, 8).map((state, index) =>
                   <span key={index} className={`cx-details-dot is-${state}`} />)}</span><span>{agents.text}</span></button>
                 : <p className="cx-details-empty">No agents yet. They start with your first message.</p>}
+              {/* Apps and terminals: a lit green dot while one runs, a red one once it is offline. A
+                  click shows it (the Preview or the Terminal), which no longer opens by itself. */}
+              <p className="cx-details-label">Processes</p>
+              {processRows.length ? processRows.map((row) => <button key={row.key} type="button" className="cx-details-row cx-process-row"
+                title={`${row.title}
+${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWorkbench(row.kind === "app" ? "preview" : "terminal")}>
+                <span className={`cx-process-dot ${row.running ? "is-running" : "is-offline"}`} role="img" aria-label={row.running ? "Running" : "Offline"} />
+                <Icon name={row.kind === "app" ? "globe" : "logs"} width="14" height="14" />
+                <span>{row.label}</span><small>{row.running ? "Running" : "Offline"}</small></button>)
+                : <p className="cx-details-empty">Apps and terminals the agents start show here.</p>}
               <p className="cx-details-label">Setup</p>
               {lead ? <>
                 <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>

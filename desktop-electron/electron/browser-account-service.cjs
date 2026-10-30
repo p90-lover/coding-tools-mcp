@@ -22,6 +22,7 @@
  * @param {() => object | null} deps.threads codex-thread-accounts, or null
  * @param {(next: object, previous: object | null) => void} [deps.placeHost] bounds and surface of a new host
  * @param {(next: object, revealed: { wasVisible: boolean, stateStore: object }) => Promise<void>} [deps.afterSwitch]
+ * @param {(accountId: string, logger: object) => object} [deps.lifecycleSyncFor] the account's saved-chat sync, for a host that switches in place
  * @param {() => number} [deps.now]
  */
 function createBrowserAccountService(deps) {
@@ -78,20 +79,41 @@ function createBrowserAccountService(deps) {
     return signInRefresh;
   }
 
+  // A host that switches in place (BrowserHost.switchAccount) is held only by what owns the page it
+  // shows; Codex turns keep running in their own tabs. One rebuilt per account is held by any turn.
   function blockerMessage(verb) {
-    const blocker = deps.host()?.accountSwitchBlocker?.();
+    const host = deps.host();
+    const blocker = host?.switchAccount ? host.homeSwitchBlocker?.() : host?.accountSwitchBlocker?.();
     return blocker ? `The Browser tab cannot ${verb} while ${blocker}. Try again when it is done.` : null;
+  }
+
+  // Shows the account in the host in use: the account left stays loaded for an instant switch back.
+  async function switchInPlace(host, accountId, partition, { logger, stateStore }) {
+    await deps.routePartition(partition, logger);
+    const previousRefresh = bridgeRefreshFor;
+    // Set first: the switch publishes the account's sign-in, which starts the bridge refresh.
+    bridgeRefreshFor = accountId;
+    try {
+      await host.switchAccount(partition, { chatLifecycleSync: deps.lifecycleSyncFor?.(accountId, logger) ?? null });
+    } catch (error) {
+      bridgeRefreshFor = previousRefresh;
+      throw error;
+    }
+    deps.registry.setActive(accountId);
+    logger?.info?.("browser_accounts.switched", { accountId, inPlace: true });
+    await deps.afterSwitch?.(host, { wasVisible: host.visible === true, stateStore });
   }
 
   async function switchTo(accountId, { logger, stateStore }) {
     const partition = deps.registry.partitionOf(accountId);
     if (accountId === deps.registry.activeId()) return status();
     if (switching) throw new Error("Another account switch is in progress");
+    const current = deps.host();
     const createHost = deps.hostFactory();
-    if (!createHost) throw new Error("The browser is still starting");
+    if (!createHost && !current?.switchAccount) throw new Error("The browser is still starting");
     const early = blockerMessage("change account");
     if (early) throw new Error(early);
-    const run = (async () => {
+    const run = current?.switchAccount ? switchInPlace(current, accountId, partition, { logger, stateStore }) : (async () => {
       const previous = deps.host();
       await previous?.persistSession?.().catch((error) => logger?.warn?.("browser_accounts.persist_failed", {
         message: error instanceof Error ? error.message : String(error),
@@ -165,6 +187,8 @@ function createBrowserAccountService(deps) {
       if (entry.accountId === accountId) host?.releaseThreadTabs?.(entry.threadId);
     }
     threads?.removeAccount(accountId);
+    // Its page, if still loaded from an earlier switch, closes before its partition is erased.
+    host?.releaseAccountHome?.(deps.registry.partitionOf(accountId));
     const partition = deps.registry.remove(accountId);
     signIns.delete(accountId);
     if (bridgeRefreshFor === accountId) bridgeRefreshFor = null;
@@ -191,6 +215,8 @@ function createBrowserAccountService(deps) {
     add,
     remove,
     switching: () => switching !== null,
+    /** Whether a switch left this account's plan for the bridge to pick up (takeBridgeRefresh clears it). */
+    bridgeRefreshPending: (accountId) => bridgeRefreshFor === accountId,
     /** Whether a switch left this account's plan for the bridge to pick up; true once, then cleared. */
     takeBridgeRefresh(accountId) {
       if (bridgeRefreshFor !== accountId) return false;
