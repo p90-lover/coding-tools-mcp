@@ -60,3 +60,30 @@ test("git still runs when no worker thread can be started", async () => {
     assert.ok(calls.length > 0);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("a detached HEAD reads as detached; a branch read that timed out reads as unknown", async () => {
+  const dir = repository();
+  try {
+    const head = childProcess.execFileSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).trim();
+    childProcess.execFileSync("git", ["-C", dir, "checkout", "--quiet", "--detach"], { windowsHide: true });
+    const { workspace } = load({ Worker: function Unavailable() { throw new Error("no workers here"); } });
+    assert.equal((await workspace.listBranches(dir)).current, `detached at ${head}`);
+
+    childProcess.execFileSync("git", ["-C", dir, "checkout", "--quiet", "main"], { windowsHide: true });
+    // A busy disk: git is killed at its timeout while reading HEAD, with no exit code.
+    const realExecFile = childProcess.execFile;
+    const realWorker = workerThreads.Worker;
+    childProcess.execFile = (file, args, options, callback) => args.includes("symbolic-ref") && args.includes("HEAD")
+      ? setImmediate(() => callback(Object.assign(new Error("Command failed: timed out"), { killed: true, code: null, signal: "SIGTERM" }), "", ""))
+      : realExecFile(file, args, options, callback);
+    try {
+      delete require.cache[MODULE];
+      workerThreads.Worker = function Unavailable() { throw new Error("no workers here"); };
+      const slow = require(MODULE);
+      assert.equal((await slow.listBranches(dir)).current, null);
+    } finally {
+      childProcess.execFile = realExecFile;
+      workerThreads.Worker = realWorker;
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

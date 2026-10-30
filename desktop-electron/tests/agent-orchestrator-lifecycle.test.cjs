@@ -208,6 +208,8 @@ function createHarness(hooks = {}) {
     "./ipc-schema.cjs": require("../electron/ipc-schema.cjs"),
     // Ending chat hosts at quit has its own tests (ao-chat-hosts.test.cjs); no fixture kills a process.
     "./process-tree.cjs": { terminateOwnedProcessTreeAsync: async () => { throw new Error("No process is killed in a fixture"); } },
+    // Warming the daemon's program off the main thread has its own tests (off-thread-run.test.cjs); a fixture's daemon is fake.
+    "./off-thread-run.cjs": { warmProgram: async () => {} },
   };
   const loadedModule = { exports: {} };
   vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), {

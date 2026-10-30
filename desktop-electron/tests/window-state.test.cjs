@@ -28,6 +28,8 @@ test("a moved window is saved off the main thread, and closing saves the final p
     fs.writeFileSync = function (target, ...rest) { if (String(target).startsWith(file)) syncWrites += 1; return writeFileSync.call(this, target, ...rest); };
     window.emit("move");
     await new Promise((resolve) => setTimeout(resolve, 700));
+    // The background save lands after the delay; on a busy machine it can take longer.
+    for (const stop = Date.now() + 5_000; !fs.existsSync(file) && Date.now() < stop;) await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(syncWrites, 0, "a drag is not saved synchronously");
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).bounds, bounds);
     bounds = { x: 50, y: 60, width: 1100, height: 720 };

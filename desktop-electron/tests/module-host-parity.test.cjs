@@ -41,6 +41,8 @@ test("Codex route waits for authenticated browser evidence and retries after log
     applyReadyRuntimeAfterBridge() {},
     send() {}, nextSessionRefreshReminderAt: () => 1,
     codexBridgeConnectInFlight: null,
+    // No AO host is up here, so a connect restores no runs.
+    activeAoWorkflow: null, headlessHost: null,
   });
   const connect = vm.runInContext(`(${functions.get("connectCodexBridgeAfterAuthentication")})`, context);
   assert.equal((await connect({ logger: context.logger, stateStore: context.stateStore })).reason, "unauthenticated");

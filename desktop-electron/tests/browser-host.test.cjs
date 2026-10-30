@@ -1162,8 +1162,10 @@ test("launcher quit remains gated through an active embedded-browser operation",
   const start = source.indexOf("async function requestQuit(");
   assert.ok(start >= 0, "requestQuit must exist");
   const quit = source.slice(start);
-  // An active browser operation, then an active runtime operation, each refuses the quit.
-  assert.match(quit, /const browserOperation = browserHost\?\.currentOperation\(\) \|\| \(browserHost\?\.activeTraceId \? "ChatGPT turn" : null\);\s*if \(browserOperation\) \{\s*throw new Error/);
+  // An active browser operation refuses the quit unless the user picks "Quit anyway"; a keep-bridge
+  // restart never asks, so it always waits. An active runtime operation always refuses.
+  assert.match(quit, /const browserOperation = browserHost\?\.currentOperation\(\) \|\| \(browserHost\?\.activeTraceId \? "ChatGPT turn" : null\);\s*if \(browserOperation\) \{/);
+  assert.match(quit, /const decision = !keepBridge && mainWindow && !mainWindow\.isDestroyed\(\)[\s\S]{0,900}: \{ response: 0 \};\s*if \(decision\.response !== 1\) throw new Error\(`Wait for \$\{browserOperation\}/);
   assert.match(quit, /const runtimeOperation = runtimeHost\?\.currentOperation\(\);\s*if \(runtimeOperation\) \{\s*throw new Error/);
 });
 
