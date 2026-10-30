@@ -17,7 +17,8 @@ const { parentPort } = require("node:worker_threads");
 const { execFile } = require("node:child_process");
 parentPort.on("message", ({ id, args, timeout }) => {
   execFile("git", args, { windowsHide: true, timeout }, (error, stdout, stderr) => {
-    parentPort.postMessage({ id, error: error ? String(error.message || error) : null, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    parentPort.postMessage({ id, error: error ? String(error.message || error) : null, code: error ? (Number.isInteger(error.code) ? error.code : null) : 0,
+      stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
   });
 });`;
 let gitWorker = null;
@@ -28,7 +29,8 @@ const gitPending = new Map();
 function runGitDirectly(args, timeout) {
   return new Promise((resolve) => {
     execFile("git", args, { windowsHide: true, timeout }, (error, stdout, stderr) => {
-      resolve({ error: error ? String(error.message || error) : null, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve({ error: error ? String(error.message || error) : null, code: error ? (Number.isInteger(error.code) ? error.code : null) : 0,
+        stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
@@ -57,7 +59,7 @@ function startGitWorker() {
   return worker;
 }
 
-/** git's { error, stdout, stderr }, never a rejection. */
+/** git's { error, code, stdout, stderr }, never a rejection. `code` is git's exit code, null when it did not finish. */
 function runGit(args, timeout) {
   if (gitWorkerBroken) return runGitDirectly(args, timeout);
   try {
@@ -132,8 +134,11 @@ async function listBranches(folder, chatRoot = null) {
   const root = await git(folder, ["rev-parse", "--show-toplevel"]);
   if (!root) return { git: false, branches: [] };
   const headOf = async (directory) => {
-    const branch = await git(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    if (branch) return branch;
+    const head = await runGit(["-C", directory, "symbolic-ref", "--quiet", "--short", "HEAD"], 10_000);
+    if (!head.error) return head.stdout.trim() || null;
+    // Exit 1 is git saying HEAD is detached. A git that timed out on a busy disk or never started
+    // says nothing about it: the branch is unknown, not "detached" (the bar showed that on main).
+    if (head.code !== 1) return null;
     const commit = await git(directory, ["rev-parse", "--short", "HEAD"]);
     return commit ? `detached at ${commit}` : null;
   };

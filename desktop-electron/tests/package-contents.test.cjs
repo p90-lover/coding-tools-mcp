@@ -7,6 +7,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const repositoryRoot = path.resolve(__dirname, "..", "..");
+// A package fixture ships the pinned CPA archive, which only packaging downloads into aiTemp/.
+// Without it these tests are skipped by name instead of failing on a missing file.
+const CPA_ARCHIVE = path.join(repositoryRoot, "aiTemp", require("../vendor/managed-components/cpa.json").platforms.win32.x64.fileName);
+const packageTest = (name, fn) => test(name, fs.existsSync(CPA_ARCHIVE) ? {} : { skip: `needs ${path.relative(repositoryRoot, CPA_ARCHIVE)} (run prepare-package-resources)` }, fn);
 const {
   REQUIRED_ASAR_FILES,
   REQUIRED_MODULE_FILES,
@@ -226,7 +230,7 @@ function packageOptions(overrides = {}) {
   };
 }
 
-test("accepts an exact package contract with verified runtime, sidecar, tunnel, migration, rollback, and notices", () => {
+packageTest("accepts an exact package contract with verified runtime, sidecar, tunnel, migration, rollback, and notices", () => {
   const { appRoot } = createPackageFixture("complete");
   const result = inspectExtractedApplication(appRoot, packageOptions());
   assert.equal(result.ok, true);
@@ -237,7 +241,7 @@ test("accepts an exact package contract with verified runtime, sidecar, tunnel, 
   assert.deepEqual(result.secretsFound, []);
 });
 
-test("rejects a packaged component changed after the package manifest was written", () => {
+packageTest("rejects a packaged component changed after the package manifest was written", () => {
   const { appRoot } = createPackageFixture("tampered", ({ resourcesRoot }) => {
     fs.appendFileSync(
       path.join(resourcesRoot, "coding-tools", "coding-tools-headless.exe"),
@@ -250,7 +254,7 @@ test("rejects a packaged component changed after the package manifest was writte
   );
 });
 
-test("rejects credential-like files and never reports their contents", () => {
+packageTest("rejects credential-like files and never reports their contents", () => {
   const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
   const { appRoot } = createPackageFixture("secret", ({ resourcesRoot }) => {
     writeFile(path.join(resourcesRoot, "coding-tools", ".env.production"), `OPENAI_API_KEY=${secret}\n`);
@@ -265,7 +269,7 @@ test("rejects credential-like files and never reports their contents", () => {
   );
 });
 
-test("allows CPA .env.example templates used for first-run setup", () => {
+packageTest("allows CPA .env.example templates used for first-run setup", () => {
   assert.equal(forbiddenName("resources/coding-tools/.env.example"), null);
   assert.equal(forbiddenName("resources/coding-tools/.env"), "environment-file");
   assert.equal(forbiddenName("resources/coding-tools/.env.production"), "environment-file");
@@ -277,7 +281,7 @@ test("allows CPA .env.example templates used for first-run setup", () => {
   assert.deepEqual(result.secretsFound, []);
 });
 
-test("rejects the retained Tauri identity masquerading as the Electron candidate", () => {
+packageTest("rejects the retained Tauri identity masquerading as the Electron candidate", () => {
   const { appRoot } = createPackageFixture("identity");
   assert.throws(
     () => inspectExtractedApplication(appRoot, packageOptions({
@@ -294,7 +298,7 @@ test("rejects the retained Tauri identity masquerading as the Electron candidate
   );
 });
 
-test("rejects an installer contract that permits elevation", () => {
+packageTest("rejects an installer contract that permits elevation", () => {
   const { appRoot } = createPackageFixture("elevated-installer", ({ resourcesRoot }) => {
     const manifestPath = path.join(resourcesRoot, "coding-tools", "package-manifest.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -307,7 +311,7 @@ test("rejects an installer contract that permits elevation", () => {
   );
 });
 
-test("rejects a package that omits a required desktop ASAR module", () => {
+packageTest("rejects a package that omits a required desktop ASAR module", () => {
   const { appRoot } = createPackageFixture("missing-required-asar");
   const requiredModule = "electron/runtime-supervisor.cjs";
   assert.ok(REQUIRED_ASAR_FILES.includes(requiredModule));
@@ -319,7 +323,7 @@ test("rejects a package that omits a required desktop ASAR module", () => {
   );
 });
 
-test("rejects a package that omits in-process module handlers next to app.asar", () => {
+packageTest("rejects a package that omits in-process module handlers next to app.asar", () => {
   const { appRoot } = createPackageFixture("missing-modules-host", ({ resourcesRoot }) => {
     fs.rmSync(path.join(resourcesRoot, "app-handler", "host.cjs"));
   });
@@ -331,7 +335,7 @@ test("rejects a package that omits in-process module handlers next to app.asar",
   );
 });
 
-test("rejects a package that omits the modules host shim next to app.asar", () => {
+packageTest("rejects a package that omits the modules host shim next to app.asar", () => {
   const { appRoot } = createPackageFixture("missing-modules-shim", ({ resourcesRoot }) => {
     fs.rmSync(path.join(resourcesRoot, "modules", "host.cjs"));
   });
@@ -342,7 +346,7 @@ test("rejects a package that omits the modules host shim next to app.asar", () =
   );
 });
 
-test("rejects a rollback reference whose checksum does not match the published v0.4.10 Windows asset", () => {
+packageTest("rejects a rollback reference whose checksum does not match the published v0.4.10 Windows asset", () => {
   const { appRoot } = createPackageFixture("rollback-checksum", ({ resourcesRoot }) => {
     const rollbackPath = path.join(resourcesRoot, "rollback", "manifest.json");
     const rollback = JSON.parse(fs.readFileSync(rollbackPath, "utf8"));
@@ -380,7 +384,7 @@ test("requires exactly one versioned Windows x64 installer", () => {
   assert.throws(() => findWindowsInstaller(root), /PACKAGE_INSTALLER_COUNT_MISMATCH/);
 });
 
-test("live .env files still fail the package secret scanner after example templates are allowed", () => {
+packageTest("live .env files still fail the package secret scanner after example templates are allowed", () => {
   const { appRoot } = createPackageFixture("live-env", ({ resourcesRoot }) => {
     writeFile(path.join(resourcesRoot, "coding-tools/.env"), "CPA_API_KEY=secret\n");
   });

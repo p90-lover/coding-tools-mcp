@@ -1,6 +1,8 @@
 # Patch files carry diff syntax: context lines start with a space, so "space before tab"
-# and lone-space lines are part of the format, not whitespace errors.
-*.patch -whitespace
+# and lone-space lines are part of the format, not whitespace errors. They stay LF in every
+# checkout: they apply to LF sources (AO's files, `git show` blobs), and a CRLF copy from
+# core.autocrlf failed with "patch does not apply" on Windows while CI passed.
+*.patch -whitespace eol=lf
 
 # Pinned third-party releases are verified by SHA-256; checkouts must keep their exact bytes.
 desktop-electron/assets/keysmith/** -text

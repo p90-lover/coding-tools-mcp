@@ -842,7 +842,11 @@ test("catalog copies for sign-ins unused for a week and stray temporaries are pr
       headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models?client_version=1",
         "x-native-authorization": "Bearer account-a", "x-native-method": "GET" },
     })).arrayBuffer();
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Pruning runs in the background after the answer; wait for it rather than a fixed 100 ms.
+    const saved = () => fs.readdirSync(dir).filter((name) => name !== "recent.json" && name.endsWith(".json")).length === 1;
+    for (const stop = Date.now() + 5_000; (fs.existsSync(old) || fs.existsSync(stray) || !saved()) && Date.now() < stop;) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     assert.ok(!fs.existsSync(old) && !fs.existsSync(stray), "a sign-in's copy unused for a week and a stray temporary are removed");
     assert.ok(fs.existsSync(recent), "a recent copy for another sign-in stays");
     assert.equal(fs.readdirSync(dir).filter((name) => name !== "recent.json" && name.endsWith(".json")).length, 1, "the new copy is saved");

@@ -6,7 +6,11 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, reviewScriptExcerpts } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow: createWorkflow, resolveAoNativeConnection, reviewScriptExcerpts } = require("../electron/agent-orchestrator-workflow.cjs");
+// A fixture never looks for the machine's own Codex CLI: without this, tests passed only where
+// `codex` was installed (a developer's PC) and failed on a clean CI runner. A test that is about
+// finding Codex passes its own findCodexExecutable.
+const createAgentOrchestratorWorkflow = (options = {}) => createWorkflow({ findCodexExecutable: () => "C:/codex.exe", ...options });
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 
@@ -2590,7 +2594,9 @@ test("the reviewer's script lookups never block the main process, and a slow dis
   clearInterval(ticker);
   assert.deepEqual(found, [], "nothing read by the deadline, so the review goes on without it");
   assert.ok(Date.now() - started < 1_000, "the deadline, not the disk, ends the wait");
-  assert.ok(ticks >= 5, "the event loop kept running while the disk did not answer");
+  // Windows timers tick every ~15.6 ms, so a busy machine sees only a few 5 ms ticks in 100 ms;
+  // any tick at all shows the event loop was not blocked.
+  assert.ok(ticks >= 2, "the event loop kept running while the disk did not answer");
 
   // A command naming many files (a grep over a dozen sources) looks up only the first few.
   const names = Array.from({ length: 12 }, (_, index) => `src/file${index}.ts`).join(" ");

@@ -6,6 +6,10 @@ const vm = require("node:vm");
 const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirname, "..")] }));
 const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorRoleEditor.tsx"), "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+// The picker's score badges (model-scores.ts) are plain functions with no imports, used as they are.
+const scores = {};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/model-scores.ts"), "utf8"),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText, { exports: scores });
 const plain = value => JSON.parse(JSON.stringify(value));
 const route = (harness = "ao:codex", model = "cpa/gpt") => ({
   harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model, permission_profile: ":ao-default",
@@ -21,7 +25,7 @@ async function picker(current, catalog) {
     useState: initial => { const index = cursor++; if (!(index in states)) states[index] = typeof initial === "function" ? initial() : initial;
       return [states[index], next => { states[index] = typeof next === "function" ? next(states[index]) : next; }]; },
     useEffect: effect => effects.push(effect),
-  } : name === "react/jsx-runtime" ? { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) } : {} });
+  } : name === "react/jsx-runtime" ? { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) } : name === "./model-scores" ? scores : {} });
   const changes = [];
   let selectedRoute = current;
   const render = () => { cursor = 0; effects = []; return editor.HarnessPicker({

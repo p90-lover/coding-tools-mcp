@@ -59,7 +59,10 @@ async function readBranch(folder, options) {
 }
 
 const samePath = (left, right) => {
-  const norm = (value) => path.resolve(value).replace(/[\\/]+$/, "");
+  // Compared where they really are: git names a folder by its long, junction-resolved path, so a
+  // project opened by a short (8.3) name or through a junction read as "inside" its own repository.
+  const real = (value) => { try { return fs.realpathSync.native(value); } catch { return value; } };
+  const norm = (value) => path.resolve(real(path.resolve(value))).replace(/[\\/]+$/, "");
   return process.platform === "win32" ? norm(left).toLowerCase() === norm(right).toLowerCase() : norm(left) === norm(right);
 };
 

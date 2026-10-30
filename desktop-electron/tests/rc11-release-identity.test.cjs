@@ -11,7 +11,7 @@ const read = (relative) => fs.readFileSync(path.join(repo, relative), "utf8").re
 test("rc.11 identity source reads stay LF-normalized on Windows checkouts", () => {
   const workflow = read(".github/workflows/codex-router-multiprovider-release-rc11.yml");
   assert.equal(workflow.includes("\r"), false);
-  assert.match(workflow, /\n {2}push:\n {4}branches:\n {6}- main/);
+  assert.match(workflow, /^ {2}workflow_dispatch:\s*$/m);
 });
 
 test("rc.11 frozen publisher still publishes v0.7.0-rc.11 without retargeting later product identity", () => {
@@ -26,7 +26,8 @@ test("rc.11 exact-source runner publishes a new tag without moving frozen rc.8, 
   const workflow = read(".github/workflows/codex-router-multiprovider-release-rc11.yml");
   assert.match(workflow, /RELEASE_VERSION: 0\.7\.0-rc\.11/);
   assert.match(workflow, /RELEASE_TAG: v0\.7\.0-rc\.11/);
-  assert.match(workflow, /\n {2}push:\n {4}branches:\n {6}- main/);
+  // Frozen: run by hand on its own ref, never by a push to main (49a8aab1).
+  assert.doesNotMatch(workflow, /^ {2}push:\s*$/m);
   assert.doesNotMatch(workflow, /RELEASE_TAG: v0\.7\.0-rc\.10/);
   assert.doesNotMatch(workflow, /RELEASE_TAG: v0\.7\.0-rc\.8/);
   assert.doesNotMatch(workflow, /\bforce\b/);

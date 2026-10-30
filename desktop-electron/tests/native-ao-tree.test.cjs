@@ -411,7 +411,8 @@ function mountResizableCanvas() {
   };
   bind(tree);
   const flush = () => { for (const [id, callback] of frames) { frames.delete(id); callback(); } };
-  callbacks.forEach(effect => effect()); observers.forEach(callback => callback()); flush();
+  // A real ResizeObserver always passes its entries; the pane observer reads the box, not them.
+  callbacks.forEach(effect => effect()); observers.forEach(callback => callback([])); flush();
   const camera = () => {
     const match = scene.style.transform.match(/translate\(([-\d.]+)px, ([-\d.]+)px\) scale\(([-\d.]+)\)/);
     return { x: Number(match[1]), y: Number(match[2]), scale: Number(match[3]) };
@@ -423,7 +424,7 @@ function mountResizableCanvas() {
       width: 212 * view.scale, height: 76 * view.scale };
   });
   return { camera, rectangles, box,
-    resize(width, height) { Object.assign(box, { width, height }); Object.assign(surface, { clientWidth: width, clientHeight: height }); observers.forEach(callback => callback()); flush(); },
+    resize(width, height) { Object.assign(box, { width, height }); Object.assign(surface, { clientWidth: width, clientHeight: height }); observers.forEach(callback => callback([])); flush(); },
     pan(dx, dy) { handlers.get("wheel")({ deltaX: dx, deltaY: dy, preventDefault() {} }); flush(); },
     zoom() { handlers.get("wheel")({ ctrlKey: true, deltaY: -100, clientX: box.width / 2, clientY: box.height / 2, preventDefault() {} }); flush(); },
   };

@@ -17,7 +17,7 @@ function load(file, imports = {}) {
   return exports;
 }
 const chat = load("ao-chat.ts");
-const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat });
+const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat, "./model-scores": load("model-scores.ts") });
 const markdown = load("ChatMarkdown.tsx", { "./chat-markdown": load("chat-markdown.ts") });
 const menu = load("ChatMenu.tsx");
 const client = { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) };

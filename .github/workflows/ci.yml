@@ -18,8 +18,50 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Which parts of the repository a run has to check. The Rust jobs build src-tauri, which the
+  # installer does not ship; they are skipped only when every changed file is in an area src-tauri
+  # never reads (a skipped job still satisfies a required check). The desktop suite is skipped only
+  # when every change is Rust-only. When the change list cannot be read, everything runs.
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.areas.outputs.rust }}
+      desktop: ${{ steps.areas.outputs.desktop }}
+    steps:
+      - id: areas
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          files=ALL
+          if [ "$EVENT" = pull_request ]; then
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename') || files=ALL
+          elif [ "$EVENT" = push ] && [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            # The compare API lists at most 300 files; a longer list runs everything.
+            files=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --jq 'if (.files | length) >= 300 then "ALL" else .files[].filename end') || files=ALL
+          fi
+          [ -n "$files" ] || files=ALL
+          # "true" unless every changed file matches the pattern of files that area never reads.
+          needed() { if [ "$files" = ALL ] || grep -qvE "$1" <<<"$files"; then echo true; else echo false; fi; }
+          rust=$(needed '^(desktop-electron/|runtime-web/|module/agent-orchestrator$|docs/releases/)')
+          desktop=$(needed '^(src-tauri/|native-helpers/|rust-core/)')
+          echo "rust=$rust desktop=$desktop"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "desktop=$desktop" >> "$GITHUB_OUTPUT"
+
   rust:
     name: Rust Linux — fmt, build, test, clippy
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -70,6 +112,8 @@ jobs:
 
   rust-windows:
     name: Rust Windows — test and clippy
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
     env:
@@ -94,6 +138,8 @@ jobs:
 
   rust-macos:
     name: Rust macOS — test and clippy
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: macos-15-intel
     timeout-minutes: 45
     env:
@@ -148,3 +194,43 @@ jobs:
 
       - name: NPM audit
         run: npm audit --audit-level=low
+
+  # The Electron app the installer ships: its own suite, which no job ran before (#702 and #707
+  # merged with about 50 of its tests failing).
+  desktop:
+    name: Desktop — Electron tests
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Allow long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # The AO board tests read AO's sources at the pinned submodule commit.
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '26'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.3
+
+      # runtime-web's playwright-core drives the runner's Chrome in the connector tests.
+      - name: Install desktop dependencies
+        run: |
+          bun install --frozen-lockfile --cwd desktop-electron
+          bun install --frozen-lockfile --cwd runtime-web
+
+      - name: Desktop tests
+        working-directory: desktop-electron
+        shell: bash
+        env:
+          # runtime-web/launcher's modules are tested without Electron installed there.
+          NODE_PATH: ${{ github.workspace }}/desktop-electron/tests/support/electron-stub
+        run: node --test tests/*.test.cjs
