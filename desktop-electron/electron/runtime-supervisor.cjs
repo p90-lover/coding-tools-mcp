@@ -503,7 +503,7 @@ class RuntimeSupervisor {
     this.extraTunnels = new ExtraTunnels({
       coreHome,
       logger,
-      runTunnel: (tunnel, args, timeoutMs, label, options) => this.runTunnelCommand({ tunnel }, args, timeoutMs, label, options),
+      runTunnel: (tunnel, args, timeoutMs, label) => this.runTunnelCommand({ tunnel }, args, timeoutMs, label),
       connectArgs: (config, tunnel) => managedTunnelConnectArgs({ ...config, tunnel }, this.tunnelMcpInvocation(config)),
       diagnostic: tunnelControlDiagnostic,
       absent: tunnelRuntimeAbsent,
@@ -1001,7 +1001,6 @@ class RuntimeSupervisor {
         ["runtimes", "cleanup", "--json"],
         5_000,
         "Local tunnel inventory probe",
-        { probe: true },
       );
     } catch (error) {
       // A probe that timed out (the CLI's cold start on a loaded machine) says nothing about the
@@ -1184,7 +1183,6 @@ class RuntimeSupervisor {
       ["runtimes", "status", tunnel.alias, "--json"],
       5_000,
       "Local tunnel health discovery",
-      { probe: true },
     );
     if (result.code !== 0) {
       throw new Error(`Local tunnel health discovery failed: ${tunnelControlDiagnostic(result)}`);
@@ -2033,117 +2031,20 @@ class RuntimeSupervisor {
   }
 
   /**
-   * A tunnel CLI command's { code, stdout, stderr, output }. A `probe` (a read-only status call,
-   * made every second while the tunnel starts and on each watchdog check) starts the CLI from a
-   * worker thread: started here, an antivirus scan of the program held every window for seconds
-   * (5.5 s of a 7 s main-process stall, profiled 2026-10-29).
+   * A tunnel CLI command's { code, stdout, stderr, output }. Every one starts from a worker thread:
+   * started here, Windows holds the starting thread until the program is loaded (an antivirus scan
+   * makes that seconds). Probes alone held every window 5.5 s of a 7 s stall (profiled 2026-10-29);
+   * after the probes moved, stop and connect still blocked the main process 40 times, 20.5 s in all,
+   * up to 1.4 s each, while the tunnel restarted on 0.8.35 (launcher.main_blocked, 2026-10-30).
+   * A timeout ends the command's whole process tree and rejects with "<label> timed out after N ms".
    */
-  async runTunnelCommand(config, args, timeoutMs, label, { probe = false } = {}) {
+  async runTunnelCommand(config, args, timeoutMs, label) {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
-    if (probe) {
-      const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
-      if (reply.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
-      if (reply.error) throw new Error(reply.error);
-      return controlResult(reply.code, reply.stdout, reply.stderr);
-    }
-    return await new Promise((resolve, reject) => {
-      const child = spawn(tunnel.binaryPath, args, {
-        cwd: tunnel.profileDir,
-        detached: DETACH_OWNED_CHILD,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      });
-      const stdout = [];
-      const stderr = [];
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
-      const capture = (chunks, chunk, stream) => {
-        const used = stream === "stdout" ? stdoutBytes : stderrBytes;
-        const remaining = MAX_CONTROL_OUTPUT_BYTES - used;
-        if (remaining <= 0) return;
-        const captured = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
-        chunks.push(captured);
-        if (stream === "stdout") stdoutBytes += captured.length;
-        else stderrBytes += captured.length;
-      };
-      let settled = false;
-      let timeoutError = null;
-      let terminationTimeout = null;
-      let forceTimeout = null;
-      const clearTimers = () => {
-        clearTimeout(timeout);
-        if (terminationTimeout) clearTimeout(terminationTimeout);
-        if (forceTimeout) clearTimeout(forceTimeout);
-      };
-      const timeout = setTimeout(() => {
-        if (settled) return;
-        timeoutError = new Error(`${label} timed out after ${timeoutMs}ms`);
-        // taskkill runs without blocking the main thread; a failure rejects as before.
-        terminateOwnedProcessTreeAsync(child).then(() => {
-          if (settled) return;
-          terminationTimeout = setTimeout(() => {
-            if (settled) return;
-            terminateOwnedProcessTreeAsync(child, "SIGKILL").then(() => {
-              if (settled) return;
-              forceTimeout = setTimeout(() => {
-                if (settled) return;
-                settled = true;
-                clearTimers();
-                reject(new Error(`${timeoutError.message}; the control process did not exit after forced termination`));
-              }, 2_000);
-            }, (error) => {
-              if (settled) return;
-              settled = true;
-              clearTimers();
-              reject(new Error(
-                `${timeoutError.message}; forced control process tree termination failed: ${errorMessage(error)}`,
-              ));
-            });
-          }, 5_000);
-        }, (error) => {
-          if (settled) return;
-          settled = true;
-          clearTimers();
-          reject(new Error(
-            `${timeoutError.message}; control process tree termination failed: ${errorMessage(error)}`,
-          ));
-        });
-      }, timeoutMs);
-      child.stdout.on("data", (chunk) => capture(stdout, chunk, "stdout"));
-      child.stderr.on("data", (chunk) => capture(stderr, chunk, "stderr"));
-      const onOutputError = (stream) => (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        terminateOwnedProcessTreeAsync(child).catch(() => {});
-        reject(new Error(`${label} ${stream} pipe failed: ${errorMessage(error)}`));
-      };
-      child.stdout.once("error", onOutputError("stdout"));
-      child.stderr.once("error", onOutputError("stderr"));
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        reject(timeoutError
-          ? new Error(`${timeoutError.message}; termination failed: ${error.message}`)
-          : error);
-      });
-      child.once("exit", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        if (timeoutError) {
-          terminateOwnedProcessTreeAsync(child, "SIGKILL").then(() => reject(timeoutError), (error) => {
-            reject(new Error(
-              `${timeoutError.message}; final control process-group cleanup failed: ${errorMessage(error)}`,
-            ));
-          });
-          return;
-        }
-        resolve(controlResult(code ?? 1, Buffer.concat(stdout).toString("utf8"), Buffer.concat(stderr).toString("utf8")));
-      });
-    });
+    const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
+    if (reply.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
+    if (reply.error) throw new Error(reply.error);
+    return controlResult(reply.code, reply.stdout, reply.stderr);
   }
 
   /**
