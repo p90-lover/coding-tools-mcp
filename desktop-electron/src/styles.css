@@ -349,17 +349,47 @@ code {
 }
 
 .sidebar-more summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   list-style: none;
-  cursor: default;
+  cursor: pointer;
   padding: 6px 10px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-tertiary);
   font-size: 10px;
   font-weight: 500;
   letter-spacing: 0.02em;
   line-height: 16px;
+  transition: color var(--duration-micro) ease;
+}
+
+.sidebar-more summary:hover {
+  color: var(--color-text-secondary);
 }
 
 .sidebar-more summary::-webkit-details-marker {
+  display: none;
+}
+
+.sidebar-more-caret {
+  flex: none;
+  transition: transform var(--duration-micro) ease;
+}
+
+.sidebar-more[open] .sidebar-more-caret {
+  transform: rotate(90deg);
+}
+
+.sidebar-more summary small {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The Connections group's first row is portalled in by ProviderHubIntegration. */
+.sidebar-provider-slot:empty {
   display: none;
 }
 
