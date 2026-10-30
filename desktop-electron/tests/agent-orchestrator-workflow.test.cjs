@@ -3575,7 +3575,14 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
 }
 const goalOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
 // A resumed goal starts its round in the background: wait for it (or, with no condition, a while).
-const goalSettle = async (done = () => false) => { for (let tick = 0; tick < 200 && !done(); tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
+const neverDone = () => false;
+const goalSettle = async (done = neverDone) => {
+  for (let tick = 0; tick < 200 && !done(); tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  // A condition can wait on real file I/O (a new app reading the goals file), which 200 ticks did not
+  // always cover on a slow CI runner (seen: "the next round started", 1 !== 2): give it up to 5 s.
+  const deadline = Date.now() + 5_000;
+  while (done !== neverDone && !done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+};
 
 test("after a round without the goal achieved, the chat runs the next round with the same Single model", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "max" };
