@@ -52,6 +52,20 @@ test("it still runs when no worker thread can be started", async () => {
   } finally { restore(); }
 });
 
+test("warming a program runs it once from a worker and never fails the caller", async () => {
+  const { module, calls, restore } = load();
+  try {
+    const marker = require("node:path").join(require("node:os").tmpdir(), `ct-warm-${process.pid}-${Date.now()}`);
+    await module.warmProgram(process.execPath, ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`]);
+    assert.equal(require("node:fs").readFileSync(marker, "utf8"), "ran");
+    require("node:fs").rmSync(marker, { force: true });
+    // The AO daemon's program is warmed so its own start (which must stay on this thread) is quick.
+    assert.deepEqual(calls, []);
+    // A missing program only ends the warm-up (a hung one times out as runOffThread's own test shows).
+    await module.warmProgram("Z:\\no\\such\\program.exe");
+  } finally { restore(); }
+});
+
 test("a program that outlives its timeout is ended and reported, and output is capped", async () => {
   const { module, restore } = load();
   try {

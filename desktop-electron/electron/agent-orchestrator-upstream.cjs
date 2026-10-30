@@ -17,6 +17,7 @@ const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
+const { warmProgram } = require("./off-thread-run.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -1937,6 +1938,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const profiler = await profilerAddress(dataRoot);
         checkStartup();
         if (profiler) logger.info?.("ao.profiler_enabled", { address: profiler });
+        // spawn() holds this thread, every window's, until Windows has loaded the program and the
+        // antivirus has scanned it: 4.8 s once after a reboot (launcher.main_blocked, 2026-10-30).
+        // The daemon's pipes and exit must live here, so its program is run once from a worker
+        // first (--help exits at once) and the start below finds it loaded and scanned.
+        await warmProgram(executable, ["--help"]);
+        checkStartup();
           // The AO CLI build answers the daemon command and the internal commands the daemon
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
           child = spawn(executable, ["daemon"], {

@@ -8727,3 +8727,42 @@ test("a held worker whose unspent grant names another build of the agent's progr
     } finally { workflow.dispose(); }
   }
 });
+
+test("a Team round that settles by itself scores its models once, graded by a free model; Single rounds are not scored", async () => {
+  const request = "Restyle the dashboard UI and add a /stats API endpoint";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Stats", description: request, state: "in_progress", clauses: [] }], runs: [] });
+  const grades = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: ["gpt-6-luna", "deepseek-v4", "gemini-3-flash"].map((id) => ({ id })) }) };
+      grades.push(JSON.parse(init.body));
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ categories: ["frontend", "backend"],
+        cards: [{ card: 1, understanding: 9, command_follow: 9, quality: 8 }, { card: 2, understanding: 6, command_follow: 4, quality: 5 }] }) } }] }) };
+    } });
+  const route = (model) => ({ harness_id: "ao:claude-code", model });
+  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, nodes: [
+    { id: "p", role: "planner", parents: [], state: "finished", route: route("cpa/glm-5"), receipt: { answer: "Split into UI and API" } },
+    { id: "w", role: "worker", parents: ["p"], state: "finished", route: route("cpa/kimi-k3"), receipt: { answer: "Did the API; skipped the UI" } },
+    { id: "q", role: "worker", parents: ["p"], state: "failed", route: route("cpa/spent"), receipt: { error: "insufficient_quota" } },
+  ] });
+  world.runs.push({ id: "s1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route: route("cpa/glm-5"), receipt: { answer: "done" } }] });
+  await workflow.scoreAfterRun("ws-1", "r1", "finished");
+  await workflow.scoreAfterRun("ws-1", "r1", "finished");
+  await workflow.scoreAfterRun("ws-1", "s1", "finished");
+  assert.equal(grades.length, 1, "graded once; the Single round is not");
+  assert.equal(grades[0].model, "gemini-3-flash", "a free, quick model, as the goal checker uses");
+  assert.match(grades[0].messages[0].content, /User request:\nRestyle the dashboard UI/);
+  assert.doesNotMatch(grades[0].messages[0].content, /cpa\/spent|insufficient_quota/, "a step that ran out of quota is not graded");
+  const scores = await workflow.call("model_scores", {});
+  assert.equal(scores.total, 1);
+  assert.deepEqual(scores.recent[0].categories, ["frontend", "backend"]);
+  assert.deepEqual(scores.summary.map((entry) => entry.model), ["cpa/glm-5", "cpa/kimi-k3"]);
+  assert.equal(scores.summary[1].categories.command_follow.average, 4);
+  assert.deepEqual((await workflow.call("model_scores", { role: "worker" })).summary.map((entry) => entry.model), ["cpa/kimi-k3"]);
+  await workflow.call("model_scores_clear", {});
+  assert.equal((await workflow.call("model_scores", {})).total, 0);
+  workflow.dispose();
+});
