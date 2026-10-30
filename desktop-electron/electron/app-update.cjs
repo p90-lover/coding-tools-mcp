@@ -281,7 +281,10 @@ function sweepUpdateLeftovers(installRoot) {
   return removed;
 }
 
-const APPLY_WAIT_MAX_MS = 10 * 60_000;
+// A live worker is waited for this long. It used to be 10 min, after which the marker was deleted
+// and the app started over files the worker was still swapping (a slow, busy disk can take longer).
+// The cap only guards against the worker's pid being reused by an unrelated process.
+const APPLY_WAIT_MAX_MS = 60 * 60_000;
 /**
  * Waits while an update worker is swapping files into the install (its `_update/applying.json`
  * names a live process), at most APPLY_WAIT_MAX_MS from when it started. A launch during the swap
@@ -386,9 +389,15 @@ function handOffUpdateRecovery(installRoot, {
   }
 }
 
+/** Whether an update to `currentVersion` was placed and is not committed yet (update-health-gate.cjs). */
+function pendingAppliedUpdate(installRoot, currentVersion) {
+  const journal = readJournal(installRoot);
+  return journal?.state === "placed" && journal.version === currentVersion;
+}
+
 /**
- * The new version reached whenReady: its update is kept. The old copies the worker kept for a
- * rollback are removed (any still running wait in set-aside.json), and so is the stage.
+ * The new version proved it works (update-health-gate.cjs): its update is kept. The old copies the
+ * worker kept for a rollback are removed (any still running wait in set-aside.json), and so is the stage.
  */
 async function commitAppliedUpdate(installRoot, currentVersion) {
   const journal = readJournal(installRoot);
@@ -687,7 +696,8 @@ function createAutoInstaller({
     if (state.status !== "available") return false;
     if (failedAt !== null && now() - failedAt < retryMs) return false;
     if (state.kind === "app" && !applyFailureAllowsRetry(state, now(), retryMs)) return false;
-    if (idleSeconds() < idleThreshold) return false;
+    // A function reads the Settings value each time.
+    if (idleSeconds() < (typeof idleThreshold === "function" ? idleThreshold() : idleThreshold)) return false;
     attempting = true;
     try {
       // A busy check that cannot answer counts as busy: never restart over work it could not see.
@@ -733,6 +743,7 @@ module.exports = {
   manifestAssetName,
   packAssetName,
   parseManifest,
+  pendingAppliedUpdate,
   planUpdate,
   platformTag,
   safeInstallPath,
