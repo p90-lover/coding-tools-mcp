@@ -1195,13 +1195,24 @@ async function removeBrowserAccount(accountId, context) {
   accountLifecycleSyncs.delete(accountId);
   const partition = browserAccounts.remove(accountId);
   if (bridgeAccountRefreshPending === accountId) bridgeAccountRefreshPending = null;
-  const removed = session.fromPartition(partition);
-  await removed.clearStorageData().catch(() => {});
-  await removed.clearCache().catch(() => {});
   fs.rmSync(browserAccountConversationFile(accountId), { force: true });
+  // Every list shows the account gone at once; its session is erased after. Erasing ChatGPT's cache
+  // on the HDD took long enough that the toolbar still offered the removed account ("Unknown browser
+  // account" on picking it) and the removal looked like it never happened (2026-10-30).
   publishBrowserAccounts();
   void refreshBrowserAccountSignIns(context.logger);
+  void eraseBrowserPartition(partition, accountId, context.logger);
   return browserAccountsStatus();
+}
+
+/** Erases a removed account's session (cookies, storage, cache), logged with how long it took. */
+async function eraseBrowserPartition(partition, accountId, logger) {
+  const started = Date.now();
+  const removed = session.fromPartition(partition);
+  const failures = [];
+  await removed.clearStorageData().catch((error) => failures.push(`storage: ${error?.message ?? error}`));
+  await removed.clearCache().catch((error) => failures.push(`cache: ${error?.message ?? error}`));
+  logger?.info?.("browser_accounts.removed", { accountId, eraseMs: Date.now() - started, ...(failures.length ? { failures } : {}) });
 }
 
 function trayImage() {
