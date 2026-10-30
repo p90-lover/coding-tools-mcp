@@ -834,7 +834,9 @@ async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reaso
     if (host && typeof workflow?.restoreRuns === "function") {
       void host.request("/api/v1/workspaces", null, { method: "GET" }).then((catalog) => {
         if (headlessHost !== host || activeAoWorkflow !== workflow) return;
-        return workflow.restoreRuns((catalog.workspaces ?? []).map(workspace => workspace.id));
+        const ids = (catalog.workspaces ?? []).map(workspace => workspace.id);
+        // A newer recovery stops an older one's resume, so this one resumes again after its observe.
+        return workflow.restoreRuns(ids).then(() => (activeAoWorkflow === workflow ? workflow.resumeInterrupted?.(ids) : undefined));
       }).catch(error => logger.warn("ao.restart_recovery_failed", { message: String(error?.message || error).slice(0, 500) }));
     }
     return { connected: true, changed: route.changed === true, runtime };
@@ -3951,6 +3953,8 @@ async function start() {
       wakeupsFile: path.join(app.getPath("userData"), "integrations", "chat-wakeups.json"),
       // So do the chats' loops (/loop).
       loopsFile: path.join(app.getPath("userData"), "integrations", "chat-loops.json"),
+      // So do the chats' queued messages, sent with the chat closed too (chat-queue.cjs).
+      chatQueueFile: path.join(app.getPath("userData"), "integrations", "chat-queue.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
       chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
       archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),
@@ -4050,6 +4054,15 @@ async function start() {
     missionWorkflowRuntime = agentOrchestratorWorkflow;
     void listHeadlessWorkspaces().then(items => agentOrchestratorWorkflow.restoreSchedules(items))
       .catch(() => logger.warn("ao.schedule_restore_failed", { detail: "Saved delayed starts need inspection; none were replayed." }));
+    // Chats a restart interrupted resume now, in every project, without waiting for the window or
+    // the ChatGPT bridge (whose connect observes their cards again): resumeInterrupted says which.
+    if (!LAUNCHER_SMOKE_TEST) {
+      void listHeadlessWorkspaces().then(async (items) => {
+        const ids = items.map(item => item.id);
+        await agentOrchestratorWorkflow.restoreRuns(ids);
+        if (activeAoWorkflow === agentOrchestratorWorkflow) await agentOrchestratorWorkflow.resumeInterrupted(ids);
+      }).catch(error => logger.warn("ao.restart_recovery_failed", { message: String(error?.message || error).slice(0, 500) }));
+    }
     logger.info("backend.started", { source: backend.source, id: backend.id });
   };
   const startBackend = () => {

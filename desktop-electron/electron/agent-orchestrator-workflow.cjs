@@ -5,6 +5,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
+const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
+const { restartResume } = require("./chat-resume.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
 const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
@@ -340,7 +342,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
   // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
   // working chat's activity poll, the run loop and their per-node checks each read the same run
   // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
@@ -361,6 +363,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const wakeups = createWakeupStore({ file: wakeupsFile, now });
   // Chats running a prompt again and again (/loop, chat-loops.cjs).
   const loops = createLoopStore({ file: loopsFile, now });
+  // Messages waiting for their chat's turn, and steers waiting to be read (chat-queue.cjs).
+  const chatQueue = createChatQueueStore({ file: chatQueueFile, now, logger });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
@@ -396,6 +400,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (["finished", "failed"].includes(state.status)) void wakeupAfterRun(workspaceId, runId).catch(() => undefined);
     // A /loop round that came due while its chat worked runs now; a self-paced one that scheduled nothing ends.
     if (["finished", "failed"].includes(state.status)) void loopAfterRun(workspaceId, runId).catch(() => undefined);
+    // A turn that ended (or stopped, or is held on a failed step) lets its chat's queue go on: a steer
+    // it never read goes back to the queue, and the queue's next message is sent (queueAfterRun).
+    if (state.stopped || state.settled || ["finished", "failed", "held"].includes(state.status)) {
+      void queueAfterRun(workspaceId, runId, state.settled || state.stopped ? (state.stopped ? "stopped" : state.status) : null)
+        .catch(error => logger?.warn?.("ao.chat_queue_failed", { message: publicText(error?.message || error, 200) }));
+    }
     // A Team round that ended by itself scores the models it ran on; one the person stopped does not.
     // Only the drive loop's own settling passes the mission: a run that could not start, or whose
     // loop broke, is reported without one and is not real work to score. A Single round costs no read.
@@ -4358,6 +4368,45 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { restored };
   }
 
+  /**
+   * After a restart, a chat the restart interrupted picks up where it was (restartResume), in every
+   * project, with the window in the background. Before, only the chat view did this: for the project
+   * open on screen, once the window had focus, so chats elsewhere waited until they were opened.
+   * Startup recovery itself takes no new background grant: a chat goes on here only on the grant its
+   * run still holds (a card still running on an agent host that outlived the app), or, with "Retry
+   * automatically" on, on a fresh one, as that switch's own retries do. Anything else still waits
+   * for the person in the window.
+   */
+  async function resumeInterrupted(workspaceIds) {
+    const generation = recoveryGeneration;
+    const autoRetry = chatPreferences.get().autoRetry;
+    let resumed = 0;
+    for (const workspaceId of workspaceIds) {
+      const saved = await runs({ workspaceId }).catch(() => null);
+      for (const run of saved?.runs ?? []) {
+        if (generation !== recoveryGeneration) return { resumed };
+        // Chats only, and only a chat's newest run: an older one gave way to the message after it.
+        if (!run.project_id || saved.runs.filter(entry => entry.project_id === run.project_id).at(-1)?.id !== run.id) continue;
+        const resume = restartResume(run, now(), { autoRetry });
+        const live = backgroundRuns.get(runKey(workspaceId, run.id));
+        if (!resume || (live && (live.starting || live.driving || live.status === "running"))) continue;
+        // startRun resumes on the run's own grant only while a card is still running under it.
+        const onItsGrant = resume === "continue" && Boolean(run.grant) && !grantSpent(run.grant)
+          && (run.nodes ?? []).some(node => node.state === "running");
+        if (!onItsGrant && !autoRetry) { logger?.info?.("ao.restart_resume_waits", { workspaceId, runId: run.id, how: resume }); continue; }
+        try {
+          if (resume === "retry") await controlRun({ workspaceId, runId: run.id, action: "retry" });
+          await startRun({ workspaceId, runId: run.id });
+          resumed += 1;
+          logger?.info?.("ao.restart_resumed", { workspaceId, runId: run.id, how: resume });
+        } catch (error) {
+          logger?.warn?.("ao.restart_resume_failed", { runId: run.id, message: publicText(error?.message || error, 200) });
+        }
+      }
+    }
+    return { resumed };
+  }
+
   async function createTeamRun(id, task, team, selection = {}, includeRun = false) {
     const current = await board({ workspaceId: id });
     const runId = randomUUID();
@@ -4554,6 +4603,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   function steered(id, task, run, card, text, objective) {
     // The goal is judged when the steered run settles (goalAfterRun), like a goal sent as a new turn.
     if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: run.id }); }
+    // Kept until the turn shows the agent read it: a turn that dies first (its agent never answered,
+    // or never really started) hands it back to the chat's queue as the next turn (queueAfterRun).
+    // Before, such a steer was simply gone.
+    try { chatQueue.delivered(id, task, { message: text, runId: run.id, ...(objective ? { goal: objective } : {}) }); } catch { /* best effort */ }
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
     // `messages`: how many messages the chat had when the steer went in; it belongs under the last.
     const note = async (messages) => {
@@ -5580,6 +5633,167 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
+  // ---- Queued messages (chat-queue.cjs) ----
+
+  // The queue is the app's, not the chat view's: it goes on with the chat closed, another chat open
+  // or the window in the background. Its next message is sent when the chat's turn settles; a steer
+  // waiting for the agent is tried again after 15 s, 30 s, then every minute while the agent works.
+  const QUEUE_RETRY_MS = 60_000, QUEUE_RESTORE_MS = 30_000, QUEUE_SEND_TRIES = 5;
+  const QUEUE_STEER_WAITS = [15_000, 30_000, 60_000];
+  const queueTimers = new Map();
+  const draining = new Set();
+  const queueFailures = new Map(); // item id -> failed sends
+  const steerTries = new Map(); // item id -> steers that found the agent not ready
+  function armQueue(workspaceId, taskId, delay, steer = false) {
+    const key = wakeKey(workspaceId, taskId);
+    if (queueTimers.has(key)) clearTimer(queueTimers.get(key).handle);
+    queueTimers.delete(key);
+    if (wakeupsDisposed || !chatQueue.list(workspaceId, taskId).length) return;
+    const handle = setTimer(() => {
+      queueTimers.delete(key);
+      void drainQueue(workspaceId, taskId, { steer }).catch(error => logger?.warn?.("ao.chat_queue_failed", { message: publicText(error?.message || error, 200) }));
+    }, Math.max(1, delay));
+    handle?.unref?.();
+    queueTimers.set(key, { handle });
+  }
+  /** How a queued message runs: as picked when it was queued, else as the chat's last turn did. */
+  function queuedSelection(item, latest) {
+    const picked = item.selection;
+    if (picked?.executionMode === "team" && typeof picked.teamId === "string") return { teamId: picked.teamId };
+    return followUpSelection(latest, picked?.executionMode === "single" ? picked.singleRoute : null);
+  }
+  /**
+   * Sends the chat's next queued message once its turn is over, or (`steer`, from the steer timer)
+   * steers a waiting one into the working agent. One message per settled turn: the next waits for
+   * the turn this one starts.
+   */
+  async function drainQueue(workspaceId, taskId, { steer = false } = {}) {
+    const key = wakeKey(workspaceId, taskId);
+    if (wakeupsDisposed || draining.has(key)) return;
+    if (!chatQueue.list(workspaceId, taskId).length) return;
+    draining.add(key);
+    try {
+      const saved = await runs({ workspaceId });
+      // An archived or deleted chat keeps its queue for when it is back.
+      if (taskLifecycle(saved, taskId).visibility !== "active") return;
+      // Read after the runs: a message joined to it meanwhile (chat_queue update) goes along.
+      const [next] = chatQueue.list(workspaceId, taskId);
+      if (!next) return;
+      const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
+      if (chatWorking(workspaceId, taskId, saved.runs)) {
+        if (!next.steer) { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
+        if (!steer) { armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(steerTries.get(next.id) ?? 0, 2)], true); return; }
+        const result = await chatSteer({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}) })
+          .catch(error => ({ steered: false, waiting: true, error }));
+        if (result.steered === true) {
+          chatQueue.remove(workspaceId, taskId, [next.id]);
+          steerTries.delete(next.id);
+          logger?.info?.("ao.chat_queue.steered", { workspaceId, taskId });
+          armQueue(workspaceId, taskId, 1_000, true);
+          return;
+        }
+        // Its turn was stopped (hung) or ended: the message goes as the next turn when it settles.
+        if (result.restarted === true || result.waiting !== true) { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
+        const tries = (steerTries.get(next.id) ?? 0) + 1;
+        steerTries.set(next.id, tries);
+        armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(tries, 2)], true);
+        return;
+      }
+      chatQueue.remove(workspaceId, taskId, [next.id]);
+      steerTries.delete(next.id);
+      try {
+        const result = await personChatSend({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}),
+          ...queuedSelection(next, latest), ...(next.executable ? { executable: next.executable } : {}), deferStart: true });
+        if (result?.ok === false) throw new Error(String(result.reason || "The queued message could not be sent"));
+        queueFailures.delete(next.id);
+        logger?.info?.("ao.chat_queue.sent", { workspaceId, taskId, left: chatQueue.list(workspaceId, taskId).length });
+      } catch (error) {
+        const why = String(error?.message || error);
+        // Another turn started first (a goal's round, a wake-up): it waits for that one, uncounted.
+        const busy = /still running/i.test(why);
+        const failures = busy ? 0 : (queueFailures.get(next.id) ?? 0) + 1;
+        if (failures) queueFailures.set(next.id, failures);
+        // Nothing is lost: it goes back to the front, saying why, and is tried again.
+        chatQueue.add(workspaceId, taskId, { ...next, note: failures ? publicText(why, 300) : undefined }, { front: true });
+        logger?.warn?.("ao.chat_queue.send_failed", { workspaceId, taskId, failures, message: publicText(why, 200) });
+        // After a few failures it waits for the next settled turn or the person's Send now.
+        if (failures < QUEUE_SEND_TRIES) armQueue(workspaceId, taskId, QUEUE_RETRY_MS * Math.max(1, failures));
+      }
+    } finally { draining.delete(key); }
+  }
+  /** The timelines of a run's agent cards, for whether a steer was read; null when none can be read. */
+  async function runTimelines(workspaceId, runId) {
+    const run = (await runs({ workspaceId })).runs.find(entry => entry.id === runId);
+    const cards = (run?.nodes ?? []).filter(node => externalAgent(node) && node.receipt?.thread_id && node.receipt?.turn_id);
+    if (!cards.length) return null;
+    const read = await Promise.all(cards.map(node => harnessService().timeline(node.receipt.thread_id, node.receipt.turn_id)
+      .then(items => publicTimeline(items, READ_TOOL_BYTES)).catch(() => null)));
+    return read.filter(Boolean);
+  }
+  /**
+   * When run `runId`'s turn settles (`outcome`, or null for a step held mid-run): a steer it took
+   * but never read (its agent stopped answering, or had not really started) goes back to the front
+   * of its chat's queue, and the queue's next message is sent.
+   */
+  async function queueAfterRun(workspaceId, runId, outcome) {
+    const steers = outcome ? chatQueue.deliveredTo(workspaceId, runId) : [];
+    if (steers.length) {
+      // A finished turn read them all (its receipts say "Read"). One the person stopped keeps its
+      // stop: sending them again would start the turn they ended.
+      const timelines = ["finished", "stopped"].includes(outcome) ? null : await runTimelines(workspaceId, runId).catch(() => null);
+      for (const taskId of new Set(steers.map(steer => steer.taskId))) {
+        const mine = steers.filter(steer => steer.taskId === taskId);
+        const unread = ["finished", "stopped"].includes(outcome) ? []
+          : mine.filter(steer => !(timelines ?? []).some(timeline => steerReadIn(timeline, steer.message) === true));
+        chatQueue.forgetDelivered(workspaceId, taskId, mine.map(steer => steer.id));
+        for (const steer of unread.reverse()) {
+          chatQueue.add(workspaceId, taskId, steer.goal ? { what: "Goal", message: steer.goal, goal: steer.goal } : { what: "Message", message: steer.message }, { front: true });
+        }
+        if (unread.length) logger?.info?.("ao.chat_queue.steer_unread", { workspaceId, taskId, count: unread.length, outcome });
+      }
+    }
+    const tasks = Object.keys(chatQueue.forWorkspace(workspaceId));
+    if (!tasks.length) return;
+    const run = (await runs({ workspaceId })).runs.find(entry => entry.id === runId);
+    if (run?.project_id && tasks.includes(run.project_id)) await drainQueue(workspaceId, run.project_id);
+  }
+  /** chat_queue: the chat view's add, remove and clear; `list` reads one chat's queue. */
+  async function chatQueueCall({ workspaceId, taskId, action, item, ids, front, itemId, message } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128);
+    // A message joined to the one queued just before it (the chat's chatQueueAdd); null once sent.
+    if (action === "update") {
+      const text = typeof message === "string" ? message.slice(0, 8192) : "";
+      if (!text.trim()) throw new Error("Type a message to queue");
+      const updated = chatQueue.update(id, task, clean(itemId, 80), { message: text });
+      return { ok: true, updated: Boolean(updated), queue: chatQueue.list(id, task) };
+    }
+    if (action === "add") {
+      const added = chatQueue.add(id, task, item, { front: front === true });
+      // Queued while the chat was free (its send was refused for now): it goes as soon as it can.
+      void drainQueue(id, task).catch(() => undefined);
+      return { ok: true, item: added, queue: chatQueue.list(id, task) };
+    }
+    if (action === "remove") {
+      if (!Array.isArray(ids) || ids.some(entry => typeof entry !== "string")) throw new Error("Choose the queued messages to remove");
+      return { ok: true, removed: chatQueue.remove(id, task, ids), queue: chatQueue.list(id, task) };
+    }
+    if (action === "clear") return { ok: true, removed: chatQueue.remove(id, task, null), queue: [] };
+    if (action === "list") return { ok: true, queue: chatQueue.list(id, task) };
+    throw new Error("Choose add, remove, clear or list");
+  }
+  /** On a read of a project's runs: a chat whose queue nothing is sending (the settle was missed) goes on. */
+  function sweepQueues(workspaceId) {
+    for (const task of Object.keys(chatQueue.forWorkspace(workspaceId))) {
+      if (!queueTimers.has(wakeKey(workspaceId, task)) && !draining.has(wakeKey(workspaceId, task))) armQueue(workspaceId, task, 1_000);
+    }
+  }
+  // Queues saved before a restart go on shortly after the app is back.
+  function restoreQueues() {
+    for (const { workspaceId, taskId } of chatQueue.chats()) {
+      if (typeof workspaceId === "string" && typeof taskId === "string") armQueue(workspaceId, taskId, QUEUE_RESTORE_MS);
+    }
+  }
+
   // ---- /loop (chat-loops.cjs) ----
 
   // A loop on an interval has its own timer; a self-paced one is driven by its agent's wake-ups.
@@ -6348,6 +6562,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     rewarmTimers.clear();
     for (const timer of taskIdleTimers) clearTimer(timer);
     taskIdleTimers.clear();
+    for (const { handle } of queueTimers.values()) clearTimer(handle);
+    queueTimers.clear();
   }
 
   async function call(operation, args = {}) {
@@ -6385,10 +6601,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const saved = await runs(args);
         // A goal whose round settled unwatched (the app was closed meanwhile) is judged now.
         if (!args.runId) sweepGoals(clean(args.workspaceId, 128), saved);
+        // So does a queued message whose chat's settle was missed.
+        if (!args.runId) sweepQueues(clean(args.workspaceId, 128));
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
-          wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)) };
+          wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)),
+          queues: chatQueue.forWorkspace(clean(args.workspaceId, 128)) };
       }
+      case "chat_queue": return chatQueueCall(args);
       case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
@@ -6514,7 +6734,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
+  restoreQueues();
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

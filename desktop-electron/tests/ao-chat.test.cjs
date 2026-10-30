@@ -1375,19 +1375,6 @@ test("late start, restart, retry and pause replies cannot change another selecte
   }
 });
 
-test("a queued message survives an unmount while its delivery fails", async () => {
-  const reply = delayedReply(), next = { what: "Message", message: "queued text" }, queues = new Map([["task-a", [next]]]);
-  const alive = { current: true }, attachments = [];
-  const flush = rendererCallback("AgentOrchestratorChat.tsx", "effect:void deliver(next.message", {
-    selectedTaskId: "task-a", queueOf: task => queues.get(task) || [], setQueue: (task, value) => queues.set(task, value),
-    accepts: true, busy: false, sending: false, sentWhileFree: { current: false }, windowFocused: true, alive,
-    composing: { current: { taskId: "task-a", draft: "", attachments } }, deliver: () => reply.promise,
-    setCard() {}, setDraft() { throw new Error("unmounted composer"); }, say() {},
-  });
-  flush(); alive.current = false; reply.resolve(false); await new Promise(setImmediate);
-  assert.deepEqual(plain(queues.get("task-a")), [next]);
-});
-
 test("a turn's activity drops answered approvals, keeps every tool call, and folds runs of calls and thinking", () => {
   const items = [
     { id: "1", kind: "reasoning", status: "completed", text: "Let me wait for the tests" },

@@ -384,15 +384,17 @@ const WATCHED = new Set<string>();
 /**
  * `errorShownBelow`: the chat's failed-step card shows this turn's error, so the turn leaves it out.
  * `refusal`: CPA refusing the running turn's model (cpaRefusalNote), said on its "Deep diving" line.
+ * `beforeStatus`: what goes right above that line while the turn runs (the chat's steers on their
+ * way): the line stays the turn's last row, as DeepSeek Harness keeps its status under everything.
  */
-export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null };
+export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null; beforeStatus?: ReactNode };
 
 /**
  * A DeepSeek turn's work. Running: its work in groups, the last one live, "Deep diving" under them. Ended: "Completed in
  * 1m 4s" heads it, folded unless the chat shows work details; a failed or stopped turn stays open.
  * The chat memoizes it with its own check of what a turn shows.
  */
-export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false, refusal = null }: DshTurnWorkProps) {
+export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false, refusal = null, beforeStatus = null }: DshTurnWorkProps) {
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
   const failed = steps.some((step) => step.error);
   const stopped = turn.status === "stopped";
@@ -402,7 +404,7 @@ export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = f
   if (live) WATCHED.add(turn.key);
   // The newest sign of life across the turn's working cards.
   const heardAt = Math.max(0, ...steps.map((step) => step.working?.heardAtMs ?? 0)) || undefined;
-  if (!steps.length) return live ? <DshRunning since={turn.startedAtMs} divider={false} /> : null;
+  if (!steps.length) return live ? <>{beforeStatus}<DshRunning since={turn.startedAtMs} divider={false} /></> : null;
   const alwaysOpen = live || failed || stopped;
   const open = alwaysOpen || (chosen ?? expanded);
   const answer = turn.final?.text;
@@ -423,6 +425,7 @@ export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = f
     {errorShownBelow ? null : steps.filter((step) => step.error).map((step) => <div key={`error:${step.key}`} className="dsh-turn-error">
       <span className="dsh-turn-error-title">This turn failed</span><span className="dsh-turn-error-message">{step.error}</span>
     </div>)}
+    {live ? beforeStatus : null}
     {live ? <DshRunning since={turn.startedAtMs} divider heardAt={heardAt} retry={dshRetryNote(steps)} refusal={refusal}
       asking={steps.some((step) => waitsForPerson(step.working?.activity))} /> : null}
   </div>;

@@ -74,6 +74,14 @@ test("a DeepSeek turn renders as DeepSeek Desktop's Standard view: a live group 
   assert.doesNotMatch(running, /dsh-title">Think</, "its rows stay folded under the heading (group bodies start collapsed)");
   assert.match(running, /Deep diving for 1m [45]s ···/, "the running status, with its clock");
   assert.doesNotMatch(running, /dsh-turn-process/, "no Completed header while it runs");
+  // A steer on its way sits above "Deep diving", which stays the turn's last row (it showed under it).
+  const steer = React.createElement("div", { className: "cx-user cx-steer" }, "its a resource monster");
+  const steering = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: false, useWork, beforeStatus: steer }));
+  assert.match(steering, /its a resource monster<\/div><div class="dsh-running"/, "the steer, then the running line");
+  const starting = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: { ...turn, steps: [] }, live: true, expanded: false, useWork, beforeStatus: steer }));
+  assert.match(starting, /its a resource monster<\/div><div class="dsh-running"/, "before its first step too");
+  const ended = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: { ...turn, status: "done" }, live: false, expanded: false, useWork, beforeStatus: steer }));
+  assert.doesNotMatch(ended, /resource monster/, "an ended turn leaves its steers to the chat, under its work");
   // A reply closes the group before it: that one reads what it did, the one after it what it is doing.
   const replied = [timeline[0], timeline[1], { id: "m1", kind: "message", status: "completed", text: "Health is fine." }, timeline[3]];
   const split = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: { ...turn, steps: [{ ...step, working: { ...step.working, timeline: replied } }] }, live: true, expanded: false, useWork }));

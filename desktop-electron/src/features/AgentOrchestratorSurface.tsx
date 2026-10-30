@@ -5,7 +5,7 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
-import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
+import { AgentOrchestratorChat, syncChatQueues, type ChatQueueActions } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ArchivedChat, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
@@ -16,7 +16,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
 import { createLatestConfigQueue } from "./ao-config";
@@ -776,6 +776,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setGoals(chatGoals(current));
     setWakeups(chatWakeups(current));
     setLoops(chatLoops(current));
+    // The app's queued messages of this project's chats (chat-queue.cjs).
+    if (current.queues && typeof current.queues === "object") syncChatQueues(id, current.queues as Record<string, QueuedChatMessage[]>);
     const setups = aoSavedTeams(current);
     setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
     setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
@@ -1732,6 +1734,23 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       throw cause;
     }
   };
+  // The chats' queued messages are the app's (chat_queue): it sends them when a chat's turn settles,
+  // whichever chat is open. A queued message runs on the model or team picked when it was queued.
+  const queueCall = async (taskId: string, args: JsonObject) => {
+    if (!workspaceId) throw new Error("Add a project first");
+    const result = await moduleCall("chat_queue", { workspaceId, taskId, ...args });
+    if (Array.isArray(result.queue)) syncChatQueues(workspaceId, { [taskId]: result.queue as QueuedChatMessage[] }, taskId);
+    return result;
+  };
+  const chatQueue: ChatQueueActions = {
+    add: async (taskId, item, front = false) => {
+      let selection: JsonObject | undefined;
+      try { selection = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { selection = undefined; }
+      await queueCall(taskId, { action: "add", front, item: { ...item, ...(selection ? { selection } : {}), ...executableArg() } });
+    },
+    update: async (taskId, id, message) => (await queueCall(taskId, { action: "update", itemId: id, message })).updated === true,
+    remove: async (taskId, ids) => { await queueCall(taskId, ids === null ? { action: "clear" } : { action: "remove", ids }); },
+  };
   // Have the agent the next message needs running before it is sent, so sending does not wait half
   // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an
   // open chat whenever its agent cannot simply continue (the backend decides, and wakes one that was
@@ -2662,7 +2681,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} commands={chatCommands}
+                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} queue={chatQueue} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
                   <span>Team</span>
