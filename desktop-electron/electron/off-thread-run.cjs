@@ -123,4 +123,14 @@ function runOffThread({ file, args = [], cwd, env, timeoutMs, maxBytes = 1024 * 
   });
 }
 
-module.exports = { runOffThread };
+/**
+ * Starts `file` once from the worker with harmless `args` (e.g. --help) and waits for it to exit, so
+ * that a long-lived child this thread must start itself (it owns its pipes and exit) finds the
+ * program already loaded and scanned. Windows' load and the antivirus scan of a fresh program are
+ * what hold the starting thread. Resolves whether or not the program ran; never rejects.
+ */
+async function warmProgram(file, args = [], timeoutMs = 30_000, run = runOffThread) {
+  await run({ file, args, timeoutMs, maxBytes: 4096 });
+}
+
+module.exports = { runOffThread, warmProgram };
