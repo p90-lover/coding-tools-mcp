@@ -3576,11 +3576,12 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
 }
 const goalOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
 // A resumed goal starts its round in the background: wait for it (or, with no condition, a while).
-// A condition is also waited for up to 5 s: its round reads the saved goals from disk, and on a
-// slow CI runner 200 turns passed before that read did ("the next round started", 1 !== 2).
+// A due pause runs on a real 0 ms timer, which a fast machine can outrun in 200 turns (CI did), so
+// a condition is also waited for in real time.
 const goalSettle = async (done) => {
-  const until = done ? Date.now() + 5_000 : 0;
-  for (let tick = 0; (tick < 200 || Date.now() < until) && !done?.(); tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  for (let tick = 0; tick < 200 && !done?.(); tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  const until = Date.now() + 5_000;
+  while (done && !done() && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 5));
 };
 
 test("after a round without the goal achieved, the chat runs the next round with the same Single model", async () => {
