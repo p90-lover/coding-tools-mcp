@@ -212,7 +212,12 @@ async function switchFolderBranch(folder, branch) {
   if (typeof branch !== "string" || !/^[\w./-]{1,200}$/.test(branch) || branch.startsWith("-")) {
     throw new Error("Choose a branch from the list");
   }
-  if (!(await git(folder, ["rev-parse", "--show-toplevel"]))) throw new Error("This project is not a git repository");
+  // Only git's own answer means "not a repository": a git that timed out on a busy disk is retried.
+  const top = await gitOutcome(folder, ["rev-parse", "--show-toplevel"]);
+  if (!top.ok) {
+    throw new Error(/not a git repository/i.test(top.message) ? "This project is not a git repository"
+      : `git could not read the project folder${top.message ? ` (${top.message})` : ""}; try again`);
+  }
   if ((await git(folder, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])) === null) {
     throw new Error(`There is no local branch named ${branch}`);
   }
