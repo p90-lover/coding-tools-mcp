@@ -8,8 +8,9 @@ const accountName = (account: GptBrowserAccount) => account.email ?? account.lab
 
 /**
  * The Browser tab's ChatGPT accounts, in its own toolbar: pick, add, and (with a second click)
- * remove one, as GPT Browser does. The active account is also the one Codex's WebGPT chats run on,
- * so main refuses a change while a chat turn is running (`busy` greys the controls meanwhile).
+ * remove one, as GPT Browser does. The active account is also the one new Codex WebGPT chats run on.
+ * A switch keeps the account left loaded and running turns going; only a check or test of the shown
+ * page holds it (`busy` greys the controls meanwhile).
  */
 export function BrowserAccountSwitcher({ api, copy, busy, setError }: {
   api: LauncherApi;

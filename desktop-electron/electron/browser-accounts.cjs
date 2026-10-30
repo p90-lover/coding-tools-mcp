@@ -17,6 +17,7 @@ const MAX_TABS_PER_ACCOUNT = 5;
 const DEFAULT_SETTINGS = Object.freeze({ newSessions: "active", keepFinishedTabsMinutes: 10 });
 const KEEP_FINISHED_TABS_MINUTES = [5, 10, 20, 30, 60];
 const MAX_ERROR = 300;
+const MAX_IMPORTED_EMAILS = 500;
 // ChatGPT's sign-in: NextAuth's session token, split into .0/.1, kept 90 days from the last visit.
 const CHATGPT_SESSION_COOKIE = "__Secure-next-auth.session-token";
 
@@ -63,9 +64,13 @@ function normalizeEntry(entry, index) {
 function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
   const statePath = path.join(dataRoot, "accounts.json");
   const firstAccount = () => normalizeEntry({ id: FIRST_ACCOUNT_ID }, 0);
-  let state = { activeId: FIRST_ACCOUNT_ID, accounts: [firstAccount()], settings: { ...DEFAULT_SETTINGS } };
+  // importedEmails: the CPA Codex sign-ins accounts were made from (importOauthAccounts), lowercase.
+  let state = { activeId: FIRST_ACCOUNT_ID, accounts: [firstAccount()], settings: { ...DEFAULT_SETTINGS }, importedEmails: [] };
   try {
     const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (Array.isArray(saved?.importedEmails)) {
+      state.importedEmails = saved.importedEmails.filter((email) => typeof email === "string" && email.includes("@")).slice(0, MAX_IMPORTED_EMAILS);
+    }
     const accounts = (Array.isArray(saved?.accounts) ? saved.accounts : [])
       .filter((entry) => entry?.id === FIRST_ACCOUNT_ID || BROWSER_ACCOUNT_ID.test(entry?.id))
       .filter((entry, index, list) => list.findIndex((other) => other.id === entry.id) === index)
@@ -76,6 +81,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
         accounts,
         activeId: accounts.some((entry) => entry.id === saved.activeId) ? saved.activeId : accounts[0].id,
         settings: { ...DEFAULT_SETTINGS },
+        importedEmails: state.importedEmails,
       };
       const newSessions = saved?.settings?.newSessions;
       if (newSessions === "balance" || accounts.some((entry) => entry.id === newSessions)) state.settings.newSessions = newSessions;
@@ -106,6 +112,15 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
   };
   const accountOfPartition = (partition) => state.accounts.find((entry) => partitionOf(entry.id) === partition) ?? null;
 
+  function addEntry(label) {
+    if (state.accounts.length >= MAX_ACCOUNTS) throw new Error(`The Browser tab holds up to ${MAX_ACCOUNTS} accounts`);
+    let id;
+    do id = randomBytes(9).toString("base64url").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12);
+    while (!BROWSER_ACCOUNT_ID.test(id) || state.accounts.some((entry) => entry.id === id));
+    state.accounts.push(normalizeEntry({ id, label }, state.accounts.length));
+    return id;
+  }
+
   return {
     status() {
       return {
@@ -128,13 +143,38 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     accountIdOfPartition: (partition) => accountOfPartition(partition)?.id ?? null,
     /** Adds an account (not yet active); returns its id. */
     add() {
-      if (state.accounts.length >= MAX_ACCOUNTS) throw new Error(`The Browser tab holds up to ${MAX_ACCOUNTS} accounts`);
-      let id;
-      do id = randomBytes(9).toString("base64url").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12);
-      while (!BROWSER_ACCOUNT_ID.test(id) || state.accounts.some((entry) => entry.id === id));
-      state.accounts.push(normalizeEntry({ id }, state.accounts.length));
+      const id = addEntry();
       save();
       return id;
+    },
+    /**
+     * Adds an account, named after it, for each CPA Codex OAuth sign-in (`entries`: { email, plan })
+     * not seen before, while there is room. An email seen once is never added again, so removing
+     * its account sticks; an account already signed in to that email counts as seen. Returns the
+     * ids added. The sign-in itself stays the user's: an OAuth token cannot make a ChatGPT web
+     * session, so the account waits signed out under that name.
+     */
+    importOauthAccounts(entries) {
+      const seen = new Set(state.importedEmails);
+      const added = [];
+      let changed = false;
+      const remember = (email) => {
+        if (seen.has(email)) return;
+        seen.add(email);
+        state.importedEmails = [...state.importedEmails, email].slice(-MAX_IMPORTED_EMAILS);
+        changed = true;
+      };
+      for (const entry of state.accounts) if (entry.email) remember(entry.email.toLowerCase());
+      for (const { email, plan } of Array.isArray(entries) ? entries : []) {
+        const key = typeof email === "string" ? email.trim().toLowerCase() : "";
+        if (!key.includes("@") || seen.has(key)) continue;
+        // No room: not remembered, so it is added once an account is removed.
+        if (state.accounts.length >= MAX_ACCOUNTS) break;
+        added.push(addEntry(typeof plan === "string" && plan ? `${key} · ${plan}` : key));
+        remember(key);
+      }
+      if (changed) save();
+      return added;
     },
     setActive(id) {
       account(id);

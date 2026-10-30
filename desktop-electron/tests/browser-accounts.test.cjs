@@ -91,6 +91,162 @@ test("a running turn, a manual operation or a sign-in blocks an account switch",
   assert.match(blocker({ loginOperation: Promise.resolve() }), /sign-in/);
 });
 
+test("only what owns the shown page blocks showing another account; Codex turns keep running", () => {
+  const blocker = (fields) => BrowserHost.prototype.homeSwitchBlocker.call(Object.assign(
+    Object.create(BrowserHost.prototype),
+    { turnTabs: new Map(), manualOperation: null, loginOperation: null, authView: null },
+    fields,
+  ));
+  assert.equal(blocker({ turnTabs: new Map([["t", { status: "running", traceId: "a", interactionMode: "automatic" }]]) }), null);
+  assert.match(blocker({ turnTabs: new Map([["t", { status: "running", traceId: "a", interactionMode: "manual" }]]) }), /Zero Risk/);
+  assert.match(blocker({ manualOperation: "session inspection" }), /session inspection is running/);
+  assert.match(blocker({ loginOperation: Promise.resolve() }), /sign-in/);
+  assert.match(blocker({ authView: {} }), /sign-in/);
+});
+
+// A BrowserHost with fake pages: enough for switchAccount, without Electron.
+function switchingHost({ failNewPage = false } = {}) {
+  const views = [];
+  const fakeView = (partition) => {
+    const view = { partition, visible: true, closed: false, zoom: null };
+    view.setVisible = (value) => { view.visible = value; };
+    view.webContents = {
+      isDestroyed: () => view.closed,
+      close: () => { view.closed = true; },
+      setZoomFactor: (value) => { view.zoom = value; },
+    };
+    views.push(view);
+    return view;
+  };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    profile: "production",
+    partition: BASE,
+    view: fakeView(BASE),
+    surfaceId: "home-surface-of-main",
+    userTabs: new Map([["u1", { id: "u1", view: fakeView(BASE) }]]),
+    selectedTabId: "u1",
+    turnTabs: new Map([["t1", { id: "t1", status: "running", interactionMode: "automatic", partition: `${BASE}-zzzzzzzzzzzz`, view: fakeView("turn") }]]),
+    parkedHomes: new Map(),
+    state: { status: "ready", authenticated: true, url: "https://chatgpt.com/", title: "ChatGPT", zoomFactor: 1.25 },
+    visible: true,
+    surfaceActive: true,
+    manualOperation: null,
+    loginOperation: null,
+    authView: null,
+    initializationReady: Promise.resolve(),
+    window: { contentView: { removeChildView: () => {} } },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    getBrowserInteractionMode: () => "manual",
+    descriptorWrites: 0,
+    created: [],
+  });
+  host.createHomeView = (partition) => { host.created.push(partition); return fakeView(partition); };
+  host.initializePrimaryView = async () => { if (failNewPage) throw new Error("page did not load"); };
+  host.syncViewVisibility = () => {};
+  host.snapshot = () => ({ partition: host.partition });
+  host.writeDescriptor = () => { host.descriptorWrites += 1; };
+  return { host, views };
+}
+
+test("switching shows the other account in place; the account left stays loaded for an instant switch back", async () => {
+  const { host } = switchingHost();
+  const other = `${BASE}-abcdefghijkl`;
+  const mainView = host.view;
+  const mainTab = host.userTabs.get("u1");
+
+  await host.switchAccount(other);
+  assert.deepEqual(host.created, [other], "a new account gets its own page");
+  assert.equal(host.partition, other);
+  assert.notEqual(host.surfaceId, "home-surface-of-main", "each account's page has its own surface");
+  assert.equal(host.userTabs.size, 0);
+  assert.equal(host.state.authenticated, false, "the new account's sign-in is its own");
+  assert.equal(mainView.visible, false);
+  assert.equal(mainView.webContents.isDestroyed(), false, "the account left is parked, not closed");
+  assert.equal(host.turnTabs.get("t1").view.webContents.isDestroyed(), false, "a running Codex turn keeps running");
+  assert.ok(host.livePartitions().includes(BASE), "the parked account stays routed");
+
+  await host.switchAccount(BASE);
+  assert.deepEqual(host.created, [other], "switching back builds nothing");
+  assert.equal(host.view, mainView);
+  assert.equal(host.surfaceId, "home-surface-of-main");
+  assert.equal(host.userTabs.get("u1"), mainTab, "its own tabs come back");
+  assert.equal(host.selectedTabId, "u1");
+  assert.equal(host.state.authenticated, true);
+  assert.equal(mainView.zoom, 1.25, "a parked page takes the current zoom");
+  assert.deepEqual([...host.parkedHomes.keys()], [other]);
+  assert.ok(host.descriptorWrites >= 2, "the bridge sees the shown account's page");
+});
+
+test("an account whose page cannot load leaves the Browser tab on the account it was on", async () => {
+  const { host, views } = switchingHost({ failNewPage: true });
+  const mainView = host.view;
+  await assert.rejects(host.switchAccount(`${BASE}-abcdefghijkl`), /page did not load/);
+  assert.equal(host.partition, BASE);
+  assert.equal(host.view, mainView);
+  assert.equal(host.surfaceId, "home-surface-of-main");
+  assert.equal(host.parkedHomes.size, 0);
+  assert.equal(views.find((view) => view.partition === `${BASE}-abcdefghijkl`).closed, true, "the failed page is closed");
+});
+
+test("past the warm limit, a parked account a turn runs on stays; a bare signed-out page goes before an older signed-in one", () => {
+  const { parkedHomeToUnload } = require("../electron/browser-host.cjs");
+  const home = (partition, parkedAt, { tabs = 0, authenticated = false } = {}) =>
+    ({ partition, parkedAt, userTabs: new Map(Array.from({ length: tabs }, (_, index) => [index, {}])), state: { authenticated } });
+  const parked = [home("a", 1, { authenticated: true }), home("b", 2, { tabs: 1 }), home("c", 3), home("d", 4)];
+  assert.equal(parkedHomeToUnload(parked, new Set()).partition, "c", "the oldest page with no tabs and no sign-in");
+  assert.equal(parkedHomeToUnload(parked, new Set(["c"])).partition, "d", "never one a turn runs on");
+  assert.equal(parkedHomeToUnload(parked.slice(0, 2), new Set()).partition, "a", "a sign-in costs less to reload than the user's tabs");
+  assert.equal(parkedHomeToUnload(parked, new Set(["a", "b", "c", "d"])), null, "every one busy: all stay");
+});
+
+test("a parked account being removed has its page closed; the shown one must be left first", async () => {
+  const { host } = switchingHost();
+  const other = `${BASE}-abcdefghijkl`;
+  await host.switchAccount(other);
+  const parkedView = host.parkedHomes.get(BASE).view;
+  assert.throws(() => host.releaseAccountHome(other), /Switch to another account/);
+  assert.equal(host.releaseAccountHome(BASE), true);
+  assert.equal(parkedView.webContents.isDestroyed(), true);
+  assert.equal(host.releaseAccountHome(BASE), false);
+});
+
+test("a switch to a partition outside the profile is refused", async () => {
+  const { host } = switchingHost();
+  await assert.rejects(host.switchAccount("persist:someone-else"), /does not match its profile/);
+  assert.equal(host.partition, BASE);
+});
+
+test("CPA Codex sign-ins become accounts once each; a removed one stays removed", (t) => {
+  const dataRoot = tempRoot(t);
+  const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
+  accounts.setEmail(FIRST_ACCOUNT_ID, "Me@Example.com");
+  const added = accounts.importOauthAccounts([
+    { email: "me@example.com", plan: "plus" },
+    { email: "team@example.com", plan: "team" },
+    { email: "pro@example.com", plan: null },
+    { email: "not-an-email", plan: "plus" },
+  ]);
+  assert.equal(added.length, 2, "the account already signed in to me@example.com counts as that sign-in");
+  const labels = accounts.status().accounts.map((entry) => entry.label);
+  assert.ok(labels.includes("team@example.com · team"));
+  assert.ok(labels.includes("pro@example.com"));
+  assert.deepEqual(accounts.importOauthAccounts([{ email: "TEAM@example.com", plan: "team" }]), [], "seen once, never added again");
+
+  const pro = accounts.status().accounts.find((entry) => entry.label === "pro@example.com").id;
+  accounts.remove(pro);
+  const reopened = createBrowserAccounts({ dataRoot, profile: "production" });
+  assert.deepEqual(reopened.importOauthAccounts([{ email: "pro@example.com" }]), [], "removing an imported account sticks across restarts");
+});
+
+test("CPA sign-ins beyond the account limit wait until there is room", (t) => {
+  const accounts = createBrowserAccounts({ dataRoot: tempRoot(t), profile: "production" });
+  const emails = Array.from({ length: MAX_ACCOUNTS + 2 }, (_unused, index) => ({ email: `user${String(index).padStart(2, "0")}@example.com` }));
+  assert.equal(accounts.importOauthAccounts(emails).length, MAX_ACCOUNTS - 1);
+  const removable = accounts.status().accounts.find((entry) => entry.id !== FIRST_ACCOUNT_ID).id;
+  accounts.remove(removable);
+  assert.deepEqual(accounts.importOauthAccounts(emails).length, 1, "the next one not yet seen takes the freed place");
+});
+
 test("account settings: a tab limit of 1 to 5, new sessions on or off, and where new sessions start", (t) => {
   const dataRoot = tempRoot(t);
   const accounts = createBrowserAccounts({ dataRoot, profile: "production" });

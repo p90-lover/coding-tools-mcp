@@ -100,6 +100,22 @@ function planFromFileName(fileName, email) {
   return email && stem.startsWith(`${email}-`) ? stem.slice(email.length + 1) || null : null;
 }
 
+// CPA identifies a Codex account by its `type`, not its file name: accounts added through some
+// flows are saved as "<email>.json" with no "codex-" prefix. The type check decides. The Browser
+// tab's accounts are made from the same list (main.cjs syncBrowserAccountsFromCpa).
+function cpaAccountOf(file, name, raw) {
+  if (!raw || String(raw.type || "").toLowerCase() !== "codex" || typeof raw.refresh_token !== "string") return null;
+  const email = typeof raw.email === "string" ? raw.email : jwtEmail(raw.id_token);
+  return {
+    slotId: cpaSlotId(raw.account_id, email),
+    source: "cpa",
+    file,
+    email: email || null,
+    plan: planFromFileName(name, email),
+    disabled: raw.disabled === true,
+  };
+}
+
 function createChatGptDesktopHost({
   logger,
   dataRoot,
@@ -264,21 +280,6 @@ function createChatGptDesktopHost({
     const exe = found?.location ? path.join(found.location, "app", "ChatGPT.exe") : null;
     packageInfo = exe && fs.existsSync(exe) ? { ...found, exe } : null;
     return packageInfo;
-  }
-
-  // CPA identifies a Codex account by its `type`, not its file name: accounts added through some
-  // flows are saved as "<email>.json" with no "codex-" prefix. The type check decides.
-  function cpaAccountOf(file, name, raw) {
-    if (!raw || String(raw.type || "").toLowerCase() !== "codex" || typeof raw.refresh_token !== "string") return null;
-    const email = typeof raw.email === "string" ? raw.email : jwtEmail(raw.id_token);
-    return {
-      slotId: cpaSlotId(raw.account_id, email),
-      source: "cpa",
-      file,
-      email: email || null,
-      plan: planFromFileName(name, email),
-      disabled: raw.disabled === true,
-    };
   }
 
   const byEmail = (a, b) => String(a.email).localeCompare(String(b.email));
@@ -945,4 +946,4 @@ function createChatGptDesktopHost({
 }
 
 module.exports = {
-  proxyRouteFromEnvironment, createChatGptDesktopHost, cpaSlotId, planFromFileName, slotPaths };
+  proxyRouteFromEnvironment, createChatGptDesktopHost, cpaAccountOf, cpaSlotId, planFromFileName, slotPaths };
