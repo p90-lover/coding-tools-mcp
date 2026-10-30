@@ -9,6 +9,8 @@ const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs")
 const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
+const { userMessages } = require("./chat-history.cjs");
+const { createModelScoreStore, gradePrompt, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
 
@@ -338,7 +340,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
   // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
   // working chat's activity poll, the run loop and their per-node checks each read the same run
   // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
@@ -363,6 +365,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const chatEdits = createChatEditStore({ file: chatEditsFile });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
   const archive = createChatArchiveStore({ file: archiveFile, now });
+  // Points per model from finished Team rounds, for the model picker (model-scores.cjs).
+  const modelScores = createModelScoreStore({ file: modelScoresFile, logger });
   /** After a message was deleted the agent's session still remembers it, so the chat's next turn must not continue it. */
   const freshSessionRequired = (workspaceId, taskId) => Boolean(taskId) && chatEdits.fresh(workspaceId, taskId);
   // A saved path goes stale when the Codex app updates itself (it replaces bin\<build>\), so a
@@ -392,6 +396,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (["finished", "failed"].includes(state.status)) void wakeupAfterRun(workspaceId, runId).catch(() => undefined);
     // A /loop round that came due while its chat worked runs now; a self-paced one that scheduled nothing ends.
     if (["finished", "failed"].includes(state.status)) void loopAfterRun(workspaceId, runId).catch(() => undefined);
+    // A Team round that ended by itself scores the models it ran on; one the person stopped does not.
+    // Only the drive loop's own settling passes the mission: a run that could not start, or whose
+    // loop broke, is reported without one and is not real work to score. A Single round costs no read.
+    if (mission && mission.execution_mode !== "single" && state.settled && !state.stopped && ["finished", "failed"].includes(state.status)) {
+      void scoreAfterRun(workspaceId, runId, state.status).catch((error) => logger?.warn?.("ao.model_score_failed", { runId, message: publicText(error?.message || error, 200) }));
+    }
     if (!onRunState) return;
     try {
       onRunState({
@@ -5012,6 +5022,76 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   const judged = (goal, runId, outcome) => goal.evaluatedRunId === runId
     && (outcome !== "finished" || (goal.evaluatedAs ?? (goal.checkedAt ? "checked" : "stalled")) === "checked");
+
+  const scoring = new Set();
+  /** The user's message a run answered: runs that answer a new message take the task's messages in order; a restart or replacement answers its original's. */
+  function runMessage(description, taskRuns, run) {
+    const said = userMessages(description);
+    const fresh = taskRuns.filter(entry => !entry.replaces_run_id && !entry.restarts_run_id);
+    let origin = run;
+    for (let hops = 0; origin && (origin.replaces_run_id || origin.restarts_run_id) && hops < 20; hops += 1) {
+      const previous = origin.replaces_run_id || origin.restarts_run_id;
+      origin = taskRuns.find(entry => entry.id === previous);
+    }
+    const index = origin ? fresh.findIndex(entry => entry.id === origin.id) : -1;
+    return (index >= 0 ? said[index] : said.at(-1))?.text ?? "";
+  }
+  /** One grade of a Team round by a free model (as checkGoal picks them); null when none answered. */
+  async function gradeRound(message, mission) {
+    const cards = scoredCards(mission, error => QUOTA_EXHAUSTED.test(error) || REQUEST_REFUSED.test(error));
+    const { baseUrl, key } = connection();
+    const catalog = await models();
+    const prompt = gradePrompt(message, mission, cards);
+    for (const model of freeModels(catalog.models ?? [], catalog.hidden ?? [])) {
+      try {
+        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model, temperature: 0, max_tokens: 900, messages: [{ role: "user", content: prompt }] }),
+          signal: AbortSignal.timeout(90_000),
+        });
+        if (!response.ok) throw await modelCallFailure(response, `the grader returned HTTP ${response.status} for ${publicText(model, 80)}`);
+        return { grade: parseGrade((await response.json())?.choices?.[0]?.message?.content, cards.length), grader: model };
+      } catch (error) {
+        reviewerFailed(model, error);
+        logger?.warn?.("ao.model_grade_failed", { model, message: publicText(error?.message || error, 200) });
+      }
+    }
+    return { grade: null, grader: null };
+  }
+  /**
+   * A Team round that settled by itself scores every model it ran on (model-scores.cjs), once. Single
+   * chats, stopped rounds and steps that failed on quota or a refused request are not scored: only
+   * real Team work says how a model does in a role.
+   */
+  async function scoreAfterRun(workspaceId, runId, outcome) {
+    const guard = runKey(workspaceId, runId);
+    if (scoring.has(guard) || modelScores.has(runId)) return;
+    scoring.add(guard);
+    try {
+      const saved = await runs({ workspaceId });
+      const mission = saved.runs.find(run => run.id === runId && run.workspace_id === workspaceId);
+      if (!mission || mission.cancelled || mission.execution_mode === "single" || !mission.project_id) return;
+      const excluded = error => QUOTA_EXHAUSTED.test(error) || REQUEST_REFUSED.test(error);
+      if (!scoredCards(mission, excluded).length) return;
+      const detail = await board({ workspaceId, taskId: mission.project_id }).catch(() => null);
+      const message = runMessage(detail?.task?.description ?? "", saved.runs.filter(run => run.project_id === mission.project_id), mission);
+      const { grade, grader } = await gradeRound(message, mission).catch(() => ({ grade: null, grader: null }));
+      const record = scoreRound({ mission, message, outcome, grade, grader, at: new Date(now()).toISOString(), excluded });
+      if (!record) return;
+      modelScores.add(record);
+      logger?.info?.("ao.model_scored", { runId, outcome, grader, categories: record.categories, cards: record.cards.length });
+    } finally {
+      scoring.delete(guard);
+    }
+  }
+  /** The score log summarised for the picker and the scores page: per model, and per role when `role` is given. */
+  function modelScoreSummary({ role = null, window, limit = 50 } = {}) {
+    const records = modelScores.records();
+    const summary = summarize(records, { role: typeof role === "string" && role ? role : null, ...(Number.isSafeInteger(window) && window > 0 ? { window } : {}) });
+    const count = Math.max(0, Math.min(200, Number.isSafeInteger(limit) ? limit : 50));
+    return { ok: true, summary, recent: count ? records.slice(-count).reverse() : [], total: records.length };
+  }
   /**
    * When a chat's latest round has settled, its goal is achieved, stalled, limited, paused, or goes
    * another round. `outcome` is how the round ended: "finished", "failed", "held" (it ended needing
@@ -6281,7 +6361,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "board": return board(args);
       // The person's name wins over an agent's rename_chat still waiting on a team round.
       case "task_rename": waitingTitles.delete(titleKey(String(args?.workspaceId ?? "").trim(), String(args?.taskId ?? "").trim())); return taskRename(args);
-      case "models": return models(args);
+      // Each model's points from finished Team rounds ride along, for the picker's hint.
+      case "models": {
+        const catalog = await models(args);
+        try { return { ...catalog, scores: pickerHints(summarize(modelScores.records())) }; } catch { return catalog; }
+      }
+      case "model_scores": return modelScoreSummary(args);
+      case "model_scores_clear": modelScores.clear(); return { ok: true };
       case "harnesses": return harnesses();
       // Runtime > Subagents (subagents.cjs): its settings and subagents, and the ones running now.
       case "subagents_config": return { ok: true, available: Boolean(subagents), ...(subagents ? subagents.config() : {}) };
@@ -6428,7 +6514,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

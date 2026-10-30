@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 import { chatWorkingDetail, type ChatActivity } from "./ao-chat";
+import { bestScored, scoreBadge, scoreText, SCORE_CATEGORY_LABELS, type ModelScoreHint } from "./model-scores";
 
 export type RoleSettings = { name: string; specialty: string; instructions: string; expected_output: string; working_directory: string; revision: number; auto_decide?: boolean; role_name?: string };
 export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; review_loop?: boolean; link_points?: Record<string, { x: number; y: number }>; is_default?: boolean; editable_graph?: boolean; nodes: AoNode[]; permission_selections?: Record<string, { permission_profile?: string; approval_policy?: string; approvals_reviewer?: string }> };
@@ -17,8 +18,9 @@ export type AoModelCapabilities = {
 /** `unavailable`: models CPA lists but cannot serve now, with why (e.g. their plugin's account is disabled in CPA). */
 /** `held`: listed models CPA is not listing right now (kept from memory), with why; they still run.
  *  `stale`: CPA could not be read, so the list is the remembered one. */
+/** `scores`: each model's points from finished Team rounds (model-scores.ts), for the picker's badges. */
 export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities>; unavailable?: Record<string, string>;
-  held?: Record<string, string>; stale?: boolean };
+  held?: Record<string, string>; stale?: boolean; scores?: Record<string, ModelScoreHint> };
 export type AoModelLoader = (harness: string) => Promise<string[] | AoModelCatalog>;
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
 
@@ -406,6 +408,28 @@ export async function pickerModels(harness: string, loadModels: AoModelLoader, a
   return { ...catalog, models: [...new Set([...catalog.models, ...webItems])].filter(model => !agentsOnly || !isWebModel(model)) };
 }
 
+/**
+ * Under the model picker: how the chosen model scored in finished Team rounds, and the listed models
+ * that scored best, each one click away. Nothing until some model has been scored.
+ */
+function ModelScoreNote({ model, models, scores, disabled, onPick }: {
+  model: string; models: string[]; scores: Record<string, ModelScoreHint> | undefined; disabled: boolean; onPick: (model: string) => void;
+}) {
+  const best = bestScored(models, scores);
+  if (!best.length) return null;
+  const own = scores?.[model];
+  return <p className="ao-hint ao-wide ao-score-note" role="note">
+    {own && own.overall !== null
+      ? <>Team score {scoreText(own.overall)}/10 over {own.missions} mission{own.missions === 1 ? "" : "s"} (recent {scoreText(own.recent)})
+        {own.strengths.length ? `, strongest at ${own.strengths.map(category => SCORE_CATEGORY_LABELS[category]).join(" and ")}` : ""}. </>
+      : <>{modelLabel(model) || "This model"} has no Team score yet. </>}
+    {best.some(entry => entry.model !== model) ? <>Best scored here:{" "}
+      {best.filter(entry => entry.model !== model).map(entry => <button key={entry.model} type="button" className="button-secondary ao-score-pick" disabled={disabled}
+        title={`${modelLabel(entry.model)}: average ${scoreText(entry.hint.overall)}, recent ${scoreText(entry.hint.recent)}, ${entry.hint.missions} missions`}
+        onClick={() => onPick(entry.model)}>{modelShortLabel(entry.model).name} ★ {scoreText(entry.hint.recent ?? entry.hint.overall)}</button>)}</> : null}
+  </p>;
+}
+
 /** Harness + model pickers shared by the inspector, New mission and Add worker sheets. */
 export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false, hideModel = false, hidePermissionNote = false, agentsOnly = false, compact = false }: {
   route: AoRoute; harnesses: AoHarness[]; disabled?: boolean; hideModel?: boolean; hidePermissionNote?: boolean; agentsOnly?: boolean;
@@ -416,15 +440,17 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
 }) {
   const [models, setModels] = useState<string[] | null>(null);
   const [capabilities, setCapabilities] = useState<{ harness: string; models: Record<string, AoModelCapabilities> } | null>(null);
+  const [scores, setScores] = useState<Record<string, ModelScoreHint> | undefined>(undefined);
   const [notice, setNotice] = useState("");
   const harness = route.harness_id;
   useEffect(() => {
     let live = true;
-    setModels(null); setCapabilities(null); setNotice("");
+    setModels(null); setCapabilities(null); setScores(undefined); setNotice("");
     pickerModels(harness, loadModels, agentsOnly).then(catalog => {
       if (!live) return;
       setModels(catalog.models);
       setCapabilities({ harness, models: catalog.capabilities ?? {} });
+      setScores(catalog.scores);
       rememberCpaProviders(catalog.capabilities);
     })
       .catch(cause => { if (live) { setModels([]); setNotice(cause instanceof Error ? cause.message : String(cause)); } });
@@ -488,8 +514,11 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         {compact ? modelShortLabel(model, native && !isWebModel(model)).name
           : <>{modelLabel(model, native && !isWebModel(model))}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
             : capabilities?.harness === harness && capabilityText(capabilities.models[model], native && isWebModel(model)) ? ` · ${capabilityText(capabilities.models[model], native && isWebModel(model))}` : ""}</>}
+        {scoreBadge(scores?.[model]) ? ` · ${scoreBadge(scores?.[model])}` : ""}
       </option>)}
     </select></label> : null}
+    {!hideModel && !compact ? <ModelScoreNote model={route.model} models={models ?? []} scores={scores} disabled={disabled}
+      onPick={model => onChange(withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route, listed))} /> : null}
     {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Native permission: {nativePermission(route) || "Unknown"}. Change it in the chat composer's permissions menu.</p>
       : <p className="ao-hint">WebGPT runs only on Native Codex. Choosing a WebGPT model switches to it, and other models run here. Native permissions don't apply on this agent.</p> : null}
     <fieldset className="ao-route-tuning"><legend>Model tuning</legend>

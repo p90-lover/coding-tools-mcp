@@ -5,6 +5,7 @@ import { aoDependencyChange, aoLevels, aoUnlinkChange, listAllWorkspaces, module
 import { AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, NATIVE_HARNESS, cardMeta,
   defaultTeam, starterSettings, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoTeam } from "./AgentOrchestratorRoleEditor";
 import { ROLE_TITLE, prepareTeamGraph } from "./AgentOrchestratorTeam";
+import { ModelScoresPanel } from "./ModelScoresPanel";
 import "./agent-orchestrator.css";
 
 /** A copy is a new preset, never another default or another revision of the original. */
@@ -94,6 +95,8 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
+  // The Model scores page in place of the team canvas.
+  const [showScores, setShowScores] = useState(false);
   // A catalog is kept a minute (as the main process keeps CPA's), then read again: a provider
   // added in CPA meanwhile appears without a restart.
   const modelCache = useRef(new Map<string, { at: number; models: ReturnType<AoModelLoader> }>());
@@ -322,7 +325,11 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
         {/* Changes also save on their own; this saves now and shows the state at a glance. */}
         <button type="button" className="button-primary" disabled={locked || saving || !dirty || !draft?.name.trim()} onClick={() => void save()}>
           {saving ? "Saving…" : dirty ? "Save team" : "Saved"}</button>
+        <button type="button" className="button-secondary ao-teams-scores-toggle" aria-pressed={showScores}
+          title="Each model's points from finished Team missions" onClick={() => setShowScores(value => !value)}>
+          {showScores ? "Back to team" : "Model scores"}</button>
       </div>
+      {showScores ? <div className="ao-teams-stage"><ModelScoresPanel setError={setError} /></div> : <>
       {draft ? <div className="ao-teams-settings">
         <label>Team name<input aria-label="Team name" maxLength={128} value={draft.name} disabled={locked} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
         <label>Workers at once<input aria-label="Team worker limit" type="number" min={1} max={24} value={draft.worker_limit} disabled={locked}
@@ -376,6 +383,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
       {draft ? <footer className="ao-teams-footer">
         <span role="status" className="ao-hint">{saving || dirty && !failed ? "Saving…" : failed && dirty ? "Not saved. Fix the error above." : notice || "Changes save automatically. Existing chats keep their team."}</span>
       </footer> : null}
+      </>}
     </div>
   </section>;
 }
