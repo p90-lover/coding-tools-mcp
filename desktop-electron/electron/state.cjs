@@ -1,5 +1,4 @@
-const fs = require("node:fs");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { readStateFile, writeStateFile } = require("./durable-state.cjs");
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 420;
 const SESSION_REFRESH_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
@@ -79,9 +78,22 @@ function nextSessionRefreshReminderAt(now = Date.now()) {
   return new Date(now + SESSION_REFRESH_REMINDER_INTERVAL_MS).toISOString();
 }
 
+/**
+ * The saved settings, from the file or, when it is torn, its last good copy (durable-state.cjs). A
+ * torn file used to read as a first start: onboarding came back and every setting was reset.
+ * Returns `{ state, recovery }`; `recovery` is null when the file read cleanly or did not exist.
+ */
 function readState(filePath) {
+  const read = readStateFile(filePath, (text) => JSON.parse(text));
+  const state = read.value === undefined ? { ...DEFAULT_STATE } : normalizeState(read.value);
+  const recovery = read.source === "backup" || read.source === "unreadable"
+    ? { source: read.source, setAside: read.setAside, message: read.error instanceof Error ? read.error.message : String(read.error ?? "missing") }
+    : null;
+  return { state, recovery };
+}
+
+function normalizeState(parsed) {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || parsed.version !== 1) return { ...DEFAULT_STATE };
     const state = { ...DEFAULT_STATE, ...parsed };
     delete state.bridgeEnabled;
@@ -172,7 +184,7 @@ function readState(filePath) {
 }
 
 function writeState(filePath, state) {
-  writePrivateFileAtomic(filePath, `${JSON.stringify(state, null, 2)}\n`);
+  writeStateFile(filePath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 function validateSidebarState(value) {
@@ -186,8 +198,11 @@ function validateSidebarState(value) {
 }
 
 function createStateStore(filePath) {
-  let state = readState(filePath);
+  const loaded = readState(filePath);
+  let state = loaded.state;
   return {
+    /** How the settings were recovered from a torn file at startup, for the log; null if they were not. */
+    recovery: loaded.recovery,
     read() {
       return structuredClone(state);
     },

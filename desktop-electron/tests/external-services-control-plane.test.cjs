@@ -305,14 +305,15 @@ test("a failed keep-alive lease write does not fail healthy CPA inspection", asy
   controller.configure("cpa", { keepAlive: true });
   const filePath = path.join(directory, "external-services.json");
   const saved = fs.readFileSync(filePath, "utf8");
-  const writeFileSync = fs.writeFileSync;
+  // The state file is written flushed (durable-state.cjs), through openSync rather than writeFileSync.
+  const openSync = fs.openSync;
   let failedWrites = 0;
-  fs.writeFileSync = function (target, ...args) {
+  fs.openSync = function (target, ...args) {
     if (String(target).startsWith(filePath + ".tmp-")) {
       failedWrites += 1;
       throw Object.assign(new Error("ENOSPC: lease storage is full"), { code: "ENOSPC" });
     }
-    return writeFileSync.call(this, target, ...args);
+    return openSync.call(this, target, ...args);
   };
   try {
     assert.equal((await controller.inspect("cpa")).status, "ready");
@@ -322,7 +323,7 @@ test("a failed keep-alive lease write does not fail healthy CPA inspection", asy
     assert.throws(() => controller.configure("cpa", { autoStart: true }), { code: "ENOSPC" });
     assert.equal(fs.readFileSync(filePath, "utf8"), saved);
   } finally {
-    fs.writeFileSync = writeFileSync;
+    fs.openSync = openSync;
     controller.dispose();
   }
 });

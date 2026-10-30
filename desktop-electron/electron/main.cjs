@@ -3499,6 +3499,8 @@ async function start() {
   process.on("uncaughtException", (error) => reportFault("launcher.uncaught_exception", error));
   process.on("unhandledRejection", (reason) => reportFault("launcher.unhandled_rejection", reason));
   if (runtimeSourceFallback) logger.warn("runtime.packaged_source_damaged", { message: runtimeSourceFallback, using: "installed copy" });
+  // Settings read back from their last good copy (or reset, when that was torn too) after a torn file.
+  if (stateStore.recovery) logger.warn("launcher.state_recovered", stateStore.recovery);
   // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs).
   const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger });
   rtkService = rtk;
