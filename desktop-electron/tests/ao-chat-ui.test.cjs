@@ -36,12 +36,13 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
   // controls and approval cards render only when a composer or an approval is passed.
   "./ChatBranchBar": { ChatBranchBar: () => null },
+  "./HarnessLogo": { ModelLogo: () => null },
   // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
   "./ChatAnnotations": load("ChatAnnotations.tsx", { "./ao-chat": chat }),
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
-  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [] },
+  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
 test("a project switch keeps its chat pane readable while loading and offers Retry after a failed read", () => {
@@ -552,19 +553,39 @@ test("the Terminal pane opens for a server or the project's app launcher, never 
   assert.equal(workbench.opensTerminal(command("npm run dev", { status: "exited", exitCode: 0 }), now), false, "an ended command never does");
 });
 
+test("the details' Processes list the app page and running commands green, ended servers and shells red", () => {
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
+  const command = (id, cmd, startedAt, extra = {}) => ({ id, cmd, workdir: "G:/p", startedAt, status: "running", exitCode: null, source: "agent", ...extra });
+  const rows = workbench.chatProcessRows([
+    command("a", "git status", 1, { status: "exited", exitCode: 0 }),
+    command("b", "npm run dev", 2, { status: "exited", exitCode: 1 }),
+    command("c", "npm run dev", 3),
+    command("d", "pytest -q", 4),
+    command("e", "pwsh", 5, { user: true, status: "exited", exitCode: 0 }),
+    command("f", "scripts/run_app.cmd", 6, { status: "exited", exitCode: 1 }),
+  ], { sessionId: "ao-1", url: "http://localhost:5173/", title: "" });
+  assert.deepEqual(JSON.parse(JSON.stringify(rows.map((row) => [row.label, row.kind, row.running]))), [
+    ["localhost:5173", "app", true],
+    ["pytest -q", "terminal", true],
+    ["npm run dev", "terminal", true],
+    ["scripts/run_app.cmd", "terminal", false],
+    ["Your terminal", "terminal", false],
+  ], "a one-off that ended is left out, and a server that runs again shows once");
+});
+
 test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {
   // Seen live: the agent started its dev server (the Terminal opened), then preview_open'd the page,
   // and the panel stayed on the Terminal: the user never saw the browser.
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
   assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000"], false), "preview", "a closed panel opens on the page");
   assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "cmd:c1"], true), "preview", "an open one switches to it");
-  assert.equal(workbench.autoOpenTab(["cmd:c1"], false), "terminal", "a command opens a closed panel on the Terminal");
-  assert.equal(workbench.autoOpenTab(["cmd:c1"], true), null, "but never takes the place of what the user looks at");
+  // The Terminal never pops up by itself: running commands are listed in the chat details' Processes.
+  assert.equal(workbench.autoOpenTab(["cmd:c1"], false), null, "a command leaves a closed panel closed");
+  assert.equal(workbench.autoOpenTab(["cmd:c1"], true), null, "and an open one as it is");
   assert.equal(workbench.autoOpenTab([], false), null);
-  // The agent asked to show a pane (show_in_chat): that pane, even over what the user looks at.
-  assert.equal(workbench.autoOpenTab(["show:show-1:terminal"], true), "terminal");
-  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "show:show-2:terminal"], false), "terminal", "an explicit request wins");
-  assert.equal(workbench.autoOpenTab(["show:show-3:preview"], true), "preview");
+  assert.equal(workbench.autoOpenTab(["show:show-1:terminal"], true), null, "not even on the agent's show_in_chat");
+  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "show:show-2:terminal"], false), "preview", "its page still shows");
+  assert.equal(workbench.autoOpenTab(["show:show-3:preview"], true), "preview", "as does a preview it asks to show");
   // Only a server process opens it: the agent's one-off commands (a status poll, a build, a test)
   // put the Terminal over the chat while it worked.
   const server = (cmd, extra = {}) => workbench.isServerProcess({ cmd, status: "running", ...extra });
