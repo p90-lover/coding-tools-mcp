@@ -126,9 +126,9 @@ const P = { frame: "#3d3d3a", screen: "#1f2a33", glow: "#7fd1ff", key: "#b4b2a7"
   blanket: "#6a9bcc", pillow: "#faf9f5", fridge: "#e8ebe6", flame: "#e8743b" };
 
 /** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. */
-type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read";
+export type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read";
 type Arms = "down" | "left" | "right" | "both" | "reach";
-type Pose = { look: -1 | 0 | 1; arms: Arms; walking: boolean; sit: boolean };
+export type Pose = { look: -1 | 0 | 1; arms: Arms; walking: boolean; sit: boolean };
 /** On the pointer: leaping on, riding along, or leaping back home to the box (screen px). */
 type Ride = { x: number; y: number; mode: "boarding" | "riding" | "leaving"; look: -1 | 0 | 1 };
 
@@ -140,9 +140,7 @@ const rect = (x: number, y: number, w: number, h: number, color: string, key: st
  * looks (closed asleep or blinking), feet stepping left and right as it walks (the CLI's waddle),
  * arms up to ask or carry, one arm working its tool or typing, and a one-row crouch to sit.
  */
-function restFrame({ mood, asleep, step, pose, blink, job, toolSide }: { mood: PetMood; asleep: boolean; step: boolean; pose: Pose; blink: boolean; job: Job; toolSide: "left" | "right" }): Frame {
-  const working = mood === "working" && !asleep;
-  const typing = working && !pose.walking && pose.arms === "down" && job === "none";
+export function restFrame({ mood, asleep, step, pose, blink, job, toolSide }: { mood: PetMood; asleep: boolean; step: boolean; pose: Pose; blink: boolean; job: Job; toolSide: "left" | "right" }): Frame {
   // The CLI has genuine side-facing Clawd glyphs. Use one for typing rather than a
   // front-facing face that appears to ignore the computer beside it.
   if (job === "laptop" && !pose.walking && !asleep) {
@@ -153,9 +151,13 @@ function restFrame({ mood, asleep, step, pose, blink, job, toolSide }: { mood: P
     : pose.look < 0 ? "left" : pose.look > 0 ? "right" : "open";
   let arms: ClawdArms = "down";
   if (!asleep) {
+    // A tool is held up in the hand on its side (Prop draws it there). The right arm went up whatever
+    // side the tool was on, with the tool down by its feet, and with no tool at all it "typed" in the
+    // air: it read as Clawd checking its watch (the user, 2026-10-30).
+    const holding: ClawdArms = toolSide === "left" ? "left-up" : "one-up";
     if (job === "carry" || (mood === "ask" && !pose.walking) || pose.arms === "both") arms = "up";
-    else if (job !== "none") arms = (job === "laptop" || job === "build") && step ? "down" : "one-up";
-    else if (typing) arms = step ? "one-up" : "down";
+    else if (job !== "none" && job !== "laptop") arms = holding;
+    else if (pose.arms === "left") arms = "left-up";
     else if (pose.arms !== "down") arms = "one-up";
   }
   const feet: Feet = pose.walking ? (step ? "left" : "right") : "both";
@@ -250,15 +252,20 @@ function House({ home, asleep, onKnock }: { home: boolean; asleep: boolean; onKn
 }
 
 /** A file box carried over its head, held up in both hands. */
-function CarriedBox() {
+export function CarriedBox() {
   const r = rect;
   return <svg className="cx-pet-box" viewBox="0 0 8 2" width={8 * PIXEL_W} height={2 * PIXEL_H} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">
     {[r(0, 0, 8, 2, P.box, "box"), r(0, 0, 8, 1, P.boxDark, "box-lid"), r(3, 1, 2, 1, P.boxDark, "box-tape")]}
   </svg>;
 }
 
-/** The tool beside it, on a 9×7 grid of the same pixels, standing on the same ground line. */
-function Prop({ job, step, tick }: { job: Job; step: boolean; tick: number }) {
+/**
+ * The tool beside it, on a 9×7 grid of the same pixels, its bottom on the same ground line. Clawd's
+ * raised hand (restFrame) is at the grid's row 2, just left of column 0 (mirrored on its left side),
+ * so a tool it holds starts there: the mug, magnifier, hammer and book were drawn by its feet while
+ * the arm went up empty, and the mug's steam and the loose hammer's sparks read as fireworks.
+ */
+export function Prop({ job, step, tick }: { job: Job; step: boolean; tick: number }) {
   if (job === "none" || job === "carry") return null;
   const r = rect;
   const parts: ReactElement[] = [];
@@ -268,24 +275,24 @@ function Prop({ job, step, tick }: { job: Job; step: boolean; tick: number }) {
     for (let line = 0; line < 2; line += 1) parts.push(r(2, 3 + line, 1 + ((tick + line * 3) % 4), 1, P.glow, `line${line}`));
     parts.push(r(0, step ? 5 : 6, 1, 1, "#d77757", "typing-paw"));
   } else if (job === "search") {
-    // A magnifier held up, bobbing as it scans.
-    const y = step ? 2 : 3;
-    parts.push(r(1, y, 3, 1, P.metal, "ring-t"), r(1, y + 2, 3, 1, P.metal, "ring-b"), r(0, y + 1, 1, 1, P.metal, "ring-l"),
-      r(4, y + 1, 1, 1, P.metal, "ring-r"), r(1, y + 1, 3, 1, P.lens, "lens"), r(4, y + 3, 1, 1, P.wood, "grip"));
+    // A magnifier held up by its grip, its lens glinting from side to side as it scans.
+    parts.push(r(0, 2, 2, 1, P.wood, "grip"), r(2, 0, 2, 1, P.metal, "ring-t"), r(1, 1, 1, 1, P.metal, "ring-l"),
+      r(4, 1, 1, 1, P.metal, "ring-r"), r(2, 2, 2, 1, P.metal, "ring-b"), r(2, 1, 2, 1, P.lens, "lens"),
+      r(step ? 3 : 2, 1, 1, 1, P.page, "glint"));
   } else if (job === "build") {
-    // A hammer swinging down onto a nail, a spark on each hit.
-    if (step) parts.push(r(0, 3, 1, 1, P.wood, "handle"), r(0, 4, 3, 1, P.metal, "head"), r(4, 6, 1, 1, P.metal, "nail"), r(5, 5, 1, 1, "#f5c451", "spark"));
-    else parts.push(r(0, 1, 1, 3, P.wood, "handle"), r(0, 0, 3, 1, P.metal, "head"), r(4, 6, 1, 1, P.metal, "nail"));
+    // A hammer in its hand, raised and then down onto a nail in the ground, a spark on each hit.
+    parts.push(r(4, 5, 1, 2, P.metal, "nail"));
+    if (step) parts.push(r(0, 2, 2, 1, P.wood, "handle"), r(2, 3, 1, 1, P.wood, "handle-end"), r(3, 3, 2, 2, P.metal, "head"),
+      r(5, 4, 1, 1, P.knob, "spark"));
+    else parts.push(r(0, 1, 1, 2, P.wood, "handle"), r(0, 0, 3, 1, P.metal, "head"));
   } else if (job === "coffee") {
-    // A mug, lifted for a sip now and then, steam curling up.
-    const y = step ? 3 : 4;
-    parts.push(r(1, y, 3, 2, P.mug, "mug"), r(1, y, 3, 1, P.rim, "rim"), r(4, y + 1, 1, 1, P.rim, "handle"));
-    const curl = tick % 3;
-    parts.push(r(1 + curl, y - 1, 1, 1, P.steam, "steam1"), r(3 - curl, y - 2, 1, 1, P.steam, "steam2"));
+    // A mug in its hand by the handle, a wisp of steam curling over it.
+    parts.push(r(0, 2, 1, 1, P.rim, "handle"), r(1, 1, 3, 2, P.mug, "mug"), r(1, 1, 3, 1, P.rim, "rim"),
+      r(1 + (tick % 3), 0, 1, 1, P.steam, "steam"));
   } else if (job === "read") {
-    // An open book, a page turning now and then.
-    parts.push(r(0, 4, 3, 2, P.page, "page-l"), r(4, 4, 3, 2, P.page, "page-r"), r(3, 4, 1, 3, P.cover, "spine"), r(0, 6, 7, 1, P.cover, "cover"));
-    if (tick % 6 === 0) parts.push(r(3, 3, 2, 1, P.page, "turn"));
+    // An open book held up in its hand, a page turning now and then.
+    parts.push(r(0, 1, 3, 2, P.page, "page-l"), r(4, 1, 3, 2, P.page, "page-r"), r(3, 1, 1, 3, P.cover, "spine"), r(0, 3, 7, 1, P.cover, "cover"));
+    if (tick % 6 === 0) parts.push(r(3, 0, 2, 1, P.page, "turn"));
   }
   return <svg className="cx-pet-prop" viewBox="0 0 9 7" width={9 * PIXEL_W} height={7 * PIXEL_H} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
 }
@@ -1008,8 +1015,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     const timer = window.setInterval(() => { setStep((current) => !current); setTick((current) => current + 1); }, beat);
     return () => window.clearInterval(timer);
   }, [walking, pose.walking, job]);
-  // A spark flies on each hammer blow.
-  useEffect(() => { if (job === "build" && step && !still) float("✦", 48); }, [job, step]);
+  // The hammer's own spark marks each blow (Prop): a ✦ also rose from every one, twice a second, and
+  // with the spinner overhead Clawd looked to be setting off fireworks (the user, 2026-10-30).
   // Light code bubbles make the typing motion recognizable without replacing Clawd's original pixels.
   useEffect(() => { if (job === "laptop" && step && tick % 4 === 0 && !still) float("{}", 20); }, [job, step, tick, still]);
   // While the agent works, Claude Code's spinner turns over its head.

@@ -31,6 +31,9 @@ function launchEnvironment(base = process.env) {
 // Electron's fs treats every *.asar path as a folder; the install's app.asar is a plain file here.
 const fs = (() => { try { return require("original-fs"); } catch { return asarFs; } })();
 const {
+  JOURNAL, LAST_RESULT, recordResult, sweep: sweepAsides, writeJsonDurable,
+} = require("./app-update-worker.cjs");
+const {
   DEFAULT_UPDATE_CHECK_INTERVAL_MS, RELEASE_API_URL, compareVersions, downloadFile, downloadText,
   expectedChecksum, parseVersion, validateReleaseAssetUrl,
 } = require("./update.cjs");
@@ -278,7 +281,10 @@ function sweepUpdateLeftovers(installRoot) {
   return removed;
 }
 
-const APPLY_WAIT_MAX_MS = 10 * 60_000;
+// A live worker is waited for this long. It used to be 10 min, after which the marker was deleted
+// and the app started over files the worker was still swapping (a slow, busy disk can take longer).
+// The cap only guards against the worker's pid being reused by an unrelated process.
+const APPLY_WAIT_MAX_MS = 60 * 60_000;
 /**
  * Waits while an update worker is swapping files into the install (its `_update/applying.json`
  * names a live process), at most APPLY_WAIT_MAX_MS from when it started. A launch during the swap
@@ -299,6 +305,122 @@ async function waitForUpdateApply(installRoot, { now = Date.now, sleep = (ms) =>
   }
 }
 
+/** Starts app-update-worker.cjs under this executable as Node, detached from the app. */
+function spawnWorkerProcess(runtime, args) {
+  const env = { ...launchEnvironment(), ELECTRON_RUN_AS_NODE: "1", ELECTRON_NO_ASAR: "1" };
+  const child = spawn(runtime, args, { detached: true, stdio: "ignore", windowsHide: true, env });
+  // A refused start (antivirus, Smart App Control) is reported by the caller from the missing
+  // pid; the 'error' event that follows on the next tick must not be uncaught.
+  child.once("error", () => undefined);
+  return child;
+}
+
+/** The worker's swap journal (app-update-worker.cjs), when it is whole and stays inside this install. */
+function readJournal(installRoot) {
+  const journal = readJson(path.join(installRoot, STAGE_DIRECTORY, JOURNAL));
+  if (journal?.schema !== 1 || !Number.isSafeInteger(journal.stamp) || typeof journal.version !== "string") return null;
+  const updateRoot = path.resolve(installRoot, STAGE_DIRECTORY).toLowerCase() + path.sep;
+  const inside = (value) => typeof value === "string" && path.resolve(value).toLowerCase().startsWith(updateRoot);
+  if (typeof journal.installRoot !== "string" || path.resolve(journal.installRoot).toLowerCase() !== path.resolve(installRoot).toLowerCase()
+    || !inside(journal.stageRoot) || !inside(journal.filesRoot)
+    || !Array.isArray(journal.changed) || !Array.isArray(journal.obsolete)
+    || journal.changed.some((file) => !safeInstallPath(file?.rel)) || journal.obsolete.some((rel) => !safeInstallPath(rel))) {
+    return null;
+  }
+  return journal;
+}
+
+// A version whose files are in but which never reaches whenReady (a native crash skips start()'s
+// catch) is undone on the start after this many tries.
+const MAX_UNCOMMITTED_LAUNCHES = 3;
+// A recovery worker that keeps dying is not started again: the app starts as it is instead of never.
+const MAX_RECOVERY_ATTEMPTS = 2;
+
+/**
+ * Called at startup (and with `startFailed` from start()'s catch). Hands an update this app cannot
+ * start from to a worker that, once this process exits, finishes or undoes it and starts the app:
+ * a swap cut off midway ("swapping"), a new version that failed to start or crashed before whenReady
+ * MAX_UNCOMMITTED_LAUNCHES times, or placed files this version does not match. Returns true when a
+ * worker took over and the caller should exit. The worker is written from this app's own copy, so
+ * it is there even when the stage was lost.
+ */
+function handOffUpdateRecovery(installRoot, {
+  currentVersion, executable = process.execPath, startFailed = null, logger = null, spawnWorker = spawnWorkerProcess,
+} = {}) {
+  const journal = readJournal(installRoot);
+  if (!journal) return false;
+  const journalPath = path.join(installRoot, STAGE_DIRECTORY, JOURNAL);
+  let reason = null;
+  if (journal.state === "swapping" || journal.state === "restoring") {
+    reason = journal.state;
+  } else if (journal.state === "placed") {
+    journal.launches = (Number.isInteger(journal.launches) ? journal.launches : 0) + 1;
+    if (startFailed) reason = "start failed";
+    else if (journal.version !== currentVersion) reason = `v${currentVersion} started instead of v${journal.version}`;
+    else if (journal.launches > MAX_UNCOMMITTED_LAUNCHES) reason = `v${journal.version} did not finish starting ${journal.launches - 1} times`;
+    if (reason) {
+      recordResult(installRoot, { version: journal.version, ok: false, stage: "start", message: startFailed || reason });
+      journal.state = "restoring";
+    }
+  }
+  if (!reason) {
+    try { writeJsonDurable(journalPath, journal); } catch {}
+    return false;
+  }
+  journal.attempts = (Number.isInteger(journal.attempts) ? journal.attempts : 0) + 1;
+  if (journal.attempts > MAX_RECOVERY_ATTEMPTS) {
+    logger?.warn("launcher.app_update_recovery_abandoned", { version: journal.version, state: journal.state });
+    try { fs.rmSync(journalPath, { force: true }); } catch {}
+    return false;
+  }
+  try {
+    journal.executable = executable;
+    writeJsonDurable(journalPath, journal);
+    const workerPath = path.join(installRoot, STAGE_DIRECTORY, "recover-worker.cjs");
+    fs.writeFileSync(workerPath, asarFs.readFileSync(path.join(__dirname, "app-update-worker.cjs")));
+    const child = spawnWorker(executable, [workerPath, "--recover", journalPath, String(process.pid)]);
+    if (!Number.isInteger(child?.pid) || child.pid <= 0) throw new Error("The update recovery worker did not start");
+    child.unref?.();
+    logger?.warn("launcher.app_update_recovery", { version: journal.version, reason, pid: child.pid });
+    return true;
+  } catch (error) {
+    logger?.warn("launcher.app_update_recovery_failed", { version: journal.version, reason, message: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
+/** Whether an update to `currentVersion` was placed and is not committed yet (update-health-gate.cjs). */
+function pendingAppliedUpdate(installRoot, currentVersion) {
+  const journal = readJournal(installRoot);
+  return journal?.state === "placed" && journal.version === currentVersion;
+}
+
+/**
+ * The new version proved it works (update-health-gate.cjs): its update is kept. The old copies the
+ * worker kept for a rollback are removed (any still running wait in set-aside.json), and so is the stage.
+ */
+async function commitAppliedUpdate(installRoot, currentVersion) {
+  const journal = readJournal(installRoot);
+  if (journal?.state !== "placed" || journal.version !== currentVersion) return null;
+  const asides = [...journal.changed.map((file) => file.rel), ...journal.obsolete]
+    .map((rel) => ({ aside: `${path.join(installRoot, ...rel.split("/"))}.old-${journal.stamp}` }))
+    .filter((entry) => fs.existsSync(entry.aside));
+  const leftover = sweepAsides({ installRoot }, asides);
+  fs.rmSync(path.join(installRoot, STAGE_DIRECTORY, JOURNAL), { force: true });
+  recordResult(installRoot, { version: journal.version, ok: true, stage: "started" });
+  await fs.promises.rm(journal.stageRoot, { recursive: true, force: true }).catch(() => undefined);
+  await fs.promises.rm(path.join(installRoot, STAGE_DIRECTORY, "recover-worker.cjs"), { force: true }).catch(() => undefined);
+  return { version: journal.version, removed: asides.length - leftover, leftover };
+}
+
+/** How an update of `version` last ended, when it failed: the auto-installer backs off it. */
+async function readApplyFailure(installRoot, version) {
+  let result;
+  try { result = JSON.parse(await fs.promises.readFile(path.join(installRoot, STAGE_DIRECTORY, LAST_RESULT), "utf8")); } catch { return null; }
+  if (result?.version !== version || result.ok !== false || !Number.isInteger(result.failures) || result.failures < 1) return null;
+  return { failures: result.failures, at: Number.isFinite(result.at) ? result.at : 0, message: typeof result.message === "string" ? result.message : null };
+}
+
 function createAppUpdateController({
   currentVersion, electronVersion, platform = process.platform, arch = process.arch,
   packaged, executablePath, logsDirectory, publish, logger, closeForUpdate, closeBlocker, dependencies = {},
@@ -310,14 +432,7 @@ function createAppUpdateController({
   const deps = {
     fetchRelease: async () => JSON.parse(await downloadText(RELEASE_API_URL)),
     downloadText, downloadFile, hash: hashFile,
-    spawnWorker(runtime, worker, job) {
-      const env = { ...launchEnvironment(), ELECTRON_RUN_AS_NODE: "1", ELECTRON_NO_ASAR: "1" };
-      const child = spawn(runtime, [worker, job], { detached: true, stdio: "ignore", windowsHide: true, env });
-      // A refused start (antivirus, Smart App Control) is reported by the caller from the missing
-      // pid; the 'error' event that follows on the next tick must not be uncaught.
-      child.once("error", () => undefined);
-      return child;
-    },
+    spawnWorker: (runtime, worker, job) => spawnWorkerProcess(runtime, [worker, job]),
     ...dependencies,
   };
   let state = { status: usable ? "idle" : "disabled", kind: "app" };
@@ -354,7 +469,12 @@ function createAppUpdateController({
           },
         };
         logger?.info("launcher.app_update_available", { currentVersion, version: selected.version });
-        return transition({ status: "available", version: selected.version });
+        // A version that failed to apply says so; the auto-installer backs off it (createAutoInstaller).
+        const failure = await readApplyFailure(installRoot, selected.version);
+        return transition({
+          status: "available", version: selected.version,
+          ...(failure ? { failedAttempts: failure.failures, failedAt: failure.at, failureMessage: failure.message } : {}),
+        });
       } catch (error) {
         candidate = null;
         const message = error instanceof Error ? error.message : String(error);
@@ -392,7 +512,10 @@ function createAppUpdateController({
     });
     fs.mkdirSync(updateRoot, { recursive: true });
     // An earlier stage holds a whole update's files: removing it synchronously held the windows.
+    // The stage a pending journal names holds what finishes or undoes that update: it stays.
+    const journalStage = readJournal(installRoot)?.stageRoot;
     for (const entry of fs.readdirSync(updateRoot, { withFileTypes: true })) {
+      if (journalStage && path.resolve(updateRoot, entry.name).toLowerCase() === path.resolve(journalStage).toLowerCase()) continue;
       if (entry.isDirectory() && entry.name.startsWith("stage-")) {
         await fs.promises.rm(path.join(updateRoot, entry.name), { recursive: true, force: true });
       }
@@ -546,6 +669,18 @@ function combineUpdateControllers(appUpdates, guiUpdates) {
 const AUTO_INSTALL_IDLE_SECONDS = 10 * 60;
 const AUTO_INSTALL_POLL_MS = 60 * 1000;
 const AUTO_INSTALL_RETRY_MS = 60 * 60 * 1000;
+// A version that failed to apply (a file that can never be renamed, a start that fails) closed the
+// app, rolled back and started it again, every hour. Each failure doubles the wait from the last,
+// and after AUTO_INSTALL_FAILURE_LIMIT only the sidebar's button installs that version.
+const AUTO_INSTALL_FAILURE_LIMIT = 3;
+
+/** Whether a failed version may install by itself yet. */
+function applyFailureAllowsRetry(state, now, retryMs) {
+  const failures = Number.isInteger(state.failedAttempts) ? state.failedAttempts : 0;
+  if (failures < 1) return true;
+  if (failures >= AUTO_INSTALL_FAILURE_LIMIT) return false;
+  return now - (Number.isFinite(state.failedAt) ? state.failedAt : 0) >= retryMs * 2 ** failures;
+}
 
 function createAutoInstaller({
   controller, enabled, idleSeconds, isBusy, logger, now = Date.now,
@@ -560,7 +695,9 @@ function createAutoInstaller({
     const state = controller.getState();
     if (state.status !== "available") return false;
     if (failedAt !== null && now() - failedAt < retryMs) return false;
-    if (idleSeconds() < idleThreshold) return false;
+    if (state.kind === "app" && !applyFailureAllowsRetry(state, now(), retryMs)) return false;
+    // A function reads the Settings value each time.
+    if (idleSeconds() < (typeof idleThreshold === "function" ? idleThreshold() : idleThreshold)) return false;
     attempting = true;
     try {
       // A busy check that cannot answer counts as busy: never restart over work it could not see.
@@ -588,20 +725,25 @@ function createAutoInstaller({
 }
 
 module.exports = {
+  AUTO_INSTALL_FAILURE_LIMIT,
   AUTO_INSTALL_IDLE_SECONDS,
   INSTALLED_MANIFEST,
   SET_ASIDE_LIST,
   STAGE_DIRECTORY,
   combineUpdateControllers,
   combinedUpdateState,
+  commitAppliedUpdate,
   createAppUpdateController,
   createAutoInstaller,
   extractPack,
+  handOffUpdateRecovery,
   hashFile,
+  readJournal,
   isFrameworkFile,
   manifestAssetName,
   packAssetName,
   parseManifest,
+  pendingAppliedUpdate,
   planUpdate,
   platformTag,
   safeInstallPath,

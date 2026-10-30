@@ -4,7 +4,6 @@ require("./support/temp-dirs.cjs"); // removes the temp folders this file makes 
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
@@ -29,8 +28,15 @@ function fakeSpawn() {
   return { spawned, spawnProcess };
 }
 
+// Test files stay in the repo's aiTemp, never the system temp folder on C: (AGENTS.md).
+function testRoot() {
+  const root = path.join(__dirname, "..", "..", "aiTemp", "chat-sandbox-tests");
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
 function runner(extra = {}) {
-  const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-sandbox-"));
+  const scriptDir = fs.mkdtempSync(path.join(testRoot(), "run-"));
   const fake = fakeSpawn();
   const sandbox = createSandboxRunner({
     locate: () => ({ codex: "C:/codex/codex.exe", folder: "C:/codex" }), roots: () => ["C:/cache/npm"], scriptDir,
@@ -144,7 +150,7 @@ test("without the sandbox nothing starts, and the real locator finds nothing off
     assert.equal(spawned.length, 0);
   } finally { cleanup(); }
   assert.equal(findCodexSandbox({ platform: "linux" }), null);
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bin-"));
+  const base = fs.mkdtempSync(path.join(testRoot(), "codex-bin-"));
   try {
     const bin = path.join(base, "OpenAI", "Codex", "bin", "1.0");
     fs.mkdirSync(bin, { recursive: true });

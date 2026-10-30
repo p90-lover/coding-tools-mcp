@@ -13,6 +13,7 @@ const {
 } = require("./process-tree.cjs");
 const { runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
 const { runOffThread } = require("./off-thread-run.cjs");
+const { ExtraTunnels } = require("./extra-tunnels.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
@@ -187,6 +188,24 @@ function controlResult(code, stdout, stderr) {
     stderr: stderrText,
     output: code === 0 ? (stdoutText || stderrText) : [stderrText, stdoutText].filter(Boolean).join("\n"),
   };
+}
+
+/**
+ * A connect that gave up while its tunnel process still runs (still starting, or even ready by the
+ * time it reported): the tunnel client's own wait is shorter than a loaded machine needs. Seen live
+ * 2026-10-28 and -29: connect exited non-zero with state=starting (once state=ready, healthy=true),
+ * the app tore the tunnel down, and the watchdog started it again two minutes later, for 20 minutes.
+ */
+function tunnelStillStarting(result) {
+  const stdout = typeof result?.stdout === "string" ? result.stdout.trim() : "";
+  if (!stdout) return false;
+  try {
+    const parsed = JSON.parse(stdout);
+    const state = String(parsed.runtime_state ?? parsed.state ?? parsed.status ?? "");
+    return parsed.process_running === true && ["starting", "ready"].includes(state);
+  } catch {
+    return false;
+  }
 }
 
 function tunnelControlDiagnostic(result) {
@@ -435,7 +454,14 @@ class RuntimeSupervisor {
     getRuntimeEnvironment = () => ({}),
     persistentBridge = false,
     processInfo = windowsProcessInfo,
+    onExtraTunnelsChange,
+    // Settings → Updates: a running MCP tunnel is adopted only when this app started it with the
+    // same tunnel program it ships now (tunnelOwnerMatches). Off (the default here) adopts any ready
+    // tunnel, as before; main.cjs passes the setting.
+    reuseTunnelOnlyWhenMatching = () => false,
   }) {
+    this.reuseTunnelOnlyWhenMatching = reuseTunnelOnlyWhenMatching;
+    this.tunnelOwnerPath = path.join(coreHome, "runtime", "tunnel-owner.json");
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
@@ -479,6 +505,28 @@ class RuntimeSupervisor {
     this.persistentBridge = persistentBridge === true && launcherProfile === "production";
     // Where an older build kept that output; removed when a persistent daemon starts.
     this.daemonLogPath = path.join(coreHome, "runtime", "daemon.log");
+    // Tunnels for further ChatGPT accounts; each runs beside the main tunnel and stops with it.
+    this.extraTunnels = new ExtraTunnels({
+      coreHome,
+      logger,
+      runTunnel: (tunnel, args, timeoutMs, label) => this.runTunnelCommand({ tunnel }, args, timeoutMs, label),
+      connectArgs: (config, tunnel) => managedTunnelConnectArgs({ ...config, tunnel }, this.tunnelMcpInvocation(config)),
+      diagnostic: tunnelControlDiagnostic,
+      absent: tunnelRuntimeAbsent,
+      onChange: onExtraTunnelsChange,
+    });
+  }
+
+  /** Starts the extra tunnels in the background; a failing one never holds up the bridge. */
+  startExtraTunnels(config) {
+    if (config?.mode !== "full" || this.launcherProfile !== "production") return;
+    void this.extraTunnels.start(config);
+  }
+
+  async stopExtraTunnels(config) {
+    const failures = await this.extraTunnels.stopAll(config);
+    if (failures.length) this.logger.warn("runtime.extra_tunnels_stop_failed", { failures });
+    return failures;
   }
 
   /**
@@ -836,6 +884,7 @@ class RuntimeSupervisor {
     const daemon = this.daemon;
     this.stopping = true;
     this.stopTunnelMonitor();
+    this.extraTunnels.detach();
     for (const name of ["daemon", "tunnel"]) {
       if (this.restartTimers[name]) {
         clearTimeout(this.restartTimers[name]);
@@ -951,13 +1000,20 @@ class RuntimeSupervisor {
     // `runtimes status` performs an optional control-plane lookup when the saved runtime key is
     // available. The cleanup dry run is the official local-only inventory and never removes
     // entries without `--apply`, so proxy or control-plane failures cannot block supervision.
-    const result = await this.runTunnelCommand(
-      config,
-      ["runtimes", "cleanup", "--json"],
-      5_000,
-      "Local tunnel inventory probe",
-      { probe: true },
-    );
+    let result;
+    try {
+      result = await this.runTunnelCommand(
+        config,
+        ["runtimes", "cleanup", "--json"],
+        5_000,
+        "Local tunnel inventory probe",
+      );
+    } catch (error) {
+      // A probe that timed out (the CLI's cold start on a loaded machine) says nothing about the
+      // tunnel: the status is unknown, so the waits poll again. Thrown, one 5 s timeout made
+      // startup call this app's own runtime external and stop it (seen live 2026-10-29).
+      result = controlResult(null, "", errorMessage(error));
+    }
     if (result.code !== 0) {
       return {
         ready: false,
@@ -1133,7 +1189,6 @@ class RuntimeSupervisor {
       ["runtimes", "status", tunnel.alias, "--json"],
       5_000,
       "Local tunnel health discovery",
-      { probe: true },
     );
     if (result.code !== 0) {
       throw new Error(`Local tunnel health discovery failed: ${tunnelControlDiagnostic(result)}`);
@@ -1159,7 +1214,18 @@ class RuntimeSupervisor {
   }
 
   async waitForTunnelMcpTransport(config, timeoutMs = 10_000) {
-    if (!this.tunnelHealthBaseUrl) await this.discoverTunnelHealthBaseUrl(config);
+    // Discovery is a 5 s CLI call; on a loaded machine one call can time out right after the
+    // tunnel reported ready. Thrown at once, that tore a healthy tunnel down and the watchdog
+    // started it again two minutes later (seen live 2026-10-30 04:50). It gets its own window.
+    const discoveryDeadline = Date.now() + timeoutMs;
+    while (!this.tunnelHealthBaseUrl) {
+      try {
+        await this.discoverTunnelHealthBaseUrl(config);
+      } catch (error) {
+        if (Date.now() >= discoveryDeadline) throw error;
+        await sleep(TUNNEL_HEALTH_POLL_INTERVAL_MS);
+      }
+    }
     const deadline = Date.now() + timeoutMs;
     let health;
     do {
@@ -1322,7 +1388,14 @@ class RuntimeSupervisor {
     this.tunnelHealthBaseUrl = null;
     try {
       const existing = await this.waitForKnownTunnelStatus(config);
-      if (existing.ready && !forceRestart) {
+      const matches = !existing.ready || this.reuseTunnelOnlyWhenMatching?.() !== true
+        || this.tunnelOwnerMatches(config, existing.pid);
+      if (existing.ready && !matches) {
+        // Left running by another build (or by a version before this check): restarted, so it runs
+        // the tunnel program this version ships. A 0.8.28 bridge once ran on under 0.8.29.
+        this.logger.info("runtime.tunnel_replaced_mismatch", { pid: existing.pid });
+      }
+      if (existing.ready && matches && !forceRestart) {
         this.tunnel = {
           pid: existing.pid,
           exitCode: null,
@@ -1346,14 +1419,20 @@ class RuntimeSupervisor {
       this.tunnelHealthBaseUrl = null;
       const connected = await this.runTunnelConnectCommand(config);
       if (connected.code !== 0) {
-        throw new Error(
-          `tunnel runtime refused managed startup: ${tunnelControlDiagnostic(connected)}`,
-        );
+        if (!tunnelStillStarting(connected)) {
+          throw new Error(
+            `tunnel runtime refused managed startup: ${tunnelControlDiagnostic(connected)}`,
+          );
+        }
+        // Its process runs: wait for it here (waitForTunnel fails at once if it stops) instead of
+        // tearing down a tunnel that is about to be ready.
+        this.logger.info("runtime.tunnel_connect_slow", { detail: tunnelControlDiagnostic(connected) });
       }
       await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, operationName);
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
       await this.waitForTunnelMcpTransport(config);
       this.startTunnelMonitor(config);
+      this.recordTunnelOwner(config, this.tunnel.pid);
     } catch (error) {
       let cleanupError;
       try {
@@ -1377,18 +1456,49 @@ class RuntimeSupervisor {
     }
   }
 
-  async runTunnelConnectCommand(config) {
+  /** Which tunnel program a started tunnel runs: its size and change time (a release ships a new one). */
+  tunnelProgramSignature(config) {
+    try {
+      const stat = fs.statSync(config.tunnel.binaryPath);
+      return `${stat.size}:${Math.round(stat.mtimeMs)}`;
+    } catch {
+      return null;
+    }
+  }
+
+  recordTunnelOwner(config, pid) {
+    try {
+      writePrivateFileAtomic(this.tunnelOwnerPath, `${JSON.stringify({
+        pid, program: this.tunnelProgramSignature(config), appVersion: this.app?.getVersion?.() ?? null,
+      })}\n`);
+    } catch (error) {
+      this.logger.warn("runtime.tunnel_owner_unrecorded", { message: errorMessage(error) });
+    }
+  }
+
+  /** Whether the running tunnel `pid` is one this app started, with the tunnel program it ships now. */
+  tunnelOwnerMatches(config, pid) {
+    let owner;
+    try { owner = JSON.parse(fs.readFileSync(this.tunnelOwnerPath, "utf8")); } catch { return false; }
+    const program = this.tunnelProgramSignature(config);
+    return Boolean(program) && owner?.pid === pid && owner.program === program;
+  }
+
+  tunnelMcpInvocation(config) {
     const contract = config.browserInteractionMode === "manual" ? "safe" : "native";
-    const invocation = this.runtimeCommand([
+    return this.runtimeCommand([
       "mcp",
       "--contract",
       contract,
       "--broker-socket",
       config.brokerSocketPath,
     ]);
+  }
+
+  async runTunnelConnectCommand(config) {
     return await this.runTunnelCommand(
       config,
-      managedTunnelConnectArgs(config, invocation),
+      managedTunnelConnectArgs(config, this.tunnelMcpInvocation(config)),
       TUNNEL_START_TIMEOUT_MS,
       "Tunnel managed startup",
     );
@@ -1618,6 +1728,7 @@ class RuntimeSupervisor {
           this.tryWriteState("degraded", detail);
           this.logger.warn("runtime.tunnel_deferred", { detail });
           this.publishOperation?.({ name: "runtime-start", status: "warning", message: detail });
+          this.startExtraTunnels(config);
           return { status: "degraded", daemonPid: this.daemon?.pid, tunnelPid: null, detail };
         }
       } else {
@@ -1632,6 +1743,7 @@ class RuntimeSupervisor {
         status: "completed",
         message: tunnelOnly ? "Isolated DEV MCP runtime is ready" : "Local runtime is ready",
       });
+      this.startExtraTunnels(config);
       return { status: "ready", daemonPid: this.daemon?.pid, tunnelPid: this.tunnel?.pid };
     } catch (error) {
       this.stopping = true;
@@ -1954,123 +2066,27 @@ class RuntimeSupervisor {
     return await this.runTunnelCommand(
       config,
       ["runtimes", "stop", tunnel.alias, "--json"],
-      10_000,
+      // A graceful stop outlasted 10 s while restarts loaded the machine (2026-10-30 04:42).
+      30_000,
       "Tunnel shutdown",
     );
   }
 
   /**
-   * A tunnel CLI command's { code, stdout, stderr, output }. A `probe` (a read-only status call,
-   * made every second while the tunnel starts and on each watchdog check) starts the CLI from a
-   * worker thread: started here, an antivirus scan of the program held every window for seconds
-   * (5.5 s of a 7 s main-process stall, profiled 2026-10-29).
+   * A tunnel CLI command's { code, stdout, stderr, output }. Every one starts from a worker thread:
+   * started here, Windows holds the starting thread until the program is loaded (an antivirus scan
+   * makes that seconds). Probes alone held every window 5.5 s of a 7 s stall (profiled 2026-10-29);
+   * after the probes moved, stop and connect still blocked the main process 40 times, 20.5 s in all,
+   * up to 1.4 s each, while the tunnel restarted on 0.8.35 (launcher.main_blocked, 2026-10-30).
+   * A timeout ends the command's whole process tree and rejects with "<label> timed out after N ms".
    */
-  async runTunnelCommand(config, args, timeoutMs, label, { probe = false } = {}) {
+  async runTunnelCommand(config, args, timeoutMs, label) {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
-    if (probe) {
-      const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
-      if (reply.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
-      if (reply.error) throw new Error(reply.error);
-      return controlResult(reply.code, reply.stdout, reply.stderr);
-    }
-    return await new Promise((resolve, reject) => {
-      const child = spawn(tunnel.binaryPath, args, {
-        cwd: tunnel.profileDir,
-        detached: DETACH_OWNED_CHILD,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      });
-      const stdout = [];
-      const stderr = [];
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
-      const capture = (chunks, chunk, stream) => {
-        const used = stream === "stdout" ? stdoutBytes : stderrBytes;
-        const remaining = MAX_CONTROL_OUTPUT_BYTES - used;
-        if (remaining <= 0) return;
-        const captured = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
-        chunks.push(captured);
-        if (stream === "stdout") stdoutBytes += captured.length;
-        else stderrBytes += captured.length;
-      };
-      let settled = false;
-      let timeoutError = null;
-      let terminationTimeout = null;
-      let forceTimeout = null;
-      const clearTimers = () => {
-        clearTimeout(timeout);
-        if (terminationTimeout) clearTimeout(terminationTimeout);
-        if (forceTimeout) clearTimeout(forceTimeout);
-      };
-      const timeout = setTimeout(() => {
-        if (settled) return;
-        timeoutError = new Error(`${label} timed out after ${timeoutMs}ms`);
-        // taskkill runs without blocking the main thread; a failure rejects as before.
-        terminateOwnedProcessTreeAsync(child).then(() => {
-          if (settled) return;
-          terminationTimeout = setTimeout(() => {
-            if (settled) return;
-            terminateOwnedProcessTreeAsync(child, "SIGKILL").then(() => {
-              if (settled) return;
-              forceTimeout = setTimeout(() => {
-                if (settled) return;
-                settled = true;
-                clearTimers();
-                reject(new Error(`${timeoutError.message}; the control process did not exit after forced termination`));
-              }, 2_000);
-            }, (error) => {
-              if (settled) return;
-              settled = true;
-              clearTimers();
-              reject(new Error(
-                `${timeoutError.message}; forced control process tree termination failed: ${errorMessage(error)}`,
-              ));
-            });
-          }, 5_000);
-        }, (error) => {
-          if (settled) return;
-          settled = true;
-          clearTimers();
-          reject(new Error(
-            `${timeoutError.message}; control process tree termination failed: ${errorMessage(error)}`,
-          ));
-        });
-      }, timeoutMs);
-      child.stdout.on("data", (chunk) => capture(stdout, chunk, "stdout"));
-      child.stderr.on("data", (chunk) => capture(stderr, chunk, "stderr"));
-      const onOutputError = (stream) => (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        terminateOwnedProcessTreeAsync(child).catch(() => {});
-        reject(new Error(`${label} ${stream} pipe failed: ${errorMessage(error)}`));
-      };
-      child.stdout.once("error", onOutputError("stdout"));
-      child.stderr.once("error", onOutputError("stderr"));
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        reject(timeoutError
-          ? new Error(`${timeoutError.message}; termination failed: ${error.message}`)
-          : error);
-      });
-      child.once("exit", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        if (timeoutError) {
-          terminateOwnedProcessTreeAsync(child, "SIGKILL").then(() => reject(timeoutError), (error) => {
-            reject(new Error(
-              `${timeoutError.message}; final control process-group cleanup failed: ${errorMessage(error)}`,
-            ));
-          });
-          return;
-        }
-        resolve(controlResult(code ?? 1, Buffer.concat(stdout).toString("utf8"), Buffer.concat(stderr).toString("utf8")));
-      });
-    });
+    const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
+    if (reply.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
+    if (reply.error) throw new Error(reply.error);
+    return controlResult(reply.code, reply.stdout, reply.stderr);
   }
 
   /**
@@ -2393,6 +2409,8 @@ class RuntimeSupervisor {
     if (this.recoveryTasks.size > 0) {
       await Promise.allSettled([...this.recoveryTasks]);
     }
+    // A failure here leaves that tunnel up; the next start adopts or restarts it.
+    if (config) await this.stopExtraTunnels(config);
     let drained = false;
     let tunnelStopped = false;
     try {
@@ -2473,6 +2491,7 @@ class RuntimeSupervisor {
         }
       }
       this.tryWriteState(restoredReady ? "ready" : "failed", message);
+      if (restoredReady) this.startExtraTunnels(config);
       throw new Error(message);
     } finally {
       this.stopping = false;
@@ -2497,6 +2516,12 @@ class RuntimeSupervisor {
     try {
       if (this.recoveryTasks.size > 0) await Promise.allSettled([...this.recoveryTasks]);
       const failures = [];
+      try {
+        const config = this.readConfig();
+        if (config) failures.push(...(await this.stopExtraTunnels(config)).map(failure => `extra tunnel ${failure}`));
+      } catch (error) {
+        failures.push(`extra tunnels: ${errorMessage(error)}`);
+      }
       if (this.tunnel) {
         try {
           const config = this.readConfig();

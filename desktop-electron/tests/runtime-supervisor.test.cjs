@@ -485,14 +485,11 @@ test("tunnel control failures preserve stderr even when stdout is also present",
     assert.equal(result.stdout, "machine-readable output");
     assert.equal(result.stderr, "root failure");
     assert.equal(result.output, "root failure\nmachine-readable output");
-    // A read-only probe runs from a worker thread and answers the same way, or times out by its label.
+    // Every command (stop and connect too) runs from a worker thread and times out by its label,
+    // its process tree ended.
     const tunnel = { binaryPath: process.execPath, profileDir: root };
-    assert.deepEqual(await supervisor.runTunnelCommand({ tunnel }, [
-      "-e",
-      "process.stdout.write('machine-readable output'); process.stderr.write('root failure'); process.exit(9)",
-    ], 5_000, "Synthetic tunnel probe", { probe: true }), result);
-    await assert.rejects(supervisor.runTunnelCommand({ tunnel }, ["-e", "setInterval(() => {}, 1000)"], 300, "Synthetic tunnel probe", { probe: true }),
-      /Synthetic tunnel probe timed out after 300ms/);
+    await assert.rejects(supervisor.runTunnelCommand({ tunnel }, ["-e", "setInterval(() => {}, 1000)"], 300, "Synthetic tunnel shutdown"),
+      /Synthetic tunnel shutdown timed out after 300ms/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1158,6 +1155,59 @@ test("launcher stops an unhealthy managed runtime before reconnecting the alias"
   }
 });
 
+test("a connect that gives up while its tunnel still starts is waited out, not torn down and restarted", async () => {
+  // Seen live: on a loaded machine connect exited non-zero with state=starting, the app stopped the
+  // tunnel, and the watchdog started it again every two minutes for 20 minutes.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-slow-connect-"));
+  const binaryPath = path.join(root, "tunnel-client");
+  const runtimeKeyFile = path.join(root, "runtime.key");
+  const profileDir = path.join(root, "profiles");
+  fs.mkdirSync(profileDir, { recursive: true });
+  fs.writeFileSync(binaryPath, "binary");
+  fs.writeFileSync(runtimeKeyFile, "runtime-key");
+  fs.writeFileSync(path.join(profileDir, "codex-chatgpt-web.yaml"), "profile");
+  const config = { mode: "full", tunnel: { binaryPath, runtimeKeyFile, profileDir, profileName: "codex-chatgpt-web" } };
+  const run = async (connectState) => {
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: path.join(root, "launcher.json"),
+    });
+    const events = [];
+    let reads = 0;
+    supervisor.readTunnelHealth = async () => {
+      reads += 1;
+      // The first read is the known-status check before connecting; the tunnel is ready on the next.
+      return reads === 1
+        ? { ready: false, pid: null, statusKnown: true, absent: true, detail: "alias is not known" }
+        : { ready: true, pid: 123_456_775, statusKnown: true, detail: "state=ready" };
+    };
+    supervisor.runTunnelStopCommand = async () => { events.push("stop"); return { code: 0, output: "{}" }; };
+    supervisor.waitForTunnelStopped = async () => { events.push("stopped"); };
+    supervisor.runTunnelConnectCommand = async () => {
+      events.push("connect");
+      const stdout = JSON.stringify({ state: connectState, process_running: connectState !== "stopped", healthy: false, ready: false });
+      return { code: 1, stdout, stderr: "", output: stdout };
+    };
+    supervisor.waitForTunnelMcpTransport = async () => { events.push("mcp"); };
+    supervisor.startTunnelMonitor = () => { events.push("monitor"); };
+    const outcome = await supervisor.startTunnel(config).then(() => "started", (error) => error.message);
+    return { outcome, events, pid: supervisor.tunnel?.pid };
+  };
+  try {
+    const slow = await run("starting");
+    assert.equal(slow.outcome, "started");
+    assert.deepEqual(slow.events, ["stop", "stopped", "connect", "mcp", "monitor"], "never stopped again after connect");
+    assert.equal(slow.pid, 123_456_775, "the running tunnel is adopted");
+    const dead = await run("stopped");
+    assert.match(dead.outcome, /refused managed startup: state=stopped/, "a tunnel whose process is gone still fails at once");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("failed tunnel startup accepts an absent alias only after its recorded process has exited", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-dead-cleanup-"));
   const binaryPath = path.join(root, "tunnel-client");
@@ -1791,6 +1841,99 @@ test("stale ownership recovery stops a managed tmux runtime even though it has n
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a ready tunnel whose health discovery times out once is still verified, not torn down", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  // As on 2026-10-30 04:50: connect reported ready, then one 5 s discovery call timed out.
+  let discoveries = 0;
+  supervisor.discoverTunnelHealthBaseUrl = async () => {
+    discoveries += 1;
+    if (discoveries === 1) throw new Error("Local tunnel health discovery timed out after 5000ms");
+    supervisor.tunnelHealthBaseUrl = "http://127.0.0.1:43123";
+    return supervisor.tunnelHealthBaseUrl;
+  };
+  supervisor.probeTunnelMcpTransport = async () => ({ observed: true, ok: true, fatal: false, detail: "ok" });
+  const health = await supervisor.waitForTunnelMcpTransport({ tunnel: { alias: "codex-chatgpt-web" } });
+  assert.equal(health.ok, true);
+  assert.equal(discoveries, 2);
+});
+
+test("health discovery that never answers still fails with its own reason", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  supervisor.discoverTunnelHealthBaseUrl = async () => {
+    throw new Error("Local tunnel health discovery timed out after 5000ms");
+  };
+  await assert.rejects(
+    supervisor.waitForTunnelMcpTransport({ tunnel: { alias: "codex-chatgpt-web" } }, 1_500),
+    /Local tunnel health discovery timed out after 5000ms/,
+  );
+});
+
+test("one timed-out inventory probe is polled again, not taken as an external owner", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-slow-inventory-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  fs.writeFileSync(supervisor.statePath, `${JSON.stringify({
+    version: 1,
+    ownerPid: 999_999_999,
+    daemonPid: null,
+    tunnelPid: null,
+    status: "ready",
+    updatedAt: new Date().toISOString(),
+  })}\n`);
+  supervisor.proxyHealthPayload = async () => null;
+  // As on 2026-10-29 00:58: the CLI's cold start on a loaded machine outlasts the 5 s probe once.
+  const probes = [];
+  supervisor.runTunnelCommand = async (_config, args, timeoutMs, label) => {
+    probes.push(args.join(" "));
+    if (probes.length === 1) throw new Error(`${label} timed out after ${timeoutMs}ms`);
+    const inventory = JSON.stringify({ entries: [] });
+    return { code: 0, stdout: inventory, stderr: "", output: inventory };
+  };
+  assert.equal(await supervisor.stopStaleOwnedRuntime({
+    mode: "full",
+    tunnel: { alias: "codex-chatgpt-web" },
+  }), true);
+  assert.deepEqual(probes, ["runtimes cleanup --json", "runtimes cleanup --json"]);
+  assert.equal(fs.existsSync(supervisor.statePath), false);
+});
+
+test("a timed-out inventory probe reads as unknown status with its reason", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  supervisor.runTunnelCommand = async (_config, _args, timeoutMs, label) => {
+    throw new Error(`${label} timed out after ${timeoutMs}ms`);
+  };
+  const health = await supervisor.readTunnelHealth({ tunnel: { alias: "codex-chatgpt-web" } });
+  assert.equal(health.statusKnown, false);
+  assert.equal(health.ready, false);
+  assert.equal(health.absent, false);
+  assert.match(health.detail, /Local tunnel inventory probe timed out after 5000ms/);
 });
 
 for (const [label, content] of [["empty", Buffer.alloc(0)], ["zero-filled", Buffer.alloc(179)]]) {

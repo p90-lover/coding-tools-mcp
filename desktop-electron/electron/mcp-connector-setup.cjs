@@ -25,6 +25,19 @@ function currentConnectorSettings(runtimeHost) {
   };
 }
 
+// An extra tunnel's connector: the same connector name, in the ChatGPT account that owns the tunnel.
+function extraConnectorSettings(runtimeHost, tunnelId) {
+  if (typeof tunnelId !== "string" || !/^tunnel_[a-f0-9]{32}$/.test(tunnelId)) {
+    throw new Error("The tunnel has no valid tunnel ID.");
+  }
+  return {
+    name: validateConnectorName(runtimeHost.mcpConnectorName()),
+    tunnelId,
+    transport: "tunnel",
+    authentication: "none",
+  };
+}
+
 function extensionHelpersSource() {
   const source = fs.readFileSync(path.join(__dirname, "extensions", "fast-access", "content.js"), "utf8");
   const boundary = source.indexOf("  // Test seam.");
@@ -180,10 +193,18 @@ function extensionHelpersSource() {
 })();`;
 }
 
-async function createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost }) {
-  const settings = currentConnectorSettings(runtimeHost);
+/**
+ * Creates the ChatGPT connector for the main tunnel, or with `target` ({ tunnelId, partition }) for
+ * an extra tunnel in its account's browser partition; the caller records an extra tunnel's connector.
+ */
+async function createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost, target }) {
+  const settings = target
+    ? extraConnectorSettings(runtimeHost, target.tunnelId)
+    : currentConnectorSettings(runtimeHost);
+  const partition = target?.partition ?? browserHost.partition;
   return browserHost.withManualOperation("MCP connector creation", async () => {
-    if (!(await browserHost.probeAuthentication()).authenticated) {
+    // Another account's sign-in is checked by the page itself: the Plugins page will not load.
+    if (partition === browserHost.partition && !(await browserHost.probeAuthentication()).authenticated) {
       throw new Error("Complete ChatGPT verification in Coding Tools Browser before creating its connector.");
     }
     const popup = new BrowserWindow({
@@ -191,7 +212,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       width: 960,
       height: 720,
       webPreferences: {
-        partition: browserHost.partition,
+        partition,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -223,7 +244,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         throw new Error("ChatGPT returned an invalid connector identity.");
       }
       const href = url.pathname + url.search;
-      if (result.created) {
+      if (result.created && !target) {
         writePrivateFileAtomic(path.join(app.getPath("userData"), "mcp-connector-binding.json"),
           JSON.stringify({ version: 1, name: settings.name, tunnelId: settings.tunnelId, href }));
       }
@@ -238,4 +259,4 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
   });
 }
 
-module.exports = { createConfiguredConnector, currentConnectorSettings, extensionHelpersSource };
+module.exports = { createConfiguredConnector, currentConnectorSettings, extensionHelpersSource, extraConnectorSettings };

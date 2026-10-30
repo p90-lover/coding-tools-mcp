@@ -6,9 +6,12 @@ const os = require("node:os");
 const path = require("node:path");
 const {
   SESSION_REFRESH_REMINDER_INTERVAL_MS,
+  UPDATE_SETTINGS,
   createStateStore,
   nextSessionRefreshReminderAt,
+  resolveUpdateSettings,
   validateSidebarState,
+  validateUpdateSettingsPatch,
 } = require("../electron/state.cjs");
 
 test("launcher state persists onboarding, language, and autostart atomically", () => {
@@ -202,6 +205,41 @@ test("saved chats default on for new and older state and keep an explicit opt-ou
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("update settings default safe, keep valid choices, and drop invalid stored values", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-update-settings-"));
+  const file = path.join(root, "state.json");
+  try {
+    const defaults = {
+      updateWaitForChats: true, updateIdleMinutes: 10, updateAutoRollback: true, updateHealthMinutes: 10, updateReuseMatchingOnly: true,
+    };
+    // Absent (older state) reads as the defaults, and nothing is written for them.
+    assert.deepEqual(resolveUpdateSettings(createStateStore(file).read()), defaults);
+    assert.equal(Object.hasOwn(createStateStore(file).read(), "updateIdleMinutes"), false);
+    const store = createStateStore(file);
+    store.update(validateUpdateSettingsPatch({ updateIdleMinutes: 0, updateAutoRollback: false }));
+    assert.deepEqual(resolveUpdateSettings(createStateStore(file).read()),
+      { ...defaults, updateIdleMinutes: 0, updateAutoRollback: false });
+    // A hand-edited or torn value is dropped back to its default, not trusted.
+    fs.writeFileSync(file, JSON.stringify({ version: 1, updateHealthMinutes: 1, updateWaitForChats: "yes", updateIdleMinutes: 5 }));
+    const repaired = createStateStore(file).read();
+    assert.equal(Object.hasOwn(repaired, "updateHealthMinutes"), false);
+    assert.deepEqual(resolveUpdateSettings(repaired), { ...defaults, updateIdleMinutes: 5 });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a Settings change to update settings is checked key by key", () => {
+  assert.deepEqual(validateUpdateSettingsPatch({ updateHealthMinutes: 60 }), { updateHealthMinutes: 60 });
+  assert.throws(() => validateUpdateSettingsPatch({ updateHealthMinutes: 61 }), /from 2 to 60/);
+  assert.throws(() => validateUpdateSettingsPatch({ updateIdleMinutes: 2.5 }), /whole number/);
+  assert.throws(() => validateUpdateSettingsPatch({ updateWaitForChats: 1 }), /true or false/);
+  assert.throws(() => validateUpdateSettingsPatch({ automaticUpdates: false }), /Unknown update setting/);
+  assert.throws(() => validateUpdateSettingsPatch({}), /No update setting/);
+  assert.throws(() => validateUpdateSettingsPatch(null), /must be an object/);
+  assert.equal(UPDATE_SETTINGS.updateIdleMinutes.max, 120);
 });
 
 test("session refresh reminders are deferred by exactly 48 hours", () => {

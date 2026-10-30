@@ -30,5 +30,6 @@ test("the quit writes it only when the bridge was kept, and the new app's descri
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   assert.match(main, /if \(detached\?\.status !== "detached"\) await runtimeSupervisor\?\.shutdown[^\n]*\n\s*else \{[\s\S]{0,400}writeRestartMarker\(BROWSER_DESCRIPTOR_PATH/);
   const host = fs.readFileSync(path.join(__dirname, "../electron/browser-host.cjs"), "utf8");
-  assert.match(host, /writePrivateFileAtomic\(this\.descriptorPath[^\n]*\n[^\n]*\n\s*try \{ fs\.rmSync\(restartMarkerPath\(this\.descriptorPath\)/);
+  // The marker goes right after the descriptor is written (a line or two of bookkeeping and comment between).
+  assert.match(host, /writePrivateFileAtomic\(this\.descriptorPath[^\n]*\n(?:[^\n]*\n){1,3}\s*try \{ fs\.rmSync\(restartMarkerPath\(this\.descriptorPath\)/);
 });

@@ -392,14 +392,21 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   const previous = `${destination}.previous-${process.pid}-${Date.now()}`;
   let previousMoved = false;
   try {
-    fs.cpSync(source, temporary, {
-      recursive: true,
-      errorOnExist: true,
-      force: false,
-      verbatimSymlinks: true,
-      // Not a file an update set aside because something still ran it.
-      filter: (from) => !SET_ASIDE_FILE.test(path.basename(from)),
-    });
+    try {
+      fs.cpSync(source, temporary, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        verbatimSymlinks: true,
+        // Not a file an update set aside because something still ran it.
+        filter: (from) => !SET_ASIDE_FILE.test(path.basename(from)),
+      });
+    } catch (error) {
+      // A full disk stopped the app at every start ("ENOSPC ... copyfile"). The packaged copy was
+      // just checked whole: this session runs from it, and a later start copies it again.
+      if (error?.code === "ENOSPC") return sourceBundle.runtimeRoot;
+      throw error;
+    }
     validateRuntimeBundle(temporary, expectedIdentity, verify);
     if (fs.existsSync(destination)) {
       try {
@@ -467,10 +474,13 @@ async function pruneOldRuntimes({ app, coreHome, now = Date.now(), keepOthers = 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const name = entry.name;
-    if (name === current || name.startsWith(`${current}-`) || name.startsWith(`${current}.`)) continue;
+    const leftover = /\.(tmp|previous|retired)-/.test(name);
+    // This version's own leftovers go too (a copy cut off by a full disk is 165 MB); its copy and
+    // a same-version side bundle stay.
+    if (!leftover && (name === current || name.startsWith(`${current}-`))) continue;
     let mtimeMs;
     try { mtimeMs = fs.statSync(path.join(versionsRoot, name)).mtimeMs; } catch { continue; }
-    if (/\.(tmp|previous|retired)-/.test(name)) {
+    if (leftover) {
       if (now - mtimeMs > STALE_RUNTIME_TEMP_MS) doomed.push(name);
     } else if (/-(win32|darwin|linux)-[a-z0-9]+$/.test(name)) {
       others.push({ name, mtimeMs });

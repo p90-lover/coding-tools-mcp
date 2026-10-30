@@ -9,6 +9,8 @@ const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs")
 const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
+const { userMessages } = require("./chat-history.cjs");
+const { createModelScoreStore, gradePrompt, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
 
@@ -238,6 +240,20 @@ function quotaResets(error) {
   const when = /resets? (in [0-9][0-9dhms ]*[dhms]|at [^.\n]{1,40})/i.exec(String(error || ""))?.[1];
   return when ? ` (it resets ${when.trim()})` : "";
 }
+/**
+ * The provider refused the request itself (Claude Code's "API Error: 400 …", or 404 / 422): a region
+ * or privacy setting, a model the account may not use, a request it cannot take. The same request
+ * gets the same answer (seen 2026-10-29: OpenCode Go's "This Go model requires Global regions. Select
+ * Global in your workspace's Privacy settings" was retried eight times a round, round after round,
+ * and the chat counted over a thousand refused requests), so nothing retries it and a goal pauses on
+ * it. A 429 (a model cooling down) and a 5xx are not refusals: a later retry gets through those.
+ */
+const REQUEST_REFUSED = /API Error: (?:400|404|422)\b/i;
+/** The provider's own reason from a refused request ("400: This Go model requires …"), for a note. */
+function refusedReason(error) {
+  const text = String(error || "").replace(/^[\s\S]*?API Error: (\d{3})\s*/i, "$1: ").replace(/Upstream request failed:\s*/i, "");
+  return text.replace(/\s+/g, " ").trim().slice(0, 200);
+}
 
 const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
 const REVIEW_SCRIPT_BYTES = 4000;
@@ -324,7 +340,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
   // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
   // working chat's activity poll, the run loop and their per-node checks each read the same run
   // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
@@ -349,6 +365,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const chatEdits = createChatEditStore({ file: chatEditsFile });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
   const archive = createChatArchiveStore({ file: archiveFile, now });
+  // Points per model from finished Team rounds, for the model picker (model-scores.cjs).
+  const modelScores = createModelScoreStore({ file: modelScoresFile, logger });
   /** After a message was deleted the agent's session still remembers it, so the chat's next turn must not continue it. */
   const freshSessionRequired = (workspaceId, taskId) => Boolean(taskId) && chatEdits.fresh(workspaceId, taskId);
   // A saved path goes stale when the Codex app updates itself (it replaces bin\<build>\), so a
@@ -378,6 +396,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (["finished", "failed"].includes(state.status)) void wakeupAfterRun(workspaceId, runId).catch(() => undefined);
     // A /loop round that came due while its chat worked runs now; a self-paced one that scheduled nothing ends.
     if (["finished", "failed"].includes(state.status)) void loopAfterRun(workspaceId, runId).catch(() => undefined);
+    // A Team round that ended by itself scores the models it ran on; one the person stopped does not.
+    // Only the drive loop's own settling passes the mission: a run that could not start, or whose
+    // loop broke, is reported without one and is not real work to score. A Single round costs no read.
+    if (mission && mission.execution_mode !== "single" && state.settled && !state.stopped && ["finished", "failed"].includes(state.status)) {
+      void scoreAfterRun(workspaceId, runId, state.status).catch((error) => logger?.warn?.("ao.model_score_failed", { runId, message: publicText(error?.message || error, 200) }));
+    }
     if (!onRunState) return;
     try {
       onRunState({
@@ -475,7 +499,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // A level the model does not take runs at its nearest one instead of failing every request: one
     // kept from another model ("medium" moved to DeepSeek V4.1 Flash, which takes none/low/high/max;
     // "none" to MiMo or GLM) was refused with a 400, and the chat's launch looked stuck.
-    const takes = viaCpa && CLINE_EFFORTS.get(baseModel);
+    // Any CPA model whose levels the catalog reported counts too (CPA refuses an unlisted level up
+    // front: "level \"medium\" not supported" on OpenCode Go's GLM 5.3 Flash, which takes low/high/max);
+    // one that reported none runs at its own effort.
+    const reported = viaCpa ? knownModels[baseModel]?.capability?.efforts : null;
+    const takes = viaCpa && (CLINE_EFFORTS.get(baseModel) ?? (Array.isArray(reported) ? reported : null));
     if (effort && takes && !takes.includes(effort)) {
       const fitted = nearestEffort(effort, takes);
       logger?.info?.("ao.effort_fitted", { model: baseModel.slice(0, 120), effort, fitted: fitted || "auto" });
@@ -660,6 +688,19 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (!sessionStops.has(session)) return usable;
     }
   }
+  // A pre-warm's check, which brings back an agent released while idle, runs one at a time. Several
+  // chats opening together (split panes, restored tabs) resumed each one's agent at once: AO answers
+  // a resume only when the agent is up, all through its one database writer, and on the busy disk
+  // all four hit the 90 s limit together and stayed half-restored (seen live 2026-10-29, four chats
+  // at 12:29:01, four "restore unconfirmed" at 12:30:31). A message sent meanwhile still checks its
+  // own chat at once; the queued pre-warm then finds that agent live.
+  let prewarmChecks = Promise.resolve();
+  function prewarmCheck(session) {
+    const check = () => continuableSession(session);
+    const turn = prewarmChecks.then(check, check);
+    prewarmChecks = turn.catch(() => undefined);
+    return turn;
+  }
   /** Hands the ready warm session for this route to a launch, or null. */
   async function takeWarm(workspaceId, route, plain) {
     const key = warmKey(workspaceId, route, plain);
@@ -766,7 +807,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // the launch on a busy machine, and the launch timed out while the spare one came up.
       if (previous && !previous.cancelled && !runSettled(previous)) return { ok: true, warmed: false, reason: "The chat's run is starting" };
       const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
-      if (live && await continuableSession(live.receipt.thread_id)) {
+      if (live && await prewarmCheck(live.receipt.thread_id)) {
         return { ok: true, warmed: false, continues: true };
       }
       return chatPrewarmRoute(id, singleRoute, true);
@@ -2974,10 +3015,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // answered 502 for every model, and each goal check spent its three places on three of them.
   const providerDown = new Map(); // "cline-pass" -> until
   const modelProvider = model => /^([^/]+)\//.exec(String(model))?.[1] ?? "";
+  // A model whose quota is used up stays out until its stated reset, or MODEL_GONE_MS when none is
+  // given: seen live 2026-10-29, the Anthropic API key behind "Claude Haiku 4.5/5.5" answered 400
+  // "You have reached your specified API usage limits. You will regain access on 2026-11-01", and
+  // every goal check tried both first again ten minutes later. Never past a week.
+  const QUOTA_BENCH_MAX_MS = 7 * 86_400_000;
   const reviewerFailed = (model, error) => {
-    reviewerDown.set(model, now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
-    if (error?.status !== 404 && modelProvider(model)) providerDown.set(modelProvider(model), now() + REVIEWER_DOWN_MS);
+    const until = error?.quotaResetAt > now() ? Math.min(error.quotaResetAt, now() + QUOTA_BENCH_MAX_MS) : now() + MODEL_GONE_MS;
+    reviewerDown.set(model, error?.quota ? until : now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
+    if (error?.status !== 404 && !error?.quota && modelProvider(model)) providerDown.set(modelProvider(model), now() + REVIEWER_DOWN_MS);
   };
+  /**
+   * The error for a model call CPA refused: its status, and whether the answer says the model's
+   * quota is used up (an API key's spend limit comes back as 400, not 429) with the reset it names.
+   */
+  async function modelCallFailure(response, message) {
+    // A 429 alone may be a short rate limit; only the answer's words say the quota is gone.
+    const text = typeof response.text === "function" ? await response.text().then(body => String(body).slice(0, 2000), () => "") : "";
+    const quota = QUOTA_EXHAUSTED.test(text);
+    const reset = /regain access on (\d{4}-\d{2}-\d{2})(?: at (\d{2}:\d{2}) UTC)?/i.exec(text);
+    const quotaResetAt = reset ? Date.parse(`${reset[1]}T${reset[2] ?? "00:00"}:00Z`) : 0;
+    return Object.assign(new Error(quota ? `${message} (its quota is used up${reset ? ` until ${reset[1]}` : ""})` : message),
+      { status: response.status, quota, quotaResetAt });
+  }
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
   // request goes to the person: one 502 from the card's model put a routine command in front of
   // them while the very next review answered.
@@ -3129,12 +3189,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
           // Codex's policy first, then this request (Codex puts the policy in the session's developer message).
-          body: JSON.stringify({ model, temperature: 0, max_tokens: 400,
+          // Room for a reasoning model to think first: at 400 a fallback reviewer (OpenCode Go's GPT-6
+          // Luna spends ~250 tokens thinking on a short request) ran out before its answer and
+          // returned nothing, "Unexpected end of JSON input" three times over, and the request went
+          // to the person. The answer itself is one short JSON line.
+          body: JSON.stringify({ model, temperature: 0, max_tokens: 2000,
             messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }),
           signal: AbortSignal.timeout(left),
         });
-        if (!response.ok) throw Object.assign(new Error(`Command approver ${model} returned HTTP ${response.status}`), { status: response.status });
-        const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
+        if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
+        const choice = (await response.json())?.choices?.[0];
+        const text = String(choice?.message?.content ?? "");
+        if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
         const decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
@@ -3505,6 +3571,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (QUOTA_EXHAUSTED.test(error)) return { detail: `The model's quota is used up${quotaResets(error)}. Choose another model, or retry once it resets.` };
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
     if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
+    if (REQUEST_REFUSED.test(error)) return { detail: `The provider refused this request (${refusedReason(error)}). Change that, or choose another model, since retrying won't fix it.` };
     const attempt = (node.history?.length ?? 0) + 1;
     if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried ${AUTO_RETRY_LIMIT} times. Check the saved answer, then retry.` };
     const key = `${mission.id}:${node.id}:${attempt}`;
@@ -3528,7 +3595,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
     const error = String(node?.receipt?.error || "");
-    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && !REQUEST_REFUSED.test(error)
+      && !pickedModelSince(mission) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+  }
+  /**
+   * The model the person picked for the chat's goal (chat_goal "route") since this single-model round
+   * started on another one, or "". A retry runs the round's card again on the model it started with,
+   * so a chat moved off a spent Cline Pass kept asking Cline for each of the round's eight automatic
+   * attempts (seen 2026-10-29). Such a round is not retried: the goal's next round runs on the pick.
+   */
+  function pickedModelSince(mission) {
+    if (!mission?.project_id || mission.execution_mode !== "single" || mission.cancelled) return "";
+    const goal = goals.get(mission.workspace_id, mission.project_id);
+    const picked = goal?.status === "active" && !goal.team?.id ? String(goal.route?.model || "") : "";
+    const card = mission.nodes?.find(node => node.role !== "retry");
+    return picked && card?.route?.model && card.route.model !== picked ? picked : "";
   }
   // A step that failed because the way out was down for a moment: the local proxy every CPA model
   // and the ChatGPT browser go through (seen live: ProxyBridge restarted, and for three minutes CPA
@@ -3587,6 +3668,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const retired = forgetRetiredModel(String(node.receipt?.error || ""));
       if (retired) logger?.info?.("cpa.model_retired", { model: retired });
     }
+    // Another model was picked for the goal since this round started: no retry of any kind runs the
+    // old one again. The round settles here, and its goal starts the next round on the pick.
+    const picked = pickedModelSince(mission);
+    if (picked) return { detail: `Moved to ${picked}; the goal's next round runs on it` };
     // A sign-in or account-pool failure (some arrive as a 5xx) is the person's, never a lost connection.
     const outage = chatPreferences.get().autoRetry
       ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))
@@ -4839,7 +4924,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         });
         // A model CPA lists can still refuse (seen live 2026-10-23: HTTP 404, and the goal stalled);
         // the note names it.
-        if (!response.ok) throw Object.assign(new Error(`the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`), { status: response.status });
+        if (!response.ok) throw await modelCallFailure(response, `the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
         const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
         logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
         return { ...check, model };
@@ -4937,6 +5022,76 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   const judged = (goal, runId, outcome) => goal.evaluatedRunId === runId
     && (outcome !== "finished" || (goal.evaluatedAs ?? (goal.checkedAt ? "checked" : "stalled")) === "checked");
+
+  const scoring = new Set();
+  /** The user's message a run answered: runs that answer a new message take the task's messages in order; a restart or replacement answers its original's. */
+  function runMessage(description, taskRuns, run) {
+    const said = userMessages(description);
+    const fresh = taskRuns.filter(entry => !entry.replaces_run_id && !entry.restarts_run_id);
+    let origin = run;
+    for (let hops = 0; origin && (origin.replaces_run_id || origin.restarts_run_id) && hops < 20; hops += 1) {
+      const previous = origin.replaces_run_id || origin.restarts_run_id;
+      origin = taskRuns.find(entry => entry.id === previous);
+    }
+    const index = origin ? fresh.findIndex(entry => entry.id === origin.id) : -1;
+    return (index >= 0 ? said[index] : said.at(-1))?.text ?? "";
+  }
+  /** One grade of a Team round by a free model (as checkGoal picks them); null when none answered. */
+  async function gradeRound(message, mission) {
+    const cards = scoredCards(mission, error => QUOTA_EXHAUSTED.test(error) || REQUEST_REFUSED.test(error));
+    const { baseUrl, key } = connection();
+    const catalog = await models();
+    const prompt = gradePrompt(message, mission, cards);
+    for (const model of freeModels(catalog.models ?? [], catalog.hidden ?? [])) {
+      try {
+        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model, temperature: 0, max_tokens: 900, messages: [{ role: "user", content: prompt }] }),
+          signal: AbortSignal.timeout(90_000),
+        });
+        if (!response.ok) throw await modelCallFailure(response, `the grader returned HTTP ${response.status} for ${publicText(model, 80)}`);
+        return { grade: parseGrade((await response.json())?.choices?.[0]?.message?.content, cards.length), grader: model };
+      } catch (error) {
+        reviewerFailed(model, error);
+        logger?.warn?.("ao.model_grade_failed", { model, message: publicText(error?.message || error, 200) });
+      }
+    }
+    return { grade: null, grader: null };
+  }
+  /**
+   * A Team round that settled by itself scores every model it ran on (model-scores.cjs), once. Single
+   * chats, stopped rounds and steps that failed on quota or a refused request are not scored: only
+   * real Team work says how a model does in a role.
+   */
+  async function scoreAfterRun(workspaceId, runId, outcome) {
+    const guard = runKey(workspaceId, runId);
+    if (scoring.has(guard) || modelScores.has(runId)) return;
+    scoring.add(guard);
+    try {
+      const saved = await runs({ workspaceId });
+      const mission = saved.runs.find(run => run.id === runId && run.workspace_id === workspaceId);
+      if (!mission || mission.cancelled || mission.execution_mode === "single" || !mission.project_id) return;
+      const excluded = error => QUOTA_EXHAUSTED.test(error) || REQUEST_REFUSED.test(error);
+      if (!scoredCards(mission, excluded).length) return;
+      const detail = await board({ workspaceId, taskId: mission.project_id }).catch(() => null);
+      const message = runMessage(detail?.task?.description ?? "", saved.runs.filter(run => run.project_id === mission.project_id), mission);
+      const { grade, grader } = await gradeRound(message, mission).catch(() => ({ grade: null, grader: null }));
+      const record = scoreRound({ mission, message, outcome, grade, grader, at: new Date(now()).toISOString(), excluded });
+      if (!record) return;
+      modelScores.add(record);
+      logger?.info?.("ao.model_scored", { runId, outcome, grader, categories: record.categories, cards: record.cards.length });
+    } finally {
+      scoring.delete(guard);
+    }
+  }
+  /** The score log summarised for the picker and the scores page: per model, and per role when `role` is given. */
+  function modelScoreSummary({ role = null, window, limit = 50 } = {}) {
+    const records = modelScores.records();
+    const summary = summarize(records, { role: typeof role === "string" && role ? role : null, ...(Number.isSafeInteger(window) && window > 0 ? { window } : {}) });
+    const count = Math.max(0, Math.min(200, Number.isSafeInteger(limit) ? limit : 50));
+    return { ok: true, summary, recent: count ? records.slice(-count).reverse() : [], total: records.length };
+  }
   /**
    * When a chat's latest round has settled, its goal is achieved, stalled, limited, paused, or goes
    * another round. `outcome` is how the round ended: "finished", "failed", "held" (it ended needing
@@ -4964,13 +5119,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // retried after it was the chat's live turn, and its settling was never judged.
       const latest = saved.runs.filter(run => run.project_id === task && (!run.cancelled || run.id === runId)).at(-1);
       if (latest?.id !== runId) return;
+      // A round that failed (or was held) on a model the person has since moved the goal off: its
+      // failure is the old model's, so it is not counted or judged, and the next round starts now on
+      // the pick (recoverHeld stopped retrying it). It kept failing on Cline Pass otherwise.
+      if (outcome !== "stopped" && outcome !== "finished" && pickedModelSince(mission)) {
+        goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "stalled", note: "" });
+        await continueGoal(workspaceId, task, goals.get(workspaceId, task), mission);
+        return;
+      }
       // The model's quota used up, after CPA's own retries across every account: the next round
       // would fail the same way (rounds of three failed attempts each, seen 2026-10-28), so the goal
-      // pauses until the person switches model or the quota resets.
-      const spent = outcome === "stopped" ? "" : mission.nodes.map(node => String(node.receipt?.error || "")).find(error => QUOTA_EXHAUSTED.test(error));
+      // pauses until the person switches model or the quota resets. A request the provider refused
+      // (a region or privacy setting, see REQUEST_REFUSED) pauses it the same way.
+      const errors = outcome === "stopped" ? [] : mission.nodes.map(node => String(node.receipt?.error || ""));
+      const spent = errors.find(error => QUOTA_EXHAUSTED.test(error));
       if (spent) {
         goals.update(workspaceId, task, { status: "paused", evaluatedRunId: runId, evaluatedAs: "stalled",
           note: `Paused: the model's quota is used up${quotaResets(spent)}. Switch model, then /goal resume` });
+        return;
+      }
+      const refused = errors.find(error => REQUEST_REFUSED.test(error));
+      if (refused) {
+        goals.update(workspaceId, task, { status: "paused", evaluatedRunId: runId, evaluatedAs: "stalled",
+          note: `Paused: the provider refused the request (${refusedReason(refused)}). Fix that or switch model, then /goal resume` });
         return;
       }
       // A round held only because the app restarted under it, or one "Retry automatically" runs
@@ -6190,7 +6361,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "board": return board(args);
       // The person's name wins over an agent's rename_chat still waiting on a team round.
       case "task_rename": waitingTitles.delete(titleKey(String(args?.workspaceId ?? "").trim(), String(args?.taskId ?? "").trim())); return taskRename(args);
-      case "models": return models(args);
+      // Each model's points from finished Team rounds ride along, for the picker's hint.
+      case "models": {
+        const catalog = await models(args);
+        try { return { ...catalog, scores: pickerHints(summarize(modelScores.records())) }; } catch { return catalog; }
+      }
+      case "model_scores": return modelScoreSummary(args);
+      case "model_scores_clear": modelScores.clear(); return { ok: true };
       case "harnesses": return harnesses();
       // Runtime > Subagents (subagents.cjs): its settings and subagents, and the ones running now.
       case "subagents_config": return { ok: true, available: Boolean(subagents), ...(subagents ? subagents.config() : {}) };
@@ -6337,7 +6514,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
   restoreLoops();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
+  /** Resolves once every goal change so far is on disk (saves run off the main thread). */
+  const goalsSaved = () => goals.saved();
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, goalAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

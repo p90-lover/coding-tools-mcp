@@ -17,7 +17,8 @@ export const CLAWD_BODY = "#d77757";
 export const CLAWD_BACKGROUND = "#000000";
 
 export type Eyes = "open" | "left" | "right" | "closed" | "wink";
-export type Arms = "down" | "up" | "one-up";
+/** `one-up` raises its right arm (the one on the viewer's right), `left-up` its left: the hand holding a tool. */
+export type Arms = "down" | "up" | "one-up" | "left-up";
 export type Feet = "both" | "left" | "right";
 export type Facing = "right-12" | "right-30" | "right-55" | "right-75" | "edge" | "back-105" | "back-125" | "back-150" | "back"
   | "left-75" | "left-55" | "left-30" | "left-12";
@@ -35,6 +36,8 @@ const ARMS: Record<Arms, { r1L: string; r1R: string; r2L: string; r2R: string }>
   down: { r1L: " ▐", r1R: "", r2L: "▝▜", r2R: "█▀" },
   up: { r1L: "▗▟", r1R: "▄", r2L: " ▜", r2R: "█▘" },
   "one-up": { r1L: " ▐", r1R: "▄", r2L: "▝▜", r2R: "█▘" },
+  // The CLI's raised left arm with its right one down.
+  "left-up": { r1L: "▗▟", r1R: "", r2L: " ▜", r2R: "█▀" },
 };
 const EYES: Record<Eyes, { glyphs: string; lid?: boolean }[]> = {
   open: [{ glyphs: "▛███▛█" }],

@@ -17,7 +17,7 @@ function load(file, imports = {}) {
   return exports;
 }
 const chat = load("ao-chat.ts");
-const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat });
+const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat, "./model-scores": load("model-scores.ts") });
 const markdown = load("ChatMarkdown.tsx", { "./chat-markdown": load("chat-markdown.ts") });
 const menu = load("ChatMenu.tsx");
 const client = { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) };
@@ -382,6 +382,35 @@ test("an answer's Markdown is parsed once per text, not on every chat re-render"
   assert.equal(parses, 1);
 });
 
+test("an approval card that arrives while the window is hidden takes focus only once it is shown", () => {
+  const { focusWhenShown } = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  const page = (visibilityState) => {
+    const listeners = new Set();
+    return { visibilityState, listeners, addEventListener: (_type, fn) => listeners.add(fn), removeEventListener: (_type, fn) => listeners.delete(fn),
+      show(state = "visible") { this.visibilityState = state; for (const fn of [...listeners]) fn(); } };
+  };
+  let focused = 0;
+  focusWhenShown(page("visible"), () => focused++);
+  assert.equal(focused, 1, "a shown window focuses at once");
+
+  focused = 0;
+  const hidden = page("hidden");
+  focusWhenShown(hidden, () => focused++);
+  assert.equal(focused, 0, "no restyle of a page nobody sees");
+  hidden.show("hidden");
+  assert.equal(focused, 0);
+  hidden.show();
+  hidden.show();
+  assert.equal(focused, 1, "focused once when shown");
+  assert.equal(hidden.listeners.size, 0);
+
+  const gone = page("hidden");
+  const cleanup = focusWhenShown(gone, () => focused++);
+  cleanup();
+  gone.show();
+  assert.equal(focused, 1, "a card answered or removed while hidden never takes focus");
+});
+
 test("an AO agent's question and tool request show as Codex's cards: numbered options; a tool request's answer is one click", () => {
   const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
   const question = { nodeId: "one", approval_id: "ask", source: "ao", kind: "question", message: "Please answer the following questions.",
@@ -652,6 +681,37 @@ test("the pet is Claude Code's Clawd: the CLI's glyphs, poses and frame-by-frame
   const html = renderToStaticMarkup(React.createElement(pet.ChatPet, { mood: "idle", context: null, onHide: () => {} }));
   assert.match(html, /class="cx-clawd" style="width:72px;height:48px"/);
   assert.match(html, /<svg class="cx-clawd-glyphs" viewBox="0 0 18 12" width="72" height="48"/);
+});
+
+test("Clawd holds its tool up in the hand on the tool's side, never an empty raised arm or a tool by its feet", () => {
+  // The user (2026-10-30): one Clawd "watching its watch", one "playing fireworks". The right arm went
+  // up whatever side the tool was on while the tool stood by its feet, with no tool it "typed" in the
+  // air, and the mug's steam and a ✦ rising from every hammer blow looked like fireworks.
+  const stand = { look: 0, arms: "down", walking: false, sit: false };
+  const frame = (job, toolSide, step = false, mood = "working") => pet.restFrame({ mood, asleep: false, step, pose: stand, blink: false, job, toolSide });
+  for (const job of ["search", "build", "coffee", "read"]) {
+    for (const step of [false, true]) {
+      assert.equal(frame(job, "right", step).pose.arms, "one-up", `${job}: the right hand, on the tool's side`);
+      assert.equal(frame(job, "left", step).pose.arms, "left-up", `${job}: the left hand, on the tool's side`);
+    }
+  }
+  for (const step of [false, true]) assert.equal(frame("none", "right", step).pose.arms, "down", "working with no tool: no air typing");
+  assert.ok("facing" in frame("laptop", "left").pose, "at the laptop it turns to face it");
+  // The left arm raised as the CLI raises it: "▗▟" in the top row, its right arm down.
+  const left = clawd.clawdCells({ eyes: "open", arms: "left-up", feet: "both" });
+  assert.equal(left.filter((cell) => cell.row === 0 && cell.col < 2).map((cell) => cell.glyph).join(""), "▗▟");
+  assert.equal(left.filter((cell) => cell.row === 1 && cell.col >= 7).map((cell) => cell.glyph).join(""), "█▀");
+  // Each held tool fills the cell its hand is in: column 0, row 2 of the prop's grid.
+  for (const job of ["search", "build", "coffee", "read"]) {
+    for (const step of [false, true]) {
+      const svg = renderToStaticMarkup(React.createElement(pet.Prop, { job, step, tick: 1 }));
+      const rects = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map((m) => m.slice(1).map(Number));
+      assert.ok(rects.some(([x, y, w, h]) => x === 0 && y <= 2 && y + h > 2 && w >= 1), `${job}${step ? " (step)" : ""} is in its hand`);
+      assert.ok(rects.every(([, y]) => y <= 6), `${job} stays inside the prop's grid`);
+    }
+  }
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  assert.doesNotMatch(source, /float\("✦"/, "no star rises from each hammer blow");
 });
 
 test("the pet stays where it stands while the chat box grows and shrinks a line at a time", () => {

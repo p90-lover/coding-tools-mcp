@@ -34,12 +34,15 @@ test("older versions' runtime copies are removed, keeping this version, the newe
   make(`0.7.0-rc.26${suffix}`, 90 * hour);
   make(`0.8.1${suffix}.tmp-35972-1792488529502`, 50 * hour); // stale temporary
   make(`0.8.9${suffix}.tmp-1-2`, 5 * 60_000);              // a temporary still being written
+  make(`0.8.11${suffix}.tmp-7-8`, 3 * hour);               // this version's copy cut off by a full disk
+  make(`0.8.11${suffix}.previous-7-9`, 20 * 60_000);       // ...and one just replaced: not yet
   fs.writeFileSync(path.join(versions, "stray.txt"), "x");
   try {
     const removed = await pruneOldRuntimes({ app: { isPackaged: true, getVersion: () => "0.8.11" }, coreHome, now });
-    assert.deepEqual(removed.sort(), [`0.7.0-rc.26${suffix}`, `0.8.1${suffix}.tmp-35972-1792488529502`, `0.8.6${suffix}`].sort());
+    assert.deepEqual(removed.sort(), [`0.7.0-rc.26${suffix}`, `0.8.1${suffix}.tmp-35972-1792488529502`, `0.8.6${suffix}`,
+      `0.8.11${suffix}.tmp-7-8`].sort());
     assert.deepEqual(fs.readdirSync(versions).sort(), [`0.8.10${suffix}`, `0.8.11${suffix}`, `0.8.11${suffix}-0123456789ab`,
-      `0.8.9${suffix}.tmp-1-2`, "stray.txt"].sort());
+      `0.8.11${suffix}.previous-7-9`, `0.8.9${suffix}.tmp-1-2`, "stray.txt"].sort());
     assert.deepEqual(await pruneOldRuntimes({ app: { isPackaged: false, getVersion: () => "0.8.11" }, coreHome, now }), [],
       "a development run leaves the core home alone");
   } finally {
@@ -153,6 +156,32 @@ test("packaged runtime is installed once into a durable versioned directory", ()
     assert.equal(invocation.args[0], path.join(installed, "app", "cli.js"));
     assert.equal(invocation.args[1], "serve");
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a full disk while copying the runtime runs this session from the packaged copy", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-enospc-"));
+  const resourcesPath = runtimeFixture(root);
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  const originalCopy = fs.cpSync;
+  fs.cpSync = function full(from, to, options) {
+    fs.mkdirSync(to, { recursive: true });
+    fs.writeFileSync(path.join(to, "partial"), "x");
+    throw Object.assign(new Error("ENOSPC: no space left on device, copyfile"), { code: "ENOSPC" });
+  };
+  try {
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), path.join(resourcesPath, "runtime"));
+    assert.deepEqual(fs.readdirSync(path.join(coreHome, "versions")), [], "the partial copy is removed");
+    fs.cpSync = originalCopy;
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }),
+      path.join(coreHome, "versions", `0.2.0-${process.platform}-${process.arch}`), "a later start with room copies it");
+    fs.cpSync = () => { throw Object.assign(new Error("EIO"), { code: "EIO" }); };
+    fs.rmSync(path.join(coreHome, "versions"), { recursive: true, force: true });
+    assert.throws(() => ensurePackagedRuntime({ app, coreHome, resourcesPath }), /EIO/, "other copy errors still stop the start");
+  } finally {
+    fs.cpSync = originalCopy;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

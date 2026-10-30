@@ -11,6 +11,7 @@
 
 const { execFile } = require("node:child_process");
 const os = require("node:os");
+const { runOffThread } = require("./off-thread-run.cjs");
 const path = require("node:path");
 
 // What a process is, by its executable's name; the app's own names first.
@@ -30,8 +31,9 @@ const ROLES = Object.freeze([
   [/^git(\.exe)?$/i, "git"],
   [/^python\d*(\.exe)?$/i, "Python"],
 ]);
-// Background services: more than one of each usually means one was left behind.
-const SINGLETONS = Object.freeze(["AO daemon", "headless service", "runtime bridge", "CPA", "tunnel"]);
+// Background services: more than one of each usually means one was left behind. Not tunnels: each
+// MCP tunnel (one per ChatGPT account) runs its own tunnel client.
+const SINGLETONS = Object.freeze(["AO daemon", "headless service", "runtime bridge", "CPA"]);
 const ELECTRON_TYPES = Object.freeze({ Browser: "app (main)", Tab: "app (window)", GPU: "app (GPU)", Utility: "app (utility)" });
 
 const SAMPLE_MS = Object.freeze({ min: 250, default: 1000, max: 5000 });
@@ -71,14 +73,16 @@ $rows = foreach ($p in (Get-CimInstance Win32_Process -Property $props)) {
 [pscustomobject]@{ elapsed = ([DateTime]::UtcNow - $at).TotalMilliseconds; rows = @($rows) } | ConvertTo-Json -Depth 3 -Compress
 `;
 
-function runPowerShell(script, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const encoded = Buffer.from(script, "utf16le").toString("base64");
-    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-      { windowsHide: true, timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }, (error, stdout) => {
-        if (error) reject(error); else resolve(stdout);
-      });
-  });
+// Started from a worker thread: starting PowerShell from the main thread held every window 1.6 s
+// while Windows loaded it (2026-10-30, the Processes view).
+async function runPowerShell(script, timeoutMs) {
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  const reply = await runOffThread({ file: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+    timeoutMs, maxBytes: 32 * 1024 * 1024 });
+  if (reply.timedOut) throw new Error(`PowerShell timed out after ${timeoutMs} ms`);
+  if (reply.error) throw new Error(reply.error);
+  if (reply.code !== 0) throw new Error(`PowerShell exited with ${reply.code}: ${String(reply.stderr).trim().slice(0, 300)}`);
+  return reply.stdout;
 }
 
 /** Every process's counters on Windows: { elapsedMs, rows: [{ pid, ppid, name, exe, createdMs, cpuMs, ws, priv, threads, handles }] }. */
@@ -118,7 +122,7 @@ function selectOwn(rows, { roots = [], own = [] } = {}) {
   const picked = new Map();
   const seeds = rows.filter((row) => own.includes(row.pid)
     || (row.exe && prefixes.some((prefix) => norm(row.exe).startsWith(prefix)))
-    || SINGLETONS.includes(roleOf(row.name)) && roleOf(row.name) !== "runtime bridge" && roleOf(row.name) !== "tunnel");
+    || SINGLETONS.includes(roleOf(row.name)) && roleOf(row.name) !== "runtime bridge");
   const queue = [...seeds];
   while (queue.length) {
     const row = queue.shift();

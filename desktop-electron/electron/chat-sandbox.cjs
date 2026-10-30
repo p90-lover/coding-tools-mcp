@@ -134,11 +134,14 @@ function cacheRoots({ localAppData = process.env.LOCALAPPDATA, env = process.env
 const tomlPath = (value) => `'${String(value).replace(/\\/g, "/").replace(/'/g, "")}'`;
 
 function createSandboxRunner({
-  locate = findCodexSandbox, roots = cacheRoots, scriptDir = path.join(os.tmpdir(), "coding-tools-sandbox"),
+  // Where command scripts go: a folder on the app data drive. No default: the system temp folder is
+  // on C:, which holds no app storage (AGENTS.md).
+  locate = findCodexSandbox, roots = cacheRoots, scriptDir,
   env = process.env, spawnProcess = spawn, logger = console, now = Date.now, platform = process.platform,
   // Folders put first on a command's PATH, e.g. the one AO keeps `ao` in for its own sessions.
   extraPath = () => [],
 } = {}) {
+  if (typeof scriptDir !== "string" || !path.isAbsolute(scriptDir)) throw new Error("The chat sandbox needs an absolute scriptDir");
   const processes = new Map(); // id -> record
   let located = { at: 0, value: null };
   const sandbox = () => {

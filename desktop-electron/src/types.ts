@@ -646,7 +646,9 @@ export interface BrowserState {
   canGoForward: boolean;
   zoomFactor: number;
   activeTabId: string;
+  /** The shown account's tab limit, and the tabs it holds (tabs of sessions on other accounts show too). */
   maxTabs: number;
+  accountTabs?: number;
   tabs: BrowserTabState[];
 }
 
@@ -654,6 +656,8 @@ export interface BrowserTabState {
   id: string;
   traceId: string | null;
   threadId?: string;
+  /** The ChatGPT account the tab's Codex session runs on (absent: the shown account). */
+  accountId?: string;
   conversationUrl?: string;
   title: string;
   status: "idle" | "loading" | "signed-out" | "ready" | "testing" | "running" | "error" | "aborted";
@@ -693,6 +697,24 @@ export interface OperationState {
   message: string;
 }
 
+/** Settings → Updates (electron/state.cjs UPDATE_SETTINGS). */
+export interface UpdateSettingValues {
+  updateWaitForChats: boolean;
+  updateIdleMinutes: number;
+  updateAutoRollback: boolean;
+  updateHealthMinutes: number;
+  updateReuseMatchingOnly: boolean;
+}
+
+export type UpdateSettingLimit =
+  | { type: "boolean"; default: boolean }
+  | { type: "minutes"; default: number; min: number; max: number };
+
+export interface UpdateSettings {
+  values: UpdateSettingValues;
+  limits: Record<keyof UpdateSettingValues, UpdateSettingLimit>;
+}
+
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
   // kind "app": a whole-app update that restarts the app; otherwise a GUI-only reload.
@@ -711,6 +733,8 @@ export interface LauncherSnapshot {
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
+  /** Tunnels beside the main one, one per further ChatGPT account. */
+  mcpTunnels?: McpTunnel[];
   /** Agents' commands run in Codex's Windows sandbox (installed), so the terminal tools default on. */
   chatAgentSandbox?: boolean;
   /** What chat agents hide when the user has no list of their own (state.chatAgentRedactList). */
@@ -768,6 +792,22 @@ export interface GptBrowserStatus {
 /** A Browser-tab account: its own sign-in, and optionally its own proxy (one proxy per account). */
 export interface BrowserAccount extends GptBrowserAccount {
   proxyProfileId: string | null;
+  /** Tabs this account may hold at once (1 to maxTabsPerAccount). */
+  maxTabs: number;
+  /** Whether new Codex sessions may start on it when they are spread across accounts. */
+  acceptsNewSessions: boolean;
+  /** The last inspection of its ChatGPT session: Plus stops at 6 High; Team and Pro add Extra High and Pro. */
+  plan: { solAvailable: boolean; proAvailable: boolean; checkedAt: number | null } | null;
+  /** What its Codex turns showed about its ChatGPT connector. */
+  connector: { okAt: number | null; error: string | null; errorAt: number | null } | null;
+  /** Its own partition holds a ChatGPT sign-in (read locally); null until first read. */
+  signedIn: boolean | null;
+}
+
+export interface BrowserAccountsSettings {
+  /** Where a new Codex session starts: the account in use, the least busy one, or an account id. */
+  newSessions: "active" | "balance" | string;
+  keepFinishedTabsMinutes: number;
 }
 
 /** The Browser tab's ChatGPT accounts; the active one is also the Codex bridge's (WebGPT turns). */
@@ -775,8 +815,41 @@ export interface BrowserAccountsStatus {
   accounts: BrowserAccount[];
   activeId: string;
   maxAccounts: number;
+  maxTabsPerAccount: number;
+  settings: BrowserAccountsSettings;
   switching: boolean;
 }
+
+/**
+ * An MCP tunnel beside the main one: its own OpenAI tunnel and MCP process, for the ChatGPT account
+ * that owns the tunnel. Every tunnel reaches the same bridge, so each account's connector works.
+ */
+export interface McpTunnel {
+  id: string;
+  label: string;
+  tunnelId: string;
+  /** The Browser-tab account whose ChatGPT holds this tunnel's connector. */
+  accountId: string | null;
+  connectorHref: string | null;
+  state: "stopped" | "starting" | "ready" | "failed";
+  detail: string;
+  pid: number | null;
+}
+
+/** A Codex thread bound to the ChatGPT account its turns run on, with the saved chats it wrote there. */
+export interface CodexThreadBinding {
+  threadId: string;
+  accountId: string;
+  boundAt: number;
+  lastUsedAt: number;
+  title: string | null;
+  running: boolean;
+  chats: Array<{ url: string; archived: boolean }>;
+}
+
+export type CodexThreadAction =
+  | { threadId: string; action: "archive" | "unarchive" | "delete" | "forget" }
+  | { threadId: string; action: "move"; accountId: string };
 
 export interface ChatGptDesktopStatus {
   supported: boolean;
@@ -966,6 +1039,11 @@ export interface LauncherApi {
   onBrowserAccountsChanged(listener: (status: BrowserAccountsStatus) => void): () => void;
   setBrowserAccountProxy(id: string, profileId: string | null): Promise<BrowserAccountsStatus>;
   assignBrowserAccountProxies(): Promise<BrowserAccountsStatus & { assigned: number }>;
+  setBrowserAccountSettings(id: string, input: { maxTabs?: number; acceptsNewSessions?: boolean }): Promise<BrowserAccountsStatus>;
+  setBrowserAccountsSettings(input: Partial<BrowserAccountsSettings>): Promise<BrowserAccountsStatus>;
+  inspectBrowserAccount(): Promise<BrowserAccountsStatus>;
+  codexThreads(): Promise<{ threads: CodexThreadBinding[] }>;
+  codexThreadAction(input: CodexThreadAction): Promise<{ threads: CodexThreadBinding[] }>;
   saveDecodo(input: Partial<DecodoSettings> & { password?: string }): Promise<ProviderNetworkSnapshot>;
   syncDecodo(): Promise<{ added: number; updated: number; snapshot: ProviderNetworkSnapshot }>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
@@ -995,6 +1073,12 @@ export interface LauncherApi {
     interactionMode?: BrowserInteractionMode;
   }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;
+  mcpTunnels(): Promise<McpTunnel[]>;
+  addMcpTunnel(input: { label: string; tunnelId: string; runtimeKey: string; accountId: string | null }): Promise<McpTunnel>;
+  removeMcpTunnel(id: string): Promise<{ removed: boolean }>;
+  reconnectMcpTunnel(id: string): Promise<McpTunnel>;
+  createMcpTunnelConnector(id: string): Promise<{ created: boolean; name: string; href: string }>;
+  onMcpTunnelsChanged(listener: (tunnels: McpTunnel[]) => void): () => void;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setUseSavedChats(enabled: boolean): Promise<LauncherState>;
@@ -1110,6 +1194,8 @@ export interface LauncherApi {
   exportLogs(): Promise<string | null>;
   checkForUpdates(): Promise<UpdateState>;
   setAutomaticUpdates(enabled: boolean): Promise<LauncherState>;
+  /** Settings → Updates: reads them, or changes the given ones (main checks every value). */
+  updateSettings(patch?: Partial<UpdateSettingValues> | null): Promise<UpdateSettings>;
   installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;

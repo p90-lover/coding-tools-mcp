@@ -40,14 +40,31 @@ function cardKeys(event: KeyboardEvent<HTMLElement>, count: number, pick: (index
   if (!typing && /^[1-9]$/.test(event.key) && Number(event.key) <= count) { event.preventDefault(); pick(Number(event.key) - 1); }
 }
 
+/**
+ * Runs `focus` now, or, while the window is hidden, once it is shown; returns the cleanup. Hidden,
+ * the page draws nothing and its style goes stale, so focus() made the browser restyle the whole
+ * chat at once: 169 ms for one approval card on a 28,500-element page (profiled on 0.8.34). Once
+ * shown, that work is done for the first frame anyway.
+ */
+export function focusWhenShown(doc: Pick<Document, "visibilityState" | "addEventListener" | "removeEventListener">, focus: () => void): () => void {
+  if (doc.visibilityState !== "hidden") { focus(); return () => undefined; }
+  const shown = () => {
+    if (doc.visibilityState === "hidden") return;
+    doc.removeEventListener("visibilitychange", shown);
+    focus();
+  };
+  doc.addEventListener("visibilitychange", shown);
+  return () => doc.removeEventListener("visibilitychange", shown);
+}
+
 /** Focuses the card when it appears, unless the person is typing somewhere (the composer). */
 function useCardFocus() {
   const card = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  useEffect(() => focusWhenShown(document, () => {
     const active = document.activeElement;
     if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || (active as HTMLElement | null)?.isContentEditable) return;
     card.current?.focus({ preventScroll: true });
-  }, []);
+  }), []);
   return card;
 }
 

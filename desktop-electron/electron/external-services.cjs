@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { readStateFile, writeStateFile } = require("./durable-state.cjs");
 const { terminateOwnedProcessTree } = require("./process-tree.cjs");
 const { publicUrlMap } = require("./five-stack-cross-use.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
@@ -144,6 +145,12 @@ function normalizeLoopbackExecutionEndpoint(value, serviceId) {
   return parsed.toString();
 }
 
+function parseFallbackKey(text) {
+  const bytes = Buffer.from(text.trim(), "base64");
+  if (bytes.length !== 32) throw new Error("The fallback key is not 32 bytes");
+  return bytes;
+}
+
 function createSecretCodec({ safeStorage, keyPath }) {
   let fallbackKey = null;
 
@@ -157,15 +164,16 @@ function createSecretCodec({ safeStorage, keyPath }) {
 
   function loadFallbackKey() {
     if (fallbackKey) return fallbackKey;
-    try {
-      const bytes = Buffer.from(fs.readFileSync(keyPath, "utf8").trim(), "base64");
-      if (bytes.length === 32) {
-        fallbackKey = bytes;
-        return fallbackKey;
-      }
-    } catch {}
+    // A torn key file is read from its copy; one with no usable copy is set aside, never written
+    // over, so the secrets it encrypted can still be recovered by hand (durable-state.cjs).
+    const read = readStateFile(keyPath, parseFallbackKey);
+    if (read.value) {
+      fallbackKey = read.value;
+      if (read.source === "backup") writeStateFile(keyPath, `${fallbackKey.toString("base64")}\n`);
+      return fallbackKey;
+    }
     fallbackKey = crypto.randomBytes(32);
-    writePrivateFileAtomic(keyPath, `${fallbackKey.toString("base64")}\n`);
+    writeStateFile(keyPath, `${fallbackKey.toString("base64")}\n`);
     return fallbackKey;
   }
 
@@ -567,10 +575,19 @@ function createExternalServicesController({
   const codec = createSecretCodec({ safeStorage, keyPath });
   let state;
   let unarchivedState = null;
+  // A torn file is read from its last good copy (durable-state.cjs) instead of starting over with
+  // every service's settings and secrets gone.
+  const read = readStateFile(filePath, (text) => JSON.parse(text));
+  if (read.source === "backup" || read.source === "unreadable") {
+    logger?.warn?.("external_services.state_recovered", {
+      source: read.source, setAside: read.setAside, message: read.error instanceof Error ? read.error.message : String(read.error ?? "missing"),
+    });
+  }
+  if (read.source === "unreadable" && archiveDeferred) throw read.error;
   try {
-    const saved = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    state = normalizeState(saved, env);
-    if (archiveDeferred) unarchivedState = saved;
+    if (read.value === undefined) throw Object.assign(new Error("no saved state"), { code: "ENOENT" });
+    state = normalizeState(read.value, env);
+    if (archiveDeferred) unarchivedState = read.value;
   } catch (error) {
     if (archiveDeferred && error?.code !== "ENOENT") throw error;
     state = initialState(env);
@@ -604,7 +621,7 @@ function createExternalServicesController({
       services: { ...unarchivedState.services, ...state.services },
       secrets: { ...unarchivedState.secrets, ...state.secrets },
     } : state;
-    writePrivateFileAtomic(filePath, `${JSON.stringify(saved, null, 2)}\n`);
+    writeStateFile(filePath, `${JSON.stringify(saved, null, 2)}\n`);
   }
 
   function secretFor(id) {
@@ -1100,6 +1117,7 @@ module.exports = {
   KEEP_ALIVE_POLL_MS,
   SERVICE_IDS,
   createExternalServicesController,
+  createSecretCodec,
   nextKeepAliveDelayMs,
   removeIncompleteSnapshots,
   normalizeLoopbackExecutionEndpoint,

@@ -18,6 +18,7 @@ import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { SurfaceHiddenContext } from "./features/page-visibility";
 import { PartErrorBoundary } from "./PartErrorBoundary";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
+import { McpTunnelsPanel } from "./features/McpTunnelsPanel";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
 import { WorkspacePanel } from "./features/WorkspacePanel";
@@ -914,7 +915,12 @@ function LauncherShell({
               />
             ))}
             {keepAlive("chatgpt-browser-management", () => (
-              <ChatGptBrowserManagement api={api!} browser={browser} setError={setError} />
+              <ChatGptBrowserManagement
+                api={api!}
+                browser={browser}
+                setError={setError}
+                setup={{ mcpReady: snapshot.state.mcpSetupComplete === true, bridgeReady: snapshot.state.coreSetupComplete === true }}
+              />
             ))}
             {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
             {(nativeChatOpen || surface === "gpt-browser" || visitedSurfaces.has("gpt-browser")) ? <GptBrowserDock
@@ -1262,7 +1268,7 @@ function BrowserSurface({
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
-  const tabLimitReached = (browser?.tabs.filter(tab => tab.id !== "home").length ?? 0) >= (browser?.maxTabs ?? 5);
+  const tabLimitReached = (browser?.accountTabs ?? browser?.tabs.filter(tab => tab.id !== "home").length ?? 0) >= (browser?.maxTabs ?? 5);
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
     && operation.status === "running"
@@ -1921,6 +1927,9 @@ function McpSurface({
                   >
                     {copy.replaceCredentials}
                   </button>
+                  {!devProfile && !configuringInactiveMode ? (
+                    <McpTunnelsPanel api={api!} initial={snapshot.mcpTunnels ?? []} setError={setError} />
+                  ) : null}
                 </div>
               ) : (
                 <div className="field-list">

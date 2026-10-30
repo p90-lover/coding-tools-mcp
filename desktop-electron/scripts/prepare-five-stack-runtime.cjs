@@ -2,7 +2,6 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { createRetentionSession, PRODUCT_VERSION } = require("./prepare-package-resources.cjs");
@@ -305,7 +304,11 @@ function resolveNpmCliJs(nodeExecutable) {
 
 function ensureWindowsNodeShims(nodeExecutable, npmExecutable, env = process.env, platform = process.platform) {
   if (platform !== "win32" || !nodeExecutable || !isFile(nodeExecutable)) return null;
-  const root = env.CODING_TOOLS_RETENTION_ROOT || env.TEMP || env.TMP || os.tmpdir();
+  // Never the system drive (AGENTS.md): TEMP is on C: there, so the repo's aiTemp takes its place.
+  const systemDrive = String(env.SystemDrive || "C:").toLowerCase();
+  const root = [env.CODING_TOOLS_RETENTION_ROOT, env.TEMP, env.TMP]
+    .find((dir) => typeof dir === "string" && dir && !path.resolve(dir).toLowerCase().startsWith(systemDrive))
+    || path.join(__dirname, "..", "..", "aiTemp");
   const shimDir = path.join(String(root), "coding-tools-node-shims");
   fs.mkdirSync(shimDir, { recursive: true });
   const nodeBody = `@echo off\r\n"${nodeExecutable}" %*\r\n`;

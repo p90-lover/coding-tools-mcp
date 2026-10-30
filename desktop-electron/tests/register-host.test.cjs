@@ -277,6 +277,42 @@ test("an early cancelled quit replaces a view fenced before shutdown ran", async
   assert.equal(f.views[0].webContents.closed, true); assert.equal(f.views.length, 2);
 });
 
+test("an answer that arrived while the main loop was blocked is read before the timeout counts", async t => {
+  // 2026-10-30: main stalls of seconds are common on this machine. The health timer then ran
+  // before the answer that had arrived meanwhile, so a service answering in 7 ms read as
+  // unresponsive and the Register view was taken down.
+  const f = await fixture(t), service = await f.serve();
+  const host = f.host({ origin: service.origin, healthTimeoutMs: 50 });
+  const checked = host.status();
+  await new Promise(resolve => setTimeout(resolve, 5)); // the request is out
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); // main blocked past the deadline
+  assert.equal((await checked).ready, true);
+});
+
+test("a ready service that is briefly slow keeps its page; one that stays silent is taken down", async t => {
+  const f = await fixture(t);
+  let silent = false;
+  const service = await f.serve((_request, response) => { if (!silent) response.end(JSON.stringify(identity)); });
+  const host = f.host({ origin: service.origin, healthTimeoutMs: 30 });
+  host.setBounds({ x: 0, y: 0, width: 100, height: 100 });
+  host.setSurfaceActive(true);
+  assert.equal((await host.status()).ready, true);
+  await f.until(() => f.attaches.length === 1);
+  silent = true;
+  for (let check = 1; check < 3; check++) {
+    const slow = await host.status();
+    assert.equal(slow.ready, true, `timeout ${check} keeps the service ready`);
+    assert.equal(slow.error, null);
+  }
+  assert.equal(f.detaches.length, 0, "the page stays up through slow answers");
+  const down = await host.status();
+  assert.equal(down.ready, false, "the third timeout in a row takes it down");
+  assert.match(down.error, /not answering/);
+  assert.equal(f.detaches.length, 1);
+  silent = false;
+  assert.equal((await host.status()).ready, true, "an answer brings it straight back");
+});
+
 test("loopback origin is constructor-only and rejects credentials or nonlocal hosts", async () => {
   for (const origin of ["https://127.0.0.1:8000", "http://localhost:8000", "http://example.invalid", "http://u:p@127.0.0.1:8000", "http://127.0.0.1:8000/path"]) {
     assert.throws(() => createRegisterHost({ origin }), /loopback/);

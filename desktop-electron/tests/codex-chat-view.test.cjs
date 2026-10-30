@@ -158,6 +158,24 @@ test("a turn shows the user bubble, the live work line and a stop button; Esc st
   assert.deepEqual(calls, [["stop", "r1"], ["stop", "r1"]]);
 });
 
+test("a chat waiting out an automatic retry still shows Stop, and Send once something is typed", () => {
+  // 2026-10-29: a held step retried for half an hour; the chat took messages, so Send stood in
+  // for Stop the whole time and nothing on screen could stop the retries.
+  const { props, calls } = base({
+    selectedTaskId: "t", working: false,
+    runs: [run("r1", "t", [node("p", "planner", "held", { receipt: { error: "API Error: 503" } })], { execution_mode: "single" })],
+  });
+  const chatView = mount(props);
+  const stop = walk(chatView.render()).find((element) => element.props?.["aria-label"] === "Stop (Esc)");
+  assert.ok(stop, "a held run is still open: Stop shows while nothing is typed");
+  stop.props.onClick();
+  assert.deepEqual(calls, [["stop", "r1"]]);
+  walk(chatView.render()).find((element) => element.type === "textarea").props.onChange({ target: { value: "try again" } });
+  const view = chatView.render();
+  assert.equal(walk(view).find((element) => element.props?.["aria-label"] === "Stop (Esc)"), undefined);
+  assert.ok(walk(view).find((element) => element.props?.["aria-label"] === "Send message"), "a typed message is sent, which stops the held run");
+});
+
 test("the reviewer's answer closes the turn in full, with Retry on the latest settled run", () => {
   const { props, calls } = base({
     selectedTaskId: "t",
@@ -998,6 +1016,15 @@ test("approval cards from different team members retain separate React identitie
   const cards = walk(mount(props).render()).filter(item => item.type === "Approval");
   assert.equal(cards.length, 2);
   assert.equal(new Set(cards.map(item => item.key)).size, 2);
+});
+
+test("the agent's questions and requests sit below the chat box, not above it", () => {
+  const { props } = base({ selectedTaskId: "t", approvals: [{ nodeId: "planner", approval_id: "request-1" }] });
+  const tree = walk(mount(props).render());
+  const box = tree.findIndex((element) => element.type === "form" && element.props?.className === "cx-composer");
+  const dock = tree.findIndex((element) => String(element.props?.className).startsWith("cx-approval-dock"));
+  assert.ok(box >= 0 && dock > box, "the approval dock comes after the chat box");
+  assert.equal(walk(tree[box].props.children).some((element) => element.type === "Approval"), false, "and is not inside it");
 });
 
 test("a hidden agent browser is offered back from the chat header, and opens the side panel on it", () => {

@@ -4,7 +4,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { app, BrowserWindow, session } = require("electron");
-const { createConfiguredConnector } = require("../../electron/mcp-connector-setup.cjs");
+const moduleRoot = process.env.MCP_CONNECTOR_TEST_APP_ROOT || path.resolve(__dirname, "../..");
+const { createConfiguredConnector } = require(path.join(moduleRoot, "electron/mcp-connector-setup.cjs"));
+const { createMcpConnectorCommand } = require(path.join(moduleRoot, "electron/mcp-connector-command.cjs"));
 
 const root = process.env.MCP_CONNECTOR_TEST_ROOT;
 if (!root || !path.isAbsolute(root) || !root.split(path.sep).includes("aiTemp")) {
@@ -132,7 +134,7 @@ app.whenReady().then(async () => {
     }
     const tunnelId = "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const options = {
-      app: { getPath: kind => { assert.equal(kind, "userData"); return data; } },
+      app: { getPath: kind => { assert.equal(kind, "userData"); return data; }, getVersion: () => app.getVersion() },
       BrowserWindow: TrackedWindow,
       browserHost: {
         partition,
@@ -147,11 +149,12 @@ app.whenReady().then(async () => {
         mcpConnectorName: () => "Coding Tools Native2",
       },
     };
+    const command = createMcpConnectorCommand({ app: options.app, run: () => createConfiguredConnector(options) });
     try {
       if (scenario.denied) {
-        await assert.rejects(createConfiguredConnector(options), /MCP server denied access.*workspace access/);
+        await assert.rejects(command.request(), /MCP server denied access.*workspace access/);
       } else {
-        const result = await createConfiguredConnector(options);
+        const result = await command.request();
         assert.equal(result.created, !scenario.existing);
         assert.equal(result.href, `/plugins/plugins~Plugin_${scenario.existing ? "existing" : "created"}`);
       }
@@ -161,6 +164,9 @@ app.whenReady().then(async () => {
       assert.equal(windows.length, 1);
       assert(windows.every(window => window.isDestroyed()), "setup must dispose its window");
       assert.equal(receipts.length, scenario.existing ? 0 : 1, "only one submission is allowed");
+      const commandReport = JSON.parse(fs.readFileSync(path.join(data, "mcp-connector-command.json")));
+      assert.equal(commandReport.status, scenario.denied ? "failed" : "completed");
+      if (scenario.denied) assert.equal(commandReport.error.code, "mcp_access_denied");
       if (receipts.length) assert.deepEqual(receipts[0], {
         name: "Coding Tools Native2", tunnelId, authentication: "NONE", trusted: true,
         search: "", personalClicks: scenario.publicTab ? 1 : 0, submits: 1,

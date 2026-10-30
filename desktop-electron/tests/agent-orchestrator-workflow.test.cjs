@@ -6,7 +6,11 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, reviewScriptExcerpts } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow: createWorkflow, resolveAoNativeConnection, reviewScriptExcerpts } = require("../electron/agent-orchestrator-workflow.cjs");
+// A fixture never looks for the machine's own Codex CLI: without this, tests passed only where
+// `codex` was installed (a developer's PC) and failed on a clean CI runner. A test that is about
+// finding Codex passes its own findCodexExecutable.
+const createAgentOrchestratorWorkflow = (options = {}) => createWorkflow({ findCodexExecutable: () => "C:/codex.exe", ...options });
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 
@@ -2590,7 +2594,9 @@ test("the reviewer's script lookups never block the main process, and a slow dis
   clearInterval(ticker);
   assert.deepEqual(found, [], "nothing read by the deadline, so the review goes on without it");
   assert.ok(Date.now() - started < 1_000, "the deadline, not the disk, ends the wait");
-  assert.ok(ticks >= 5, "the event loop kept running while the disk did not answer");
+  // Windows timers tick every ~15.6 ms, so a busy machine sees only a few 5 ms ticks in 100 ms;
+  // any tick at all shows the event loop was not blocked.
+  assert.ok(ticks >= 2, "the event loop kept running while the disk did not answer");
 
   // A command naming many files (a grep over a dozen sources) looks up only the first few.
   const names = Array.from({ length: 12 }, (_, index) => `src/file${index}.ts`).join(" ");
@@ -3456,12 +3462,13 @@ test("a goal round says what Claude Code's /goal says: the condition first, then
   assert.throws(() => parseGoalCheck('{"met": "yes"}'), /no verdict/);
 });
 
-test("goals are kept per chat in a file and survive a restart", () => {
+test("goals are kept per chat in a file and survive a restart", async () => {
   const file = path.join(require("node:os").tmpdir(), `ct-goals-${crypto.randomUUID()}.json`);
   try {
     const store = createGoalStore({ file, now: () => 1000 });
     store.set("ws-1", "task-1", "  make the build green  ");
     store.update("ws-1", "task-1", { round: 2 });
+    await store.saved();
     const again = createGoalStore({ file });
     assert.equal(again.get("ws-1", "task-1").objective, "make the build green");
     assert.equal(again.get("ws-1", "task-1").round, 2);
@@ -3470,16 +3477,25 @@ test("goals are kept per chat in a file and survive a restart", () => {
     assert.deepEqual(again.forWorkspace("ws-2"), {});
     assert.throws(() => again.set("ws-1", "task-2", "   "), /Describe your goal/);
     assert.equal(again.clear("ws-1", "task-1"), true);
+    await again.saved();
     assert.equal(createGoalStore({ file }).get("ws-1", "task-1"), null);
   } finally { fs.rmSync(file, { force: true }); }
 });
 
-test("a goals file a crash tore is kept aside, not written over, and saves are flushed to disk", () => {
+test("a goals file a crash tore is kept aside, not written over, and saves are flushed to disk off the main thread", async () => {
   const directory = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "ct-goals-torn-"));
   const file = path.join(directory, "chat-goals.json");
   const fsync = fs.fsyncSync;
+  const open = fs.promises.open;
   let flushed = 0;
-  fs.fsyncSync = (descriptor) => { flushed += 1; return fsync(descriptor); };
+  let flushedOnMain = 0;
+  fs.fsyncSync = (descriptor) => { flushedOnMain += 1; return fsync(descriptor); };
+  fs.promises.open = async (...args) => {
+    const handle = await open(...args);
+    const sync = handle.sync.bind(handle);
+    handle.sync = async () => { flushed += 1; return sync(); };
+    return handle;
+  };
   try {
     // What a power cut left of another state file on 2026-10-23: its size, all NUL bytes.
     fs.writeFileSync(file, Buffer.alloc(300));
@@ -3487,10 +3503,18 @@ test("a goals file a crash tore is kept aside, not written over, and saves are f
     assert.equal(store.get("ws-1", "task-1"), null);
     assert.deepEqual(fs.readFileSync(path.join(directory, "chat-goals.json.unreadable-2000")), Buffer.alloc(300), "the torn bytes are kept");
     store.set("ws-1", "task-1", "make the build green");
+    await store.saved();
     assert.equal(flushed, 1, "the save is flushed before it replaces the file");
+    assert.equal(flushedOnMain, 0, "the flush never waits on the main thread");
     assert.equal(createGoalStore({ file }).get("ws-1", "task-1").objective, "make the build green");
+    // A round ending changes a goal several times at once: one save, then one with the latest goals.
+    for (let round = 1; round <= 5; round += 1) store.update("ws-1", "task-1", { round });
+    await store.saved();
+    assert.equal(flushed, 3, "five changes in a row are two saves");
+    assert.equal(createGoalStore({ file }).get("ws-1", "task-1").round, 5, "the last save has the latest goals");
   } finally {
     fs.fsyncSync = fsync;
+    fs.promises.open = open;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -3536,7 +3560,12 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
       if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: models.map((id) => ({ id })) }) };
       const body = JSON.parse(init.body);
       checks.push(body);
-      if (refuse(body.model)) return { ok: false, status: refuse(body.model), json: async () => ({}) };
+      // `refuse` gives a status, or { status, text } for an answer with words (a spent API key).
+      const refused = refuse(body.model);
+      if (refused) {
+        const { status, text = "" } = typeof refused === "object" ? refused : { status: refused };
+        return { ok: false, status, json: async () => ({}), text: async () => text };
+      }
       const verdict = evaluator(body.messages[0].content);
       if (verdict instanceof Error) return { ok: false, status: 503, json: async () => ({}) };
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
@@ -3611,6 +3640,33 @@ test("a model the evaluator gets a 404 for sits out for hours; one that was down
     await workflow.goalAfterRun("ws-1", next, "finished", null);
     assert.equal(checks[2].model, sitsOut ? "deepseek-v4" : "gemini-3-flash", `HTTP ${status}, half an hour on`);
   }
+});
+
+test("a model whose quota is used up sits out until the reset its answer names", async () => {
+  // Seen live 2026-10-29: the Anthropic API key behind Claude Haiku answered 400 with its spend limit,
+  // and every goal check tried it first again ten minutes later.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const round = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "not yet" } }] });
+  const clock = { at: Date.parse("2026-10-24T08:00:00Z") };
+  const spent = { status: 400, text: JSON.stringify({ type: "error", error: { type: "invalid_request_error",
+    message: "You have reached your specified API usage limits. You will regain access on 2026-10-26 at 00:00 UTC." } }) };
+  const { world, workflow, checks } = await goalChat({ refuse: (model) => model === "gemini-3-flash" ? spent : 0, now: () => clock.at });
+  const judged = async () => {
+    const next = (await goalOf(workflow)).lastRunId || "r1";
+    world.runs.push(round(next));
+    await workflow.goalAfterRun("ws-1", next, "finished", null);
+    return checks.at(-1).model;
+  };
+  assert.equal(await judged(), "deepseek-v4");
+  assert.equal(checks.at(-2).model, "gemini-3-flash", "tried once");
+  clock.at += 6 * 3_600_000;
+  const before = checks.length;
+  assert.equal(await judged(), "deepseek-v4");
+  assert.equal(checks.length, before + 1, "six hours on, the spent model is not asked at all");
+  clock.at = Date.parse("2026-10-26T00:01:00Z");
+  await judged();
+  assert.equal(checks.at(-2).model, "gemini-3-flash", "asked again once its quota is back");
 });
 
 test("a provider that is down for every model costs a goal check one request, not all three", async () => {
@@ -3875,6 +3931,7 @@ test("a goal judged not met whose next round never started goes on at the next r
       await workflow.call("runs", { workspaceId: "ws-1" });
       await goalSettle();
       assert.equal(world.updates.length, before + 1);
+      await workflow.goalsSaved();
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -3948,6 +4005,68 @@ test("a goal round that ends on a used-up quota pauses the goal: no retry and no
     "API Error: 429 all credentials for model glm-5.3 are cooling down", "HTTP 429 Too Many Requests"]) {
     assert.equal(QUOTA_EXHAUSTED.test(other), false, other);
   }
+});
+
+test("a goal round the provider refused (400) pauses the goal with the provider's reason: no retry and no next round", async () => {
+  // Seen 2026-10-29: OpenCode Go answered every request "This Go model requires Global regions", the
+  // step retried eight times a round and the goal started round after round, over a thousand refusals.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/opencode-go/deepseek-v4.1-flash", permission_profile: ":ao-default" };
+  const error = "API Error: 400 Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it.";
+  for (const [state, outcome] of [["failed", "failed"], ["held", "held"]]) {
+    const timers = [];
+    const { world, workflow, checks } = await goalChat({ timers, now: () => 1_000_000 });
+    await workflow.call("chat_auto_retry", { enabled: true });
+    world.runs.push({ id: "g1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state, route, history: [], receipt: { error } }] });
+    const before = world.updates.length;
+    await workflow.goalAfterRun("ws-1", "g1", outcome);
+    const goal = await goalOf(workflow);
+    assert.equal(goal.status, "paused", `a ${state} refused round pauses the goal`);
+    assert.equal(goal.note, "Paused: the provider refused the request (400: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it.). Fix that or switch model, then /goal resume");
+    assert.equal(checks.length, 0, "not sent to the evaluator");
+    assert.equal(timers.length, 0, "no next round is scheduled");
+    assert.equal(world.updates.length, before, "and nothing is retried");
+  }
+  const { REQUEST_REFUSED } = require("../electron/agent-orchestrator-workflow.cjs");
+  for (const refused of [error, "API Error: 404 model not found", "API Error: 422 Unprocessable Entity"]) assert.equal(REQUEST_REFUSED.test(refused), true, refused);
+  // A cooling model, an outage or a spent quota is not a refusal of the request.
+  for (const other of ["API Error: 429 all credentials for model glm-5.3 are cooling down", "API Error: 502 Error 429: You have reached your monthly Clinepass limit",
+    "API Error: 500 upstream", "upstream 500 from the model", "read line 400 of the log", "HTTP 400"]) assert.equal(REQUEST_REFUSED.test(other), false, other);
+});
+
+test("a goal round that failed on a model the person has since moved the goal off starts the next round on the pick at once", async () => {
+  // Seen 2026-10-29: the chats were moved from Cline Pass to OpenCode Go, yet each held round's
+  // automatic retries, and the rounds after it, still asked the spent Cline Pass.
+  const cline = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4.1-flash-1017", permission_profile: ":ao-default" };
+  const picked = { ...cline, model: "cpa/opencode-go/deepseek-v4.1-flash" };
+  const error = "API Error: 502 Error 429: You have reached your monthly Clinepass limit. The limit resets in 5d 8h, please try again later.";
+  for (const outcome of ["held", "failed"]) {
+    const timers = [];
+    const { world, workflow, checks } = await goalChat({ timers, now: () => 1_000_000, models: ["gpt-6-luna", "cline-pass/deepseek-v4.1-flash-1017", "opencode-go/deepseek-v4.1-flash"] });
+    await workflow.call("chat_auto_retry", { enabled: true });
+    world.runs.push({ id: "c1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state: outcome, route: cline, history: [{ error }], receipt: { error } }] });
+    await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "route", singleRoute: picked });
+    const before = world.updates.length;
+    await workflow.goalAfterRun("ws-1", "c1", outcome);
+    await goalSettle(() => world.updates.some((change, at) => at >= before && change.operation === "create_from_team"));
+    const goal = await goalOf(workflow);
+    assert.equal(goal.status, "active", "the old model's spent quota does not pause the goal");
+    assert.equal(checks.length, 0, "not sent to the evaluator");
+    assert.equal(timers.length, 0, "no pause first");
+    const next = world.updates.slice(before);
+    // The held round on the old model is retired, and the next one starts on the pick.
+    assert.deepEqual(next.map(change => change.operation), outcome === "held" ? ["cancel", "create_from_team"] : ["create_from_team"]);
+    assert.equal(next.at(-1).single_route.model, picked.model, "on the picked model");
+    assert.equal(goal.round, 2);
+  }
+  // The same round on the goal's own model is retried as before (or paused, here: its quota is spent).
+  const { world, workflow } = await goalChat({ models: ["gpt-6-luna", "cline-pass/deepseek-v4.1-flash-1017"] });
+  world.runs.push({ id: "c2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route: cline, history: [], receipt: { error } }] });
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "route", singleRoute: cline });
+  await workflow.goalAfterRun("ws-1", "c2", "held");
+  assert.equal((await goalOf(workflow)).status, "paused");
 });
 
 test("a judged goal round that runs again (the app restarted, Retry) is judged again when it settles", async () => {
@@ -4034,6 +4153,7 @@ test("a goal waiting out a pause carries on after an app restart, is not judged 
     // The app closes during the pause: its timer goes, and one that fires anyway does nothing.
     const pending = timers[0];
     first.workflow.dispose();
+    await first.workflow.goalsSaved(); // as a quit waits for it
     assert.equal(timers.length, 0, "dispose clears the goal's timer");
     const before = world.updates.length;
     pending.callback();
@@ -4766,11 +4886,11 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
-  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"] } = {}) {
+  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"], empty = [] } = {}) {
     const request = { approval_id: "write", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions };
     const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
       { id: "one", role: "planner", state: "running", parents: [], route: { ...route, model }, receipt: { thread_id: "session-1", request_key: "k" } }] };
-    const asked = [], resolved = [];
+    const asked = [], resolved = [], caps = [];
     let detail = "";
     const workflow = createAgentOrchestratorWorkflow({
       findCodexExecutable: () => process.execPath,
@@ -4780,7 +4900,10 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
         if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: catalog.map((id) => ({ id })) }) };
         const model = JSON.parse(init.body).model;
         asked.push(model);
+        caps.push(JSON.parse(init.body).max_tokens);
         if (failing.includes(model)) return { ok: false, status: 503, json: async () => ({}) };
+        // A reasoning model that spent its whole output on thinking: a 200 with no answer in it.
+        if (empty.includes(model)) return { ok: true, json: async () => ({ choices: [{ message: { content: "" }, finish_reason: "length" }] }) };
         return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"fixture"}' } }] }) };
       },
       requestHeadless: async (endpoint, body) => {
@@ -4804,11 +4927,21 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
       detail ||= JSON.stringify(status);
       await new Promise(resolve => setTimeout(resolve, 10));
     }
-    return { asked, resolved, detail };
+    return { asked, resolved, detail, caps };
   }
   const healthy = await review([]);
   assert.deepEqual(healthy.asked, ["codex-auto-review"], "Codex's reviewer, not the worker reviewing itself");
   assert.deepEqual(healthy.resolved, ["yes"]);
+  // At 400 output tokens a reasoning reviewer could think its whole budget away and answer nothing.
+  assert.ok(healthy.caps.every((cap) => cap >= 2000), `room to think before answering (max_tokens ${healthy.caps.join(", ")})`);
+  // An empty answer is a failed review like any other: the next model answers and the request is
+  // answered for the person, not handed to them.
+  const thoughtOut = await review([], { empty: ["codex-auto-review"] });
+  assert.deepEqual(thoughtOut.asked, ["codex-auto-review", "test-model"]);
+  assert.deepEqual(thoughtOut.resolved, ["yes"]);
+  const allEmpty = await review([], { empty: ["codex-auto-review", "test-model"] });
+  assert.deepEqual(allEmpty.resolved, []);
+  assert.match(allEmpty.detail, /gave no answer \(it ran out of tokens\)/, "and the person sees why, not a JSON parse error");
   const signedOut = await review(["codex-auto-review"]);
   assert.deepEqual(signedOut.asked, ["codex-auto-review", "test-model"], "the card's own model takes over");
   assert.deepEqual(signedOut.resolved, ["yes"]);
@@ -6533,6 +6666,38 @@ test("an open chat pre-warms only when its next message cannot continue its agen
   assert.deepEqual(killed, ["warm-1"], "the oldest waiting agent is ended once a third is warmed");
 });
 
+test("chats opened together bring back their released agents one at a time", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const ids = ["task-1", "task-2", "task-3", "task-4"];
+  const tasks = ids.map(id => ({ id, title: id, description: "ask", state: "in_progress", clauses: [] }));
+  const runs = ids.map((id, index) => ({ id: `r${index}`, project_id: id, execution_mode: "single", cancelled: true,
+    nodes: [{ id: "one", role: "planner", state: "cancelled", parents: [], route, receipt: { thread_id: `sess-${index}` } }] }));
+  const world = chatWorld({ tasks, runs });
+  let inFlight = 0, most = 0;
+  const order = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: {
+      spawn: async () => "warm",
+      // A resume answers only once the agent is up; the first one fails as a timed-out one does.
+      continuable: async id => {
+        inFlight += 1; most = Math.max(most, inFlight); order.push(id);
+        await new Promise(resolve => setTimeout(resolve, 15));
+        inFlight -= 1;
+        if (id === "sess-0") throw Object.assign(new Error("Couldn't confirm the agent was restored."), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
+        return true;
+      },
+      kill: async () => ({ ok: true }),
+      warmSessions: async () => [],
+    } });
+  const results = await Promise.allSettled(ids.map(taskId =>
+    workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId })));
+  assert.equal(most, 1, "never two resumes at once");
+  assert.deepEqual(order, ["sess-0", "sess-1", "sess-2", "sess-3"]);
+  assert.equal(results[0].status, "rejected", "the failed one still reports its failure");
+  assert.deepEqual(results.slice(1).map(result => result.value?.continues), [true, true, true], "and does not hold up the rest");
+  workflow.dispose();
+});
+
 // A launch's world for one new chat: the run it creates, its grant, reservation and submission.
 function launchWorld(route) {
   const world = chatWorld();
@@ -7672,6 +7837,36 @@ test("a CPA model's picked effort goes in the request body, never as a model suf
   workflow.dispose();
 });
 
+test("a saved effort a plugin model's reported levels lack runs at its nearest one, not CPA's 400", async (t) => {
+  // CPA refuses an unlisted level up front (2026-10-29, Provider Manager 0.2.1): "level \"medium\"
+  // not supported, valid levels: low, high, max" on OpenCode Go's GLM 5.3 Flash.
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "known-efforts-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const knownModelsFile = path.join(dir, "cpa-known-models.json");
+  const seen = Date.now();
+  fs.writeFileSync(knownModelsFile, JSON.stringify({ models: {
+    "opencode-go/glm-5.3-flash": { seen, capability: { efforts: ["low", "high", "max"] } },
+    "opencode-go/kimi-k3": { seen, capability: { efforts: ["max"] } },
+    "opencode-go/qwen3.7-plus": { seen, capability: { efforts: [] } },
+  } }));
+  const spawned = [];
+  const workflow = createAgentOrchestratorWorkflow({ knownModelsFile, requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
+    aoHarness: { spawn: async input => { spawned.push({ model: input.model, effort: input.effort }); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
+  const warm = async (model, effort) => {
+    const before = spawned.length;
+    await workflow.call("chat_prewarm", { workspaceId: `ws-${model}-${effort}`, executionMode: "single",
+      singleRoute: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model, effort } });
+    for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    return spawned.at(-1);
+  };
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "medium"), { model: "opencode-go/glm-5.3-flash", effort: "high" });
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "low"), { model: "opencode-go/glm-5.3-flash", effort: "low" });
+  assert.deepEqual(await warm("cpa/opencode-go/kimi-k3", "low"), { model: "opencode-go/kimi-k3", effort: "max" });
+  // No levels reported (it only switches reasoning on and off): the model's own effort.
+  assert.deepEqual(await warm("cpa/opencode-go/qwen3.7-plus", "high"), { model: "opencode-go/qwen3.7-plus", effort: undefined });
+  workflow.dispose();
+});
+
 test("\"Retry automatically\" retries a failed step by itself once its pause is over, with no click", async () => {
   // The run stopped on the first pass after the failure ("No card is ready"), so the countdown it
   // showed never ended and the failed step waited for a click after all.
@@ -7718,6 +7913,49 @@ test("\"Retry automatically\" retries a failed step by itself once its pause is 
     clock += 11_000;
     for (let tries = 0; tries < 200 && !controls.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.deepEqual(controls, ["retry"], "the failed step was retried by itself");
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+});
+test("\"Retry automatically\" leaves a request the provider refused (400) for the person, with the provider's reason", async () => {
+  // OpenCode Go's region refusal was retried eight times a round (2026-10-29); each try got the same 400.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/opencode-go/deepseek-v4.1-flash" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const controls = [];
+  let clock = 1_000_000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "opencode-go/deepseek-v4.1-flash" }] }) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint === "/api/v1/ao/control") controls.push(body.action);
+      return { ok: true, run: mission };
+    },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt,
+      error: "API Error: 400 Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it." } };
+    let detail = "";
+    for (let tries = 0; tries < 100 && !/provider refused/.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, /^The provider refused this request \(400: This Go model requires Global regions\. .*\)\. Change that, or choose another model, since retrying won't fix it\.$/);
+    clock += 60 * 60_000;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.deepEqual(controls, [], "never retried, however long it waits");
   } finally {
     mission.nodes[0].state = "finished";
     for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
@@ -8514,4 +8752,43 @@ test("a held worker whose unspent grant names another build of the agent's progr
       }
     } finally { workflow.dispose(); }
   }
+});
+
+test("a Team round that settles by itself scores its models once, graded by a free model; Single rounds are not scored", async () => {
+  const request = "Restyle the dashboard UI and add a /stats API endpoint";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Stats", description: request, state: "in_progress", clauses: [] }], runs: [] });
+  const grades = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: ["gpt-6-luna", "deepseek-v4", "gemini-3-flash"].map((id) => ({ id })) }) };
+      grades.push(JSON.parse(init.body));
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ categories: ["frontend", "backend"],
+        cards: [{ card: 1, understanding: 9, command_follow: 9, quality: 8 }, { card: 2, understanding: 6, command_follow: 4, quality: 5 }] }) } }] }) };
+    } });
+  const route = (model) => ({ harness_id: "ao:claude-code", model });
+  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, nodes: [
+    { id: "p", role: "planner", parents: [], state: "finished", route: route("cpa/glm-5"), receipt: { answer: "Split into UI and API" } },
+    { id: "w", role: "worker", parents: ["p"], state: "finished", route: route("cpa/kimi-k3"), receipt: { answer: "Did the API; skipped the UI" } },
+    { id: "q", role: "worker", parents: ["p"], state: "failed", route: route("cpa/spent"), receipt: { error: "insufficient_quota" } },
+  ] });
+  world.runs.push({ id: "s1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route: route("cpa/glm-5"), receipt: { answer: "done" } }] });
+  await workflow.scoreAfterRun("ws-1", "r1", "finished");
+  await workflow.scoreAfterRun("ws-1", "r1", "finished");
+  await workflow.scoreAfterRun("ws-1", "s1", "finished");
+  assert.equal(grades.length, 1, "graded once; the Single round is not");
+  assert.equal(grades[0].model, "gemini-3-flash", "a free, quick model, as the goal checker uses");
+  assert.match(grades[0].messages[0].content, /User request:\nRestyle the dashboard UI/);
+  assert.doesNotMatch(grades[0].messages[0].content, /cpa\/spent|insufficient_quota/, "a step that ran out of quota is not graded");
+  const scores = await workflow.call("model_scores", {});
+  assert.equal(scores.total, 1);
+  assert.deepEqual(scores.recent[0].categories, ["frontend", "backend"]);
+  assert.deepEqual(scores.summary.map((entry) => entry.model), ["cpa/glm-5", "cpa/kimi-k3"]);
+  assert.equal(scores.summary[1].categories.command_follow.average, 4);
+  assert.deepEqual((await workflow.call("model_scores", { role: "worker" })).summary.map((entry) => entry.model), ["cpa/kimi-k3"]);
+  await workflow.call("model_scores_clear", {});
+  assert.equal((await workflow.call("model_scores", {})).total, 0);
+  workflow.dispose();
 });
