@@ -77,12 +77,14 @@ const report = (result) => process.stdout.write(JSON.stringify(result) + "\\n");
 `;
 
 /** Compacts `<dataRoot>/ao.db` if it is worth it; resolves to what was done, never rejects. */
-function compactAoDatabase(dataRoot, options = {}) {
+async function compactAoDatabase(dataRoot, options = {}) {
   const settings = { ...DEFAULTS, ...options };
   const file = path.join(dataRoot, "ao.db");
-  if (!fs.existsSync(file)) return Promise.resolve({ action: "none", reason: "no database yet" });
+  // Both checks run before every AO start; made synchronously, the existence check alone held the
+  // main process (every window) 1.85 s on the busy hard disk after a reboot (2026-10-30).
+  try { await fs.promises.access(file); } catch { return { action: "none", reason: "no database yet" }; }
   let diskFreeBytes = null;
-  try { const stats = fs.statfsSync(dataRoot); diskFreeBytes = Number(stats.bavail) * Number(stats.bsize); } catch { /* unknown */ }
+  try { const stats = await fs.promises.statfs(dataRoot); diskFreeBytes = Number(stats.bavail) * Number(stats.bsize); } catch { /* unknown */ }
   const input = JSON.stringify({ file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
     maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes, incrementalMaxBytes: settings.incrementalMaxBytes });
   return new Promise((resolve) => {
