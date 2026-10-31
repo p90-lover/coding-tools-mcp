@@ -52,9 +52,11 @@ export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="assistant"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
-  // The new UI owns the whole exchange, including a thinking-only placeholder, here.
-  // Answer extraction still requires assistant Markdown and its completion control.
-  '[data-turn-key]',
+  // The exchange exists when the user's prompt mounts; require its assistant subtree,
+  // including an empty reasoning shell or a rich-only reply.
+  '[data-turn-key]:has([data-conversation-role="assistant"])',
+  '[data-turn-key]:has([data-message-author-role="assistant"])',
+  '[data-turn-key]:has([data-markdown-text-style="assistant-message"])',
 ].join(", ");
 export const CHATGPT_USER_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="user"]',
