@@ -26,6 +26,12 @@ const MAX_REQUEST_BYTES: usize = 1_048_576;
 const MAX_RESULT_BYTES: usize = 262_144;
 const MAX_OPERATION_RECORDS: usize = 128;
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_IDLE_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_TOOL_CONTEXT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -161,10 +167,15 @@ impl Lifecycle {
     pub async fn wait_idle(&self, timeout: Duration) -> bool {
         let wait = async {
             loop {
+                let notified = self.inner.notify.notified();
                 if self.snapshot().active_requests == 0 {
                     return;
                 }
-                self.inner.notify.notified().await;
+                #[cfg(test)]
+                if let Some(hook) = BEFORE_IDLE_WAIT.with(|slot| slot.borrow_mut().take()) {
+                    hook();
+                }
+                notified.await;
             }
         };
         tokio::time::timeout(timeout, wait).await.is_ok()
@@ -334,19 +345,51 @@ impl OperationStore {
         }
         self.records.insert(id, receipt);
         while self.order.len() > MAX_OPERATION_RECORDS {
-            if let Some(oldest) = self.order.pop_front() {
-                if self
-                    .records
-                    .get(&oldest)
-                    .is_some_and(|item| item.state != "running")
-                {
-                    self.records.remove(&oldest);
-                } else {
-                    self.order.push_front(oldest);
-                    break;
-                }
+            let Some(index) = self.order.iter().position(|id| {
+                self.records.get(id).is_some_and(|item| item.state != "running")
+            }) else {
+                break;
+            };
+            if let Some(oldest) = self.order.remove(index) {
+                self.records.remove(&oldest);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod operation_audit_tests {
+    use super::*;
+
+    #[test]
+    fn audit_receipts_evict_completed_rows_behind_running_work() {
+        let mut store = OperationStore::default();
+        for index in 0..MAX_OPERATION_RECORDS + 20 {
+            store.insert(OperationReceipt {
+                request_id: index.to_string(),
+                fingerprint: String::new(),
+                workspace_id: "fixture".into(),
+                tool: "read_file".into(),
+                state: if index == 0 { "running" } else { "completed" }.into(),
+                admitted_at_ms: 0,
+                finished_at_ms: (index != 0).then_some(1),
+                result: None,
+                error: None,
+                automatic_replay: false,
+            });
+        }
+        assert!(store.records.len() <= MAX_OPERATION_RECORDS);
+        assert!(store.records.contains_key("0"), "running work must remain queryable");
+        assert!(!store.records.contains_key("1"), "the oldest completed row must expire");
+    }
+
+    #[tokio::test]
+    async fn audit_drain_does_not_lose_the_last_lease_notification() {
+        let lifecycle = Lifecycle::new(1);
+        let lease = lifecycle.admit("fixture").unwrap();
+        BEFORE_IDLE_WAIT.with(|slot| *slot.borrow_mut() = Some(Box::new(move || drop(lease))));
+        assert!(lifecycle.wait_idle(Duration::from_millis(30)).await);
+        assert_eq!(lifecycle.snapshot().active_requests, 0);
     }
 }
 
@@ -3344,6 +3387,65 @@ mod session_root_tests {
             shutdown_tx,
             drain_timeout: Duration::from_secs(1),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audit_request_ids_are_reserved_before_context_construction() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        let state = context_lifecycle_fixture(&root);
+        let profile = state.core
+            .with_data(|store| Ok(store.get("ws-1").unwrap().clone()))
+            .unwrap();
+        let mut context = tools::ToolContext::for_test(root.clone(), base.path().join("harness"))
+            .unwrap();
+        context.auth = profile.auth.clone();
+        context.policy = tools::PolicySettings::from_runtime(&profile.runtime);
+        context.tool_profile = profile.runtime.tool_profile.clone();
+        context.permission_mode = context.policy.canonical_permission_mode().into();
+        context.bind_workspace_id("ws-1");
+        let context = Arc::new(context);
+        let fingerprint = format!("{:x}", Sha256::digest(
+            serde_json::to_vec(&(&profile.path, &profile.auth)).unwrap()
+        ));
+        state.contexts.lock().unwrap().insert("ws-1".into(), ContextEntry {
+            fingerprint,
+            context: context.clone(),
+            used: std::time::Instant::now(),
+        });
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let owner_state = state.clone();
+        let handle = tokio::runtime::Handle::current();
+        let owner = std::thread::spawn(move || {
+            BEFORE_TOOL_CONTEXT.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
+                entered_tx.send(()).unwrap();
+                continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            })));
+            handle.block_on(call(&owner_state, "same-request", "update_plan", json!({"plan":[]}), None))
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let duplicate = call(&state, "same-request", "update_plan", json!({"plan":[]}), None).await;
+        continue_tx.send(()).unwrap();
+        let original = owner.join().unwrap();
+        assert_eq!(original.0, StatusCode::OK);
+        assert_eq!(duplicate.0, StatusCode::OK);
+        let saved = tools::dispatch::call_tool_mcp(&context, "get_plan", &json!({}));
+        assert_eq!(saved["revision"], 1, "the same request dispatched twice: {saved}");
+        let conflict = call(&state, "same-request", "update_plan", json!({"plan":[],"explanation":"different"}), None).await;
+        assert_eq!(conflict.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn audit_context_failure_settles_the_reserved_request() {
+        let base = tempfile::tempdir().unwrap();
+        let state = context_lifecycle_fixture(&base.path().join("missing"));
+        let failed = call(&state, "context-failure", "get_plan", json!({}), None).await;
+        assert_eq!(failed.0, StatusCode::BAD_REQUEST);
+        assert_eq!(state.operations.lock().unwrap().records["context-failure"].state, "failed");
+        let retry = call(&state, "context-failure", "get_plan", json!({}), None).await;
+        assert_eq!(retry.1["operation"]["state"], "failed");
     }
 
     #[test]
@@ -6659,8 +6761,21 @@ async fn tool_call(
             .unwrap_or_default(),
         )
     );
+    let admitted_at_ms = now_ms();
+    let admitted = OperationReceipt {
+        request_id: body.request_id.clone(),
+        fingerprint: fingerprint.clone(),
+        workspace_id: body.workspace_id.clone(),
+        tool: body.tool.clone(),
+        state: "running".into(),
+        admitted_at_ms,
+        finished_at_ms: None,
+        result: None,
+        error: None,
+        automatic_replay: false,
+    };
     {
-        let operations = state.operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut operations = state.operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(existing) = operations.records.get(&body.request_id) {
             if existing.fingerprint != fingerprint {
                 return json_error(
@@ -6674,6 +6789,11 @@ async fn tool_call(
             )
             .into_response();
         }
+        operations.insert(admitted.clone());
+    }
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_TOOL_CONTEXT.with(|slot| slot.borrow_mut().take()) {
+        hook();
     }
     let native = matches!(
         body.tool.as_str(),
@@ -6695,25 +6815,17 @@ async fn tool_call(
     } {
         Ok(context) => context,
         Err(error) => {
+            state.operations.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(OperationReceipt {
+                    state: "failed".into(),
+                    finished_at_ms: Some(now_ms()),
+                    error: Some(format!("WORKSPACE_CONTEXT_FAILED: {error}")),
+                    ..admitted
+                });
             return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
         }
     };
-    let admitted_at_ms = now_ms();
-    {
-        let mut operations = state.operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        operations.insert(OperationReceipt {
-            request_id: body.request_id.clone(),
-            fingerprint: fingerprint.clone(),
-            workspace_id: body.workspace_id.clone(),
-            tool: body.tool.clone(),
-            state: "running".into(),
-            admitted_at_ms,
-            finished_at_ms: None,
-            result: None,
-            error: None,
-            automatic_replay: false,
-        });
-    }
     let request_id = body.request_id.clone();
     let workspace_id = body.workspace_id.clone();
     let tool = body.tool.clone();
