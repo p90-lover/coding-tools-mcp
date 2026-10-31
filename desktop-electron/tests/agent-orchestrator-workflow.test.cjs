@@ -1516,6 +1516,47 @@ test("a run's loop that loses a local connection picks the run up again instead 
   assert.equal(world.grants, 2);
 });
 
+test("a closing app neither drives a run again nor holds it on the stopping service's errors", async () => {
+  // Seen at a quit (2026-10-31): the drive loops lost their sockets, their bare retry timers drove the
+  // runs again after dispose, "Local execution service is stopping" held all of them, and 19 auto-retries
+  // and needs-attention reports followed for chats that were only being closed.
+  const make = (fail) => {
+    const world = heldMissionWorld();
+    let reads = 0;
+    const box = {};
+    const requestHeadless = async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read" && ++reads === 2) fail(box.workflow);
+      return world.requestHeadless(endpoint, body);
+    };
+    const states = [];
+    box.workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+      fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }] }) }),
+      webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+      onRunState: (update) => states.push(`${update?.status ?? ""}: ${update?.detail ?? ""}`),
+      resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+    return { world, states, workflow: box.workflow, reads: () => reads };
+  };
+  const waitFor = async (check, ms) => { for (const end = Date.now() + ms; !check() && Date.now() < end;) await new Promise((resolve) => setTimeout(resolve, 20)); };
+
+  // A lost socket's retry is cancelled by dispose.
+  const lost = make(() => { throw Object.assign(new Error("connect ECONNRESET 127.0.0.1:64174"), { code: "ECONNRESET" }); });
+  await lost.workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await waitFor(() => lost.states.some((line) => /Lost a local connection/.test(line)), 2_000);
+  lost.workflow.dispose();
+  const readsAtQuit = lost.reads();
+  await new Promise((resolve) => setTimeout(resolve, 2_600));
+  assert.equal(lost.reads(), readsAtQuit, "the run is not driven again after dispose");
+  assert.equal(lost.world.grants, 1);
+
+  // A call in flight when the app closes fails "stopping": nothing is held or reported for it.
+  const closing = make((workflow) => { workflow.dispose(); throw new Error("Local execution service is stopping"); });
+  await closing.workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await waitFor(() => closing.reads() >= 2, 2_000);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(closing.states.some((line) => /stopping/.test(line) || line.startsWith("held")), false, closing.states.join(" | "));
+});
+
 test("a local call that times out keeps the run going by itself and says so, instead of a failed step", async () => {
   // Seen 2026-10-31: "Step failed: Headless request timed out" waited for a click with "Retry
   // automatically" on, since no step was held for it to retry. The user: "when tools call timeout,
