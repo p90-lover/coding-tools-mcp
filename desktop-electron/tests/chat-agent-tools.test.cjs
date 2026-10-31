@@ -1988,6 +1988,49 @@ test("computer control is asked on a card in the chat, never in a window of its 
   assert.ok(!barPage({ title: "</span><script>" }).includes("</span><script>"));
 });
 
+// Seen live on 0.8.39 (2026-10-31): a data: page never navigates in-page, so the picker's Start and
+// the bar's Stop, both sent as a hash change, never reached the app.
+test("the control bar's Stop reaches the app on a data: page: it renames the page, not its hash", async () => {
+  const vm = require("node:vm");
+  const { createComputerControl, barPage } = require("../electron/computer-control.cjs");
+  const page = barPage({ title: "Calculator" });
+  assert.doesNotMatch(page, /location\.hash/, "a hash change never fires on a data: page");
+  // The page's own script, run against a stand-in document: Stop renames the page.
+  const elements = { stop: {}, left: {} };
+  const document = { title: "Computer control is on", getElementById: (id) => elements[id] };
+  vm.runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document, window: {} });
+  elements.stop.onclick();
+
+  const calls = [];
+  const handlers = {};
+  class FakeWindow {
+    constructor() { this.webContents = { on: (name, handler) => { handlers[name] = handler; }, setWindowOpenHandler() {}, executeJavaScript: async () => undefined }; }
+    setAlwaysOnTop() {} on() {} showInactive() {} destroy() {}
+    loadURL() { return Promise.resolve(); }
+    isDestroyed() { return false; }
+    isVisible() { return true; }
+  }
+  const request = async (endpoint, body) => {
+    calls.push(endpoint);
+    if (endpoint === "/api/v1/computer/targets") return { targets: [{ window_id: 7, pid: 70, title: "Calculator" }] };
+    if (endpoint === "/api/v1/workspaces") return { workspaces: [{ id: "ws", name: "proj", screen_capture_enabled: true }] };
+    return {};
+  };
+  const control = createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1],
+    screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+  try {
+    const asked = control.pick({ workspaceId: "ws", aoSession: "s1" });
+    for (let tick = 0; tick < 50 && !control.requests().length; tick += 1) await new Promise(setImmediate);
+    assert.deepEqual(await control.answer({ id: control.requests()[0].id, window: 0, duration: "300" }), { ok: true });
+    await asked;
+    let prevented = false;
+    handlers["page-title-updated"]({ preventDefault: () => { prevented = true; } }, document.title);
+    await new Promise(setImmediate);
+    assert.ok(calls.includes("/api/v1/computer/stop"), "Stop on the bar stops control");
+    assert.ok(prevented, "and the bar keeps its own title");
+  } finally { control.dispose(); }
+});
+
 test("turning the app's tools off refuses calls in running sessions", async () => {
   const tree = tempTree();
   let on = true;
