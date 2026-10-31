@@ -404,18 +404,22 @@ export function ChatThreadList(props: ThreadListProps) {
     saveOpenOthers(others);
     if (collapsed.has(workspaceId)) { const next = new Set(collapsed); next.delete(workspaceId); saveCollapsed(next); }
   }, [workspaceId]);
-  // Other open projects' chats, read when opened and refreshed with the list's clock.
+  // Every other project's chats, read when one opens and refreshed with the list's clock (a minute,
+  // paused while the window is hidden). Collapsed projects are read too: their row's badge (running,
+  // waiting on you, unread) comes from them, and only opened projects were read, so a collapsed
+  // project with chats running showed nothing.
   const [otherChats, setOtherChats] = useState<Record<string, ChatSummary[]>>({});
   const { loadProjectChats } = props;
   const openOtherIds = [...openOthers].filter((id) => id !== workspaceId && workspaces.some((item) => item.id === id)).join("\n");
+  const otherIds = workspaces.map((item) => item.id).filter((id) => id !== workspaceId).join("\n");
   useEffect(() => {
-    if (!loadProjectChats || !openOtherIds) return undefined;
+    if (!loadProjectChats || !otherIds) return undefined;
     let live = true;
-    for (const id of openOtherIds.split("\n")) {
+    for (const id of otherIds.split("\n")) {
       void loadProjectChats(id).then((list) => { if (live) setOtherChats((current) => ({ ...current, [id]: list })); }, () => undefined);
     }
     return () => { live = false; };
-  }, [loadProjectChats, openOtherIds, now]);
+  }, [loadProjectChats, otherIds, openOtherIds, now]);
   // The order you dragged projects into. Before there was one, projects rose as they were used; the
   // first list seen keeps that order, so nothing moves on the update.
   const [projectOrderSaved, setProjectOrderSaved] = useState<string[] | null>(() => {
