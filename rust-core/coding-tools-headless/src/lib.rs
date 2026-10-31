@@ -1628,13 +1628,23 @@ mod workspace_auth_tests {
         )
         .unwrap();
         let expected = [
-            "preview_render", "preview_open", "preview_read", "preview_screenshot", "preview_click",
-            "preview_type", "preview_press", "preview_scroll", "preview_navigate", "preview_wait",
+            "preview_render",
+            "preview_open",
+            "preview_read",
+            "preview_screenshot",
+            "preview_click",
+            "preview_type",
+            "preview_press",
+            "preview_scroll",
+            "preview_navigate",
+            "preview_wait",
             "preview_console",
         ];
         assert_eq!(enabled, expected);
         for tool in expected {
-            assert!(config.contains(&format!("[mcp_servers.coding-tools.tools.{tool}]\napproval_mode = \"approve\"\n")));
+            assert!(config.contains(&format!(
+                "[mcp_servers.coding-tools.tools.{tool}]\napproval_mode = \"approve\"\n"
+            )));
         }
         assert_eq!(
             config.matches("approval_mode = \"approve\"").count(),
@@ -4338,8 +4348,16 @@ fn prepare_ao_preview_home(
     // This private home receives only the workflow's bound preview capability. New tools
     // remain unavailable and unapproved; global command/file/MCP approval policy is unchanged.
     let preview_tools = [
-        "preview_render", "preview_open", "preview_read", "preview_screenshot", "preview_click",
-        "preview_type", "preview_press", "preview_scroll", "preview_navigate", "preview_wait",
+        "preview_render",
+        "preview_open",
+        "preview_read",
+        "preview_screenshot",
+        "preview_click",
+        "preview_type",
+        "preview_press",
+        "preview_scroll",
+        "preview_navigate",
+        "preview_wait",
         "preview_console",
     ];
     config.push_str(&format!(
