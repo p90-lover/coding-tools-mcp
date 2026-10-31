@@ -4122,6 +4122,8 @@ async function start() {
       // Points per model from finished Team rounds (model-scores.cjs).
       modelScoresFile: path.join(app.getPath("userData"), "integrations", "model-scores.json"),
       knownModelsFile: path.join(app.getPath("userData"), "integrations", "cpa-known-models.json"),
+      // Models the app's own calls skip for now (spent quota, repeated failures), kept across restarts.
+      modelBenchFile: path.join(app.getPath("userData"), "integrations", "model-benches.json"),
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
         return headlessHost.request(endpoint, body, options);

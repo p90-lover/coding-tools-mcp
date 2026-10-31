@@ -3577,7 +3577,7 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
  */
 async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
   ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." }, refuse = () => 0,
-  timers = null, request = null, goalsFile = null, now = Date.now, world: restarted = null, models = ["gpt-6-luna", "deepseek-v4", "gemini-3-flash"] } = {}) {
+  timers = null, request = null, goalsFile = null, now = Date.now, world: restarted = null, models = ["gpt-6-luna", "deepseek-v4", "gemini-3-flash"], modelBenchFile = null } = {}) {
   // `world` given: the app restarting on the same AO state (and `goalsFile`), its goal kept.
   const world = restarted ?? chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
   const checks = [];
@@ -3586,7 +3586,7 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
     setTimer: (callback, ms) => { if (ms < 30_000) return setTimeout(callback, ms); timers.push({ callback, ms }); return timers.at(-1); },
     clearTimer: (timer) => { const at = timers.indexOf(timer); if (at >= 0) timers.splice(at, 1); else clearTimeout(timer); },
   } : {};
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: request ? request(world) : world.requestHeadless, findCodexExecutable: () => "C:/codex.exe", ...timerOptions, goalsFile, now,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: request ? request(world) : world.requestHeadless, findCodexExecutable: () => "C:/codex.exe", ...timerOptions, goalsFile, now, modelBenchFile,
     resolveHarness: async () => { throw new Error("stop before the background loop"); },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     fetchImpl: async (url, init) => {
@@ -3707,6 +3707,43 @@ test("a model whose quota is used up sits out until the reset its answer names",
   clock.at = Date.parse("2026-10-26T00:01:00Z");
   await judged();
   assert.equal(checks.at(-2).model, "gemini-3-flash", "asked again once its quota is back");
+});
+
+test("a benched model stays benched after the app restarts", async () => {
+  // Seen live 2026-10-31: after each restart the goal checks spent their tries on two API keys
+  // spent until the next day and a model answering 503, failed, and waited two minutes.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const round = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "not yet" } }] });
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "ct-model-bench-"));
+  const modelBenchFile = path.join(dir, "integrations", "model-benches.json");
+  const clock = { at: Date.parse("2026-10-31T07:29:00Z") };
+  const spent = { status: 400, text: JSON.stringify({ type: "error", error: { type: "invalid_request_error",
+    message: "You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC." } }) };
+  const app = () => goalChat({ refuse: (model) => model === "gemini-3-flash" ? spent : 0, now: () => clock.at, modelBenchFile });
+  const judged = async ({ world, workflow, checks }) => {
+    const next = (await goalOf(workflow)).lastRunId || "r1";
+    world.runs.push(round(next));
+    await workflow.goalAfterRun("ws-1", next, "finished", null);
+    return checks.map(check => check.model);
+  };
+  try {
+    const first = await app();
+    assert.ok((await judged(first)).includes("gemini-3-flash"), "asked once, and its quota is spent");
+    for (let tries = 0; tries < 100 && !fs.existsSync(modelBenchFile); tries += 1) await new Promise(resolve => setTimeout(resolve, 10));
+    first.workflow.dispose();
+    // The app restarts: the spent model is not asked again before its reset.
+    clock.at += 60 * 60_000;
+    const second = await app();
+    assert.ok(!(await judged(second)).includes("gemini-3-flash"), "benched across the restart");
+    second.workflow.dispose();
+    clock.at = Date.parse("2026-11-01T00:01:00Z");
+    const third = await app();
+    assert.ok((await judged(third)).includes("gemini-3-flash"), "asked again once its quota is back");
+    third.workflow.dispose();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a model that keeps failing sits out twice as long each time, and from the start again once it answers", async () => {

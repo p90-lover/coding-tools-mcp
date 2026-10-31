@@ -342,7 +342,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
   // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
   // working chat's activity poll, the run loop and their per-node checks each read the same run
   // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
@@ -3051,8 +3051,54 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const down = Math.min(REVIEWER_DOWN_MS * 2 ** (strikes - 1), MODEL_GONE_MS);
     reviewerDown.set(model, error?.quota ? until : now() + (error?.status === 404 ? MODEL_GONE_MS : down));
     if (error?.status !== 404 && !error?.quota && modelProvider(model)) providerDown.set(modelProvider(model), now() + REVIEWER_DOWN_MS);
+    saveBenches();
   };
-  const reviewerAnswered = model => { reviewerDown.delete(model); reviewerStrikes.delete(model); };
+  const reviewerAnswered = model => {
+    const benched = reviewerDown.delete(model);
+    if (reviewerStrikes.delete(model) || benched) saveBenches();
+  };
+  // The benches outlive a restart: seen live 2026-10-31, after each app restart the goal checks
+  // spent their three tries on models already known to be out (two API keys spent until the next
+  // day, a model answering 503 for hours), failed, and waited two minutes. They are written only
+  // when a bench changes, without blocking, and expired ones are dropped.
+  (() => {
+    let saved = null;
+    try { saved = modelBenchFile ? JSON.parse(fs.readFileSync(modelBenchFile, "utf8")) : null; } catch { saved = null; }
+    if (!saved || typeof saved !== "object") return;
+    const at = now();
+    const restore = (map, entries, valid) => {
+      for (const [key, value] of Object.entries(entries && typeof entries === "object" ? entries : {}).slice(0, 200)) {
+        if (key && key.length <= 160 && valid(value)) map.set(key, value);
+      }
+    };
+    const upcoming = until => Number.isFinite(until) && until > at && until <= at + QUOTA_BENCH_MAX_MS;
+    restore(reviewerDown, saved.down, upcoming);
+    restore(providerDown, saved.providers, upcoming);
+    restore(reviewerStrikes, saved.strikes, strikes => Number.isInteger(strikes) && strikes >= 1 && strikes <= 16);
+    for (const model of reviewerStrikes.keys()) if (!reviewerDown.has(model)) reviewerStrikes.delete(model);
+  })();
+  let benchSaving = null, benchDirty = false;
+  function saveBenches() {
+    if (!modelBenchFile) return;
+    benchDirty = true;
+    if (benchSaving) return;
+    benchSaving = (async () => {
+      while (benchDirty) {
+        benchDirty = false;
+        const at = now();
+        const live = map => Object.fromEntries([...map].filter(([, until]) => until > at));
+        const down = live(reviewerDown);
+        const body = JSON.stringify({ down, providers: live(providerDown),
+          strikes: Object.fromEntries([...reviewerStrikes].filter(([model]) => model in down)) });
+        const temporary = `${modelBenchFile}.${process.pid}.tmp`;
+        try {
+          await fs.promises.mkdir(path.dirname(modelBenchFile), { recursive: true });
+          await fs.promises.writeFile(temporary, body);
+          await fs.promises.rename(temporary, modelBenchFile);
+        } catch (error) { logger?.warn?.("ao.model_bench.save_failed", { error: publicText(error?.message || error, 200) }); }
+      }
+    })().finally(() => { benchSaving = null; });
+  }
   /**
    * The error for a model call CPA refused: its status, and whether the answer says the model's
    * quota is used up (an API key's spend limit comes back as 400, not 429) with the reset it names.
