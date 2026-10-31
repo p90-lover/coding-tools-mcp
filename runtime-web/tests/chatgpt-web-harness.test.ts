@@ -3346,8 +3346,9 @@ prompt: ${secrets[4]}` },
       }));
       // ChatGPT caches the complete tools/list contract under a connector identity.
       // An intentional hash change therefore requires an explicit connector refresh or identity migration.
+      // WebGPT catalog guidance changed the description; refresh existing connector definitions.
       expect(createHash("sha256").update(canonicalJson(publicConnectorAbi)).digest("hex"))
-        .toBe("d423efdf28d473ce1277d91246b4697d3f2cb462ace070f35fa043d4109b727d");
+        .toBe("8fe7498303a30ea6f2f8ad1b6c7872f96279b9f8cd06ad0277480f25b5ba84c5");
       for (const tool of listed.tools.filter(tool => tool.name.startsWith("codex_"))) {
         const properties = tool.inputSchema.properties as Record<string, unknown>;
         expect(properties.turn_token).toEqual({ type: "string", minLength: 20, maxLength: 256 });
