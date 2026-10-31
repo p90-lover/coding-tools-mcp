@@ -106,3 +106,20 @@ test("automatic MCP reads no file while the browser is busy, and uses the config
   assert.deepEqual(reads, ["credentials", "config", "state"]);
   assert.equal(f.state.mcpSetupComplete, true);
 });
+
+test("automatic MCP checks the saved credentials of the config the monitor read without a synchronous disk call", async () => {
+  // Seen live 2026-10-31: the credentials check read config.json again synchronously, and its statSync
+  // froze every window for up to 26 s on the app's busy hard disk.
+  const f = fixture();
+  const reads = [];
+  const config = { mode: "full", releaseVersion: "5.0.6" };
+  f.context.runtimeHost.mcpCredentialsConfigured = () => { reads.push("sync credentials"); return true; };
+  f.context.runtimeHost.mcpCredentialsConfiguredAsync = async (known) => { reads.push(known === config ? "monitor config" : "other config"); return true; };
+  assert.equal(await f.run({ config }), false);
+  assert.deepEqual(reads, ["monitor config"]);
+  assert.equal(f.state.mcpSetupComplete, true);
+  const none = fixture();
+  none.context.runtimeHost.mcpCredentialsConfiguredAsync = async () => false;
+  assert.equal(await none.run({ config }), false);
+  assert.deepEqual(none.calls, [], "no saved credentials: nothing to connect");
+});

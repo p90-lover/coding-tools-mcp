@@ -341,6 +341,27 @@ test("a turn's stats read CPA Helper's records for its model since it started, w
   assert.deepEqual(await usage.turnStats({ model: "", from: NOW }), { ok: true, available: false });
 });
 
+test("turn stats read CPA Helper's records three at a time, and the same turn asked twice is read once", async () => {
+  // Seen live 2026-10-31: opening a chat read every ended turn's foot at once; 17 record reads went to
+  // CPA together during a disk stall, all timed out in the same 2 s, and those feet stayed blank.
+  let inFlight = 0, most = 0, reads = 0;
+  const usage = createCpaUsage({
+    now: () => NOW, logger: { warn() {} },
+    getConnection: () => ({ baseUrl: "http://127.0.0.1:8317", managementKey: KEY }),
+    fetchImpl: async () => {
+      reads += 1; inFlight += 1; most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return { ok: true, status: 200, json: async () => ({ items: [{ latency_ms: 1000, output_tokens: 80 }] }) };
+    },
+  });
+  const turns = Array.from({ length: 10 }, (_, index) => ({ model: "cpa/glm", from: NOW - 100_000 + index * 1000, to: NOW - 99_500 + index * 1000 }));
+  const results = await Promise.all([...turns, turns[0]].map((turn) => usage.turnStats(turn)));
+  assert.equal(most, 3, "at most three record reads at a time");
+  assert.equal(reads, 10, "the turn asked twice shares one read");
+  assert.ok(results.every((stats) => stats.available && stats.steps === 1), "every turn still gets its numbers");
+});
+
 test("an ended turn's stats stop at its end, say when its last request was, and are kept once settled", async () => {
   const urls = [];
   const usage = createCpaUsage({

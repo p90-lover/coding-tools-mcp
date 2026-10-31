@@ -1223,8 +1223,9 @@ function createChatAgentTools({
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
   sandbox = null,
-  // Computer control (computer-control.cjs: { status(), pick({ workspaceId, chat, signal }) }): a chat
-  // asking for control while it is off opens the app's window picker. Without it control can't start.
+  // Computer control (computer-control.cjs: { status(), pick({ workspaceId, aoSession, chat, signal }) }):
+  // a chat asking for control while it is off shows a request card in that chat, where the person
+  // picks the window. Without it control can't start.
   computerControl = null,
   // Where the leases (credential hashes, never credentials) and the port are kept across restarts.
   statePath = null,
@@ -1619,8 +1620,8 @@ function createChatAgentTools({
   const who = (entry) => [`Agent: ${entry.agent}\nAO session: `, { value: String(entry.aoSession), own: true }, "\n"];
 
   /**
-   * A chat asking for control while none is on opens the app's window picker: the person picks the
-   * window, and doing so allows this chat. A control call the person turned down is refused; a
+   * A chat asking for control while none is on shows a request card in that chat: the person picks
+   * the window there, and doing so allows this chat. A control call the person turned down is refused; a
    * computer_status call goes on to read "stopped", and does not ask again for a while.
    */
   async function startControlIfOff(entry, name, signal) {
@@ -1628,7 +1629,8 @@ function createChatAgentTools({
     try { current = await computerControl.status(); } catch { return null; }
     if (current?.state !== "stopped") return null;
     if (name === "computer_status" && now() - (entry.controlDeclinedAt ?? -Infinity) < CONTROL_ASK_AGAIN_MS) return null;
-    const picked = await computerControl.pick({ workspaceId: entry.workspaceId, chat: `${entry.agent} (session ${entry.aoSession})`, signal });
+    const picked = await computerControl.pick({ workspaceId: entry.workspaceId, aoSession: entry.aoSession,
+      chat: `${entry.agent} (session ${entry.aoSession})`, signal });
     if (picked?.started) { entry.controlAllowed = true; return null; }
     entry.controlDeclinedAt = now();
     return name === "computer_status" ? null

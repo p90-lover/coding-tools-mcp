@@ -1516,6 +1516,39 @@ test("a run's loop that loses a local connection picks the run up again instead 
   assert.equal(world.grants, 2);
 });
 
+test("a local call that times out keeps the run going by itself and says so, instead of a failed step", async () => {
+  // Seen 2026-10-31: "Step failed: Headless request timed out" waited for a click with "Retry
+  // automatically" on, since no step was held for it to retry. The user: "when tools call timeout,
+  // it should keep going it self silently and say in chat that a tool has time out".
+  const world = heldMissionWorld();
+  let calls = 0;
+  const requestHeadless = async (endpoint, body) => {
+    if (endpoint === "/api/v1/ao/read" && ++calls === 2) throw new Error("Headless request timed out");
+    return world.requestHeadless(endpoint, body);
+  };
+  const updates = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"retry","reason":"The send timed out"}' } }] }) };
+    },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    onRunState: (update) => updates.push(update),
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  const waitFor = async (check, ms) => { for (const end = Date.now() + ms; !check() && Date.now() < end;) await new Promise((resolve) => setTimeout(resolve, 20)); };
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await waitFor(() => updates.some((update) => update.warning), 2_000);
+  const status = await workflow.call("run_status", { workspaceId: "ws-1", runId: "r1" });
+  assert.equal(status.status, "running", "not held for a click");
+  assert.equal(status.detail, undefined, "silently: no failure detail");
+  assert.match(status.warning, /^A tool call timed out \(Headless request timed out\)\. The chat keeps going by itself\.$/);
+  assert.ok(!updates.some((update) => update.attention === "error"), "never reported as a failed step");
+  await waitFor(() => world.grants >= 2, 8_000);
+  assert.deepEqual(world.controls, ["retry"], "the loop came back and recovered the run as usual");
+  workflow.dispose();
+});
+
 test("a card interrupted by an app restart is retried directly, without asking the helper", async () => {
   const world = heldMissionWorld({ error: "The agent's process ended before it finished (the app restarted); retry this card." });
   let asked = 0;
@@ -8054,7 +8087,7 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
       grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
       nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history, receipt: { thread_id: "session-1", request_key: "k" } }] };
     const controls = [], timers = [];
-    let lost = false;
+    let lost = false, stopping = false;
     const workflow = createAgentOrchestratorWorkflow({
       // Only the auto-retry pauses; other timers are not this test's.
       setTimer: (fn, ms) => { if ([10_000, 20_000, 30_000, 60_000, 15 * 60_000].includes(ms)) timers.push({ fn, ms }); return { unref() {} }; },
@@ -8064,6 +8097,7 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
       fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
       requestHeadless: async (endpoint, body) => {
         if (endpoint.endsWith("/read")) {
+          if (stopping) { stopping = false; throw new Error("Local execution service is stopping"); }
           if (lost) { lost = false; return { ok: true, runs: [], worker_capacity: { run: 1 } }; }
           return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
         }
@@ -8081,7 +8115,7 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
       mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: "launch timed out" } };
       lost = true; // the next read fails, ending the run on an error
     };
-    return { workflow, mission, controls, timers, fail };
+    return { workflow, mission, controls, timers, fail, stopOnce: () => { stopping = true; } };
   }
   const settle = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -8119,6 +8153,25 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
   await settle(200);
   assert.deepEqual(replaced.controls, [], "a disposed backend starts nothing");
   replaced.mission.nodes[0].state = "finished";
+
+  // The restart's read fails while the local service restarts: it tries again after the next pause.
+  // Before, it logged "Local execution service is stopping" and the step waited for a click (2026-10-31).
+  const restarting = setup([]);
+  await restarting.workflow.call("chat_auto_retry", { enabled: true });
+  await restarting.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  restarting.fail();
+  for (let tries = 0; tries < 200 && !restarting.timers.length; tries++) await settle(10);
+  restarting.stopOnce();
+  restarting.timers.shift().fn();
+  for (let tries = 0; tries < 200 && !restarting.timers.length; tries++) await settle(10);
+  assert.deepEqual(restarting.timers.map(timer => timer.ms), [10_000], "tried again after a pause, not given up");
+  restarting.timers.shift().fn();
+  for (let tries = 0; tries < 200 && !restarting.timers.length; tries++) await settle(10);
+  restarting.timers.shift().fn();
+  for (let tries = 0; tries < 200 && !restarting.controls.length; tries++) await settle(10);
+  assert.deepEqual(restarting.controls, ["retry"], "the step was retried once the service was back");
+  restarting.workflow.dispose();
 
   // Three quick tries spent: it still retries by itself, a minute later. Before, the step waited
   // for a click here, and the click worked.

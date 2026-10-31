@@ -1979,12 +1979,67 @@ test("a chat asking for computer control while it is off is shown the window pic
   } finally { await tools.close(); tree.cleanup(); }
 });
 
-test("the computer-control picker shows every window as text, never markup", () => {
-  const { pickerPage, barPage } = require("../electron/computer-control.cjs");
-  const page = pickerPage({ chat: "codex", project: "<b>p</b>", captureOff: true,
-    targets: [{ window_id: 1, pid: 2, title: "<img src=x onerror=alert(1)>" }] });
-  assert.ok(!page.includes("<img src=x"), "a window title is escaped");
-  assert.match(page, /Turn on screen capture for &#60;b&#62;p&#60;\/b&#62;/);
+test("computer control is asked on a card in the chat, never in a window of its own that takes the focus", async () => {
+  const { createComputerControl, barPage } = require("../electron/computer-control.cjs");
+  const calls = [];
+  const published = [];
+  const windows = [];
+  const request = async (endpoint, body) => {
+    calls.push([endpoint, body]);
+    if (endpoint === "/api/v1/computer/targets") {
+      return { targets: [{ window_id: 7, pid: 70, title: "<img src=x onerror=alert(1)>" }, { window_id: 8, pid: 1, title: "Coding Tools" }] };
+    }
+    if (endpoint === "/api/v1/workspaces") {
+      return { workspaces: [{ id: "ws", name: "proj", screen_capture_enabled: false, permission_mode: "p", approval_mode: "a", tool_profile: "t" }] };
+    }
+    return {};
+  };
+  class FakeWindow {
+    constructor(options) { windows.push(options); this.webContents = { on() {}, setWindowOpenHandler() {}, executeJavaScript: async () => undefined }; }
+    setAlwaysOnTop() {} on() {} showInactive() {} destroy() {}
+    loadURL() { return Promise.resolve(); }
+    isDestroyed() { return false; }
+    isVisible() { return true; }
+  }
+  const control = createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1], onRequests: (list) => published.push(list),
+    screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+  const settle = async () => { for (let tick = 0; tick < 50 && !control.requests().length; tick += 1) await new Promise(setImmediate); };
+  try {
+    const asked = control.pick({ workspaceId: "ws", aoSession: "s1", chat: "codex" });
+    await settle();
+    const [card] = control.requests();
+    assert.equal(windows.length, 0, "no window comes up to ask");
+    assert.deepEqual(JSON.parse(JSON.stringify(card.windows)), [{ title: "<img src=x onerror=alert(1)>", pid: 70 }],
+      "the app's own windows are not offered; titles stay plain text for the card to show as text");
+    assert.equal(card.captureOff, true);
+    assert.deepEqual([...card.sessions], ["s1"]);
+    assert.equal(control.pick({ workspaceId: "ws", aoSession: "s2", chat: "other" }), asked, "a chat asking meanwhile shares the request");
+    assert.deepEqual([...control.requests()[0].sessions], ["s1", "s2"], "and its card shows in that chat too");
+
+    assert.match((await control.answer({ id: card.id, window: 0 })).error, /screen capture/, "capture off needs the tick");
+    assert.equal((await control.answer({ id: "another", window: 0, capture: true })).ok, false, "a stale card starts nothing");
+    assert.deepEqual(await control.answer({ id: card.id, window: 0, duration: "300", capture: true }), { ok: true });
+    assert.deepEqual(await asked, { started: true });
+    assert.equal(calls.find(([endpoint]) => endpoint === "/api/v1/workspaces/policy")[1].screen_capture_enabled, true);
+    const start = calls.find(([endpoint]) => endpoint === "/api/v1/computer/start")[1];
+    assert.deepEqual([start.window_id, start.pid, start.duration_seconds], [7, 70, 300]);
+    assert.deepEqual(control.requests(), [], "the card goes once answered");
+    assert.deepEqual(published.at(-1), []);
+    assert.equal(windows.length, 1, "only the control bar is a window, shown without the focus (showInactive)");
+    await control.stop();
+
+    const declined = control.pick({ workspaceId: "ws", aoSession: "s1" });
+    await settle();
+    assert.deepEqual(await control.answer({ id: control.requests()[0].id, cancel: true }), { ok: true });
+    assert.deepEqual(await declined, { started: false, reason: "the user cancelled" });
+
+    const stopping = new AbortController();
+    const stopped = control.pick({ workspaceId: "ws", aoSession: "s1", signal: stopping.signal });
+    await settle();
+    stopping.abort();
+    assert.deepEqual(await stopped, { started: false, reason: "the chat stopped" });
+    assert.deepEqual(control.requests(), [], "a stopped chat's card goes");
+  } finally { control.dispose(); }
   assert.ok(!barPage({ title: "</span><script>" }).includes("</span><script>"));
 });
 

@@ -132,6 +132,24 @@ test("a pane dragged by its grip moves: a new column, an empty cell, or trading 
   assert.equal(split.movePane([pane("b", 1, 0)], "b", { kind: "column" }), null, "the last column's only pane stays");
 });
 
+test("an open chat dragged from the sidebar to another place opens there and its old pane closes", () => {
+  const panes = [pane("b", 1, 0), pane("c", 1, 1), pane("d", 2, 0)];
+  const at = (list) => Object.fromEntries(list.map((item) => [item.id, `${item.col}:${item.row}`]));
+  assert.deepEqual(at(split.relocatePane(panes, "c", { kind: "cell", col: 2, row: 0 })), { b: "1:0", c: "2:0" },
+    "onto another chat: that chat closes, and the chat leaves its old cell");
+  assert.deepEqual(at(split.relocatePane(panes, "c", { kind: "cell", col: 2, row: 1 })), { b: "1:0", c: "2:1", d: "2:0" }, "into an empty cell");
+  assert.deepEqual(at(split.relocatePane(panes, "c", { kind: "column" })), { b: "1:0", c: "3:0", d: "2:0" }, "into a new column");
+  // Its old column closes when the chat was the only one in it.
+  assert.deepEqual(at(split.relocatePane([pane("b", 1, 0), pane("d", 2, 0)], "b", { kind: "cell", col: 2, row: 1 })), { b: "1:1", d: "1:0" });
+  assert.equal(split.relocatePane(panes, "b", { kind: "cell", col: 1, row: 0 }), null, "its own cell: no change");
+  assert.equal(split.relocatePane(panes, "b", { kind: "cell", col: 0, row: 0 }), null, "the primary's cell is not a target");
+  assert.equal(split.relocatePane(panes, "b", { kind: "left" }), null, "left is the window's pane move");
+  // The window uses it: an open chat dropped somewhere else moves instead of only being focused.
+  const surface = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  assert.match(surface, /relocatePane\(splitPanes, open, at\)/);
+  assert.match(surface, /if \(open === "main" && at && "kind" in at && at\.kind !== "left"\) \{ moveMainChat\(at\); return; \}/);
+});
+
 test("a movable split gives each other pane a Move grip and a corner where dividers meet", () => {
   const { ChatSplit } = load("ChatSplit.tsx", { "./chat-split": split });
   const render = (props) => renderToStaticMarkup(React.createElement(ChatSplit, {

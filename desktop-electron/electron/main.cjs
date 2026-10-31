@@ -43,8 +43,8 @@ const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
-const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
-const { isMcpConnectorCommand, createMcpConnectorCommand } = require("./mcp-connector-command.cjs");
+const { createConfiguredConnector, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
+const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
@@ -245,14 +245,15 @@ let automaticMcpAttemptPid = null;
 let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
 let mcpConnectorCommand = null;
-let pendingMcpConnectorCommand = isMcpConnectorCommand(process.argv);
+let pendingMcpConnectorCommand = mcpConnectorCommandAction(process.argv);
 let launcherReadyForMcpCommand = false;
 
 function dispatchMcpConnectorCommand() {
   if (!pendingMcpConnectorCommand || !launcherReadyForMcpCommand || !mcpConnectorCommand) return;
-  pendingMcpConnectorCommand = false;
+  const action = pendingMcpConnectorCommand;
+  pendingMcpConnectorCommand = null;
   // The private command receipt and existing operation status carry failure details.
-  void mcpConnectorCommand.request().catch(() => undefined);
+  void mcpConnectorCommand.request(action).catch(() => undefined);
 }
 let updateController = null;
 let autoInstaller = null;
@@ -270,6 +271,8 @@ let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
 /** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
 let chatAgentTools = null;
+// A chat's computer control (computer-control.cjs), made with the tool server: its request cards.
+let computerControlService = null;
 // Plugins > MCPs: the person's own MCP servers, handed to every chat session next to the app's tools.
 let chatMcpServers = null;
 function userMcpServers(logger = null) {
@@ -631,7 +634,12 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
     || browserHost.activeTraceId || browserHost.currentOperation() || runtimeHost.currentOperation()) return true;
   const contents = browserHost.view?.webContents;
   if (!contents || contents.isDestroyed()) return true;
-  if (!runtimeHost?.mcpCredentialsConfigured()) return false;
+  // With the monitor's config, the saved credentials are checked without a synchronous call: reading
+  // config.json again here froze every window for up to 26 s (statSync, seen live 2026-10-31).
+  const credentials = knownConfig !== undefined && runtimeHost?.mcpCredentialsConfiguredAsync
+    ? await runtimeHost.mcpCredentialsConfiguredAsync(knownConfig)
+    : runtimeHost?.mcpCredentialsConfigured();
+  if (!credentials) return false;
   const config = knownConfig !== undefined ? knownConfig : runtimeSupervisor?.readConfig();
   if (config?.mode !== "full") return false;
   if (health.version !== config.releaseVersion || health.pid !== runtimeSupervisor.readState()?.daemonPid) return true;
@@ -1845,6 +1853,17 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
   handle("coding-tools:computer:status", (event) => codingTools.computerStatus(event));
+  // A chat's request for computer control, shown as a card in that chat.
+  handle("coding-tools:computer:requests", (event) => {
+    assertFocusedMainWindow(event, false);
+    return { requests: computerControlService?.requests() ?? [] };
+  });
+  // Its answer starts control of a window, so it must be the person's click in the focused window.
+  handle("coding-tools:computer:answer", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
+    return computerControlService.answer(input);
+  });
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
   let nativeApprovalPromptInFlight = false;
@@ -2748,7 +2767,7 @@ function registerIpc({ logger, stateStore }) {
     return work;
   };
   handle("launcher:mcp-verify", event => verifyMcpConnection(event));
-  if (!mcpConnectorCommand) mcpConnectorCommand = createMcpConnectorCommand({ app, logger, run: async () => {
+  if (!mcpConnectorCommand) mcpConnectorCommand = createMcpConnectorCommand({ app, logger, run: async action => {
     if (IS_DEV_PROFILE) throw new Error("Automatic connector creation is available in the production profile only");
     await runtimeStartupInFlight;
     if (quitting || shutdownInProgress || browserAccountsStatus().switching || runtimeHost.currentOperation()) {
@@ -2761,16 +2780,97 @@ function registerIpc({ logger, stateStore }) {
       || browserAccountsStatus().switching || quitting || shutdownInProgress) {
       throw new Error("Browser account switching or shutdown is in progress");
     }
+    if (action === "tunnel-settings" || action === "primary-tunnel-settings") {
+      return openConfiguredTunnelSettings({ BrowserWindow, browserHost: operationBrowser, runtimeHost,
+        partition: action === "primary-tunnel-settings" ? LAUNCHER_PROFILE.browserPartition : operationPartition });
+    }
+    if (action === "add-tunnel") {
+      const accountId = browserAccounts.accountIdOfPartition(operationPartition);
+      return operationBrowser.withManualOperation("MCP tunnel connection", async () => {
+        publishOperation({ name: "mcp-tunnel-add", status: "running", message: "Connecting the account's MCP tunnel" });
+        try {
+          if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+            || browserAccountsStatus().switching || quitting || shutdownInProgress || runtimeHost.currentOperation()) {
+            throw new Error("Browser account switching or shutdown is in progress");
+          }
+          const inputFile = path.join(CORE_HOME, "secrets", "mcp-tunnel-add.json");
+          const fd = fs.openSync(inputFile, "r");
+          let input, inputBytes;
+          try {
+            if (!fs.fstatSync(fd).isFile()) throw new Error("Invalid private tunnel input");
+            const bytes = Buffer.alloc(64 * 1024 + 1);
+            const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+            if (length > 64 * 1024) throw new Error("Invalid private tunnel input");
+            inputBytes = bytes.subarray(0, length);
+            input = JSON.parse(inputBytes.toString("utf8").replace(/^\uFEFF/, ""));
+          } finally {
+            fs.closeSync(fd);
+          }
+          if (!accountId || input?.accountId !== accountId || typeof input.label !== "string"
+            || typeof input.tunnelId !== "string" || typeof input.runtimeKey !== "string") {
+            throw new Error("The private tunnel input does not match the active browser account");
+          }
+          const extraTunnels = runtimeSupervisor.extraTunnels;
+          const tunnelId = input.tunnelId.trim();
+          let tunnel = extraTunnels.status().find(candidate => candidate.accountId === accountId && candidate.tunnelId === tunnelId);
+          if (!tunnel) tunnel = await extraTunnels.add({ accountId, label: input.label, tunnelId, runtimeKey: input.runtimeKey });
+          else if (tunnel.state !== "ready") tunnel = await extraTunnels.reconnect(tunnel.id);
+          if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+            || browserAccounts.accountIdOfPartition(operationPartition) !== accountId
+            || browserAccountsStatus().switching || quitting || shutdownInProgress || runtimeHost.currentOperation()) {
+            throw new Error("Browser account switching or shutdown is in progress");
+          }
+          const ready = extraTunnels.status().find(candidate => candidate.id === tunnel?.id
+            && candidate.accountId === accountId && candidate.tunnelId === tunnelId);
+          if (ready?.state !== "ready") throw new Error("The account's MCP tunnel is not ready");
+          const currentFd = fs.openSync(inputFile, "r");
+          try {
+            if (!fs.fstatSync(currentFd).isFile()) throw new Error("Invalid private tunnel input");
+            const currentBytes = Buffer.alloc(64 * 1024 + 1);
+            const length = fs.readSync(currentFd, currentBytes, 0, currentBytes.length, 0);
+            if (!inputBytes.equals(currentBytes.subarray(0, length))) throw new Error("The private tunnel input changed");
+          } finally {
+            fs.closeSync(currentFd);
+          }
+          fs.unlinkSync(inputFile);
+          publishOperation({ name: "mcp-tunnel-add", status: "completed", message: "The account's MCP tunnel is connected" });
+          return { added: true };
+        } catch {
+          const message = "MCP tunnel connection failed. The private input was retained for retry.";
+          publishOperation({ name: "mcp-tunnel-add", status: "failed", message });
+          throw new Error(message);
+        }
+      });
+    }
     publishOperation({ name: "mcp-connector-create", status: "running", message: "Creating the ChatGPT connector" });
     try {
-      const result = await createConfiguredConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost });
-      const state = stateStore.update({
-        autoConnectExistingMcp: true,
-        ...(result.created ? { mcpSetupComplete: false } : {}),
+      const extraTunnels = runtimeSupervisor?.extraTunnels;
+      const accountId = browserAccounts.accountIdOfPartition(operationPartition);
+      let accountTunnel = accountId ? extraTunnels?.status().find(tunnel => tunnel.accountId === accountId) : null;
+      if (accountTunnel && accountTunnel.state !== "ready") {
+        await extraTunnels.reconnect(accountTunnel.id);
+        if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+          || browserAccountsStatus().switching || quitting || shutdownInProgress) {
+          throw new Error("Browser account switching or shutdown is in progress");
+        }
+        accountTunnel = extraTunnels.status().find(tunnel => tunnel.id === accountTunnel.id && tunnel.accountId === accountId);
+        if (accountTunnel?.state !== "ready") throw new Error("The account's MCP tunnel is not ready. Reconnect it before creating the connector.");
+      }
+      const result = await createConfiguredConnector({
+        app, BrowserWindow, browserHost: operationBrowser, runtimeHost,
+        ...(accountTunnel ? { target: { tunnelId: accountTunnel.tunnelId, partition: operationPartition } } : {}),
       });
-      automaticMcpAttemptPid = null;
-      send("launcher:state-changed", state);
-      startCatalogVerificationMonitor({ logger, stateStore });
+      if (accountTunnel) {
+        extraTunnels.setConnector(accountTunnel.id, result.href);
+      } else {
+        const state = stateStore.update({
+          autoConnectExistingMcp: true,
+          ...(result.created ? { mcpSetupComplete: false } : {}),
+        });
+        automaticMcpAttemptPid = null;
+        send("launcher:state-changed", state);
+        startCatalogVerificationMonitor({ logger, stateStore });
+      }
       publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
       return result;
     } catch (error) {
@@ -3336,8 +3436,9 @@ async function start() {
     return;
   }
   app.on("second-instance", (_event, argv) => {
-    if (isMcpConnectorCommand(argv)) {
-      pendingMcpConnectorCommand = true;
+    const commandAction = mcpConnectorCommandAction(argv);
+    if (commandAction) {
+      pendingMcpConnectorCommand = commandAction;
       dispatchMcpConnectorCommand();
       return;
     }
@@ -3834,14 +3935,22 @@ async function start() {
       // An agent's `ao` commands work in the app's terminal too, as in its own shell.
       const chatSandbox = createSandboxRunner({ logger, scriptDir: path.join(launcherUserData, "sandbox-scripts"), extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.(), rtk.binDir()].filter(Boolean) });
       app.on("will-quit", () => chatSandbox.killAll());
-      // A chat's computer control: the window picker, and the control bar whose heartbeat keeps input on.
+      // A chat's computer control: the request card in the asking chat (no window of its own, which
+      // took the focus), and the control bar whose heartbeat keeps input on.
       const { createComputerControl } = backendBundles.requireModule(backend, "computer-control.cjs");
       const computerControl = createComputerControl({
         request: (endpoint, body, options) => headlessHost.request(endpoint, body, options),
         BrowserWindow, screen, logger,
         // The app's own windows are never offered as a target.
         ownPids: () => app.getAppMetrics().map((metric) => metric.pid),
+        onRequests: (requests) => {
+          send("launcher:computer-requests", requests);
+          // Asked in the chat, never by bringing a window up: a window that is not in front only
+          // flashes its taskbar button, which takes no focus.
+          if (requests.length && mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFocused()) mainWindow.flashFrame(true);
+        },
       });
+      computerControlService = computerControl;
       app.on("will-quit", () => computerControl.dispose());
       chatAgentTools = createChatAgentTools({
         previews: chatPreviews,
@@ -4741,7 +4850,7 @@ void start().catch((error) => {
   } catch {}
   try {
     if (isMcpConnectorCommand(process.argv)) {
-      if (app.isReady()) (mcpConnectorCommand || createMcpConnectorCommand({ app, run: () => undefined })).failStartup();
+      if (app.isReady()) (mcpConnectorCommand || createMcpConnectorCommand({ app, run: () => undefined })).failStartup(mcpConnectorCommandAction(process.argv));
     } else if (!LAUNCHER_SMOKE_TEST) {
       dialog.showErrorBox("Coding Tools could not start", message);
     }

@@ -8,6 +8,7 @@ import { ModelLogo } from "./HarnessLogo";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
 import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
@@ -803,7 +804,7 @@ function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
-  approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
+  approvals, approve, describeRoute: _describeRoute, notice, warning, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
 }: {
@@ -854,6 +855,8 @@ export function AgentOrchestratorChat({
   modelName?: (model: string) => string;
   /** Why this chat's latest run could not start, if it could not. */
   notice?: string;
+  /** Something that went wrong in the latest run while it carries on by itself (a tool call that timed out). */
+  warning?: string;
   retryStart: (runId: string) => void;
   /** This chat's own Retry is on its way; Retry waits on nothing else (not the app-wide `busy`). */
   retrying?: boolean;
@@ -1074,6 +1077,10 @@ export function AgentOrchestratorChat({
   const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
+  // An agent of this chat asking to control a window: asked here, beside its other requests.
+  const allComputerRequests = useComputerRequests();
+  const computerRequests = useMemo(() => selectedTaskId ? chatComputerRequests(allComputerRequests, agentSessionIds, projectId) : [],
+    [selectedTaskId, allComputerRequests, agentSessionIds, projectId]);
   const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
   // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
   const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
@@ -2034,6 +2041,9 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
               </>}
             </div> : null}
             {threadTurns}
+            {/* A tool call that timed out: the chat keeps going by itself, so this is a red line in the
+                conversation, not the failed-step card that waited for a click (2026-10-31). */}
+            {warning && latest && !recovering ? <p className="cx-step-error cx-timeout-line" role="status">{warning}</p> : null}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
                 <strong>{notice ? "Couldn't start the run" : "This run hasn't started"}</strong>
@@ -2045,7 +2055,8 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             {/* The agent's questions and requests end the conversation, right above the chat box, and
                 scroll with it. Docked under the box they took up to 420 px of the pane: in a split pane
                 the conversation had no room left at all (2026-10-31). */}
-            {approvals.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+            {approvals.length || computerRequests.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+              {computerRequests.map((request) => <ComputerControlCard key={request.id} request={request} />)}
               {approvals.map(approval => {
                 // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
                 const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;

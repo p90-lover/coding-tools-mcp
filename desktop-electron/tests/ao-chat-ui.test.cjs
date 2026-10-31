@@ -44,6 +44,7 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] },
+  "./ComputerControlCard": { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
 test("a project switch keeps its chat pane readable while loading and offers Retry after a failed read", () => {
@@ -222,6 +223,17 @@ test("normal asynchronous startup detail is not shown as a failed launch", () =>
   assert.equal(starting.includes("start the run"), false);
   const failed = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, working: false, notice: "Codex CLI unavailable" }));
   assert.ok(failed.includes("start the run"));
+});
+
+test("a tool call that timed out is a red line in a running chat, not the failed-step card", () => {
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [{ id: "lead", role: "planner", state: "running" }] }],
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [], working: true,
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const warning = "A tool call timed out (Headless request timed out). The chat keeps going by itself.";
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, warning }));
+  assert.match(html, /<p class="cx-step-error cx-timeout-line" role="status">A tool call timed out \(Headless request timed out\)\. The chat keeps going by itself\.<\/p>/);
+  assert.equal(html.includes("Step failed"), false, "nothing waits for a click");
+  assert.equal(renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props)).includes("cx-timeout-line"), false);
 });
 
 test("terminal failed work never becomes a successful chat just because review finished", () => {

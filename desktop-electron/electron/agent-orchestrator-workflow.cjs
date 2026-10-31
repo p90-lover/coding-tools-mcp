@@ -401,6 +401,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     try {
       onRunState({
         workspaceId, runId, status: state.status, detail: state.detail, stopped: state.stopped === true, attention,
+        ...(state.warning ? { warning: state.warning } : {}),
         ...(mission ? { fingerprint: (mission.nodes ?? []).map((node) => `${node.id}:${node.state}`).join(",") } : {}),
       });
     } catch { /* observational only */ }
@@ -790,7 +791,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   async function releaseIdle() {
     const ours = new Set([...warm.values()].map(entry => entry.session).filter(Boolean));
     const idle = await harnessService().idleChatSessions?.(IDLE_RELEASE_MS, now()).catch(() => []) ?? [];
-    const quiet = await harnessService().quietWorkingChatSessions?.(STALE_WORKING_MS, now()).catch(() => []) ?? [];
+    const quiet = await harnessService().quietWorkingChatSessions?.(STALE_WORKING_MS, now(), IDLE_RELEASE_MS).catch(() => []) ?? [];
     // Only when every driven run could be read: a session one of them still uses is never stopped.
     const driven = quiet.length ? await drivenSessions() : new Set();
     const stale = driven ? quiet.filter(id => !driven.has(id)) : [];
@@ -2480,7 +2481,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const current = backgroundRuns.get(runKey(id, run));
     // `driven`: this app session's loop is observing the run right now. A card a previous session
     // left "running" is only ever settled by an observe, so callers need to tell the two apart.
-    if (current) return { ok: true, status: current.status, driven: current.driving === true, ...(current.detail ? { detail: current.detail } : {}) };
+    if (current) return { ok: true, status: current.status, driven: current.driving === true, ...(current.detail ? { detail: current.detail } : {}),
+      ...(current.warning ? { warning: current.warning, warningAt: current.warningAt } : {}) };
     const saved = await runs({ workspaceId: id, runId: run });
     const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run unavailable");
@@ -3827,6 +3829,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!mission) throw new Error("Saved mission is unavailable");
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed orchestrator doesn't report worker capacity. Update the runtime.");
         state.socketRestarts = 0;
+        state.timeoutRestarts = 0;
         // Start every ready Native Codex card's harness together first. Launching a Codex process
         // can take minutes on a slow disk; done one card at a time, a sibling worker waited for
         // it and the workers ran one after another instead of in parallel. The launches below
@@ -3986,6 +3989,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         else await pause();
       }
     } catch (error) {
+      // A call to a local service timed out (the busy hard disk held the headless service, or it was
+      // restarting): the run's cards are fine, only this call took too long. The chat showed "Step
+      // failed: Headless request timed out" and waited for a click with "Retry automatically" on,
+      // since no step was held for it to retry (the user, 2026-10-31: "when tools call timeout, it
+      // should keep going it self silently and say in chat that a tool has time out"). The loop
+      // starts again after a pause (2 s, doubling to 60 s) for as long as it takes; the chat shows
+      // the timeout as a warning, not a failure.
+      const message = `${error?.message ?? error}`;
+      if (!state.stopped && LOCAL_TIMEOUT.test(message)) {
+        const restarts = state.timeoutRestarts ?? 0;
+        state.timeoutRestarts = restarts + 1;
+        state.timeouts = (state.timeouts ?? 0) + 1;
+        const delay = Math.min(60_000, 2_000 * 2 ** Math.min(restarts, 5));
+        state.status = "running";
+        state.detail = "";
+        state.warning = `A tool call timed out (${publicText(message, 80)})${state.timeouts > 1 ? `, ${state.timeouts} times` : ""}. The chat keeps going by itself.`;
+        state.warningAt = now();
+        reportRun(workspaceId, runId, state, null);
+        logger?.warn?.("ao.drive_timeout_retry", { attempt: state.timeoutRestarts, message: publicText(message, 120) });
+        const timer = setTimer(() => { autoRetryTimers.delete(timer); if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); }, delay);
+        timer?.unref?.();
+        autoRetryTimers.add(timer);
+        return;
+      }
       // The machine ran short of local sockets or a local service dropped a connection: the run's
       // cards are fine, only this read or send failed. Seen live: another program opened about 44
       // loopback connections a second, every port sat in TIME_WAIT, "connect EADDRINUSE" ended this
@@ -4020,30 +4047,42 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // the run (and its AO agent) again through its stopped harness.
   const autoRetryTimers = new Set();
   let autoRetryDisposed = false;
-  function scheduleAutoRetry(workspaceId, runId, executable, state) {
+  function scheduleAutoRetry(workspaceId, runId, executable, state, tries = 0) {
     if (!chatPreferences.get().autoRetry) return;
     const key = runKey(workspaceId, runId);
     const current = () => !autoRetryDisposed && !state.stopped && backgroundRuns.get(key) === state;
     const mission = async () => (await runs({ workspaceId, runId })).runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
+    const later = (ms, work) => {
+      const timer = setTimer(() => { autoRetryTimers.delete(timer); work(); }, ms);
+      timer?.unref?.();
+      autoRetryTimers.add(timer);
+    };
+    // A read or start that failed (the local service restarting or held by the disk) tries again after
+    // the next pause. It gave up at once: four chats logged "Local execution service is stopping" at
+    // the same moment and then waited for a click with "Retry automatically" on (2026-10-31).
+    const failedTry = (error) => {
+      logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200), tries: tries + 1 });
+      if (current() && tries + 1 < AUTO_RETRY_LIMIT) later(autoRetryPause(tries + 1), () => scheduleAutoRetry(workspaceId, runId, executable, state, tries + 1));
+    };
     void (async () => {
       const failed = await mission();
       if (!current() || !autoRetryAllowed(failed)) return;
       // The same growing pause as autoRetryStep: 10 s before the first try, 20 s before the second.
       const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
       const attempt = (held?.history?.length ?? 0) + 1;
-      const timer = setTimer(() => {
-        autoRetryTimers.delete(timer);
+      later(autoRetryPause(attempt), () => {
         void (async () => {
           const latest = await mission();
           if (!current() || !autoRetryAllowed(latest)) return;
           logger?.info?.("ao.auto_retry_restart", { attempt });
           await startRun({ workspaceId, runId, executable });
-        })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
-      }, autoRetryPause(attempt));
-      timer?.unref?.();
-      autoRetryTimers.add(timer);
-    })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
+        })().catch(failedTry);
+      });
+    })().catch(failedTry);
   }
+  // A local call that took too long, not a failed run (see driveRun): the headless service's own
+  // request timeout, one it answered while restarting, or a socket timeout.
+  const LOCAL_TIMEOUT = /Headless request timed out|Local execution service is (stopping|starting|not ready)|ETIMEDOUT|\btimed out after \d+ ?ms/i;
   // A failed local connection, not a failed run (see driveRun).
   const LOCAL_SOCKET_FAILURE = /EADDRINUSE|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOBUFS|socket hang up|other side closed|fetch failed/i;
   const SOCKET_RESTART_LIMIT = 10;

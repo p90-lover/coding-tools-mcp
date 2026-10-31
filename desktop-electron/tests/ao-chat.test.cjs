@@ -229,6 +229,28 @@ test("a message no run answered shows as not sent, and every later run stays und
   assert.deepEqual(sent.map(turn => [turn.key, turn.status]), [["first", "done"], ["pending:1", "queued"]]);
 });
 
+test("a compacted chat pairs its newest messages with its newest runs", () => {
+  // Seen live: a goal chat with 17 runs kept 4 messages after compacting; the person's new message
+  // showed beside the 4th run, far up the chat, and the turn answering it showed none ("the message
+  // doesnt sent to chat" while the goal was paused).
+  const at = (stamp) => Date.parse(`${stamp.replace(" ", "T")}:00Z`);
+  const answered = (id, started) => run(id, "t", [node("p", "planner", "finished", { receipt: { started_at_ms: started, answer: id } })], { execution_mode: "single" });
+  const runs = ["r1", "r2", "r3", "r4"].map((id, index) => answered(id, at("2026-10-31 01:00") + index * 60_000));
+  runs.push(answered("r5", at("2026-10-31 03:31") + 2_000));
+  const description = "Summary of the earlier conversation (compacted 2026-10-31 03:30 UTC):\nwhat happened so far"
+    + "\n\nFollow-up (2026-10-31 03:31 UTC):\none more thing";
+  const turns = plain(chat.chatTurns(runs, description));
+  assert.deepEqual(turns.map(turn => [turn.runId, turn.user?.text ?? null]), [
+    ["r1", null], ["r2", null], ["r3", null],
+    ["r4", "Summary of the earlier conversation (compacted 2026-10-31 03:30 UTC):\nwhat happened so far"],
+    ["r5", "one more thing"],
+  ]);
+  assert.equal(turns.at(-1).messageIndex, 1, "the newest turn answers the newest message");
+  // A restart still answers its run's message again, after the summarized runs.
+  const restarted = plain(chat.chatTurns([...runs, run("again", "t", [node("p", "planner", "running")], { execution_mode: "single", restarts_run_id: "r5" })], description));
+  assert.deepEqual(restarted.slice(-2).map(turn => [turn.runId, turn.user?.text ?? null]), [["r5", "one more thing"], ["again", null]]);
+});
+
 test("a chat the app restart left behind resumes when its project opens, single or team, within its budget", () => {
   const restarted = { error: "The agent's process ended before it finished (the app restarted); retry this card." };
   const single = (card, extra = {}) => run("r", "t", [card], { execution_mode: "single", ...extra });
@@ -469,6 +491,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
       : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
+      : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
         TurnRestart: react.createContext({ restarting: false }) } : {},
   });

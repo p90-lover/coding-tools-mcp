@@ -1,9 +1,12 @@
 "use strict";
 // Computer control for chat agents (Settings > "Let chat agents see and control the screen").
-// A chat's computer_* tools act only on the one window the person picks here, and only while this
+// A chat's computer_* tools act only on the one window the person picks on the chat's request card
+// (it was a window of its own until 2026-10-31, which took the focus), and only while this
 // app's control bar is on screen: headless refuses input 3 s after the bar's last heartbeat, and
 // only the app may start control (the local UI token). The Tauri app had its own picker and
 // monitor; the Electron app had neither, so every chat's computer_status read "stopped".
+
+const crypto = require("node:crypto");
 
 const HEARTBEAT_MS = 1_000;
 const DURATIONS = Object.freeze([
@@ -19,36 +22,6 @@ const STYLE = `body{font:13px system-ui,"Segoe UI",sans-serif;margin:0;color:#1f
 button{font:inherit;padding:6px 14px;border-radius:6px;border:1px solid #8884;background:transparent;color:inherit;cursor:pointer}
 button.primary{background:#2563eb;border-color:#2563eb;color:#fff}button:disabled{opacity:.5;cursor:default}`;
 
-/** The picker: the chat asking, every window that can be controlled, how long, and Start. */
-function pickerPage({ chat, project, targets, captureOff }) {
-  const rows = targets.map((target, index) => `<label class="row"><input type="radio" name="w" value="${index}">`
-    + `<span>${escapeHtml(target.title || "(untitled)")}</span><small>pid ${target.pid}</small></label>`).join("");
-  const durations = DURATIONS.map((d) => `<option value="${d.id}">${escapeHtml(d.label)}</option>`).join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Computer control</title><style>${STYLE}
-main{padding:16px;display:flex;flex-direction:column;gap:10px;height:100vh;box-sizing:border-box}
-h1{font-size:15px;margin:0}p{margin:0;opacity:.8}#list{flex:1;overflow:auto;border:1px solid #8884;border-radius:6px}
-.row{display:flex;gap:8px;align-items:center;padding:6px 8px;cursor:pointer}.row:hover{background:#f2f2f2}
-.row span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}small{opacity:.6}
-footer{display:flex;gap:8px;align-items:center}footer select{flex:1}#error{color:#dc2626;min-height:1em}</style></head>
-<body><main><h1>Let a chat control a window</h1>
-<p>${escapeHtml(chat)} asked to control your screen in ${escapeHtml(project)}. Pick the one window it may click and type in.
-A bar stays on screen while control is on; Stop there or Ctrl+Alt+Escape ends it.</p>
-<div id="list">${rows || "<p style=\"padding:8px\">No window can be controlled right now.</p>"}</div>
-${captureOff ? `<label><input type="checkbox" id="capture"> Turn on screen capture for ${escapeHtml(project)} (control needs it)</label>` : ""}
-<div id="error"></div>
-<footer><select id="duration">${durations}</select><button id="cancel">Cancel</button><button id="start" class="primary" disabled>Start</button></footer></main>
-<script>
-const start = document.getElementById("start"), capture = document.getElementById("capture");
-const ready = () => { start.disabled = !document.querySelector("input[name=w]:checked") || (capture && !capture.checked); };
-document.addEventListener("change", ready);
-start.onclick = () => { start.disabled = true; location.hash = "start:" + encodeURIComponent(JSON.stringify({
-  window: Number(document.querySelector("input[name=w]:checked").value), duration: document.getElementById("duration").value,
-  capture: Boolean(capture && capture.checked) })); };
-document.getElementById("cancel").onclick = () => { location.hash = "cancel"; };
-window.showError = (text) => { document.getElementById("error").textContent = text; location.hash = ""; ready(); };
-</script></body></html>`;
-}
-
 /** The bar shown while control is on: what is controlled, time left, and Stop. */
 function barPage({ title }) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Computer control is on</title><style>${STYLE}
@@ -60,10 +33,15 @@ button{-webkit-app-region:no-drag;background:#dc2626;border-color:#dc2626;color:
 window.showLeft = (text) => { document.getElementById("left").textContent = text; };</script></body></html>`;
 }
 
-function createComputerControl({ request, BrowserWindow, screen, logger = null, ownPids = () => [process.pid] }) {
+function createComputerControl({ request, BrowserWindow, screen, logger = null, ownPids = () => [process.pid], onRequests = () => undefined }) {
   let bar = null;
   let heartbeat = null;
   let picking = null;
+  // The one request waiting for the person: { public, workspace, targets, captureOff, finish }.
+  let pending = null;
+  // What the chats show: the request (several chats asking at once share it), or none.
+  const requests = () => pending ? [pending.public] : [];
+  const publish = () => { try { onRequests(requests()); } catch { /* a closed window shows none */ } };
 
   const status = async () => (await request("/api/v1/computer/status", null, { method: "GET" }))?.status ?? { state: "stopped" };
 
@@ -121,17 +99,25 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   }
 
   /**
-   * Shows the picker for a chat that asked for control; resolves { started: true } once control of
-   * the chosen window is on, else { started: false, reason }. One picker at a time: a second chat
-   * asking meanwhile shares its answer.
+   * Asks for control in the chat that wants it: a card there (requests(), onRequests) the person
+   * answers with answer(), never a window of its own that would take the focus from whatever they
+   * are doing. Resolves { started: true } once control of the chosen window is on, else
+   * { started: false, reason }. One request at a time: a chat asking meanwhile joins it (its card
+   * shows there too) and shares its answer.
    */
-  function pick({ workspaceId, chat = "A chat", signal = null }) {
-    if (picking) return picking;
-    picking = choose({ workspaceId, chat, signal }).finally(() => { picking = null; });
+  function pick({ workspaceId, aoSession = null, chat = "A chat", signal = null }) {
+    if (picking) {
+      if (pending && aoSession && !pending.public.sessions.includes(aoSession)) {
+        pending.public = Object.freeze({ ...pending.public, sessions: Object.freeze([...pending.public.sessions, aoSession]) });
+        publish();
+      }
+      return picking;
+    }
+    picking = choose({ workspaceId, aoSession, chat, signal }).finally(() => { picking = null; });
     return picking;
   }
 
-  async function choose({ workspaceId, chat, signal }) {
+  async function choose({ workspaceId, aoSession, chat, signal }) {
     const own = new Set(ownPids());
     const targets = ((await request("/api/v1/computer/targets", null, { method: "GET" }))?.targets ?? [])
       .filter((target) => !own.has(target.pid));
@@ -140,62 +126,73 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     if (!workspace) return { started: false, reason: "the chat's project is not registered" };
     const project = workspace.name || workspace.path || workspace.id;
     const captureOff = workspace.screen_capture_enabled !== true && workspace.screenCaptureEnabled !== true;
-    const picker = new BrowserWindow({
-      width: 560, height: 520, title: "Computer control", autoHideMenuBar: true, alwaysOnTop: true, show: false,
-      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false },
-    });
-    lockDown(picker);
     return new Promise((resolve) => {
       let done = false;
       const finish = (answer) => {
         if (done) return;
         done = true;
         signal?.removeEventListener?.("abort", aborted);
-        if (!picker.isDestroyed()) picker.destroy();
+        if (pending?.finish === finish) { pending = null; publish(); }
         resolve(answer);
       };
       const aborted = () => finish({ started: false, reason: "the chat stopped" });
       signal?.addEventListener?.("abort", aborted, { once: true });
       if (signal?.aborted) { aborted(); return; }
-      picker.on("closed", () => finish({ started: false, reason: "the picker was closed" }));
-      picker.webContents.on("did-navigate-in-page", async (_event, url) => {
-        const hash = decodeURIComponent(new URL(url).hash.slice(1));
-        if (hash === "cancel") { finish({ started: false, reason: "the user cancelled" }); return; }
-        if (!hash.startsWith("start:")) return;
-        let choice;
-        try { choice = JSON.parse(hash.slice("start:".length)); } catch { return; }
-        const target = targets[choice.window];
-        const duration = DURATIONS.find((d) => d.id === choice.duration) ?? DURATIONS[0];
-        if (!target) return;
-        try {
-          if (captureOff) {
-            if (!choice.capture) throw new Error("Control needs screen capture for this project");
-            await request("/api/v1/workspaces/policy", {
-              workspace_id: workspaceId, permission_mode: workspace.permission_mode, approval_mode: workspace.approval_mode,
-              tool_profile: workspace.tool_profile, screen_capture_enabled: true, confirm: true,
-            });
-          }
-          await request("/api/v1/computer/start", { workspace_id: workspaceId, window_id: target.window_id, pid: target.pid,
-            duration_seconds: duration.seconds, always_enabled: duration.seconds === 0 }, { localConfirmation: true });
-          logger?.info?.("computer.started", { pid: target.pid, duration: duration.id });
-          openBar(target.title || `process ${target.pid}`);
-          finish({ started: true });
-        } catch (error) {
-          const message = String(error?.message || error).slice(0, 300);
-          if (!picker.isDestroyed()) void picker.webContents.executeJavaScript(`window.showError(${JSON.stringify(message)})`).catch(() => undefined);
-        }
-      });
-      void picker.loadURL(pageUrl(pickerPage({ chat, project, targets, captureOff })))
-        .then(() => { if (!picker.isDestroyed()) { picker.show(); picker.focus(); } })
-        .catch((error) => finish({ started: false, reason: String(error?.message || error).slice(0, 200) }));
+      pending = {
+        workspace, targets, captureOff, finish, starting: false,
+        // Plain data only: the chat shows every title as text.
+        public: Object.freeze({
+          id: crypto.randomUUID(), workspaceId, sessions: Object.freeze(aoSession ? [aoSession] : []), chat: String(chat), project: String(project),
+          captureOff, windows: Object.freeze(targets.map((target) => Object.freeze({ title: String(target.title || "(untitled)"), pid: Number(target.pid) }))),
+          durations: Object.freeze(DURATIONS.map(({ id, label }) => Object.freeze({ id, label }))),
+        }),
+      };
+      publish();
     });
   }
 
+  /**
+   * The person's answer on a request's card: { id, window, duration, capture } starts control of
+   * that window (its index in the request's windows); { id, cancel: true } turns the request down.
+   * Resolves { ok: true }, or { ok: false, error } for the card to show while it stays open.
+   */
+  async function answer(input) {
+    const current = pending;
+    if (!current || input?.id !== current.public.id) return { ok: false, error: "This request is no longer waiting" };
+    if (input.cancel === true) { current.finish({ started: false, reason: "the user cancelled" }); return { ok: true }; }
+    const target = Number.isInteger(input.window) ? current.targets[input.window] : undefined;
+    if (!target) return { ok: false, error: "Pick the window it may control" };
+    if (current.starting) return { ok: false, error: "Control is already starting" };
+    const duration = DURATIONS.find((d) => d.id === input.duration) ?? DURATIONS[0];
+    current.starting = true;
+    try {
+      if (current.captureOff) {
+        if (input.capture !== true) throw new Error("Control needs screen capture for this project");
+        const { workspace } = current;
+        await request("/api/v1/workspaces/policy", {
+          workspace_id: workspace.id, permission_mode: workspace.permission_mode, approval_mode: workspace.approval_mode,
+          tool_profile: workspace.tool_profile, screen_capture_enabled: true, confirm: true,
+        });
+      }
+      await request("/api/v1/computer/start", { workspace_id: current.workspace.id, window_id: target.window_id, pid: target.pid,
+        duration_seconds: duration.seconds, always_enabled: duration.seconds === 0 }, { localConfirmation: true });
+      logger?.info?.("computer.started", { pid: target.pid, duration: duration.id });
+      openBar(target.title || `process ${target.pid}`);
+      current.finish({ started: true });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error).slice(0, 300) };
+    } finally {
+      current.starting = false;
+    }
+  }
+
   function dispose() {
+    pending?.finish({ started: false, reason: "the app quit" });
     if (bar) void stop("app quit");
   }
 
-  return Object.freeze({ status, pick, stop, dispose });
+  return Object.freeze({ status, pick, answer, requests, stop, dispose });
 }
 
-module.exports = { createComputerControl, pickerPage, barPage, DURATIONS };
+module.exports = { createComputerControl, barPage, DURATIONS };

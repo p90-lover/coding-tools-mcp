@@ -1433,7 +1433,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         let session = await read();
         if (invalid(session)) return refuse(session ? "invalid" : "not_found", session);
         if (session.id !== key) throw uncertain();
-        if (session.status !== "exited") return (await chatHostGone(key)) ? refuse("host_gone", session) : true;
+        // A live chat AO could not reconnect when it started ("unavailable") has no controller, so a
+        // message to it fails CHAT_CONTROLLER_NOT_READY. Seen live 2026-10-31: an update restarted AO
+        // while the old one still held two chats' agents; the retries went to fresh agents and the old
+        // ones ran on, unreachable. Resuming it asks AO to reconnect it, as for an exited one.
+        if (session.status !== "exited" && session.statusReadiness !== "unavailable") {
+          return (await chatHostGone(key)) ? refuse("host_gone", session) : true;
+        }
         const restore = async () => {
           // Startup may already own restoration. A conflict is not readiness: wait for this
           // exact session's observable live state, without issuing a second resume or new launch.
@@ -1564,14 +1570,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * reaper (exited only) stopped it. Seen 2026-10-22: two hosts and their agents, quiet 8 hours and
      * a day, while their chats had moved on to new sessions. A working agent reports activity with
      * every tool call; AO's activity time restarts with the host, which only makes it look newer.
+     * A chat AO could not reconnect when it started ("unavailable") reaches no one whatever its
+     * status, so it is released after the shorter `unavailableMs`; its next message resumes it.
      */
-    async quietWorkingChatSessions(quietMs, now = Date.now()) {
+    async quietWorkingChatSessions(quietMs, now = Date.now(), unavailableMs = quietMs) {
       const list = await internalApi("GET", "/api/v1/sessions");
       const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
-      return sessions.filter(session => session?.mode === "chat" && !session.isTerminated && session.status === "working")
+      return sessions.filter(session => session?.mode === "chat" && !session.isTerminated
+        && (session.status === "working" || session.statusReadiness === "unavailable"))
         .filter(session => {
           const at = Date.parse(session.activity?.lastActivityAt ?? "");
-          return Number.isFinite(at) && now - at >= quietMs;
+          const limit = session.statusReadiness === "unavailable" ? unavailableMs : quietMs;
+          return Number.isFinite(at) && now - at >= limit;
         })
         .map(session => String(session.id));
     },

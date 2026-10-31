@@ -495,6 +495,70 @@ test("tunnel control failures preserve stderr even when stdout is also present",
   }
 });
 
+test("extra tunnel commands isolate native state and temp files without changing the main environment", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-extra-tunnel-env-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+    getRuntimeEnvironment: () => ({ CODING_TOOLS_EXTRA_TUNNEL_TEST: "runtime-service" }),
+  });
+  const tunnel = { binaryPath: process.execPath, profileDir: root };
+  const args = ["-e", `process.stdout.write(JSON.stringify({
+    stateRoot: process.env.TUNNEL_CLIENT_STATE_DIR ?? null,
+    temp: process.env.TEMP ?? null,
+    tmp: process.env.TMP ?? null,
+    service: process.env.CODING_TOOLS_EXTRA_TUNNEL_TEST ?? null,
+    inheritedPath: Boolean(process.env.PATH),
+  }))`];
+  const mainBefore = await supervisor.runTunnelCommand({ tunnel }, args, 5_000, "Main environment probe");
+  const extra = await supervisor.extraTunnels.runTunnel(tunnel, args, 5_000, "Extra environment probe");
+  const mainAfter = await supervisor.runTunnelCommand({ tunnel }, args, 5_000, "Main environment probe");
+  assert.equal(mainBefore.code, 0);
+  assert.equal(extra.code, 0);
+  assert.deepEqual(JSON.parse(mainAfter.output), JSON.parse(mainBefore.output));
+  const stateRoot = path.join(root, "tunnel", "extra-runtime");
+  assert.deepEqual(JSON.parse(extra.output), {
+    stateRoot,
+    temp: path.join(stateRoot, "temp"),
+    tmp: path.join(stateRoot, "temp"),
+    service: "runtime-service",
+    inheritedPath: JSON.parse(mainBefore.output).inheritedPath,
+  });
+  assert.equal(fs.statSync(path.join(stateRoot, "temp")).isDirectory(), true);
+});
+
+test("saved extra tunnels require migration when their isolated native state is missing", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-extra-tunnel-migration-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "tunnel"), { recursive: true });
+  fs.writeFileSync(path.join(root, "tunnel", "extra-tunnels.json"), JSON.stringify({
+    version: 1,
+    tunnels: [{ id: "0123abcd", label: "Saved account", tunnelId: `tunnel_${"b".repeat(32)}`, accountId: "acct-2" }],
+  }));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const tunnel = { binaryPath: process.execPath, profileDir: root };
+  const args = ["-e", "process.stdout.write('ready')"];
+  await assert.rejects(
+    async () => supervisor.extraTunnels.runTunnel(tunnel, args, 5_000, "Legacy extra tunnel probe"),
+    /extra tunnels require migration/i,
+  );
+  assert.equal((await supervisor.runTunnelCommand({ tunnel }, args, 5_000, "Main tunnel probe")).output, "ready");
+  const stateRoot = path.join(root, "tunnel", "extra-runtime");
+  fs.mkdirSync(stateRoot, { recursive: true });
+  fs.writeFileSync(path.join(stateRoot, "aliases.yaml"), "{}");
+  assert.equal((await supervisor.extraTunnels.runTunnel(tunnel, args, 5_000, "Migrated extra tunnel probe")).output, "ready");
+});
+
 test("tunnel health diagnostics preserve the machine-readable readiness state", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-health-detail-"));
   const supervisor = new RuntimeSupervisor({

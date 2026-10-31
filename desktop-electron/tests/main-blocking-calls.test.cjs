@@ -92,3 +92,14 @@ test("callers are file:line, without folders", () => {
   assert.match(callerOf(stack), /readThing store\.cjs:12/u);
   assert.doesNotMatch(callerOf(stack), /G:/u);
 });
+
+test("a caller keeps six frames, enough to reach past a helper many paths share", () => {
+  // Three frames ended a 26 s statSync at RuntimeHost.runtimeConfigSnapshot, which 13 paths call (2026-10-31).
+  const frames = ["readConfigJson supervisor.cjs:540", "readSetupConfig supervisor.cjs:590", "runtimeConfigSnapshot runtime.cjs:449",
+    "mcpCredentialsConfigured runtime.cjs:471", "autoConnect main.cjs:634", "monitor main.cjs:713", "timer main.cjs:900"];
+  const stack = ["Error", ...frames.map((frame) => {
+    const [name, place] = frame.split(" ");
+    return `    at ${name} (G:\\x\\electron\\${place}:1)`;
+  })].join("\n");
+  assert.equal(callerOf(stack), frames.slice(0, 6).join(" < "));
+});

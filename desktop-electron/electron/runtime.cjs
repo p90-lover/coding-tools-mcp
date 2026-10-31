@@ -468,7 +468,19 @@ class RuntimeHost {
   }
 
   mcpCredentialsConfigured(requestedMode) {
-    const config = this.runtimeConfigSnapshot().config;
+    const tunnel = this.credentialTunnel(this.runtimeConfigSnapshot().config, requestedMode);
+    return Boolean(tunnel && fs.existsSync(tunnel.runtimeKeyFile));
+  }
+
+  /** mcpCredentialsConfigured for a timer that already read the config, without a synchronous disk call. */
+  async mcpCredentialsConfiguredAsync(config, requestedMode) {
+    const tunnel = this.credentialTunnel(config, requestedMode);
+    if (!tunnel) return false;
+    return fs.promises.access(tunnel.runtimeKeyFile).then(() => true, () => false);
+  }
+
+  /** The saved tunnel whose credentials the config keeps for a mode, or null. */
+  credentialTunnel(config, requestedMode) {
     const interactionMode = requestedMode ?? config?.browserInteractionMode ?? "automatic";
     if (interactionMode !== "automatic" && interactionMode !== "manual") {
       throw new Error("Browser interaction mode must be automatic or manual");
@@ -480,13 +492,11 @@ class RuntimeHost {
     const tunnel = config?.mode === "full"
       ? explicitTunnel || (!hasExplicitProfiles && interactionMode === "automatic" ? config.tunnel : null)
       : null;
-    return Boolean(
-      tunnel
+    return tunnel
       && /^tunnel_[a-f0-9]{32}$/.test(tunnel.tunnelId)
       && typeof tunnel.runtimeKeyFile === "string"
       && path.isAbsolute(tunnel.runtimeKeyFile)
-      && fs.existsSync(tunnel.runtimeKeyFile),
-    );
+      ? tunnel : null;
   }
 
   captureSetupCheckpoint(snapshot) {

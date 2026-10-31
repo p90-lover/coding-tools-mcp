@@ -24,6 +24,20 @@ export interface WorkspaceSummary {
   readonly actionsUseSharedSecrets: boolean | null;
 }
 
+/** A chat agent asking to control a window (electron/computer-control.cjs requests()). */
+export interface ComputerRequest {
+  readonly id: string;
+  readonly workspaceId: string;
+  /** The AO sessions of the chats that asked (several chats asking at once share one request). */
+  readonly sessions: readonly string[];
+  readonly chat: string;
+  readonly project: string;
+  /** Screen capture is off for the project: starting control turns it on, with the person's tick. */
+  readonly captureOff: boolean;
+  readonly windows: readonly { readonly title: string; readonly pid: number }[];
+  readonly durations: readonly { readonly id: string; readonly label: string }[];
+}
+
 export interface PageRequest {
   readonly cursor?: number;
   readonly limit?: number;
@@ -99,6 +113,10 @@ export interface CodingToolsApi {
   };
   readonly computer: {
     status(): Promise<JsonObject>;
+    /** A chat's request for computer control, waiting for the person (a card in that chat). */
+    requests(): Promise<{ requests: ComputerRequest[] }>;
+    answer(input: { id: string; cancel?: boolean; window?: number; duration?: string; capture?: boolean }): Promise<{ ok: boolean; error?: string }>;
+    onRequests(listener: (requests: ComputerRequest[]) => void): () => void;
   };
   readonly tasks: {
     list(input: PageRequest & { readonly workspaceId: string }): Promise<TaskPage>;

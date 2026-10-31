@@ -58,6 +58,10 @@ function extensionHelpersSource() {
     const openLabel = canonicalAppIdentity('open ' + name);
     const matches = pluginCardLinks().filter(link => {
       if (canonicalAppIdentity(link.getAttribute('aria-label')) === openLabel) return true;
+      // Current cards use an empty overlay link labelled by a sibling title.
+      const labelledTitle = (link.getAttribute('aria-labelledby') || '').trim().split(/\\s+/)
+        .map(id => document.getElementById(id)?.textContent || '').join(' ');
+      if (canonicalAppIdentity(labelledTitle) === wanted) return true;
       const card = link.closest('article,[role="article"]') || link;
       const heading = card.querySelector('h1,h2,h3,h4');
       return heading && canonicalAppIdentity(heading.innerText || heading.textContent) === wanted;
@@ -180,6 +184,46 @@ function extensionHelpersSource() {
     if (!created) throw new Error('ChatGPT did not confirm connector creation.');
     return created;
   }
+  async function ensureTunnelConnectorConnected(name) {
+    if (location.origin !== 'https://chatgpt.com' || !isPluginDetailUrl(location.href)) {
+      throw new Error('Open the exact ChatGPT plugin before connecting it.');
+    }
+    const wanted = canonicalAppIdentity(name);
+    const connected = () => {
+      const main = document.querySelector('main');
+      if (!main || visibleDialogs().length || connectControlIn(main)
+        || allClickable(main).some(el => textMatches(el, ['Connect'], true))) return false;
+      const rows = [...main.querySelectorAll('[role="button"][tabindex]')].filter(row => visible(row)
+        && [...row.querySelectorAll('[id]')].some(title => canonicalAppIdentity(title.textContent) === wanted));
+      if (rows.length > 1) throw new Error('ChatGPT exposed more than one matching app row.');
+      // Current plugin details replace Connect with an inspectable app row after consent.
+      return observeAppConnection(name).connectionObserved || rows.length === 1;
+    };
+    const ready = await waitFor(() => {
+      if (connected()) return { connected: true };
+      const main = document.querySelector('main');
+      if (!main || !exactNameIn(main, name)) return null;
+      const controls = allClickable(main).filter(el => textMatches(el, ['Connect'], true)
+        && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
+      if (controls.length > 1) throw new Error('ChatGPT exposed more than one Connect action.');
+      const connect = connectControlIn(main);
+      return controls.length === 1 && controls[0] === connect ? { connect } : null;
+    }, 15000);
+    if (!ready) throw new Error('ChatGPT did not finish loading this plugin connection.');
+    if (ready.connected) return;
+    await pointerActivateMenu(ready.connect);
+    const consent = await waitFor(() => {
+      const dialog = visibleDialogs().at(-1);
+      if (!dialog || ![...dialog.querySelectorAll('h1,h2,h3,[role="heading"]')]
+        .some(heading => textMatches(heading, ['Connect ' + name], true))) return null;
+      const controls = allClickable(dialog).filter(el => textMatches(el, ['Connect ' + name], true)
+        && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
+      return controls.length === 1 ? controls[0] : null;
+    }, 9000);
+    if (!consent) throw new Error('ChatGPT did not expose this plugin connection confirmation.');
+    await pointerActivateMenu(consent);
+    if (!await waitFor(connected, 15000)) throw new Error('ChatGPT did not confirm this plugin connection.');
+  }
   createFormPresent = () => {
     const surface = activeSurface();
     return Boolean(findInput('name', surface) && (findInput('url', surface)
@@ -188,7 +232,7 @@ function extensionHelpersSource() {
   };
   globalThis.__codingToolsConnectorHelpers = Object.freeze({
     activeSurface, acknowledgeCustomServerTrust, allClickable, canonicalAppIdentity,
-    cardDetailUrl, clearPluginSearch, connectControlIn, createTunnelConnector, elementLabels, ensurePersonalView, findClickable, findExactAppNode,
+    cardDetailUrl, clearPluginSearch, connectControlIn, createTunnelConnector, elementLabels, ensurePersonalView, ensureTunnelConnectorConnected, findClickable, findExactAppNode,
     findGridArticle, findInput, findManagedAppCard, isPersonalPluginsPage, observeAppConnection, personalPluginsLoaded,
     openCreateFormStrict, pluginCardLinks, pointerActivate, setInputValue,
     textMatches, visible, waitFor, waitForPersonalPluginsPage, waitForPluginsPageReady
@@ -220,6 +264,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         nodeIntegration: false,
         sandbox: true,
         backgroundThrottling: false,
+        offscreen: true,
       },
     });
     let timedOut = false;
@@ -247,6 +292,11 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         throw new Error("ChatGPT returned an invalid connector identity.");
       }
       const href = url.pathname + url.search;
+      await popup.loadURL(url.href);
+      await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
+      await popup.webContents.executeJavaScript(
+        `globalThis.__codingToolsConnectorHelpers.ensureTunnelConnectorConnected(${JSON.stringify(settings.name)})`, true,
+      );
       if (result.created && !target) {
         writePrivateFileAtomic(path.join(app.getPath("userData"), "mcp-connector-binding.json"),
           JSON.stringify({ version: 1, name: settings.name, tunnelId: settings.tunnelId, href }));
@@ -262,4 +312,44 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
   });
 }
 
-module.exports = { createConfiguredConnector, currentConnectorSettings, extensionHelpersSource, extraConnectorSettings };
+async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtimeHost, partition = browserHost.partition }) {
+  const settings = currentConnectorSettings(runtimeHost);
+  // The owned chat page is refreshed by catalog verification; settings need their own surface.
+  return browserHost.withManualOperation("MCP tunnel settings", async () => {
+    // Offscreen composition keeps hidden Platform dialogs animating without a visible window.
+    const popup = new BrowserWindow({
+      show: false, width: 1100, height: 800,
+      webPreferences: { partition, contextIsolation: true,
+        nodeIntegration: false, sandbox: true, backgroundThrottling: false, offscreen: true },
+    });
+    const closed = new Promise(resolve => popup.once("closed", resolve));
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (!popup.isDestroyed()) popup.destroy();
+    }, 15 * 60_000);
+    timer.unref?.();
+    try {
+      popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      const guardNavigation = (event, value) => {
+        try {
+          const url = new URL(value);
+          if (url.protocol === "https:" && !url.username && !url.password && !url.port
+            && ["platform.openai.com", "auth.openai.com", "auth0.openai.com", "chatgpt.com"].includes(url.hostname)) return;
+        } catch {}
+        event.preventDefault();
+      };
+      popup.webContents.on("will-navigate", guardNavigation);
+      popup.webContents.on("will-redirect", guardNavigation);
+      await popup.loadURL("https://platform.openai.com/settings/organization/tunnels");
+      await closed;
+      if (timedOut) throw new Error("MCP tunnel settings timed out");
+      return { opened: true, name: settings.name };
+    } finally {
+      clearTimeout(timer);
+      if (!popup.isDestroyed()) popup.destroy();
+    }
+  });
+}
+
+module.exports = { createConfiguredConnector, currentConnectorSettings, extensionHelpersSource, extraConnectorSettings, openConfiguredTunnelSettings };

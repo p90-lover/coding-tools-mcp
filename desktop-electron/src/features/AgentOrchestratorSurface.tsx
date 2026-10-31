@@ -9,7 +9,7 @@ import { AgentOrchestratorChat, syncChatQueues, type ChatQueueActions } from "./
 import { ChatThreadList, type ArchivedChat, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
-  SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, movePane, normalizeSplit, paneOrder, readSplit, spatialNeighbour, splitColumns,
+  SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, movePane, normalizeSplit, paneOrder, readSplit, relocatePane, spatialNeighbour, splitColumns,
   type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
@@ -615,6 +615,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [detectedExecutable, setDetectedExecutable] = useState("");
   const executableArg = (): JsonObject => (executable.trim() ? { executable: executable.trim() } : {});
   const [advanceNotice, setAdvanceNotice] = useState("");
+  // What went wrong in the selected run while it carries on by itself (run_status `warning`).
+  const [runWarning, setRunWarning] = useState("");
   const [autoStatus, setAutoStatus] = useState("idle");
   const [pendingApprovals, setPendingApprovals] = useState<AoApproval[]>([]);
   const approvalScope = useRef({ workspaceId: "", runId: "" });
@@ -1431,6 +1433,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // ("AO run not found in this workspace"), surfacing as an error toast.
   const selectedRunHere = missions.some((mission) => mission.id === selectedRunId && mission.workspace_id === workspaceId);
   useEffect(() => {
+    setRunWarning("");
     if (!workspaceId || !selectedRunId || !selectedRunHere) { setAutoStatus("idle"); return; }
     let live = true;
     let reading = false;
@@ -1443,6 +1446,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         const nextStatus = typeof status.status === "string" ? status.status : "idle";
         setAutoStatus(nextStatus);
         setAdvanceNotice(typeof status.detail === "string" ? status.detail : "");
+        setRunWarning(typeof status.warning === "string" ? status.warning : "");
         if (nextStatus !== "idle") {
           const current = await moduleCall("runs", { workspaceId, runId: selectedRunId });
           if (live && Array.isArray(current.runs)) {
@@ -1873,6 +1877,16 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const openInSplit = (id: string, taskId: string, at?: SplitDropTarget | PanePos | null) => {
     const open = paneShowing(id, taskId);
     setView("chat"); setSheet("");
+    // An open chat dragged from the sidebar to another place moves there and its old pane closes;
+    // only a click (no target) goes back to the pane already showing it.
+    if (open && at && "kind" in at && open !== "main") {
+      if (at.kind === "left") { moveSplitPane(open, at); return; }
+      const next = relocatePane(splitPanes, open, at);
+      if (next) setSplitPanes(next);
+      setFocusedPane(open);
+      return;
+    }
+    if (open === "main" && at && "kind" in at && at.kind !== "left") { moveMainChat(at); return; }
     if (open) { setFocusedPane(open); return; }
     if (at && "kind" in at && at.kind === "left") {
       // In front of the window's own chat: that chat moves into a pane of its own, every column one right.
@@ -1915,6 +1929,29 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     if (!next) return;
     setSplitPanes(next);
     setFocusedPane(id);
+  };
+  /**
+   * The window's own chat dragged from the sidebar into a pane's cell: onto another chat, the two
+   * trade places; into a new column or an empty cell, it opens there and the window's place goes to
+   * the first pane with a chat (whose pane closes), as when the window's chat is closed.
+   */
+  const moveMainChat = (target: Exclude<SplitDropTarget, { kind: "left" }>) => {
+    const to: PanePos = target.kind === "column" ? { col: splitColumns(splitPanes), row: 0 } : { col: target.col, row: target.row };
+    if (to.col === 0 && to.row === 0) { setFocusedPane("main"); return; }
+    const own = { workspaceId, taskId: chatTaskId ?? "" };
+    const holder = splitPanes.find((item) => item.col === to.col && item.row === to.row);
+    if (holder) {
+      setSplitPanes((current) => current.map((item) => item.id === holder.id ? { ...item, ...own } : item));
+      setFocusedPane(holder.id);
+      showInMain(holder.workspaceId, holder.taskId);
+      return;
+    }
+    const added = { id: crypto.randomUUID(), ...own, ...to };
+    const first = [...splitPanes].sort(paneOrder).find((item) => item.taskId);
+    setSplitPanes((current) => normalizeSplit([...current.filter((item) => item.id !== first?.id), added]));
+    setFocusedPane(added.id);
+    if (first) showInMain(first.workspaceId, first.taskId);
+    else startNewChat();
   };
   /** Close split view: a pane goes; the window's own chat closed hands its place to the first pane with a chat. */
   const closeSplitPane = (id: string) => {
@@ -2709,6 +2746,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                   loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies} />}
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}
+                warning={chatTaskId && selectedRun?.project_id === chatTaskId ? runWarning || undefined : undefined}
                 retryStart={retryChatStart} retrying={Boolean(chatTaskId && chatBusy.includes(chatTaskId))}
                 describeNode={describeChatNode} activity={chatActivity} modelName={chatModelName}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
