@@ -148,11 +148,19 @@ test("background failures retain failure state without exporting private error d
   const root = fs.mkdtempSync(path.join(parent, "mcp-command-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const app = { getPath: () => root, getVersion: () => "test" };
-  const command = createMcpConnectorCommand({ app, run: async () => { throw new Error("The MCP server denied access. SECRET_PRIVATE_PATH"); } });
-  await assert.rejects(command.request(), /denied access/);
-  const failed = JSON.parse(fs.readFileSync(path.join(root, "mcp-connector-command.json")));
-  assert.equal(failed.status, "failed");
-  assert.equal(failed.error.code, "mcp_access_denied");
-  assert(!JSON.stringify(failed).includes("SECRET_PRIVATE_PATH"));
-  assert.equal(failed.result, undefined);
+  const message = "The MCP server denied access. SECRET_PRIVATE_PATH";
+  for (const failure of [new Error(message), message]) {
+    const warnings = [];
+    const command = createMcpConnectorCommand({ app,
+      logger: { warn: (event, detail) => warnings.push({ event, code: detail.code }) },
+      run: async () => { throw failure; },
+    });
+    await assert.rejects(command.request(), error => error === failure);
+    const failed = JSON.parse(fs.readFileSync(path.join(root, "mcp-connector-command.json")));
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.error.code, "mcp_access_denied");
+    assert(!JSON.stringify(failed).includes("SECRET_PRIVATE_PATH"));
+    assert.equal(failed.result, undefined);
+    assert.deepEqual(warnings, [{ event: "mcp.connector_creation_failed", code: "mcp_access_denied" }]);
+  }
 });

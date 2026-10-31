@@ -2691,7 +2691,7 @@ function registerIpc({ logger, stateStore }) {
     return work;
   };
   handle("launcher:mcp-verify", event => verifyMcpConnection(event));
-  if (!mcpConnectorCommand) mcpConnectorCommand = createMcpConnectorCommand({ app, run: async () => {
+  if (!mcpConnectorCommand) mcpConnectorCommand = createMcpConnectorCommand({ app, logger, run: async () => {
     if (IS_DEV_PROFILE) throw new Error("Automatic connector creation is available in the production profile only");
     await runtimeStartupInFlight;
     if (quitting || shutdownInProgress || browserAccountsStatus().switching || runtimeHost.currentOperation()) {

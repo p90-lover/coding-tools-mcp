@@ -497,6 +497,7 @@ function loadCommittedBrowserSurface(
   }
   return new Promise((resolve, reject) => {
     let settled = false;
+    let loadFinished = false;
     const cleanup = () => {
       clearTimeout(timeout);
       contents.off("did-stop-loading", onReady);
@@ -517,10 +518,11 @@ function loadCommittedBrowserSurface(
         finish(new Error("Browser closed during idle document bootstrap"));
         return;
       }
-      if (contents.getURL() === url) finish();
+      if (loadFinished && contents.getURL() === url) finish();
     };
     const onFailed = (_event, errorCode, errorDescription, failedUrl, mainFrame) => {
-      if (!mainFrame) return;
+      // A stopped previous load can emit its abort after this attempt starts.
+      if (!mainFrame || errorCode === -3) return;
       finish(new Error(
         `Browser idle document failed: ${errorDescription} (${errorCode}) at ${failedUrl}`,
       ));
@@ -540,7 +542,10 @@ function loadCommittedBrowserSurface(
     contents.on("render-process-gone", onRendererGone);
     contents.on("destroyed", onDestroyed);
     try {
-      Promise.resolve(contents.loadURL(url)).then(onReady, error => {
+      Promise.resolve(contents.loadURL(url)).then(() => {
+        loadFinished = true;
+        onReady();
+      }, error => {
         finish(error instanceof Error ? error : new Error(String(error)));
       });
     } catch (error) {

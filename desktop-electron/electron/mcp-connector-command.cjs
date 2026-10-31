@@ -8,7 +8,7 @@ function isMcpConnectorCommand(argv) {
   return Array.isArray(argv) && argv.includes("--create-mcp-connector");
 }
 
-function createMcpConnectorCommand({ app, run }) {
+function createMcpConnectorCommand({ app, run, logger }) {
   const reportFile = path.join(app.getPath("userData"), "mcp-connector-command.json");
   let inFlight = null;
   const begin = () => ({ version: 1, id: randomUUID(), pid: process.pid,
@@ -32,7 +32,7 @@ function createMcpConnectorCommand({ app, run }) {
         return result;
       }).catch(error => {
         // Keep arbitrary errors, filesystem paths and credentials out of the automation receipt.
-        const text = String(error?.message || "");
+        const text = String(error?.message || error || "");
         const [code, message] = /denied access/i.test(text)
           ? ["mcp_access_denied", "The MCP server denied access. Check its authentication and workspace access."]
           : /verification|authenticate|sign.?in|cloudflare/i.test(text)
@@ -44,6 +44,7 @@ function createMcpConnectorCommand({ app, run }) {
                 : /configuration|automatic MCP harness|tunnel ID|production profile/i.test(text)
                   ? ["configuration_required", "Configure the saved automatic MCP harness first."]
                   : ["creation_failed", "Connector creation failed. Check Configuration in Coding Tools."];
+        logger?.warn("mcp.connector_creation_failed", { code, message: text });
         save({ ...operation, status: "failed", finishedAt: new Date().toISOString(), error: { code, message } });
         throw error;
       }).finally(() => { inFlight = null; });
