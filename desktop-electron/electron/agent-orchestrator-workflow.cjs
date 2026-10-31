@@ -4438,12 +4438,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           await startRun({ workspaceId, runId: run.id });
           resumed += 1;
           logger?.info?.("ao.restart_resumed", { workspaceId, runId: run.id, how: resume });
+          await resumeLaunched(workspaceId, run.id, generation);
         } catch (error) {
           logger?.warn?.("ao.restart_resume_failed", { runId: run.id, message: publicText(error?.message || error, 200) });
         }
       }
     }
     return { resumed };
+  }
+
+  // startRun returns before its agent launches, so after a restart every interrupted chat launched
+  // at once: six cold agent starts together on the busy hard disk, and some timed out getting ready
+  // (2026-10-31). Each resumed chat now waits for the one before it to finish launching. One whose
+  // agent is still running launches nothing, and is let go once no launch of it began in time.
+  const RESUME_LAUNCH_BEGIN_MS = 10_000;
+  const RESUME_LAUNCH_WAIT_MS = 90_000;
+  async function resumeLaunched(workspaceId, runId, generation) {
+    const prefix = JSON.stringify([workspaceId, runId]).slice(0, -1) + ",";
+    const started = now();
+    let begun = false;
+    while (generation === recoveryGeneration && now() - started < RESUME_LAUNCH_WAIT_MS) {
+      const state = backgroundRuns.get(runKey(workspaceId, runId));
+      if (!state || state.settled || state.stopped) return;
+      // A card's launch stage is there exactly while dispatchExternal launches it.
+      if ([...launchStages.keys()].some(key => key.startsWith(prefix))) begun = true;
+      else if (begun || now() - started >= RESUME_LAUNCH_BEGIN_MS) return;
+      await new Promise(resolve => setTimer(resolve, 500));
+    }
   }
 
   async function createTeamRun(id, task, team, selection = {}, includeRun = false) {

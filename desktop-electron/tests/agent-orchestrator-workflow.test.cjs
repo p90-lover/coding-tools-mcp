@@ -9016,3 +9016,53 @@ test("after a restart the app resumes interrupted chats in every project, with n
   assert.deepEqual(retrying.started.sort(), ["live", "r1"]);
   retrying.workflow.dispose();
 });
+
+test("after a restart the interrupted chats launch their agents one after another, not all at once", async () => {
+  // Seen 2026-10-31: after an update six interrupted chats launched together on the busy hard
+  // disk, and some timed out getting ready.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const restarted = "the agent's process ended before it finished (the app restarted)";
+  const runs = ["r1", "r2"].map((id, index) => ({ id, workspace_id: "ws-1", project_id: `task-${index + 1}`, execution_mode: "single", revision: 1, cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { error: restarted, started_at_ms: Date.now() - 60_000 } }] }));
+  const world = chatWorld();
+  const byId = id => runs.find(run => run.id === id);
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read") {
+      const listed = body.run_id ? [byId(body.run_id)] : runs;
+      return { ok: true, runs: structuredClone(listed), worker_capacity: Object.fromEntries(listed.map(run => [run.id, 1])) };
+    }
+    const run = byId(body.run_id);
+    const node = run?.nodes[0];
+    if (endpoint === "/api/v1/ao/control") { node.history.push(node.receipt); node.state = "pending"; node.receipt = undefined; return { ok: true, run }; }
+    if (endpoint === "/api/v1/ao/grant") { run.grant = { executable_sha256: "a".repeat(64) }; return { ok: true, run, grant: run.grant }; }
+    if (endpoint === "/api/v1/ao/external/reserve") { node.state = "reserved"; return { ok: true, request_key: `key-${run.id}`, prompt: `continue ${run.id}` }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { node.state = "running"; node.receipt = { thread_id: body.session_id }; return { ok: true, run }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { node.state = "finished"; return { ok: true, run }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const spawned = [];
+  const finish = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      spawn: input => { spawned.push(input.prompt); return new Promise(resolve => finish.push(() => resolve(`session-${spawned.length}`))); },
+      continuable: async () => false,
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "done" }),
+      warmSessions: async () => [],
+      kill: async () => ({ ok: true }),
+    },
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  const resuming = workflow.resumeInterrupted(["ws-1"]);
+  await until(() => spawned.length === 1);
+  await tick(1_200);
+  assert.deepEqual(spawned, ["continue r1"], "the second chat waits while the first one's agent launches");
+  finish[0]();
+  await until(() => spawned.length === 2);
+  assert.deepEqual(spawned, ["continue r1", "continue r2"]);
+  finish[1]();
+  assert.equal((await resuming).resumed, 2);
+  workflow.dispose();
+});
