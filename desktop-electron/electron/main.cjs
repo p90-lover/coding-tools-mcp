@@ -32,7 +32,7 @@ const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-li
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
-const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
+const { createGptBrowserHost, cleanUserAgent, readGptBrowserState } = require("./gpt-browser.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
@@ -253,7 +253,7 @@ function dispatchMcpConnectorCommand() {
   const action = pendingMcpConnectorCommand;
   pendingMcpConnectorCommand = null;
   // The private command receipt and existing operation status carry failure details.
-  void mcpConnectorCommand.request(action).catch(() => undefined);
+  void mcpConnectorCommand.request(action, "command").catch(() => undefined);
 }
 let updateController = null;
 let autoInstaller = null;
@@ -380,11 +380,14 @@ async function routeGptBrowserSession(browserSession) {
   await browserSession.setProxy({ mode: "fixed_servers", proxyRules: route, proxyBypassRules: process.env.NO_PROXY || "" });
 }
 
+/** The GPT Browser host, made on first use once its saved accounts are read off the main thread. */
 function getGptBrowser(logger) {
   if (gptBrowser) return gptBrowser;
-  gptBrowser = createGptBrowserHost({
+  const dataRoot = path.join(CORE_HOME, "gpt-browser");
+  gptBrowser = readGptBrowserState(dataRoot, logger).then((savedText) => createGptBrowserHost({
     logger,
-    dataRoot: path.join(CORE_HOME, "gpt-browser"),
+    dataRoot,
+    savedText,
     sessionFor: (partition) => session.fromPartition(partition),
     prepareSession: routeGptBrowserSession,
     createView: (partition) => new WebContentsView({
@@ -396,6 +399,10 @@ function getGptBrowser(logger) {
     // mailto click failed as an unhandled rejection and the mail app never opened.
     openExternal: (url) => (/^mailto:/i.test(String(url)) ? shell.openExternal(String(url)) : openWebUrl(url)),
     onChange: (status) => send("launcher:gpt-browser-changed", status),
+  })).catch((error) => {
+    // A host that could not be made is made again on the next call, as before.
+    gptBrowser = null;
+    throw error;
   });
   return gptBrowser;
 }
@@ -1074,8 +1081,16 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   const setupState = stateStore.read();
   if (IS_DEV_PROFILE || !runtimeHost || quitting || shutdownInProgress
     || setupState.coreSetupComplete !== true || setupState.browserInteractionMode !== "automatic") return;
+  // Setup checks the sign-in of the account the Browser tab shows. Switched on meanwhile (to one not
+  // signed in, it timed out "ChatGPT login was not completed"; mid-load it failed with -3, both
+  // 2026-10-31), it would check the wrong page: the next signed-in switch refreshes the bridge.
+  const shownElsewhere = () => browserHost !== host || browserAccounts.activeId() !== accountId;
   try {
     await waitForRuntimeHostIdle();
+    if (shownElsewhere()) {
+      logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "account-changed" });
+      return;
+    }
     await runtimeHost.setupCore();
     stateStore.update({ codexCatalogVerified: false, codexRestartRequired: true });
     // Setup's capability check recorded the plan it installed (onSessionInspected).
@@ -1084,6 +1099,10 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
     scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-account" });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (shownElsewhere()) {
+      logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "account-changed", message: message.slice(0, 300) });
+      return;
+    }
     logger.warn("browser_accounts.bridge_refresh_failed", { accountId, message: message.slice(0, 300) });
     publishOperation({ name: "browser-account", status: "failed", message: `The Codex bridge did not pick up this account's plan; run Install models again. ${message}` });
   }
@@ -2329,7 +2348,7 @@ function registerIpc({ logger, stateStore }) {
     // the agent pre-warm and the Retry automatically switch unset. They still need a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm"].includes(input.operation)
-        || (["chat_auto_retry", "chat_model_judges"].includes(input.operation) && input.arguments?.enabled === undefined));
+        || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined));
     assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
     // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
     if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
@@ -2394,6 +2413,11 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     return removeBrowserAccount(id, { logger, stateStore });
   });
+  // Bulk delete (ChatGPT browser management): several accounts in one action, same focus rule.
+  handle("launcher:browser-accounts-remove", (event, ids) => {
+    assertFocusedMainWindow(event, true);
+    return browserAccountService.removeMany(ids, { logger, stateStore });
+  });
   // Browser settings: one account's (tab limit, new sessions), every account's, and a fresh look at
   // the account in use's plan. Every change needs the focused main window.
   handle("launcher:browser-account-settings", (event, input) => {
@@ -2455,6 +2479,9 @@ function registerIpc({ logger, stateStore }) {
   // in the ChatGPT view is never interrupted; only a session that is signed in is then refreshed
   // in the view. Nothing runs under a login, smoke test or turn.
   handle("launcher:browser-check-auth", async () => {
+    // Setup asks as soon as it shows, which can be before the browser exists (handlers are registered
+    // first): that failed with "Cannot read properties of null (reading 'snapshot')" on every launch.
+    if (!browserHost) return null;
     const current = browserHost.snapshot();
     if (stateStore.read().browserInteractionMode === "manual" || current?.authenticated === true
       || browserHost.currentOperation?.() || browserHost.activeTraceId) return current;
@@ -2532,36 +2559,36 @@ function registerIpc({ logger, stateStore }) {
     return getChatGptDesktop(logger).localSend(input.text, { returnTo });
   });
   // Workspace -> GPT Browser. Every change needs the focused main window; status is read-only.
-  handle("launcher:gpt-browser-status", () => getGptBrowser(logger).status());
-  handle("launcher:gpt-browser-add", (event) => {
+  handle("launcher:gpt-browser-status", async () => (await getGptBrowser(logger)).status());
+  handle("launcher:gpt-browser-add", async (event) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).addAccount();
+    return (await getGptBrowser(logger)).addAccount();
   });
-  handle("launcher:gpt-browser-switch", (event, id) => {
+  handle("launcher:gpt-browser-switch", async (event, id) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).switchTo(id);
+    return (await getGptBrowser(logger)).switchTo(id);
   });
-  handle("launcher:gpt-browser-open-url", (event, url) => {
+  handle("launcher:gpt-browser-open-url", async (event, url) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).openUrl(url);
+    return (await getGptBrowser(logger)).openUrl(url);
   });
-  handle("launcher:gpt-browser-navigate", (event, action) => {
+  handle("launcher:gpt-browser-navigate", async (event, action) => {
     assertFocusedMainWindow(event, false);
-    return getGptBrowser(logger).navigate(action);
+    return (await getGptBrowser(logger)).navigate(action);
   });
-  handle("launcher:gpt-browser-rename", (event, input) => {
+  handle("launcher:gpt-browser-rename", async (event, input) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).rename(input?.id, input?.label);
+    return (await getGptBrowser(logger)).rename(input?.id, input?.label);
   });
-  handle("launcher:gpt-browser-remove", (event, id) => {
+  handle("launcher:gpt-browser-remove", async (event, id) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).remove(id);
+    return (await getGptBrowser(logger)).remove(id);
   });
-  handle("launcher:gpt-browser-surface-active", (_event, active) => getGptBrowser(logger).setSurfaceActive(active === true));
-  handle("launcher:gpt-browser-bounds", (event, bounds) => {
+  handle("launcher:gpt-browser-surface-active", async (_event, active) => (await getGptBrowser(logger)).setSurfaceActive(active === true));
+  handle("launcher:gpt-browser-bounds", async (event, bounds) => {
     const rect = validateBounds(bounds);
     const zoom = event.sender.getZoomFactor();
-    getGptBrowser(logger).setBounds({
+    (await getGptBrowser(logger)).setBounds({
       x: Math.round(rect.x * zoom), y: Math.round(rect.y * zoom),
       width: Math.round(rect.width * zoom), height: Math.round(rect.height * zoom),
     });
@@ -2891,7 +2918,7 @@ function registerIpc({ logger, stateStore }) {
   dispatchMcpConnectorCommand();
   handle("launcher:mcp-create-connector", event => {
     assertFocusedMainWindow(event, true);
-    return mcpConnectorCommand.request();
+    return mcpConnectorCommand.request("create", "settings");
   });
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
@@ -2920,7 +2947,7 @@ function registerIpc({ logger, stateStore }) {
       await runtimeHost.uninstallIntegration();
     } finally {
       // Never let re-publishing the descriptor replace the removal's own result or error.
-      try { browserHost.writeDescriptor(); } catch (error) {
+      try { await browserHost.writeDescriptor(); } catch (error) {
         logger.warn("browser.descriptor_write_failed", { message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
       }
     }
@@ -3776,11 +3803,11 @@ async function start() {
       await service.request("/api/v1/events/config", { proxy }, { timeout: 10_000 });
       mcpEventProxyPushed = pushed;
     },
-    bridgeHealthUrl: () => {
+    bridgeHealthUrl: async () => {
       // Probe the Codex bridge only while this launcher owns or adopted it.
       if (!runtimeSupervisor?.daemon || !runtimeHost) return null;
       try {
-        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const snapshot = await runtimeHost.runtimeConfigSnapshotAsync();
         const config = snapshot.config;
         if (!snapshot.configured || config?.host !== "127.0.0.1" || !Number.isInteger(config.port)) return null;
         return `http://127.0.0.1:${config.port}/healthz`;
@@ -4210,6 +4237,7 @@ async function start() {
       logger,
       // A pre-warmed session is reused only by a launch that attaches the same app tools.
       agentToolsIdentity: (workspaceId) => chatAgentTools?.identity(workspaceId) ?? null,
+      nativePreviewTools: chatAgentTools,
       // Runtime > Subagents: its settings, saved subagents and running ones.
       subagents: subagentsService,
       // Chat goals (/goal) survive an app restart.
@@ -4228,6 +4256,8 @@ async function start() {
       // Points per model from finished Team rounds (model-scores.cjs).
       modelScoresFile: path.join(app.getPath("userData"), "integrations", "model-scores.json"),
       knownModelsFile: path.join(app.getPath("userData"), "integrations", "cpa-known-models.json"),
+      // Models the app's own calls skip for now (spent quota, repeated failures), kept across restarts.
+      modelBenchFile: path.join(app.getPath("userData"), "integrations", "model-benches.json"),
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
         return headlessHost.request(endpoint, body, options);
@@ -4243,10 +4273,10 @@ async function start() {
         return { baseUrl: `http://127.0.0.1:${config.port}/v1` };
       },
       webBridgeReadiness: async () => {
-        if (!browserHost || !fs.existsSync(browserHost.descriptorPath)) return { authenticated: null, ready: false };
+        if (!browserHost || !(await fs.promises.access(browserHost.descriptorPath).then(() => true, () => false))) return { authenticated: null, ready: false };
         const session = await browserHost.authenticationReadiness();
         if (session.authenticated !== true || session.ready !== true) return session;
-        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const snapshot = await runtimeHost.runtimeConfigSnapshotAsync();
         const config = snapshot.config;
         if (!snapshot.configured || config?.host !== "127.0.0.1"
           || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {
@@ -4448,6 +4478,7 @@ async function start() {
     // Settings → Updates: a tunnel left running by another build is restarted, not adopted.
     reuseTunnelOnlyWhenMatching: () => resolveUpdateSettings(stateStore.read()).updateReuseMatchingOnly,
     onExtraTunnelsChange: tunnels => send("launcher:mcp-tunnels-changed", tunnels),
+    watchConfigFile: true,
   });
   runtimeHost = new RuntimeHost({
     app,
@@ -4464,7 +4495,8 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
     // Settings → "Use Coding Tools in Codex": absent is on (as every install before it was).
     codexRouteEnabled: () => stateStore.read().codexRoute !== false,
-    refreshBrowserDescriptor: () => browserHost?.writeDescriptor(),
+    // Read straight back (launcherControlEnvironment): written before this returns.
+    refreshBrowserDescriptor: () => browserHost?.writeDescriptor({ now: true }),
   });
   // Only a preference sync: an unreadable or invalid setup config (seen: a byte order mark) keeps
   // the saved mode and the app starts, as the same read a few lines on already does.

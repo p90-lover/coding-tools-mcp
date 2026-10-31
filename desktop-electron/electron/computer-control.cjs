@@ -101,6 +101,11 @@ const STYLE = `body{font:13px system-ui,"Segoe UI",sans-serif;margin:0;color:#1f
 button{font:inherit;padding:6px 14px;border-radius:6px;border:1px solid #8884;background:transparent;color:inherit;cursor:pointer}
 button.primary{background:#2563eb;border-color:#2563eb;color:#fff}button:disabled{opacity:.5;cursor:default}`;
 
+// The bar's Stop tells the app by renaming its page: a data: page never navigates in-page, so a
+// hash change there never fired did-navigate-in-page and Stop did nothing (the 0.8.39 picker's
+// Start was dead the same way, 2026-10-31). page-title-updated fires for any page, with no preload.
+const STOP_TITLE = "stop-computer-control";
+
 /** The bar shown while control is on: what is controlled, time left, and Stop. */
 function barPage({ title }) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Computer control is on</title><style>${STYLE}
@@ -108,7 +113,7 @@ body{display:flex;align-items:center;gap:10px;padding:0 10px;height:100vh;box-si
 border:2px solid #dc2626;border-radius:8px}b{color:#dc2626}span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 button{-webkit-app-region:no-drag;background:#dc2626;border-color:#dc2626;color:#fff}</style></head>
 <body><b>●</b><span>A chat controls “${escapeHtml(title)}” <small id="left"></small></span><button id="stop">Stop</button>
-<script>document.getElementById("stop").onclick = () => { location.hash = "stop"; };
+<script>document.getElementById("stop").onclick = () => { document.title = ${JSON.stringify(STOP_TITLE)}; };
 window.showLeft = (text) => { document.getElementById("left").textContent = text; };</script></body></html>`;
 }
 
@@ -144,7 +149,7 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     logger?.info?.("computer.stopped", { reason });
   }
 
-  // A page of ours that only ever changes its hash: every other navigation and popup is refused.
+  // A page of ours that never navigates: every navigation and popup is refused.
   function lockDown(window) {
     window.webContents.on("will-navigate", (event) => event.preventDefault());
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -163,7 +168,11 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     lockDown(bar);
     const own = bar;
     own.on("closed", () => { if (bar === own) void stop("control bar closed"); });
-    own.webContents.on("did-navigate-in-page", (_event, url) => { if (url.endsWith("#stop")) void stop("Stop pressed"); });
+    own.webContents.on("page-title-updated", (event, pageTitle) => {
+      if (pageTitle !== STOP_TITLE) return;
+      event.preventDefault?.();
+      if (bar === own) void stop("Stop pressed");
+    });
     void own.loadURL(pageUrl(barPage({ title }))).then(() => { if (!own.isDestroyed()) own.showInactive(); });
     // The bar's heartbeat keeps input allowed; a bar hidden or gone sends none, and input stops.
     heartbeat = setInterval(async () => {

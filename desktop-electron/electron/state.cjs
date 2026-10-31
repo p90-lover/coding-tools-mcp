@@ -200,6 +200,11 @@ function validateSidebarState(value) {
 function createStateStore(filePath) {
   const loaded = readState(filePath);
   let state = loaded.state;
+  // What this store last wrote. A patch that changes nothing is not written again: each write is an
+  // fsync'd atomic write plus its .bak on the main thread, up to 2.4 s on the busy hard disk, and
+  // callers often set what is already set (codexRestartRequired: false on each catalog failure).
+  // The session's first update always writes, so settings recovered from a torn file reach the disk.
+  let written = null;
   return {
     /** How the settings were recovered from a torn file at startup, for the log; null if they were not. */
     recovery: loaded.recovery,
@@ -208,7 +213,11 @@ function createStateStore(filePath) {
     },
     update(patch) {
       const next = { ...state, ...patch, version: 1 };
-      writeState(filePath, next);
+      const text = JSON.stringify(next);
+      if (text !== written) {
+        writeState(filePath, next);
+        written = text;
+      }
       state = next;
       return structuredClone(next);
     },

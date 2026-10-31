@@ -9,7 +9,7 @@
 // is current without the user opening CPA.
 
 const CACHE_MS = 20_000;
-const STALE_MS = 10 * 60_000;
+const STALE_MS = 60_000;
 const REFRESH_PER_READ = 4;
 const TIMEOUT_MS = 8_000;
 const MAX_ACCOUNTS = 12;
@@ -103,7 +103,8 @@ function createCpaQuota({ getConnection, fetchImpl = fetch, now = Date.now, logg
   function refreshStale(target, accounts) {
     const at = now();
     const stale = accounts.filter((account) => account.id && !account.disabled
-      && (!account.checkedAt || at - account.checkedAt > STALE_MS) && at - (refreshedAt.get(account.id) ?? 0) > STALE_MS)
+      && (!account.checkedAt || at - account.checkedAt >= STALE_MS) && at - (refreshedAt.get(account.id) ?? 0) >= STALE_MS)
+      .sort((a, b) => (refreshedAt.get(a.id) ?? 0) - (refreshedAt.get(b.id) ?? 0))
       .slice(0, REFRESH_PER_READ);
     for (const account of stale) {
       refreshedAt.set(account.id, at);

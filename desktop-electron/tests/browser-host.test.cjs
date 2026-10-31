@@ -42,7 +42,7 @@ test("Electron and Bun agree on the exact launcher idle surface", () => {
   ));
 });
 
-test("descriptor publishes native surface identities without inspecting renderers or Zero Risk tabs", () => {
+test("descriptor publishes native surface identities without inspecting renderers or Zero Risk tabs", async () => {
   const dir = fs.mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "browser-targets-"));
   const queried = [];
   const contents = id => ({
@@ -59,32 +59,48 @@ test("descriptor publishes native surface identities without inspecting renderer
     partition: "persist:codex-web-gpt-chatgpt", control: {}, helper: {},
     descriptorPath: require("node:path").join(dir, "descriptor.json"),
   };
+  const write = () => BrowserHost.prototype.writeDescriptor.call(fixture);
   try {
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    // Written off the main thread: no synchronous disk call while the write is asked for or runs.
+    const synchronous = [];
+    const watched = ["openSync", "writeFileSync", "writeSync", "renameSync", "fsyncSync", "mkdirSync", "rmSync"];
+    const originals = Object.fromEntries(watched.map(name => [name, fs[name]]));
+    for (const name of watched) fs[name] = (...args) => { synchronous.push(name); return originals[name](...args); };
+    try { await write(); } finally { Object.assign(fs, originals); }
+    assert.deepEqual(synchronous, []);
     const descriptor = JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8"));
     assert.equal(descriptor.version, 3);
     assert.deepEqual(descriptor.surfaceTargets, { [fixture.surfaceId]: "home-target", [automatic.surfaceId]: "auto-target" });
     assert.deepEqual(queried, ["home-target", "auto-target"]);
     fixture.getBrowserInteractionMode = () => "manual";
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    await write();
     assert.deepEqual(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).surfaceTargets, {});
     assert.deepEqual(queried, ["home-target", "auto-target"]);
-    // Nothing the bridge reads changed (a tab was selected): no disk write on the main process.
+    // Nothing the bridge reads changed (a tab was selected): no disk write at all.
     const written = fs.readFileSync(fixture.descriptorPath, "utf8");
     fs.rmSync(fixture.descriptorPath);
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    await write();
     assert.equal(fs.existsSync(fixture.descriptorPath), false);
-    // A change is written at once, and a host that removed its descriptor writes it again.
+    // A change is written, and a host that removed its descriptor writes it again.
     fixture.getBrowserInteractionMode = () => "automatic";
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    await write();
     assert.equal(Object.keys(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).surfaceTargets).length, 2);
     fixture.window = { off() {} };
     fixture.shellZoomShortcutBindings = new Map();
     fs.writeFileSync(fixture.descriptorPath, written.replace(/"pid": \d+/, `"pid": ${process.pid}`));
     try { BrowserHost.prototype.destroy.call(fixture); } catch {}
     fixture.getBrowserInteractionMode = () => "manual";
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    await write();
     assert.equal(fs.existsSync(fixture.descriptorPath), true);
+    // A write that destroy() overtakes does not bring the closed browser's descriptor back.
+    fixture.getBrowserInteractionMode = () => "automatic";
+    const overtaken = write();
+    try { BrowserHost.prototype.destroy.call(fixture); } catch {}
+    await overtaken;
+    assert.equal(fs.existsSync(fixture.descriptorPath), false);
+    // The caller that reads it straight back gets it written before the call returns.
+    BrowserHost.prototype.writeDescriptor.call(fixture, { now: true });
+    assert.equal(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).version, 3);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

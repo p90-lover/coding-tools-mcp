@@ -76,6 +76,16 @@ const TOOL_CALL_TIMEOUT_MS = 120_000;
 const MCP_HTTP_AGENTS = new Set(["claude-code", "codex", "opencode"]);
 const WORKSPACE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const SESSION_KEY = /^[A-Za-z0-9_-]{16,64}$/;
+const SESSION_ID = /^(?:[a-zA-Z0-9_-]{1,128}|native:[^:\s]{1,1152}:[^:\s]{1,1152}:[^:\s]{1,1152})$/;
+function nativeChatPreviewSessionId(workspaceId, taskId, roleId = "single") {
+  if (![workspaceId, taskId, roleId].every(value => typeof value === "string" && value.length > 0 && value.length <= 128)) return null;
+  return `native:${[workspaceId, taskId, roleId].map(encodeURIComponent).join(":")}`;
+}
+function nativePreviewScope(value) {
+  return value && Object.keys(value).length === 2
+    && [value.runId, value.nodeId].every(id => typeof id === "string" && WORKSPACE_ID.test(id))
+    ? { runId: value.runId, nodeId: value.nodeId } : null;
+}
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const IMAGE_TOOLS = new Set(["view_image", "capture_screenshot", "capture_window", "capture_process"]);
 const WINDOWS = process.platform === "win32";
@@ -1269,6 +1279,7 @@ function createChatAgentTools({
   // A group is usable only if the session got it and the setting still allows it.
   const allowed = (entry, group) => entry.groups.includes(group) && currentGroups().includes(group);
   const unavailable = (entry, name, signal = entry.lifetime.signal) => {
+    if (entry.previewOnly && now() >= entry.expiresAt) forget(entry.key, { ended: true });
     if (closing || !entry.expected || sessions.get(entry.key) !== entry) {
       return failedCall("This chat's session has ended; its tools are no longer available.");
     }
@@ -1298,7 +1309,7 @@ function createChatAgentTools({
     }
   }
 
-  function mint({ agent, workspaceId, approvalMode, autoReview = false, subagent = false }) {
+  function mint({ agent, workspaceId, approvalMode, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null }) {
     while (sessions.size >= MAX_SESSIONS) {
       const oldest = [...sessions.values()].sort((left, right) => left.usedAt - right.usedAt)[0];
       forget(oldest.key);
@@ -1308,7 +1319,8 @@ function createChatAgentTools({
     const entry = {
       // Only the credential's hash is held (and kept on disk), never the credential itself.
       // A subagent's own session never starts subagents (one level only).
-      key, agent, workspaceId, groups: currentGroups().filter((group) => !subagent || group !== "subagents"), expected: hashBearer(`Bearer ${token}`),
+      key, agent, workspaceId, groups: currentGroups().filter((group) => previewOnly ? group === "preview" : !subagent || group !== "subagents"), expected: hashBearer(`Bearer ${token}`),
+      previewOnly, expiresAt, nativeScope,
       subagent: subagent === true,
       // Only a session launched to bypass permissions runs commands without a confirmation each.
       // Captured once, at spawn time, from the mode the session was launched with: changing the
@@ -1331,6 +1343,7 @@ function createChatAgentTools({
   }
 
   function authorized(request, entry) {
+    if (entry?.previewOnly && now() >= entry.expiresAt) forget(entry.key, { ended: true });
     const given = hashBearer(String(request.headers.authorization || ""));
     const expected = entry?.expected ?? crypto.randomBytes(32);
     return crypto.timingSafeEqual(given, expected) && Boolean(entry?.expected);
@@ -1360,6 +1373,7 @@ function createChatAgentTools({
       sessions: [...sessions.values()].filter((entry) => entry.expected).map((entry) => ({
         key: entry.key, hash: entry.expected.toString("hex"), agent: entry.agent, workspaceId: entry.workspaceId, aoSession: entry.aoSession,
         groups: entry.groups, bypass: entry.bypass, autoReview: entry.autoReview, subagent: entry.subagent === true, createdAt: entry.createdAt, usedAt: entry.usedAt,
+        ...(entry.previewOnly ? { previewOnly: true, expiresAt: entry.expiresAt, nativeScope: entry.nativeScope } : {}),
         origins: [...entry.origins].slice(0, 50),
       })),
     };
@@ -1400,12 +1414,17 @@ function createChatAgentTools({
     const entries = (Array.isArray(data.sessions) ? data.sessions : []).slice(0, MAX_SESSIONS)
       .filter((saved) => SESSION_KEY.test(String(saved?.key)) && /^[0-9a-f]{64}$/.test(String(saved?.hash))
         && MCP_HTTP_AGENTS.has(saved.agent) && WORKSPACE_ID.test(String(saved.workspaceId))
-        && (saved.aoSession === null || /^[a-zA-Z0-9_-]{1,128}$/.test(String(saved.aoSession)))
+        && (saved.aoSession === null || SESSION_ID.test(String(saved.aoSession)))
+        && (saved.previewOnly !== true || saved.agent === "codex" && nativePreviewScope(saved.nativeScope)
+          && Number.isFinite(saved.expiresAt) && saved.expiresAt > now() && saved.expiresAt <= now() + 900_000
+          && (saved.aoSession === null || String(saved.aoSession).startsWith(`native:${encodeURIComponent(saved.workspaceId)}:`)))
         && Number.isFinite(saved.usedAt) && now() - saved.usedAt < LEASE_MAX_IDLE_MS)
       .map((saved) => ({
         key: saved.key, agent: saved.agent, workspaceId: saved.workspaceId, expected: Buffer.from(saved.hash, "hex"),
-        groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group)),
+        groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group) && (saved.previewOnly !== true || group === "preview")),
         bypass: saved.bypass === true, autoReview: saved.autoReview === true, subagent: saved.subagent === true,
+        previewOnly: saved.previewOnly === true, expiresAt: saved.previewOnly === true ? saved.expiresAt : null,
+        nativeScope: saved.previewOnly === true ? nativePreviewScope(saved.nativeScope) : null,
         aoSession: saved.aoSession ?? null, root: null, checkedAt: 0, createdAt: Number(saved.createdAt) || now(), usedAt: saved.usedAt,
         commands: new Map(), commandState: { ended: false }, origins: new Set((Array.isArray(saved.origins) ? saved.origins : []).filter((origin) => typeof origin === "string").slice(0, 50)), lifetime: new AbortController(),
         chatProjects: new Set(),
@@ -1485,6 +1504,7 @@ function createChatAgentTools({
   }
 
   async function listTools(entry) {
+    if (entry.previewOnly) return allowed(entry, "preview") ? [...PREVIEW_TOOL_DEFS] : [];
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
     const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
@@ -2014,6 +2034,10 @@ function createChatAgentTools({
     const stopped = unavailable(entry, name, signal);
     if (stopped) return stopped;
     const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
+    if (entry.previewOnly && group === "preview") {
+      if (!entry.aoSession) return failedCall("This native chat's preview is not bound yet.");
+      return previews.call(entry.aoSession, name, withoutConsent(given), { permit: (origin) => permitOrigin(entry, origin, signal), signal });
+    }
     if (name === "show_in_chat") return showInChat(entry, given);
     if (name === "schedule_wakeup") return scheduleWakeup(entry, given);
     if (name === "app_processes") return listProcesses(given);
@@ -2214,7 +2238,7 @@ function createChatAgentTools({
       }
       if (name === "exec_command") {
         const workdir = typeof args.workdir === "string" ? args.workdir : typeof args.cwd === "string" ? args.cwd : ".";
-        const id = sandbox.start({ cmd: String(args.cmd ?? ""), cwd: path.resolve(root.path, workdir), writable: root.path,
+        const id = await sandbox.start({ cmd: String(args.cmd ?? ""), cwd: path.resolve(root.path, workdir), writable: root.path,
           stdin: typeof args.stdin === "string" ? args.stdin : "" });
         track(entry, name, args, toolResult(name, args, { ok: true, command_id: id, status: "running" }), true);
         await sandbox.wait(id, yieldOf(args.yield_time_ms, 1000));
@@ -2400,6 +2424,10 @@ function createChatAgentTools({
   /** Forgets credentials never bound to a session, and those whose session AO reports ended. */
   async function sweep() {
     for (const entry of [...sessions.values()]) {
+      if (entry.previewOnly) {
+        if (now() >= entry.expiresAt) forget(entry.key, { ended: true });
+        continue;
+      }
       if (!entry.aoSession) {
         if (now() - entry.createdAt >= UNBOUND_TTL_MS) forget(entry.key);
         continue;
@@ -2412,7 +2440,6 @@ function createChatAgentTools({
 
   // The chat's Terminal and Preview panes act for the user, never for the agent.
 
-  const SESSION_ID = /^[a-zA-Z0-9_-]{1,128}$/;
   /** The live credential of an AO session (the newest one), or null. */
   function entryFor(sessionId) {
     if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return null;
@@ -2585,16 +2612,21 @@ function createChatAgentTools({
      * is the session's AO permission mode: only "bypass-permissions" runs every command unconfirmed;
      * `autoReview` (the card is set to "Approve for me") runs its routine project commands unconfirmed.
      */
-    async lease({ agent, workspaceId, approvalMode = null, autoReview = false, subagent = false } = {}) {
+    async lease({ agent, workspaceId, approvalMode = null, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null } = {}) {
       if (!isEnabled() || !MCP_HTTP_AGENTS.has(agent) || typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
+      if (previewOnly && (agent !== "codex" || !currentGroups().includes("preview"))) return null;
+      if (previewOnly && (!Number.isFinite(expiresAt) || expiresAt <= now() || expiresAt > now() + 900_000)) throw new Error("Native preview lease must expire within its native connection lifetime");
+      const scope = nativePreviewScope(nativeScope);
+      if (previewOnly && !scope) throw new Error("Native preview lease requires its owning run and node");
       await listen();
-      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview, subagent });
+      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview, subagent, previewOnly, expiresAt, nativeScope: scope });
       const url = `http://127.0.0.1:${port}/mcp/${encodeURIComponent(workspaceId)}/${entry.key}`;
       return Object.freeze({
         servers: [{ name: SERVER_NAME, type: "http", url, headers: { Authorization: `Bearer ${token}` } }],
         bind(sessionId) {
           if (sessions.get(entry.key) !== entry) return false;
-          if (typeof sessionId !== "string" || !sessionId || (entry.aoSession && entry.aoSession !== sessionId)) {
+          if (typeof sessionId !== "string" || !sessionId || (entry.aoSession && entry.aoSession !== sessionId)
+            || entry.previewOnly && (!SESSION_ID.test(sessionId) || !sessionId.startsWith(`native:${encodeURIComponent(entry.workspaceId)}:`))) {
             forget(entry.key);
             return false;
           }
@@ -2617,7 +2649,14 @@ function createChatAgentTools({
           save();
           return true;
         },
-        release() { forget(entry.key); },
+        limitLifetime(seconds) {
+          if (entry.previewOnly && Number.isFinite(seconds) && seconds >= 0) {
+            entry.expiresAt = Math.min(entry.expiresAt, now() + seconds * 1000);
+            if (now() >= entry.expiresAt) forget(entry.key, { ended: true });
+            save();
+          }
+        },
+        release({ ended = false } = {}) { forget(entry.key, { ended }); },
       });
     },
     /**
@@ -2629,7 +2668,7 @@ function createChatAgentTools({
      */
     async renew(sessionId) {
       const previous = entryFor(sessionId);
-      if (!previous || !isEnabled() || !MCP_HTTP_AGENTS.has(previous.agent)) return null;
+      if (!previous || previous.previewOnly || !isEnabled() || !MCP_HTTP_AGENTS.has(previous.agent)) return null;
       await listen();
       const { entry, token } = mint({ agent: previous.agent, workspaceId: previous.workspaceId,
         approvalMode: previous.bypass ? "bypass-permissions" : null, autoReview: previous.autoReview, subagent: previous.subagent === true });
@@ -2662,6 +2701,20 @@ function createChatAgentTools({
       for (const entry of [...sessions.values()]) if (entry.aoSession === sessionId) forget(entry.key, { ended: true });
       const retained = paneEntries.get(sessionId);
       if (retained) endCommands(retained);
+    },
+    /** Also reaches restored native credentials, without relying on the workflow's local handles. */
+    revokeNativePreviews({ workspaceId, runId, nodeId = null } = {}) {
+      if (typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)
+        || typeof runId !== "string" || !WORKSPACE_ID.test(runId)
+        || nodeId !== null && (typeof nodeId !== "string" || !WORKSPACE_ID.test(nodeId))) return 0;
+      let revoked = 0;
+      for (const entry of [...sessions.values()]) {
+        if (!entry.previewOnly || entry.workspaceId !== workspaceId || entry.nativeScope?.runId !== runId
+          || nodeId !== null && entry.nativeScope.nodeId !== nodeId) continue;
+        forget(entry.key, { ended: true });
+        revoked++;
+      }
+      return revoked;
     },
     /**
      * What a launch would attach now: the tool groups (agent[+terminal][+desktop]) and this
@@ -2830,6 +2883,7 @@ module.exports = Object.freeze({
   DESKTOP_TOOLS,
   GOAL_TOOLS,
   MCP_HTTP_AGENTS,
+  nativeChatPreviewSessionId,
   SERVER_NAME,
   TERMINAL_TOOLS,
   createChatAgentTools,

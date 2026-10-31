@@ -290,6 +290,63 @@ test("the runtime config is parsed once per change, not on every monitor read", 
   }
 });
 
+test("with the folder watched, reads of an unchanged runtime config never touch the disk", async () => {
+  // 2026-10-31: the one statSync per synchronous read (IPC handlers, setup) froze every window up
+  // to 7.9 s, 30 s in an hour, on the busy hard disk.
+  const { RuntimeHost } = require("../electron/runtime.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-config-watch-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const configPath = path.join(root, "config.json");
+  const sync = { statSync: fs.statSync, readFileSync: fs.readFileSync };
+  const logger = { info() {}, warn() {}, error() {} };
+  const supervisor = new RuntimeSupervisor({ app: { getVersion: () => "0.2.0", isPackaged: false }, logger,
+    sourceRoot: root, coreHome: root, browserDescriptorPath: descriptorPath, watchConfigFile: true });
+  const host = new RuntimeHost({ app: { getPath: () => root, getVersion: () => "0.2.0" }, logger,
+    sourceRoot: root, browserDescriptorPath: descriptorPath, supervisor });
+  const until = async (condition) => {
+    for (let tries = 0; tries < 200 && !condition(); tries += 1) await new Promise(resolve => setTimeout(resolve, 10));
+    return condition();
+  };
+  try {
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath))}\n`);
+    const blocking = [];
+    fs.statSync = function (file, ...rest) { if (file === configPath) blocking.push("stat"); return sync.statSync.call(this, file, ...rest); };
+    fs.readFileSync = function (file, ...rest) { if (file === configPath) blocking.push("read"); return sync.readFileSync.call(this, file, ...rest); };
+    assert.equal(supervisor.readConfig().port, 17841);
+    assert.deepEqual(blocking, ["stat", "read"], "the first read checks and parses the file");
+    // The watch may still report the write above; once it settles, reads stop checking.
+    await new Promise(resolve => setTimeout(resolve, 100));
+    supervisor.readConfig();
+    blocking.length = 0;
+    for (let i = 0; i < 5; i++) {
+      assert.equal(supervisor.readSetupConfig().port, 17841);
+      assert.equal(host.runtimeConfigSnapshot().config.port, 17841);
+    }
+    assert.equal((await supervisor.readConfigAsync()).port, 17841);
+    assert.deepEqual(blocking, [], "an unchanged file is not checked again");
+    supervisor.readSetupConfig().port = 1;
+    assert.equal(supervisor.readSetupConfig().port, 17841, "a caller's change does not leak into the next read");
+
+    // Another process (the setup command) replaces it the way it saves: a new file renamed over it.
+    const temporary = `${configPath}.tmp-1`;
+    fs.writeFileSync(temporary, `${JSON.stringify(launcherConfig(descriptorPath, { port: 17999, appName: "Changed app" }))}\n`);
+    fs.renameSync(temporary, configPath);
+    assert.ok(await until(() => supervisor.readConfig().port === 17999), "the reported change is read");
+
+    // A setup rollback writes it back: the next read checks the file without waiting for the watch.
+    await new Promise(resolve => setTimeout(resolve, 100));
+    supervisor.readConfig();
+    blocking.length = 0;
+    host.restoreSetupCheckpoint([]);
+    supervisor.readConfig();
+    assert.deepEqual(blocking, ["stat"], "checked once after a restore, and not parsed again unchanged");
+  } finally {
+    Object.assign(fs, sync);
+    supervisor.configWatcher?.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("timers read the runtime config without a synchronous disk call, sharing the same cache", async () => {
   // A main-process profile (2026-10-24): the catalog monitor's one statSync of config.json froze
   // every window for 3 s on the busy hard disk holding the app's data.
@@ -323,6 +380,41 @@ test("timers read the runtime config without a synchronous disk call, sharing th
     assert.equal((await supervisor.readConfigAsync()).port, 17999, "another writer's change is seen");
     fs.rmSync(configPath);
     assert.equal(await supervisor.readConfigAsync(), null);
+  } finally {
+    Object.assign(fs, sync);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the runtime snapshot for timers matches the synchronous one without a synchronous disk call", async () => {
+  // Seen live 2026-10-31: the MCP events monitor's 30 s bridge check took the synchronous snapshot,
+  // and its statSync of config.json froze every window for up to 7.9 s on the busy hard disk.
+  const { RuntimeHost } = require("../electron/runtime.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-snapshot-async-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const configPath = path.join(root, "config.json");
+  const sync = { statSync: fs.statSync, readFileSync: fs.readFileSync };
+  try {
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath))}\n`);
+    const logger = { info() {}, warn() {}, error() {} };
+    const supervisor = new RuntimeSupervisor({ app: { getVersion: () => "0.2.0", isPackaged: false }, logger,
+      sourceRoot: root, coreHome: root, browserDescriptorPath: descriptorPath });
+    const host = new RuntimeHost({ app: { getPath: () => root, getVersion: () => "0.2.0" }, logger,
+      sourceRoot: root, browserDescriptorPath: descriptorPath, supervisor });
+    const expected = host.runtimeConfigSnapshot();
+    assert.equal(expected.configured, true);
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath, { port: 17999 }))}\n`);
+    fs.utimesSync(configPath, new Date(), new Date(Date.now() + 5_000));
+    const blocking = [];
+    fs.statSync = function (file, ...rest) { if (file === configPath) blocking.push("stat"); return sync.statSync.call(this, file, ...rest); };
+    fs.readFileSync = function (file, ...rest) { if (file === configPath) blocking.push("read"); return sync.readFileSync.call(this, file, ...rest); };
+    const changed = await host.runtimeConfigSnapshotAsync();
+    assert.deepEqual(blocking, [], "no synchronous call on the timers' path");
+    assert.equal(changed.config.port, 17999, "a change on disk is seen");
+    Object.assign(fs, sync);
+    assert.deepEqual(changed, host.runtimeConfigSnapshot(), "the same snapshot as the synchronous one");
+    fs.rmSync(configPath);
+    assert.deepEqual(await host.runtimeConfigSnapshotAsync(), host.runtimeConfigSnapshot());
   } finally {
     Object.assign(fs, sync);
     fs.rmSync(root, { recursive: true, force: true });

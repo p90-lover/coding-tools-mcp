@@ -12,6 +12,7 @@ export type ChatNode = {
   state: string;
   x: number;
   settings?: { name?: string; role_name?: string };
+  template_role_id?: string;
   route?: { harness_id: string; model: string; effort?: string; context_window?: number };
   /** `thread_id` is the card's AO session id when its harness is an AO agent ("ao:…"). */
   receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; finished_at_ms?: number; thread_id?: string };
@@ -19,27 +20,34 @@ export type ChatNode = {
   history?: { answer?: string; verdict?: string; error?: string; started_at_ms?: number }[];
 };
 
-/** One AO agent session of a chat, for its Preview and Terminal panes. */
-export type ChatAgentSession = { id: string; label: string; model?: string; contextWindow?: number };
+/** An AO session, or a native chat owner used only by the Preview pane. */
+export type ChatAgentSession = { id: string; label: string; model?: string; contextWindow?: number; previewOnly?: boolean };
 
 /**
  * The chat's AO agent sessions, newest first, each once (a follow-up reuses its session): the cards
- * whose harness is an AO agent and that have started one. Native Codex threads are not AO sessions.
+ * whose harness is an AO agent and that have started one. With nativePreview, include native panel
+ * owners too; the default list still keeps native threads out of AO's file and terminal tools.
  */
-export function chatAgentSessions(runs: { nodes: ChatNode[] }[]): ChatAgentSession[] {
+export function chatAgentSessions(runs: { nodes: ChatNode[]; execution_mode?: string }[], nativePreview?: { workspaceId: string; taskId: string }): ChatAgentSession[] {
   const seen = new Map<string, ChatAgentSession>();
   for (const run of [...runs].reverse()) {
     for (const node of [...(run.nodes ?? [])].reverse()) {
-      const id = node.receipt?.thread_id;
-      if (!id || seen.has(id) || !node.route?.harness_id?.startsWith("ao:")) continue;
+      const route = node.route;
+      if (!route) continue;
+      const native = route.harness_id === "codex-native" && route.model.startsWith("chatgpt-web/")
+        && Boolean(nativePreview?.workspaceId && nativePreview.taskId);
+      if (!node.receipt?.thread_id || !native && !route.harness_id?.startsWith("ao:")) continue;
+      const id = native ? `native:${[nativePreview!.workspaceId, nativePreview!.taskId,
+        node.template_role_id || (run.execution_mode === "single" ? "single" : node.id)].map(encodeURIComponent).join(":")}` : node.receipt.thread_id;
+      if (seen.has(id)) continue;
       // Always a string: the chat reads these labels while rendering (the context meter splits
       // them), and a card saved with no name, role name or role would otherwise throw there.
       const name = node.settings?.name || node.settings?.role_name || node.role || "Agent";
       // The window the card asked for is the one the agent runs with (Claude Code's
       // CLAUDE_CODE_MAX_CONTEXT_TOKENS), even when its usage report still names the model's default.
-      const contextWindow = node.route.context_window;
-      seen.set(id, { id, label: node.route.model ? `${name} · ${node.route.model}` : name, ...(node.route.model ? { model: node.route.model } : {}),
-        ...(typeof contextWindow === "number" && contextWindow > 0 ? { contextWindow } : {}) });
+      const contextWindow = route.context_window;
+      seen.set(id, { id, label: route.model ? `${name} · ${route.model}` : name, ...(route.model ? { model: route.model } : {}),
+        ...(typeof contextWindow === "number" && contextWindow > 0 ? { contextWindow } : {}), ...(native ? { previewOnly: true } : {}) });
     }
   }
   // The same agent in several sessions (a follow-up that started a fresh one): the newest is the
@@ -1595,14 +1603,18 @@ export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
   { name: "goal", hint: "Set a goal to keep pursuing", args: "<objective> | pause | resume | edit | clear" },
   { name: "loop", hint: "Run a prompt or command on a recurring interval", args: "[interval] <prompt or /review, /init> | stop", needsChat: true },
   { name: "plan", hint: "Turn plan mode on or off" },
-  { name: "compact", hint: "Compact this chat's context", needsChat: true },
+  { name: "compact", hint: "Compact this chat's context", args: "[what the summary should focus on]", needsChat: true },
+  { name: "autocompact", hint: "Turn auto-compact on or off, or set how full the chat gets first", args: "[on | off | <percent>]" },
+  { name: "context", hint: "Show how full this chat's context is", needsChat: true },
   { name: "review", hint: "Review the current changes", args: "[what to focus on]" },
   { name: "init", hint: "Create an AGENTS.md file with instructions for agents" },
   { name: "status", hint: "Show chat ID, context usage, cards and goal" },
   { name: "diff", hint: "Show the project's uncommitted changes" },
   { name: "mcp", hint: "Show MCP server status" },
   { name: "model", hint: "Choose the model or team" },
+  { name: "effort", hint: "Choose the reasoning effort" },
   { name: "new", hint: "Start a new chat" },
+  { name: "clear", hint: "Clear the conversation: start a new chat" },
   { name: "resume", hint: "Resume a recent chat" },
   { name: "fork", hint: "Start a new chat from this conversation", needsChat: true },
   { name: "rewind", hint: "Go back to an earlier message and edit it", args: "[message number]", needsChat: true },
@@ -1769,8 +1781,12 @@ export type ChatCommands = {
   stopLoop?: () => Promise<void>;
   /** Edit goal: saves a new objective for the rounds still to come. */
   goalEdit: (objective: string) => Promise<void>;
-  /** Compacts the chat's context; says what happened. */
-  compact: () => Promise<string>;
+  /** Compacts the chat's context, the summary focused as `instructions` say; says what happened. */
+  compact: (instructions?: string) => Promise<string>;
+  /** Auto-compact (/autocompact): read with no change, or turned on/off and its threshold set. */
+  autoCompact?: (change?: AutoCompactChange) => Promise<AutoCompactSetting>;
+  /** /context: how full the chat is, when it compacts itself and when it last did. */
+  context?: () => Promise<ChatCommandCard>;
   diff: () => Promise<ChatCommandCard>;
   mcp: () => Promise<ChatCommandCard>;
   status: () => ChatCommandCard;
@@ -1778,6 +1794,26 @@ export type ChatCommands = {
   planMode: boolean;
   setPlanMode: (on: boolean) => void;
 };
+
+/** Auto-compact, as the bridge keeps it (chat_auto_compact): on or off, and at what share of the chat's limit. */
+export type AutoCompactSetting = { autoCompact: boolean; percent: number; limit: number };
+export type AutoCompactChange = { enabled?: boolean; percent?: number };
+
+/**
+ * /autocompact's argument: nothing shows the setting (null); "on" or "off" switches it; a number
+ * ("80" or "80%") is how full the chat gets before its next message compacts it first, as Claude
+ * Code's CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, and turns it on.
+ */
+export function autoCompactArg(arg: string): AutoCompactChange | { error: string } | null {
+  const word = arg.trim().toLowerCase();
+  if (!word) return null;
+  if (["on", "true", "enable"].includes(word)) return { enabled: true };
+  if (["off", "false", "disable"].includes(word)) return { enabled: false };
+  const match = /^(\d{1,3})\s*%?$/.exec(word);
+  const percent = match ? Number(match[1]) : NaN;
+  if (percent >= 20 && percent <= 100) return { enabled: true, percent };
+  return { error: "Use /autocompact on, /autocompact off, or a share from 20% to 100%, like /autocompact 80." };
+}
 
 /** How long a goal has been going, as Codex shows it: "50s", "4m 50s", "7d 4h 4m 50s". */
 export function goalElapsed(since: number, now = Date.now()): string {

@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createGptBrowserHost, browsableUrl, cleanUserAgent, partitionFor } = require("../electron/gpt-browser.cjs");
+const { createGptBrowserHost, browsableUrl, cleanUserAgent, partitionFor, readGptBrowserState } = require("../electron/gpt-browser.cjs");
 
 function fakeWorld() {
   const sessions = new Map();
@@ -94,6 +94,8 @@ test("each account gets its own persistent partition and survives a restart", as
 
   await first.switchTo(a);
   assert.equal([...world.attached][0].webContents.partition, partitionFor(a));
+  // Saved off the main thread: the restart reads what reached the disk.
+  await first.saved();
 
   const again = host(fakeWorld(), root);
   assert.deepEqual(again.status().accounts.map((entry) => entry.id), [a, b]);
@@ -167,6 +169,7 @@ test("overlapping surface activation creates one page and hiding detaches it", a
   const root = tempRoot();
   const saved = host(fakeWorld(), root);
   await saved.addAccount();
+  await saved.saved();
   saved.dispose();
 
   const world = fakeWorld();
@@ -196,6 +199,7 @@ test("a failed shared page preparation can be retried", async () => {
   const root = tempRoot();
   const saved = host(fakeWorld(), root);
   await saved.addAccount();
+  await saved.saved();
   saved.dispose();
 
   const world = fakeWorld();
@@ -226,6 +230,7 @@ test("removal and shutdown cancel pending page creation", async () => {
     const root = tempRoot();
     const saved = host(fakeWorld(), root);
     await saved.addAccount();
+    await saved.saved();
     saved.dispose();
 
     const world = fakeWorld();
@@ -253,4 +258,31 @@ test("hiding the pane takes the page out of the window", async () => {
   assert.equal(world.attached.size, 1);
   await browser.setSurfaceActive(false);
   assert.equal(world.attached.size, 0);
+});
+
+test("saved accounts are read off the main thread and handed to the host", async () => {
+  const root = tempRoot();
+  const first = host(fakeWorld(), root);
+  const id = (await first.addAccount()).activeId;
+  await first.saved();
+  first.dispose();
+
+  const readSync = fs.readFileSync;
+  let syncReads = 0;
+  fs.readFileSync = (...args) => { syncReads += 1; return readSync(...args); };
+  try {
+    const text = await readGptBrowserState(root);
+    const browser = host(fakeWorld(), root, { savedText: text });
+    assert.deepEqual(browser.status().accounts.map((entry) => entry.id), [id]);
+    assert.equal(syncReads, 0, "the host does not read the file again");
+    browser.dispose();
+    // None saved yet: an empty browser, with nothing logged.
+    const warnings = [];
+    const empty = await readGptBrowserState(tempRoot(), { warn: (...args) => warnings.push(args) });
+    assert.equal(empty, null);
+    assert.deepEqual(host(fakeWorld(), root, { savedText: empty }).status().accounts, []);
+    assert.deepEqual(warnings, []);
+  } finally {
+    fs.readFileSync = readSync;
+  }
 });
