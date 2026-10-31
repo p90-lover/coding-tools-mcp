@@ -1020,6 +1020,11 @@ class BrowserHost {
       loading: tab.loading === true,
       active: this.selectedTabId === tab.id,
       closable: true,
+      // For ChatGPT browser management: how long the tab ran, and when a finished one closes.
+      ...(tab.startedAt ? { startedAt: tab.startedAt } : {}),
+      ...(tab.finishedAt ? { finishedAt: tab.finishedAt } : {}),
+      ...(tab.status === "ready" && this.turnTabs?.get(tab.id) === tab && Number.isFinite(tab.lastHeartbeatAt)
+        ? { closesAt: tab.lastHeartbeatAt + retainedTabTtl(this) } : {}),
     };
     if (tab.interactionMode === "manual") {
       Object.assign(snapshot, {
@@ -1074,6 +1079,7 @@ class BrowserHost {
       conversationKey,
       connectorIdentity,
       connectorBound: false,
+      startedAt: Date.now(),
       helperPid,
       view,
       status: "running",
@@ -1152,6 +1158,7 @@ class BrowserHost {
     signInFriendlyUserAgent(view.webContents);
     const tab = {
       id: randomBytes(12).toString("base64url"),
+      startedAt: Date.now(),
       traceId: null,
       ordinal,
       label: `ChatGPT ${ordinal}`,
@@ -1206,6 +1213,7 @@ class BrowserHost {
     const tab = {
       id,
       surfaceId: null,
+      startedAt: Date.now(),
       traceId,
       // Kept: the Browser tab may show another account while this turn waits.
       partition: this.partition,
@@ -3239,6 +3247,7 @@ class BrowserHost {
     tab.message = status === "completed" ? "Task completed"
       : status === "superseded" ? "Continuing this Codex task" : message || `ChatGPT turn ${status}`;
     tab.loading = false;
+    tab.finishedAt = Date.now();
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });

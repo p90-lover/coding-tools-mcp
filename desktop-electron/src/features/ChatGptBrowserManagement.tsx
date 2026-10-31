@@ -104,6 +104,15 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
     void api.codexThreads().then(next => { if (live) setThreads(next.threads); }).catch(() => {});
     return () => { live = false; };
   }, [api, tabSignature, accounts?.accounts.length]);
+  // A running turn's session keeps using tokens: while one runs, the numbers are read again every 15 s.
+  const turnRunning = (browser?.tabs ?? []).some(tab => tab.status === "running");
+  useEffect(() => {
+    if (!turnRunning) return;
+    const timer = window.setInterval(() => {
+      void api.codexThreads().then(next => setThreads(next.threads)).catch(() => {});
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [api, turnRunning]);
 
   const run = useCallback(async (key: string, action: () => Promise<unknown>) => {
     setError(null);
@@ -228,6 +237,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
             run={run}
             onOpenBrowser={onOpenBrowser}
             sessions={sessionsOf(account.id)}
+            threads={threads}
             tabs={tabsOf(account.id)}
             tunnel={tunnels.find(entry => entry.accountId === account.id)}
           />
@@ -307,8 +317,10 @@ function Stat({ label, value, detail, tone }: { label: string; value: string | n
 
 function AccountCard({
   account, api, authenticated, isRunning, chatRunning, canRemove, inUse, removing, switching, mainTunnelReady, maxTabs, proxies, holders, run,
-  sessions, tabs, tunnel, selected = false, onSelect, onOpenBrowser,
+  sessions, tabs, threads, tunnel, selected = false, onSelect, onOpenBrowser,
 }: {
+  /** Every bound Codex session: a tab's own one gives its tokens, model and effort. */
+  threads: CodexThreadBinding[];
   /** Shows the Browser tab: after Use, and for Sign in, whose page opens there. */
   onOpenBrowser?: () => void;
   account: BrowserAccount;
@@ -338,6 +350,7 @@ function AccountCard({
   tunnel: McpTunnel | undefined;
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [tabsOpen, setTabsOpen] = useState(false);
   const confirmTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(confirmTimer.current), []);
 
@@ -497,9 +510,21 @@ function AccountCard({
         <div>
           <dt>Tabs</dt>
           <dd className="cbm-meter-row">
-            <span className="cbm-meter" aria-hidden><span style={{ width: `${fill}%` }} /></span>
-            <span className="cbm-muted">{tabs.length} of {account.maxTabs}{runningTabs ? ` · ${runningTabs} running` : ""}</span>
+            <button
+              aria-controls={`cbm-tabs-${account.id}`}
+              aria-expanded={tabsOpen}
+              className="cbm-tabs-toggle"
+              onClick={() => setTabsOpen(open => !open)}
+              type="button"
+            >
+              <span className="cbm-meter" aria-hidden><span style={{ width: `${fill}%` }} /></span>
+              <span className="cbm-muted">{tabs.length} of {account.maxTabs}{runningTabs ? ` · ${runningTabs} running` : ""}</span>
+              <svg aria-hidden className="cbm-chevron" height="12" viewBox="0 0 12 12" width="12">
+                <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
+              </svg>
+            </button>
           </dd>
+          <AccountTabs id={`cbm-tabs-${account.id}`} open={tabsOpen} tabs={tabs} threads={threads} />
         </div>
         <div>
           <dt>Sessions</dt>
@@ -550,6 +575,88 @@ function AccountCard({
         ) : null}
       </footer>
     </article>
+  );
+}
+
+const TAB_STATUS: Record<BrowserState["tabs"][number]["status"], { label: string; dot: string }> = {
+  running: { label: "Running", dot: " is-on" },
+  ready: { label: "Finished", dot: "" },
+  loading: { label: "Loading", dot: "" },
+  testing: { label: "Testing", dot: " is-on" },
+  idle: { label: "Idle", dot: "" },
+  "signed-out": { label: "Signed out", dot: " is-warn" },
+  error: { label: "Failed", dot: " is-warn" },
+  aborted: { label: "Stopped", dot: " is-warn" },
+};
+
+/** 45 s, 12 min 5 s, 1 h 4 min. */
+function duration(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ${seconds % 60} s`;
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+const tokenCount = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+
+/** Re-renders every `ms` while `on`: the drawer's clocks tick only while it is open. */
+function useNow(on: boolean, ms = 1000) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!on) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), ms);
+    return () => window.clearInterval(timer);
+  }, [on, ms]);
+  return now;
+}
+
+/**
+ * The account's tabs, opened from its Tabs row: each with how long it has run (or ran, and when it
+ * closes if left idle) and its Codex session's tokens, model and effort. Slides open and shut.
+ */
+function AccountTabs({ id, open, tabs, threads }: {
+  id: string;
+  open: boolean;
+  tabs: BrowserState["tabs"];
+  threads: CodexThreadBinding[];
+}) {
+  const now = useNow(open);
+  return (
+    <dd aria-hidden={!open} className={`cbm-tab-drawer${open ? " is-open" : ""}`} id={id}>
+      <div className="cbm-tab-drawer-inner">
+        {tabs.length ? (
+          <ul className="cbm-tab-list">
+            {tabs.map(tab => {
+              const thread = tab.threadId ? threads.find(entry => entry.threadId === tab.threadId) : undefined;
+              const status = TAB_STATUS[tab.status] ?? { label: tab.status, dot: "" };
+              const timing = tab.status === "running" && tab.startedAt ? `Running ${duration(now - tab.startedAt)}`
+                : tab.finishedAt && tab.startedAt ? `Ran ${duration(tab.finishedAt - tab.startedAt)}`
+                  : tab.startedAt ? `Open ${duration(now - tab.startedAt)}` : null;
+              const closes = tab.closesAt ? (tab.active ? "open now" : `closes in ${duration(tab.closesAt - now)}`) : null;
+              const session = [
+                thread?.tokensUsed != null ? `${tokenCount.format(thread.tokensUsed)} tokens` : null,
+                thread?.model ? [thread.model, thread.effort].filter(Boolean).join(" · ") : null,
+              ].filter(Boolean);
+              return (
+                <li className="cbm-tab-row" key={tab.id}>
+                  <div className="cbm-tab-row-head">
+                    <i aria-hidden className={`cbm-dot${status.dot}`} />
+                    <strong title={thread?.title ?? tab.title}>{thread?.title ?? tab.title}</strong>
+                    <span className="cbm-pill">{status.label}</span>
+                  </div>
+                  <span className="cbm-muted">
+                    {[timing, closes].filter(Boolean).join(" · ") || "Just opened"}
+                    {session.length ? ` · ${session.join(" · ")}` : thread ? "" : " · not a Codex session"}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        ) : <p className="cbm-muted">No tabs open on this account.</p>}
+      </div>
+    </dd>
   );
 }
 

@@ -666,6 +666,10 @@ export interface BrowserTabState {
   loading: boolean;
   active: boolean;
   closable: boolean;
+  /** When the tab opened, its turn finished, and a finished one closes if left idle (ms). */
+  startedAt?: number;
+  finishedAt?: number;
+  closesAt?: number;
   interactionMode?: BrowserInteractionMode;
   manualState?: "awaiting-user" | "sent" | "running" | "completed" | "timed-out" | "cancelled" | "failed";
   manualDeadlineAt?: string;
@@ -845,6 +849,10 @@ export interface CodexThreadBinding {
   boundAt: number;
   lastUsedAt: number;
   title: string | null;
+  /** From Codex's own thread index: tokens the whole session used, its model and effort (null: unknown). */
+  tokensUsed: number | null;
+  model: string | null;
+  effort: string | null;
   running: boolean;
   chats: Array<{ url: string; archived: boolean }>;
 }

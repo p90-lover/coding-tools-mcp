@@ -212,7 +212,8 @@
   display: grid;
   grid-template-columns: 84px minmax(0, 1fr);
   align-items: center;
-  gap: 12px;
+  /* Columns only: the Tabs row's drawer sits on a row of its own, no taller than 0 when shut. */
+  gap: 0 12px;
   min-height: 34px;
   border-top: 1px solid var(--color-border);
 }
@@ -281,6 +282,98 @@
   inset: 0 auto 0 0;
   border-radius: inherit;
   background: var(--color-text-secondary);
+}
+
+/* Tabs row: opens the account's tabs in a drawer below it */
+.cbm-tabs-toggle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  margin: -2px -6px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.cbm-tabs-toggle:hover { background: var(--color-background-control-hover); }
+
+.cbm-chevron {
+  flex: none;
+  color: var(--color-text-tertiary);
+  transition: transform 180ms ease;
+}
+
+.cbm-tabs-toggle[aria-expanded="true"] .cbm-chevron { transform: rotate(180deg); }
+
+/* Rows from 0 to their own height: slides without measuring the list. */
+.cbm-facts dd.cbm-tab-drawer {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-rows: 0fr;
+  padding: 0;
+  opacity: 0;
+  transition: grid-template-rows 220ms ease, opacity 180ms ease, padding 220ms ease;
+}
+
+.cbm-facts dd.cbm-tab-drawer.is-open {
+  grid-template-rows: 1fr;
+  padding: 0 0 8px;
+  opacity: 1;
+}
+
+.cbm-tab-drawer-inner { min-height: 0; overflow: hidden; }
+
+.cbm-tab-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cbm-tab-row {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  background: var(--color-background-control);
+}
+
+.cbm-tab-row-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.cbm-tab-row-head strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cbm-tab-row > .cbm-muted,
+.cbm-tab-drawer-inner > .cbm-muted {
+  overflow: hidden;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cbm-chevron,
+  .cbm-facts dd.cbm-tab-drawer { transition: none; }
 }
 
 .cbm-card-settings {
