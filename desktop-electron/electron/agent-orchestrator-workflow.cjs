@@ -7,6 +7,7 @@ const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAn
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
 const { restartResume } = require("./chat-resume.cjs");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
 const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
@@ -1206,15 +1207,23 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return kept;
     } catch { return Object.create(null); }
   })();
+  // Saved off the main thread, the newest list once more after the write in flight: the
+  // synchronous mkdir held every window 7 s on the busy hard disk while CPA's catalog loaded
+  // (2026-10-31 13:52).
+  let knownModelsSaving = null;
+  let knownModelsAgain = false;
   function saveKnownModels() {
     if (!knownModelsFile) return;
-    try {
-      fs.mkdirSync(path.dirname(knownModelsFile), { recursive: true });
-      const temporary = `${knownModelsFile}.${process.pid}.tmp`;
-      fs.writeFileSync(temporary, JSON.stringify({ models: knownModels }));
-      fs.renameSync(temporary, knownModelsFile);
-    } catch (error) { logger?.warn?.("cpa.known_models.save_failed", { error: String(error?.message || error).slice(0, 200) }); }
+    if (knownModelsSaving) { knownModelsAgain = true; return; }
+    knownModelsSaving = writePrivateFileAtomicAsync(knownModelsFile, JSON.stringify({ models: knownModels }), { protectDirectory: false })
+      .catch(error => logger?.warn?.("cpa.known_models.save_failed", { error: String(error?.message || error).slice(0, 200) }))
+      .finally(() => {
+        knownModelsSaving = null;
+        if (knownModelsAgain) { knownModelsAgain = false; saveKnownModels(); }
+      });
   }
+  /** Resolves once the remembered models are on disk. */
+  async function knownModelsSaved() { while (knownModelsSaving) await knownModelsSaving; }
   const HELD_NOTE = "CPA is not listing it right now (cooling down after upstream errors, or CPA is restarting); a message still goes to CPA, which answers for itself";
   /** The remembered models CPA did not list (ids already listed stay as CPA gave them). */
   function rememberedModels(ids, capabilities, plugins, held, note, at = now()) {
@@ -7162,7 +7171,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

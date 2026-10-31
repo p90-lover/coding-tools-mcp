@@ -3238,7 +3238,9 @@ test("the models CPA listed are remembered across restarts, and a send on one CP
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
     confirm: async () => true,
   });
-  await make().call("models", {});
+  const first = make();
+  await first.call("models", {});
+  await first.knownModelsSaved();
   assert.ok(fs.existsSync(knownModelsFile), "the list is saved");
   // After a restart CPA lists only Gemini (Cline cooling down).
   catalog = { data: [{ id: "gemini-3.8-flash-high" }] };
