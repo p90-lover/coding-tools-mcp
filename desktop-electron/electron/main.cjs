@@ -320,10 +320,12 @@ function publishOperation(operation) {
   send("launcher:operation", operation);
 }
 
-function cpaAuthDirectory() {
+// Read off the main thread: the account sync's timer read it synchronously and held every window
+// 15.7 s on the busy hard disk (2026-10-31 13:47).
+async function cpaAuthDirectory() {
   const stateDirectory = path.join(app.getPath("userData"), "integrations", "state", "cpa");
   try {
-    const line = fs.readFileSync(path.join(stateDirectory, "config.yaml"), "utf8").match(/^auth-dir:\s*(.+)$/m);
+    const line = (await fs.promises.readFile(path.join(stateDirectory, "config.yaml"), "utf8")).match(/^auth-dir:\s*(.+)$/m);
     if (line) return path.resolve(JSON.parse(line[1]));
   } catch {}
   return path.join(stateDirectory, "auth");
@@ -1173,7 +1175,7 @@ async function assignBrowserAccountProxies({ logger }) {
 const CPA_BROWSER_ACCOUNT_SYNC_MS = 5 * 60_000;
 const cpaBrowserAccountFiles = new Map(); // file -> { size, mtimeMs, account }
 async function syncBrowserAccountsFromCpa(logger) {
-  const directory = cpaAuthDirectory();
+  const directory = await cpaAuthDirectory();
   let names;
   try { names = await fs.promises.readdir(directory); } catch { return []; }
   const files = names.filter((name) => /\.json$/i.test(name)).map((name) => [name, path.join(directory, name)]);
