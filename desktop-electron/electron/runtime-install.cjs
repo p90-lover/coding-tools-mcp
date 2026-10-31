@@ -350,16 +350,24 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   const source = path.join(resourcesPath, "runtime");
   // Bundles already hashed are remembered here (see verifiedSignatures), outside every bundle.
   const verify = { stampDir: runtimeVerifiedDir(coreHome) };
-  let sourceBundle;
-  try {
-    sourceBundle = inspectRuntimeBundle(source, identity, verify);
-  } catch (error) {
+  // The packaged copy is a source to copy from: only its manifest (which bundle this release is)
+  // is read up front, and its files are checked only when they are about to be copied. Checking
+  // them at every launch, then the installed copy as well, was two walks of 6,149 files on the
+  // main process before the app could start (blocked up to 1 s per stat on the busy hard disk,
+  // 2026-10-31). The installed copy, which the app runs, is still checked whole every launch.
+  const sourceFailed = (error) => {
     // The installed copy of this version, when whole, runs the app (installedPackagedRuntime).
     const installed = installedPackagedRuntime({ app, coreHome });
     if (installed) return installed;
     throw error;
+  };
+  let sourceManifest;
+  try {
+    sourceManifest = readRuntimeManifest(source, identity);
+  } catch (error) {
+    return sourceFailed(error);
   }
-  const expectedIdentity = { ...identity, bundleId: sourceBundle.manifest.bundleId };
+  const expectedIdentity = { ...identity, bundleId: sourceManifest.bundleId };
   const versionsRoot = path.join(coreHome, "versions");
   const destination = path.join(
     versionsRoot,
@@ -369,7 +377,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   // persistent core (bridge, MCP, CPA) still runs from it: Windows refuses to rename an open
   // directory. That release then lives beside it, named by its bundle id, until a later launch
   // finds the version directory free and promotes it.
-  const side = `${destination}-${String(sourceBundle.manifest.bundleId).slice(0, 12)}`;
+  const side = `${destination}-${String(sourceManifest.bundleId).slice(0, 12)}`;
   if (fs.existsSync(destination)) {
     try {
       const root = validateRuntimeBundle(destination, expectedIdentity, verify);
@@ -387,6 +395,13 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     retireDirectory(side);
   }
 
+  // A copy is needed: the packaged files must be whole before they are copied.
+  let sourceBundle;
+  try {
+    sourceBundle = inspectRuntimeBundle(source, identity, verify);
+  } catch (error) {
+    return sourceFailed(error);
+  }
   fs.mkdirSync(versionsRoot, { recursive: true, mode: 0o700 });
   const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`;
   const previous = `${destination}.previous-${process.pid}-${Date.now()}`;
