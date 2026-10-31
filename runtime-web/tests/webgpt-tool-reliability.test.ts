@@ -77,6 +77,70 @@ test("nested inventory preserves supplied schemas and labels unavailable schemas
   });
 });
 
+test("nested inventory accepts native exec framing and structured catalogs without changing pagination or scope", async () => {
+  const direct: CodexTool = { name: "visible", description: "Browser screenshot direct", parameters: {} };
+  const gateway: CodexTool = { name: "exec", description: "Native tools", parameters: {}, freeform: true };
+  const registry = [
+    { name: "visible", description: "Excluded outer duplicate" },
+    { name: "exec", description: "Excluded outer gateway" },
+    { name: "mcp__browser__first", description: "Browser screenshot first", parameters: { type: "object" },
+      annotations: { readOnlyHint: true }, _meta: { "openai/outputTemplate": "ui://browser/first" } },
+    { name: "mcp__browser__second", description: "Browser screenshot second" },
+  ];
+  for (const format of ["framed", "structured", "metadata", "plain"] as const) {
+    await withMcp([gateway, direct], async ({ client, broker, token }) => {
+      for (const offset of [0, 2]) {
+        const pending = client.callTool({ name: "codex_tool_inventory",
+          arguments: { turn_token: token, query: "browser screenshot", offset, limit: 2 } });
+        const [request] = await broker.nextToolBatch(token);
+        expect(request?.wireName).toBe("exec");
+        const emitted: string[] = [];
+        const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+        await new AsyncFunction("ALL_TOOLS", "text", request!.input!)(registry, (text: string) => emitted.push(text));
+        expect(emitted).toHaveLength(1);
+        expect(emitted[0]).not.toContain("Excluded outer");
+        const catalog = { tools: [registry[offset === 0 ? 2 : 3]], total: 2 };
+        const framed = `Script completed\nWall time: 0.13 seconds\nOutput:\n${emitted[0]}\n`;
+        broker.completeTool(token, request!.callId, {
+          content: [{ type: "text", text: format === "plain" ? JSON.stringify(catalog) : framed }],
+          ...(format === "structured" ? { structuredContent: catalog } : {}),
+          ...(format === "metadata" ? { structuredContent: { execution: "completed" } } : {}),
+        });
+        const result = await pending;
+        expect(result.isError).not.toBeTrue();
+        expect(result.structuredContent).toMatchObject({ total: 3, next_offset: offset === 0 ? 2 : null,
+          tools: offset === 0 ? [{ wire_name: "visible" }, { wire_name: registry[2]!.name,
+            parameters: registry[2]!.parameters, annotations: registry[2]!.annotations, _meta: registry[2]!._meta }]
+            : [{ wire_name: registry[3]!.name }] });
+      }
+    });
+  }
+});
+
+test("nested inventory rejects malformed native frames, oversized output and excluded descriptors", async () => {
+  await withMcp([{ name: "exec", description: "Native tools", parameters: {}, freeform: true }], async ({ client, broker, token }) => {
+    for (const invalid of ["truncated", "duplicate", "unframed", "oversized", "excluded", "pagination", "failed"] as const) {
+      const pending = client.callTool({ name: "codex_tool_inventory", arguments: { turn_token: token } });
+      const [request] = await broker.nextToolBatch(token);
+      const emitted: string[] = [];
+      const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+      await new AsyncFunction("ALL_TOOLS", "text", request!.input!)([], (text: string) => emitted.push(text));
+      const output = emitted[0]!;
+      const bad = invalid === "truncated" ? output.slice(0, -8)
+        : invalid === "duplicate" ? `${output}\n${output}`
+          : invalid === "unframed" ? `unrelated wrapper text\n${JSON.stringify({ tools: [], total: 0 })}`
+            : invalid === "oversized" ? "x".repeat(1024 * 1024 + 1)
+              : invalid === "excluded" ? JSON.stringify({ tools: [{ name: "exec", description: "hidden outer tool" }], total: 1 })
+                : invalid === "pagination" ? JSON.stringify({ tools: [], total: -1 }) : output;
+      broker.completeTool(token, request!.callId, { content: [{ type: "text", text: bad }],
+        ...(invalid === "failed" ? { isError: true, structuredContent: { tools: [], total: 0 } } : {}) });
+      const result = await pending;
+      expect(result.isError).toBeTrue();
+      expect(JSON.stringify(result.content)).toContain("Native nested tool inventory");
+    }
+  });
+});
+
 test("MCP receipts survive polling, deduplicate identical IDs and reject changed actions", async () => {
   await withMcp([command], async ({ client, broker, token, socket }) => {
     const args = { turn_token: token, wire_name: "exec_command", invocation_id: "build-1", arguments: { cmd: "build" }, wait_ms: 0 };
