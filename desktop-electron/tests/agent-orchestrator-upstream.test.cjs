@@ -1754,6 +1754,40 @@ test("a running turn with no agent process behind it is over: interrupted, with 
   assert.equal(coming.agentGone, undefined);
 });
 
+test("a running turn whose controller stopped while its chat host is still up keeps running", async () => {
+  // Seen live 2026-10-31: at an app quit AO dropped every controller, and three cards read "stopped
+  // mid-turn" and were retried while two of the turns ran on in their hosts, so each chat got a
+  // needless "you were interrupted" turn queued behind its own.
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-ao-host-up-"));
+  const live = require("node:net").createServer().listen(0, "127.0.0.1");
+  await new Promise(resolve => live.once("listening", resolve));
+  const hostFile = path.join(dataRoot, "chat-hosts", "s", "host.json");
+  fs.mkdirSync(path.dirname(hostFile), { recursive: true });
+  fs.writeFileSync(hostFile, JSON.stringify({ address: `127.0.0.1:${live.address().port}`, pid: 1 }));
+  const interrupts = [];
+  const upstream = observeHarness({ dataRoot,
+    internalApi: async (_method, endpoint) => {
+      if (endpoint.includes("/conversation?limit=100&includePending=1")) return { controller: "stopped", turns: [{ id: "t", state: "running" }], messages: [], activities: [] };
+      if (endpoint.endsWith("/interrupt")) { interrupts.push(endpoint); return {}; }
+      return { session: { id: "s", mode: "chat", status: "working", provisionState: "ready" } };
+    },
+  });
+  try {
+    const kept = await upstream.observe("s");
+    assert.equal(kept.turnState, "running", "the host still runs the agent: the next AO reattaches it");
+    assert.equal(kept.error, undefined, "the card is not failed");
+    assert.deepEqual(interrupts, [], "nothing is interrupted");
+    // An agent that exits takes its host with it, and the host deletes its record.
+    fs.rmSync(hostFile);
+    const ended = await upstream.observe("s");
+    assert.equal(ended.turnState, "interrupted");
+    assert.equal(ended.agentGone, true);
+  } finally {
+    live.close();
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("a request left pending by an agent that is gone shows no card, since nothing can take the answer", async () => {
   // Seen live 2026-10-23: Allow on such a card failed twice with "the agent controller for this
   // session is not running (CHAT_CONTROLLER_NOT_READY)".

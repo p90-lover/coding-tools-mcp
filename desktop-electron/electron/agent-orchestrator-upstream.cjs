@@ -451,6 +451,26 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     });
   }
   /**
+   * Whether the chat host recorded for an AO session is known to be up: its record is there and its
+   * loopback address accepts a connection. A host deletes its record when its agent exits, so a
+   * missing record is not alive (unlike chatHostGone, which asks the opposite question). A probe
+   * that times out on a busy machine counts as alive: the card is checked again on the next read.
+   */
+  async function chatHostAlive(id) {
+    let address;
+    try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
+    catch { return false; }
+    const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
+    if (!match) return false;
+    return new Promise(resolve => {
+      const socket = net.connect({ host: "127.0.0.1", port: Number(match[1]) });
+      const settle = alive => { socket.destroy(); resolve(alive); };
+      socket.setTimeout(1500, () => settle(true));
+      socket.once("connect", () => settle(true));
+      socket.once("error", () => settle(false));
+    });
+  }
+  /**
    * How many chat hosts outlived the last app run: their recorded loopback address still accepts
    * a connection. Their agents keep working while AO is down, but a permission request or a turn
    * end waits for AO to reattach, and AO otherwise starts only when its panel is first shown.
@@ -1347,7 +1367,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const lastFailure = (Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(item => item.turnId === turn?.id && item.activityKind === "system" && item.detail?.event === "provider.failure"
           && typeof item.detail.text === "string" && item.detail.text.trim()).at(-1)?.detail.text.trim();
-      const deadAgent = agentGone && turn?.state === "running";
+      // A stopped controller alone is not proof: AO drops every controller when it shuts down (an
+      // app quit or update), while the chat hosts keep their agents and turns going for the next AO
+      // to reattach. Seen live 2026-10-31: three cards read "stopped mid-turn" at a quit and were
+      // retried, while two of the turns ran on, so each chat got a needless "you were interrupted"
+      // turn queued behind its own. An agent that really exited took its host with it.
+      const deadAgent = agentGone && turn?.state === "running" && !(await chatHostAlive(id));
       if (reconciled || deadAgent || ((settling || settled) && await chatHostGone(id))) {
         if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
         return {
