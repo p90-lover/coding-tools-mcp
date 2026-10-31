@@ -687,7 +687,8 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let file = fixture.path().join("data/profiles.json");
         std::fs::create_dir_all(file.with_extension("lock")).unwrap();
-        let mut profile = WorkspaceProfile::new(fixture.path().to_string_lossy().into_owned(), None);
+        let mut profile =
+            WorkspaceProfile::new(fixture.path().to_string_lossy().into_owned(), None);
         profile.auth.auth_type = "oauth".into();
         profile.auth.use_shared_secrets = true;
         profile.runtime.local_port = 0;
@@ -695,7 +696,10 @@ mod tests {
             let mut supervisor = RuntimeSupervisor::default();
             assert!(supervisor.start_mcp(&profile).is_err());
             assert_ne!(supervisor.mcp_status(&profile).state, "starting");
-            assert!(supervisor.start_mcp(&profile).is_err(), "retry must attempt startup again");
+            assert!(
+                supervisor.start_mcp(&profile).is_err(),
+                "retry must attempt startup again"
+            );
         });
     }
 
