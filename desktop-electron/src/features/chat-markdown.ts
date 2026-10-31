@@ -42,6 +42,14 @@ export function safeHref(href: string, image = false): string | null {
 }
 
 export function parseInline(source: string): MdInline[] {
+  const ticks = new Map<number, { starts: number[]; next: number }>();
+  const backticks = /`+/g;
+  for (let run = backticks.exec(source); run; run = backticks.exec(source)) {
+    const length = run[0].length;
+    const group = ticks.get(length);
+    if (group) group.starts.push(run.index);
+    else ticks.set(length, { starts: [run.index], next: 0 });
+  }
   const out: MdInline[] = [];
   let text = "";
   const flush = () => { if (text) { out.push({ kind: "text", text }); text = ""; } };
@@ -55,8 +63,27 @@ export function parseInline(source: string): MdInline[] {
     }
     const cite = /^:codex-annotation\{index="?(\d{1,3})"?\}/.exec(rest);
     if (cite) { flush(); out.push({ kind: "annotation", index: Number(cite[1]) }); index += cite[0].length; continue; }
-    const code = /^(`+)([\s\S]*?[^`])\1(?!`)/.exec(rest);
-    if (code) { flush(); out.push({ kind: "code", text: code[2].replace(/^ (.*) $/, "$1") }); index += code[0].length; continue; }
+    if (source[index] === "`") {
+      let end = index + 1;
+      while (source[end] === "`") end += 1;
+      let length = end - index;
+      let close: number | undefined;
+      // Retain the longest opener that can close, without retrying its suffixes at every character.
+      for (; length > 0; length -= 1) {
+        const group = ticks.get(length);
+        if (!group) continue;
+        while (group.starts[group.next] < end) group.next += 1;
+        close = group.starts[group.next];
+        if (close !== undefined) break;
+      }
+      if (close !== undefined) {
+        flush(); out.push({ kind: "code", text: source.slice(index + length, close).replace(/^ (.*) $/, "$1") });
+        index = close + length;
+      } else {
+        text += source.slice(index, end); index = end;
+      }
+      continue;
+    }
     const image = /^!\[([^\]\n]*)\]\((<[^>\n]+>|[^)\s]+)\)/.exec(rest);
     if (image) {
       const src = safeHref(image[2], true);
