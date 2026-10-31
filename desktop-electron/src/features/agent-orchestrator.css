@@ -474,7 +474,7 @@
    is greyed and folded under "+N", one that needs a sign-in has a dot on its logo, and the tooltip
    says which. The pick is marked by its tint and check, so the rows need no radio. The panel rises
    in, its rows follow one by one, the check pops and a hovered logo tips toward the pointer. */
-.ao-workflow .ao-composer-popover.ao-harness-popup { width: min(224px, calc(100vw - 40px)); padding: 8px 6px 6px; border-radius: 14px;
+.ao-workflow .ao-composer-popover.ao-harness-popup { width: min(176px, calc(100vw - 40px)); padding: 5px; border-radius: 12px;
   transform-origin: 16px 100%; animation: ao-popover-in .26s cubic-bezier(.2, .8, .2, 1) backwards; }
 .ao-workflow .ao-harness-popup > header { margin: 0 2px 4px 8px; }
 .ao-workflow .ao-harness-popup h3 { font-size: 13px; }
@@ -492,10 +492,17 @@
   animation: ao-check-pop .34s cubic-bezier(.3, 1.6, .5, 1) .12s backwards; }
 .ao-workflow .ao-harness-list .ao-harness-option strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .ao-workflow .ao-harness-list .ao-picker-option:disabled { opacity: 0.55; cursor: default; }
-.ao-workflow .ao-harness-option.is-missing .ao-harness-logo { filter: grayscale(1); }
+/* A missing harness greys its logo and name, not the row, so its red dot keeps its colour. */
+.ao-workflow .ao-harness-list .ao-picker-option:disabled:has(.is-missing) { opacity: 1; }
+.ao-workflow .ao-harness-option.is-missing .ao-harness-logo { filter: grayscale(1); opacity: .45; }
+.ao-workflow .ao-harness-option.is-missing strong { color: var(--claude-text-2, #7a879c); }
 .ao-workflow .ao-harness-face { position: relative; display: inline-grid; flex: none; }
 .ao-workflow .ao-harness-signin { position: absolute; top: -2px; right: -3px; width: 7px; height: 7px; border-radius: 50%;
   background: var(--ao-amber, #c98a12); box-shadow: 0 0 0 2px var(--claude-raised, #fff); animation: ao-check-pop .34s cubic-bezier(.3, 1.6, .5, 1) .3s backwards; }
+/* Not installed: a red dot on the logo's top left that blinks (the row itself is greyed). */
+.ao-workflow .ao-harness-missing { position: absolute; top: -2px; left: -3px; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ao-red, #e5484d); box-shadow: 0 0 0 2px var(--claude-raised, #fff); animation: ao-missing-blink 1.2s ease-in-out infinite; }
+@keyframes ao-missing-blink { 50% { opacity: .25; } }
 .ao-workflow .ao-harness-more > summary { display: flex; align-items: center; gap: 6px; margin-top: 2px; padding: 4px 8px; border-radius: 8px;
   color: var(--claude-text-2, #7a879c); font-size: 11.5px; list-style: none; cursor: pointer; transition: background-color .16s ease, color .16s ease; }
 .ao-workflow .ao-harness-more > summary::-webkit-details-marker { display: none; }
@@ -511,7 +518,7 @@
 @keyframes ao-check-pop { from { opacity: 0; transform: scale(.3) rotate(-25deg); } }
 @media (prefers-reduced-motion: reduce) {
   .ao-workflow .ao-harness-popup, .ao-workflow .ao-harness-list .ao-picker-option, .ao-workflow .ao-harness-list .ao-picker-option > svg,
-  .ao-workflow .ao-harness-signin { animation: none !important; }
+  .ao-workflow .ao-harness-signin, .ao-workflow .ao-harness-missing { animation: none !important; }
   .ao-workflow .ao-harness-list *, .ao-workflow .ao-harness-popup .ao-popover-close { transition: none !important; }
   .ao-workflow .ao-harness-list .ao-picker-option:hover:not(:disabled), .ao-workflow .ao-harness-list .ao-picker-option:hover .ao-harness-logo,
   .ao-workflow .ao-harness-popup .ao-popover-close:hover { transform: none; }
