@@ -9,16 +9,28 @@ const test = require("node:test");
 const root = path.resolve(__dirname, "..");
 const network = require(path.join(root, "electron/provider-network.cjs"));
 const { decodoRequestUrl, parseDecodoEndpoints, normalizeDecodoSettings } = require(path.join(root, "electron/decodo-proxies.cjs"));
-const { createBrowserAccounts } = require(path.join(root, "electron/browser-accounts.cjs"));
+const { createBrowserAccounts: openBrowserAccounts } = require(path.join(root, "electron/browser-accounts.cjs"));
 
 const BASE = "persist:coding-tools-chatgpt";
 
 function fixtureRoot(t) {
   const directory = path.join(root, "aiTemp/chatgpt-browser-proxies", crypto.randomUUID());
   fs.mkdirSync(directory, { recursive: true });
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    await accountsSaved();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
   return directory;
 }
+
+// Accounts save off the main thread: a test folder goes once every store opened in it is written.
+const opened = new Set();
+function createBrowserAccounts(options) {
+  const accounts = openBrowserAccounts(options);
+  opened.add(accounts);
+  return accounts;
+}
+const accountsSaved = () => Promise.all([...opened].map((accounts) => accounts.saved()));
 
 const decodoBody = (ports, { wrap = false } = {}) => {
   const list = ports.map(port => `http://user-sp1-session-${port}:pa%40ss@gate.decodo.com:${port}`);

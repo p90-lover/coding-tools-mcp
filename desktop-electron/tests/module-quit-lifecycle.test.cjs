@@ -33,7 +33,7 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
     runtimeStartupInFlight: null, codexBridgeConnectInFlight: null,
     // Goal changes are saved off the main thread; a quit waits for the last one.
     missionWorkflowRuntime: { goalsSaved: async () => { goalSaves.push(true); } },
-    // So is the browser account list (browser-accounts.cjs).
+    // So are Browser account changes (browser-accounts.cjs).
     browserAccounts: { saved: async () => { accountSaves.push(true); } },
     runtimeHost: { currentOperation: () => active, restoreBridgeRoute: async () => {
       order.push("restore-route");
@@ -132,7 +132,7 @@ test("accepted app quit disposes each integration controller once", async () => 
   assert.equal(f.quits.length, 1);
   assert.deepEqual(f.order, ["restore-route", "stop-runtime", "stop-register", "stop-chatgpt-desktop"]);
   assert.deepEqual(f.goalSaves, [true], "the last goal change is on disk before the app goes");
-  assert.deepEqual(f.accountSaves, [true], "so is the last browser account change");
+  assert.deepEqual(f.accountSaves, [true], "so is the last Browser account change");
 });
 
 test("route restoration failure cancels quit unless the user chooses Quit anyway", async () => {

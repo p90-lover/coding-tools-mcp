@@ -1,16 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Copy } from "../i18n";
 import type { BrowserAccountsStatus, GptBrowserAccount, LauncherApi } from "../types";
-
-const CONFIRM_WINDOW_MS = 4_000;
 
 const accountName = (account: GptBrowserAccount) => account.email ?? account.label;
 
 /**
- * The Browser tab's ChatGPT accounts, in its own toolbar: pick, add, and (with a second click)
- * remove one, as GPT Browser does. The active account is also the one new Codex WebGPT chats run on.
- * A switch keeps the account left loaded and running turns going; only a check or test of the shown
- * page holds it (`busy` greys the controls meanwhile).
+ * The Browser tab's ChatGPT accounts, in its own toolbar: pick one or add one. Removing accounts
+ * lives in ChatGPT browser management only, where each is ticked and confirmed; a Remove button
+ * here took the account shown with it. The active account is also the one new Codex WebGPT chats
+ * run on. A switch keeps the account left loaded and running turns going; only a check or test of
+ * the shown page holds it (`busy` greys the controls meanwhile).
  */
 export function BrowserAccountSwitcher({ api, copy, busy, setError }: {
   api: LauncherApi;
@@ -19,8 +18,6 @@ export function BrowserAccountSwitcher({ api, copy, busy, setError }: {
   setError: (error: string | null) => void;
 }) {
   const [status, setStatus] = useState<BrowserAccountsStatus | null>(null);
-  const [confirmRemove, setConfirmRemove] = useState(false);
-  const confirmTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     let live = true;
@@ -29,7 +26,6 @@ export function BrowserAccountSwitcher({ api, copy, busy, setError }: {
     return () => {
       live = false;
       unsubscribe();
-      window.clearTimeout(confirmTimer.current);
     };
   }, [api]);
 
@@ -41,19 +37,6 @@ export function BrowserAccountSwitcher({ api, copy, busy, setError }: {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, [setError]);
-
-  const remove = () => {
-    if (!status) return;
-    if (!confirmRemove) {
-      setConfirmRemove(true);
-      confirmTimer.current = window.setTimeout(() => setConfirmRemove(false), CONFIRM_WINDOW_MS);
-      return;
-    }
-    window.clearTimeout(confirmTimer.current);
-    setConfirmRemove(false);
-    const id = status.activeId;
-    void run(() => api.removeBrowserAccount(id));
-  };
 
   if (!status) return null;
   const locked = busy || status.switching;
@@ -72,24 +55,17 @@ export function BrowserAccountSwitcher({ api, copy, busy, setError }: {
         ))}
       </select>
       {status.switching ? <span className="browser-account-note">{copy.browserAccountSwitching}</span> : null}
-      <button
-        className="toolbar-text-button"
-        disabled={locked || full}
-        onClick={() => void run(() => api.addBrowserAccount())}
-        type="button"
-      >
-        {copy.browserAccountAdd}
-      </button>
-      {status.accounts.length > 1 ? (
+      {/* A disabled button shows no tooltip of its own: the wrapper carries why it is off. */}
+      <span title={full ? copy.browserAccountFull : undefined}>
         <button
-          className={`toolbar-text-button${confirmRemove ? " is-danger" : ""}`}
-          disabled={locked}
-          onClick={remove}
+          className="toolbar-text-button"
+          disabled={locked || full}
+          onClick={() => void run(() => api.addBrowserAccount())}
           type="button"
         >
-          {confirmRemove ? copy.browserAccountRemoveConfirm : copy.browserAccountRemove}
+          {copy.browserAccountAdd}
         </button>
-      ) : null}
+      </span>
     </div>
   );
 }
