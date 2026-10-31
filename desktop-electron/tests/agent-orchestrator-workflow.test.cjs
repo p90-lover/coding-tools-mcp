@@ -3695,7 +3695,7 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
         const { status, text = "" } = typeof refused === "object" ? refused : { status: refused };
         return { ok: false, status, json: async () => ({}), text: async () => text };
       }
-      const verdict = evaluator(body.messages[0].content);
+      const verdict = await evaluator(body.messages[0].content);
       if (verdict instanceof Error) return { ok: false, status: 503, json: async () => ({}) };
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
     } });
@@ -3711,6 +3711,148 @@ const goalSettle = async (done) => {
   const until = Date.now() + 5_000;
   while (done && !done() && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 5));
 };
+
+test("a pending goal verdict is replaced by a fresh check after editing, replacing, or resuming a goal", async (t) => {
+  for (const action of ["edit", "agent edit", "replace", "pause then resume"]) await t.test(action, async (child) => {
+    let release, releaseFresh, attempt = 0;
+    const pending = new Promise(resolve => { release = resolve; });
+    const fresh = new Promise(resolve => { releaseFresh = resolve; });
+    const { world, workflow, checks } = await goalChat({ now: () => 1000,
+      evaluator: async () => {
+        if (attempt++ === 0) { await pending; return { met: true, reason: "The old objective is done." }; }
+        await fresh;
+        return { met: true, reason: "The current objective is independently checked." };
+      } });
+    child.after(() => { release(); releaseFresh(); workflow.dispose(); });
+    const original = await goalOf(workflow);
+    world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { thread_id: "sess-1", answer: "ALL DONE" } }] });
+    const before = world.updates.length;
+    const checking = workflow.goalAfterRun("ws-1", "r1", "finished");
+    let current;
+    try {
+      await goalSettle(() => checks.length === 1);
+      assert.equal(checks.length, 1, "the evaluator request is outstanding");
+      if (action === "edit") current = (await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "ship the docs too" })).goal;
+      else if (action === "agent edit") {
+        await workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", action: "update", objective: "ship the docs too" });
+        current = original;
+      }
+      else if (action === "replace") {
+        await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" });
+        await workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", action: "create", objective: "build green" });
+        current = (await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "build green" })).goal;
+      } else {
+        await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+        current = (await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" })).goal;
+      }
+    } finally { release(); }
+    await checking;
+    await goalSettle(() => checks.length === 2);
+    assert.equal(checks.length, 2, "the current goal is checked again without renderer reads");
+    assert.equal(current.status, "active", "a verdict from before the control change is discarded");
+    assert.equal(current.evaluatedRunId, "", "the current goal still needs its own check");
+    assert.ok(checks[1].messages[0].content.includes(`Condition: ${current.objective}`));
+    releaseFresh();
+    await goalSettle(() => current.status === "achieved");
+    assert.equal(current.status, "achieved");
+    assert.equal(current.note, "The current objective is independently checked.");
+    assert.equal(world.updates.length, before, "a stale verdict starts no round");
+  });
+});
+
+test("a goal's next round is cancelled before acceptance when paused, cleared, edited, or replaced", async (t) => {
+  for (const stage of ["continuation read", "send read", "message preflight", "run preflight"]) {
+    for (const action of ["pause", "clear", "edit", "replace"]) await t.test(`${stage}: ${action}`, async (child) => {
+      let release, entered = false, continuing = false, reads = 0;
+      const pending = new Promise(resolve => { release = resolve; });
+      const { world, workflow } = await goalChat({
+        evaluator: () => { continuing = true; return { met: false, reason: "Finish the remaining tests." }; },
+        request: world => async (endpoint, body, ...rest) => {
+          if (continuing && !entered) {
+            const runRead = endpoint === "/api/v1/ao/read" && !body.run_id;
+            if (runRead) reads++;
+            const boardRead = endpoint === "/api/v1/tools/call" && body.tool === "workflow_list";
+            if ((stage === "continuation read" && runRead && reads === 1)
+              || (stage === "send read" && runRead && reads === 2)
+              || (stage === "message preflight" && boardRead && body.arguments.task_id)
+              || (stage === "run preflight" && boardRead && !body.arguments.task_id)) {
+              entered = true;
+              await pending;
+            }
+          }
+          return world.requestHeadless(endpoint, body, ...rest);
+        },
+      });
+      child.after(() => workflow.dispose());
+      const goal = await goalOf(workflow);
+      const previous = { round: goal.round, lastMessage: goal.lastMessage };
+      world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+        nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { thread_id: "sess-1", answer: "not yet" } }] });
+      const before = world.updates.length, description = world.tasks[0].description;
+      const checking = workflow.goalAfterRun("ws-1", "r1", "finished");
+      let replacement;
+      try {
+        await goalSettle(() => entered);
+        assert.equal(entered, true, "the next round reached the awaited preflight");
+        if (action === "replace") {
+          await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" });
+          await workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", action: "create", objective: "replacement objective" });
+          replacement = (await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "replacement objective" })).goal;
+        } else {
+          await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action, ...(action === "edit" ? { objective: "the edited objective" } : {}) });
+        }
+      } finally { release(); }
+      await checking;
+      assert.equal(world.updates.length, before, "no round is accepted after the goal stops");
+      assert.equal(world.tasks[0].description, description, "a cancelled preflight leaves no unanswered follow-up");
+      if (action === "pause" || action === "edit") {
+        assert.equal(goal.round, previous.round, "an unaccepted preflight does not consume a round");
+        assert.equal(goal.lastMessage, previous.lastMessage, "an unaccepted preflight does not replace the last accepted message");
+      }
+      if (replacement) {
+        assert.equal(replacement.round, 1, "old preflight cleanup cannot change the replacement goal's round");
+        assert.equal(replacement.lastMessage, undefined, "old preflight cleanup cannot replace the new goal's message");
+      }
+    });
+  }
+});
+
+test("pausing or clearing a goal leaves a round already accepted by run creation intact", async (t) => {
+  for (const action of ["pause", "clear"]) await t.test(action, async (child) => {
+    let release, entered = false, continuing = false;
+    const pending = new Promise(resolve => { release = resolve; });
+    const { world, workflow } = await goalChat({
+      evaluator: () => { continuing = true; return { met: false, reason: "Finish the remaining tests." }; },
+      request: world => async (endpoint, body, ...rest) => {
+        const result = await world.requestHeadless(endpoint, body, ...rest);
+        if (continuing && !entered && endpoint === "/api/v1/ao/update" && body.change.operation === "create_from_team") {
+          entered = true;
+          await pending;
+        }
+        return result;
+      },
+    });
+    child.after(() => { release(); workflow.dispose(); });
+    const goal = await goalOf(workflow), previous = goal.round;
+    world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { answer: "not yet" } }] });
+    const before = world.updates.length;
+    const checking = workflow.goalAfterRun("ws-1", "r1", "finished");
+    try {
+      await goalSettle(() => entered);
+      assert.equal(entered, true);
+      await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action });
+    } finally { release(); }
+    await checking;
+    assert.equal(world.updates.length, before + 1, "the accepted round is kept");
+    assert.equal(goal.round, previous + 1);
+    if (action === "pause") {
+      assert.equal(goal.status, "paused");
+      assert.equal(goal.lastRunId, world.updates.at(-1).run_id, "acceptance is recorded without undoing Pause");
+    }
+  });
+});
 
 test("after a round without the goal achieved, the chat runs the next round with the same Single model", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "max" };
@@ -4007,13 +4149,15 @@ test("a refused message leaves a stalled goal stalled, with its note", async () 
   await workflow.goalAfterRun("ws-1", "r1", "held", null);
   const before = await goalOf(workflow);
   assert.equal(before.status, "stalled");
+  const note = before.note;
+  assert.match(note, /needs you/);
   // The chat is working again (another turn): the message is refused.
   world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
     nodes: [{ id: "one", role: "planner", parents: [], state: "running", route, receipt: {} }] });
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" }), /still running/);
   const after = await goalOf(workflow);
   assert.equal(after.status, "stalled");
-  assert.equal(after.note, before.note);
+  assert.equal(after.note, note);
 });
 
 test("a goal round that finished while the app was not driving it goes on at the next read of the chat", async () => {
