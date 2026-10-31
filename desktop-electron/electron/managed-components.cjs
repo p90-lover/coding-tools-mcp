@@ -9,6 +9,7 @@ const { pipeline } = require("node:stream/promises");
 const { spawn, spawnSync } = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { readStateFile, writeStateFile } = require("./durable-state.cjs");
 const { processRunning, terminateOwnedProcessTree } = require("./process-tree.cjs");
 
 /**
@@ -359,7 +360,7 @@ function verifySha256(filePath, expected) {
   return actual;
 }
 
-function createSecretCodec({ safeStorage, keyPath }) {
+function createSecretCodec({ safeStorage, keyPath, canCreateKey }) {
   let fallbackKey = null;
 
   function encryptionAvailable() {
@@ -367,19 +368,20 @@ function createSecretCodec({ safeStorage, keyPath }) {
     catch { return false; }
   }
 
-  function loadFallbackKey() {
+  function loadFallbackKey(create = false) {
     if (fallbackKey) return fallbackKey;
-    try {
-      const candidate = Buffer.from(fs.readFileSync(keyPath, "utf8").trim(), "base64");
-      if (candidate.length === 32) {
-        fallbackKey = candidate;
-        return fallbackKey;
-      }
-    } catch {}
-    fallbackKey = crypto.randomBytes(32);
-    fs.mkdirSync(path.dirname(keyPath), { recursive: true, mode: 0o700 });
-    writePrivateFileAtomic(keyPath, `${fallbackKey.toString("base64")}\n`);
-    return fallbackKey;
+    const read = readStateFile(keyPath, text => {
+      const key = Buffer.from(text.trim(), "base64");
+      if (key.length !== 32) throw new Error("Invalid encryption key");
+      return key;
+    }, { preserveUnreadable: true });
+    if (read.value) return (fallbackKey = read.value);
+    if (read.source !== "none" || !create || !canCreateKey()) {
+      throw new Error("Saved encryption key is unavailable; restore it before changing credentials");
+    }
+    const key = crypto.randomBytes(32);
+    writeStateFile(keyPath, `${key.toString("base64")}\n`);
+    return (fallbackKey = key);
   }
 
   function encrypt(value) {
@@ -392,7 +394,7 @@ function createSecretCodec({ safeStorage, keyPath }) {
       };
     }
     const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv("aes-256-gcm", loadFallbackKey(), iv);
+    const cipher = crypto.createCipheriv("aes-256-gcm", loadFallbackKey(true), iv);
     const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
     return {
       version: SECRET_VERSION,
@@ -537,12 +539,24 @@ function createManagedComponentController({
   const trashRoot = path.join(dataRoot, "Trash", "managed-components");
   const secretPath = path.join(dataRoot, "managed-components.secrets.json");
   const secretKeyPath = path.join(dataRoot, "managed-components.key");
-  const codec = createSecretCodec({ safeStorage, keyPath: secretKeyPath });
+  const readSecrets = () => readStateFile(secretPath, text => {
+    const value = JSON.parse(text);
+    if (!value || (value.version !== undefined && value.version !== SECRET_VERSION)
+      || !value.components || typeof value.components !== "object" || Array.isArray(value.components)) {
+      throw new Error("Invalid component credentials");
+    }
+    return value;
+  }, { preserveUnreadable: true });
+  let secretRead = readSecrets();
+  let secrets = secretRead.value || { version: SECRET_VERSION, components: {} };
+  const codec = createSecretCodec({ safeStorage, keyPath: secretKeyPath,
+    canCreateKey: () => secretRead.source !== "unreadable" && !Object.values(secrets.components)
+      .some(envelope => envelope?.scheme === "aes-256-gcm-v1"),
+  });
   const operations = new Map();
   const processes = new Map();
   const stoppingChildren = new WeakSet();
   let disposed = false;
-  let secrets = readJson(secretPath) || { version: SECRET_VERSION, components: {} };
   const persistentIds = new Set(Array.isArray(persistentComponents) ? persistentComponents : []);
   // Install state remembered per version folder (see sourceState), and whether this build bundles
   // each version's runtime, which cannot change while it runs.
@@ -762,23 +776,33 @@ function createManagedComponentController({
     return manifest.updatedFrom && manifests.get(manifest.id) !== manifest ? `${manifest.id}:update` : manifest.id;
   }
 
-  function secretFor(id) {
-    return codec.decrypt(secrets.components?.[id]) || {};
+  function secretFor(id, required = false) {
+    if (secretRead.source === "unreadable") {
+      const read = readSecrets();
+      if (read.value) { secretRead = read; secrets = read.value; }
+    }
+    const envelope = secrets.components?.[id];
+    const value = codec.decrypt(envelope);
+    if (required && (secretRead.source === "unreadable" || (envelope && !value))) {
+      throw new Error("Saved component credentials are unavailable; restore them before changing credentials");
+    }
+    return value || {};
   }
 
   function writeSecret(id, value) {
-    secrets = {
+    const next = {
       version: SECRET_VERSION,
       components: {
         ...(secrets.components || {}),
         [id]: codec.encrypt(value),
       },
     };
-    writeJson(secretPath, secrets);
+    writeStateFile(secretPath, `${JSON.stringify(next, null, 2)}\n`);
+    secrets = next;
   }
 
   function ensureComponentSecrets(id) {
-    let current = secretFor(id);
+    let current = secretFor(id, true);
     let changed = false;
     if (id === "cpa" && !current.proxyApiKey) {
       current = { ...current, proxyApiKey: crypto.randomBytes(36).toString("base64url") };
@@ -812,7 +836,7 @@ function createManagedComponentController({
     if (normalized.length < minimumLength || normalized.length > 8_192 || normalized.includes("\0")) {
       throw new Error(`${manifest.name} credential ${key} is invalid`);
     }
-    writeSecret(id, { ...secretFor(id), [key]: normalized });
+    writeSecret(id, { ...secretFor(id, true), [key]: normalized });
     emit();
     return project(id);
   }
@@ -847,6 +871,8 @@ function createManagedComponentController({
       : source.state === "not-installed" && operation?.state === "error"
         ? "error"
         : source.state;
+    let current = {}, credentialError = null;
+    try { current = secretFor(id, true); } catch (error) { credentialError = error.message; }
     return {
       id,
       name: manifest.name,
@@ -857,10 +883,10 @@ function createManagedComponentController({
       managedHome: source.home,
       installedAt: source.marker?.installedAt || null,
       currentStep: operation?.step || null,
-      error: operation?.error || null,
+      error: operation?.error || credentialError,
       platformMode: platformMode(manifest),
       processes: serviceProcesses(id),
-      secretConfigured: Object.keys(secretFor(id)).length > 0,
+      secretConfigured: Object.keys(current).length > 0,
       missingCredentials: missingCredentials(manifest),
       bundledRuntime: bundledRuntimeFor(manifest),
       bundledVersion: bundledManifests.get(id).version,
