@@ -295,6 +295,9 @@ const codingToolsApi = Object.freeze({
   }),
   computer: Object.freeze({
     status: () => invokeContract(ipcRenderer, "computer.status"),
+    requests: () => invokeContract(ipcRenderer, "computer.requests"),
+    answer: (input) => invokeContract(ipcRenderer, "computer.answer", input),
+    onRequests: (listener) => subscription("launcher:computer-requests", listener),
   }),
   tasks: Object.freeze({
     list: (input = {}) => invokeContract(ipcRenderer, "tasks.list", input),

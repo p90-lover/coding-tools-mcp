@@ -270,6 +270,8 @@ let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
 /** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
 let chatAgentTools = null;
+// A chat's computer control (computer-control.cjs), made with the tool server: its request cards.
+let computerControlService = null;
 // Plugins > MCPs: the person's own MCP servers, handed to every chat session next to the app's tools.
 let chatMcpServers = null;
 function userMcpServers(logger = null) {
@@ -1850,6 +1852,17 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
   handle("coding-tools:computer:status", (event) => codingTools.computerStatus(event));
+  // A chat's request for computer control, shown as a card in that chat.
+  handle("coding-tools:computer:requests", (event) => {
+    assertFocusedMainWindow(event, false);
+    return { requests: computerControlService?.requests() ?? [] };
+  });
+  // Its answer starts control of a window, so it must be the person's click in the focused window.
+  handle("coding-tools:computer:answer", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
+    return computerControlService.answer(input);
+  });
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
   let nativeApprovalPromptInFlight = false;
@@ -3839,14 +3852,22 @@ async function start() {
       // An agent's `ao` commands work in the app's terminal too, as in its own shell.
       const chatSandbox = createSandboxRunner({ logger, scriptDir: path.join(launcherUserData, "sandbox-scripts"), extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.(), rtk.binDir()].filter(Boolean) });
       app.on("will-quit", () => chatSandbox.killAll());
-      // A chat's computer control: the window picker, and the control bar whose heartbeat keeps input on.
+      // A chat's computer control: the request card in the asking chat (no window of its own, which
+      // took the focus), and the control bar whose heartbeat keeps input on.
       const { createComputerControl } = backendBundles.requireModule(backend, "computer-control.cjs");
       const computerControl = createComputerControl({
         request: (endpoint, body, options) => headlessHost.request(endpoint, body, options),
         BrowserWindow, screen, logger,
         // The app's own windows are never offered as a target.
         ownPids: () => app.getAppMetrics().map((metric) => metric.pid),
+        onRequests: (requests) => {
+          send("launcher:computer-requests", requests);
+          // Asked in the chat, never by bringing a window up: a window that is not in front only
+          // flashes its taskbar button, which takes no focus.
+          if (requests.length && mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFocused()) mainWindow.flashFrame(true);
+        },
       });
+      computerControlService = computerControl;
       app.on("will-quit", () => computerControl.dispose());
       chatAgentTools = createChatAgentTools({
         previews: chatPreviews,

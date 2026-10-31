@@ -554,6 +554,22 @@ test("a live-file change snapshots only the live files and points at the unchang
   assert.equal(fs.readdirSync(path.join(archive, "snapshots")).length, 2);
 });
 
+test("a live file rewritten with the same size and mtime is still a change: live files are compared by content", () => {
+  // CI 2026-10-31: two same-size writes in one millisecond kept size and mtime, and the second was missed.
+  const directory = temporaryDirectory();
+  const filePath = path.join(directory, "external-services.json");
+  const options = { filePath, keyPath: path.join(directory, "external-services.key") };
+  fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {}, secrets: { change: 1 } }));
+  createExternalServicesController(options).dispose();
+  const { mtime } = fs.statSync(filePath);
+  fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {}, secrets: { change: 2 } }));
+  fs.utimesSync(filePath, mtime, mtime);
+  createExternalServicesController(options).dispose();
+  const archive = path.join(directory, "archives", "retired-services");
+  const latest = JSON.parse(fs.readFileSync(path.join(archive, "latest.json"), "utf8")).relative;
+  assert.match(fs.readFileSync(path.join(archive, latest, "external-services.json"), "utf8"), /"change":2/);
+});
+
 test("a retired-state change after an inherited snapshot gets a full snapshot again", () => {
   const directory = temporaryDirectory();
   const dataRoot = path.join(directory, "integrations");

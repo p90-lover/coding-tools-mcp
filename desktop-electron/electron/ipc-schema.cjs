@@ -726,6 +726,27 @@ const CONTRACTS = Object.freeze({
     request: emptyObject,
     response: genericObject,
   }),
+  "computer.requests": Object.freeze({
+    channel: "coding-tools:computer:requests",
+    request: emptyObject,
+    response: genericObject,
+  }),
+  "computer.answer": Object.freeze({
+    channel: "coding-tools:computer:answer",
+    request: Object.freeze({
+      type: "object",
+      required: Object.freeze(["id"]),
+      properties: Object.freeze({
+        id: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+        cancel: Object.freeze({ type: "boolean" }),
+        window: Object.freeze({ type: "integer", minimum: 0, maximum: 10_000 }),
+        duration: Object.freeze({ type: "string", minLength: 1, maxLength: 16 }),
+        capture: Object.freeze({ type: "boolean" }),
+      }),
+      additionalProperties: false,
+    }),
+    response: genericObject,
+  }),
   "tasks.list": Object.freeze({
     channel: "coding-tools:tasks:list",
     request: taskListRequest,

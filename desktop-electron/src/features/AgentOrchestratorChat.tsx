@@ -8,6 +8,7 @@ import { ModelLogo } from "./HarnessLogo";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
 import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
@@ -1076,6 +1077,10 @@ export function AgentOrchestratorChat({
   const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
+  // An agent of this chat asking to control a window: asked here, beside its other requests.
+  const allComputerRequests = useComputerRequests();
+  const computerRequests = useMemo(() => selectedTaskId ? chatComputerRequests(allComputerRequests, agentSessionIds, projectId) : [],
+    [selectedTaskId, allComputerRequests, agentSessionIds, projectId]);
   const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
   // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
   const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
@@ -2050,7 +2055,8 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             {/* The agent's questions and requests end the conversation, right above the chat box, and
                 scroll with it. Docked under the box they took up to 420 px of the pane: in a split pane
                 the conversation had no room left at all (2026-10-31). */}
-            {approvals.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+            {approvals.length || computerRequests.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+              {computerRequests.map((request) => <ComputerControlCard key={request.id} request={request} />)}
               {approvals.map(approval => {
                 // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
                 const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;
