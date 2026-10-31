@@ -170,7 +170,9 @@ pub fn scan(workspace: &Workspace, history_dir: &Path) -> WorkspaceResult<ScanRe
         let mut next = 1_u64;
         for &number in &report.numbers {
             let remaining = MISSING_NUMBER_SAMPLE_LIMIT - report.missing_numbers.len();
-            report.missing_numbers.extend((next..number).take(remaining));
+            report
+                .missing_numbers
+                .extend((next..number).take(remaining));
             if report.missing_numbers.len() == MISSING_NUMBER_SAMPLE_LIMIT {
                 break;
             }
@@ -211,7 +213,8 @@ pub fn read_document(
         return Ok(None);
     }
     ensure_safe_candidate(workspace, &path)?;
-    let mut file = File::open(&path).map_err(|error| io_error("HISTORY_READ_FAILED", error, true))?;
+    let mut file =
+        File::open(&path).map_err(|error| io_error("HISTORY_READ_FAILED", error, true))?;
     Workspace::isolated(workspace.root().to_path_buf())?.verify_opened(&file, &path)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)

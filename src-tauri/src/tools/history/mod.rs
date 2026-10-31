@@ -403,11 +403,19 @@ pub fn read(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
         Some(number)
     } else {
         args.get("path").and_then(Value::as_str).and_then(|path| {
-            let stem = std::path::Path::new(path).file_name()?.to_str()?.strip_suffix(".md")?;
+            let stem = std::path::Path::new(path)
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".md")?;
             let number = stem.parse::<u64>().ok()?;
-            (number > 0 && stem == number.to_string()
-                && path == relative_display(ctx.workspace.root(), &history_dir.join(format!("{number}.md"))))
-                .then_some(number)
+            (number > 0
+                && stem == number.to_string()
+                && path
+                    == relative_display(
+                        ctx.workspace.root(),
+                        &history_dir.join(format!("{number}.md")),
+                    ))
+            .then_some(number)
         })
     };
     let document = match number {

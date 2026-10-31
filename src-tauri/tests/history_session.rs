@@ -53,9 +53,16 @@ fn audit_history_read_does_not_open_unrelated_archives() {
     fs::write(dir.join("2.md"), [0xff, 0xfe, 0xff]).unwrap();
     let page = invoke_ok(&ctx, "history_session_read", json!({"number":1}));
     assert_eq!(page["content"], "# Selected archive\nExact contents\n");
-    let by_path = invoke_ok(&ctx, "history_session_read", json!({"path":"docs/history-session/1.md"}));
+    let by_path = invoke_ok(
+        &ctx,
+        "history_session_read",
+        json!({"path":"docs/history-session/1.md"}),
+    );
     assert_eq!(by_path["content_hash"], page["content_hash"]);
-    for path in ["docs/history-session/01.md", "docs/history-session/../history-session/1.md"] {
+    for path in [
+        "docs/history-session/01.md",
+        "docs/history-session/../history-session/1.md",
+    ] {
         assert_err(&invoke(&ctx, "history_session_read", json!({"path":path})));
     }
     assert_err(&invoke(&ctx, "history_session_validate", json!({})));
