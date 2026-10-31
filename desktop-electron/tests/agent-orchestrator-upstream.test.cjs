@@ -1038,6 +1038,50 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
     "one that cannot be stopped either may still come back, so no second agent is started beside it");
 });
 
+test("a chat AO could not reconnect after a restart is resumed before a message, and released when left alone", async () => {
+  // Seen live 2026-10-31: an update restarted AO while the old one still held two chats' agents, so
+  // the new one could not reconnect them ("unavailable") and kept them live. The retry's message failed
+  // CHAT_CONTROLLER_NOT_READY, went to a fresh agent, and the old agents ran on unreachable.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  const now = Date.parse("2026-10-31T04:00:00Z");
+  const ago = minutes => new Date(now - minutes * 60_000).toISOString();
+  const sessions = [
+    { id: "lost-working", mode: "chat", status: "working", statusReadiness: "unavailable", activity: { lastActivityAt: ago(40) } },
+    { id: "lost-idle", mode: "chat", status: "idle", statusReadiness: "unavailable", activity: { lastActivityAt: ago(40) } },
+    { id: "lost-recent", mode: "chat", status: "working", statusReadiness: "unavailable", activity: { lastActivityAt: ago(10) } },
+    { id: "checking", mode: "chat", status: "working", statusReadiness: "checking", activity: { lastActivityAt: ago(40) } },
+    { id: "busy", mode: "chat", status: "working", statusReadiness: "ready", activity: { lastActivityAt: ago(40) } },
+    { id: "stale", mode: "chat", status: "working", statusReadiness: "ready", activity: { lastActivityAt: ago(150) } },
+  ];
+  const posts = [];
+  let readiness = "unavailable";
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise, agentTools: null,
+    exitedReleased: new Set(), logger: null, setTimeout: (resolve) => { resolve(); return 0; },
+    internalApi: async (method, endpoint) => {
+      if (endpoint === "/api/v1/sessions") return { sessions };
+      if (method === "POST") posts.push(endpoint.split("/").at(-1));
+      if (endpoint.endsWith("/resume-agent")) { readiness = "ready"; return { ok: true }; }
+      return { session: { id: endpoint.split("/")[4], mode: "chat", status: "working", statusReadiness: readiness, activity: { state: "active" } } };
+    },
+  });
+  assert.equal(await upstream.continuable("lost-working"), true);
+  assert.deepEqual(posts, ["resume-agent"], "AO is asked to reconnect it before the message is sent");
+  posts.length = 0;
+  assert.equal(await upstream.continuable("lost-working"), true);
+  assert.deepEqual(posts, [], "a chat AO has its controller for is sent to as before");
+  assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now, 30 * 60_000)].sort(), ["lost-idle", "lost-working", "stale"],
+    "one AO lost is released after the shorter limit; a recent, still-checking or live working one is kept");
+  assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now)].sort(), ["stale"], "without the shorter limit, as before");
+});
+
 test("stale sessions are this project's live, unpinned, idle ones with no message (or creation) within the limit", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");

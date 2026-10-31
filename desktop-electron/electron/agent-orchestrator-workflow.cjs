@@ -782,7 +782,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   async function releaseIdle() {
     const ours = new Set([...warm.values()].map(entry => entry.session).filter(Boolean));
     const idle = await harnessService().idleChatSessions?.(IDLE_RELEASE_MS, now()).catch(() => []) ?? [];
-    const quiet = await harnessService().quietWorkingChatSessions?.(STALE_WORKING_MS, now()).catch(() => []) ?? [];
+    const quiet = await harnessService().quietWorkingChatSessions?.(STALE_WORKING_MS, now(), IDLE_RELEASE_MS).catch(() => []) ?? [];
     // Only when every driven run could be read: a session one of them still uses is never stopped.
     const driven = quiet.length ? await drivenSessions() : new Set();
     const stale = driven ? quiet.filter(id => !driven.has(id)) : [];

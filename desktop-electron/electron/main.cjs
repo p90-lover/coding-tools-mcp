@@ -631,7 +631,12 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
     || browserHost.activeTraceId || browserHost.currentOperation() || runtimeHost.currentOperation()) return true;
   const contents = browserHost.view?.webContents;
   if (!contents || contents.isDestroyed()) return true;
-  if (!runtimeHost?.mcpCredentialsConfigured()) return false;
+  // With the monitor's config, the saved credentials are checked without a synchronous call: reading
+  // config.json again here froze every window for up to 26 s (statSync, seen live 2026-10-31).
+  const credentials = knownConfig !== undefined && runtimeHost?.mcpCredentialsConfiguredAsync
+    ? await runtimeHost.mcpCredentialsConfiguredAsync(knownConfig)
+    : runtimeHost?.mcpCredentialsConfigured();
+  if (!credentials) return false;
   const config = knownConfig !== undefined ? knownConfig : runtimeSupervisor?.readConfig();
   if (config?.mode !== "full") return false;
   if (health.version !== config.releaseVersion || health.pid !== runtimeSupervisor.readState()?.daemonPid) return true;
