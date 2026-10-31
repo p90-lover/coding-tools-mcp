@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
 import { defaultConfig } from "../src/config";
 import { parseRequest } from "../src/responses/parser";
+import { expandPreviousResponseInput, flushResponseState, rememberResponseState } from "../src/responses/state";
 import { responseRequest } from "../src/server";
 
 const freeformFormat = {
@@ -52,6 +55,118 @@ test("Responses Lite exposes native exec from the default functions namespace on
   expect(waitTool).toEqual(expect.objectContaining({ name: "wait" }));
   expect(waitTool).not.toHaveProperty("namespace");
   expect(parsed.context.tools?.some(tool => tool.name === "run_script")).toBe(false);
+});
+
+test("current request tools replace historical Code Mode declarations after a model switch", () => {
+  const command = { type: "function", name: "exec_command", parameters: { type: "object", properties: {} } };
+  for (const tools of [[command], []]) {
+    const parsed = parseRequest({
+      model: "chatgpt-web/high",
+      tools,
+      input: [
+        { type: "additional_tools", role: "developer", tools: responsesLiteTools() },
+        { type: "custom_tool_call", call_id: "previous_exec", name: "exec", input: "text('previous result')" },
+        { type: "custom_tool_call_output", call_id: "previous_exec", output: "previous result" },
+        { type: "message", role: "user", content: "Continue with the current model" },
+      ],
+    });
+    expect((parsed.context.tools ?? []).map(tool => tool.name)).toEqual(tools.map(tool => tool.name));
+    expect(parsed.context.messages.some(message => message.role === "toolResult"
+      && message.toolCallId === "previous_exec" && message.content === "previous result")).toBe(true);
+  }
+});
+
+test("omitted request tools retain Code Mode and discovered tools during a continuation", () => {
+  const parsed = parseRequest({
+    model: "chatgpt-web/high",
+    input: [
+      { type: "additional_tools", role: "developer", tools: responsesLiteTools() },
+      { type: "message", role: "user", content: "Continue using the same tools" },
+      { type: "custom_tool_call", call_id: "previous_exec", name: "exec", input: "text('previous result')" },
+      { type: "custom_tool_call_output", call_id: "previous_exec", output: "previous result" },
+      { type: "tool_search_call", call_id: "search", execution: "client", arguments: { query: "preview" } },
+      { type: "tool_search_output", call_id: "search", status: "completed", tools: [{
+        type: "namespace", name: "panel_verification", tools: [{
+          type: "function", name: "preview_read", parameters: { type: "object", properties: {} },
+        }],
+      }] },
+    ],
+  });
+  expect(parsed.context.tools).toContainEqual(expect.objectContaining({ name: "exec", freeform: true }));
+  expect(parsed.context.tools).toContainEqual(expect.objectContaining({ name: "wait" }));
+  expect(parsed.context.tools).toContainEqual(expect.objectContaining({ name: "preview_read", namespace: "panel_verification" }));
+});
+
+test("deferred discovery is scoped to the current user turn across response continuations", () => {
+  const storageRoot = resolve(import.meta.dir, "../../aiTemp", `deferred-tools-${crypto.randomUUID()}`);
+  const previousHome = process.env.CODEX_CHATGPT_WEB_HOME;
+  mkdirSync(storageRoot, { recursive: true });
+  process.env.CODEX_CHATGPT_WEB_HOME = storageRoot;
+  try {
+    for (const provenance of ["request", "user", "none"]) {
+      const turnId = `discovery_${provenance}`;
+      const nextTurn = `${turnId}_next`;
+      const discoveryId = `response_${crypto.randomUUID()}`;
+      const callId = `search_${provenance}`;
+      const tools = [{ type: "tool_search" }];
+      const discoveredTools = [{ type: "namespace", name: "mcp__panel_verification", tools: [{
+        type: "function", name: "preview_read", parameters: { type: "object", properties: {} },
+      }] }];
+      const metadata = provenance === "request" ? { metadata: { turn_id: turnId } } : {};
+      const itemMetadata = provenance !== "none" ? { internal_chat_message_metadata_passthrough: { turn_id: turnId } } : {};
+      const request = { model: "chatgpt-web/high", tools, ...metadata,
+        input: [{ type: "message", role: "user", content: "Read the live panel", ...itemMetadata }] };
+      rememberResponseState(request, { id: discoveryId, status: "completed", output: [{
+        type: "tool_search_call", call_id: callId, execution: "client", arguments: { query: "preview" },
+      }] });
+      const discovered = expandPreviousResponseInput({ model: request.model, tools, ...metadata,
+        previous_response_id: discoveryId, input: [{ type: "tool_search_output", call_id: callId,
+          status: "completed", tools: discoveredTools, ...itemMetadata }] }) as Record<string, unknown>;
+      const expected = expect.objectContaining({ name: "preview_read", namespace: "mcp__panel_verification" });
+      expect(parseRequest(discovered).context.tools).toContainEqual(expected);
+
+      const readId = `response_${crypto.randomUUID()}`;
+      rememberResponseState(discovered, { id: readId, status: "completed", output: [{
+        type: "function_call", call_id: `read_${provenance}`, name: "preview_read",
+        namespace: "mcp__panel_verification", arguments: "{}",
+      }] });
+      const continued = expandPreviousResponseInput({ model: request.model, tools, ...metadata,
+        previous_response_id: readId, input: [{ type: "function_call_output", call_id: `read_${provenance}`, output: "Counter: 0" }] });
+      expect(parseRequest(continued).context.tools).toContainEqual(expected);
+      expect(parseRequest(continued).context.messages.at(-1)).toMatchObject({ role: "toolResult", content: "Counter: 0" });
+      if (provenance !== "none") {
+        expect(parseRequest({ ...discovered, input: [...discovered.input as unknown[],
+          { type: "message", role: "user", content: "Same-turn context", ...itemMetadata },
+        ] }).context.tools).toContainEqual(expected);
+      }
+
+      const later = expandPreviousResponseInput({ model: request.model, tools,
+        ...(provenance === "request" ? { metadata: { turn_id: nextTurn } } : {}), previous_response_id: readId,
+        input: [{ type: "message", role: "user", content: "A later user turn or fork",
+          ...(provenance !== "none" ? { internal_chat_message_metadata_passthrough: { turn_id: nextTurn } } : {}) }] }) as Record<string, unknown>;
+      const parsedLater = parseRequest(later);
+      expect(parsedLater.context.tools?.map(tool => tool.name)).toEqual(["tool_search"]);
+      expect(parsedLater.context.messages.some(message => message.role === "toolResult"
+        && message.toolCallId === callId && typeof message.content === "string"
+        && message.content.includes("preview_read"))).toBe(true);
+      if (provenance === "request") {
+        expect(parseRequest({ ...discovered, metadata: { turn_id: nextTurn } }).context.tools?.map(tool => tool.name))
+          .toEqual(["tool_search"]);
+      }
+      const rediscovered = parseRequest({ ...later, input: [...later.input as unknown[],
+        { type: "tool_search_call", call_id: `${callId}_fresh`, execution: "client", arguments: { query: "preview" } },
+        { type: "tool_search_output", call_id: `${callId}_fresh`, status: "completed", tools: discoveredTools,
+          ...(provenance !== "none" ? { internal_chat_message_metadata_passthrough: { turn_id: nextTurn } } : {}) },
+      ] });
+      expect(rediscovered.context.tools).toContainEqual(expected);
+      expect(parseRequest({ ...later, tools: discoveredTools }).context.tools).toContainEqual(expected);
+    }
+  } finally {
+    flushResponseState();
+    if (previousHome === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME;
+    else process.env.CODEX_CHATGPT_WEB_HOME = previousHome;
+    rmSync(storageRoot, { recursive: true, force: true });
+  }
 });
 
 test("Responses Lite native tools preserve declared namespaces in JSON and SSE without qualifying legacy calls", async () => {

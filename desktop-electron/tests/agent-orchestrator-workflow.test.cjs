@@ -458,6 +458,7 @@ test("AO worker passes the managed CPA key to its child only after exact-model a
 });
 
 test("native chat startup attaches its preview lease and stopping one chat revokes only that owner", async () => {
+  let consent = false;
   const leases = [], attached = [];
   let rejectReconnect = false;
   const workflow = createAgentOrchestratorWorkflow({
@@ -470,11 +471,12 @@ test("native chat startup attaches its preview lease and stopping one chat revok
       leases.push(lease);
       return lease;
     } },
-    requestHeadless: async (endpoint, body) => {
+    requestHeadless: async (endpoint, body, options) => {
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: body.workspace_id, project_id: "task", execution_mode: "single",
         nodes: [{ id: "lead", role: "worker", state: "pending", route: { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
           model: "chatgpt-web/high", permission_profile: ":read-only" } }] }] };
       if (endpoint === "/api/v1/ao/harness/connect") {
+        assert.deepEqual(options, { localConfirmation: true });
         attached.push(body);
         if (rejectReconnect) throw new Error("An existing matching native connection is retained");
         assert.deepEqual(leases.at(-1).bound, [], "bind only after the real native connection succeeds");
@@ -488,9 +490,17 @@ test("native chat startup attaches its preview lease and stopping one chat revok
     webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
     webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
-    confirm: async () => true,
+    confirm: async () => consent,
   });
   try {
+    const input = { workspaceId: "ws1", runId: "run", nodeId: "lead", executable: "G:/fixture/codex.exe" };
+    for (const extra of [{ confirm: true }, { granted: true }, { chat_preview_server: {} }]) {
+      await assert.rejects(workflow.call("connect_harness", { ...input, ...extra }), /unsupported AO connection field/);
+    }
+    assert.deepEqual(await workflow.call("connect_harness", input), { ok: false, cancelled: true });
+    assert.equal(leases.length, 0, "a preview setting cannot bypass new harness confirmation");
+    assert.equal(attached.length, 0);
+    consent = true;
     for (const workspaceId of ["ws1", "ws2"]) await workflow.call("connect_harness", { workspaceId, runId: "run", nodeId: "lead", executable: "G:/fixture/codex.exe" });
     assert.deepEqual(leases.map(lease => lease.bound), [["native:ws1:task:single"], ["native:ws2:task:single"]]);
     assert.ok(leases.every(lease => lease.options.previewOnly && lease.options.expiresAt === 121000));
@@ -505,6 +515,37 @@ test("native chat startup attaches its preview lease and stopping one chat revok
     assert.deepEqual(leases[1].released, []);
   } finally { workflow.dispose(); }
   assert.deepEqual(leases[1].released, [{ ended: true }], "closing the workflow revokes its remaining native lease");
+});
+
+test("native visualize loading receives only a successful persisted model answer and rechecks its receipt", async () => {
+  for (const outcome of ["finished", "running", "cancelled", "failed", "cpa", "worker", "team-working"]) {
+    const answer = 'visualize{"path":"G:/task/panel.html"}';
+    const mission = { id: "run", workspace_id: "ws", project_id: "task", execution_mode: outcome === "team-working" ? "team" : "single", cancelled: outcome === "cancelled", nodes: [{ id: "lead",
+      role: outcome === "worker" ? "worker" : outcome === "team-working" ? "reviewer" : "planner",
+      state: outcome === "running" ? "running" : "finished", settings: { working_directory: "src" }, route: { harness_id: "codex-native", model: outcome === "cpa" ? "gemini-flash" : "chatgpt-web/high" },
+      receipt: { request_key: "request", thread_id: "native-thread", turn_id: "native-turn", answer, ...(outcome === "failed" ? { error: "failed" } : {}) } }] };
+    if (outcome === "team-working") mission.nodes.push({ id: "working", role: "worker", state: "running" });
+    const renders = [];
+    const workflow = createAgentOrchestratorWorkflow({ nativePreviewTools: { renderNativeVisualization: async input => {
+      renders.push(input);
+      assert.equal(input.answer, answer, "renderer arguments cannot supply a path or replace model output");
+      assert.equal(input.workingDirectory, "src", "the saved native node supplies its working-directory scope");
+      assert.equal(await input.stillCurrent(), true);
+      mission.nodes[0].settings.working_directory = "elsewhere";
+      assert.equal(await input.stillCurrent(), false, "a changed native directory ends the artifact's provenance");
+      mission.nodes[0].settings.working_directory = "src";
+      mission.nodes[0].receipt.request_key = "replacement";
+      assert.equal(await input.stillCurrent(), false, "a replaced attempt cannot finish loading its artifact");
+    } }, requestHeadless: async endpoint => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(mission)] };
+      if (endpoint === "/api/v1/ao/harness/observe") return { ok: true, run: structuredClone(mission) };
+      throw new Error(endpoint);
+    } });
+    try {
+      await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "lead", answer: "foreign path" });
+      assert.equal(renders.length, outcome === "finished" ? 1 : 0, outcome);
+    } finally { workflow.dispose(); }
+  }
 });
 
 test("AO WebGPT connect uses the selected Codex bundled catalog without a CPA key", async () => {
@@ -808,7 +849,8 @@ test("AO granted run dispatches parallel workers after focus loss and finishes e
         assert.equal(body.connection.permission_profile, ":read-only", "stale idle policy is replaced through the existing exact graph grant");
         assert.equal(focused, false);
         assert.equal(body.confirm, false);
-        assert.equal(options?.localConfirmation, undefined);
+        assert.equal(options?.localConfirmation, body.chat_preview_server ? true : undefined,
+          "only the internally minted preview descriptor receives private issuer provenance on a saved-grant connect");
         return { ok: true, owned: true, status: { connected: true, model: body.connection.model } };
       }
       if (endpoint === "/api/v1/ao/harness/execute") {
@@ -837,6 +879,9 @@ test("AO granted run dispatches parallel workers after focus loss and finishes e
     webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
     webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
+    nativePreviewTools: { lease: async ({ workspaceId }) => ({ servers: [{ name: "coding-tools", type: "http",
+      url: `http://127.0.0.1:47991/mcp/${workspaceId}/abcdefghijklmnop`, headers: { Authorization: `Bearer ${"x".repeat(43)}` } }],
+      bind: () => true, limitLifetime() {}, release() {} }) },
     resolveHarness: async ({ model }) => ({ executable: "C:\\codex.exe", expected_sha256: "a".repeat(64),
       codex_home: "C:\\ao-home", model, allow_model_usage: true,
       allow_command_execution: false, permission_profile: ":read-only", request_limit: 3, lifetime_seconds: 900 }),

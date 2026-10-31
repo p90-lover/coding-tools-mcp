@@ -1103,8 +1103,52 @@ function rendererCallback(file, name, globals) {
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
 
+test("a split pane acknowledges parent selection before reporting its own chat, then reports its first send", () => {
+  for (const requested of [{ workspaceId: "ws", taskId: "" }, { workspaceId: "ws", taskId: "task-b" }, { workspaceId: "other", taskId: "task-b" }]) {
+    let parent = { ...requested };
+    const reports = [];
+    const state = { workspaceId: "ws", chatTaskId: "old-task", loadedWorkspace: "ws" };
+    const paneWanted = { current: { workspaceId: "ws", taskId: "old-task" } };
+    const paneSelectionPending = { current: false };
+    const effects = () => {
+      const globals = { ...state, paneWanted, paneSelectionPending,
+        pane: { ...parent, onChat: (workspaceId, taskId) => { reports.push([workspaceId, taskId]); parent = { workspaceId, taskId }; } },
+        switchToWorkspace: workspaceId => { state.workspaceId = workspaceId; state.chatTaskId = null; },
+        selectChat: taskId => { state.chatTaskId = taskId; }, startNewChat: () => { state.chatTaskId = ""; },
+      };
+      return {
+        apply: rendererCallback("AgentOrchestratorSurface.tsx", "effect:paneWanted.current = { workspaceId: pane.workspaceId", globals),
+        report: rendererCallback("AgentOrchestratorSurface.tsx", "effect:pane.onChat(workspaceId, chatTaskId)", globals),
+      };
+    };
+    // A parent selection and a completed workspace read can share a commit. Both effects still
+    // see the old child selection, even after the first effect schedules its state update.
+    const first = effects();
+    first.apply(); first.report();
+    assert.deepEqual(parent, requested, "the old child cannot overwrite the parent request");
+    assert.deepEqual(reports, []);
+    assert.deepEqual(plain(paneWanted.current), requested);
+
+    state.workspaceId = requested.workspaceId; state.loadedWorkspace = requested.workspaceId;
+    state.chatTaskId = requested.taskId;
+    effects().report();
+    assert.deepEqual(parent, requested, "an applied new draft or existing chat stays selected");
+    assert.deepEqual(reports, []);
+
+    state.chatTaskId = "first-send";
+    effects().report();
+    assert.deepEqual(parent, { workspaceId: requested.workspaceId, taskId: "first-send" });
+    assert.deepEqual(reports, [[requested.workspaceId, "first-send"]], "the child's own new chat still reaches the parent");
+    effects().apply(); // The parent's acknowledgement already matches the child; it must not wait again.
+    state.chatTaskId = "second-send";
+    effects().report();
+    assert.deepEqual(parent, { workspaceId: requested.workspaceId, taskId: "second-send" });
+  }
+});
+
 test("an unsent split chat can switch projects and finish choosing its new chat", () => {
   const paneWanted = { current: { workspaceId: "old-project", taskId: "" } };
+  const paneSelectionPending = { current: true };
   const state = { workspaceId: "old-project", taskId: null };
   const pendingSelect = { current: null };
   const choose = rendererCallback("AgentOrchestratorSurface.tsx", "chooseWorkspace", {
@@ -1115,13 +1159,19 @@ test("an unsent split chat can switch projects and finish choosing its new chat"
   choose("new-project");
   const decide = rendererCallback("AgentOrchestratorSurface.tsx", "effect:const wanted = paneWanted.current", {
     chatTaskId: null, workspaceId: state.workspaceId, loadedWorkspace: "new-project",
-    board: { tasks: [] }, boardWorkspace: { current: "new-project" }, paneWanted, pendingSelect,
+    board: { tasks: [] }, boardWorkspace: { current: "new-project" }, paneWanted, paneSelectionPending, pendingSelect,
     missions: [], taskLifecycle: [], chatSeed: { workspaceId: "new-project", text: "Keep my draft" },
     chatList: chat.chatList, setChatTaskId: id => { state.taskId = id; }, setView() {}, setSelectedRunId() {},
   });
   decide();
   assert.equal(state.taskId, "", "the pane resolves its new chat so it can accept input and notify its parent");
   assert.equal(paneWanted.current.workspaceId, "new-project");
+  const reports = [];
+  rendererCallback("AgentOrchestratorSurface.tsx", "effect:pane.onChat(workspaceId, chatTaskId)", {
+    pane: { workspaceId: "old-project", taskId: "", onChat: (...selection) => reports.push(selection) },
+    workspaceId: state.workspaceId, chatTaskId: state.taskId, loadedWorkspace: "new-project", paneWanted, paneSelectionPending,
+  })();
+  assert.deepEqual(reports, [["new-project", ""]], "the resolved project choice is still reported to the parent");
 });
 
 function workspaceRecovery({ hidden = false, selected = "p3" } = {}) {

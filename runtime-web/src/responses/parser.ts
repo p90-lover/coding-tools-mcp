@@ -378,8 +378,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
     }
     return holder;
   };
-  // Tool specs surfaced by a prior tool_search (deferred tools, e.g. subagents). Codex does not
-  // re-list these in `tools`, but chat models can only call listed tools — so we re-inject them.
+  // Responses Lite declarations and current-turn discovery supplement the request's tool list.
   const loadedToolSpecs: unknown[] = [];
   // Remote compaction v2: the input tail carries `{type:"compaction_trigger"}` and Codex expects a
   // synthetic `{type:"compaction"}` output item (src/responses/compaction.ts). Flagged for the server.
@@ -393,7 +392,22 @@ export function parseRequest(body: unknown): CodexParsedRequest {
   if (typeof data.input === "string") {
     messages.push({ role: "user", content: data.input, timestamp: now });
   } else if (data.input) {
-    for (const item of data.input) {
+    const rawInput = isObj(body) && Array.isArray(body.input) ? body.input : [];
+    let lastUserIndex = -1;
+    for (let index = rawInput.length - 1; index >= 0; index--) {
+      const item = rawInput[index];
+      if (isObj(item) && item.role === "user" && (item.type === undefined || item.type === "message")) {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    const lastUser = rawInput[lastUserIndex];
+    const userMetadata = isObj(lastUser) && isObj(lastUser.internal_chat_message_metadata_passthrough)
+      ? lastUser.internal_chat_message_metadata_passthrough : undefined;
+    const requestMetadata = isObj(body) && isObj(body.metadata) ? body.metadata : undefined;
+    const currentTurnId = typeof requestMetadata?.turn_id === "string" ? requestMetadata.turn_id
+      : typeof userMetadata?.turn_id === "string" ? userMetadata.turn_id : undefined;
+    for (const [inputIndex, item] of data.input.entries()) {
       const effectiveType = (item as { type?: string }).type ?? ("role" in item ? "message" : undefined);
 
       if (effectiveType === "compaction_trigger") {
@@ -404,12 +418,13 @@ export function parseRequest(body: unknown): CodexParsedRequest {
       if (effectiveType === "additional_tools") {
         // Codex Desktop responses_lite WS path: tools ride INSIDE input as an
         // `additional_tools` item ({type, role, tools:[...]}) instead of body.tools.
-        // Same spec wire shapes (function/namespace/custom/tool_search) — collect and
-        // merge through the exact buildTools path so surface detection (collabSurface)
-        // and chat-model tool listing see them. The item itself never becomes a message;
-        // the native passthrough keeps it verbatim in _rawBody.
+        // An explicit request-level tools list is the current native inventory, including [].
+        // Older additional_tools can remain in replay after a model switch; merging them back
+        // would expose handlers (such as Code Mode exec) the current native router no longer has.
+        // When tools is omitted, retain the Responses Lite inventory for normal continuations.
+        // The item never becomes a message; native passthrough keeps it verbatim in _rawBody.
         const at = item as { tools?: unknown[] };
-        if (Array.isArray(at.tools)) loadedToolSpecs.push(...at.tools);
+        if (data.tools === undefined && Array.isArray(at.tools)) loadedToolSpecs.push(...at.tools);
         continue;
       }
 
@@ -603,7 +618,16 @@ export function parseRequest(body: unknown): CodexParsedRequest {
         // Pair the tool_search call with its result so the model sees what was loaded.
         const out = item as { call_id?: string; status?: string; tools?: unknown[] };
         const specs = Array.isArray(out.tools) ? (out.tools as Record<string, unknown>[]) : [];
-        loadedToolSpecs.push(...specs);
+        const rawItem = rawInput[inputIndex];
+        const searchMetadata = isObj(rawItem) && isObj(rawItem.internal_chat_message_metadata_passthrough)
+          ? rawItem.internal_chat_message_metadata_passthrough : undefined;
+        const searchTurnId = typeof searchMetadata?.turn_id === "string" ? searchMetadata.turn_id : undefined;
+        // A historical search remains conversation history, not authority for the current native
+        // router. Turn provenance also covers result-only continuations; otherwise the last user
+        // message is the boundary, including when previous_response_id expanded earlier input.
+        const currentDiscovery = currentTurnId && searchTurnId
+          ? currentTurnId === searchTurnId : inputIndex > lastUserIndex;
+        if (currentDiscovery) loadedToolSpecs.push(...specs);
         // List the EXACT wire names the model must call (flattened for namespaced specs), matching
         // how buildTools exposes them — otherwise the model guesses wrong names (e.g. the bare namespace).
         const wireNames: string[] = [];
@@ -623,7 +647,9 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           content: failed && wireNames.length === 0
             ? `Tool search failed (status: ${out.status}).`
             : wireNames.length
-              ? `Tool search loaded these tools — they are now in your available tools. Call one by its EXACT name: ${wireNames.join(", ")}.`
+              ? currentDiscovery
+                ? `Tool search loaded these tools — they are now in your available tools. Call one by its EXACT name: ${wireNames.join(", ")}.`
+                : `Earlier tool search returned: ${wireNames.join(", ")}. Run tool_search again to confirm current availability.`
               : "Tool search returned no tools.",
           isError: failed && wireNames.length === 0, timestamp: now,
         });
