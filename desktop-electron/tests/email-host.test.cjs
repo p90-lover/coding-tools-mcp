@@ -23,6 +23,102 @@ function tmp() {
 // A safeStorage stub with encryption unavailable, forcing the AES fallback path.
 const noStorage = { isEncryptionAvailable: () => false };
 
+function credentialOptions() {
+  const dir = tmp();
+  return { logger: null, filePath: path.join(dir, "e.json"), keyPath: path.join(dir, "e.key"), safeStorage: noStorage,
+    fetchNative: async url => new Response(JSON.stringify(url.endsWith("/open_api/settings") ? { domains: ["example.test"] } : {}), { status: 200 }),
+    parseMessage, sanitizeHtml };
+}
+
+test("unreadable Email keys and connection files stay intact and recover on a fresh open", async t => {
+  for (const kind of ["key", "connection"]) await t.test(kind, async () => {
+    const options = credentialOptions(), original = { origin: "https://mail.example.test", adminAuth: "fixture-original" };
+    await createEmailHost(options).connect(original);
+    const files = [options.filePath, `${options.filePath}.bak`, options.keyPath, `${options.keyPath}.bak`];
+    const before = files.map(file => fs.readFileSync(file));
+    const failed = new Set(kind === "key" ? files.slice(2) : files.slice(0, 2)), readFile = fs.readFileSync;
+    let unavailable, reads = 0;
+    fs.readFileSync = function (file, ...args) {
+      if (failed.has(String(file))) { reads += 1; throw Object.assign(new Error("fixture read unavailable"), { code: "EIO" }); }
+      return readFile.call(this, file, ...args);
+    };
+    try {
+      unavailable = createEmailHost(options);
+      assert.equal(unavailable.status().configured, false);
+      assert.equal((await unavailable.currentStatus()).configured, false, "status remains usable without a credential");
+      if (kind === "key") await assert.rejects(() => unavailable.connect({ origin: "https://replacement.example.test", adminAuth: "fixture-replacement" }), error => {
+        assert.match(error.message, /key|credential/i); assert.ok(error.message.length <= 300); return true;
+      });
+    } finally { fs.readFileSync = readFile; }
+    assert.ok(reads >= 2, "the primary file and its backup were both unavailable");
+    files.forEach((file, index) => assert.ok(fs.readFileSync(file).equals(before[index]), `${path.basename(file)} stays unchanged`));
+    assert.equal(fs.readdirSync(path.dirname(options.filePath)).some(file => file.includes(".corrupt-")), false);
+    let authenticated = false;
+    const reopened = createEmailHost({ ...options, fetchNative: (url, request) => {
+      authenticated = request.headers["x-admin-auth"] === original.adminAuth;
+      return options.fetchNative(url, request);
+    } });
+    assert.equal(reopened.status().configured, true);
+    assert.equal(reopened.status().origin, original.origin);
+    await reopened.listMessages({});
+    assert.ok(authenticated, "the recovered connection uses the original credential");
+    files.forEach((file, index) => assert.ok(fs.readFileSync(file).equals(before[index]), "reopening does not rotate the saved key or credential"));
+  });
+});
+
+test("decrypting Email with missing or torn key copies never generates a replacement key", async t => {
+  for (const damage of ["missing", "torn"]) await t.test(damage, async () => {
+    const options = credentialOptions();
+    await createEmailHost(options).connect({ origin: "https://mail.example.test", adminAuth: "fixture" });
+    const credential = fs.readFileSync(options.filePath), backup = fs.readFileSync(`${options.filePath}.bak`), key = fs.readFileSync(options.keyPath);
+    for (const file of [options.keyPath, `${options.keyPath}.bak`]) {
+      if (damage === "missing") fs.rmSync(file);
+      else fs.writeFileSync(file, "torn");
+    }
+    assert.equal(createEmailHost(options).status().configured, false);
+    assert.ok(fs.readFileSync(options.filePath).equals(credential));
+    assert.ok(fs.readFileSync(`${options.filePath}.bak`).equals(backup));
+    for (const file of [options.keyPath, `${options.keyPath}.bak`]) {
+      if (damage === "missing") assert.equal(fs.existsSync(file), false, "a read cannot create a key");
+      else assert.ok(fs.readFileSync(file).equals(Buffer.from("torn")), "damaged bytes stay available for recovery");
+      fs.writeFileSync(file, key);
+    }
+    assert.equal(createEmailHost(options).status().configured, true);
+  });
+});
+
+test("a failed first Email key save is retried before any credential uses that key", async () => {
+  const options = credentialOptions(), host = createEmailHost(options), rename = fs.renameSync;
+  let injected = false;
+  fs.renameSync = function (source, destination) {
+    if (String(destination) === options.keyPath) { injected = true; throw Object.assign(new Error("fixture key persistence failed"), { code: "EIO" }); }
+    return rename.call(this, source, destination);
+  };
+  try { await assert.rejects(() => host.connect({ origin: "https://mail.example.test", adminAuth: "fixture" }), /persistence failed/); }
+  finally { fs.renameSync = rename; }
+  assert.ok(injected);
+  assert.equal(host.status().configured, false); assert.equal(fs.existsSync(options.filePath), false); assert.equal(fs.existsSync(options.keyPath), false);
+  await host.connect({ origin: "https://mail.example.test", adminAuth: "fixture" });
+  assert.equal(fs.existsSync(options.keyPath), true);
+  assert.equal(createEmailHost(options).status().configured, true, "the credential uses a durably saved first-start key");
+});
+
+test("a complete Email replacement and explicit disconnect do not require the old plaintext", async () => {
+  const options = credentialOptions();
+  await createEmailHost(options).connect({ origin: "https://old.example.test", adminAuth: "fixture-old" });
+  const key = fs.readFileSync(options.keyPath), stored = JSON.parse(fs.readFileSync(options.filePath, "utf8"));
+  stored.credential.data = Buffer.from("unreadable fixture ciphertext").toString("base64");
+  for (const file of [options.filePath, `${options.filePath}.bak`]) fs.writeFileSync(file, JSON.stringify(stored));
+  const host = createEmailHost(options);
+  assert.equal(host.status().configured, false);
+  await host.connect({ origin: "https://replacement.example.test", adminAuth: "fixture-new" });
+  assert.equal(createEmailHost(options).status().origin, "https://replacement.example.test");
+  assert.ok(fs.readFileSync(options.keyPath).equals(key), "complete replacement can reuse the existing valid key");
+  assert.equal(host.disconnect().configured, false);
+  assert.equal(fs.existsSync(options.filePath), false); assert.equal(fs.existsSync(`${options.filePath}.bak`), false);
+  assert.equal(createEmailHost(options).status().configured, false);
+});
+
 test("normalizeOrigin rejects non-https, paths, and query strings", () => {
   assert.equal(normalizeOrigin("https://mail.example.com"), "https://mail.example.com");
   assert.throws(() => normalizeOrigin("http://mail.example.com"), /https/);
