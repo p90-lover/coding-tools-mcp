@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createAoDependencyLinks, detectDependencyLinks, mergeManaged } = require("../electron/ao-dependency-links.cjs");
+const { createAoDependencyLinks, detectDependencyLinks, detectDependencyLinksAsync, mergeManaged } = require("../electron/ao-dependency-links.cjs");
 const { createAoWorkspaceBoard } = require("../electron/agent-orchestrator-workspace.cjs");
 
 function tree(t, files) {
@@ -33,6 +33,38 @@ test("detection finds installed node_modules and virtual environments where a pr
   const node = tree(t, ["package.json", "node_modules/", "venv/pyvenv.cfg"]);
   assert.deepEqual(detectDependencyLinks(node), ["node_modules", "venv"]);
   assert.deepEqual(detectDependencyLinks(path.join(node, "missing")), []);
+});
+
+test("the sync before each spawn finds the same folders without reading the disk synchronously", async (t) => {
+  // Seen live 2026-10-31: one statSync of this scan held every window for 2.3 s on the busy hard disk.
+  const root = tree(t, [
+    "requirements.txt", ".venv/pyvenv.cfg", "package.json", "node_modules/",
+    "frontend/package.json", "frontend/node_modules/react/",
+    "backend/pyproject.toml", "backend/venv/pyvenv.cfg",
+    "docs/node_modules/", "tools/requirements.txt", "tools/venv/", "api/package.json",
+  ]);
+  assert.deepEqual(await detectDependencyLinksAsync(root), detectDependencyLinks(root));
+  assert.deepEqual(await detectDependencyLinksAsync(path.join(root, "missing")), []);
+  const file = path.join(root, "state", "links.json");
+  const ao = aoProject({});
+  assert.deepEqual((await createAoDependencyLinks({ file, request: ao.request, logger: { warn() {} } }).sync("reg", root)).hardLinkFarms,
+    ["node_modules", "frontend/node_modules"]);
+  // The next spawn (here in a new app session, so nothing is remembered) scans and reads the
+  // state again; saving it, only when the app's own entries change, stays one synchronous step.
+  const links = createAoDependencyLinks({ file, request: ao.request, logger: { warn() {} } });
+  const { statSync, readFileSync, readdirSync } = fs;
+  let blocking = 0;
+  Object.assign(fs, {
+    statSync: (...args) => { blocking += 1; return statSync(...args); },
+    readFileSync: (...args) => { blocking += 1; return readFileSync(...args); },
+    readdirSync: (...args) => { blocking += 1; return readdirSync(...args); },
+  });
+  try {
+    assert.deepEqual((await links.sync("reg", root)).hardLinkFarms, ["node_modules", "frontend/node_modules"]);
+  } finally {
+    Object.assign(fs, { statSync, readFileSync, readdirSync });
+  }
+  assert.equal(blocking, 0);
 });
 
 test("each path list keeps the user's entries and only adds or drops the app's own", () => {
@@ -202,7 +234,8 @@ test("another whole-config write waits for a running sync and runs before the ne
   fsMod.writeFileSync(pathMod.join(dir, "proj", "package.json"), "{}");
   const syncing = links.sync("p1", pathMod.join(dir, "proj"));
   const exclusive = links.exclusive("p1", async () => { order.push("mode-write"); return "done"; });
-  await new Promise((resolve) => setImmediate(resolve));
+  // The sync reads the disk without blocking before it asks AO.
+  for (let tries = 0; tries < 200 && !order.length; tries += 1) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(order, ["sync-read"], "the mode write waits for the running sync");
   release();
   assert.equal(await exclusive, "done");
