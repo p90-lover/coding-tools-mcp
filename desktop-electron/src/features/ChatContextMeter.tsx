@@ -3,7 +3,7 @@ import { getCodingToolsClient } from "../api/client";
 import { cpaProviderOf } from "./AgentOrchestratorRoleEditor";
 import { FloatingLayer } from "./ChatMenu";
 import { contextFraction, tokensShort } from "./ao-chat";
-import { agoLabel, clineStateLabel, costLabel, costSourceLabel, isClineModel, readCpaUsage, type CpaUsage, type CpaUsageAccount } from "./cpa-usage";
+import { agoLabel, clineStateLabel, costLabel, costSourceLabel, isClineModel, readCpaUsage, servingAccounts, type CpaUsage, type CpaUsageAccount } from "./cpa-usage";
 
 // The composer's context meter, as Claude Code shows one: a ring filling as the chat's agent
 // session uses its context window, and on click what AO knows about it. That is the agent's own
@@ -15,7 +15,10 @@ import { agoLabel, clineStateLabel, costLabel, costSourceLabel, isClineModel, re
 // Helper's quota, through the cpa_quota operation), worded as Claude Code words plan limits, and
 // each account's tokens and estimated cost over the last 7 days (cpa_usage). A Cline Pass model
 // shows the switcher's keys instead: Cline reports no quota for them, only whether a key is at
-// its limit, so that is what the meter can say.
+// its limit, so that is what the meter can say. Any other CPA model (a Claude API key, StepFun,
+// Antigravity, OpenCode Go) shows what the accounts that served it spent today, over 7 and over
+// 30 days, from the same usage log: an API key can't read its credit balance, so spend is the
+// number there is.
 
 type Usage = {
   contextUsed: number | null; contextWindow: number | null;
@@ -118,6 +121,21 @@ function UsageLine({ account }: { account: CpaUsageAccount | undefined }) {
   </p>;
 }
 
+/** An account's spend over each period, as the conversation's spend list: "Today ~$0.42". The
+ * tokens and requests are on hover; a period not read yet shows "…", one with no requests "none". */
+function SpendList({ periods }: { periods: { name: string; report: CpaUsage | null; account: CpaUsageAccount | undefined }[] }) {
+  return <dl className="cx-ctx-spend">{periods.map(({ name, report, account }) => <span key={name} style={{ display: "contents" }}>
+    <dt>{name}</dt>
+    <dd className={account?.requests ? "is-cost" : undefined}
+      title={account?.requests ? `${tokensShort(account.totalTokens)} tokens · ${account.requests.toLocaleString()} requests\n${costSourceLabel(account.costSource, account.costPartial, false)}` : undefined}>
+      {!report?.available ? "…" : !account?.requests ? "none" : costLabel(account.cost, account.costPartial)}</dd>
+  </span>)}</dl>;
+}
+
+/** "Claude" from "claude", "OpenCode Go" from "opencode-go": the provider as the spend section names it. */
+const providerName = (provider: string) => ({ claude: "Claude", antigravity: "Antigravity", gemini: "Gemini", "opencode-go": "OpenCode Go" } as Record<string, string>)[provider]
+  ?? provider.replace(/^openai-compatible-/, "").replace(/(^|[-_])(\w)/g, (_, gap: string, letter: string) => `${gap ? " " : ""}${letter.toUpperCase()}`);
+
 /** A bar that grows in when the panel opens and follows each new reading after. */
 function Bar({ percent, level }: { percent: number; level: string }) {
   return <div className={`cx-ctx-bar is-${level}`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></div>;
@@ -204,9 +222,14 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
   const [snapshot, setSnapshot] = useState<ChatContextSnapshot | null>(null);
   const [quota, setQuota] = useState<CpaQuota | null>(null);
   const [cpaUsage, setUsageReport] = useState<CpaUsage | null>(null);
+  // Today's and 30 days' usage, read only for a model whose spend the meter shows (onCpaOther).
+  const [daySpend, setDaySpend] = useState<CpaUsage | null>(null);
+  const [monthSpend, setMonthSpend] = useState<CpaUsage | null>(null);
   const cpaProvider = cpaProviderOf(model)?.toLowerCase() ?? null;
   const onCpaCodex = cpaProvider === "codex";
   const onCpaCline = isClineModel(cpaProvider);
+  // Any CPA model, its provider known or not: "cpa/claude-opus-5-5" has none until CPA's catalog loads.
+  const onCpaOther = Boolean(model?.startsWith("cpa/")) && !onCpaCodex && !onCpaCline;
   const [open, setOpen] = useState<{ left: number; bottom: number } | null>(null);
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -236,7 +259,9 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
   useEffect(() => {
     setQuota(null);
     setUsageReport(null);
-    if (!onCpaCodex && !onCpaCline) return undefined;
+    setDaySpend(null);
+    setMonthSpend(null);
+    if (!onCpaCodex && !onCpaCline && !onCpaOther) return undefined;
     let live = true;
     const read = () => {
       if (onCpaCodex) {
@@ -245,6 +270,10 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
           .catch(() => undefined);
       }
       void readCpaUsage(USAGE_RANGE).then((next) => { if (live) setUsageReport(next); }).catch(() => undefined);
+      if (onCpaOther) {
+        void readCpaUsage("24h").then((next) => { if (live) setDaySpend(next); }).catch(() => undefined);
+        void readCpaUsage("30d").then((next) => { if (live) setMonthSpend(next); }).catch(() => undefined);
+      }
     };
     read();
     const timer = window.setInterval(() => { if (document.visibilityState === "visible") read(); }, QUOTA_POLL_MS);
@@ -252,7 +281,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
     button.current?.addEventListener("click", onOpen);
     const target = button.current;
     return () => { live = false; window.clearInterval(timer); target?.removeEventListener("click", onOpen); };
-  }, [onCpaCodex, onCpaCline]);
+  }, [onCpaCodex, onCpaCline, onCpaOther]);
 
   // The category split reads the chat's history, so only while the panel is open. The last split
   // stays across openings and failed reads: clearing it on every open showed only "Used" until a
@@ -327,6 +356,13 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
   const clineBridge = !limitRows.length && onCpaCline
     ? (cpaUsage?.accounts ?? []).find((account) => account.quota?.kind === "cline") : undefined;
   const clineKeys = clineBridge?.quota?.kind === "cline" ? clineBridge.quota : null;
+  // Any other CPA model: the accounts that served it, found in the widest period read so far (an
+  // account quiet this week still spent this month), each with its spend in every period.
+  const spendBase = monthSpend?.available ? monthSpend : cpaUsage?.available ? cpaUsage : null;
+  const serving = onCpaOther && !limitRows.length && spendBase && model ? servingAccounts(spendBase.accounts ?? [], model, cpaProvider) : [];
+  // The provider CPA's catalog reported, else the one the serving accounts are from.
+  const spendProvider = cpaProvider ?? serving.find((account) => account.provider)?.provider ?? null;
+  const accountIn = (report: CpaUsage | null, id: string) => (report?.available ? report.accounts ?? [] : []).find((account) => account.id === id);
 
   // An agent can report more in use than its window; the bar then measures against the larger figure.
   const scale = usage?.contextWindow ? Math.max(usage.contextWindow, breakdown?.used ?? 0, usage.contextUsed ?? 0) : null;
@@ -414,6 +450,24 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
             {!clineKeys ? <p className="cx-ctx-meta">The switcher didn't answer through CPA.</p> : null}
             {clineKeys && !clineKeys.accounts.length ? <p className="cx-ctx-meta">No keys yet. Add one in CPA › Plugins › Cline Pass.</p> : null}
             <UsageLine account={clineBridge} />
+          </>}
+        </section> : null}
+        {onCpaOther && !limitRows.length && (cpaUsage || monthSpend) ? <section className="cx-ctx-section">
+          <h4 title="Estimated at API prices from CPA's request log">Spend{spendProvider ? <small>{providerName(spendProvider)}</small> : null}</h4>
+          {!spendBase ? <p className="cx-ctx-meta">{(monthSpend ?? cpaUsage)?.reason || "CPA's account usage is unavailable."}</p> : <>
+            {serving.map((account) => <div key={account.id} className={`cx-ctx-account${account.disabled ? " is-resting" : ""}`}>
+              <div className="cx-ctx-account-head">
+                <span title={account.label}>{account.label}</span>
+                {account.disabled ? <small>disabled</small> : null}
+              </div>
+              <SpendList periods={[
+                { name: "Today", report: daySpend, account: accountIn(daySpend, account.id) },
+                { name: "7 days", report: cpaUsage, account: accountIn(cpaUsage, account.id) },
+                { name: "30 days", report: monthSpend, account: accountIn(monthSpend, account.id) },
+              ]} />
+            </div>)}
+            {!serving.length ? <p className="cx-ctx-meta">CPA's log has no requests for this model in the last 30 days.</p> : null}
+            {spendProvider === "claude" ? <p className="cx-ctx-meta">Anthropic doesn't tell an API key its credit balance. It's on console.anthropic.com under Billing.</p> : null}
           </>}
         </section> : null}
         {snapshot?.mcpServers.length ? <section className="cx-ctx-section">
