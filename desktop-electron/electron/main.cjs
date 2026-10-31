@@ -1566,13 +1566,13 @@ function noticeAoApproval(update) {
   }
 }
 
-function assertFocusedMainWindow(event, write = false) {
+function assertFocusedMainWindow(event, write = false, backgroundRead = false) {
   const window = BrowserWindow.fromWebContents(event.sender);
   const valid = window
     && window === mainWindow
     && !window.isDestroyed()
-    && window.isVisible()
-    && !window.isMinimized()
+    && (!backgroundRead || (event.sender.mainFrame && event.senderFrame === event.sender.mainFrame))
+    && ((!write && backgroundRead) || (window.isVisible() && !window.isMinimized()))
     && (!write || (window.isFocused() && event.sender.isFocused()));
   if (!valid) {
     // Said in the user's terms: this refused chat sends and starts too, and the old wording
@@ -2316,11 +2316,15 @@ function registerIpc({ logger, stateStore }) {
     // The chat surface's own background calls run on load, on a timer or when a chat opens, often
     // while focus sits in an embedded view or another app; refused there, they only filled the
     // Activity log ("Click into the Coding Tools window", 22 a night) and left the archived list,
-    // the agent pre-warm and the Retry automatically switch unset. They still need a visible window.
+    // the agent pre-warm and the Retry automatically switch unset. Layout still needs a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm"].includes(input.operation)
         || (["chat_auto_retry", "chat_model_judges"].includes(input.operation) && input.arguments?.enabled === undefined));
-    assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
+    const readOnly = appsHost.isReadOnly(input.moduleId, input.operation);
+    // These two status clocks also run while minimized. Only the trusted main frame may read them.
+    const backgroundRead = readOnly && input.moduleId === "agent-orchestrator"
+      && ["run_status", "subagents_runs"].includes(input.operation);
+    assertFocusedMainWindow(event, !passiveAoLayout && !readOnly, backgroundRead);
     // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
     if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
       input = { ...input, arguments: { ...(input.arguments || {}), zoom: event.sender.getZoomFactor() } };

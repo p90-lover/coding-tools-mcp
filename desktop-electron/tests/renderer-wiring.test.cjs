@@ -151,6 +151,52 @@ test("Register IPC trusts only the launcher frame and permits hidden detach", as
   assert.throws(() => handlers.get("launcher:register-bounds")(event, { x: NaN, y: 0, width: 1, height: 1 }), /finite/);
 });
 
+test("minimized AO status polls require the trusted main frame and preserve focused writes", () => {
+  const vm = require("node:vm"), ts = require("typescript");
+  const file = ts.createSourceFile("main.cjs", electronMain, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const functions = file.statements.filter(ts.isFunctionDeclaration);
+  const guard = functions.find(node => node.name?.text === "assertFocusedMainWindow");
+  let registration;
+  const visit = node => {
+    if (ts.isCallExpression(node) && node.expression.getText(file) === "handle"
+      && node.arguments[0]?.text === "coding-tools:apps:call") registration = node.getText(file);
+    ts.forEachChild(node, visit);
+  };
+  visit(functions.find(node => node.name?.text === "registerIpc"));
+  assert.ok(registration);
+  let visible = false, minimized = true, focused = false, destroyed = false;
+  const mainFrame = {}, calls = [], handlers = new Map();
+  const sender = { mainFrame, isFocused: () => focused, getZoomFactor: () => 1 };
+  const mainWindow = { isDestroyed: () => destroyed, isVisible: () => visible,
+    isMinimized: () => minimized, isFocused: () => focused };
+  const appsHost = {
+    isReadOnly: (_module, operation) => ["run_status", "subagents_runs", "models"].includes(operation),
+    call: (module, operation) => { calls.push([module, operation]); return { ok: true }; },
+  };
+  vm.runInNewContext(guard.getText(file) + "\n" + registration, {
+    mainWindow, BrowserWindow: { fromWebContents: value => value === sender ? mainWindow : {} },
+    appsHost, handle: (channel, handler) => handlers.set(channel, handler),
+  });
+  const call = handlers.get("coding-tools:apps:call"), event = { sender, senderFrame: mainFrame };
+  for (const operation of ["run_status", "subagents_runs"]) {
+    assert.equal(call(event, { moduleId: "agent-orchestrator", operation }).ok, true);
+    assert.throws(() => call({ sender, senderFrame: {} }, { moduleId: "agent-orchestrator", operation }));
+    assert.throws(() => call({ sender: { mainFrame }, senderFrame: mainFrame }, { moduleId: "agent-orchestrator", operation }));
+  }
+  assert.equal(calls.length, 2);
+  for (const operation of ["chat_send", "start_run", "subagents_stop", "models", "chat_preview_show"]) {
+    assert.throws(() => call(event, { moduleId: "agent-orchestrator", operation }));
+  }
+  assert.throws(() => call(event, { moduleId: "other", operation: "run_status" }));
+  destroyed = true;
+  assert.throws(() => call(event, { moduleId: "agent-orchestrator", operation: "run_status" }));
+  destroyed = false; visible = true; minimized = false;
+  assert.throws(() => call(event, { moduleId: "agent-orchestrator", operation: "chat_send" }), /focused/);
+  focused = true;
+  assert.equal(call(event, { moduleId: "agent-orchestrator", operation: "chat_send" }).ok, true);
+  assert.equal(calls.length, 3, "only accepted reads and the genuinely focused send reach the host");
+});
+
 test("Register native page detaches for launcher reload and crash without stopping its service", async () => {
   const vm = require("node:vm"), ts = require("typescript");
   const file = ts.createSourceFile("main.cjs", electronMain, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
