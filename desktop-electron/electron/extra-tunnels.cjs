@@ -1,9 +1,8 @@
 "use strict";
 
-// More MCP tunnels beside the main one the runtime supervisor owns. An OpenAI tunnel belongs to one
-// OpenAI account, and ChatGPT attaches a connector only through a tunnel of its own account, so each
-// further ChatGPT account needs its own tunnel. Every tunnel runs its own tunnel-client runtime and
-// its own MCP process (stdio); all of them reach the same turn broker, which serves many clients.
+// More MCP tunnels beside the main one the runtime supervisor owns. accountId is a local browser
+// profile's routing hint; setup checks the actual ChatGPT workspace and Platform tunnel owner.
+// Every tunnel runs its own tunnel-client runtime and MCP process (stdio); all reach the same broker.
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -15,6 +14,7 @@ const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_TUNNELS = 8;
 const MAX_LABEL_LENGTH = 60;
 const MAX_KEY_BYTES = 64 * 1024;
+const MAX_CONNECTOR_BINDINGS = 64;
 const TIMING = Object.freeze({
   monitorMs: 10_000,
   pollMs: 1_000,
@@ -37,6 +37,18 @@ function validEntry(entry) {
     && TUNNEL_ID.test(entry.tunnelId)
     && typeof entry.label === "string" && entry.label.trim() && entry.label.length <= MAX_LABEL_LENGTH
     && (entry.accountId === null || ACCOUNT_ID.test(entry.accountId)));
+}
+
+function connectorBinding(value, tunnelId, href = value?.href) {
+  if (!value || value.tunnelId !== tunnelId || !TUNNEL_ID.test(tunnelId)
+    || typeof value.userId !== "string" || !/^user-[A-Za-z0-9_-]{1,120}$/.test(value.userId)
+    || typeof value.workspaceId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value.workspaceId)
+    || typeof href !== "string" || href.length > 512) return null;
+  let url;
+  try { url = new URL(href, "https://chatgpt.com"); } catch { return null; }
+  if (url.origin !== "https://chatgpt.com" || url.username || url.password || !url.pathname.startsWith("/plugins/")) return null;
+  // The pathname is the connector identity. Directory query strings and unrelated fields are not.
+  return { userId: value.userId, workspaceId: value.workspaceId, tunnelId, href: url.pathname };
 }
 
 /** tunnel-client's local inventory as alias → { state, ready, pid }. */
@@ -130,6 +142,8 @@ class ExtraTunnels {
         tunnelId: entry.tunnelId,
         accountId: entry.accountId,
         connectorHref: typeof entry.connectorHref === "string" ? entry.connectorHref : null,
+        connectorBindings: (Array.isArray(entry.connectorBindings) ? entry.connectorBindings : [])
+          .slice(-MAX_CONNECTOR_BINDINGS).map(binding => connectorBinding(binding, entry.tunnelId)).filter(Boolean),
         state: runtime?.state ?? "stopped",
         detail: runtime?.detail ?? "",
         pid: runtime?.pid ?? null,
@@ -320,11 +334,18 @@ class ExtraTunnels {
     });
   }
 
-  /** Records the ChatGPT connector created for a tunnel. */
-  setConnector(id, href) {
+  /** Records scoped connector identities; saved records still require fresh remote verification. */
+  setConnector(id, href, context) {
     const entries = this.entries();
-    if (!entries.some(entry => entry.id === id)) throw new Error("That tunnel is not configured.");
-    this.writeEntries(entries.map(entry => (entry.id === id ? { ...entry, connectorHref: href } : entry)));
+    const entry = entries.find(entry => entry.id === id);
+    if (!entry) throw new Error("That tunnel is not configured.");
+    const binding = context === undefined ? null : connectorBinding(context, entry.tunnelId, href);
+    if (context !== undefined && !binding) throw new Error("The connector binding does not match this tunnel and workspace.");
+    const bindings = (Array.isArray(entry.connectorBindings) ? entry.connectorBindings : [])
+      .map(saved => connectorBinding(saved, entry.tunnelId)).filter(Boolean);
+    const next = binding ? bindings.filter(saved => saved.userId !== binding.userId || saved.workspaceId !== binding.workspaceId)
+      .concat(binding).slice(-MAX_CONNECTOR_BINDINGS) : bindings;
+    this.writeEntries(entries.map(entry => (entry.id === id ? { ...entry, connectorHref: href, connectorBindings: next } : entry)));
     this.onChange(this.status());
   }
 

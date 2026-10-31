@@ -44,7 +44,7 @@ const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
-const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand } = require("./mcp-connector-command.cjs");
+const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
@@ -2856,12 +2856,25 @@ function registerIpc({ logger, stateStore }) {
         accountTunnel = extraTunnels.status().find(tunnel => tunnel.id === accountTunnel.id && tunnel.accountId === accountId);
         if (accountTunnel?.state !== "ready") throw new Error("The account's MCP tunnel is not ready. Reconnect it before creating the connector.");
       }
+      const assertCurrent = () => {
+        if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+          || browserAccounts.accountIdOfPartition(operationPartition) !== accountId
+          || browserAccountsStatus().switching || quitting || shutdownInProgress || runtimeHost.currentOperation()) {
+          throw new Error("Browser account switching or shutdown is in progress");
+        }
+        if (accountTunnel && !extraTunnels.status().some(tunnel => tunnel.id === accountTunnel.id
+          && tunnel.accountId === accountId && tunnel.tunnelId === accountTunnel.tunnelId && tunnel.state === "ready")) {
+          throw new Error("The account's MCP tunnel changed or is not ready.");
+        }
+      };
+      assertCurrent();
       const result = await createConfiguredConnector({
-        app, BrowserWindow, browserHost: operationBrowser, runtimeHost,
+        app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
         ...(accountTunnel ? { target: { tunnelId: accountTunnel.tunnelId, partition: operationPartition } } : {}),
       });
+      assertCurrent();
       if (accountTunnel) {
-        extraTunnels.setConnector(accountTunnel.id, result.href);
+        extraTunnels.setConnector(accountTunnel.id, result.href, result.binding);
       } else {
         const state = stateStore.update({
           autoConnectExistingMcp: true,
@@ -2874,8 +2887,9 @@ function registerIpc({ logger, stateStore }) {
       publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
       return result;
     } catch (error) {
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: error instanceof Error ? error.message : String(error) });
-      throw error;
+      const failure = mcpConnectorCommandFailure(error);
+      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   } });
   dispatchMcpConnectorCommand();
@@ -3066,18 +3080,30 @@ function registerIpc({ logger, stateStore }) {
     const tunnel = runtimeSupervisor.extraTunnels.status().find(candidate => candidate.id === id);
     if (!tunnel) throw new Error("That tunnel is not configured.");
     if (!tunnel.accountId) throw new Error("Choose the ChatGPT account this tunnel belongs to first.");
+    const operationBrowser = browserHost, operationPartition = operationBrowser.partition;
+    const targetPartition = browserAccounts.partitionOf(tunnel.accountId);
+    const assertCurrent = () => {
+      if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+        || browserAccounts.partitionOf(tunnel.accountId) !== targetPartition || browserAccountsStatus().switching
+        || quitting || shutdownInProgress || runtimeHost.currentOperation()) throw new Error("Browser account switching or shutdown is in progress");
+      if (!runtimeSupervisor.extraTunnels.status().some(current => current.id === id && current.accountId === tunnel.accountId
+        && current.tunnelId === tunnel.tunnelId && current.state === "ready")) throw new Error("The account's MCP tunnel changed or is not ready.");
+    };
     publishOperation({ name: "mcp-connector-create", status: "running", message: `Creating the ChatGPT connector for ${tunnel.label}` });
     try {
+      assertCurrent();
       const result = await createConfiguredConnector({
-        app, BrowserWindow, browserHost, runtimeHost,
-        target: { tunnelId: tunnel.tunnelId, partition: browserAccounts.partitionOf(tunnel.accountId) },
+        app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
+        target: { tunnelId: tunnel.tunnelId, partition: targetPartition },
       });
-      runtimeSupervisor.extraTunnels.setConnector(id, result.href);
+      assertCurrent();
+      runtimeSupervisor.extraTunnels.setConnector(id, result.href, result.binding);
       publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
       return result;
     } catch (error) {
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: error instanceof Error ? error.message : String(error) });
-      throw error;
+      const failure = mcpConnectorCommandFailure(error);
+      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   });
   handle("launcher:set-mcp-step", (_event, step) => {

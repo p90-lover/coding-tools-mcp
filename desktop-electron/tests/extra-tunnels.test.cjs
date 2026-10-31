@@ -209,6 +209,31 @@ test("an extra tunnel's connector uses the connector name with that tunnel's ID"
   assert.throws(() => extraConnectorSettings(runtimeHost, "tunnel_x"), /no valid tunnel ID/);
 });
 
+test("connector bindings keep Personal and Business identities distinct without trusting legacy display links", async t => {
+  const { tunnels, config, coreHome } = setup();
+  t.after(() => fs.rmSync(coreHome, { recursive: true, force: true }));
+  await tunnels.start(config);
+  t.after(() => tunnels.detach());
+  const added = await tunnels.add({ label: "Same label", tunnelId: SECOND_ID, runtimeKey: "PRIVATE_KEY", accountId: "account-2" });
+  const businessId = "602b5d8d-e211-49b1-9762-206108d52954";
+  const personalId = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122";
+  const binding = workspaceId => ({ userId: "user-fixture", workspaceId, tunnelId: SECOND_ID, runtimeKey: "DO_NOT_RETURN" });
+  tunnels.setConnector(added.id, "/plugins/legacy-display");
+  assert.deepEqual(tunnels.status()[0].connectorBindings, [], "old scalar links do not establish a workspace binding");
+  tunnels.setConnector(added.id, "/plugins/business", binding(businessId));
+  tunnels.setConnector(added.id, "/plugins/personal?directoryTab=personal", binding(personalId));
+  const status = tunnels.status()[0];
+  assert.equal(status.connectorHref, "/plugins/personal?directoryTab=personal", "the scalar remains available to the existing UI");
+  assert.deepEqual(status.connectorBindings, [
+    { userId: "user-fixture", workspaceId: businessId, tunnelId: SECOND_ID, href: "/plugins/business" },
+    { userId: "user-fixture", workspaceId: personalId, tunnelId: SECOND_ID, href: "/plugins/personal" },
+  ]);
+  assert.doesNotMatch(JSON.stringify(status), /PRIVATE_KEY|DO_NOT_RETURN|runtimeKey/);
+  assert.throws(() => tunnels.setConnector(added.id, "/plugins/wrong", { ...binding(personalId), tunnelId: THIRD_ID }), /binding.*tunnel/i);
+  assert.throws(() => tunnels.setConnector(added.id, "https://other.example/plugins/wrong", binding(personalId)), /binding/i);
+  assert.equal(tunnels.status()[0].connectorBindings.length, 2, "invalid bindings cannot replace either workspace");
+});
+
 test("the supervisor runs extra tunnels with its own tunnel client and MCP command", () => {
   const coreHome = fs.mkdtempSync(path.join(os.tmpdir(), "extra-tunnels-supervisor-"));
   const supervisor = new RuntimeSupervisor({
