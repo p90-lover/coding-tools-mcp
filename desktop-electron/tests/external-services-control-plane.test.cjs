@@ -13,6 +13,7 @@ const {
   normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
   removeIncompleteSnapshots,
+  removeSupersededSnapshots,
 } = require("../electron/external-services.cjs");
 
 const root = path.resolve(__dirname, "..");
@@ -605,6 +606,48 @@ test("snapshots an interrupted launch left behind are removed, but never a compl
   assert.equal(fs.existsSync(interrupted), false);
   assert.equal(fs.existsSync(complete) && fs.existsSync(young), true);
   assert.equal(fs.readFileSync(path.join(outside, "keep.txt"), "utf8"), "keep", "a linked folder is never entered");
+});
+
+test("superseded snapshots are removed, keeping the latest, the newest few and the state they name", async () => {
+  const directory = temporaryDirectory();
+  const archive = path.join(directory, "archives", "retired-services");
+  const snapshots = path.join(archive, "snapshots");
+  const id = (n) => `0000000${n}-0000-4000-8000-000000000000`;
+  const make = (n, manifest, minutesAgo) => {
+    fs.mkdirSync(path.join(snapshots, id(n), "integrations", "state", "paseo"), { recursive: true });
+    fs.writeFileSync(path.join(snapshots, id(n), "external-services.json"), "{}");
+    const file = path.join(snapshots, id(n), "manifest.json");
+    fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, sources: {}, stats: {}, ...manifest }));
+    const at = new Date(Date.now() - minutesAgo * 60_000);
+    fs.utimesSync(file, at, at);
+  };
+  // 1 holds the frozen state every later snapshot points to; 2 and 3 are old history; 4, 5 the newest.
+  make(1, {}, 500);
+  fs.writeFileSync(path.join(snapshots, id(1), "integrations", "state", "paseo", "state.bin"), "frozen");
+  make(2, { stateRoot: `snapshots/${id(1)}` }, 400);
+  make(3, { stateRoot: `snapshots/${id(1)}` }, 300);
+  make(4, { stateRoot: `snapshots/${id(1)}` }, 200);
+  make(5, { stateRoot: `snapshots/${id(1)}` }, 100);
+  fs.writeFileSync(path.join(archive, "latest.json"), JSON.stringify({ relative: `snapshots/${id(5)}` }));
+  const outside = path.join(directory, "outside");
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, "keep.txt"), "keep");
+  fs.symlinkSync(outside, path.join(snapshots, id(6)), "junction");
+
+  const removed = await removeSupersededSnapshots(archive);
+  assert.deepEqual(removed.sort(), [id(2), id(3)]);
+  assert.equal(fs.readFileSync(path.join(snapshots, id(1), "integrations", "state", "paseo", "state.bin"), "utf8"), "frozen");
+  assert.equal([4, 5].every((n) => fs.existsSync(path.join(snapshots, id(n), "manifest.json"))), true);
+  assert.equal(fs.readFileSync(path.join(outside, "keep.txt"), "utf8"), "keep", "a linked folder is never entered");
+  assert.deepEqual(await removeSupersededSnapshots(archive), [], "nothing more once only kept snapshots remain");
+
+  // An unreadable manifest among the kept stops the pass with nothing removed.
+  make(7, { stateRoot: `snapshots/${id(1)}` }, 50);
+  make(8, { stateRoot: `snapshots/${id(1)}` }, 10);
+  fs.writeFileSync(path.join(snapshots, id(8), "manifest.json"), "{torn");
+  fs.writeFileSync(path.join(archive, "latest.json"), JSON.stringify({ relative: `snapshots/${id(8)}` }));
+  assert.deepEqual(await removeSupersededSnapshots(archive), []);
+  assert.equal([4, 5, 7, 8].every((n) => fs.existsSync(path.join(snapshots, id(n)))), true);
 });
 
 test("archived retired state is not walked again on later launches", () => {

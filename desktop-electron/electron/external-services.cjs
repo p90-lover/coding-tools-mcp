@@ -539,6 +539,60 @@ async function removeIncompleteSnapshots(archiveRoot, { logger = null, now = Dat
   return removed;
 }
 
+// Completed snapshots kept besides those still read: the newest few, a short history of the live files.
+const KEPT_SNAPSHOTS = 2;
+
+/**
+ * Removes completed snapshots nothing reads any more. Each change to the small live files writes a
+ * new snapshot with its own manifest (~10 MB: every retired file is listed), and none was ever
+ * removed (seen: 48 in a month, 480 MB of manifests alone). Only the snapshot latest.json names and
+ * the one its manifest's stateRoot names are read; the newest few are kept too, with whatever their
+ * stateRoots name. Anything unreadable stops the pass with nothing removed. Like
+ * removeIncompleteSnapshots it runs off the main thread and never follows links, and a hard-linked
+ * file of a removed snapshot stays on disk under the names kept snapshots give it.
+ */
+async function removeSupersededSnapshots(archiveRoot, { logger = null, keep = KEPT_SNAPSHOTS } = {}) {
+  const snapshots = path.join(archiveRoot, "snapshots");
+  const readJson = async (file) => JSON.parse(await fs.promises.readFile(file, "utf8"));
+  const kept = new Set();
+  let completed;
+  try {
+    const latest = (await readJson(path.join(archiveRoot, "latest.json"))).relative;
+    if (typeof latest !== "string" || !SNAPSHOT_RELATIVE.test(latest)) return [];
+    completed = [];
+    for (const entry of await fs.promises.readdir(snapshots, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^[a-f0-9-]{36}$/.test(entry.name)) continue;
+      const info = await fs.promises.stat(path.join(snapshots, entry.name, "manifest.json")).catch(() => null);
+      if (info) completed.push({ relative: `snapshots/${entry.name}`, mtimeMs: info.mtimeMs });
+    }
+    // Nothing to remove: skip reading manifests (each is ~10 MB of JSON).
+    if (completed.length <= keep + 1) return [];
+    completed.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const read = [latest, ...completed.slice(0, keep).map((snapshot) => snapshot.relative)];
+    for (const relative of read) {
+      kept.add(relative);
+      const { stateRoot } = await readJson(path.join(archiveRoot, relative, "manifest.json"));
+      if (stateRoot === undefined || stateRoot === "") continue;
+      if (typeof stateRoot !== "string" || !SNAPSHOT_RELATIVE.test(stateRoot)) return [];
+      kept.add(stateRoot);
+    }
+  } catch {
+    return [];
+  }
+  const removed = [];
+  for (const { relative } of completed) {
+    if (kept.has(relative)) continue;
+    try {
+      await fs.promises.rm(path.join(archiveRoot, relative), { recursive: true, force: true });
+      removed.push(relative.slice("snapshots/".length));
+    } catch (error) {
+      logger?.warn?.("external_services.archive_cleanup_failed", { snapshot: relative, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  if (removed.length) logger?.info?.("external_services.archive_superseded_removed", { count: removed.length, kept: kept.size });
+  return removed;
+}
+
 function createExternalServicesController({
   filePath,
   keyPath,
@@ -571,7 +625,8 @@ function createExternalServicesController({
     archiveDeferred = true;
     logger?.warn?.("external_services.archive_failed", { code: error?.code ?? null, message: error instanceof Error ? error.message : String(error) });
   }
-  void removeIncompleteSnapshots(path.join(path.dirname(filePath), "archives", "retired-services"), { logger });
+  const archiveRoot = path.join(path.dirname(filePath), "archives", "retired-services");
+  void removeIncompleteSnapshots(archiveRoot, { logger }).then(() => removeSupersededSnapshots(archiveRoot, { logger }));
   const codec = createSecretCodec({ safeStorage, keyPath });
   let state;
   let unarchivedState = null;
@@ -1120,6 +1175,7 @@ module.exports = {
   createSecretCodec,
   nextKeepAliveDelayMs,
   removeIncompleteSnapshots,
+  removeSupersededSnapshots,
   normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
 };
