@@ -44,17 +44,33 @@ test("persisted mesh excludes credentials", () => {
   assert.throws(() => persistLoopbackMesh(filePath, { ...parsed, leak: "proxyApiKey" }), /secrets/i);
 });
 
-test("an unchanged mesh is not rewritten, a changed or deleted one is", () => {
+test("an unchanged mesh is not rewritten or checked synchronously, a changed or deleted one is written", async () => {
+  // Seen live 2026-10-31: the existsSync of an unchanged mesh, every 20 s keep-alive, froze every
+  // window for up to 10 s on the app's busy hard disk.
   const filePath = path.join(temporaryDirectory(), "loopback-mesh.json");
+  const mesh = buildLoopbackMesh([{ id: "cpa", endpoint: "http://127.0.0.1:9000" }]);
   persistLoopbackMesh(filePath, buildLoopbackMesh());
   fs.writeFileSync(filePath, "marker");
-  persistLoopbackMesh(filePath, buildLoopbackMesh());
+  const { existsSync, statSync } = fs;
+  let blocking = 0;
+  fs.existsSync = (...args) => { blocking += 1; return existsSync(...args); };
+  fs.statSync = (...args) => { blocking += 1; return statSync(...args); };
+  try {
+    persistLoopbackMesh(filePath, buildLoopbackMesh());
+    assert.equal(blocking, 0, "same content: no synchronous disk call");
+  } finally {
+    Object.assign(fs, { existsSync, statSync });
+  }
   assert.equal(fs.readFileSync(filePath, "utf8"), "marker", "same content: no write");
-  persistLoopbackMesh(filePath, buildLoopbackMesh([{ id: "cpa", endpoint: "http://127.0.0.1:9000" }]));
+  persistLoopbackMesh(filePath, mesh);
   assert.match(fs.readFileSync(filePath, "utf8"), /9000/);
   fs.rmSync(filePath);
-  persistLoopbackMesh(filePath, buildLoopbackMesh([{ id: "cpa", endpoint: "http://127.0.0.1:9000" }]));
-  assert.ok(fs.existsSync(filePath), "a deleted mesh is written again");
+  persistLoopbackMesh(filePath, mesh);
+  for (let tries = 0; tries < 100 && !fs.existsSync(filePath); tries += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    persistLoopbackMesh(filePath, mesh);
+  }
+  assert.ok(fs.existsSync(filePath), "a deleted mesh is written again by a later publish");
 });
 
 test("external and managed controllers advertise the same CPA mesh", () => {

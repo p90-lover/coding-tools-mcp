@@ -148,8 +148,17 @@ function persistLoopbackMesh(filePath, mesh) {
   }
   // Every CPA keep-alive (20 s) publishes the mesh. An unchanged mesh that is still on disk is not
   // rewritten: each atomic write (six file operations) blocked the main thread for seconds on the
-  // busy hard disk.
-  if (lastWritten.get(filePath) === serialized && fs.existsSync(filePath)) return filePath;
+  // busy hard disk. Whether it is still there is asked without blocking: the existsSync that did it
+  // froze every window for up to 10 s (2026-10-31). One found missing is written by the next publish.
+  if (lastWritten.get(filePath) === serialized) {
+    if (!checking.has(filePath)) {
+      checking.add(filePath);
+      fs.promises.access(filePath)
+        .catch(() => { if (lastWritten.get(filePath) === serialized) lastWritten.delete(filePath); })
+        .finally(() => checking.delete(filePath));
+    }
+    return filePath;
+  }
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   writePrivateFileAtomic(filePath, serialized);
   lastWritten.set(filePath, serialized);
@@ -157,6 +166,7 @@ function persistLoopbackMesh(filePath, mesh) {
 }
 
 const lastWritten = new Map();
+const checking = new Set();
 
 module.exports = {
   DEFAULT_IN_APP_LOOPBACKS,
