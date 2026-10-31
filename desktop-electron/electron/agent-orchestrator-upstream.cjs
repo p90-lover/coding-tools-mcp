@@ -8,7 +8,7 @@ const { execFile, spawn } = require("node:child_process");
 const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway.cjs");
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
 const { MAX_RESPONSE_BYTES } = require("./ipc-schema.cjs");
-const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
+const { readCpaCatalog, collectMissionAccounting, accountingMeasurements } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 const { createDaemonLogFilter } = require("./ao-daemon-log.cjs");
@@ -381,10 +381,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         readSession: async id => {
           const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
           if (record?.session?.id !== id || record.session.projectId !== scope.projectId) return record;
-          const [normalized, conversation] = await Promise.all([
-            internalApi("GET", `/api/v1/usage/sessions/${sessionId(id)}`).catch(() => null),
-            internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=1`).catch(() => null),
-          ]);
+          const normalized = await internalApi("GET", `/api/v1/usage/sessions/${sessionId(id)}`).catch(() => null);
+          const conversation = accountingMeasurements(normalized).length ? null
+            : await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=1`).catch(() => null);
           return { session: record.session, normalized, conversation: { usage: conversation?.usage } };
         },
       }),
