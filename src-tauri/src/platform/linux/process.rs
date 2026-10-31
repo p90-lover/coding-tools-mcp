@@ -34,9 +34,7 @@ pub fn terminate_process_tree(root_pid: u32) -> AppResult<()> {
 }
 
 fn collect_child_pids(root_pid: u32) -> AppResult<Vec<u32>> {
-    let mut pending = vec![root_pid];
-    let mut seen = std::collections::HashSet::from([root_pid]);
-    let mut ordered = Vec::new();
+    let mut records = Vec::new();
     let proc = Path::new("/proc");
 
     for entry in fs::read_dir(proc)
@@ -58,12 +56,9 @@ fn collect_child_pids(root_pid: u32) -> AppResult<Vec<u32>> {
         else {
             continue;
         };
-        if pending.contains(&parent) && seen.insert(pid) {
-            ordered.push(pid);
-            pending.push(pid);
-        }
+        records.push((pid, parent));
     }
-    Ok(ordered)
+    Ok(crate::platform::descendant_pids(root_pid, &records))
 }
 
 fn parent_pid_from_stat_read(result: std::io::Result<String>) -> AppResult<Option<u32>> {
