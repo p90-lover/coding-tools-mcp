@@ -3,7 +3,8 @@ require("./support/temp-dirs.cjs"); // removes the temp folders this file makes 
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { PREVIEW_TOOL_DEFS, createChatPreviews, createNativeChatPreviews, previewTarget } = require("../electron/chat-preview.cjs");
+const vm = require("node:vm");
+const { PREVIEW_TOOL_DEFS, createChatPreviews, createNativeChatPreviews, previewTarget, visualizeFragmentError } = require("../electron/chat-preview.cjs");
 const { createChatAgentTools, instructionsFor, previewOriginDecision } = require("../electron/chat-agent-tools.cjs");
 
 /** A WebContentsView stand-in: records bounds, protocol commands and the session's handlers. */
@@ -18,7 +19,7 @@ function fakeView({ page = {} } = {}) {
     emit(event, ...args) { for (const fn of handlers[event] ?? []) fn(...args); },
     setWindowOpenHandler(fn) { this.openHandler = fn; },
     async loadURL(url) {
-      await page.beforeLoad?.(url);
+      await page.beforeLoad?.(url, this);
       if (page.refused?.(url)) throw new Error(`ERR_CONNECTION_REFUSED (-102) loading '${url}'`);
       (this.loads ??= []).push(url);
       const failed = page.fail?.(url);
@@ -43,7 +44,7 @@ function fakeView({ page = {} } = {}) {
       async sendCommand(method, params) {
         sent.push([method, params]);
         if (method === "Page.captureScreenshot") return { data: "iVBORw0KGgo=" };
-        if (method === "Runtime.evaluate") return { result: { value: page.evaluate ? page.evaluate(params.expression) : null } };
+        if (method === "Runtime.evaluate") return { result: { value: page.evaluate ? page.evaluate(params.expression, contents) : null } };
         return {};
       },
     },
@@ -139,16 +140,113 @@ test("visualize fragments get offline theme utilities without changing explicit 
     await service.call("owner", "preview_render", { html: '<button class="btn">0</button>' }, { visualization: true });
     assert.match(markup(), /--background:Canvas/);
     assert.match(markup(), /connect-src 'none'/);
-    assert.doesNotMatch(markup(), /window\.openai/);
+    assert.match(markup(), /setWidgetState/);
     assert.equal(service.matchesPanel("owner", '<button class="btn">0</button>'), true);
     assert.equal(service.matchesPanel("other", '<button class="btn">0</button>'), false);
     await service.call("owner", "preview_render", { html: "<button>Explicit</button>" });
     assert.equal(views.length, 1);
     assert.doesNotMatch(markup(), /--background:Canvas/);
+    assert.doesNotMatch(markup(), /setWidgetState/);
     assert.equal(service.matchesPanel("owner", '<button class="btn">0</button>'), false);
     service.close("owner");
     assert.equal(service.matchesPanel("owner", "<button>Explicit</button>"), false);
   } finally { service.closeAll(); }
+});
+
+test("native visualization widget state stays local to its owner across replacements", async (t) => {
+  // The model-created counter contract, kept inline so this regression needs no external artifact.
+  const counter = `<div id="native-counter-phase-one">
+  <h2>NATIVE_CODEX_COUNTER_PHASE_ONE</h2>
+  <button id="native-counter-phase-one-button" class="btn btn-primary tabular-nums" type="button" aria-label="Counter: 0" aria-live="polite">0</button>
+</div>
+<script>
+(() => {
+  const root = document.getElementById('native-counter-phase-one');
+  const button = root.querySelector('#native-counter-phase-one-button');
+  const saved = window.openai?.widgetState?.modelContent?.counter;
+  let count = Number.isSafeInteger(saved) && saved >= 0 ? saved : 0;
+  const render = () => {
+    button.textContent = String(count);
+    button.setAttribute('aria-label', \`Counter: \${count}\`);
+  };
+  window.addEventListener('openai:set_globals', event => {
+    const next = event.detail?.globals?.widgetState?.modelContent?.counter;
+    if (Number.isSafeInteger(next) && next >= 0) { count = next; render(); }
+  });
+  button.addEventListener('click', () => {
+    count += 1;
+    render();
+    if (typeof window.openai?.setWidgetState === 'function') {
+      window.openai.setWidgetState({ modelContent: { counter: count }, privateContent: null }).catch(() => {});
+    }
+  });
+  render();
+})();
+</script>`;
+  const executable = () => {
+    const documents = new Map();
+    const fixture = previews({ page: {
+      beforeLoad(url, contents) {
+        const markup = Buffer.from(url.split(",")[1], "base64").toString("utf8");
+        const handlers = new Map(), listeners = new Map();
+        const button = { textContent: "", setAttribute() {}, addEventListener: (name, handler) => handlers.set(name, handler) };
+        const root = { querySelector: () => button };
+        const sandbox = { document: { getElementById: () => root }, TextEncoder,
+          CustomEvent: class { constructor(type, { detail }) { this.type = type; this.detail = detail; } },
+          addEventListener: (name, listener) => { const values = listeners.get(name) ?? []; values.push(listener); listeners.set(name, values); },
+          dispatchEvent: event => { for (const listener of listeners.get(event.type) ?? []) listener(event); return true; } };
+        sandbox.window = sandbox;
+        const context = vm.createContext(sandbox);
+        documents.set(contents, { context, button, handlers, markup });
+        for (const script of markup.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) vm.runInContext(script[1], context);
+      },
+      evaluate: (expression, contents) => vm.runInContext(expression, documents.get(contents).context),
+    } });
+    return { ...fixture, document: index => documents.get(fixture.views[index].webContents) };
+  };
+  await t.test("the actual counter uses only the supported state contract", () => {
+    assert.equal(visualizeFragmentError(counter), null);
+    for (const html of ['<script>window.openai.callTool("x")</script>', '<script>window.openai?.sendFollowUpMessage({})</script>',
+      '<script>lucide.createIcons()</script>', '<script>Tweak.foo()</script>']) assert.match(visualizeFragmentError(html), /native host APIs/);
+  });
+  await t.test("click, AI replacement and reload preserve state without sharing it", async () => {
+    const { service, views, document } = executable();
+    try {
+      assert.equal((await service.call("owner", "preview_render", { html: counter }, { visualization: true })).isError, false);
+      assert.equal(document(0).button.textContent, "0");
+      document(0).handlers.get("click")();
+      assert.equal(document(0).button.textContent, "1");
+      await service.call("owner", "preview_render", { html: counter + "<p>AI update</p>" }, { visualization: true });
+      assert.equal(document(0).button.textContent, "1", "a new AI document receives the prior owned state");
+      await service.call("owner", "preview_navigate", { action: "reload" });
+      assert.equal(document(0).button.textContent, "1");
+      assert.equal(views.length, 1, "the same pane survives both replacements");
+      assert.deepEqual(Array.from(vm.runInContext("Object.keys(window.openai)", document(0).context)).sort(), ["setWidgetState", "widgetState"]);
+      await vm.runInContext("window.openai.setWidgetState({modelContent:{counter:7}})", document(0).context);
+      assert.equal(document(0).button.textContent, "7", "openai:set_globals delivers the new local snapshot");
+      await service.call("other", "preview_render", { html: counter }, { visualization: true });
+      assert.equal(document(1).button.textContent, "0");
+      assert.equal(vm.runInContext("window.openai.widgetState", document(1).context), null);
+      await service.call("owner", "preview_render", { html: "<button>Explicit</button>" });
+      assert.equal(vm.runInContext("typeof window.openai", document(0).context), "undefined");
+    } finally { service.closeAll(); }
+  });
+  await t.test("state is bounded JSON and cannot terminate the bootstrap script", async () => {
+    const { service, document } = executable();
+    try {
+      await service.call("owner", "preview_render", { html: counter }, { visualization: true });
+      const payload = "</script><script>globalThis.injected=true</script>\u2028\u2029";
+      await vm.runInContext(`window.openai.setWidgetState(${JSON.stringify({ modelContent: { counter: 1, payload } })})`, document(0).context);
+      await assert.rejects(vm.runInContext(`window.openai.setWidgetState({modelContent:${JSON.stringify("x".repeat(32 * 1024))}})`, document(0).context), /KiB|large|limit/);
+      await assert.rejects(vm.runInContext("window.openai.setWidgetState({modelContent:Infinity})", document(0).context), /JSON/);
+      await service.call("owner", "preview_render", { html: counter + "<p>Update</p>" }, { visualization: true });
+      assert.equal(vm.runInContext("window.openai.widgetState.modelContent.payload", document(0).context), payload);
+      assert.equal(vm.runInContext("typeof injected", document(0).context), "undefined");
+      assert.match(document(0).markup, /\\u003c\/script>/);
+      assert.ok(!document(0).markup.includes("\u2028") && !document(0).markup.includes("\u2029"));
+      assert.equal(document(0).button.textContent, "1", "a rejected oversized snapshot does not replace valid state");
+    } finally { service.closeAll(); }
+  });
 });
 
 test("parallel panel updates stay ordered and an ended owner cannot render queued content", async () => {

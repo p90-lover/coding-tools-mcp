@@ -31,6 +31,7 @@ const MAX_ELEMENTS = 250;
 const MAX_TYPED = 4_000;
 // Worst-case JSON escaping stays below the agent MCP server's 1 MB request budget.
 const MAX_PANEL_BYTES = 128 * 1024;
+const MAX_WIDGET_STATE_BYTES = 16 * 1024;
 // A small offline subset of the native fragment styles. No host APIs or network libraries.
 const VISUALIZE_STYLE = `:root{--background:Canvas;--foreground:CanvasText;--card:Canvas;--card-foreground:CanvasText;--popover:Canvas;--popover-foreground:CanvasText;--primary:Highlight;--primary-foreground:HighlightText;--secondary:ButtonFace;--secondary-foreground:ButtonText;--muted:color-mix(in srgb,CanvasText 8%,Canvas);--muted-foreground:color-mix(in srgb,CanvasText 70%,Canvas);--accent:color-mix(in srgb,Highlight 12%,Canvas);--accent-foreground:CanvasText;--border:color-mix(in srgb,CanvasText 20%,Canvas);--input:var(--border);--ring:Highlight;--font-size-base:14px;--destructive:light-dark(#b42318,#ffb4ab);--viz-series-1:Highlight}body{background:var(--background);color:var(--foreground)}.card{background:var(--card);color:var(--card-foreground);padding:16px;border:1px solid var(--border);border-radius:8px}.btn{font:inherit;padding:6px 12px;border:1px solid var(--border);border-radius:6px;background:var(--secondary);color:var(--secondary-foreground)}.btn-primary,button[aria-pressed=true]{background:var(--primary);color:var(--primary-foreground)}.btn-ghost{background:transparent}.btn-block{display:block;width:100%}.viz-row,.viz-controls{display:flex;flex-wrap:wrap;align-items:center;gap:12px}.viz-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:12px}.form-label{display:block}.form-control,.form-select{box-sizing:border-box;max-width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--background);color:var(--foreground)}.form-range{max-width:100%}.text-muted{color:var(--muted-foreground)}.text-small{font-size:12px}.tabular-nums{font-variant-numeric:tabular-nums}.table{border-collapse:collapse;width:100%}.table th,.table td{padding:8px;text-align:start;border-bottom:1px solid var(--border)}.table-responsive{overflow:auto}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}button,input,select,textarea{max-width:100%}`;
 const LIVE_PANEL_URL = "about:blank#live-panel";
@@ -211,7 +212,8 @@ function visualizeFragmentError(html) {
   if (typeof html !== "string" || !html.trim()) return "The visualization file is empty or unavailable.";
   if (Buffer.byteLength(html, "utf8") > MAX_PANEL_BYTES) return "This Preview supports fragments up to 128 KiB; larger native visualizations are unsupported.";
   if (/<!doctype|<\/?(?:html|head|body)\b/i.test(html)) return "This Preview needs an HTML fragment, not a complete document.";
-  if (/\b(?:openai|lucide)\s*(?:\.|\[)|\bTweak\s*(?:\.|\()|\bdata-lucide\s*=/i.test(html)) return "This visualization requires native host APIs that Coding Tools Preview does not provide.";
+  const hostReferences = html.replace(/\bopenai\s*(?:\??\.\s*(?:widgetState|setWidgetState)\b|(?:\?\.)?\s*\[\s*(["'])(?:widgetState|setWidgetState)\1\s*\])/g, "");
+  if (/\b(?:openai|lucide)\s*(?:\??\.|\[)|\bTweak\s*(?:\.|\()|\bdata-lucide\s*=/i.test(hostReferences)) return "This visualization requires native host APIs that Coding Tools Preview does not provide.";
   if (/<(?:script|link)\b[^>]*\b(?:src|href)\s*=|<(?:iframe|object|embed|base)\b|\b(?:src|href)\s*=\s*["']?https?:|@import\b|url\(\s*["']?https?:|\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(/i.test(html)) {
     return "This visualization requires external resources or network APIs. Coding Tools Preview supports offline fragments only.";
   }
@@ -495,6 +497,17 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     const current = () => !signal?.aborted && previews.get(preview.key) === preview && !preview.view.webContents.isDestroyed();
     const render = (preview.changing ?? Promise.resolve()).catch(() => undefined).then(async () => {
       if (!current()) throw new PreviewError("This chat's panel request ended.");
+      if (preview.visualization && preview.panelMode) {
+        let saved;
+        try { saved = await evaluate(preview, "JSON.stringify(window.openai?.widgetState ?? null)"); } catch { /* restore the last bounded snapshot if the old page stopped answering */ }
+        if (!current()) throw new PreviewError("This chat's panel request ended.");
+        if (typeof saved === "string" && Buffer.byteLength(saved, "utf8") <= MAX_WIDGET_STATE_BYTES) {
+          try {
+            const state = JSON.parse(saved);
+            if (state === null || typeof state === "object" && !Array.isArray(state)) preview.widgetState = state;
+          } catch { /* an invalid renderer value never replaces the owned snapshot */ }
+        }
+      }
       await change(current);
       if (!current()) throw new PreviewError("This chat's panel request ended.");
     });
@@ -507,7 +520,28 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
       const source = html ?? preview.html;
       if (typeof source !== "string") throw new PreviewError("This chat has no live panel to restore.");
       preview.panelMode = true;
-      const markup = "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Live panel</title><style>:root{color-scheme:light dark}body{margin:0;padding:16px;font:14px system-ui}button,input,select,textarea{font:inherit}" + (visualization ? VISUALIZE_STYLE : "") + "</style>" + source;
+      const initialState = JSON.stringify(preview.widgetState ?? null).replace(/[<\u2028\u2029]/g,
+        value => ({ "<": "\\u003c", "\u2028": "\\u2028", "\u2029": "\\u2029" })[value]);
+      const stateBridge = visualization ? `<script>(() => {
+        let state = ${initialState};
+        const copy = () => JSON.parse(JSON.stringify(state));
+        Object.defineProperty(window, "openai", { value: Object.freeze({
+          get widgetState() { return copy(); },
+          async setWidgetState(next) {
+            const parsed = JSON.parse(JSON.stringify(next, (_key, value) => {
+              if (["undefined", "function", "symbol", "bigint"].includes(typeof value)
+                || typeof value === "number" && !Number.isFinite(value)) throw new TypeError("Widget state must be a JSON object");
+              return value;
+            }));
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new TypeError("Widget state must be a JSON object");
+            const serialized = JSON.stringify({ modelContent: null, privateContent: null, ...parsed });
+            if (new TextEncoder().encode(serialized).length > ${MAX_WIDGET_STATE_BYTES}) throw new TypeError("Widget state must be JSON of at most 16 KiB");
+            state = JSON.parse(serialized);
+            window.dispatchEvent(new CustomEvent("openai:set_globals", { detail: { globals: { widgetState: copy() } } }));
+          }
+        }) });
+      })();</script>` : "";
+      const markup = "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Live panel</title><style>:root{color-scheme:light dark}body{margin:0;padding:16px;font:14px system-ui}button,input,select,textarea{font:inherit}" + (visualization ? VISUALIZE_STYLE : "") + "</style>" + stateBridge + source;
       // A fresh opaque origin prevents a panel from inheriting a project's cookies or storage.
       await load(preview, `data:text/html;base64,${Buffer.from(markup, "utf8").toString("base64")}`);
       if (!current()) throw new PreviewError("This chat's panel request ended.");

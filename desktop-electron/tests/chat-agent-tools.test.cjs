@@ -147,7 +147,7 @@ test("native preview leases expose only their own panel and expire without works
 });
 
 test("native visualize references read only the bound workspace and retain an unchanged panel", async () => {
-  let enabled = true, html = '<div class="card"><button class="btn">0</button></div>';
+  let enabled = true, html = '<div class="card"><button class="btn">0</button></div><script>const saved = window.openai?.widgetState; if (typeof window.openai?.setWidgetState === "function") window.openai.setWidgetState({modelContent:{counter:1},privateContent:null}).catch(() => {});</script>';
   const rendered = [], closed = [], panels = new Map();
   const { tools, calls } = fixture({ previewEnabled: () => enabled, previews: {
     call: async (owner, name, args, options) => { panels.set(owner, args.html); rendered.push({ owner, name, html: args.html, options }); return { isError: false }; },
@@ -171,6 +171,7 @@ test("native visualize references read only the bound workspace and retain an un
     assert.equal(calls[1].body.root_kind, "project_folder");
     assert.equal(rendered[0].owner, "native:ws1:task:single");
     assert.equal(rendered[0].options.visualization, true, "the engine supplies the offline theme/utility adapter");
+    assert.equal(rendered[0].html, html, "supported widget state does not turn the native counter into an unavailable notice");
     await render(reference);
     assert.equal(calls.length, 2, "a repeated completed observation does not re-read or reset interaction state");
     const next = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "followup", nodeId: "lead" } });
@@ -281,7 +282,7 @@ test("native visualize loading rejects inert references, scoped read failures an
     result = { ok: true, content: "<div>partial", total_bytes: 200000, truncated: true, next_offset: 10 };
     await render(reference);
     assert.match(rendered.at(-1), /128 KiB/);
-    for (const [html, message] of [["<script>window.openai.setWidgetState({})</script>", /native host APIs/],
+    for (const [html, message] of [["<script>window.openai.callTool({})</script>", /native host APIs/],
       ['<script src="https://cdn.jsdelivr.net/example.js"></script>', /offline/], ["<html><body>Document</body></html>", /fragment/]]) {
       result = { ok: true, content: html, total_bytes: Buffer.byteLength(html), truncated: false, next_offset: null };
       await render(reference);
