@@ -18,6 +18,7 @@
 //   works whether or not the preview is on screen.
 
 const crypto = require("node:crypto");
+const path = require("node:path");
 
 const VIEWPORT = Object.freeze({ width: 1280, height: 800 });
 const MAX_PREVIEWS = 8;
@@ -30,6 +31,8 @@ const MAX_ELEMENTS = 250;
 const MAX_TYPED = 4_000;
 // Worst-case JSON escaping stays below the agent MCP server's 1 MB request budget.
 const MAX_PANEL_BYTES = 128 * 1024;
+// A small offline subset of the native fragment styles. No host APIs or network libraries.
+const VISUALIZE_STYLE = `:root{--background:Canvas;--foreground:CanvasText;--card:Canvas;--card-foreground:CanvasText;--popover:Canvas;--popover-foreground:CanvasText;--primary:Highlight;--primary-foreground:HighlightText;--secondary:ButtonFace;--secondary-foreground:ButtonText;--muted:color-mix(in srgb,CanvasText 8%,Canvas);--muted-foreground:color-mix(in srgb,CanvasText 70%,Canvas);--accent:color-mix(in srgb,Highlight 12%,Canvas);--accent-foreground:CanvasText;--border:color-mix(in srgb,CanvasText 20%,Canvas);--input:var(--border);--ring:Highlight;--font-size-base:14px;--destructive:light-dark(#b42318,#ffb4ab);--viz-series-1:Highlight}body{background:var(--background);color:var(--foreground)}.card{background:var(--card);color:var(--card-foreground);padding:16px;border:1px solid var(--border);border-radius:8px}.btn{font:inherit;padding:6px 12px;border:1px solid var(--border);border-radius:6px;background:var(--secondary);color:var(--secondary-foreground)}.btn-primary,button[aria-pressed=true]{background:var(--primary);color:var(--primary-foreground)}.btn-ghost{background:transparent}.btn-block{display:block;width:100%}.viz-row,.viz-controls{display:flex;flex-wrap:wrap;align-items:center;gap:12px}.viz-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:12px}.form-label{display:block}.form-control,.form-select{box-sizing:border-box;max-width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--background);color:var(--foreground)}.form-range{max-width:100%}.text-muted{color:var(--muted-foreground)}.text-small{font-size:12px}.tabular-nums{font-variant-numeric:tabular-nums}.table{border-collapse:collapse;width:100%}.table th,.table td{padding:8px;text-align:start;border-bottom:1px solid var(--border)}.table-responsive{overflow:auto}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}button,input,select,textarea{max-width:100%}`;
 const LIVE_PANEL_URL = "about:blank#live-panel";
 // A page script that does not answer within this fails the call.
 const EVALUATE_TIMEOUT_MS = 5_000;
@@ -174,6 +177,46 @@ const PREVIEW_TOOL_DEFS = Object.freeze([
     inputSchema: object({ after: { type: "integer", minimum: 0 }, errors_only: { type: "boolean" } }) },
 ]);
 const PREVIEW_TOOLS = new Set(PREVIEW_TOOL_DEFS.map((tool) => tool.name));
+
+/** Standalone final-answer references only: quoted, fenced and partial tokens have no authority. */
+function visualizeReference(answer) {
+  if (typeof answer !== "string") return null;
+  let fence = null, found = null;
+  for (const line of answer.split(/\r?\n/)) {
+    if (fence) {
+      const close = /^\s{0,3}(`{3,}|~{3,})\s*$/.exec(line)?.[1];
+      if (close && close[0] === fence[0] && close.length >= fence.length) fence = null;
+      continue;
+    }
+    const run = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (run) { fence = run; continue; }
+    if (/^ {4}|^\t/.test(line)) continue;
+    const match = /^\s*visualize([^\r\n]+)\s*$/.exec(line);
+    if (!match) continue;
+    if (found) return { error: "This Preview supports one visualization per chat agent. Use one final reference." };
+    try {
+      const value = JSON.parse(match[1]);
+      if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !["path", "title", "mode"].includes(key))
+        || typeof value.path !== "string" || value.path.length > 4096 || /[\u0000-\u001f]/.test(value.path)
+        || !path.isAbsolute(value.path) || !/\.html$/i.test(value.path)
+        || value.title !== undefined && (typeof value.title !== "string" || value.title.length > 250)
+        || value.mode !== undefined && value.mode !== "wide") throw new Error("invalid");
+      found = value;
+    } catch { return { error: "This visualization reference is invalid. Use an absolute HTML fragment path." }; }
+  }
+  return found;
+}
+
+function visualizeFragmentError(html) {
+  if (typeof html !== "string" || !html.trim()) return "The visualization file is empty or unavailable.";
+  if (Buffer.byteLength(html, "utf8") > MAX_PANEL_BYTES) return "This Preview supports fragments up to 128 KiB; larger native visualizations are unsupported.";
+  if (/<!doctype|<\/?(?:html|head|body)\b/i.test(html)) return "This Preview needs an HTML fragment, not a complete document.";
+  if (/\b(?:openai|lucide)\s*(?:\.|\[)|\bTweak\s*(?:\.|\()|\bdata-lucide\s*=/i.test(html)) return "This visualization requires native host APIs that Coding Tools Preview does not provide.";
+  if (/<(?:script|link)\b[^>]*\b(?:src|href)\s*=|<(?:iframe|object|embed|base)\b|\b(?:src|href)\s*=\s*["']?https?:|@import\b|url\(\s*["']?https?:|\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(/i.test(html)) {
+    return "This visualization requires external resources or network APIs. Coding Tools Preview supports offline fragments only.";
+  }
+  return null;
+}
 
 const textResult = (value, isError = false) => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value, isError });
 const failure = (message) => ({ content: [{ type: "text", text: message }], isError: true });
@@ -459,17 +502,18 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     try { await render; } finally { if (preview.changing === render) preview.changing = null; }
   }
 
-  async function renderPanel(preview, html, signal) {
+  async function renderPanel(preview, html, signal, visualization = preview.visualization === true) {
     await changePage(preview, async current => {
       const source = html ?? preview.html;
       if (typeof source !== "string") throw new PreviewError("This chat has no live panel to restore.");
       preview.panelMode = true;
-      const markup = "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Live panel</title><style>:root{color-scheme:light dark}body{margin:0;padding:16px;font:14px system-ui}button,input,select,textarea{font:inherit}</style>" + source;
+      const markup = "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Live panel</title><style>:root{color-scheme:light dark}body{margin:0;padding:16px;font:14px system-ui}button,input,select,textarea{font:inherit}" + (visualization ? VISUALIZE_STYLE : "") + "</style>" + source;
       // A fresh opaque origin prevents a panel from inheriting a project's cookies or storage.
       await load(preview, `data:text/html;base64,${Buffer.from(markup, "utf8").toString("base64")}`);
       if (!current()) throw new PreviewError("This chat's panel request ended.");
       preview.view.webContents.navigationHistory?.clear?.();
       preview.html = source;
+      preview.visualization = visualization;
     }, signal);
   }
 
@@ -614,7 +658,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
      * One preview tool call for the agent of `key`. `permit(origin)` decides whether this chat may
      * open an origin it has not opened before: true, or the refusal (an MCP result) to return.
      */
-    async call(key, name, args = {}, { permit = async () => true, signal } = {}) {
+    async call(key, name, args = {}, { permit = async () => true, signal, visualization = false } = {}) {
       if (!PREVIEW_TOOLS.has(name)) return failure(`Unknown tool: ${name}`);
       const generation = ownerGeneration;
       if (signal?.aborted) return failure("This chat's preview request was cancelled.");
@@ -625,7 +669,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
           const preview = previews.get(key) ?? create(key);
           preview.usedAt = now();
           place(preview);
-          await renderPanel(preview, args.html, signal);
+          await renderPanel(preview, args.html, signal, visualization);
           return textResult({ ok: true, ...summary(preview) });
         }
         if (name === "preview_open") {
@@ -661,6 +705,11 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
         logger.warn?.("chat_preview.call_failed", { tool: name, message: String(error?.message ?? error).slice(0, 300) });
         return failure(`The preview could not do that: ${String(error?.message ?? error).slice(0, 300)}`);
       }
+    },
+    /** Internal artifact reuse check; never exposes panel source through the UI/tool state. */
+    matchesPanel(key, html) {
+      const preview = previews.get(key);
+      return Boolean(preview?.panelMode && !preview.view.webContents.isDestroyed() && preview.html === html);
     },
     /** What the chat's Preview pane shows for one agent, or null when it has opened nothing. */
     state(key) {
@@ -869,4 +918,4 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, Menu, clipboard
   return Object.freeze({ ...previews, closeAll });
 }
 
-module.exports = Object.freeze({ PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, createChatPreviews, createNativeChatPreviews, previewMenuTemplate, previewTarget, isLoopbackHost });
+module.exports = Object.freeze({ PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, createChatPreviews, createNativeChatPreviews, previewMenuTemplate, previewTarget, isLoopbackHost, visualizeReference, visualizeFragmentError });

@@ -132,6 +132,25 @@ test("a live panel renders and updates in the same isolated preview without a de
   } finally { service.closeAll(); }
 });
 
+test("visualize fragments get offline theme utilities without changing explicit preview renders", async () => {
+  const { service, views } = previews();
+  const markup = () => Buffer.from(views[0].webContents.url.split(",")[1], "base64").toString("utf8");
+  try {
+    await service.call("owner", "preview_render", { html: '<button class="btn">0</button>' }, { visualization: true });
+    assert.match(markup(), /--background:Canvas/);
+    assert.match(markup(), /connect-src 'none'/);
+    assert.doesNotMatch(markup(), /window\.openai/);
+    assert.equal(service.matchesPanel("owner", '<button class="btn">0</button>'), true);
+    assert.equal(service.matchesPanel("other", '<button class="btn">0</button>'), false);
+    await service.call("owner", "preview_render", { html: "<button>Explicit</button>" });
+    assert.equal(views.length, 1);
+    assert.doesNotMatch(markup(), /--background:Canvas/);
+    assert.equal(service.matchesPanel("owner", '<button class="btn">0</button>'), false);
+    service.close("owner");
+    assert.equal(service.matchesPanel("owner", "<button>Explicit</button>"), false);
+  } finally { service.closeAll(); }
+});
+
 test("parallel panel updates stay ordered and an ended owner cannot render queued content", async () => {
   let started, release;
   const began = new Promise(resolve => { started = resolve; });

@@ -1618,6 +1618,34 @@ mod workspace_auth_tests {
         let config = fs::read_to_string(&config_path).unwrap();
         assert!(config.contains("[mcp_servers.coding-tools]"));
         assert!(config.contains("http_headers = { Authorization ="));
+        let enabled: Vec<String> = serde_json::from_str(
+            config
+                .lines()
+                .find_map(|line| line.strip_prefix("enabled_tools = "))
+                .expect("the private server must allow only the bound preview capability"),
+        )
+        .unwrap();
+        let expected = [
+            "preview_render", "preview_open", "preview_read", "preview_screenshot", "preview_click",
+            "preview_type", "preview_press", "preview_scroll", "preview_navigate", "preview_wait",
+            "preview_console",
+        ];
+        assert_eq!(enabled, expected);
+        for tool in expected {
+            assert!(config.contains(&format!("[mcp_servers.coding-tools.tools.{tool}]\napproval_mode = \"approve\"\n")));
+        }
+        assert_eq!(
+            config.matches("approval_mode = \"approve\"").count(),
+            expected.len()
+        );
+        assert!(
+            !config.contains("default_tools_approval_mode"),
+            "new or unexpected server tools remain unapproved"
+        );
+        assert!(
+            !config.contains("approval_policy"),
+            "preview authorization must not change the global policy"
+        );
         for invalid in [
             {
                 let mut value = server.clone();
@@ -1632,6 +1660,11 @@ mod workspace_auth_tests {
             {
                 let mut value = server.clone();
                 value["headers"]["Other"] = json!("not allowed");
+                value
+            },
+            {
+                let mut value = server.clone();
+                value["approval_mode"] = json!("approve");
                 value
             },
         ] {
@@ -2228,6 +2261,16 @@ mod workspace_auth_tests {
         ui_headers.insert("x-coding-tools-local-ui", "a".repeat(43).parse().unwrap());
         assert!(local_ui_authorized(&ui_headers, &gated));
         assert!(!local_ui_authorized(&headers, &gated));
+        let preview_without_issuer = ao_harness_connect(
+            State(gated.clone()), headers.clone(),
+            Json(serde_json::from_value(json!({"workspace_id":"ws-1", "run_id":"run", "node_id":"lead",
+                "connection":{}, "confirm":false, "chat_preview_server":{
+                    "name":"coding-tools", "type":"http", "url":"http://127.0.0.1:47991/mcp/ws-1/abcdefghijklmnop",
+                    "headers":{"Authorization":format!("Bearer {}", "x".repeat(43))}
+                }})).unwrap()),
+        ).await;
+        assert_eq!(preview_without_issuer.status(), StatusCode::FORBIDDEN,
+            "a public control bearer cannot install an auto-approved MCP server even on a saved-grant connect");
         let status = workspace_service(
             State(state.clone()),
             headers.clone(),
@@ -4290,11 +4333,24 @@ fn prepare_ao_preview_home(
     }
     let config_path = home.join("config.toml");
     let mut config = fs::read_to_string(&config_path).map_err(text_error)?;
+    // This private home receives only the workflow's bound preview capability. New tools
+    // remain unavailable and unapproved; global command/file/MCP approval policy is unchanged.
+    let preview_tools = [
+        "preview_render", "preview_open", "preview_read", "preview_screenshot", "preview_click",
+        "preview_type", "preview_press", "preview_scroll", "preview_navigate", "preview_wait",
+        "preview_console",
+    ];
     config.push_str(&format!(
-        "\n[mcp_servers.coding-tools]\nurl = {}\nhttp_headers = {{ Authorization = {} }}\n",
+        "\n[mcp_servers.coding-tools]\nurl = {}\nhttp_headers = {{ Authorization = {} }}\nenabled_tools = {}\n",
         serde_json::to_string(address).map_err(text_error)?,
         serde_json::to_string(bearer).map_err(text_error)?,
+        serde_json::to_string(&preview_tools).map_err(text_error)?,
     ));
+    for tool in preview_tools {
+        config.push_str(&format!(
+            "\n[mcp_servers.coding-tools.tools.{tool}]\napproval_mode = \"approve\"\n",
+        ));
+    }
     write_private_file(
         &config_path,
         config.as_bytes(),
@@ -4466,6 +4522,15 @@ async fn ao_harness_connect(
         Ok(lease) => lease,
         Err(response) => return *response,
     };
+    // The general control bearer and an existing run grant do not prove who issued a server.
+    // Only the app's private workflow transport may install its internally minted preview lease.
+    if body.chat_preview_server.is_some() && !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_PREVIEW_LOCAL_ISSUER_REQUIRED",
+            "Native preview tools must be issued by the app's chat workflow",
+        );
+    }
     if body.confirm && !local_ui_authorized(&headers, &state) {
         return json_error(
             StatusCode::FORBIDDEN,

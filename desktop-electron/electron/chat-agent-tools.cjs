@@ -60,7 +60,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
-const { PREVIEW_TOOL_DEFS, PREVIEW_TOOLS } = require("./chat-preview.cjs");
+const { PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, visualizeReference, visualizeFragmentError } = require("./chat-preview.cjs");
 const { SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS } = require("./subagents.cjs");
 const { CHAT_HISTORY_TOOL_DEFS, CHAT_HISTORY_TOOLS } = require("./chat-history.cjs");
 const { MAX_SECRET, MAX_SECRETS } = require("./chat-redaction.cjs");
@@ -1875,6 +1875,11 @@ function createChatAgentTools({
     const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
     if (entry.previewOnly && group === "preview") {
       if (!entry.aoSession) return failedCall("This native chat's preview is not bound yet.");
+      if (["preview_render", "preview_open", "preview_navigate"].includes(name)) {
+        entry.explicitPreview = true;
+        entry.visualization = null;
+        entry.visualizationAbort?.abort();
+      }
       return previews.call(entry.aoSession, name, withoutConsent(given), { permit: (origin) => permitOrigin(entry, origin, signal), signal });
     }
     if (name === "show_in_chat") return showInChat(entry, given);
@@ -2486,6 +2491,7 @@ function createChatAgentTools({
           const retained = paneEntries.get(sessionId);
           if (retained?.workspaceId === entry.workspaceId) {
             entry.commands = retained.commands; entry.commandState = retained.commandState; entry.root = retained.root;
+            entry.visualization = retained.visualization;
           }
           // One credential per session: an older one for the same session is retired.
           for (const other of [...sessions.values()]) {
@@ -2495,6 +2501,7 @@ function createChatAgentTools({
             entry.commands = other.commands;
             entry.commandState = other.commandState;
             entry.root ??= other.root;
+            entry.visualization = other.visualization ?? null;
             for (const origin of other.origins) entry.origins.add(origin);
             forget(other.key);
           }
@@ -2568,6 +2575,73 @@ function createChatAgentTools({
         revoked++;
       }
       return revoked;
+    },
+    /** Only the workflow calls this, with a persisted successful native answer and a fresh owner check. */
+    async renderNativeVisualization({ workspaceId, runId, nodeId, answer, requestKey, workingDirectory = ".", stillCurrent } = {}) {
+      const entry = [...sessions.values()].find(value => value.previewOnly && value.workspaceId === workspaceId
+        && value.nativeScope?.runId === runId && value.nativeScope.nodeId === nodeId && value.aoSession);
+      if (!entry || typeof requestKey !== "string" || typeof stillCurrent !== "function") return false;
+      const reference = visualizeReference(answer);
+      if (!reference) return false;
+      const active = () => isEnabled() && allowed(entry, "preview") && sessions.get(entry.key) === entry
+        && entry.expected && now() < entry.expiresAt && !entry.explicitPreview && !entry.lifetime.signal.aborted;
+      if (!active()) return false;
+      const attempt = crypto.createHash("sha256").update(JSON.stringify([requestKey, answer])).digest("hex");
+      if (entry.visualizationAttempt === attempt) return entry.visualizationPending ?? false;
+      entry.visualizationAttempt = attempt;
+      const controller = new AbortController();
+      entry.visualizationAbort = controller;
+      const signal = AbortSignal.any([entry.lifetime.signal, controller.signal]);
+      const current = async () => {
+        if (!active() || signal.aborted || !await stillCurrent()) return false;
+        return active() && !signal.aborted;
+      };
+      const pending = (async () => {
+        if (!await current()) return false;
+        let html, artifact = null, problem = reference.error;
+        if (!problem) {
+          try {
+            const registry = await requestHeadless("/api/v1/workspaces", null, { method: "GET", timeout: 20_000 });
+            if (!await current()) return false;
+            const registered = registry?.workspaces?.filter(value => value.id === entry.workspaceId);
+            const root = registered?.length === 1 ? registered[0].path : null;
+            if (typeof root !== "string" || !path.isAbsolute(root) || typeof workingDirectory !== "string") throw new Error("Workspace unavailable");
+            const relative = path.relative(root, path.resolve(root, workingDirectory));
+            if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Working directory changed");
+            // The registry chooses the root. A project-folder call is isolated and verifies the
+            // opened file remains inside it, including after symlink resolution; refs choose no root.
+            const response = await requestHeadless("/api/v1/tools/call", {
+              request_id: crypto.randomUUID(), workspace_id: entry.workspaceId, tool: "read_file",
+              root, root_kind: "project_folder",
+              arguments: { path: reference.path, max_bytes: 128 * 1024 + 1 },
+            }, { timeout: 20_000 });
+            const read = response?.operation?.result;
+            if (response?.operation?.state !== "completed" || read?.ok === false || typeof read?.content !== "string") {
+              problem = "The visualization file could not be read under this chat's workspace permissions.";
+            } else if (read.truncated || read.next_offset != null || read.total_bytes > 128 * 1024) {
+              problem = "This Preview supports complete fragments up to 128 KiB; this file is larger or incomplete.";
+            } else {
+              html = read.content;
+              problem = visualizeFragmentError(html);
+              if (!problem) artifact = { path: path.normalize(reference.path), hash: crypto.createHash("sha256").update(html).digest("hex") };
+            }
+          } catch { problem = "The visualization file is unavailable under this chat's workspace permissions."; }
+        }
+        if (!await current()) return false;
+        if (artifact && entry.visualization?.path === artifact.path && entry.visualization.hash === artifact.hash
+          && previews.matchesPanel?.(entry.aoSession, html) === true) return true;
+        if (problem) html = `<h2>Visualization unavailable</h2><p role="alert">${problem.replace(/[&<>]/g, value => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[value])}</p>`;
+        if (!await current()) return false;
+        const rendered = await previews.call(entry.aoSession, "preview_render", { html }, { signal, visualization: true });
+        if (!await current() || rendered?.isError !== false) return false;
+        entry.visualization = artifact;
+        return !problem;
+      })();
+      entry.visualizationPending = pending;
+      try { return await pending; } finally {
+        if (entry.visualizationPending === pending) entry.visualizationPending = null;
+        if (entry.visualizationAbort === controller) entry.visualizationAbort = null;
+      }
     },
     /**
      * What a launch would attach now: the tool groups (agent[+terminal][+desktop]) and this
@@ -2701,7 +2775,13 @@ function createChatAgentTools({
     /** The user's own navigation in a session's preview: back, forward, reload or a loopback URL. */
     async previewNavigate(sessionId, request) {
       if (!previews || typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return { ok: false, error: "No preview" };
-      if (request?.url !== undefined && !entryFor(sessionId)) return { ok: false, error: "That chat agent's session has ended" };
+      const entry = entryFor(sessionId);
+      if (request?.url !== undefined && !entry) return { ok: false, error: "That chat agent's session has ended" };
+      if (entry?.previewOnly) {
+        entry.explicitPreview = true;
+        entry.visualization = null;
+        entry.visualizationAbort?.abort();
+      }
       return previews.navigate(sessionId, request ?? {});
     },
     /** The port this server listens on (0 before it does), so a preview never opens it. */
