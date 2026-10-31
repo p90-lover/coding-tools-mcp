@@ -1079,6 +1079,7 @@ export interface LauncherApi {
   addMcpTunnel(input: { label: string; tunnelId: string; runtimeKey: string; accountId: string | null }): Promise<McpTunnel>;
   removeMcpTunnel(id: string): Promise<{ removed: boolean }>;
   reconnectMcpTunnel(id: string): Promise<McpTunnel>;
+  openMcpTunnelSettings(id: string): Promise<{ opened: boolean; name: string }>;
   createMcpTunnelConnector(id: string): Promise<{ created: boolean; name: string; href: string }>;
   onMcpTunnelsChanged(listener: (tunnels: McpTunnel[]) => void): () => void;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;

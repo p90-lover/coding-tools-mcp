@@ -130,6 +130,15 @@ export function McpTunnelsPanel({ api, initial, setError }: {
                 {tunnel.state === "failed" && tunnel.detail ? <small className="mtp-muted">{tunnel.detail}</small> : null}
               </div>
               <div className="mtp-actions" role="cell">
+                <button
+                  className="mtp-link"
+                  disabled={Boolean(busy) || !accountList.some(account => account.id === tunnel.accountId)}
+                  onClick={() => void run(`settings:${tunnel.id}`, () => api.openMcpTunnelSettings(tunnel.id))}
+                  title="Open Platform settings in this Browser account"
+                  type="button"
+                >
+                  {busy === `settings:${tunnel.id}` ? "Opening…" : "Platform settings"}
+                </button>
                 {tunnel.connectorHref ? (
                   <span className="mtp-muted">Connector added</span>
                 ) : (

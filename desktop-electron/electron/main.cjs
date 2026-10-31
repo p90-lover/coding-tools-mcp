@@ -3135,6 +3135,37 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     return runtimeSupervisor.extraTunnels.reconnect(id);
   });
+  handle("launcher:mcp-tunnel-settings", async (event, id) => {
+    assertFocusedMainWindow(event, true);
+    if (!event.sender.mainFrame || event.senderFrame !== event.sender.mainFrame) throw new Error("Platform settings require the main launcher frame");
+    if (IS_DEV_PROFILE) throw new Error("Extra MCP tunnels are available in the production profile only");
+    if (typeof id !== "string" || !/^[a-f0-9]{8}$/.test(id)) throw new Error("That tunnel is not configured.");
+    const extraTunnels = runtimeSupervisor?.extraTunnels;
+    const tunnel = extraTunnels?.status().find(candidate => candidate.id === id);
+    if (!tunnel) throw new Error("That tunnel is not configured.");
+    if (!tunnel.accountId) throw new Error("Choose the ChatGPT account this tunnel belongs to first.");
+    const accountId = tunnel.accountId, tunnelId = tunnel.tunnelId;
+    const partition = browserAccounts.partitionOf(accountId);
+    const operationBrowser = browserHost, operationPartition = operationBrowser.partition;
+    const assertCurrent = () => {
+      if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+        || extraTunnels !== runtimeSupervisor?.extraTunnels || browserAccounts.partitionOf(accountId) !== partition
+        || browserAccountsStatus().switching || quitting || shutdownInProgress || runtimeHost.currentOperation()) {
+        throw new Error("Browser account switching or shutdown is in progress");
+      }
+      if (!extraTunnels.status().some(current => current.id === id && current.accountId === accountId && current.tunnelId === tunnelId)) {
+        throw new Error("That tunnel's account assignment changed. Retry from More tunnels.");
+      }
+    };
+    assertCurrent();
+    await runtimeStartupInFlight;
+    assertCurrent();
+    await operationBrowser.ready();
+    assertCurrent();
+    const result = await openConfiguredTunnelSettings({ BrowserWindow, browserHost: operationBrowser, runtimeHost, partition });
+    assertCurrent();
+    return result;
+  });
   handle("launcher:mcp-tunnel-connector", async (event, id) => {
     assertFocusedMainWindow(event, true);
     const tunnel = runtimeSupervisor.extraTunnels.status().find(candidate => candidate.id === id);

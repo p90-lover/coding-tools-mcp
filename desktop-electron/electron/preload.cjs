@@ -142,6 +142,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   addMcpTunnel: (input) => ipcRenderer.invoke("launcher:mcp-tunnel-add", input),
   removeMcpTunnel: (id) => ipcRenderer.invoke("launcher:mcp-tunnel-remove", id),
   reconnectMcpTunnel: (id) => ipcRenderer.invoke("launcher:mcp-tunnel-reconnect", id),
+  openMcpTunnelSettings: (id) => ipcRenderer.invoke("launcher:mcp-tunnel-settings", id),
   createMcpTunnelConnector: (id) => ipcRenderer.invoke("launcher:mcp-tunnel-connector", id),
   onMcpTunnelsChanged: (listener) => subscription("launcher:mcp-tunnels-changed", listener),
   setAutostart: (enabled) => ipcRenderer.invoke("launcher:autostart", enabled),

@@ -181,6 +181,71 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
   assert.equal(creates, 1);
 });
 
+test("extra tunnel Platform settings open only the registered account partition without changing configuration", async t => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const start = source.indexOf('  handle("launcher:mcp-tunnel-settings",');
+  const end = source.indexOf('\n  handle("launcher:mcp-tunnel-connector",', start);
+  assert(start >= 0 && end > start);
+  for (const scenario of [
+    { name: "opens the registered account while a different global profile stays selected", opens: true },
+    { name: "permits inspection when the existing tunnel is stopped", opens: true, stopped: true },
+    { name: "rejects an unknown existing-format id", input: "deadbeef" },
+    { name: "rejects arbitrary partition arguments", input: { id: "b41a6986", partition: "persist:untrusted" } },
+    { name: "rejects an oversized id", input: "a".repeat(1024) },
+    { name: "rejects a tunnel without an assigned account", noAccount: true },
+    { name: "rejects an account removed from the registry", removedAccount: true },
+    { name: "rejects a subframe caller", subframe: true },
+    { name: "rejects account switching", switching: true },
+    { name: "rejects shutdown", shutdown: true },
+    { name: "rejects another runtime operation", operation: true },
+    { name: "rejects an account partition remapped during readiness", remap: true },
+    { name: "rejects a global profile change during readiness", switchDuringReady: true },
+    { name: "rejects a tunnel assignment changed during readiness", reassign: true },
+  ]) await t.test(scenario.name, async () => {
+    let action, targetPartition = "persist:account-2";
+    const opened = [], mutations = [], focus = [];
+    const mainFrame = {}, event = { sender: { mainFrame }, senderFrame: scenario.subframe ? {} : mainFrame };
+    let tunnel = { id: "b41a6986", accountId: scenario.noAccount ? null : "account-2", tunnelId: "tunnel_owned", state: scenario.stopped ? "stopped" : "ready" };
+    const mutate = name => () => { mutations.push(name); throw new Error(`Unexpected mutation: ${name}`); };
+    const host = { partition: "persist:global-r7", ready: async () => {
+      if (scenario.remap) targetPartition = "persist:remapped";
+      if (scenario.switchDuringReady) host.partition = "persist:other";
+      if (scenario.reassign) tunnel = { ...tunnel, accountId: "other-account" };
+    } };
+    const context = {
+      handle: (_name, callback) => { action = callback; },
+      assertFocusedMainWindow: (_event, write) => focus.push(write),
+      IS_DEV_PROFILE: false, runtimeStartupInFlight: Promise.resolve(),
+      BrowserWindow: function () {}, browserHost: host, quitting: false, shutdownInProgress: scenario.shutdown === true,
+      browserAccountsStatus: () => ({ switching: scenario.switching === true }),
+      browserAccounts: { partitionOf: accountId => {
+        if (scenario.removedAccount || accountId !== "account-2") throw new Error("Unknown ChatGPT account");
+        return targetPartition;
+      }, switchTo: mutate("switch account") },
+      runtimeHost: { currentOperation: () => scenario.operation ? "setup" : null },
+      runtimeSupervisor: { extraTunnels: { status: () => [tunnel], add: mutate("add tunnel"), reconnect: mutate("reconnect"), setConnector: mutate("save connector") } },
+      stateStore: { update: mutate("save launcher") }, createConfiguredConnector: mutate("create connector"),
+      openConfiguredTunnelSettings: async options => { opened.push(options); return { opened: true, name: "Coding Tools" }; },
+    };
+    vm.runInNewContext(source.slice(start, end), context);
+    const input = Object.hasOwn(scenario, "input") ? scenario.input : "b41a6986";
+    if (scenario.opens) {
+      assert.equal((await action(event, input)).opened, true);
+      assert.equal(opened.length, 1);
+      assert.equal(opened[0].partition, "persist:account-2");
+      assert.equal(opened[0].browserHost, host);
+      assert.equal(opened[0].runtimeHost, context.runtimeHost);
+      assert.deepEqual(Object.keys(opened[0]).sort(), ["BrowserWindow", "browserHost", "partition", "runtimeHost"].sort());
+      assert.equal(host.partition, "persist:global-r7");
+    } else {
+      await assert.rejects(action(event, input));
+      assert.equal(opened.length, 0);
+    }
+    assert.deepEqual(focus, [true], "the ordinary focused-window policy stays in place");
+    assert.deepEqual(mutations, [], "inspection cannot switch accounts or persist tunnel/connector state");
+  });
+});
+
 test("the real hidden tunnel-add action consumes only successful stable account input", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const start = source.indexOf("  if (!mcpConnectorCommand) mcpConnectorCommand =");
