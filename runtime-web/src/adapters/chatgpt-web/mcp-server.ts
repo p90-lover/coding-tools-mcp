@@ -662,7 +662,7 @@ export async function runChatGptMcpServer(options: {
     "coding_tools_agent_orchestrator",
     {
       title: "Manage Coding Tools missions",
-      description: "Create and run durable AO missions. Use board/runs/next to read tasks, models to inspect exact CPA worker models, create to add a task, and update_run to save its revisioned planner/worker/reviewer graph. Use start_run with workspaceId, runId and the configured native Codex executable to start or resume background execution; run_status reads progress and observe reads a node receipt without resubmitting it. WebGPT plans and reviews, while workers use their saved AO harness and CPA model. Tool approvals remain with the user and cannot be granted through this tool. Do not retry an unknown submission or claim success without completed receipts.",
+      description: "Create and run durable AO missions. Use board/runs/next to read tasks, models to list Native Codex's WebGPT tiers and shared CPA models by default, create to add a task, and update_run to save its revisioned planner/worker/reviewer graph. For a specific model catalog, set arguments.harness to codex-native, cpa, or ao:<agent>. A listed model does not establish live runtime readiness. Use start_run with workspaceId, runId and the configured native Codex executable to start or resume background execution; run_status reads progress and observe reads a node receipt without resubmitting it. WebGPT plans and reviews, while workers use their saved AO harness and CPA model. Tool approvals remain with the user and cannot be granted through this tool. Do not retry an unknown submission or claim success without completed receipts.",
       inputSchema: {
         workspace_id: z.string().min(1).max(128),
         operation: z.enum(["inspect", "board", "models", "runs", "update_run", "harness_status", "connect_harness", "stop_harness", "start_run", "run_status", "observe", "next", "create", "append", "move_task", "move_clause"]),
@@ -677,13 +677,16 @@ export async function runChatGptMcpServer(options: {
       }
       try {
         const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+        const operationArguments = operation === "models" && !Object.hasOwn(arguments_, "harness")
+          ? { ...arguments_, harness: "codex-native" }
+          : arguments_;
         const response = await fetch(`${descriptor.control.endpoint}/v1/coding-tools/agent-orchestrator`, {
           method: "POST",
           headers: {
             authorization: `Bearer ${descriptor.control.token}`,
             "content-type": "application/json",
           },
-          body: JSON.stringify({ workspace_id, operation, arguments: arguments_ }),
+          body: JSON.stringify({ workspace_id, operation, arguments: operationArguments }),
           signal: extra.signal,
         });
         if (!response.ok) throw new Error(`Agent Orchestrator returned HTTP ${response.status}`);
