@@ -711,11 +711,65 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 @media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
 
 .cx-answer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
-.cx-answer-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 12px; }
-.cx-answer-meta > span:first-child { color: var(--color-text-primary); font-weight: 500; }
-.cx-answer-meta > .cx-answer-name { color: var(--color-text-primary); font-weight: 500; }
-.cx-answer-meta > .ao-model-logo { display: inline-grid; place-items: center; line-height: 0; }
-.cx-answer-mode { padding: 0 6px; border: 1px solid var(--ao-line); border-radius: 9px; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; }
+/* A reply (ChatReplyHead.tsx): one card per turn, its head first — who answered, how it stands and
+   for how long, why it failed, a team's cards and the files it changed — then its work and answer.
+   The card's edge takes the turn's tone, so a failed or stuck reply is seen while scrolling past. */
+/* Live work in its own blue: the Claude palette's accent (--ao-blue there) is orange, next to Failed's red. */
+.cx-chat { --reply-live: #2f6fd6; }
+.ao-workflow[data-theme="dark"] .cx-chat, :root[data-theme="dark"] .cx-chat { --reply-live: #6ea8fe; }
+.cx-reply { --reply-tone: var(--ao-muted); display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 10px 14px 10px;
+  border: 1px solid var(--ao-line); border-left: 3px solid color-mix(in srgb, var(--reply-tone) 70%, var(--ao-line)); border-radius: 10px;
+  background: color-mix(in srgb, var(--color-text-primary) 1.5%, transparent); }
+.cx-reply.is-working, .cx-reply.is-queued { --reply-tone: var(--reply-live); }
+.cx-reply.is-done { --reply-tone: var(--ao-green); }
+.cx-reply.is-failed { --reply-tone: var(--ao-red); }
+.cx-reply.is-stalled, .cx-reply.is-waiting { --reply-tone: var(--ao-amber); }
+.cx-reply.is-stopped { --reply-tone: var(--ao-muted); }
+.cx-reply-head { display: flex; flex-direction: column; gap: 8px; padding-bottom: 9px; border-bottom: 1px solid var(--ao-line); }
+.cx-reply-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; font-size: 13px; line-height: 20px; }
+.cx-reply-who { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; color: var(--color-text-primary); font-weight: 600; }
+.cx-reply-who > .ao-model-logo { display: inline-grid; flex: none; place-items: center; line-height: 0; }
+.cx-reply-who-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-reply-mode { padding: 0 7px; border: 1px solid var(--ao-line); border-radius: 9px; color: var(--ao-muted); font-size: 11px; font-weight: 600; line-height: 17px; }
+.cx-reply-status { --tone: var(--ao-muted); display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--tone) 14%, transparent); color: var(--tone); font-size: 11.5px; font-weight: 600; line-height: 19px; white-space: nowrap; }
+.cx-reply-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.cx-reply-status.is-working, .cx-reply-status.is-queued { --tone: var(--reply-live); }
+.cx-reply-status.is-working::before, .cx-reply-status.is-queued::before { animation: cx-pulse 1.4s ease-in-out infinite; }
+.cx-reply-status.is-done { --tone: var(--ao-green); }
+.cx-reply-status.is-failed { --tone: var(--ao-red); }
+.cx-reply-status.is-stalled, .cx-reply-status.is-waiting { --tone: var(--ao-amber); }
+.cx-reply-time { color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cx-reply-spacer { flex: 1 1 0; min-width: 0; }
+.cx-reply-total { color: var(--ao-muted); font-size: 12px; white-space: nowrap; }
+.cx-reply-diff { font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.cx-reply-diff .is-add { color: var(--ao-green); }
+.cx-reply-diff .is-del { color: var(--ao-red); }
+.cx-reply-error { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 7px 10px; border-radius: 7px;
+  background: color-mix(in srgb, var(--ao-red) 9%, transparent); font-size: 12.5px; line-height: 18px; }
+.cx-reply-error-title { color: var(--ao-red); font-weight: 600; }
+.cx-reply-error-text { display: -webkit-box; overflow: hidden; color: var(--color-text-primary); overflow-wrap: anywhere; white-space: pre-wrap;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.cx-reply-roster, .cx-reply-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.cx-reply-member { --tone: var(--ao-muted); display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; padding: 2px 9px 2px 8px;
+  border: 1px solid var(--ao-line); border-radius: 7px; font-size: 12px; line-height: 18px; }
+.cx-reply-member.is-working, .cx-reply-member.is-queued { --tone: var(--reply-live); }
+.cx-reply-member.is-done { --tone: var(--ao-green); }
+.cx-reply-member.is-failed { --tone: var(--ao-red); border-color: color-mix(in srgb, var(--ao-red) 40%, var(--ao-line)); }
+.cx-reply-member.is-stalled, .cx-reply-member.is-waiting { --tone: var(--ao-amber); }
+.cx-reply-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tone); }
+.cx-reply-member.is-working .cx-reply-dot { animation: cx-pulse 1.4s ease-in-out infinite; }
+.cx-reply-member-name { flex: none; color: var(--color-text-primary); font-weight: 500; }
+.cx-reply-member-model { flex: none; color: var(--ao-muted); }
+.cx-reply-member-state { min-width: 0; overflow: hidden; color: var(--tone); text-overflow: ellipsis; white-space: nowrap; }
+.cx-reply-file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 1px 8px; border-radius: 6px; background: var(--cx-hover);
+  font-size: 12px; line-height: 20px; }
+.cx-reply-file-name { overflow: hidden; color: var(--color-text-primary); font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11.5px;
+  text-overflow: ellipsis; white-space: nowrap; }
+.cx-reply-file.is-more { color: var(--ao-muted); }
+/* A reply head is the turn's own summary, so the foot's line sits flush with the card's bottom. */
+.cx-reply > .cx-turn-foot { margin-top: 0; }
+@media (prefers-reduced-motion: reduce) { .cx-reply-status::before, .cx-reply-dot { animation: none !important; } }
 .cx-verdict { padding: 1px 7px; border-radius: 9px; background: var(--cx-hover); font-size: 11px; font-weight: 600; }
 .cx-verdict.is-approved { color: var(--ao-green); }
 .cx-verdict.is-changes_required { color: var(--ao-amber); }
