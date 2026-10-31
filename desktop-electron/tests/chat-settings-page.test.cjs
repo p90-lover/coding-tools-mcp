@@ -46,3 +46,16 @@ test("Settings changes go through main's checked IPC, within main's own limits",
   const main = read("electron/main.cjs");
   assert.match(main, /handle\("launcher:update-settings", \(_event, patch\) => \{[\s\S]{0,200}validateUpdateSettingsPatch\(patch\)/);
 });
+
+test("Settings › Chat holds Claude Code's auto-compact and the chat's own switches, read from and saved by the bridge", () => {
+  const page = read("src/features/ChatSettingsPage.tsx");
+  assert.match(page, /\{ id: "chat", label: "Chat" \}/);
+  for (const operation of ["chat_auto_compact", "chat_auto_retry", "chat_model_judges"]) {
+    assert.ok(page.includes(`chatCall("${operation}")`), `${operation} is read`);
+    assert.ok(page.includes(`setChatPreference("${operation}"`), `${operation} is set`);
+  }
+  // The shares offered are the ones the bridge takes (chatAutoCompact: 20 to 100).
+  for (const percent of JSON.parse(page.match(/const COMPACT_CHOICES = (\[[^\]]*\]);/)[1])) assert.ok(percent >= 20 && percent <= 100, `${percent}%`);
+  // Reading them is passive (no focus needed), as the other chat switches; changing them is not.
+  assert.match(read("electron/main.cjs"), /\["chat_auto_retry", "chat_model_judges", "chat_auto_compact"\]\.includes\(input\.operation\) && input\.arguments\?\.enabled === undefined && input\.arguments\?\.percent === undefined/);
+});

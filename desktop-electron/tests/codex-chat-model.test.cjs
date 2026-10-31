@@ -76,10 +76,10 @@ test("forking keeps the conversation up to the chosen message, in the follow-up 
 
 test("slash commands offer only what applies, and attachments become paths or inline text", () => {
   assert.deepEqual(plain(chat.chatSlashMatches("/", { chat: false, run: false })).map((command) => command.name),
-    ["goal", "plan", "review", "init", "status", "diff", "mcp", "model", "new", "resume", "board"], "Codex's commands first; chat-only ones need a chat");
+    ["goal", "plan", "autocompact", "review", "init", "status", "diff", "mcp", "model", "effort", "new", "clear", "resume", "board"], "Codex's commands first; chat-only ones need a chat");
   assert.deepEqual(plain(chat.chatSlashMatches("/st", { chat: true, run: true })).map((command) => command.name), ["status", "stop", "structure"]);
   assert.deepEqual(plain(chat.chatSlashMatches("/st", { chat: true, run: true, open: false })).map((command) => command.name), ["status", "structure"], "/stop only while a mission is open");
-  assert.deepEqual(plain(chat.chatSlashMatches("/co", { chat: true, run: true })).map((command) => command.name), ["compact", "copy"]);
+  assert.deepEqual(plain(chat.chatSlashMatches("/co", { chat: true, run: true })).map((command) => command.name), ["compact", "context", "copy"]);
   assert.deepEqual(plain(chat.chatSlashMatches("/stop now", { chat: true, run: true })), [], "a space ends the command menu");
   assert.equal(chat.chatSlashCommand(" /Stop "), "stop");
   assert.equal(chat.chatSlashCommand("/unknown"), null);
@@ -125,6 +125,19 @@ test("slash commands offer only what applies, and attachments become paths or in
     { name: "a.png", path: "C:\\shots\\a.png", image: true },
     { name: "notes.txt", text: "x ``` y" },
   ]), "look\n\nAttached image: C:\\shots\\a.png\n\nAttached file `notes.txt`:\n```\nx ``\u200b` y\n```");
+});
+
+test("Claude Code's /autocompact, /compact [focus], /context, /effort and /clear are chat commands", () => {
+  assert.deepEqual(plain(chat.chatSlashParse("/compact focus on the API changes")), { name: "compact", arg: "focus on the API changes" });
+  assert.deepEqual(plain(chat.chatSlashParse("/autocompact 80")), { name: "autocompact", arg: "80" });
+  for (const name of ["context", "effort", "clear"]) assert.deepEqual(plain(chat.chatSlashParse(`/${name}`)), { name, arg: "" });
+  assert.equal(chat.chatSlashParse("/context please"), null, "/context takes no argument");
+  assert.equal(chat.autoCompactArg(""), null, "no argument shows the setting");
+  assert.deepEqual(plain(chat.autoCompactArg("on")), { enabled: true });
+  assert.deepEqual(plain(chat.autoCompactArg("OFF")), { enabled: false });
+  assert.deepEqual(plain(chat.autoCompactArg("80%")), { enabled: true, percent: 80 }, "a share also turns it on");
+  assert.deepEqual(plain(chat.autoCompactArg("100")), { enabled: true, percent: 100 });
+  for (const wrong of ["10", "101", "eighty", "80 percent"]) assert.match(chat.autoCompactArg(wrong).error, /20% to 100%/, wrong);
 });
 
 test("answers render as Markdown data, never HTML, and only web links are clickable", () => {
