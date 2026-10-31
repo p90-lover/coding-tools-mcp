@@ -2094,3 +2094,55 @@ test("chats AO still calls working with no agent activity for long are listed, s
   assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now)], ["stranded"],
     "only a live chat quiet past the limit: not a busy one, an idle or ended one, a non-chat, or one with no activity time");
 });
+
+test("mission accounting reads the conversation only when normalized usage has no usable counters", async t => {
+  const vm = require("node:vm");
+  const { collectMissionAccounting, accountingMeasurements } = require("../electron/agent-orchestrator-accounting.cjs");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("      readAccounting: async scope =>");
+  const method = source.slice(start, source.indexOf("\n      listProjects:", start));
+  const catalog = { prices: [{ provider: "openai", model: "gpt-5.5", input_usd_per_million: 2,
+    output_usd_per_million: 8, cache_read_usd_per_million: 0.5, cache_creation_usd_per_million: 3,
+    request_usd: 0, source: "manual", updated_ms: 123 }] };
+  const measured = totals => ({ sessionId: "owned", harnesses: [{ harness: "codex", models: [{ modelId: "gpt-5.5", totals }] }] });
+  const snapshot = { usage: { inputTokens: 10, cachedTokens: 2, outputTokens: 3, totalTokens: 15 } };
+  const cases = [
+    { name: "reported normalized usage", normalized: measured({ uncachedInputTokens: 10, cachedInputTokens: 2, outputTokens: 3, processedTokens: 15 }), reads: 2, tokens: 15, cost: 25000, source: "normalized_session", coverage: "complete" },
+    { name: "measured zero", normalized: measured({ uncachedInputTokens: 0, cachedInputTokens: 0, outputTokens: 0, processedTokens: 0 }), reads: 2, tokens: 0, cost: 0, source: "normalized_session", coverage: "complete" },
+    { name: "empty normalized usage", normalized: { sessionId: "owned", harnesses: [] }, reads: 3 },
+    { name: "missing normalized counters", normalized: measured({}), reads: 3 },
+    { name: "invalid normalized counters", normalized: measured({ uncachedInputTokens: -1, cachedInputTokens: -1, outputTokens: -1, processedTokens: -1 }), reads: 3 },
+    { name: "normalized endpoint unavailable", unavailable: true, reads: 3 },
+    { name: "foreign session", foreign: true, reads: 1, tokens: null, cost: null, coverage: "unavailable" },
+  ];
+  for (const fixture of cases) await t.test(fixture.name, async () => {
+    const calls = [];
+    const readAccounting = vm.runInNewContext(`({${method}}).readAccounting`, {
+      collectMissionAccounting, accountingMeasurements, getCpaPricesPath: () => "prices", readCpaCatalog: () => catalog,
+      sessionId: id => id,
+      internalApi: async (verb, endpoint) => {
+        calls.push(`${verb} ${endpoint}`);
+        if (endpoint === "/api/v1/sessions/owned") return { session: { id: "owned", projectId: fixture.foreign ? "other" : "p" } };
+        if (endpoint === "/api/v1/usage/sessions/owned") {
+          if (fixture.unavailable) throw new Error("usage unavailable");
+          return fixture.normalized;
+        }
+        assert.equal(endpoint, "/api/v1/sessions/owned/conversation?limit=1");
+        return snapshot;
+      },
+    });
+    const result = (await readAccounting({ projectId: "p", runs: [{ id: "r", nodes: [{ receipt: {
+      thread_id: "owned", route: { harness_id: "ao:codex", model: "cpa/gpt-5.5" },
+    } }] }] })).r;
+    assert.equal(calls.length, fixture.reads);
+    assert.equal(calls.includes("GET /api/v1/sessions/owned/conversation?limit=1"), fixture.reads === 3);
+    assert.equal(result.processedTokens, fixture.tokens === undefined ? 15 : fixture.tokens);
+    assert.equal(result.cost.totalNanos, fixture.cost === undefined ? 25000 : fixture.cost);
+    assert.equal(result.cost.source, "CPA Helper");
+    assert.equal(result.coverage, fixture.coverage || "partial");
+    if (!fixture.foreign) {
+      assert.equal(result.sessions[0].measurements[0].source, fixture.source || "latest_snapshot");
+      assert.equal(result.cost.coverage, "partial", "unknown cache categories keep the existing partial price label");
+    }
+  });
+});
