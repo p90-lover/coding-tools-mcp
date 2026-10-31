@@ -324,13 +324,19 @@ function delayToMilliseconds(value, unit) {
  * The chat's own preferences that outlive a restart: autoRetry (a failed single-model step is
  * retried by itself, chatAutoRetry) and modelJudges (what would wait for the person, a request the
  * reviewer would hand on or a goal round that ended needing them, is judged by the model instead,
- * chatModelJudges). Kept in memory when no file is given (tests).
+ * chatModelJudges), and autoCompact / autoCompactPercent (a chat compacts itself once a follow-up
+ * would fill that share of its size limit, as Claude Code's autoCompactEnabled and
+ * CLAUDE_AUTOCOMPACT_PCT_OVERRIDE; chatAutoCompact). Kept in memory when no file is given (tests).
  */
+const AUTO_COMPACT_PERCENT = 95;
+const AUTO_COMPACT_MIN_PERCENT = 20;
+const autoCompactPercent = value => (Number.isSafeInteger(value) && value >= AUTO_COMPACT_MIN_PERCENT && value <= 100 ? value : AUTO_COMPACT_PERCENT);
 function createChatPreferences(file) {
   let saved = {};
   try { if (file) saved = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch { saved = {}; }
   return {
-    get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true }),
+    get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true,
+      autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent) }),
     set(change) {
       saved = { ...saved, ...change };
       if (!file) return;
@@ -3738,6 +3744,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return { ok: true, modelJudges: chatPreferences.get().modelJudges };
   }
+  /**
+   * chat_auto_compact: reads auto-compact, or sets it with `enabled` and/or `percent` (how full a
+   * chat gets, of its size limit, before its next message compacts it first). The user: "make a
+   * command to set how much to auto compact like claude code".
+   */
+  function chatAutoCompact({ enabled, percent } = {}) {
+    const change = {};
+    if (enabled !== undefined) {
+      if (typeof enabled !== "boolean") throw new Error("Choose on or off");
+      change.autoCompact = enabled;
+    }
+    if (percent !== undefined) {
+      if (!Number.isSafeInteger(percent) || percent < AUTO_COMPACT_MIN_PERCENT || percent > 100) throw new Error(`Choose ${AUTO_COMPACT_MIN_PERCENT}% to 100%`);
+      change.autoCompactPercent = percent;
+    }
+    if (Object.keys(change).length) chatPreferences.set(change);
+    const saved = chatPreferences.get();
+    return { ok: true, autoCompact: saved.autoCompact, percent: saved.autoCompactPercent, limit: BOARD_TEXT_BYTES };
+  }
 
   async function recoverHeld(workspaceId, mission, state = {}) {
     const held = mission.nodes.filter(node => node.state === "held");
@@ -4919,15 +4944,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
       let description = rewoundDescription ?? extended();
       if (rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This rewind exceeds the chat size limit; shorten the conversation first");
-      if (utf8Bytes(description) > BOARD_TEXT_BYTES) {
-        // A long chat compacts itself, as Codex does, instead of stopping at the size limit: the
-        // earlier conversation becomes a handoff summary (what /compact does) and the chat goes on.
-        const compacted = await compactChat({ workspaceId: id, taskId: task })
-          .catch(error => { throw new Error(`This chat is full and couldn't be compacted: ${String(error?.message || error).slice(0, 200)}`); });
-        detail = await board({ workspaceId: id, taskId: task });
-        if (!detail.task) throw new Error("This chat's task no longer exists");
-        description = extended();
-        if (!compacted.compacted || utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full. Start a new chat to continue.");
+      const { autoCompact, autoCompactPercent: percent } = chatPreferences.get();
+      const full = utf8Bytes(description) > BOARD_TEXT_BYTES;
+      if (!rewind && (full || (autoCompact && utf8Bytes(description) > Math.floor(BOARD_TEXT_BYTES * percent / 100)))) {
+        if (!autoCompact) throw new Error("This chat is full. Use /compact, or turn auto-compact on with /autocompact on.");
+        // A long chat compacts itself, as Claude Code does, once the follow-up would fill the share
+        // of the limit set with /autocompact: the earlier conversation becomes a handoff summary
+        // (what /compact does) and the chat goes on. The summary leaves room for this follow-up: a
+        // goal round's feedback is up to 3.5 KB, and a 6,000-character summary plus that was still
+        // over the limit, so a goal stalled "full" right after compacting.
+        const reserve = utf8Bytes(`\n\nFollow-up (${stamp} UTC):\n${text}`);
+        let compacted = { compacted: false };
+        try {
+          compacted = await compactChat({ workspaceId: id, taskId: task, reserve });
+        } catch (error) {
+          // Below the limit the follow-up still fits: compacting waits for the next one.
+          if (full) throw new Error(`This chat is full and couldn't be compacted: ${String(error?.message || error).slice(0, 200)}`);
+          logger?.warn?.("ao.chat_auto_compact_failed", { error: String(error?.message || error).slice(0, 200) });
+        }
+        if (compacted.compacted) {
+          detail = await board({ workspaceId: id, taskId: task });
+          if (!detail.task) throw new Error("This chat's task no longer exists");
+          description = extended();
+        }
+        if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full even after compacting. Shorten the message or start a new chat.");
       }
       const saidBefore = String(detail.task.description || "");
       await write(id, { expected_revision: detail.revision,
@@ -5052,7 +5092,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Another turn started first (a wakeup, a queued message; see chatSend): that turn is the
       // goal's to judge once it settles (goalAfterRun), so this round is not counted or stalled.
       if (/still running/.test(message)) { goals.update(id, task, { round: goal.round }); return; }
-      goals.update(id, task, { status: "stalled", note: /chat is full/.test(message) ? "This chat is full; use /compact, then /goal resume" : message.slice(0, 300) });
+      // A full chat says why it could not compact (the note was only "use /compact" before).
+      goals.update(id, task, { status: "stalled", note: /chat is full/.test(message) ? `${message.slice(0, 240)} Use /compact, then /goal resume.` : message.slice(0, 300) });
     }
   }
 
@@ -6050,18 +6091,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   // Codex's own compaction instruction (codex-rs core/src/tasks/compact.rs).
   const COMPACT_PROMPT = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.";
-  /** A CPA model's handoff summary of a conversation (COMPACT_PROMPT); throws when none answers. */
-  async function handoffSummary(text) {
+  /**
+   * A CPA model's handoff summary of a conversation (COMPACT_PROMPT); throws when none answers.
+   * `maxChars` asks for a shorter one, and `instructions` are the person's own (/compact focus on
+   * …), added to the prompt as Claude Code adds them.
+   */
+  async function handoffSummary(text, { maxChars = 0, instructions = "" } = {}) {
     const { baseUrl, key } = connection();
     const catalog = await models();
     // A summary reads a whole conversation: never on the person's Codex quota (freeModels).
     const model = freeModels(catalog.models ?? [], catalog.hidden ?? [])[0];
     if (!model) throw new Error("CPA has no model outside the Codex quota for a summary");
+    const prompt = [COMPACT_PROMPT,
+      ...(maxChars ? [`Keep the summary under ${maxChars.toLocaleString("en-US")} characters.`] : []),
+      ...(instructions ? [`Additional instructions from the user:\n${instructions}`] : [])].join("\n\n");
     const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: 1600, messages: [
-        { role: "system", content: COMPACT_PROMPT }, { role: "user", content: text }] }),
+      body: JSON.stringify({ model, temperature: 0, max_tokens: maxChars ? Math.min(1600, Math.ceil(maxChars / 3)) : 1600, messages: [
+        { role: "system", content: prompt }, { role: "user", content: text }] }),
       signal: AbortSignal.timeout(120_000),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -6084,6 +6132,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     while (start > 0 && used + utf8Bytes(chars[start - 1]) <= bytes) used += utf8Bytes(chars[--start]);
     return chars.slice(start).join("");
   };
+  /** The start of a text within a UTF-8 byte budget, never splitting a character. */
+  const utf8Head = (text, bytes) => {
+    if (utf8Bytes(text) <= bytes) return text;
+    const chars = Array.from(text);
+    let used = 0, end = 0;
+    while (end < chars.length && used + utf8Bytes(chars[end]) <= bytes) used += utf8Bytes(chars[end++]);
+    return chars.slice(0, end).join("");
+  };
+  // A compacted chat's summary: at most this much of the chat's 8 KiB, and at least this much room
+  // for one, or compacting is pointless.
+  const SUMMARY_BYTES = 6000;
+  const SUMMARY_MIN_BYTES = 512;
   // A chat's last handoff summary: the replies it covered (a hash of exactly those, and how many)
   // and its text. Each fresh start (a model switch, another agent) summarized the chat's whole,
   // growing history again; now nothing new reuses the summary, and replies added since are
@@ -6137,23 +6197,34 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   // /compact: a chat's context is its task text (every follow-up is appended to it, up to 8,192
   // characters). Replace it with a handoff summary so the chat can keep going.
-  async function compactChat({ workspaceId, taskId } = {}) {
+  // `instructions` are the person's (/compact focus on the API changes), as Claude Code's /compact
+  // takes them. `reserve` is the room, in UTF-8 bytes, the summary leaves for the follow-up that
+  // made the chat compact itself (chatSend).
+  async function compactChat({ workspaceId, taskId, instructions = "", reserve = 0 } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
+    const focus = instructions ? boardText(clean(String(instructions), 1000, false)) : "";
     const saved = await runs({ workspaceId: id });
     if (chatWorking(id, task, saved.runs)) throw new Error("Compact is disabled while a chat is in progress");
     const detail = await board({ workspaceId: id, taskId: task });
     if (!detail.task) throw new Error("This chat's task no longer exists");
     const before = String(detail.task.description || "");
     if (before.length < 800) return { ok: true, compacted: false, before: before.length, after: before.length };
+    const stamp = new Date(now()).toISOString().replace("T", " ").slice(0, 16);
+    const head = `Summary of the earlier conversation (compacted ${stamp} UTC):\n`;
+    const kept = Number.isSafeInteger(reserve) && reserve > 0 ? reserve : 0;
+    const room = Math.min(SUMMARY_BYTES, BOARD_TEXT_BYTES - utf8Bytes(head) - kept);
+    if (room < SUMMARY_MIN_BYTES) throw new Error("The next message leaves no room for a summary. Shorten it or start a new chat.");
     let summary = "";
     try {
-      summary = await handoffSummary(before);
+      summary = await handoffSummary(before, { maxChars: room, instructions: focus });
     } catch (error) {
       throw new Error(`Couldn't compact: no CPA model answered. ${String(error?.message || error).slice(0, 160)}`);
     }
+    // A model's summary may run past the length it was asked for, or carry control characters: it
+    // is cut to the room left (clean() threw on either, so a long summary failed the compaction).
+    summary = boardText(summary).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
     if (!summary) throw new Error("The model returned no summary. The chat is unchanged.");
-    const stamp = new Date(now()).toISOString().replace("T", " ").slice(0, 16);
-    const description = boardText(clean(`Summary of the earlier conversation (compacted ${stamp} UTC):\n${summary}`, 6000, false));
+    const description = `${head}${utf8Head(summary, room)}`;
     if (utf8Bytes(description) >= utf8Bytes(before)) return { ok: true, compacted: false, before: before.length, after: before.length };
     const fresh = await board({ workspaceId: id, taskId: task });
     if (!fresh.task || String(fresh.task.description || "") !== before) throw new Error("The chat changed while compacting. Try again.");
@@ -6749,6 +6820,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_loop": return chatLoop(args);
       case "chat_auto_retry": return chatAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
+      case "chat_auto_compact": return chatAutoCompact(args);
       case "compact_chat": return compactChat(args);
       case "chat_diff": return chatDiff(args);
       case "update_run": return updateRun(args);

@@ -2395,14 +2395,32 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       await moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "edit", objective });
       await loadMissions(workspaceId);
     },
-    compact: async () => {
+    compact: async (instructions = "") => {
       if (!chatTaskId) throw new Error("Open a chat first");
-      const result = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId });
+      const result = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId, ...(instructions ? { instructions } : {}) });
       await loadBoard(workspaceId);
       const full = (size: number) => Math.round(size / CHAT_CONTEXT_LIMIT * 100);
       return result.compacted
         ? `Context compacted from ${Number(result.before).toLocaleString("en-US")} to ${Number(result.after).toLocaleString("en-US")} characters, now ${full(Number(result.after))}% full.`
         : `Nothing to compact yet. The context is ${Number(result.before).toLocaleString("en-US")} characters, ${full(Number(result.before))}% full.`;
+    },
+    autoCompact: async (change = {}) => {
+      const result = await moduleCall("chat_auto_compact", change);
+      return { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || 95, limit: Number(result.limit) || CHAT_CONTEXT_LIMIT };
+    },
+    context: async () => {
+      const description = board?.tasks.find(task => task.id === chatTaskId)?.description ?? "";
+      const setting = await moduleCall("chat_auto_compact", {});
+      const percent = Number(setting.percent) || 95;
+      const used = Math.round(description.length / CHAT_CONTEXT_LIMIT * 100);
+      // A compacted chat starts with its summary's heading (compactChat), which says when.
+      const compacted = /^Summary of the earlier conversation \(compacted ([^)]+) UTC\)/.exec(description)?.[1];
+      const rows: [string, string][] = [
+        ["Context", `${description.length.toLocaleString("en-US")} of ${CHAT_CONTEXT_LIMIT.toLocaleString("en-US")} characters (${used}% full)`],
+        ["Auto-compact", setting.autoCompact === false ? "Off: a full chat stops until you /compact" : `On: compacts before a message that would fill ${percent}%`],
+        ["Last compacted", compacted ? `${compacted} UTC` : "Never"],
+      ];
+      return { title: "Context", rows, text: "The chat's context is its messages, sent to every new agent session. Each agent also compacts its own session by itself." };
     },
     diff: async () => {
       const result = await moduleCall("chat_diff", { workspaceId });

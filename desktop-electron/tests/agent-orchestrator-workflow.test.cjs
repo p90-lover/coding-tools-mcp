@@ -6379,6 +6379,73 @@ test("a chat over the board's byte limit in fewer characters compacts too, and a
     /9,000 bytes; a chat message can be at most 8,192/, "one message over the limit by itself says so, not that the chat is full");
 });
 
+// A chat for the auto-compact tests: its task text, a summarizer answering `summary` (or failing),
+// and the system prompts the summarizer was sent.
+function compactWorld(description, { summary = "Did the first half.", fail = false } = {}) {
+  const task = { id: "task-1", title: "Long job", description, state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
+  const prompts = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/c.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      prompts.push(JSON.parse(init.body).messages[0].content);
+      if (fail) return { ok: false, status: 502 };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: summary } }] }) };
+    },
+  });
+  return { world, workflow, prompts };
+}
+
+test("auto-compact leaves room for a goal round's long message, and a summary longer than asked is cut, not refused", async () => {
+  // The user's goal stalled "This chat is full; use /compact" right after compacting: the summary
+  // (up to 6,000 characters, or clean() threw past that) plus a goal round's feedback was still over 8 KiB.
+  const { world, workflow, prompts } = compactWorld("x".repeat(8180), { summary: `Progress so far.\n${"y".repeat(7000)}` });
+  const message = `Stop hook feedback:\n[ship the feature]: ${"z".repeat(3400)}`;
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message });
+  const final = world.tasks[0].description;
+  assert.match(final, /^Summary of the earlier conversation \(compacted [^)]+ UTC\):\nProgress so far\.\ny+\n\nFollow-up \([^)]+ UTC\):\nStop hook feedback:/);
+  assert.ok(final.endsWith(message), "the follow-up is whole");
+  assert.ok(Buffer.byteLength(final, "utf8") <= 8192, "within the board's limit");
+  const asked = Number(/under ([\d,]+) characters/.exec(prompts[0])?.[1].replace(/,/g, ""));
+  assert.ok(asked > 512 && asked < 8192 - Buffer.byteLength(message, "utf8"), "the summarizer is asked for what fits");
+});
+
+test("/autocompact: on by default at 95%; a lower share compacts sooner; off stops a full chat with what to do", async () => {
+  const fresh = compactWorld("x".repeat(100));
+  assert.deepEqual(await fresh.workflow.call("chat_auto_compact", {}), { ok: true, autoCompact: true, percent: 95, limit: 8192 });
+  await assert.rejects(fresh.workflow.call("chat_auto_compact", { percent: 10 }), /20% to 100%/);
+  await assert.rejects(fresh.workflow.call("chat_auto_compact", { enabled: "yes" }), /on or off/);
+
+  // At 50%, a 5,000-character chat compacts before its next message though it is not full.
+  const early = compactWorld("x".repeat(5000));
+  assert.equal((await early.workflow.call("chat_auto_compact", { percent: 50 })).percent, 50);
+  await early.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on" });
+  assert.match(early.world.tasks[0].description, /^Summary of the earlier conversation[\s\S]*\nDid the first half\.\n\nFollow-up \([^)]+ UTC\):\ngo on$/);
+
+  // Below the limit, a summarizer that fails does not stop the message: it compacts next time.
+  const down = compactWorld("x".repeat(5000), { fail: true });
+  await down.workflow.call("chat_auto_compact", { percent: 50 });
+  await down.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on" });
+  assert.match(down.world.tasks[0].description, /^x{5000}\n\nFollow-up \([^)]+ UTC\):\ngo on$/);
+  assert.equal(down.prompts.length, 1, "it tried");
+
+  const off = compactWorld("x".repeat(8180));
+  assert.equal((await off.workflow.call("chat_auto_compact", { enabled: false })).autoCompact, false);
+  await assert.rejects(off.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" }), /Use \/compact, or turn auto-compact on with \/autocompact on/);
+  assert.equal(off.prompts.length, 0, "nothing was summarized");
+  assert.equal(off.world.tasks[0].description, "x".repeat(8180));
+});
+
+test("/compact takes instructions for the summary, as Claude Code's does", async () => {
+  const { world, workflow, prompts } = compactWorld("x".repeat(2000), { summary: "API changes: none yet." });
+  const result = await workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1", instructions: "focus on the API changes" });
+  assert.equal(result.compacted, true);
+  assert.match(prompts[0], /CONTEXT CHECKPOINT COMPACTION[\s\S]*Additional instructions from the user:\nfocus on the API changes$/);
+  assert.match(world.tasks[0].description, /\nAPI changes: none yet\.$/);
+});
+
 test("a card stopped while its agent launched also stops that agent once its session arrives", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single", cancelled: false, grant: { executable_sha256: "a".repeat(64) },

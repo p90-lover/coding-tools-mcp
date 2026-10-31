@@ -2319,7 +2319,7 @@ function registerIpc({ logger, stateStore }) {
     // the agent pre-warm and the Retry automatically switch unset. They still need a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm"].includes(input.operation)
-        || (["chat_auto_retry", "chat_model_judges"].includes(input.operation) && input.arguments?.enabled === undefined));
+        || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined));
     assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
     // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
     if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
