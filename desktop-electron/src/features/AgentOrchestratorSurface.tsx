@@ -615,6 +615,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [detectedExecutable, setDetectedExecutable] = useState("");
   const executableArg = (): JsonObject => (executable.trim() ? { executable: executable.trim() } : {});
   const [advanceNotice, setAdvanceNotice] = useState("");
+  // What went wrong in the selected run while it carries on by itself (run_status `warning`).
+  const [runWarning, setRunWarning] = useState("");
   const [autoStatus, setAutoStatus] = useState("idle");
   const [pendingApprovals, setPendingApprovals] = useState<AoApproval[]>([]);
   const approvalScope = useRef({ workspaceId: "", runId: "" });
@@ -1431,6 +1433,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // ("AO run not found in this workspace"), surfacing as an error toast.
   const selectedRunHere = missions.some((mission) => mission.id === selectedRunId && mission.workspace_id === workspaceId);
   useEffect(() => {
+    setRunWarning("");
     if (!workspaceId || !selectedRunId || !selectedRunHere) { setAutoStatus("idle"); return; }
     let live = true;
     let reading = false;
@@ -1443,6 +1446,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         const nextStatus = typeof status.status === "string" ? status.status : "idle";
         setAutoStatus(nextStatus);
         setAdvanceNotice(typeof status.detail === "string" ? status.detail : "");
+        setRunWarning(typeof status.warning === "string" ? status.warning : "");
         if (nextStatus !== "idle") {
           const current = await moduleCall("runs", { workspaceId, runId: selectedRunId });
           if (live && Array.isArray(current.runs)) {
@@ -2704,6 +2708,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                   loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies} />}
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}
+                warning={chatTaskId && selectedRun?.project_id === chatTaskId ? runWarning || undefined : undefined}
                 retryStart={retryChatStart} retrying={Boolean(chatTaskId && chatBusy.includes(chatTaskId))}
                 describeNode={describeChatNode} activity={chatActivity} modelName={chatModelName}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
