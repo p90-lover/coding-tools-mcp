@@ -3771,9 +3771,19 @@ async function start() {
       // An agent's `ao` commands work in the app's terminal too, as in its own shell.
       const chatSandbox = createSandboxRunner({ logger, scriptDir: path.join(launcherUserData, "sandbox-scripts"), extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.(), rtk.binDir()].filter(Boolean) });
       app.on("will-quit", () => chatSandbox.killAll());
+      // A chat's computer control: the window picker, and the control bar whose heartbeat keeps input on.
+      const { createComputerControl } = backendBundles.requireModule(backend, "computer-control.cjs");
+      const computerControl = createComputerControl({
+        request: (endpoint, body, options) => headlessHost.request(endpoint, body, options),
+        BrowserWindow, screen, logger,
+        // The app's own windows are never offered as a target.
+        ownPids: () => app.getAppMetrics().map((metric) => metric.pid),
+      });
+      app.on("will-quit", () => computerControl.dispose());
       chatAgentTools = createChatAgentTools({
         previews: chatPreviews,
         sandbox: chatSandbox,
+        computerControl,
         // "Approve for me" runs the same routine project commands through the app's terminal as it
         // allows from the agent's own shell (the workflow's list), without a dialog each.
         // The workflow running now: these tools outlive the backend start that created them, and

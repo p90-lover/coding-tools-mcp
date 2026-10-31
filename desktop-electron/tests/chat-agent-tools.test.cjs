@@ -37,7 +37,7 @@ function tempTree() {
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
-  chatTitles = null, redaction = null } = {}) {
+  chatTitles = null, redaction = null, computerControl = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
@@ -47,6 +47,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
+    ...(computerControl ? { computerControl } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -1882,6 +1883,54 @@ test("capture_process is a reviewed screen observation that returns the window a
     assert.equal((await callTool(reviewed.url, reviewed.auth, "capture_process", { pid: 4242 })).isError, false);
     assert.equal(confirmations.length, asked);
   } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a chat asking for computer control while it is off is shown the window picker; picking a window allows that chat", async () => {
+  // Seen live: every chat's computer_status read "stopped" and the agent asked the person to "enable
+  // it in the app", which the Electron app had no way to do.
+  const tree = tempTree();
+  let state = "stopped";
+  let answer = { started: true };
+  const picks = [];
+  let clock = 1_000_000;
+  const computerControl = {
+    status: async () => ({ state }),
+    pick: async (request) => { picks.push(request); if (answer.started) state = "active"; return answer; },
+  };
+  const { tools, calls, confirmations } = fixture({ root: tree.root, desktop: () => true, computerControl, now: () => clock });
+  try {
+    const chat = await session(tools, { id: "ao-1" });
+    assert.equal((await callTool(chat.url, chat.auth, "computer_status", {})).isError, false);
+    assert.equal(picks.length, 1, "the picker is shown");
+    assert.equal(picks[0].workspaceId, "ws1");
+    assert.equal((await callTool(chat.url, chat.auth, "computer_action", { session_id: "s", action: "click" })).isError, false);
+    assert.equal(confirmations.length, 0, "picking the window allowed this chat: no second question");
+    assert.equal(picks.length, 1, "control is on: no picker");
+
+    // Turned down: a control call is refused and reaches nothing; status reads on without asking again.
+    state = "stopped";
+    answer = { started: false, reason: "the user cancelled" };
+    const other = await session(tools, { id: "ao-2" });
+    const before = calls.filter((call) => call.endpoint === "/api/v1/tools/call").length;
+    const refused = await callTool(other.url, other.auth, "computer_action", { session_id: "s", action: "click" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /did not start computer control \(the user cancelled\)/);
+    assert.equal(calls.filter((call) => call.endpoint === "/api/v1/tools/call").length, before, "nothing reached the screen");
+    assert.equal((await callTool(other.url, other.auth, "computer_status", {})).isError, false);
+    assert.equal(picks.length, 2, "a declined chat's status reads do not ask again at once");
+    clock += 6 * 60_000;
+    await callTool(other.url, other.auth, "computer_status", {});
+    assert.equal(picks.length, 3, "after a while it may ask again");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("the computer-control picker shows every window as text, never markup", () => {
+  const { pickerPage, barPage } = require("../electron/computer-control.cjs");
+  const page = pickerPage({ chat: "codex", project: "<b>p</b>", captureOff: true,
+    targets: [{ window_id: 1, pid: 2, title: "<img src=x onerror=alert(1)>" }] });
+  assert.ok(!page.includes("<img src=x"), "a window title is escaped");
+  assert.match(page, /Turn on screen capture for &#60;b&#62;p&#60;\/b&#62;/);
+  assert.ok(!barPage({ title: "</span><script>" }).includes("</span><script>"));
 });
 
 test("turning the app's tools off refuses calls in running sessions", async () => {
