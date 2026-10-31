@@ -136,8 +136,9 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
   const sessionsOf = (id: string) => threads.filter(thread => thread.accountId === id).length;
   const bound = accounts.accounts.filter(account => account.proxyProfileId).length;
   const decodoCount = proxies.filter(profile => profile.id.startsWith(DECODO_PREFIX)).length;
-  // One switch at a time (the service refuses a second): adding switches to the new account too.
-  const switching = accounts.switching || isRunning("add") || [...inFlight].some(key => key.startsWith("use:"));
+  // One switch at a time (the service refuses a second): adding switches to the new account too,
+  // and so does Sign in on an account not in use (a sign-in holds switches until it ends).
+  const switching = accounts.switching || isRunning("add") || [...inFlight].some(key => key.startsWith("use:") || key.startsWith("signin:"));
   const removing = isRunning("remove-many");
   const full = accounts.accounts.length >= accounts.maxAccounts;
   const chatRunning = browser?.status === "running" || running > 0;
@@ -225,6 +226,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
             proxies={proxies}
             holders={accounts.accounts}
             run={run}
+            onOpenBrowser={onOpenBrowser}
             sessions={sessionsOf(account.id)}
             tabs={tabsOf(account.id)}
             tunnel={tunnels.find(entry => entry.accountId === account.id)}
@@ -305,8 +307,10 @@ function Stat({ label, value, detail, tone }: { label: string; value: string | n
 
 function AccountCard({
   account, api, authenticated, isRunning, chatRunning, canRemove, inUse, removing, switching, mainTunnelReady, maxTabs, proxies, holders, run,
-  sessions, tabs, tunnel, selected = false, onSelect,
+  sessions, tabs, tunnel, selected = false, onSelect, onOpenBrowser,
 }: {
+  /** Shows the Browser tab: after Use, and for Sign in, whose page opens there. */
+  onOpenBrowser?: () => void;
   account: BrowserAccount;
   /** Ticked for bulk delete; no tick box without `onSelect` (a single account cannot be removed). */
   selected?: boolean;
@@ -351,6 +355,17 @@ function AccountCard({
     : signedIn ? { tone: inUse ? "ok" : "idle", label: "Signed in" } : { tone: "warn", label: "Not signed in" };
   const fill = Math.min(100, Math.round((tabs.length / account.maxTabs) * 100));
 
+  // Use and Sign in end in the Browser tab: the account's page (or its sign-in) opens there.
+  const use = () => run(`use:${account.id}`, async () => {
+    await api.switchBrowserAccount(account.id);
+    onOpenBrowser?.();
+  });
+  const signInNow = () => run(`signin:${account.id}`, async () => {
+    if (!inUse) await api.switchBrowserAccount(account.id);
+    onOpenBrowser?.();
+    await api.openLogin();
+  });
+
   const remove = () => {
     if (!confirmRemove) {
       setConfirmRemove(true);
@@ -388,7 +403,21 @@ function AccountCard({
       <dl className="cbm-facts">
         <div>
           <dt>Sign-in</dt>
-          <dd><span className={`cbm-tone is-${signIn.tone}`}>{signIn.label}</span>{!inUse && account.email ? <span className="cbm-muted"> · last seen as {account.email}</span> : null}</dd>
+          <dd>
+            <span className={`cbm-tone is-${signIn.tone}`}>{signIn.label}</span>
+            {!inUse && account.email ? <span className="cbm-muted"> · last seen as {account.email}</span> : null}
+            {signedIn === false ? (
+              <button
+                className="cbm-link"
+                disabled={isRunning(`signin:${account.id}`) || (!inUse && (switching || removing)) || (inUse && chatRunning)}
+                onClick={() => void signInNow()}
+                title={inUse ? "Opens ChatGPT's sign-in in the Browser tab" : "Switches the Browser tab to this account and opens ChatGPT's sign-in"}
+                type="button"
+              >
+                {isRunning(`signin:${account.id}`) ? "Opening…" : "Sign in"}
+              </button>
+            ) : null}
+          </dd>
         </div>
         <div>
           <dt>Plan</dt>
@@ -510,7 +539,7 @@ function AccountCard({
 
       <footer className="cbm-card-actions">
         {!inUse ? (
-          <button className="cbm-button" disabled={switching || removing || isRunning(`remove:${account.id}`)} onClick={() => void run(`use:${account.id}`, () => api.switchBrowserAccount(account.id))} type="button">
+          <button className="cbm-button" disabled={switching || removing || isRunning(`remove:${account.id}`)} onClick={() => void use()} type="button">
             {isRunning(`use:${account.id}`) ? "Switching…" : "Use in Browser tab"}
           </button>
         ) : null}

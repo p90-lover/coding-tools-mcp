@@ -220,7 +220,10 @@ const browserAccountService = createBrowserAccountService({
   threads: () => threadAccounts,
   lifecycleSyncFor: (accountId, logger) => lifecycleSyncFor(accountId, logger),
   afterSwitch: async (next, { wasVisible, stateStore }) => {
-    if (wasVisible) await next.reveal(stateStore.read().browserInteractionMode === "automatic");
+    const automatic = stateStore.read().browserInteractionMode === "automatic";
+    // The account switched to opens ChatGPT whether or not the Browser tab is showing.
+    if (wasVisible) await next.reveal(automatic);
+    else await next.openHomePage?.(automatic);
     send("launcher:browser-state", next.snapshot());
   },
 });

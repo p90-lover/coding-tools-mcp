@@ -2559,11 +2559,18 @@ class BrowserHost {
   async reveal(inspectSession = true) {
     if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
     this.show();
-    if (!this.selectedTurnTab() && this.view.webContents.getURL() === IDLE_BROWSER_URL) {
-      await this.view.webContents.loadURL(newChatUrlFor(this));
-      if (inspectSession) await this.probeAuthentication();
-    }
+    await this.openHomePage(inspectSession);
     return this.snapshot();
+  }
+
+  /**
+   * Puts ChatGPT on the shown account's page while it still holds the blank idle document. An
+   * account switched to while the Browser tab was hidden stayed blank: only reveal loaded it.
+   */
+  async openHomePage(inspectSession = true) {
+    if (this.selectedTurnTab() || this.view.webContents.getURL() !== IDLE_BROWSER_URL) return;
+    await this.view.webContents.loadURL(newChatUrlFor(this));
+    if (inspectSession) await this.probeAuthentication();
   }
 
   hide() {
