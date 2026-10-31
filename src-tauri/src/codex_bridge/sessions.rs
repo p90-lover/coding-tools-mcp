@@ -188,8 +188,7 @@ impl Hub {
     pub fn with_state_file(path: PathBuf) -> Self {
         Self {
             state_file: Some(path),
-            current: Mutex::new(None),
-            recovery: Mutex::new(()),
+            ..Self::default()
         }
     }
 
