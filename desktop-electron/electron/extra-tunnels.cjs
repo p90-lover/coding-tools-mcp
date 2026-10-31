@@ -73,6 +73,7 @@ class ExtraTunnels {
     this.monitorTimer = null;
     this.monitorInFlight = false;
     this.queue = Promise.resolve();
+    this.saved = null; // the registry's entries once read (entries())
   }
 
   /** Mutating work runs one at a time: starts, adds, removals, reconnects and monitor restarts. */
@@ -82,18 +83,27 @@ class ExtraTunnels {
     return run;
   }
 
+  // Only this class writes the registry, so it is read from disk once and kept: the monitor read it
+  // every 10 s and the Tunnels page on each refresh, and one read held every window 23.7 s on the
+  // busy hard disk (ExtraTunnels.check, 2026-10-31). A read that fails for another reason than a
+  // missing file is not kept, so the next call tries again.
   entries() {
-    let parsed;
-    try {
-      parsed = JSON.parse(fs.readFileSync(this.registryPath, "utf8"));
-    } catch {
-      return [];
+    if (!this.saved) {
+      let parsed;
+      try {
+        parsed = JSON.parse(fs.readFileSync(this.registryPath, "utf8"));
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) return [];
+        parsed = null;
+      }
+      this.saved = Array.isArray(parsed?.tunnels) ? parsed.tunnels.filter(validEntry) : [];
     }
-    return Array.isArray(parsed?.tunnels) ? parsed.tunnels.filter(validEntry) : [];
+    return [...this.saved];
   }
 
   writeEntries(tunnels) {
     writePrivateFileAtomic(this.registryPath, `${JSON.stringify({ version: 1, tunnels }, null, 2)}\n`);
+    this.saved = tunnels.filter(validEntry);
   }
 
   keyPath(id) {

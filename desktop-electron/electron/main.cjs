@@ -2915,7 +2915,7 @@ function registerIpc({ logger, stateStore }) {
       await runtimeHost.uninstallIntegration();
     } finally {
       // Never let re-publishing the descriptor replace the removal's own result or error.
-      try { browserHost.writeDescriptor(); } catch (error) {
+      try { await browserHost.writeDescriptor(); } catch (error) {
         logger.warn("browser.descriptor_write_failed", { message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
       }
     }
@@ -4445,7 +4445,8 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
     // Settings → "Use Coding Tools in Codex": absent is on (as every install before it was).
     codexRouteEnabled: () => stateStore.read().codexRoute !== false,
-    refreshBrowserDescriptor: () => browserHost?.writeDescriptor(),
+    // Read straight back (launcherControlEnvironment): written before this returns.
+    refreshBrowserDescriptor: () => browserHost?.writeDescriptor({ now: true }),
   });
   // Only a preference sync: an unreadable or invalid setup config (seen: a byte order mark) keeps
   // the saved mode and the app starts, as the same read a few lines on already does.
