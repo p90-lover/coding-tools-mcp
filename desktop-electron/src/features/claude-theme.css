@@ -264,9 +264,7 @@
 .ao-workflow .cx-chat .cx-goal-edit { --ge-ink: var(--claude-text); border-color: var(--claude-line); background: var(--claude-raised); box-shadow: var(--claude-shadow); }
 .ao-workflow .cx-chat .cx-goal-edit-save { color: var(--claude-raised); }
 .ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card, .ao-workflow .cx-chat .cx-queued, .ao-workflow .cx-chat .cx-goal-edit,
-.ao-workflow .cx-chat .cx-composer-modes, .ao-workflow .cx-chat .cx-route-note,
-/* The approval card docks above the composer at its exact width, as Codex's does (it was 40px wider). */
-.ao-workflow .cx-chat .cx-approval-dock { max-width: 740px; }
+.ao-workflow .cx-chat .cx-composer-modes, .ao-workflow .cx-chat .cx-route-note { max-width: 740px; }
 .ao-workflow .cx-chat .cx-composer { padding: 12px 12px 8px 14px; border: 1px solid var(--claude-line); border-radius: 16px; background: var(--claude-raised);
   box-shadow: var(--claude-shadow); }
 .ao-workflow .cx-chat .cx-composer:focus-within { border-color: color-mix(in srgb, var(--claude-accent) 45%, var(--claude-line));

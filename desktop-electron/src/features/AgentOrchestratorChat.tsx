@@ -1185,6 +1185,13 @@ export function AgentOrchestratorChat({
   };
   // A new chat starts at the bottom.
   useEffect(() => { setAtBottom(true); setShowStructure(false); setRenaming(null); }, [selectedTaskId]);
+  // A new request ends the thread: bring it into view even when the person had scrolled up to read.
+  const requestKeys = approvals.map((approval) => `${approval.nodeId}\u0000${approval.approval_id}`).join("\u0001");
+  useEffect(() => {
+    if (!requestKeys) return;
+    setAtBottom(true);
+    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
+  }, [requestKeys]);
   // Each chat keeps its own unsent draft, as Codex does (the new-chat composer is "" here): opening
   // another chat puts this one's draft aside and brings that chat's back.
   const draftOwner = useRef(selectedTaskId);
@@ -2035,6 +2042,17 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
               </div>
             ) : null}
             {recovering && latest ? <FailedStepCard step={failedStep} notice={notice} busy={retrying} onRetry={() => retryStart(latest.id)} /> : null}
+            {/* The agent's questions and requests end the conversation, right above the chat box, and
+                scroll with it. Docked under the box they took up to 420 px of the pane: in a split pane
+                the conversation had no room left at all (2026-10-31). */}
+            {approvals.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+              {approvals.map(approval => {
+                // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
+                const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;
+                const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
+                return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
+              })}
+            </div> : null}
           </div>
           {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
@@ -2227,7 +2245,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request below. New messages send after it"
+            placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above. New messages send after it"
               : queueing ? "Running. New messages send when it finishes" : !accepts ? "Running. Send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
@@ -2272,9 +2290,8 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
         </form>
         {selectedTaskId ? <ChatTurnStats model={agentSessions[0]?.model} rounds={turns.filter((turn) => turn.runId).length}
           from={statsSpan.from} models={statsSpan.models} running={runOpen} onRefusal={setCpaRefusal} /> : null}
-        {/* Every box that asks the person something sits below the chat box, as wide as it: a
-            command's card (its choices), the delete confirmation, and the agent's questions and
-            requests. Above the box they pushed it up the pane and away from where the person types. */}
+        {/* A command's card (its choices) and the delete confirmation sit below the chat box, as wide
+            as it. Above the box they pushed it up the pane and away from where the person types. */}
         {card ? <section className="cx-command-card" role="status" aria-label={card.title}>
           <header><strong>{card.title}</strong>
             <button type="button" className="cx-icon-button" aria-label="Close" onClick={() => setCard(null)}><Icon name="close" width="12" height="12" /></button></header>
@@ -2292,14 +2309,6 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
           <footer><button type="button" className="cx-text-button" onClick={() => setDeleting(null)}>Cancel</button>
             <button type="button" className="cx-primary-button" disabled={Boolean(deleteBlocked) || deletingBusy} onClick={() => void confirmDelete()}>Delete</button></footer>
         </section> : null}
-        {approvals.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
-          {approvals.map(approval => {
-            // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
-            const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;
-            const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
-            return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
-          })}
-        </div> : null}
       </section>
       {showStructure && structure ? <aside className="cx-structure" aria-label="Cards" style={cardsWidth ? { flexBasis: cardsWidth } : undefined}>
         <div className="cx-structure-resize" role="separator" aria-orientation="vertical" aria-label="Resize the cards panel" tabIndex={0}

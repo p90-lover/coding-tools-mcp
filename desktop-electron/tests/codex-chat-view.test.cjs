@@ -1059,13 +1059,17 @@ test("approval cards from different team members retain separate React identitie
   assert.equal(new Set(cards.map(item => item.key)).size, 2);
 });
 
-test("the agent's questions and requests sit below the chat box, not above it", () => {
+// Seen 2026-10-31 in a split pane: docked under the chat box, a command's approval took the whole
+// pane and the conversation above it had no room left.
+test("the agent's questions and requests end the conversation and scroll with it", () => {
   const { props } = base({ selectedTaskId: "t", approvals: [{ nodeId: "planner", approval_id: "request-1" }] });
   const tree = walk(mount(props).render());
+  const column = tree.find((element) => element.props?.className === "cx-column");
   const box = tree.findIndex((element) => element.type === "form" && element.props?.className === "cx-composer");
   const dock = tree.findIndex((element) => String(element.props?.className).startsWith("cx-approval-dock"));
-  assert.ok(box >= 0 && dock > box, "the approval dock comes after the chat box");
-  assert.equal(walk(tree[box].props.children).some((element) => element.type === "Approval"), false, "and is not inside it");
+  assert.ok(walk(column.props.children).some((element) => String(element.props?.className).startsWith("cx-approval-dock")), "the requests are in the scrolling thread");
+  assert.ok(box >= 0 && dock < box, "above the chat box");
+  assert.equal(walk(tree[box].props.children).some((element) => element.type === "Approval"), false, "and not inside it");
 });
 
 test("a hidden agent browser is offered back from the chat header, and opens the side panel on it", () => {
