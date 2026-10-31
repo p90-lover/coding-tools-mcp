@@ -44,6 +44,7 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] },
+  "./ComputerControlCard": { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
 test("a project switch keeps its chat pane readable while loading and offers Retry after a failed read", () => {
