@@ -121,6 +121,98 @@ for (const kind of ["provider", "managed"]) {
   });
 }
 
+test("provider partial credential merges reject an unreadable key cycle before changing saved envelopes", async t => {
+  const endpoint = { protocol: "http", host: "proxy.example.test", port: 8080 };
+  const profile = { id: "fixture", name: "Fixture", endpoint };
+  const account = { id: "fixture-account", providerId: "fixture-provider", label: "Fixture", auth: "api_key", status: "connected" };
+  const secret = { apiKey: "fixture-key", refreshToken: "fixture-refresh", cpaAuthName: "fixture.json" };
+  const cases = [
+    { name: "partial proxy login", seed: store => store.saveProxyProfile({ ...profile, username: "fixture", password: "fixture-password" }),
+      change: store => store.saveProxyProfile({ ...profile, name: "Renamed", username: "updated-user" }),
+      read: store => store.proxySecret(profile.id), expected: before => ({ ...before, username: "updated-user" }) },
+    { name: "partial account credential", seed: store => store.saveAccount({ ...account, secret }),
+      change: store => store.saveAccount({ ...account, secret: { apiKey: "updated-key" } }),
+      read: store => store.accountSecret(account.id), expected: before => ({ ...before, apiKey: "updated-key" }) },
+    { name: "account session binding", seed: store => store.saveAccount({ ...account, secret }),
+      change: store => store.mergeAccountSecret(account.id, { cpaAuthName: "updated.json" }),
+      read: store => store.accountSecret(account.id), expected: before => ({ ...before, cpaAuthName: "updated.json" }) },
+  ];
+  for (const entry of cases) await t.test(entry.name, t => {
+    const f = fixture(t, "provider"), first = f.open();
+    entry.seed(first);
+    const expected = entry.read(first), state = fs.readFileSync(f.statePath), backup = fs.readFileSync(`${f.statePath}.bak`), key = fs.readFileSync(f.keyPath);
+    const reopened = f.open(), readFile = fs.readFileSync, failures = new Set([f.keyPath, `${f.keyPath}.bak`]);
+    fs.readFileSync = function (file, ...args) {
+      if (failures.delete(String(file))) throw Object.assign(new Error("fixture key read unavailable"), { code: "EIO" });
+      return readFile.call(this, file, ...args);
+    };
+    try {
+      assert.throws(() => entry.change(reopened), /credential|key/i);
+      assert.doesNotThrow(() => reopened.snapshot());
+    } finally { fs.readFileSync = readFile; }
+    assert.equal(failures.size, 0, "both copies failed in one read cycle");
+    assert.ok(fs.readFileSync(f.keyPath).equals(key));
+    assert.ok(fs.readFileSync(f.statePath).equals(state), "a failed merge cannot replace original state or envelopes");
+    assert.ok(fs.readFileSync(`${f.statePath}.bak`).equals(backup));
+    assert.ok(JSON.stringify(entry.read(reopened)) === JSON.stringify(expected), "normal reads recover every original credential field");
+    entry.change(reopened);
+    assert.ok(JSON.stringify(entry.read(f.open())) === JSON.stringify(entry.expected(expected)), "retry preserves fields outside the requested change");
+  });
+});
+
+test("authoritative credential replacements and explicit clears do not need the previous plaintext", async t => {
+  const profile = { id: "fixture", name: "Fixture", endpoint: { protocol: "http", host: "proxy.example.test", port: 8080 }, sourceKey: "fixture-source" };
+  const cases = [
+    { name: "source proxy replacement", seed: store => store.syncSourceProfiles("nova", [{ ...profile, username: "fixture", password: "fixture-password" }]),
+      change: store => store.syncSourceProfiles("nova", [{ ...profile, username: "updated-user", password: "updated-password" }]),
+      read: store => store.proxySecret(profile.id), expected: { username: "updated-user", password: "updated-password" } },
+    { name: "Decodo password clear", seed: store => store.saveDecodoSettings({ username: "fixture", password: "fixture-password" }),
+      change: store => store.saveDecodoSettings({ username: "updated-user", password: "" }),
+      read: store => ({ password: store.decodoSettings().password }), expected: { password: "" } },
+  ];
+  for (const entry of cases) await t.test(entry.name, t => {
+    const f = fixture(t, "provider"), first = f.open();
+    entry.seed(first);
+    const key = fs.readFileSync(f.keyPath), reopened = f.open(), readFile = fs.readFileSync, failures = new Set([f.keyPath, `${f.keyPath}.bak`]);
+    fs.readFileSync = function (file, ...args) {
+      if (failures.delete(String(file))) throw Object.assign(new Error("fixture key read unavailable"), { code: "EIO" });
+      return readFile.call(this, file, ...args);
+    };
+    try { assert.doesNotThrow(() => entry.change(reopened)); }
+    finally { fs.readFileSync = readFile; }
+    assert.ok(fs.readFileSync(f.keyPath).equals(key));
+    assert.ok(JSON.stringify(entry.read(f.open())) === JSON.stringify(entry.expected));
+  });
+});
+
+test("provider metadata-only edits preserve credentials without reading the fallback key", t => {
+  const f = fixture(t, "provider"), first = f.open();
+  const profile = { id: "fixture", name: "Fixture", endpoint: { protocol: "http", host: "proxy.example.test", port: 8080 } };
+  const account = { id: "fixture-account", providerId: "fixture-provider", label: "Fixture", auth: "api_key", status: "connected" };
+  first.saveProxyProfile({ ...profile, username: "fixture", password: "fixture-password" });
+  first.saveAccount({ ...account, secret: { apiKey: "fixture-key" } });
+  first.saveDecodoSettings({ username: "fixture", password: "fixture-password" });
+  const saved = JSON.parse(fs.readFileSync(f.statePath, "utf8")).secrets, reopened = f.open(), readFile = fs.readFileSync;
+  let keyReads = 0;
+  fs.readFileSync = function (file, ...args) {
+    if ([f.keyPath, `${f.keyPath}.bak`].includes(String(file))) {
+      keyReads += 1;
+      throw Object.assign(new Error("fixture key read unavailable"), { code: "EIO" });
+    }
+    return readFile.call(this, file, ...args);
+  };
+  try {
+    assert.doesNotThrow(() => reopened.saveProxyProfile({ ...profile, name: "Renamed" }));
+    assert.doesNotThrow(() => reopened.saveAccount({ ...account, label: "Renamed" }));
+    assert.doesNotThrow(() => reopened.saveDecodoSettings({ username: "renamed-user" }));
+  } finally { fs.readFileSync = readFile; }
+  assert.equal(keyReads, 0);
+  assert.ok(JSON.stringify(JSON.parse(fs.readFileSync(f.statePath, "utf8")).secrets) === JSON.stringify(saved));
+  assert.ok(reopened.accountSecret(account.id).apiKey === "fixture-key");
+  assert.ok(reopened.proxySecret(profile.id).password === "fixture-password");
+  assert.ok(reopened.decodoSettings().password === "fixture-password");
+});
+
 test("managed secrets-container read failure never replaces existing CPA credentials", t => {
   const f = fixture(t, "managed"), first = f.open();
   f.save(first);

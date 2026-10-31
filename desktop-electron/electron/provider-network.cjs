@@ -334,27 +334,31 @@ function createSecretCodec({ safeStorage, keyPath, canCreateKey }) {
     };
   }
 
-  function decrypt(envelope) {
-    if (!envelope || typeof envelope !== "object") return null;
+  function decrypt(envelope, required = false) {
+    if (envelope === undefined || envelope === null) return null;
     try {
+      let plain;
       if (envelope.scheme === "electron-safe-storage-v1" && encryptionAvailable()) {
-        const plain = safeStorage.decryptString(Buffer.from(envelope.data, "base64"));
-        return JSON.parse(plain);
+        plain = safeStorage.decryptString(Buffer.from(envelope.data, "base64"));
+      } else {
+        if (envelope.scheme !== "aes-256-gcm-v1") throw new Error("Unsupported saved credential");
+        const key = loadFallbackKey();
+        const decipher = crypto.createDecipheriv(
+          "aes-256-gcm",
+          key,
+          Buffer.from(envelope.iv, "base64"),
+        );
+        decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
+        plain = Buffer.concat([
+          decipher.update(Buffer.from(envelope.data, "base64")),
+          decipher.final(),
+        ]).toString("utf8");
       }
-      if (envelope.scheme !== "aes-256-gcm-v1") return null;
-      const key = loadFallbackKey();
-      const decipher = crypto.createDecipheriv(
-        "aes-256-gcm",
-        key,
-        Buffer.from(envelope.iv, "base64"),
-      );
-      decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
-      const plain = Buffer.concat([
-        decipher.update(Buffer.from(envelope.data, "base64")),
-        decipher.final(),
-      ]).toString("utf8");
-      return JSON.parse(plain);
+      const value = JSON.parse(plain);
+      if (required && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error("Invalid saved credential");
+      return value;
     } catch {
+      if (required) throw new Error("Saved provider credentials are unavailable; restore them before changing credentials");
       return null;
     }
   }
@@ -435,7 +439,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       )))
       : null;
     if (suppliedSecret && Object.keys(suppliedSecret).length > 0) {
-      const previousSecret = codec.decrypt(state.secrets.accounts[id]) || {};
+      const previousSecret = codec.decrypt(state.secrets.accounts[id], true) || {};
       state.secrets.accounts[id] = codec.encrypt({
         ...previousSecret,
         ...suppliedSecret,
@@ -568,7 +572,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     const password = typeof input.password === "string" ? input.password : undefined;
     if (username !== undefined || password !== undefined) {
       // A field left out keeps the saved one: a new password alone keeps the username, and back.
-      const saved = codec.decrypt(state.secrets.proxies[id]) ?? {};
+      const saved = codec.decrypt(state.secrets.proxies[id], true) ?? {};
       state.secrets.proxies[id] = codec.encrypt({
         username: username ?? saved.username ?? "",
         password: password ?? saved.password ?? "",
@@ -824,9 +828,10 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   }
 
   function mergeAccountSecret(accountId, patch = {}) {
+    recoverState();
     const account = findAccount(accountId);
     if (!account || account.archivedAt) throw new Error("Provider account was not found");
-    const current = accountSecret(accountId) || {};
+    const current = codec.decrypt(state.secrets.accounts[accountId], true) || {};
     for (const key of [
       "antigravityAuthName",
       "antigravityAuthIndex",
