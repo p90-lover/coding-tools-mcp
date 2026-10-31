@@ -226,6 +226,21 @@ test("an account whose page cannot load leaves the Browser tab on the account it
   assert.equal(views.find((view) => view.partition === `${BASE}-abcdefghijkl`).closed, true, "the failed page is closed");
 });
 
+test("a cold account switch keeps the leaving account counted and routed while its new page loads", async () => {
+  const { host } = switchingHost();
+  const tab = host.userTabs.get("u1");
+  host.userTabs = new Map(Array.from({ length: 5 }, (_, id) => [id, { ...tab, id }]));
+  let finish;
+  host.initializePrimaryView = () => new Promise(resolve => { finish = resolve; });
+  const switching = host.switchAccount(`${BASE}-abcdefghijkl`);
+  await new Promise(setImmediate);
+  try {
+    assert.equal(host.tabCount(BASE), 5);
+    assert.ok(host.livePartitions().includes(BASE));
+    assert.equal(makeTabRoom(host, BASE, false), 5);
+  } finally { finish(); await switching; }
+});
+
 test("past the warm limit, a parked account a turn runs on stays; a bare signed-out page goes before an older signed-in one", () => {
   const { parkedHomeToUnload } = require("../electron/browser-host.cjs");
   const home = (partition, parkedAt, { tabs = 0, authenticated = false } = {}) =>
@@ -356,6 +371,19 @@ test("each account holds its own tabs up to its limit, and frees only its own re
   );
   assert.equal(makeTabRoom(host, other, false), 2);
   assert.deepEqual(removed, ["b2"], "never another account's tab");
+});
+
+test("parked account tabs still count toward account and global tab limits", () => {
+  const parked = `${BASE}-abcdefghijkl`;
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    partition: BASE, userTabs: new Map(), turnTabs: new Map(),
+    parkedHomes: new Map([[parked, { partition: parked, userTabs: new Map(Array.from({ length: 5 }, (_, id) => [id, {}])) }]]),
+  });
+  assert.equal(host.tabCount(parked), 5, "switching accounts does not free its loaded user tabs");
+  assert.equal(makeTabRoom(host, parked, false), 5);
+  for (let id = 0; id < 10; id += 1) host.turnTabs.set(id, { partition: `other-${Math.floor(id / 5)}`, status: "running" });
+  assert.equal(makeTabRoom(host, BASE, false), 15, "the global ceiling includes every parked home");
+  assert.equal(host.turnTabs.size, 10, "a capacity read never evicts running work");
 });
 
 test("an account counts as signed in while its own partition holds an unexpired ChatGPT session token", () => {
