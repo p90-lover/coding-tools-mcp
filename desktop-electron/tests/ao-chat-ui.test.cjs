@@ -40,6 +40,8 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   "./HarnessLogo": { ModelLogo: () => null },
   "./AgentOrchestratorRoleEditor": roles,
   "./ChatReplyHead": load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null } }),
+  "./ChatReplyPlan": load("ChatReplyPlan.tsx"),
+  "./chat-reply-plan": load("chat-reply-plan.ts", { "./ao-chat": chat }),
   // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
   "./ChatAnnotations": load("ChatAnnotations.tsx", { "./ao-chat": chat }),
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },

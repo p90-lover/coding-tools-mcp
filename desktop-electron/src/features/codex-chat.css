@@ -774,6 +774,64 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* A reply head is the turn's own summary, so the foot's line sits flush with the card's bottom. */
 .cx-reply > .cx-turn-foot { margin-top: 0; }
 @media (prefers-reduced-motion: reduce) { .cx-reply-status::before, .cx-reply-dot { animation: none !important; } }
+.cx-reply-attempt { padding: 0 7px; border-radius: 9px; background: color-mix(in srgb, var(--ao-amber) 14%, transparent); color: var(--ao-amber);
+  font-size: 11px; font-weight: 600; line-height: 17px; white-space: nowrap; }
+
+/* A reply's steps in the chosen chat style (ChatReplyPlan). One list, four looks. */
+.cx-rplan { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 4px; font-size: 12.5px; line-height: 18px; }
+.cx-rplan-head { display: flex; align-items: baseline; gap: 8px; }
+.cx-rplan-title { color: var(--color-text-primary); font-weight: 600; }
+.cx-rplan-count { color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cx-rplan-steps { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.cx-rplan-step { --tone: var(--ao-muted); position: relative; display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 3px 0; }
+.cx-rplan-step.is-done { --tone: var(--ao-green); }
+.cx-rplan-step.is-running { --tone: var(--reply-live); }
+.cx-rplan-step.is-failed { --tone: var(--ao-red); }
+.cx-rplan-mark { flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; margin-top: 1px; border: 1.5px solid var(--tone);
+  border-radius: 50%; color: var(--tone); box-sizing: border-box; }
+.cx-rplan-step.is-done .cx-rplan-mark { border-color: transparent; background: color-mix(in srgb, var(--tone) 16%, transparent); }
+.cx-rplan-step.is-running .cx-rplan-mark { border-top-color: transparent; animation: cx-rplan-spin 0.9s linear infinite; }
+.cx-rplan-step.is-pending .cx-rplan-mark { border-style: dashed; }
+@keyframes cx-rplan-spin { to { transform: rotate(360deg); } }
+.cx-rplan-body { display: flex; flex-direction: column; min-width: 0; }
+.cx-rplan-step-title { min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }
+.cx-rplan-step.is-done .cx-rplan-step-title { color: var(--ao-muted); }
+.cx-rplan-step.is-running .cx-rplan-step-title { font-weight: 600; }
+.cx-rplan-num { margin-right: 5px; color: var(--ao-muted); font-variant-numeric: tabular-nums; }
+.cx-rplan-finish { color: var(--ao-muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.cx-rplan-finish.is-failed { color: var(--ao-red); }
+/* Codex / Cursor: a card pinned to the reply's top while it works. */
+.cx-rplan.is-plan { padding: 9px 12px; border: 1px solid var(--ao-line); border-radius: 10px; background: var(--cx-hover); }
+.cx-reply.is-working > .cx-rplan.is-plan, .cx-reply.is-stalled > .cx-rplan.is-plan { position: sticky; top: 0; z-index: 2;
+  background: color-mix(in srgb, var(--cx-hover) 60%, var(--color-background-primary, Canvas)); }
+.cx-rplan.is-plan .cx-rplan-finish { display: none; }
+/* Copilot: a numbered timeline, each step joined to the next and saying how it ended. */
+.cx-rplan.is-timeline .cx-rplan-step:not(:last-child)::after { content: ""; position: absolute; top: 22px; bottom: -3px; left: 7.5px; width: 1px; background: var(--ao-line); }
+.cx-rplan.is-timeline .cx-rplan-step.is-done:not(:last-child)::after { background: color-mix(in srgb, var(--ao-green) 35%, var(--ao-line)); }
+.cx-rplan.is-timeline .cx-rplan-step-title { white-space: normal; }
+/* Windsurf: each step with chips for what it did. */
+.cx-rplan.is-cascade .cx-rplan-step { padding: 5px 8px; border-radius: 8px; }
+.cx-rplan.is-cascade .cx-rplan-step:hover { background: var(--cx-hover); }
+.cx-rplan-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.cx-rplan-chip { padding: 0 7px; border: 1px solid var(--ao-line); border-radius: 9px; color: var(--ao-muted); font-size: 11px; line-height: 17px; white-space: nowrap; }
+.cx-rplan-chip.is-edit, .cx-rplan-chip.is-write { color: var(--ao-green); }
+.cx-rplan-chip.is-commands, .cx-rplan-chip.is-code { color: var(--ao-blue); }
+/* ChatGPT: where the turn is now, in one line, with a thin progress bar. */
+.cx-rplan-focus { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 2px 0; color: var(--ao-muted); font-size: 12.5px; line-height: 18px; }
+.cx-rplan-focus-at { color: var(--color-text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+.cx-rplan-bar { flex: 0 0 100%; height: 2px; overflow: hidden; border-radius: 1px; background: var(--ao-line); }
+.cx-rplan-bar > span { display: block; height: 100%; background: var(--reply-live); transition: width 0.4s ease; }
+@media (prefers-reduced-motion: reduce) { .cx-rplan-step.is-running .cx-rplan-mark { animation: none; } .cx-rplan-bar > span { transition: none; } }
+
+/* A goal's new round: a divider with its number and the evaluator's reason, then the round's reply. */
+.cx-round { display: flex; align-items: flex-start; gap: 10px; margin: 6px 0 10px; font-size: 12px; line-height: 17px; }
+.cx-round-line { flex: none; width: 3px; align-self: stretch; border-radius: 2px; background: color-mix(in srgb, var(--ao-blue) 55%, transparent); }
+.cx-round-body { display: flex; flex: 1 1 0; flex-direction: column; gap: 1px; min-width: 0; }
+.cx-round-title { color: var(--ao-blue); font-weight: 600; }
+.cx-round-reason { display: -webkit-box; overflow: hidden; color: var(--ao-muted); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.cx-round-fold { display: block; width: 100%; margin: 4px 0 12px; padding: 6px 10px; border: 1px dashed var(--ao-line); border-radius: 8px; background: transparent;
+  color: var(--ao-muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.cx-round-fold:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-verdict { padding: 1px 7px; border-radius: 9px; background: var(--cx-hover); font-size: 11px; font-weight: 600; }
 .cx-verdict.is-approved { color: var(--ao-green); }
 .cx-verdict.is-changes_required { color: var(--ao-amber); }
@@ -1234,9 +1292,6 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* Three lines at most (the whole verdict is its tooltip); clamped inside the padding, not through it. */
 .cx-goal-verdict > span { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 /* A goal's later round, as Claude Code shows a Stop hook's feedback: a dim "⎿" line, not a message bubble. */
-.cx-hook-feedback { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0 0 8px; color: var(--ao-muted); font-size: 12px; }
-.cx-hook-feedback-mark { flex: 0 0 auto; }
-.cx-hook-feedback-text { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .cx-goal button, .cx-plan-chip button { display: inline-flex; align-items: center; padding: 2px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font-size: 12px; cursor: pointer; }
 .cx-goal button:hover, .cx-plan-chip button:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-plan-chip { display: inline-flex; align-items: center; gap: 2px; padding: 4px 4px 4px 10px; border-radius: 10px; background: color-mix(in srgb, var(--ao-blue) 10%, transparent); color: var(--ao-blue); font-size: 12px; font-weight: 600; }

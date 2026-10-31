@@ -98,6 +98,8 @@ const RETRYABLE_DOWNLOAD_CODES = new Set([
   "ETIMEDOUT",
 ]);
 const DEFAULT_COMMAND_TIMEOUT_MS = 30 * 60_000;
+// How often a component's shown install state is rechecked on disk, off the main thread.
+const SOURCE_RECHECK_MS = 30_000;
 const DEFAULT_STOP_TIMEOUT_MS = 8_000;
 const MARKER_NAME = ".coding-tools-managed-component.json";
 const SECRET_VERSION = 1;
@@ -519,6 +521,7 @@ function createManagedComponentController({
   // or update, and are adopted by the next launcher when their version and health match.
   persistentComponents = [],
   healthProbe = null,
+  sourceRecheckMs = SOURCE_RECHECK_MS,
 } = {}) {
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
   const downloadFetch = typeof fetchImpl === "function" ? fetchImpl : null;
@@ -644,25 +647,77 @@ function createManagedComponentController({
     return readJson(markerPath(componentHome(manifest)));
   }
 
-  function sourceState(manifest) {
-    const home = componentHome(manifest);
-    const exists = fs.existsSync(home);
-    const marker = exists ? readMarker(manifest) : null;
-    if (!exists) return { state: "not-installed", home, marker: null };
-    if (!markerMatches(manifest, marker)) return { state: "repair-required", home, marker };
+  /** The files an installed component must have, as paths under its home. */
+  function requiredSourceFiles(manifest, marker, home) {
     const requiredFiles = manifest.install.steps
       .filter((step) => step.kind === "assert-file")
       .map((step) => step.path);
     if (manifest.bundle?.entrypoint) requiredFiles.push(manifest.bundle.entrypoint);
     if (marker.artifact) requiredFiles.push(marker.artifact);
+    return requiredFiles.map((relative) => path.join(home, assertSafeRelativePath(relative, "Managed package file")));
+  }
+
+  /** A component's files as they are now on disk. Installing, starting and stopping decide on this. */
+  function sourceState(manifest) {
+    const home = componentHome(manifest);
+    const value = (() => {
+      const exists = fs.existsSync(home);
+      const marker = exists ? readMarker(manifest) : null;
+      if (!exists) return { state: "not-installed", home, marker: null };
+      if (!markerMatches(manifest, marker)) return { state: "repair-required", home, marker };
+      try {
+        if (requiredSourceFiles(manifest, marker, home).some((file) => !fs.statSync(file).isFile())) return { state: "repair-required", home, marker };
+      } catch {
+        return { state: "repair-required", home, marker };
+      }
+      return { state: "installed", home, marker };
+    })();
+    rememberSource(manifest, value);
+    return value;
+  }
+
+  /** sourceState off the main thread, for the shown state's recheck. */
+  async function sourceStateAsync(manifest) {
+    const home = componentHome(manifest);
+    if (!(await fs.promises.stat(home).then(() => true, () => false))) return { state: "not-installed", home, marker: null };
+    const marker = await fs.promises.readFile(markerPath(home), "utf8").then(JSON.parse).catch(() => null);
+    if (!markerMatches(manifest, marker)) return { state: "repair-required", home, marker };
     try {
-      if (requiredFiles.some((relative) => !fs.statSync(path.join(
-        home, assertSafeRelativePath(relative, "Managed package file"),
-      )).isFile())) return { state: "repair-required", home, marker };
+      for (const file of requiredSourceFiles(manifest, marker, home)) {
+        if (!(await fs.promises.stat(file)).isFile()) return { state: "repair-required", home, marker };
+      }
     } catch {
       return { state: "repair-required", home, marker };
     }
     return { state: "installed", home, marker };
+  }
+
+  // What project() shows of each component's files, by home. Snapshots run project() for every
+  // component, and its existsSync on a component's home held every window 28.8 s on the busy hard
+  // disk (cpaConnection, 2026-10-31). While a component runs, its files are held open and change only
+  // through an operation here (install, repair, removal), which forgets the shown state: it is read
+  // once, then rechecked off the main thread every sourceRecheckMs. A stopped one is read as it is.
+  const shownSources = new Map();
+  function rememberSource(manifest, value) {
+    shownSources.set(value.home, { id: manifest.id, value, at: Date.now(), checking: false });
+  }
+  function forgetSources(id) {
+    for (const [home, entry] of shownSources) if (entry.id === id) shownSources.delete(home);
+  }
+  function shownSourceState(manifest) {
+    const known = shownSources.get(componentHome(manifest));
+    if (!known || !processes.get(manifest.id)?.size) return sourceState(manifest);
+    if (!known.checking && !disposed && Date.now() - known.at >= sourceRecheckMs) {
+      known.checking = true;
+      void sourceStateAsync(manifest).then((value) => {
+        // An operation forgot it, or a fresh read replaced it, meanwhile: theirs is newer.
+        if (shownSources.get(value.home) !== known) return;
+        const changed = JSON.stringify(value) !== JSON.stringify(known.value);
+        rememberSource(manifest, value);
+        if (changed && !disposed) emit();
+      });
+    }
+    return known.value;
   }
 
   function operationState(id) {
@@ -753,7 +808,7 @@ function createManagedComponentController({
   function project(idValue) {
     const id = requiredComponentId(idValue);
     const manifest = manifestFor(id);
-    const source = sourceState(manifest);
+    const source = shownSourceState(manifest);
     const operation = operationState(id);
     const installState = operation?.state === "installing"
       ? "installing"
@@ -793,6 +848,8 @@ function createManagedComponentController({
   }
 
   function setOperation(id, patch) {
+    // The operation may have installed, replaced or removed the component's files.
+    forgetSources(String(id).split(":")[0]);
     const next = { ...(operationState(id) || {}), ...patch };
     operations.set(id, next);
     emit();
@@ -814,6 +871,7 @@ function createManagedComponentController({
     assertWithin(trashRoot, destination, "Managed component Trash destination");
     fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
     fs.renameSync(sourcePath, destination);
+    forgetSources(manifest.id);
     writeJson(path.join(destination, "CODING_TOOLS_TRASH_RECORD.json"), {
       schemaVersion: 1,
       id: manifest.id,
@@ -884,7 +942,16 @@ function createManagedComponentController({
     return new Error(`${manifest.name} is bundled inside Coding Tools Desktop; the runtime is missing from this build`);
   }
 
+  // Whether this build bundles a component's runtime: up to seven existsSync and statSync calls,
+  // for every component on every snapshot. The app's own files do not change while it runs.
+  const bundledRuntimes = new Map();
   function hasBundledRuntime(manifest) {
+    const key = `${manifest.id}@${manifest.version}@${manifest.strategy}`;
+    if (!bundledRuntimes.has(key)) bundledRuntimes.set(key, findBundledRuntime(manifest));
+    return bundledRuntimes.get(key);
+  }
+
+  function findBundledRuntime(manifest) {
     try {
       if (manifest.strategy === "release-binary") {
         return Boolean(bundledReleaseAssetPath(manifest, selectedReleaseAsset(manifest)));

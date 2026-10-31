@@ -58,8 +58,11 @@ function mount(props) {
   // The reply's head renders inline too, so a turn's who, status and files can be read.
   const replyHead = transpile("ChatReplyHead.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
+  // The reply's steps (chat-reply-plan) and their views, real too.
+  const replyPlan = transpile("chat-reply-plan.ts", (name) => name === "./ao-chat" ? chat : {});
+  const replyPlanView = transpile("ChatReplyPlan.tsx", (name) => name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {});
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "./ChatReplyHead" ? replyHead : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
+    : name === "./ao-chat" ? chat : name === "./ChatReplyHead" ? replyHead : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.

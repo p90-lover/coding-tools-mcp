@@ -15,6 +15,8 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
 import { ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
+import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
+import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, type ChatStyle } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
@@ -1150,6 +1152,12 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem(COMPACT_ACTIVITY_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
     return !current;
   });
+  // How a reply draws its steps (chat-reply-plan's styles), picked from the header menu.
+  const [replyStyle, setReplyStyle] = useState<ChatStyle>(() => { try { return chatStyle(localStorage.getItem(CHAT_STYLE_KEY)); } catch { return "transcript"; } });
+  const pickReplyStyle = (next: ChatStyle) => {
+    try { localStorage.setItem(CHAT_STYLE_KEY, next); } catch { /* applies now regardless */ }
+    setReplyStyle(next);
+  };
   // Bit, the chat's pet (ChatPet), shown unless turned off from the header menu or its own right-click.
   const [petOn, setPetOn] = useState(() => { try { return localStorage.getItem(PET_KEY) !== "off"; } catch { return true; } });
   // In split view the panes share one pet: hiding it in one pane hides it in all of them.
@@ -1810,6 +1818,8 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
     ] as ChatMenuItem[] : []),
     ...(steer ? [{ label: "Steer while working", checked: steerOn, run: toggleSteer } as ChatMenuItem] : []),
     { label: "Compact activity", checked: compactActivity, run: toggleCompact } as ChatMenuItem,
+    { label: "Reply style", detail: CHAT_STYLES.find((style) => style.id === replyStyle)?.label,
+      items: CHAT_STYLES.map((style) => ({ label: style.label, detail: style.hint, checked: style.id === replyStyle, run: () => pickReplyStyle(style.id) })) } as ChatMenuItem,
     { label: "Show pet", checked: petOn, run: togglePet } as ChatMenuItem,
     { label: workMode === "single" ? "Show work details" : "Show workers' activity", checked: showWork, run: toggleWork } as ChatMenuItem,
     { kind: "separator" },
@@ -1857,7 +1867,29 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
   // Each turn's steers on their way as one element, kept while they are unchanged so a DeepSeek turn's
   // memoized work (DshWork) does not draw again for them.
   const steerViews = useMemo(() => new Map([...steersByTurn].map(([at, list]) => [at, <PendingSteers steers={list} />])), [steersByTurn]);
+  // A goal's rounds past the newest two fold under one row (FoldedRounds): a 52-round goal was 52
+  // replies to scroll past. `foldOf` maps a folded turn to its run of rounds, `foldAt` the run's first turn to its row.
+  const [openRounds, setOpenRounds] = useState<ReadonlySet<string>>(() => new Set());
+  const roundFolds = useMemo(() => {
+    const foldOf = new Map<number, string>();
+    const foldAt = new Map<number, { key: string; first: number; last: number }>();
+    for (const [key, indexes] of foldedRounds(turns)) {
+      for (const index of indexes) foldOf.set(index, key);
+      foldAt.set(indexes[0], { key, first: goalRound(turns, indexes[0])!.round, last: goalRound(turns, indexes[indexes.length - 1])!.round });
+    }
+    return { foldOf, foldAt };
+  }, [turns]);
+  const toggleRounds = (key: string) => setOpenRounds((open) => {
+    const next = new Set(open);
+    if (!next.delete(key)) next.add(key);
+    return next;
+  });
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
+    const foldKey = roundFolds.foldOf.get(turnIndex);
+    const foldRow = roundFolds.foldAt.get(turnIndex);
+    const foldToggle = foldRow ? <FoldedRounds key={`fold:${foldRow.key}`} first={foldRow.first} last={foldRow.last}
+      open={openRounds.has(foldRow.key)} onToggle={() => toggleRounds(foldRow.key)} /> : null;
+    if (foldKey && !openRounds.has(foldKey)) return foldToggle;
     // A turn on a DeepSeek model shows as DeepSeek Harness shows one (DshTranscript); others as Claude Code.
     const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
     let readWork = dshReaders.get(turn.runId);
@@ -1888,16 +1920,21 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
     const failing = cards.find((step) => step.error);
     // The chat's failed-step card says this turn's error already (FailedStepCard).
     const headError = failing && turn !== failedTurn ? { step: failing.name, message: failing.error! } : undefined;
-    const changes = turnChanges(cards.flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? []));
+    const items = cards.flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? []);
+    const changes = turnChanges(items);
+    // The reply as steps, drawn in the chat style (ChatReplyPlan); the transcript's rows are its steps.
+    const plan = replyStyle === "transcript" ? null : replyPlan(items, live, failing?.error);
+    // Focus keeps the work behind Show work whatever the chat's setting: its progress line says where the turn is.
+    const turnWork = replyStyle === "focus" ? false : showWork;
     const hasReply = Boolean(cards.length || live);
+    // A goal's later round opens on a divider: its number and why the last round fell short.
+    const round = feedback ? goalRound(turns, turnIndex) : null;
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
-    return <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
-              {feedback ? <div className="cx-hook-feedback" role="note">
-                <span className="cx-hook-feedback-mark" aria-hidden="true">⎿</span>
-                <span className="cx-hook-feedback-text">Stop hook feedback:{"\n"}[{feedback.objective}]: {feedback.reason}</span>
-                {turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
-              </div> : turn.user ? <div className="cx-user">
+    const view = <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
+              {feedback ? <RoundDivider round={round?.round ?? 2} reason={feedback.reason}
+                stamp={turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null} />
+              : turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
                 <MessageActions text={chatMessageReadable(turn.user.text)}>
                   {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
@@ -1920,13 +1957,14 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
               {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} aria-label="Reply">
               <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
                 startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
-                verdict={turn.final?.verdict} error={headError} members={members} changes={changes} />
+                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} error={headError} members={members} changes={changes} />
+              {plan ? <ReplyPlanView plan={plan} style={replyStyle} live={live} /> : null}
               {/* The head says the error, so the DeepSeek turn leaves its own copy out. */}
               {dsh && readWork
-                ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={live} expanded={showWork} useWork={readWork}
+                ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
                   errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null}
                   beforeStatus={live ? steerViews.get(turnIndex) : undefined} headed />
-                : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
+                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork} />}
               {/* A steer on its way sits above the turn's running line ("Deep diving", "Working"), never
                   under it: a running DeepSeek turn draws it inside its work, right above that line. */}
               {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
@@ -1949,7 +1987,9 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
               </section> : null}
               {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick]);
+    return foldToggle ? [foldToggle, view] : view;
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
+    replyStyle, roundFolds, openRounds]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>

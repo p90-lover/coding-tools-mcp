@@ -54,10 +54,18 @@ export function turnChanges(items: ChatLiveItem[]): ChangedFile[] {
   return orderChanges([...byPath.values()]);
 }
 
-/** Which changed files the head lists first: it shows CHANGES_SHOWN of them, the rest behind "N more". */
+// Files nobody reads in a diff: lockfiles, build output, snapshots. They go last, whatever their size.
+const NOISE_FILE = /(^|[\\/])(package-lock\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|go\.sum|[^\\/]+\.snap|[^\\/]+\.min\.(js|css))$|(^|[\\/])(dist|build|out|node_modules)[\\/]/i;
+/**
+ * Which changed files the head lists first: it shows CHANGES_SHOWN of them, the rest behind "N more".
+ * The biggest changes lead (most lines added and removed), ties keep the order first touched, and
+ * lockfiles and build output sink to the end: a 900-line package-lock.json took the first slot.
+ */
 export function orderChanges(files: ChangedFile[]): ChangedFile[] {
-  // TODO(human)
-  return files;
+  const rank = (file: ChangedFile) => (NOISE_FILE.test(file.path) ? 1 : 0);
+  return files.map((file, index) => ({ file, index }))
+    .sort((a, b) => rank(a.file) - rank(b.file) || (b.file.additions + b.file.deletions) - (a.file.additions + a.file.deletions) || a.index - b.index)
+    .map(({ file }) => file);
 }
 
 const CHANGES_SHOWN = 4;
@@ -87,6 +95,8 @@ export type ReplyHeadProps = {
   startedAtMs?: number;
   endedAtMs?: number;
   verdict?: string;
+  /** The answering card's attempt, from 2 when it was retried ("Attempt 3"). */
+  attempt?: number;
   /** The failing card's error, unless the chat's failed-step card below already shows it. */
   error?: { step: string; message: string };
   /** A team's cards, in pipeline order; empty for a single chat. */
@@ -94,7 +104,7 @@ export type ReplyHeadProps = {
   changes: ChangedFile[];
 };
 
-export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, verdict, error, members, changes }: ReplyHeadProps) {
+export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, verdict, attempt = 1, error, members, changes }: ReplyHeadProps) {
   const live = tone === "working" || tone === "stalled" || tone === "queued";
   const now = useNow(live);
   const end = live ? now : endedAtMs;
@@ -112,6 +122,7 @@ export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, ver
       {team ? <span className="cx-reply-mode">Team · {members.length}</span> : null}
       <span className={`cx-reply-status is-${tone}`} role={live ? "status" : undefined}>{TONE_LABEL[tone]}</span>
       {time ? <span className="cx-reply-time" title={startedAtMs ? `Started ${new Date(startedAtMs).toLocaleString()}` : undefined}>{time}</span> : null}
+      {attempt > 1 ? <span className="cx-reply-attempt" title={`${attempt - 1} earlier ${attempt === 2 ? "attempt" : "attempts"} folded under the work`}>Attempt {attempt}</span> : null}
       {verdict ? <span className={`cx-verdict is-${verdict.toLowerCase()}`}>{verdict}</span> : null}
       <span className="cx-reply-spacer" />
       {changes.length ? <span className="cx-reply-total" title={changes.map((file) => file.path).join("\n")}>

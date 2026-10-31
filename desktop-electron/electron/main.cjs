@@ -32,7 +32,7 @@ const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-li
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
-const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
+const { createGptBrowserHost, cleanUserAgent, readGptBrowserState } = require("./gpt-browser.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
@@ -380,11 +380,14 @@ async function routeGptBrowserSession(browserSession) {
   await browserSession.setProxy({ mode: "fixed_servers", proxyRules: route, proxyBypassRules: process.env.NO_PROXY || "" });
 }
 
+/** The GPT Browser host, made on first use once its saved accounts are read off the main thread. */
 function getGptBrowser(logger) {
   if (gptBrowser) return gptBrowser;
-  gptBrowser = createGptBrowserHost({
+  const dataRoot = path.join(CORE_HOME, "gpt-browser");
+  gptBrowser = readGptBrowserState(dataRoot, logger).then((savedText) => createGptBrowserHost({
     logger,
-    dataRoot: path.join(CORE_HOME, "gpt-browser"),
+    dataRoot,
+    savedText,
     sessionFor: (partition) => session.fromPartition(partition),
     prepareSession: routeGptBrowserSession,
     createView: (partition) => new WebContentsView({
@@ -396,6 +399,10 @@ function getGptBrowser(logger) {
     // mailto click failed as an unhandled rejection and the mail app never opened.
     openExternal: (url) => (/^mailto:/i.test(String(url)) ? shell.openExternal(String(url)) : openWebUrl(url)),
     onChange: (status) => send("launcher:gpt-browser-changed", status),
+  })).catch((error) => {
+    // A host that could not be made is made again on the next call, as before.
+    gptBrowser = null;
+    throw error;
   });
   return gptBrowser;
 }
@@ -2542,36 +2549,36 @@ function registerIpc({ logger, stateStore }) {
     return getChatGptDesktop(logger).localSend(input.text, { returnTo });
   });
   // Workspace -> GPT Browser. Every change needs the focused main window; status is read-only.
-  handle("launcher:gpt-browser-status", () => getGptBrowser(logger).status());
-  handle("launcher:gpt-browser-add", (event) => {
+  handle("launcher:gpt-browser-status", async () => (await getGptBrowser(logger)).status());
+  handle("launcher:gpt-browser-add", async (event) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).addAccount();
+    return (await getGptBrowser(logger)).addAccount();
   });
-  handle("launcher:gpt-browser-switch", (event, id) => {
+  handle("launcher:gpt-browser-switch", async (event, id) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).switchTo(id);
+    return (await getGptBrowser(logger)).switchTo(id);
   });
-  handle("launcher:gpt-browser-open-url", (event, url) => {
+  handle("launcher:gpt-browser-open-url", async (event, url) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).openUrl(url);
+    return (await getGptBrowser(logger)).openUrl(url);
   });
-  handle("launcher:gpt-browser-navigate", (event, action) => {
+  handle("launcher:gpt-browser-navigate", async (event, action) => {
     assertFocusedMainWindow(event, false);
-    return getGptBrowser(logger).navigate(action);
+    return (await getGptBrowser(logger)).navigate(action);
   });
-  handle("launcher:gpt-browser-rename", (event, input) => {
+  handle("launcher:gpt-browser-rename", async (event, input) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).rename(input?.id, input?.label);
+    return (await getGptBrowser(logger)).rename(input?.id, input?.label);
   });
-  handle("launcher:gpt-browser-remove", (event, id) => {
+  handle("launcher:gpt-browser-remove", async (event, id) => {
     assertFocusedMainWindow(event, true);
-    return getGptBrowser(logger).remove(id);
+    return (await getGptBrowser(logger)).remove(id);
   });
-  handle("launcher:gpt-browser-surface-active", (_event, active) => getGptBrowser(logger).setSurfaceActive(active === true));
-  handle("launcher:gpt-browser-bounds", (event, bounds) => {
+  handle("launcher:gpt-browser-surface-active", async (_event, active) => (await getGptBrowser(logger)).setSurfaceActive(active === true));
+  handle("launcher:gpt-browser-bounds", async (event, bounds) => {
     const rect = validateBounds(bounds);
     const zoom = event.sender.getZoomFactor();
-    getGptBrowser(logger).setBounds({
+    (await getGptBrowser(logger)).setBounds({
       x: Math.round(rect.x * zoom), y: Math.round(rect.y * zoom),
       width: Math.round(rect.width * zoom), height: Math.round(rect.height * zoom),
     });

@@ -6,6 +6,12 @@ const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand } = require("../electron/mcp-connector-command.cjs");
 
+// The receipt is written off the main thread: wait for it, then for the command to start running.
+async function ran(command) {
+  await command.written();
+  await new Promise(resolve => setImmediate(resolve));
+}
+
 test("only the exact background connector flag requests creation", () => {
   assert.equal(isMcpConnectorCommand(["app", "--hidden", "--create-mcp-connector"]), true);
   assert.equal(isMcpConnectorCommand(["app", "--hidden", "--open-mcp-tunnel-settings"]), true);
@@ -281,7 +287,7 @@ test("tunnel settings commands preserve their intent and do not claim connector 
   const first = command.request("tunnel-settings");
   assert.equal(first, command.request("tunnel-settings"));
   const otherAction = assert.rejects(command.request(), /busy/);
-  await Promise.resolve();
+  await ran(command);
   const reportFile = path.join(root, "mcp-connector-command.json");
   const runningAction = JSON.parse(fs.readFileSync(reportFile)).action;
   finish({ opened: true, created: true, name: "Coding Tools Native2", token: "DO_NOT_EXPORT" });
@@ -344,6 +350,7 @@ test("background commands coalesce, replace stale success and write only bounded
   const first = command.request();
   const second = command.request();
   assert.equal(first, second);
+  await ran(command);
   const running = JSON.parse(fs.readFileSync(reportFile));
   assert.equal(running.status, "running");
   assert.notEqual(running.id, "stale");
@@ -376,12 +383,12 @@ test("each MCP command is logged with its action and what asked for it, and its 
   const first = command.request("create", "settings");
   command.request("create", "command");
   await assert.rejects(command.request("tunnel-settings", "command"), /busy with another action/);
-  await Promise.resolve();
+  await ran(command);
   finish({ created: false, name: "Coding Tools", href: "/plugins/x" });
   await first;
   finish = null;
   const opened = command.request("tunnel-settings", "command");
-  await Promise.resolve();
+  await ran(command);
   finish({ opened: true, name: "Coding Tools" });
   await opened;
   assert.deepEqual(events, [

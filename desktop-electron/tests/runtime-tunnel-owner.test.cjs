@@ -51,7 +51,7 @@ test("with the setting on, a ready tunnel this app did not start with its curren
 test("a tunnel started by this app with the same program is adopted; a new program restarts it", async () => {
   const { root, binaryPath, supervisor, config, did, logs } = harness({ reuse: true });
   try {
-    supervisor.recordTunnelOwner(config, 4321);
+    await supervisor.recordTunnelOwner(config, 4321);
     await supervisor.startTunnel(config);
     assert.deepEqual(did, ["monitor"], "adopted without a restart");
     assert.ok(logs.includes("runtime.tunnel_adopted"));
