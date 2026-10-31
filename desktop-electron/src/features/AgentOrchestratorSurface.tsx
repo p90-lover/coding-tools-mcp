@@ -1910,6 +1910,12 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setSplitPanes((current) => normalizeSplit([...current, added]));
     setFocusedPane(added.id);
   };
+  /** A new chat in this pane, in place of the chat it showed. */
+  const newChatInPane = (paneId: string, id: string) => {
+    setView("chat"); setSheet("");
+    setSplitPanes((current) => current.map((item) => item.id === paneId ? { ...item, workspaceId: id, taskId: "" } : item));
+    setFocusedPane(paneId);
+  };
   /**
    * A pane dragged by its grip (Claude Code's pane move): to a new column or another cell, trading
    * places with the pane there; dropped in front of the window's own chat, it becomes that chat and
@@ -2046,10 +2052,14 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     }
     if (id === workspaceId) selectChat(taskId); else selectChatIn(id, taskId);
   };
-  /** New chat: in a split window it opens a pane of its own; otherwise it replaces the open chat. */
+  /**
+   * New chat: in the focused pane, in place of its chat. It opened a pane of its own in a split
+   * window, so each New chat added one more screen (2026-10-31: the user asked for it to open where
+   * they were). Ctrl+Alt+\ / Ctrl+Alt+- and dragging a chat still open more panes.
+   */
   const openNewChat = (id = workspaceId) => {
     if (pane) { pane.onNewChat(id); return; }
-    if (splitPanes.length) { openInSplit(id, ""); return; }
+    if (focusedSplit) { newChatInPane(focusedSplit.id, id); return; }
     if (id === workspaceId) startNewChat();
     else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); }
   };
@@ -2698,7 +2708,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
           onMovePane={pane ? undefined : moveSplitPane}
           panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError}
-            pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => openInSplit(id, ""), onClose: () => closeSplitPane(item.id),
+            pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
               onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
         {view === "chat" ? (
           !workspaceId && workspaceReady
