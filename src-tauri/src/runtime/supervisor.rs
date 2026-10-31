@@ -276,20 +276,6 @@ impl RuntimeSupervisor {
             )));
         }
 
-        self.entries.insert(
-            key.clone(),
-            RuntimeEntry {
-                phase: RuntimePhase::Starting,
-                context: None,
-                shutdown: None,
-                handle: None,
-                error_message: None,
-                started_at: Some(std::time::Instant::now()),
-                missing_port_checks: 0,
-                missing_port_since: None,
-            },
-        );
-
         let port = port_for(profile, kind);
         if let Some(pid) = platform().find_pid_listening_on_port(port)? {
             if is_own_process(pid) {
@@ -407,6 +393,20 @@ impl RuntimeSupervisor {
             }
         };
 
+        // Publish only after fallible setup: an early error must leave startup retryable.
+        self.entries.insert(
+            key.clone(),
+            RuntimeEntry {
+                phase: RuntimePhase::Starting,
+                context: None,
+                shutdown: None,
+                handle: None,
+                error_message: None,
+                started_at: Some(std::time::Instant::now()),
+                missing_port_checks: 0,
+                missing_port_since: None,
+            },
+        );
         match spawn_result {
             Ok((shutdown, handle, context)) => {
                 let started_at = self
@@ -681,6 +681,23 @@ fn actions_oauth_secret(profile_id: &str, key: &str) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_failed_start_can_be_retried_after_a_secret_store_error() {
+        let fixture = tempfile::tempdir().unwrap();
+        let file = fixture.path().join("data/profiles.json");
+        std::fs::create_dir_all(file.with_extension("lock")).unwrap();
+        let mut profile = WorkspaceProfile::new(fixture.path().to_string_lossy().into_owned(), None);
+        profile.auth.auth_type = "oauth".into();
+        profile.auth.use_shared_secrets = true;
+        profile.runtime.local_port = 0;
+        crate::data::with_test_file(file, || {
+            let mut supervisor = RuntimeSupervisor::default();
+            assert!(supervisor.start_mcp(&profile).is_err());
+            assert_ne!(supervisor.mcp_status(&profile).state, "starting");
+            assert!(supervisor.start_mcp(&profile).is_err(), "retry must attempt startup again");
+        });
+    }
 
     fn entry(phase: RuntimePhase, started_at: Option<std::time::Instant>) -> RuntimeEntry {
         RuntimeEntry {
