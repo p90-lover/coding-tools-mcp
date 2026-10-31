@@ -73,6 +73,8 @@ const BACKEND_MODULES = Object.freeze([
   // chats after a restart (#706).
   "chat-queue.cjs",
   "chat-resume.cjs",
+  // main.cjs gives chat agents computer control through it: the window picker and the control bar.
+  "computer-control.cjs",
 ]);
 
 function sha256File(filePath) {

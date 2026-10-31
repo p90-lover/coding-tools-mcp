@@ -284,6 +284,9 @@ const CONFIRMED_TOOLS = new Map([
 const CONTROL_TOOLS = new Set([
   "computer_route", "computer_select_window", "computer_find_control", "computer_wait", "computer_action", "computer_sequence",
 ]);
+// A chat whose request for control the person turned down is not shown the picker again from its
+// computer_status calls for this long.
+const CONTROL_ASK_AGAIN_MS = 5 * 60_000;
 // A chat agent's view of the tools the user sees beside the chat. Headless's own descriptions are
 // for its generic clients (they point at request_permissions, which a chat never has); a model
 // picks tools by these, so they say what each one is in the chat and when to use it.
@@ -1058,9 +1061,11 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
     + (groups.includes("desktop")
       ? (autoReview
         ? "capture_process, capture_screenshot, list_windows and computer_* see and drive the desktop: each call is reviewed before it "
-          + "runs, like any other tool request, and computer control works only while the user has enabled it in the app. "
+          + "runs, like any other tool request. "
         : "capture_process, capture_screenshot, list_windows and computer_* see and drive the desktop: the user confirms each screen "
-          + "capture, and computer control works only while the user has enabled it in the app and allowed this chat. ")
+          + "capture. ")
+        + "To control a window, call computer_status: when control is off, the user is shown a window picker and the call "
+        + "waits for their choice; then use the session_id it returns. Control acts only on the window the user picked. "
       : "")
     + (groups.includes("subagents")
       ? "Subagents: for a self-contained piece of work (exploring part of the codebase, an independent change, a review) you can "
@@ -1165,6 +1170,9 @@ function createChatAgentTools({
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
   sandbox = null,
+  // Computer control (computer-control.cjs: { status(), pick({ workspaceId, chat, signal }) }): a chat
+  // asking for control while it is off opens the app's window picker. Without it control can't start.
+  computerControl = null,
   // Where the leases (credential hashes, never credentials) and the port are kept across restarts.
   statePath = null,
   worktreesRoot = null,
@@ -1557,6 +1565,23 @@ function createChatAgentTools({
 
   const who = (entry) => [`Agent: ${entry.agent}\nAO session: `, { value: String(entry.aoSession), own: true }, "\n"];
 
+  /**
+   * A chat asking for control while none is on opens the app's window picker: the person picks the
+   * window, and doing so allows this chat. A control call the person turned down is refused; a
+   * computer_status call goes on to read "stopped", and does not ask again for a while.
+   */
+  async function startControlIfOff(entry, name, signal) {
+    let current;
+    try { current = await computerControl.status(); } catch { return null; }
+    if (current?.state !== "stopped") return null;
+    if (name === "computer_status" && now() - (entry.controlDeclinedAt ?? -Infinity) < CONTROL_ASK_AGAIN_MS) return null;
+    const picked = await computerControl.pick({ workspaceId: entry.workspaceId, chat: `${entry.agent} (session ${entry.aoSession})`, signal });
+    if (picked?.started) { entry.controlAllowed = true; return null; }
+    entry.controlDeclinedAt = now();
+    return name === "computer_status" ? null
+      : failedCall(`The user did not start computer control${picked?.reason ? ` (${picked.reason})` : ""}; nothing was done.`);
+  }
+
   /** The user's confirmation of one command or one input to a command, unless the session bypasses permissions. */
   async function confirmTerminal(entry, name, args, root, { sandboxed: inSandbox = false, signal = entry.lifetime.signal } = {}) {
     if (entry.bypass) return false;
@@ -1881,6 +1906,10 @@ function createChatAgentTools({
       const answer = await ask(`A chat agent wants to ${CONFIRMED_TOOLS.get(name)}`,
         dialogText([...who(entry), `Tool: ${name}\n`, ...details, "\nAllow this once?"]), `The user declined ${name}.`, tooLongToShow(name), { entry, tool: name, signal });
       if (answer !== true) return answer;
+    }
+    if (computerControl && (CONTROL_TOOLS.has(name) || name === "computer_status")) {
+      const refused = await startControlIfOff(entry, name, signal);
+      if (refused) return refused;
     }
     if (CONTROL_TOOLS.has(name) && !entry.controlAllowed && !reviewed) {
       // This allows the chat, not one action, so the action's arguments are not what is approved.

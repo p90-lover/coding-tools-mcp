@@ -2087,6 +2087,70 @@ mod workspace_auth_tests {
     }
 
     #[tokio::test]
+    async fn computer_control_starts_only_from_the_app_and_only_where_capture_is_on() {
+        let data = serde_json::from_value(serde_json::json!({
+            "profiles": [{
+                "id": "ws-1", "name": "Demo", "path": ".",
+                "tunnel": {}, "auth": {"type": "oauth"}, "runtime": {"permission_mode":"workspace-write"}, "actions": {}
+            }]
+        }))
+        .expect("in-memory profile");
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(None);
+        let auth = ControlAuth::generate();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", auth.token).parse().unwrap(),
+        );
+        let state = ServiceState {
+            lifecycle: Lifecycle::new(4),
+            auth,
+            local_ui_token: Some("a".repeat(43)),
+            core: Arc::new(CoreState::from_data(data).unwrap()),
+            contexts: Arc::new(Mutex::new(HashMap::new())),
+            ao_hubs: Arc::new(Mutex::new(HashMap::new())),
+            ao_home_root: PathBuf::from("aiTemp/ao-test-home"),
+            ao_worktrees_root: None,
+            operations: Arc::new(Mutex::new(OperationStore::default())),
+            shutdown_tx,
+            drain_timeout: Duration::from_secs(1),
+        };
+        let mut ui_headers = headers.clone();
+        ui_headers.insert("x-coding-tools-local-ui", "a".repeat(43).parse().unwrap());
+        let start = |headers: HeaderMap| {
+            computer_start(
+                State(state.clone()),
+                headers,
+                Json(ComputerStartRequest {
+                    workspace_id: "ws-1".into(),
+                    window_id: 1,
+                    pid: 1,
+                    duration_seconds: 300,
+                    always_enabled: false,
+                }),
+            )
+        };
+        // A token holder that is not the app's own window (an agent's process) cannot arm control.
+        assert_eq!(start(headers.clone()).await.status(), StatusCode::FORBIDDEN);
+        // The app can, but not for a project whose screen capture is off.
+        assert_eq!(start(ui_headers.clone()).await.status(), StatusCode::BAD_REQUEST);
+        // Status is readable by any client; only the app's bar keeps input alive.
+        let status = computer_status(
+            State(state.clone()),
+            headers.clone(),
+            Query(ComputerStatusQuery { heartbeat: true }),
+        )
+        .await;
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_eq!(
+            computer_stop(State(state.clone()), headers.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
     async fn listener_status_is_readable_but_start_requires_local_confirmation() {
         let data = serde_json::from_value(serde_json::json!({
             "profiles": [{
@@ -6277,6 +6341,136 @@ fn valid_request_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
 }
 
+#[derive(Deserialize)]
+struct ComputerStartRequest {
+    workspace_id: String,
+    window_id: u32,
+    pid: u32,
+    #[serde(default)]
+    duration_seconds: u64,
+    #[serde(default)]
+    always_enabled: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct ComputerStatusQuery {
+    #[serde(default)]
+    heartbeat: bool,
+}
+
+// Computer control for chat agents. Only the app arms it, from the window the person picked in
+// its own UI (the local UI token); no tool can. The Tauri app did this with local IPC, which the
+// Electron app never had, so every chat's computer_status read "stopped".
+
+async fn computer_targets(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "computer_targets") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(tools::computer::list_local_targets).await {
+        Ok(Ok(targets)) => Json(json!({"ok": true, "targets": targets})).into_response(),
+        Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, "COMPUTER_TARGETS_FAILED", error.message()),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "COMPUTER_TARGETS_FAILED", text_error(error)),
+    }
+}
+
+/// Arms control of one window for a workspace, bound to the workspace's root as its chats' tool
+/// calls are. The workspace must allow screen capture, as the tools themselves require.
+async fn computer_start(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<ComputerStartRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "computer_start") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "COMPUTER_LOCAL_CONFIRMATION_REQUIRED",
+            "Start computer control from the app's own window",
+        );
+    }
+    let profile = match state.core.with_data(|store| {
+        store.refresh()?;
+        store.get(&body.workspace_id).cloned().ok_or_else(|| {
+            coding_tools_core::error::AppError::Message("workspace not found".into())
+        })
+    }) {
+        Ok(profile) => profile,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, "COMPUTER_WORKSPACE_INVALID", text_error(error)),
+    };
+    if !profile.runtime.allow_screen_capture || !matches!(profile.auth.auth_type.as_str(), "bearer" | "oauth") {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "COMPUTER_POLICY_DISABLED",
+            "Turn on screen capture for this project first",
+        );
+    }
+    if tools::PolicySettings::from_runtime(&profile.runtime).canonical_permission_mode() == "read-only" {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "COMPUTER_POLICY_DISABLED",
+            "A read-only project cannot be given computer control",
+        );
+    }
+    let root = match tools::Workspace::new(PathBuf::from(&profile.path)) {
+        Ok(workspace) => workspace.root().to_path_buf(),
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, "COMPUTER_WORKSPACE_INVALID", error.message()),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let target = tools::computer::list_local_targets()
+            .map_err(|error| error.message())?
+            .into_iter()
+            .find(|target| target.window_id == body.window_id && target.pid == body.pid)
+            .ok_or_else(|| "That window changed or closed; pick it again".to_string())?;
+        let armed = tools::computer::local_arm_with_mode(root, target, body.duration_seconds, body.always_enabled)
+            .map_err(|error| error.message())?;
+        let _ = tools::computer::focus_local_target();
+        Ok::<_, String>(armed)
+    })
+    .await;
+    match result {
+        Ok(Ok(status)) => Json(json!({"ok": true, "status": status})).into_response(),
+        Ok(Err(message)) => json_error(StatusCode::BAD_REQUEST, "COMPUTER_START_FAILED", message),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "COMPUTER_START_FAILED", text_error(error)),
+    }
+}
+
+/// Control's state. `heartbeat` is the app's visible control bar saying it is still on screen:
+/// input is refused once it stops (CONTROL_DISPLAY_LOST), so only the app's own UI may send it.
+async fn computer_status(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Query(query): Query<ComputerStatusQuery>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let heartbeat = query.heartbeat && local_ui_authorized(&headers, &state);
+    let mut status = tools::computer::local_status(heartbeat, None);
+    // The agent's last frame is an image; the bar polls every second and never shows it.
+    if let Some(fields) = status.as_object_mut() {
+        fields.remove("agent_frame");
+    }
+    Json(json!({"ok": true, "status": status})).into_response()
+}
+
+async fn computer_stop(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    tools::computer::runtime_only_stop("Stopped in Coding Tools");
+    Json(json!({"ok": true, "status": tools::computer::local_status(false, None)})).into_response()
+}
+
 async fn tool_call(
     State(state): State<ServiceState>,
     headers: HeaderMap,
@@ -6468,6 +6662,10 @@ fn router(state: ServiceState) -> Router {
         )
         .route("/api/v1/tools/catalog", get(tool_catalog))
         .route("/api/v1/tools/call", post(tool_call))
+        .route("/api/v1/computer/targets", get(computer_targets))
+        .route("/api/v1/computer/start", post(computer_start))
+        .route("/api/v1/computer/status", get(computer_status))
+        .route("/api/v1/computer/stop", post(computer_stop))
         .route("/api/v1/operations/{request_id}", get(operation_read))
         .route("/api/v1/events/emit", post(events_emit))
         .route("/api/v1/events/config", post(events_config))
