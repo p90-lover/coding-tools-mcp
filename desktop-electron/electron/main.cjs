@@ -3683,11 +3683,11 @@ async function start() {
       await service.request("/api/v1/events/config", { proxy }, { timeout: 10_000 });
       mcpEventProxyPushed = pushed;
     },
-    bridgeHealthUrl: () => {
+    bridgeHealthUrl: async () => {
       // Probe the Codex bridge only while this launcher owns or adopted it.
       if (!runtimeSupervisor?.daemon || !runtimeHost) return null;
       try {
-        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const snapshot = await runtimeHost.runtimeConfigSnapshotAsync();
         const config = snapshot.config;
         if (!snapshot.configured || config?.host !== "127.0.0.1" || !Number.isInteger(config.port)) return null;
         return `http://127.0.0.1:${config.port}/healthz`;
@@ -4137,10 +4137,10 @@ async function start() {
         return { baseUrl: `http://127.0.0.1:${config.port}/v1` };
       },
       webBridgeReadiness: async () => {
-        if (!browserHost || !fs.existsSync(browserHost.descriptorPath)) return { authenticated: null, ready: false };
+        if (!browserHost || !(await fs.promises.access(browserHost.descriptorPath).then(() => true, () => false))) return { authenticated: null, ready: false };
         const session = await browserHost.authenticationReadiness();
         if (session.authenticated !== true || session.ready !== true) return session;
-        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const snapshot = await runtimeHost.runtimeConfigSnapshotAsync();
         const config = snapshot.config;
         if (!snapshot.configured || config?.host !== "127.0.0.1"
           || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {

@@ -329,6 +329,41 @@ test("timers read the runtime config without a synchronous disk call, sharing th
   }
 });
 
+test("the runtime snapshot for timers matches the synchronous one without a synchronous disk call", async () => {
+  // Seen live 2026-10-31: the MCP events monitor's 30 s bridge check took the synchronous snapshot,
+  // and its statSync of config.json froze every window for up to 7.9 s on the busy hard disk.
+  const { RuntimeHost } = require("../electron/runtime.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-snapshot-async-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const configPath = path.join(root, "config.json");
+  const sync = { statSync: fs.statSync, readFileSync: fs.readFileSync };
+  try {
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath))}\n`);
+    const logger = { info() {}, warn() {}, error() {} };
+    const supervisor = new RuntimeSupervisor({ app: { getVersion: () => "0.2.0", isPackaged: false }, logger,
+      sourceRoot: root, coreHome: root, browserDescriptorPath: descriptorPath });
+    const host = new RuntimeHost({ app: { getPath: () => root, getVersion: () => "0.2.0" }, logger,
+      sourceRoot: root, browserDescriptorPath: descriptorPath, supervisor });
+    const expected = host.runtimeConfigSnapshot();
+    assert.equal(expected.configured, true);
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath, { port: 17999 }))}\n`);
+    fs.utimesSync(configPath, new Date(), new Date(Date.now() + 5_000));
+    const blocking = [];
+    fs.statSync = function (file, ...rest) { if (file === configPath) blocking.push("stat"); return sync.statSync.call(this, file, ...rest); };
+    fs.readFileSync = function (file, ...rest) { if (file === configPath) blocking.push("read"); return sync.readFileSync.call(this, file, ...rest); };
+    const changed = await host.runtimeConfigSnapshotAsync();
+    assert.deepEqual(blocking, [], "no synchronous call on the timers' path");
+    assert.equal(changed.config.port, 17999, "a change on disk is seen");
+    Object.assign(fs, sync);
+    assert.deepEqual(changed, host.runtimeConfigSnapshot(), "the same snapshot as the synchronous one");
+    fs.rmSync(configPath);
+    assert.deepEqual(await host.runtimeConfigSnapshotAsync(), host.runtimeConfigSnapshot());
+  } finally {
+    Object.assign(fs, sync);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher runtime validation rejects a relative full-mode executable before spawn", () => {
   const descriptorPath = path.join(os.tmpdir(), "launcher.json");
   assert.throws(() => validateConfig(launcherConfig(descriptorPath, {

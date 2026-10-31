@@ -588,7 +588,17 @@ class RuntimeSupervisor {
 
   readSetupConfig() {
     const config = this.readConfigJson();
-    if (config === undefined) return null;
+    return config === undefined ? null : this.setupConfigOf(config);
+  }
+
+  /** readSetupConfig for timers, which must not block the main process (readConfigJsonAsync). */
+  async readSetupConfigAsync() {
+    const config = await this.readConfigJsonAsync();
+    return config === undefined ? null : this.setupConfigOf(config);
+  }
+
+  /** The checks readSetupConfig makes on config.json's parsed contents. */
+  setupConfigOf(config) {
     if (!config || typeof config !== "object" || Array.isArray(config)) {
       throw new Error("Runtime configuration is not an object");
     }

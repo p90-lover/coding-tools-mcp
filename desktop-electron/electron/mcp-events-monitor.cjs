@@ -363,7 +363,7 @@ function createMcpEventMonitor({
     ticking = true;
     try {
       checkStalls();
-      const health = bridgeHealthUrl();
+      const health = await bridgeHealthUrl();
       let bridgeLabel = null;
       try { bridgeLabel = health ? new URL(health).host : null; } catch { bridgeLabel = null; }
       await checkComponent("bridge", bridgeLabel, () => probeHttp(health), "The Codex bridge",
