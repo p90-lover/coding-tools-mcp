@@ -58,10 +58,14 @@
 /* A collapsed project's most urgent chat: a dot when waiting on you or unread, a spinner while running. */
 .cx-project-badge { flex: 0 0 auto; width: 6px; height: 6px; margin-left: 2px; border-radius: 50%; box-shadow: 0 0 0 .5px var(--cc-side-bg); }
 .cx-project-badge.is-attention { background: var(--cc-warning); }
-/* A running project spins at its end, as Codex's does, until none of its chats runs. */
-.cx-project-badge.is-running { box-sizing: border-box; width: 12px; height: 12px; margin-left: auto; box-shadow: none; border: 2px solid color-mix(in srgb, var(--cc-muted) 22%, transparent);
-  border-top-color: var(--cc-text-2); border-right-color: var(--cc-text-2); animation: cx-spin .8s linear infinite; }
-.cx-project-badge.is-running ~ .cx-project-tag.is-warn, .cx-project-badge.is-running ~ .cx-project-pin { margin-left: 4px; }
+/* A running project spins at its end, as Codex's does, until none of its chats runs: in the very place
+   of its chats' spinners (.cx-thread-dot.status-running), and like theirs it gives way to the row's
+   buttons on hover. In the row's flow it stopped at the button's 28 px end padding, 22 px left of
+   the chats' spinners, and stayed under "New chat in" on hover. */
+.cx-project-badge.is-running { position: absolute; top: calc(50% - 6px); right: 6px; box-sizing: border-box; width: 12px; height: 12px; margin: 0;
+  box-shadow: none; border: 2px solid color-mix(in srgb, var(--cc-muted) 22%, transparent);
+  border-top-color: var(--cc-text-2); border-right-color: var(--cc-text-2); pointer-events: none; transition: opacity .15s ease; animation: cx-spin .8s linear infinite; }
+.cx-project-row:hover .cx-project-badge.is-running, .cx-project-row:focus-within .cx-project-badge.is-running { opacity: 0; }
 .cx-project-badge.is-unread { background: var(--cc-accent); }
 .cx-project-pin { margin-left: auto; font-size: 10px; opacity: .7; }
 /* A folder chats can't use ("not git"): amber, the one git label kept on the header. */
