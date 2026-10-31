@@ -71,6 +71,23 @@ export function movePane(panes: readonly SplitPane[], id: string, target: SplitD
   return next.every((pane, index) => pane.col === panes[index].col && pane.row === panes[index].row) ? null : next;
 }
 
+/**
+ * The grid after the chat already open in pane `id` was dragged from the sidebar onto `target`: it
+ * opens there, in place of any chat in that cell (as a dropped chat does), and its old pane closes,
+ * so the chat is still open once. null: no change (its own cell, the primary's, or "left", which
+ * the window handles as a pane move).
+ */
+export function relocatePane(panes: readonly SplitPane[], id: string, target: SplitDropTarget): SplitPane[] | null {
+  const moving = panes.find((pane) => pane.id === id);
+  if (!moving || target.kind === "left") return null;
+  const to: PanePos = target.kind === "column" ? { col: splitColumns(panes), row: 0 } : { col: target.col, row: target.row };
+  if ((to.col === 0 && to.row === 0) || (to.col === moving.col && to.row === moving.row)) return null;
+  const next = normalizeSplit(panes.filter((pane) => pane.id === id || pane.col !== to.col || pane.row !== to.row)
+    .map((pane) => pane.id === id ? { ...pane, ...to } : pane));
+  const same = next.length === panes.length && next.every((pane, index) => pane.col === panes[index].col && pane.row === panes[index].row);
+  return same ? null : next;
+}
+
 /** Column weights for `count` columns: the saved ones while each column keeps 320 px, else equal. */
 export function splitWeights(saved: readonly number[] | undefined, count: number, width: number): number[] {
   const even = Array.from({ length: count }, () => 1);
