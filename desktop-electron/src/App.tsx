@@ -1317,7 +1317,7 @@ function BrowserSurface({
   return (
     <section className="browser-surface">
       <div className="browser-tab-strip" title={copy.browserTabLimit}>
-        {(browser?.tabs ?? []).map((tab) => (
+        {(browser?.tabs ?? []).filter(tab => !tab.otherAccount).map((tab) => (
           <div
             className={`browser-tab${tab.active ? " is-active" : ""}`}
             key={tab.id}
@@ -1349,7 +1349,7 @@ function BrowserSurface({
         <button
           aria-label={copy.newTab}
           className="browser-new-tab"
-          disabled={!browser || tabLimitReached || (!manualInteraction && !browser.authenticated)}
+          disabled={!browser || tabLimitReached}
           onClick={() => void createTab()}
           title={copy.newTab}
           type="button"

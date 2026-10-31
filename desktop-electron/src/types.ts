@@ -658,6 +658,8 @@ export interface BrowserTabState {
   threadId?: string;
   /** The ChatGPT account the tab's Codex session runs on (absent: the shown account). */
   accountId?: string;
+  /** Runs on an account the Browser tab is not showing: kept out of its tab strip. */
+  otherAccount?: boolean;
   conversationUrl?: string;
   title: string;
   status: "idle" | "loading" | "signed-out" | "ready" | "testing" | "running" | "error" | "aborted";

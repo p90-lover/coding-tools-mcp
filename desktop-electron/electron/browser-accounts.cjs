@@ -14,7 +14,7 @@ const MAX_LABEL = 60;
 const FIRST_ACCOUNT_ID = "main";
 // Browser tabs one account may hold at once (its Codex turns, and the Browser tab's own pages).
 const MAX_TABS_PER_ACCOUNT = 5;
-const DEFAULT_SETTINGS = Object.freeze({ newSessions: "active", keepFinishedTabsMinutes: 10 });
+const DEFAULT_SETTINGS = Object.freeze({ newSessions: "active", keepFinishedTabsMinutes: 5 });
 const KEEP_FINISHED_TABS_MINUTES = [5, 10, 20, 30, 60];
 const MAX_ERROR = 300;
 const MAX_IMPORTED_EMAILS = 500;

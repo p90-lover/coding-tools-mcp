@@ -2611,7 +2611,7 @@ for (const [useSavedChats, endedAt, expected] of [
   [true, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, `/c/${SAVED_CONVERSATION_ID}`],
   [false, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`, `/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`],
   [false, "https://chatgpt.com/?temporary-chat=true", "/?temporary-chat=true"],
-  // No owned conversation page: the tab is released instead of retained.
+  // No owned conversation page: the tab lingers for the idle time, matched by no later turn.
   [true, "https://chatgpt.com/", null],
   [true, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`, null],
   [false, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, null],
@@ -2633,8 +2633,13 @@ for (const [useSavedChats, endedAt, expected] of [
     logger: { info() {}, warn() {} },
   });
   await BrowserHost.prototype.endTurn.call(fixture, "trace_end", 7, "completed", false, undefined, true, true);
-  assert.equal(tab.retainedLocation, expected ?? undefined);
-  assert.deepEqual(removed, expected ? [] : ["ending"]);
+  assert.equal(tab.retainedLocation, expected ?? null);
+  assert.deepEqual(removed, []);
+  if (!expected) {
+    assert.equal(tab.lingering, true);
+    assert.equal(tab.traceId, null, "no later turn of this trace finds it");
+    assert.equal(tab.conversationKey, null, "no later turn of this conversation reuses it");
+  }
 });
 
 test("steering retains only the owned task tab and the next turn reuses it", async () => {
@@ -3161,11 +3166,33 @@ test("a completed keyed turn is retained for thirty minutes and preserves its ac
   assert.deepEqual(throttling, [true]);
 
   const retainedAt = tab.lastHeartbeatAt;
-  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, retainedAt + (10 * 60 * 1000) - 1);
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, retainedAt + (5 * 60 * 1000) - 1);
   assert.equal(fixture.turnTabs.has(tab.id), true);
 });
 
-test("a retained browser tab expires at ten minutes", () => {
+test("a finished tab on screen is in use: its idle time starts once it is left", () => {
+  const tab = { id: "tab-shown", traceId: null, status: "ready", lastHeartbeatAt: 100 };
+  const removed = [];
+  const fixture = {
+    turnTabs: new Map([[tab.id, tab]]),
+    visible: true,
+    selectedTabId: tab.id,
+    logger: { info() {} },
+    removeTurnTab(candidate) { removed.push(candidate.id); this.turnTabs.delete(candidate.id); },
+  };
+  // Swept as the timer does, moments after the last sweep (a long gap reads as the machine asleep).
+  const sweep = (now) => { fixture.lastTurnSweepAt = now - 1000; BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, now); };
+  const later = 100 + (60 * 60 * 1000);
+  sweep(later);
+  assert.deepEqual(removed, []);
+  fixture.selectedTabId = "home";
+  sweep(later + (5 * 60 * 1000) - 1);
+  assert.deepEqual(removed, [], "five idle minutes from when it was left");
+  sweep(later + (5 * 60 * 1000));
+  assert.deepEqual(removed, [tab.id]);
+});
+
+test("a retained browser tab expires at five minutes", () => {
   const removed = [];
   const tab = {
     id: "tab-expired",
@@ -3182,7 +3209,7 @@ test("a retained browser tab expires at ten minutes", () => {
     },
   };
 
-  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 100 + (10 * 60 * 1000));
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 100 + (5 * 60 * 1000));
 
   assert.deepEqual(removed, [[tab.id, false]]);
   assert.equal(fixture.turnTabs.size, 0);
@@ -3865,4 +3892,18 @@ test("manual turns have no live-session TTL but are revoked when their owner pro
     helperPid: dead.helperPid,
     status: "failed",
   });
+});
+
+test("a Codex turn on another account is flagged, so the shown account's strip leaves it out", () => {
+  const view = { webContents: { isDestroyed: () => false, getURL: () => "https://chatgpt.com/" } };
+  const own = { id: "own", traceId: "t1", partition: "persist:coding-tools-chatgpt", label: "ChatGPT 1", status: "running", view };
+  const other = { id: "other", traceId: "t2", partition: "persist:coding-tools-chatgpt-abcdefabcdef", accountId: "abcdefabcdef", label: "ChatGPT 2", status: "running", view };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    partition: "persist:coding-tools-chatgpt",
+    selectedTabId: "own",
+    turnTabs: new Map([[own.id, own], [other.id, other]]),
+    userTabs: new Map(),
+  });
+  assert.equal(BrowserHost.prototype.tabSnapshot.call(fixture, own).otherAccount, undefined);
+  assert.equal(BrowserHost.prototype.tabSnapshot.call(fixture, other).otherAccount, true);
 });
