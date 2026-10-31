@@ -4383,3 +4383,109 @@ test("a stage that spans a system sleep is not charged for the slept time", asyn
   await stage;
   expect(outcome).toEqual(["ChatGPT browser stage timed out: probe"]);
 }, 10_000);
+
+test.each(["before observation", "alert probe", "retry probe", "failure message probe"] as const)(
+  "a failed-send Retry stops when cancelled at %s",
+  async (checkpoint) => {
+    const fixture = failedSendPage();
+    const controller = new AbortController();
+    const alert = fixture.page.locator('main aside[role="alert"]').last();
+    const retry = alert.getByRole("button", { name: /^Retry$/ }).last();
+    if (checkpoint === "before observation") controller.abort();
+    else if (checkpoint === "failure message probe") alert.innerText = async () => {
+      controller.abort();
+      return "Failed to fetch";
+    };
+    else (checkpoint === "alert probe" ? alert : retry).isVisible = async () => {
+      controller.abort();
+      return true;
+    };
+    const retrier = new ChatGptFailedSendRetrier(() => 0, checkpoint === "failure message probe" ? [] : [0], 0);
+    const attempts: number[] = [];
+
+    await expect(retrier.handle(fixture.page, attempt => { attempts.push(attempt); }, controller.signal))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(fixture.state.clicks).toBe(0);
+    expect(retrier.retries).toBe(0);
+    expect(attempts).toEqual([]);
+  },
+);
+
+test("a failed-send Retry click is cancelled by the owning turn's signal", async () => {
+  const fixture = failedSendPage();
+  const controller = new AbortController();
+  const retry = fixture.page.locator('main aside[role="alert"]')
+    .getByRole("button", { name: /^Retry$/ }).last();
+  let entered!: () => void;
+  const clicking = new Promise<void>(resolve => { entered = resolve; });
+  retry.click = async (options) => {
+    entered();
+    if (!options?.signal) throw new Error("Retry click did not receive the turn's signal");
+    expect(options.signal).toBe(controller.signal);
+    await new Promise<never>((_resolve, reject) => options.signal!.addEventListener(
+      "abort", () => reject(new DOMException("Retry cancelled", "AbortError")), { once: true },
+    ));
+  };
+  const retrier = new ChatGptFailedSendRetrier(() => 0, [0]);
+  const attempts: number[] = [];
+  const pending = retrier.handle(fixture.page, attempt => { attempts.push(attempt); }, controller.signal)
+    .catch(error => error);
+  await clicking;
+  controller.abort();
+
+  expect(await pending).toMatchObject({ name: "AbortError" });
+  expect(retrier.retries).toBe(0);
+  expect(attempts).toEqual([]);
+});
+
+test("an accepted failed-send Retry remains counted if Stop follows the click", async () => {
+  const fixture = failedSendPage();
+  const controller = new AbortController();
+  const retry = fixture.page.locator('main aside[role="alert"]')
+    .getByRole("button", { name: /^Retry$/ }).last();
+  retry.click = async () => { fixture.state.clicks += 1; controller.abort(); };
+  const retrier = new ChatGptFailedSendRetrier(() => 0, [0]);
+  const attempts: number[] = [];
+
+  expect(await retrier.handle(fixture.page, attempt => { attempts.push(attempt); }, controller.signal)).toBeTrue();
+  expect(fixture.state.clicks).toBe(1);
+  expect(retrier.retries).toBe(1);
+  expect(attempts).toEqual([1]);
+});
+
+test("multipart observation cannot activate Retry after its turn is cancelled during a DOM probe", async () => {
+  const source = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const start = source.indexOf("  private async waitForMultipartAcknowledgement(");
+  const end = source.indexOf("  private async resetPromptComposerForRetry(", start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(
+    `class Observer {${source.slice(start, end)}}; new Observer();`,
+  );
+  // Execute the shipped caller with an immediately eligible Retry. Other response observations
+  // are outside this cancellation boundary; no real browser or global clock mutation is needed.
+  const observer = runInContext(javascript, createContext({
+    DOMException, setTimeout,
+    ChatGptCompletionTracker, ChatGptTurnDomHealthTracker,
+    CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_STOP_BUTTON_SELECTOR: "stop",
+    ChatGptFailedSendRetrier: class extends ChatGptFailedSendRetrier {
+      constructor() { super(() => 0, [0]); }
+    },
+    throwIfChatGptSessionFailureAlert: async () => {},
+    throwIfChatGptTerminalErrorAlert: async () => {},
+  })) as {
+    waitForMultipartAcknowledgement(page: Page, binding: unknown, baseline: unknown,
+      stage: unknown, deadline: undefined, signal: AbortSignal): Promise<void>;
+  };
+  const fixture = failedSendPage();
+  fixture.page.isClosed = () => false;
+  const controller = new AbortController();
+  const retry = fixture.page.locator('main aside[role="alert"]')
+    .getByRole("button", { name: /^Retry$/ }).last();
+  retry.isVisible = async () => { await Promise.resolve(); controller.abort(); return true; };
+
+  await expect(observer.waitForMultipartAcknowledgement(
+    fixture.page, { locator: {} }, {}, {}, undefined, controller.signal,
+  )).rejects.toMatchObject({ name: "AbortError" });
+  expect(fixture.state.clicks).toBe(0);
+});
