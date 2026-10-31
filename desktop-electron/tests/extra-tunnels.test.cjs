@@ -92,6 +92,27 @@ test("adding a tunnel connects it under its own alias and key, and its status ca
   tunnels.detach();
 });
 
+test("the registry is read from disk once; later reads and monitor passes use the saved copy", async () => {
+  const { coreHome, config, tunnels } = setup();
+  await tunnels.start(config);
+  const added = await tunnels.add({ label: "Team", tunnelId: SECOND_ID, runtimeKey: "sk", accountId: "acct-2" });
+  const registry = path.join(coreHome, "tunnel", "extra-tunnels.json");
+  const readFileSync = fs.readFileSync;
+  const reads = [];
+  fs.readFileSync = (file, ...rest) => { if (file === registry) reads.push(file); return readFileSync(file, ...rest); };
+  try {
+    await tunnels.check();
+    assert.deepEqual(tunnels.status().map(entry => entry.id), [added.id]);
+    tunnels.setConnector(added.id, "https://chatgpt.com/connector");
+    assert.equal(tunnels.status()[0].connectorHref, "https://chatgpt.com/connector");
+  } finally { fs.readFileSync = readFileSync; }
+  assert.deepEqual(reads, []);
+  // What it saved is what a new launcher reads.
+  const next = new ExtraTunnels({ coreHome, runTunnel: async () => ({ code: 0, output: "{}" }), connectArgs: () => [] });
+  assert.equal(next.entries()[0].connectorHref, "https://chatgpt.com/connector");
+  tunnels.detach();
+});
+
 test("a tunnel that does not connect is not kept", async () => {
   const { coreHome, config, tunnels } = setup({ connectFails: true });
   await tunnels.start(config);

@@ -516,15 +516,21 @@ class RuntimeSupervisor {
     // Tunnels for further ChatGPT accounts; each runs beside the main tunnel and stops with it.
     const extraStateDir = path.join(coreHome, "tunnel", "extra-runtime");
     const extraTempDir = path.join(extraStateDir, "temp");
+    let extraStateMigrated = false;
     this.extraTunnels = new ExtraTunnels({
       coreHome,
       logger,
-      runTunnel: (tunnel, args, timeoutMs, label) => {
+      runTunnel: async (tunnel, args, timeoutMs, label) => {
         // A new state root cannot see legacy runtimes; starting them again would create duplicates.
-        if (savedExtraTunnels && !fs.existsSync(path.join(extraStateDir, "aliases.yaml"))) {
-          throw new Error("Existing extra tunnels require migration to the dedicated runtime state directory before they can be started.");
+        // Checked with fs.promises: the monitor runs this every 10 s, and the synchronous check and
+        // mkdir held every window up to 21 s on the busy hard disk (2026-10-31). A migrated root stays so.
+        if (savedExtraTunnels && !extraStateMigrated) {
+          extraStateMigrated = await fs.promises.access(path.join(extraStateDir, "aliases.yaml")).then(() => true, () => false);
+          if (!extraStateMigrated) {
+            throw new Error("Existing extra tunnels require migration to the dedicated runtime state directory before they can be started.");
+          }
         }
-        fs.mkdirSync(extraTempDir, { recursive: true, mode: 0o700 });
+        await fs.promises.mkdir(extraTempDir, { recursive: true, mode: 0o700 });
         return this.runTunnelCommand({ tunnel }, args, timeoutMs, label, {
           ...this.getRuntimeEnvironment(),
           TUNNEL_CLIENT_STATE_DIR: extraStateDir,

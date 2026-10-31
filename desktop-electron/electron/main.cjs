@@ -1074,8 +1074,16 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   const setupState = stateStore.read();
   if (IS_DEV_PROFILE || !runtimeHost || quitting || shutdownInProgress
     || setupState.coreSetupComplete !== true || setupState.browserInteractionMode !== "automatic") return;
+  // Setup checks the sign-in of the account the Browser tab shows. Switched on meanwhile (to one not
+  // signed in, it timed out "ChatGPT login was not completed"; mid-load it failed with -3, both
+  // 2026-10-31), it would check the wrong page: the next signed-in switch refreshes the bridge.
+  const shownElsewhere = () => browserHost !== host || browserAccounts.activeId() !== accountId;
   try {
     await waitForRuntimeHostIdle();
+    if (shownElsewhere()) {
+      logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "account-changed" });
+      return;
+    }
     await runtimeHost.setupCore();
     stateStore.update({ codexCatalogVerified: false, codexRestartRequired: true });
     // Setup's capability check recorded the plan it installed (onSessionInspected).
@@ -1084,6 +1092,10 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
     scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-account" });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (shownElsewhere()) {
+      logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "account-changed", message: message.slice(0, 300) });
+      return;
+    }
     logger.warn("browser_accounts.bridge_refresh_failed", { accountId, message: message.slice(0, 300) });
     publishOperation({ name: "browser-account", status: "failed", message: `The Codex bridge did not pick up this account's plan; run Install models again. ${message}` });
   }
@@ -2384,6 +2396,11 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     return removeBrowserAccount(id, { logger, stateStore });
   });
+  // Bulk delete (ChatGPT browser management): several accounts in one action, same focus rule.
+  handle("launcher:browser-accounts-remove", (event, ids) => {
+    assertFocusedMainWindow(event, true);
+    return browserAccountService.removeMany(ids, { logger, stateStore });
+  });
   // Browser settings: one account's (tab limit, new sessions), every account's, and a fresh look at
   // the account in use's plan. Every change needs the focused main window.
   handle("launcher:browser-account-settings", (event, input) => {
@@ -2913,7 +2930,7 @@ function registerIpc({ logger, stateStore }) {
       await runtimeHost.uninstallIntegration();
     } finally {
       // Never let re-publishing the descriptor replace the removal's own result or error.
-      try { browserHost.writeDescriptor(); } catch (error) {
+      try { await browserHost.writeDescriptor(); } catch (error) {
         logger.warn("browser.descriptor_write_failed", { message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
       }
     }
@@ -4446,7 +4463,8 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
     // Settings → "Use Coding Tools in Codex": absent is on (as every install before it was).
     codexRouteEnabled: () => stateStore.read().codexRoute !== false,
-    refreshBrowserDescriptor: () => browserHost?.writeDescriptor(),
+    // Read straight back (launcherControlEnvironment): written before this returns.
+    refreshBrowserDescriptor: () => browserHost?.writeDescriptor({ now: true }),
   });
   // Only a preference sync: an unreadable or invalid setup config (seen: a byte order mark) keeps
   // the saved mode and the app starts, as the same read a few lines on already does.
