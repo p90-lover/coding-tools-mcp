@@ -24,7 +24,7 @@ const {
   navigationErrorForLog,
   navigationOriginForLog,
 } = require("../electron/browser-host.cjs");
-const { BrowserHost: StandaloneBrowserHost } = require("../../runtime-web/launcher/electron/browser-host.cjs");
+const { BrowserHost: StandaloneBrowserHost, loadCommittedBrowserSurface: loadStandaloneBrowserSurface } = require("../../runtime-web/launcher/electron/browser-host.cjs");
 const SAVED_CONVERSATION_ID = "0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c";
 
 test("manual prompt handoff keeps ordinary turns at thirty seconds and compaction at two minutes", () => {
@@ -88,32 +88,62 @@ test("descriptor publishes native surface identities without inspecting renderer
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("primary browser bootstrap accepts only the exact committed idle document", async () => {
-  const calls = [];
-  const contents = new EventEmitter();
-  let currentUrl = "about:blank";
-  contents.isDestroyed = () => false;
-  contents.getURL = () => currentUrl;
-  contents.stop = () => calls.push("stop");
-  contents.loadURL = async (url) => {
-    calls.push(["load", url]);
-    currentUrl = url;
-  };
+test("primary browser bootstrap accepts only the exact committed idle document", async t => {
+  for (const [name, load] of [["desktop", loadCommittedBrowserSurface], ["standalone", loadStandaloneBrowserSurface]]) {
+    await t.test(name, async () => {
+      const calls = [];
+      const contents = new EventEmitter();
+      let currentUrl = "about:blank";
+      contents.isDestroyed = () => false;
+      contents.getURL = () => currentUrl;
+      contents.stop = () => calls.push("stop");
+      contents.loadURL = async (url) => {
+        calls.push(["load", url]);
+        queueMicrotask(() => contents.emit("did-fail-load", {}, -3, "ERR_ABORTED", url, true));
+        currentUrl = url;
+      };
 
-  await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL, 50);
+      await load(contents, IDLE_BROWSER_URL, 50);
 
-  assert.deepEqual(calls, [["load", IDLE_BROWSER_URL]]);
-  assert.equal(contents.listenerCount("did-stop-loading"), 0);
-  assert.equal(contents.listenerCount("did-finish-load"), 0);
-  assert.equal(contents.listenerCount("did-fail-load"), 0);
-  assert.equal(contents.listenerCount("render-process-gone"), 0);
-  assert.equal(contents.listenerCount("destroyed"), 0);
+      assert.deepEqual(calls, [["load", IDLE_BROWSER_URL]]);
+      for (const event of ["did-stop-loading", "did-finish-load", "did-fail-load", "render-process-gone", "destroyed"]) {
+        assert.equal(contents.listenerCount(event), 0);
+      }
+    });
+  }
+});
+
+test("primary browser bootstrap rejects its own aborted reload after stale stop events", async t => {
+  for (const [name, load] of [["desktop", loadCommittedBrowserSurface], ["standalone", loadStandaloneBrowserSurface]]) {
+    await t.test(name, async () => {
+      const contents = new EventEmitter();
+      contents.isDestroyed = () => false;
+      contents.getURL = () => IDLE_BROWSER_URL;
+      contents.stop = () => {};
+      contents.loadURL = url => new Promise((_resolve, reject) => {
+        queueMicrotask(() => {
+          contents.emit("did-fail-load", {}, -3, "ERR_ABORTED", url, true);
+          contents.emit("did-stop-loading");
+          reject(new Error("current navigation aborted"));
+        });
+      });
+
+      await assert.rejects(load(contents, IDLE_BROWSER_URL, 50), /current navigation aborted/);
+      for (const event of ["did-stop-loading", "did-finish-load", "did-fail-load", "render-process-gone", "destroyed"]) {
+        assert.equal(contents.listenerCount(event), 0);
+      }
+    });
+  }
 });
 
 test("primary browser bootstrap fails closed on navigation, renderer, and timeout boundaries", async () => {
   const keepTestAlive = setTimeout(() => {}, 100);
   try {
     const failureCases = [
+      {
+        error: new Error("net::ERR_ABORTED"),
+        expected: /ERR_ABORTED/,
+      },
       {
         event: ["did-fail-load", {}, -2, "ERR_FAILED", IDLE_BROWSER_URL, true],
         expected: /idle document failed: ERR_FAILED \(-2\)/,
@@ -123,32 +153,32 @@ test("primary browser bootstrap fails closed on navigation, renderer, and timeou
         expected: /renderer stopped during idle document bootstrap: crashed/,
       },
     ];
-    for (const failure of failureCases) {
-      const contents = new EventEmitter();
-      contents.isDestroyed = () => false;
-      contents.getURL = () => "about:blank";
-      contents.stop = () => {};
-      contents.loadURL = () => {
-        queueMicrotask(() => contents.emit(...failure.event));
-        return new Promise(() => {});
-      };
-      await assert.rejects(
-        loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL, 50),
-        failure.expected,
-      );
-    }
+    for (const load of [loadCommittedBrowserSurface, loadStandaloneBrowserSurface]) {
+      for (const failure of failureCases) {
+        const contents = new EventEmitter();
+        contents.isDestroyed = () => false;
+        contents.getURL = () => "about:blank";
+        contents.stop = () => {};
+        contents.loadURL = () => {
+          if (failure.error) return Promise.reject(failure.error);
+          queueMicrotask(() => contents.emit(...failure.event));
+          return new Promise(() => {});
+        };
+        await assert.rejects(load(contents, IDLE_BROWSER_URL, 50), failure.expected);
+      }
 
-    const stalled = new EventEmitter();
-    const calls = [];
-    stalled.isDestroyed = () => false;
-    stalled.getURL = () => "about:blank";
-    stalled.stop = () => calls.push("stop");
-    stalled.loadURL = () => new Promise(() => {});
-    await assert.rejects(
-      loadCommittedBrowserSurface(stalled, IDLE_BROWSER_URL, 5),
-      /idle document did not commit within 5ms/,
-    );
-    assert.deepEqual(calls, ["stop"]);
+      const stalled = new EventEmitter();
+      const calls = [];
+      stalled.isDestroyed = () => false;
+      stalled.getURL = () => "about:blank";
+      stalled.stop = () => calls.push("stop");
+      stalled.loadURL = () => new Promise(() => {});
+      await assert.rejects(
+        load(stalled, IDLE_BROWSER_URL, 5),
+        /idle document did not commit within 5ms/,
+      );
+      assert.deepEqual(calls, ["stop"]);
+    }
   } finally {
     clearTimeout(keepTestAlive);
   }
@@ -261,23 +291,27 @@ test("primary browser initialization keeps its view offscreen but visible until 
   ]);
 });
 
-test("a new turn tab that misses its first idle-document window is retried instead of failing the turn", async () => {
+test("a new turn tab that misses its first idle-document window is retried instead of failing the turn", async t => {
   // Seen live: "Browser idle document did not commit within 10000ms" failed a Web GPT turn as
   // browser_page while the machine was busy; turn tabs had one window, the primary view several.
   const { loadIdleSurfaceWithRetries } = require("../electron/browser-host.cjs");
+  const keepAlive = setTimeout(() => {}, 100);
+  t.after(() => clearTimeout(keepAlive));
   let currentUrl = "about:blank";
   let loads = 0;
   const retries = [];
   const contents = new EventEmitter();
   contents.isDestroyed = () => false;
   contents.getURL = () => currentUrl;
-  contents.stop = () => {};
+  contents.stop = () => queueMicrotask(() => contents.emit("did-fail-load", {}, -3, "ERR_ABORTED", IDLE_BROWSER_URL, true));
   contents.loadURL = (url) => {
     loads += 1;
     if (loads === 1) return new Promise(() => {});
-    currentUrl = url;
-    queueMicrotask(() => contents.emit("did-finish-load"));
-    return Promise.resolve();
+    return new Promise(resolve => queueMicrotask(() => {
+      currentUrl = url;
+      contents.emit("did-finish-load");
+      resolve();
+    }));
   };
   await loadIdleSurfaceWithRetries(contents, [5, 50], (attempt, timeoutMs) => retries.push([attempt, timeoutMs]));
   assert.equal(currentUrl, IDLE_BROWSER_URL);

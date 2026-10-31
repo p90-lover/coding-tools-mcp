@@ -351,9 +351,12 @@ test("a foreground launch request survives hidden startup until the launcher win
     /mainWindowReadyToShow = true;[\s\S]*?if \(mainWindowShowRequested\) showMainWindow\(\);/,
   );
 
-  const secondInstance = electronMain.search(/app\.on\("second-instance", \(\) => \{[\s\S]{0,400}?showMainWindow\(\);\s*\}\);/);
+  const secondInstance = electronMain.indexOf('app.on("second-instance",');
+  const secondInstanceEnd = electronMain.indexOf("\n  });", secondInstance);
   const runtimeMaterialization = electronMain.indexOf("await waitForPackagedRuntimeSource", secondInstance);
   assert.ok(secondInstance >= 0, "the second-instance foreground request must be registered");
+  assert.ok(secondInstanceEnd > secondInstance, "the second-instance handler must be complete");
+  assert.match(electronMain.slice(secondInstance, secondInstanceEnd), /showMainWindow\(\);/);
   assert.ok(
     runtimeMaterialization > secondInstance,
     "the foreground request must be registered before packaged-runtime startup can block window creation",

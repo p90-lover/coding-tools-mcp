@@ -44,6 +44,7 @@ const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
+const { isMcpConnectorCommand, createMcpConnectorCommand } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
@@ -243,6 +244,16 @@ let catalogVerificationInFlight = false;
 let automaticMcpAttemptPid = null;
 let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
+let mcpConnectorCommand = null;
+let pendingMcpConnectorCommand = isMcpConnectorCommand(process.argv);
+let launcherReadyForMcpCommand = false;
+
+function dispatchMcpConnectorCommand() {
+  if (!pendingMcpConnectorCommand || !launcherReadyForMcpCommand || !mcpConnectorCommand) return;
+  pendingMcpConnectorCommand = false;
+  // The private command receipt and existing operation status carry failure details.
+  void mcpConnectorCommand.request().catch(() => undefined);
+}
 let updateController = null;
 let autoInstaller = null;
 // Set once the main window's renderer has loaded (the update health gate's window check).
@@ -1430,17 +1441,25 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   }
   window.once("ready-to-show", () => {
     if (!state.onboardingComplete && !Number.isFinite(windowState.bounds.x)) window.center();
-    if (windowState.maximized) window.maximize();
-    if (windowState.fullscreen) window.setFullScreen(true);
+    const restoreLayout = () => {
+      if (windowState.maximized) window.maximize();
+      if (windowState.fullscreen) window.setFullScreen(true);
+    };
+    // maximize/fullscreen can show a hidden window; restore only when the person reveals it.
+    if (startHidden) window.once("show", restoreLayout);
+    else restoreLayout();
     if (mainWindow === window) mainWindowReadyToShow = true;
     if (mainWindowShowRequested) showMainWindow();
     else if (!startHidden) window.show();
   });
-  trackWindowState(window, windowStatePath, (error) => {
+  const trackLayout = () => trackWindowState(window, windowStatePath, (error) => {
     logger.warn("launcher.window_state_write_failed", {
       message: error instanceof Error ? error.message : String(error),
     });
   }, { quitting: () => quitting });
+  // A hidden command that exits before reveal must not overwrite the saved maximized state.
+  if (startHidden) window.once("show", trackLayout);
+  else trackLayout();
   logger.info("launcher.window_created", { platform: process.platform, cdpPort });
   return window;
 }
@@ -2729,12 +2748,22 @@ function registerIpc({ logger, stateStore }) {
     return work;
   };
   handle("launcher:mcp-verify", event => verifyMcpConnection(event));
-  handle("launcher:mcp-create-connector", async event => {
-    assertFocusedMainWindow(event, true);
+  if (!mcpConnectorCommand) mcpConnectorCommand = createMcpConnectorCommand({ app, logger, run: async () => {
     if (IS_DEV_PROFILE) throw new Error("Automatic connector creation is available in the production profile only");
+    await runtimeStartupInFlight;
+    if (quitting || shutdownInProgress || browserAccountsStatus().switching || runtimeHost.currentOperation()) {
+      throw new Error("MCP connector setup is busy");
+    }
+    const operationBrowser = browserHost;
+    const operationPartition = operationBrowser.partition;
+    await operationBrowser.ready();
+    if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+      || browserAccountsStatus().switching || quitting || shutdownInProgress) {
+      throw new Error("Browser account switching or shutdown is in progress");
+    }
     publishOperation({ name: "mcp-connector-create", status: "running", message: "Creating the ChatGPT connector" });
     try {
-      const result = await createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost });
+      const result = await createConfiguredConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost });
       const state = stateStore.update({
         autoConnectExistingMcp: true,
         ...(result.created ? { mcpSetupComplete: false } : {}),
@@ -2748,6 +2777,11 @@ function registerIpc({ logger, stateStore }) {
       publishOperation({ name: "mcp-connector-create", status: "failed", message: error instanceof Error ? error.message : String(error) });
       throw error;
     }
+  } });
+  dispatchMcpConnectorCommand();
+  handle("launcher:mcp-create-connector", event => {
+    assertFocusedMainWindow(event, true);
+    return mcpConnectorCommand.request();
   });
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
@@ -3301,7 +3335,12 @@ async function start() {
     app.quit();
     return;
   }
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
+    if (isMcpConnectorCommand(argv)) {
+      pendingMcpConnectorCommand = true;
+      dispatchMcpConnectorCommand();
+      return;
+    }
     // A window whose renderer died is reloaded before it is shown, so launching again recovers it.
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.isCrashed()) {
       void loadRenderer(mainWindow).catch(() => undefined);
@@ -3488,7 +3527,8 @@ async function start() {
     stateRoot: path.join(app.getPath("userData"), "integrations", "state", "cpa"), logger,
   });
   app.on("will-quit", () => cpaPluginModels.stop());
-  const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  const commandStartup = isMcpConnectorCommand(process.argv);
+  const startHidden = commandStartup || (process.argv.includes("--hidden") && stateStore.read().onboardingComplete);
   // Updates install inside the app: a whole-app update (app-update.cjs) swaps the changed files
   // in after the app closes the way "Restart app (keep Codex bridge, MCP, CPA)" does; a GUI-only
   // update reloads the renderer in place. Neither runs an installer.
@@ -4390,7 +4430,7 @@ async function start() {
   setProviderBrowserHost(() => browserHost);
   registerIpc({ logger, stateStore });
   const trayAvailable = createTray(logger, stateStore.read().language);
-  if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
+  if (startHidden && !trayAvailable && !commandStartup) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = LAUNCHER_SMOKE_TEST;
   let startupAuthenticationRefresh = Promise.resolve(browserHost.snapshot());
   await ensureRendererLoaded(mainWindow, logger);
@@ -4663,6 +4703,8 @@ async function start() {
   });
   process.once("SIGINT", () => { void requestQuit(); });
   process.once("SIGTERM", () => { void requestQuit(); });
+  launcherReadyForMcpCommand = true;
+  dispatchMcpConnectorCommand();
 }
 
 void start().catch((error) => {
@@ -4678,7 +4720,9 @@ void start().catch((error) => {
     }
   } catch {}
   try {
-    if (!LAUNCHER_SMOKE_TEST) {
+    if (isMcpConnectorCommand(process.argv)) {
+      if (app.isReady()) (mcpConnectorCommand || createMcpConnectorCommand({ app, run: () => undefined })).failStartup();
+    } else if (!LAUNCHER_SMOKE_TEST) {
       dialog.showErrorBox("Coding Tools could not start", message);
     }
   } catch {}

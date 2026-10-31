@@ -4,7 +4,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { app, BrowserWindow, session } = require("electron");
-const { createConfiguredConnector } = require("../../electron/mcp-connector-setup.cjs");
+const moduleRoot = process.env.MCP_CONNECTOR_TEST_APP_ROOT || path.resolve(__dirname, "../..");
+const { createConfiguredConnector } = require(path.join(moduleRoot, "electron/mcp-connector-setup.cjs"));
+const { createMcpConnectorCommand } = require(path.join(moduleRoot, "electron/mcp-connector-command.cjs"));
 
 const root = process.env.MCP_CONNECTOR_TEST_ROOT;
 if (!root || !path.isAbsolute(root) || !root.split(path.sep).includes("aiTemp")) {
@@ -49,7 +51,7 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification }) {
         + '<button id="server-url" ${legacy ? 'role="radio"' : ''}>Server URL</button>'
         + '<button id="tunnel-mode" ${legacy ? 'role="radio" aria-label="Tunnel"' : 'aria-label="Secure MCP Tunnel"'}>Tunnel</button>'
         + '<select id="custom-connector-tunnel-select"><option>Loading tunnels...</option></select>'
-        + '<button id="use-id">Use tunnel ID instead</button>'
+        + '<button id="use-id" hidden>Use tunnel ID instead</button>'
         + '<select id="custom-connector-auth"><option value="OAUTH">OAuth</option><option value="NONE">${legacy ? 'No Auth' : 'No authentication'}</option></select>'
         + '<label>I understand <input id="trust-checkbox" type="checkbox"></label>'
         + '<button id="save" disabled>${legacy ? 'Create' : 'Create as a plugin'}</button></div>');
@@ -64,9 +66,14 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification }) {
       };
       dialog.addEventListener('input', ready);
       dialog.addEventListener('change', ready);
-      dialog.querySelector('#tunnel-mode').onclick = () => { tunnelSelected = true; ready(); };
+      const selectTunnel = () => {
+        tunnelSelected = true;
+        queueMicrotask(() => { dialog.querySelector('#use-id').hidden = false; ready(); });
+      };
+      if (scenario.legacy) dialog.querySelector('#tunnel-mode').onclick = selectTunnel;
+      else dialog.querySelector('#tunnel-mode').onmousedown = selectTunnel;
       dialog.querySelector('#use-id').onclick = () => {
-        dialog.querySelector('#custom-connector-tunnel-select').outerHTML = '<input type="text" id="custom-connector-tunnel-id" placeholder="tunnel_0123456789abcdef0123456789abcdef">';
+        dialog.querySelector('#custom-connector-tunnel-select').outerHTML = '<input id="custom-connector-tunnel-id" placeholder="tunnel_0123456789abcdef0123456789abcdef"' + (scenario.legacy ? ' type="text"' : '') + '>';
         dialog.querySelector('#use-id').remove();
       };
       dialog.querySelector('#save').onclick = async () => {
@@ -88,11 +95,19 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification }) {
         }
       };
     }
-    document.querySelector('#add').onclick = () => {
-      if (!scenario.menu) return form();
-      document.body.insertAdjacentHTML('beforeend', '<div role="menu"><button role="menuitem">Add a custom MCP server</button></div>');
-      document.querySelector('[role="menuitem"]').onclick = form;
-    };
+    const add = document.querySelector('#add');
+    if (!scenario.menu) add.onclick = form;
+    else {
+      let openedAt = 0;
+      add.onpointerdown = () => {
+        openedAt = performance.now();
+        document.body.insertAdjacentHTML('beforeend', '<div role="menu"><button role="menuitem">Add a custom MCP server</button></div>');
+        document.querySelector('[role="menuitem"]').onclick = form;
+      };
+      add.onclick = () => {
+        if (performance.now() - openedAt < 100) document.querySelector('[role="menu"]')?.remove();
+      };
+    }
     </script>`;
 }
 
@@ -132,7 +147,7 @@ app.whenReady().then(async () => {
     }
     const tunnelId = "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const options = {
-      app: { getPath: kind => { assert.equal(kind, "userData"); return data; } },
+      app: { getPath: kind => { assert.equal(kind, "userData"); return data; }, getVersion: () => app.getVersion() },
       BrowserWindow: TrackedWindow,
       browserHost: {
         partition,
@@ -147,11 +162,12 @@ app.whenReady().then(async () => {
         mcpConnectorName: () => "Coding Tools Native2",
       },
     };
+    const command = createMcpConnectorCommand({ app: options.app, run: () => createConfiguredConnector(options) });
     try {
       if (scenario.denied) {
-        await assert.rejects(createConfiguredConnector(options), /MCP server denied access.*workspace access/);
+        await assert.rejects(command.request(), /MCP server denied access.*workspace access/);
       } else {
-        const result = await createConfiguredConnector(options);
+        const result = await command.request();
         assert.equal(result.created, !scenario.existing);
         assert.equal(result.href, `/plugins/plugins~Plugin_${scenario.existing ? "existing" : "created"}`);
       }
@@ -161,6 +177,9 @@ app.whenReady().then(async () => {
       assert.equal(windows.length, 1);
       assert(windows.every(window => window.isDestroyed()), "setup must dispose its window");
       assert.equal(receipts.length, scenario.existing ? 0 : 1, "only one submission is allowed");
+      const commandReport = JSON.parse(fs.readFileSync(path.join(data, "mcp-connector-command.json")));
+      assert.equal(commandReport.status, scenario.denied ? "failed" : "completed");
+      if (scenario.denied) assert.equal(commandReport.error.code, "mcp_access_denied");
       if (receipts.length) assert.deepEqual(receipts[0], {
         name: "Coding Tools Native2", tunnelId, authentication: "NONE", trusted: true,
         search: "", personalClicks: scenario.publicTab ? 1 : 0, submits: 1,
