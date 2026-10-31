@@ -22,16 +22,17 @@ app.on("window-all-closed", () => {});
 const deadline = setTimeout(() => { console.error("MCP_NATIVE_TIMEOUT"); app.exit(2); }, 180_000);
 console.log("MCP_NATIVE_START");
 
-function fixture({ legacy, publicTab, menu, existing, denied, notification, labelledBy, unrelatedLabel }) {
-  return `<!doctype html><title>Plugins | ChatGPT</title><main>
+function fixture({ legacy, publicTab, menu, existing, denied, notification, labelledBy, unrelatedLabel, loadingPersonal, blockCreateToExisting }) {
+  return `<!doctype html><meta charset="utf-8"><title>Plugins | ChatGPT</title><main>
     <div role="tablist"><button id="public" role="tab" aria-selected="${Boolean(publicTab)}">Public</button>
     <button id="personal" role="tab" aria-selected="${!publicTab}">Personal</button></div>
     <input type="text" aria-label="Search plugins" placeholder="Search plugins" value="filtered query">
+    ${loadingPersonal || blockCreateToExisting ? '<section><h2>Installed</h2><div class="group/plugin-row"><a aria-label="Coding Tools Native2" href="/plugins/plugin_asdk_app_existing?directoryTab=personal" data-discover="true"><span aria-hidden="true">Coding Tools Native2</span></a></div></section>' : ''}
     <section id="list"></section><button id="add">${legacy ? "Create app" : "Add"}</button></main>
     ${notification ? '<div role="alert">Unrelated notification</div>' : ''}
     <script>
-    const scenario = ${JSON.stringify({ legacy, publicTab, menu, existing, denied, labelledBy, unrelatedLabel })};
-    let personalClicks = 0, submits = 0;
+    const scenario = ${JSON.stringify({ legacy, publicTab, menu, existing, denied, labelledBy, unrelatedLabel, loadingPersonal, blockCreateToExisting })};
+    let personalClicks = 0, submits = 0, gridLoaded = !scenario.loadingPersonal;
     function card(id, name = 'Coding Tools Native2') {
       if (!scenario.labelledBy) return '<article><a aria-label="Open Coding Tools Native2" href="/plugins/plugins~Plugin_' + id + '"><h2>Coding Tools Native2</h2></a></article>';
       // Observed ChatGPT row: an empty overlay link names its sibling title, not its description.
@@ -41,6 +42,10 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification, labe
         + '<div class="line-clamp-1">Coding Tools Native2</div></div>';
     }
     function list() {
+      if (!gridLoaded) {
+        document.querySelector('#list').innerHTML = '<div>Loading plugins…</div>';
+        return;
+      }
       document.querySelector('#list').innerHTML = scenario.existing
         ? card('existing')
         : scenario.unrelatedLabel ? card('other', 'Build Web Apps')
@@ -48,6 +53,7 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification, labe
     }
     if (!scenario.publicTab) list();
     else document.querySelector('#list').innerHTML = '<article><a aria-label="Open Coding Tools Native2" href="/plugins/plugins~Plugin_public"><h2>Coding Tools Native2</h2></a></article>';
+    if (scenario.loadingPersonal) setTimeout(() => { gridLoaded = true; list(); }, 2500);
     document.querySelector('#personal').onclick = () => {
       personalClicks++;
       document.querySelector('#public').setAttribute('aria-selected', 'false');
@@ -101,7 +107,8 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification, labe
           dialog.insertAdjacentHTML('beforeend', '<div role="alert">The MCP server denied access. Check your authentication settings and, if using a tunnel, its workspace access.</div>');
         } else {
           dialog.remove();
-          document.querySelector('#list').innerHTML = card('created');
+          // The duplicate POST is blocked, then the existing Personal card finishes loading.
+          if (!scenario.loadingPersonal) document.querySelector('#list').innerHTML = card(scenario.blockCreateToExisting ? 'existing' : 'created');
         }
       };
     }
@@ -147,6 +154,8 @@ app.whenReady().then(async () => {
     { name: "legacy", legacy: true },
     { name: "existing-private", publicTab: true, existing: true },
     { name: "existing-labelled-title", existing: true, labelledBy: true },
+    { name: "existing-personal-loading", existing: true, labelledBy: true, loadingPersonal: true },
+    { name: "post-create-existing-identity", labelledBy: true, blockCreateToExisting: true },
     { name: "existing-connected", existing: true, labelledBy: true, connected: true },
     { name: "disabled-connect-loading", existing: true, labelledBy: true, disabledConnect: true },
     { name: "ambiguous-connected-rows", existing: true, labelledBy: true, connected: true, ambiguous: true },
@@ -211,6 +220,8 @@ app.whenReady().then(async () => {
         await assert.rejects(command.request(), /MCP server denied access.*workspace access/);
       } else if (scenario.ambiguous) {
         await assert.rejects(command.request(), /more than one matching app row/);
+      } else if (scenario.blockCreateToExisting) {
+        await assert.rejects(command.request(), /existing connector.*Create/i);
       } else {
         const result = await command.request();
         assert.equal(result.created, !scenario.existing);
@@ -222,17 +233,17 @@ app.whenReady().then(async () => {
       assert.equal(windows.length, 1);
       assert(windows.every(window => window.isDestroyed()), "setup must dispose its window");
       assert.equal(receipts.length, scenario.existing ? 0 : 1, "only one submission is allowed");
-      assert.equal(connections.length, scenario.denied || scenario.connected ? 0 : 1, "connect once and reuse an existing connection");
+      assert.equal(connections.length, scenario.denied || scenario.connected || scenario.blockCreateToExisting ? 0 : 1, "connect once and reuse an existing connection");
       if (connections.length) assert.deepEqual(connections[0], { name: "Coding Tools Native2" });
       const commandReport = JSON.parse(fs.readFileSync(path.join(data, "mcp-connector-command.json")));
-      assert.equal(commandReport.status, scenario.denied || scenario.ambiguous ? "failed" : "completed");
+      assert.equal(commandReport.status, scenario.denied || scenario.ambiguous || scenario.blockCreateToExisting ? "failed" : "completed");
       if (scenario.denied) assert.equal(commandReport.error.code, "mcp_access_denied");
       if (receipts.length) assert.deepEqual(receipts[0], {
         name: "Coding Tools Native2", tunnelId, authentication: "NONE", trusted: true,
         search: "", personalClicks: scenario.publicTab ? 1 : 0, submits: 1,
       });
       const binding = path.join(data, "mcp-connector-binding.json");
-      assert.equal(fs.existsSync(binding), !scenario.existing && !scenario.denied);
+      assert.equal(fs.existsSync(binding), !scenario.existing && !scenario.denied && !scenario.blockCreateToExisting);
       if (fs.existsSync(binding)) assert.equal(JSON.parse(fs.readFileSync(binding)).href, expectedHref);
       console.log(`MCP_NATIVE_PASS ${scenario.name}`);
     } finally {

@@ -59,6 +59,27 @@ test("the adapted extension exposes form helpers without the destructive Sync or
   assert.equal(helpers.canonicalAppIdentity("🔧 Shared tools"), "🔧 shared tools");
 });
 
+test("Personal plugin readiness waits for its visible loader even when Installed links are present", () => {
+  let loading = true, skeleton = false;
+  const loader = { innerText: "Loading plugins…", textContent: "Loading plugins…", get offsetWidth() { return loading ? 100 : 0; }, getClientRects: () => loading ? [{}] : [] };
+  const personal = { innerText: "Personal", getAttribute: () => null };
+  const installed = { innerText: "Coding Tools Native2", getAttribute: name => name === "href" ? "/plugins/plugin_asdk_app_existing" : null };
+  const context = { document: {
+    querySelectorAll: selector => selector === 'main [role="tab"][aria-selected="true"]' ? [personal]
+      : selector === "main *" ? [installed, loader] : selector === "a[href]" ? [installed] : [],
+    querySelector: () => skeleton ? {} : null,
+  } };
+  vm.runInNewContext(extensionHelpersSource(), context);
+  const loaded = context.__codingToolsConnectorHelpers.personalPluginsLoaded;
+  assert.equal(loaded(), false, "Installed links cannot establish directory completion while the loader is visible");
+  loader.innerText = "Loading plugins...";
+  assert.equal(loaded(), false);
+  loading = false;
+  assert.equal(loaded(), true, "a hidden loader must not block a completed directory");
+  skeleton = true;
+  assert.equal(loaded(), false, "existing skeleton guards remain active");
+});
+
 test("managed connector matching ignores an unrelated plugin card mentioning its name", async () => {
   const { chromium } = require(require.resolve("playwright-core", { paths: [path.join(__dirname, "../../runtime-web")] }));
   const browser = await chromium.launch({
@@ -93,7 +114,40 @@ test("managed connector matching ignores an unrelated plugin card mentioning its
   }
 });
 
-test("current configuration creates a Tunnel connector from the observed ChatGPT form", async () => {
+test("a loading Personal directory reuses its existing connector without opening Create", async () => {
+  const { chromium } = require(require.resolve("playwright-core", { paths: [path.join(__dirname, "../../runtime-web")] }));
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    headless: true,
+    args: ["--no-proxy-server"],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.route("https://chatgpt.com/plugins?view=personal", route => route.fulfill({
+      contentType: "text/html",
+      body: `<meta charset="utf-8"><main><div role="tablist"><button role="tab" aria-selected="true">Personal</button></div>
+        <section><h2>Installed</h2><a aria-label="Coding Tools Native2" href="/plugins/plugin_asdk_app_existing?directoryTab=personal"><span>Coding Tools Native2</span></a></section>
+        <section id="grid"></section><button id="add">Add</button></main>
+        <script>window.createAttempts = 0; document.querySelector('#add').onclick = () => { createAttempts++; };
+        setTimeout(() => { document.querySelector('#grid').innerHTML = '<div>Loading plugins…</div>'; }, 200);
+        setTimeout(() => { document.querySelector('#grid').innerHTML = '<h2>Created by you</h2><div style="position:relative;width:320px;height:140px"><a style="position:absolute;inset:0" aria-labelledby="personal-title" href="/plugins/plugin_asdk_app_existing?directoryTab=personal"></a><div id="personal-title"><span>Coding Tools Native2</span></div></div>'; }, 2500);</script>`,
+    }));
+    await page.goto("https://chatgpt.com/plugins?view=personal");
+    await page.evaluate(extensionHelpersSource());
+    assert.equal(await page.evaluate(() => document.characterSet), "UTF-8");
+    const result = await page.evaluate(async () => ({
+      ...(await globalThis.__codingToolsConnectorHelpers.createTunnelConnector({
+        name: "Coding Tools Native2", tunnelId: "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", authentication: "none",
+      })),
+      createAttempts: globalThis.createAttempts,
+    }));
+    assert.deepEqual(result, { created: false, href: "/plugins/plugin_asdk_app_existing?directoryTab=personal", createAttempts: 0 });
+  } finally {
+    await browser.close();
+  }
+});
+
+for (const previouslySeen of [false, true]) test(`observed Tunnel form ${previouslySeen ? "rejects a previously visible confirmation identity" : "confirms a newly created connector"}`, async () => {
   const { chromium } = require(require.resolve("playwright-core", { paths: [path.join(__dirname, "../../runtime-web")] }));
   const browser = await chromium.launch({
     executablePath: process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
@@ -137,13 +191,20 @@ test("current configuration creates a Tunnel connector from the observed ChatGPT
       };
     });
     await page.evaluate(extensionHelpersSource());
+    if (previouslySeen) await page.evaluate(() => document.querySelector("main").insertAdjacentHTML("beforeend",
+      '<section><h2>Installed</h2><a aria-label="Coding Tools Native2" href="/plugins/plugins~Plugin_created"><span>Coding Tools Native2</span></a></section>'));
     const settings = currentConnectorSettings(runtime());
-    const result = await page.evaluate(async settings => {
+    const pending = page.evaluate(async settings => {
       const helpers = globalThis.__codingToolsConnectorHelpers;
       const available = typeof helpers.createTunnelConnector;
       if (available !== "function") return { available };
       return { available, ...(await helpers.createTunnelConnector(settings)), submitted: globalThis.submittedConnector };
     }, settings);
+    if (previouslySeen) {
+      await assert.rejects(pending, /existing connector.*Create/i);
+      return;
+    }
+    const result = await pending;
     assert.equal(result.available, "function");
     assert.equal(result.created, true);
     assert.equal(result.href, "/plugins/plugins~Plugin_created");
