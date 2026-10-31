@@ -187,8 +187,10 @@ pub(super) fn revoke(path: &Path) -> Result<()> {
 impl Hub {
     pub fn with_state_file(path: PathBuf) -> Self {
         Self {
+            current: Mutex::new(None),
+            admission_epoch: AtomicU64::new(0),
             state_file: Some(path),
-            ..Self::default()
+            recovery: Mutex::new(()),
         }
     }
 
