@@ -415,6 +415,12 @@ struct NativeApproval {
     reason: String,
     expires_at: Instant,
 }
+struct NativeResponse<'a> {
+    id: &'a str,
+    thread_id: &'a str,
+    turn_id: &'a str,
+    response: &'a Value,
+}
 impl NativeApproval {
     fn display_path(&self) -> Value {
         if self.method.is_empty() {
@@ -636,6 +642,76 @@ struct Bridge {
     memory: Arc<Mutex<Memory>>,
     operation: Mutex<()>,
 }
+#[derive(Debug)]
+enum EnqueueFailure {
+    Expired,
+    Stopped,
+    Unavailable,
+}
+
+fn finish_enqueue(
+    result: std::result::Result<(), EnqueueFailure>,
+    on_expired: impl FnOnce(),
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(EnqueueFailure::Expired) => {
+            on_expired();
+            Err("Native session stopped; request not submitted".into())
+        }
+        Err(EnqueueFailure::Stopped) => Err("Native session stopped; request not submitted".into()),
+        Err(EnqueueFailure::Unavailable) => {
+            Err("Native outgoing queue unavailable; request not submitted".into())
+        }
+    }
+}
+
+fn resolve_native_response(
+    memory: &Mutex<Memory>,
+    approvals: &Mutex<BTreeMap<String, NativeApproval>>,
+    answer: NativeResponse<'_>,
+    is_live: impl FnOnce() -> bool,
+    send: impl FnOnce(Value) -> std::result::Result<(), EnqueueFailure>,
+    on_expired: impl FnOnce(),
+) -> Result<Value> {
+    let (sent, value) = {
+        let mut memory = lock(memory)?;
+        let mut pending = lock(approvals)?;
+        let request = pending
+            .get(answer.id)
+            .ok_or("Native request expired or was already answered")?;
+        if request.method.is_empty() {
+            return Err("Use the legacy approval response for this request".into());
+        }
+        if !request.belongs_to(
+            answer.thread_id,
+            answer.turn_id,
+            memory.threads.get(&request.thread_id),
+            is_live(),
+        ) {
+            return Err("Native response is stale or belongs to another thread/turn".into());
+        }
+        consent::validate(&request.method, &request.request, answer.response)?;
+        let approved = consent::granted(&request.method, &request.request, answer.response);
+        let method = request.method.clone();
+        // Validation, queue insertion and removal stay atomic for competing replies.
+        let sent = send(json!({"id":request.rpc_id,"result":answer.response}));
+        if sent.is_ok() {
+            pending.remove(answer.id);
+            if let Some(thread) = memory.threads.get_mut(answer.thread_id) {
+                thread.notice = None;
+            }
+        }
+        (
+            sent,
+            json!({"ok":true,"approved":approved,"method":method,"scope":answer.response["scope"]}),
+        )
+    };
+    // Expiry shutdown also locks memory and approvals, so neither guard may survive here.
+    finish_enqueue(sent, on_expired)?;
+    Ok(value)
+}
+
 fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
     m.lock()
         .map_err(|_| "Native bridge state unavailable".into())
@@ -1326,33 +1402,19 @@ impl Hub {
         response: &Value,
     ) -> Result<Value> {
         let bridge = self.bridge()?;
-        let mut memory = lock(&bridge.memory)?;
-        let mut pending = lock(&bridge.approvals)?;
-        let request = pending
-            .get(id)
-            .ok_or("Native request expired or was already answered")?;
-        if request.method.is_empty() {
-            return Err("Use the legacy approval response for this request".into());
-        }
-        if !request.belongs_to(
-            thread_id,
-            turn_id,
-            memory.threads.get(&request.thread_id),
-            bridge.live.load(Ordering::SeqCst),
-        ) {
-            return Err("Native response is stale or belongs to another thread/turn".into());
-        }
-        consent::validate(&request.method, &request.request, response)?;
-        let approved = consent::granted(&request.method, &request.request, response);
-        // Holding the queue lock makes check + response + removal atomic for competing replies.
-        bridge.enqueue(json!({"id":request.rpc_id,"result":response}))?;
-        let method = request.method.clone();
-        pending.remove(id);
-        drop(pending);
-        if let Some(thread) = memory.threads.get_mut(thread_id) {
-            thread.notice = None;
-        }
-        Ok(json!({"ok":true,"approved":approved,"method":method,"scope":response["scope"]}))
+        resolve_native_response(
+            &bridge.memory,
+            &bridge.approvals,
+            NativeResponse {
+                id,
+                thread_id,
+                turn_id,
+                response,
+            },
+            || bridge.live.load(Ordering::SeqCst),
+            |reply| bridge.try_enqueue(reply),
+            || bridge.stop("local_consent_expired"),
+        )
     }
     /// The thread state with the first page of its answer.
     pub fn read(&self, id: &str) -> Result<Value> {
@@ -1537,17 +1599,22 @@ fn exact_external_write(root: &Path, permissions: &Value) -> Option<PathBuf> {
 
 impl Bridge {
     fn enqueue(&self, value: Value) -> Result<()> {
+        finish_enqueue(self.try_enqueue(value), || {
+            self.stop("local_consent_expired")
+        })
+    }
+    fn try_enqueue(&self, value: Value) -> std::result::Result<(), EnqueueFailure> {
         if self.options.lifetime_seconds != 0
             && self.started.elapsed() >= Duration::from_secs(self.options.lifetime_seconds)
         {
-            self.stop("local_consent_expired");
+            return Err(EnqueueFailure::Expired);
         }
         if !self.live.load(Ordering::SeqCst) {
-            return Err("Native session stopped; request not submitted".into());
+            return Err(EnqueueFailure::Stopped);
         }
         self.outgoing
             .try_send(value)
-            .map_err(|_| "Native outgoing queue unavailable; request not submitted".into())
+            .map_err(|_| EnqueueFailure::Unavailable)
     }
     fn rpc(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -2896,9 +2963,8 @@ mod tests {
         assert_eq!(memory.ledger.len(), MAX_LEDGER);
     }
 
-    #[test]
-    fn native_request_scope_rejects_wrong_turn_expiry_and_stopped_connection() {
-        let mut request = NativeApproval {
+    fn native_request_fixture() -> (NativeApproval, ThreadState) {
+        let request = NativeApproval {
             rpc_id: json!(7),
             method: "item/permissions/requestApproval".into(),
             request: json!({"permissions":{"network":{"enabled":true}}}),
@@ -2916,6 +2982,12 @@ mod tests {
             turn_id: Some("turn-one".into()),
             ..Default::default()
         };
+        (request, thread)
+    }
+
+    #[test]
+    fn native_request_scope_rejects_wrong_turn_expiry_and_stopped_connection() {
+        let (mut request, thread) = native_request_fixture();
         assert!(request.belongs_to("thread-one", "turn-one", Some(&thread), true));
         assert!(!request.belongs_to("unrelated", "turn-one", Some(&thread), true));
         assert!(!request.belongs_to("thread-one", "stale", Some(&thread), true));
@@ -2948,6 +3020,155 @@ mod tests {
         request.expires_at = Instant::now() - Duration::from_secs(1);
         assert!(!request.belongs_to("thread-one", "turn-one", Some(&thread), true));
     }
+
+    #[test]
+    fn native_response_expiry_stops_after_both_guards_are_released() {
+        let (request, mut thread) = native_request_fixture();
+        thread.notice = Some("waiting".into());
+        let memory = Mutex::new(Memory {
+            threads: BTreeMap::from([("thread-one".into(), thread)]),
+            ..Default::default()
+        });
+        let approvals = Mutex::new(BTreeMap::from([("approval-one".into(), request)]));
+        let response = json!({"permissions":{"network":{"enabled":true}},"scope":"turn"});
+        let stopped = AtomicBool::new(false);
+        let result = resolve_native_response(
+            &memory,
+            &approvals,
+            NativeResponse {
+                id: "approval-one",
+                thread_id: "thread-one",
+                turn_id: "turn-one",
+                response: &response,
+            },
+            || true,
+            |_| Err(EnqueueFailure::Expired),
+            || {
+                let memory = memory.try_lock().expect("expiry stop must not hold memory");
+                let approvals = approvals
+                    .try_lock()
+                    .expect("expiry stop must not hold approvals");
+                assert!(approvals.contains_key("approval-one"));
+                assert_eq!(
+                    memory.threads["thread-one"].notice.as_deref(),
+                    Some("waiting")
+                );
+                stopped.store(true, Ordering::SeqCst);
+            },
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "Native session stopped; request not submitted"
+        );
+        assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn native_response_queue_failures_retain_requests_and_success_is_once() {
+        for (sent, expected_error) in [
+            (
+                Err(EnqueueFailure::Unavailable),
+                Some("Native outgoing queue unavailable; request not submitted"),
+            ),
+            (
+                Err(EnqueueFailure::Stopped),
+                Some("Native session stopped; request not submitted"),
+            ),
+            (Ok(()), None),
+        ] {
+            let (request, mut thread) = native_request_fixture();
+            thread.notice = Some("waiting".into());
+            let memory = Mutex::new(Memory {
+                threads: BTreeMap::from([("thread-one".into(), thread)]),
+                ..Default::default()
+            });
+            let mut other = native_request_fixture().0;
+            other.rpc_id = json!(8);
+            let approvals = Mutex::new(BTreeMap::from([
+                ("approval-one".into(), request),
+                ("approval-other".into(), other),
+            ]));
+            let response = json!({"permissions":{"network":{"enabled":true}},"scope":"turn"});
+            for (turn_id, live) in [("stale-turn", true), ("turn-one", false)] {
+                let stale = resolve_native_response(
+                    &memory,
+                    &approvals,
+                    NativeResponse {
+                        id: "approval-one",
+                        thread_id: "thread-one",
+                        turn_id,
+                        response: &response,
+                    },
+                    || live,
+                    |_| panic!("stale response must not be queued"),
+                    || panic!("stale response must not stop the bridge"),
+                );
+                assert_eq!(
+                    stale.unwrap_err(),
+                    "Native response is stale or belongs to another thread/turn"
+                );
+            }
+            let result = resolve_native_response(
+                &memory,
+                &approvals,
+                NativeResponse {
+                    id: "approval-one",
+                    thread_id: "thread-one",
+                    turn_id: "turn-one",
+                    response: &response,
+                },
+                || true,
+                |reply| {
+                    assert!(
+                        memory.try_lock().is_err(),
+                        "queue insertion must hold memory"
+                    );
+                    assert!(
+                        approvals.try_lock().is_err(),
+                        "queue insertion must hold approvals"
+                    );
+                    assert_eq!(reply, json!({"id":7,"result":response}));
+                    sent
+                },
+                || panic!("non-expiry queue result must not stop the bridge"),
+            );
+            assert!(approvals.lock().unwrap().contains_key("approval-other"));
+            if let Some(error) = expected_error {
+                assert_eq!(result.unwrap_err(), error);
+                assert!(approvals.lock().unwrap().contains_key("approval-one"));
+                assert_eq!(
+                    memory.lock().unwrap().threads["thread-one"]
+                        .notice
+                        .as_deref(),
+                    Some("waiting")
+                );
+            } else {
+                assert_eq!(result.unwrap()["approved"], true);
+                assert!(!approvals.lock().unwrap().contains_key("approval-one"));
+                assert!(memory.lock().unwrap().threads["thread-one"]
+                    .notice
+                    .is_none());
+                let duplicate = resolve_native_response(
+                    &memory,
+                    &approvals,
+                    NativeResponse {
+                        id: "approval-one",
+                        thread_id: "thread-one",
+                        turn_id: "turn-one",
+                        response: &response,
+                    },
+                    || true,
+                    |_| panic!("answered response must not be queued twice"),
+                    || panic!("answered response must not stop the bridge"),
+                );
+                assert_eq!(
+                    duplicate.unwrap_err(),
+                    "Native request expired or was already answered"
+                );
+            }
+        }
+    }
+
     #[test]
     fn ao_command_approval_is_bounded_and_always_a_single_decision() {
         let root =
