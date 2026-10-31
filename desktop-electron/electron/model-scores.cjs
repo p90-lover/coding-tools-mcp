@@ -12,7 +12,7 @@
 // - simple_process, frontend, backend, android: the card's work quality, only in the categories
 //   the round touched (named by the grader, or by keywords when there was no grade).
 
-const { readStateFile, writeStateFile } = require("./durable-state.cjs");
+const { createStateFileWriter, readStateFile } = require("./durable-state.cjs");
 
 const CATEGORIES = Object.freeze(["simple_process", "frontend", "backend", "android", "understanding", "handling", "command_follow"]);
 const DOMAINS = Object.freeze(["simple_process", "frontend", "backend", "android"]);
@@ -244,10 +244,12 @@ function createModelScoreStore({ file = null, limit = RECORD_LIMIT, logger = nul
     if (read.value) records = read.value;
     if (read.source === "backup" || read.source === "unreadable") logger?.warn?.("ao.model_scores_recovered", { source: read.source, setAside: read.setAside });
   }
-  const persist = () => {
-    if (file) writeStateFile(file, `${JSON.stringify({ version: 1, records })}\n`, { protectDirectory: false });
-  };
+  const writer = file ? createStateFileWriter(file, { protectDirectory: false,
+    onError: (error) => logger?.warn?.("ao.model_scores_save_failed", { message: String(error?.message || error).slice(0, 200) }) }) : null;
+  const persist = () => writer?.save(`${JSON.stringify({ version: 1, records })}\n`);
   return {
+    /** Resolves once every change so far is on disk (tests, and a caller about to exit). */
+    saved: async () => writer?.saved(),
     has: (id) => records.some((record) => record.id === id),
     add(record) {
       records = [...records.filter((entry) => entry.id !== record.id), record].slice(-limit);

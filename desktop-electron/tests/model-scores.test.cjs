@@ -82,7 +82,7 @@ test("the summary gives each model's average, recent, best and last per category
   });
 });
 
-test("the score log is saved, replaces a round scored again, keeps its newest records and survives a torn file", () => {
+test("the score log is saved, replaces a round scored again, keeps its newest records and survives a torn file", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "model-scores-test-"));
   const file = path.join(root, "model-scores.json");
   const store = createModelScoreStore({ file, limit: 2 });
@@ -91,6 +91,7 @@ test("the score log is saved, replaces a round scored again, keeps its newest re
   store.add({ id: "2", cards: [{ model: "again" }] });
   store.add({ id: "3", cards: [] });
   assert.deepEqual(store.records().map((record) => record.id), ["2", "3"]);
+  await store.saved();
   assert.equal(createModelScoreStore({ file }).has("3"), true);
   fs.writeFileSync(file, Buffer.alloc(fs.statSync(file).size));
   const warnings = [];
@@ -98,5 +99,6 @@ test("the score log is saved, replaces a round scored again, keeps its newest re
   assert.deepEqual(recovered.records().map((record) => record.id), ["2", "3"]);
   assert.equal(warnings[0].detail.source, "backup");
   recovered.clear();
+  await recovered.saved();
   assert.deepEqual(createModelScoreStore({ file }).records(), []);
 });

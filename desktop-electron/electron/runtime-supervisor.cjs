@@ -459,7 +459,15 @@ class RuntimeSupervisor {
     // same tunnel program it ships now (tunnelOwnerMatches). Off (the default here) adopts any ready
     // tunnel, as before; main.cjs passes the setting.
     reuseTunnelOnlyWhenMatching = () => false,
+    // The app watches config.json's folder and trusts its cached copy until the watch reports a
+    // change (readConfigJson); off, every read checks the file, as tests that write it and read it
+    // back at once expect.
+    watchConfigFile = false,
   }) {
+    this.watchConfigFile = watchConfigFile;
+    this.configWatcher = null;
+    this.configTrusted = false;
+    this.configChanges = 0;
     this.reuseTunnelOnlyWhenMatching = reuseTunnelOnlyWhenMatching;
     this.tunnelOwnerPath = path.join(coreHome, "runtime", "tunnel-owner.json");
     this.app = app;
@@ -551,6 +559,9 @@ class RuntimeSupervisor {
    * time changes, whoever wrote it.
    */
   readConfigJson() {
+    if (this.configTrusted && this.configCache) return structuredClone(this.configCache.value);
+    const changes = this.configChanges;
+    const watching = this.watchConfig();
     let stat;
     try { stat = fs.statSync(this.configPath); } catch { this.configCache = null; return undefined; }
     const cached = this.configCache;
@@ -558,7 +569,41 @@ class RuntimeSupervisor {
       this.configCache = null;
       this.configCache = { size: stat.size, mtimeMs: stat.mtimeMs, value: readJson(this.configPath) };
     }
+    this.configTrusted = watching && changes === this.configChanges;
     return structuredClone(this.configCache.value);
+  }
+
+  /**
+   * Watches config.json's folder (once; false when off or the watch cannot start). Even the one
+   * statSync readConfigJson makes per call froze every window up to 7.9 s on the busy hard disk
+   * (30 s in an hour from IPC and setup reads, 2026-10-31). The system reports a change without
+   * reading the disk, so the cached copy is used until one is reported. The watch starts before
+   * the check that makes the copy trusted, so a write in between is never missed.
+   */
+  watchConfig() {
+    if (!this.watchConfigFile) return false;
+    if (this.configWatcher) return true;
+    const name = path.basename(this.configPath).toLowerCase();
+    try {
+      this.configWatcher = fs.watch(path.dirname(this.configPath), { persistent: false }, (_event, file) => {
+        if (!file || String(file).toLowerCase() === name) this.forgetConfig();
+      });
+    } catch {
+      this.configWatcher = null;
+      return false;
+    }
+    this.configWatcher.on("error", () => {
+      try { this.configWatcher?.close(); } catch {}
+      this.configWatcher = null;
+      this.forgetConfig();
+    });
+    return true;
+  }
+
+  /** The next read checks config.json on disk (a reported change, or a writer that just ran). */
+  forgetConfig() {
+    this.configChanges += 1;
+    this.configTrusted = false;
   }
 
   /**
@@ -568,6 +613,9 @@ class RuntimeSupervisor {
    * disk holding it answered a read in 0.6 s on average and up to 7 s.
    */
   async readConfigJsonAsync() {
+    if (this.configTrusted && this.configCache) return structuredClone(this.configCache.value);
+    const changes = this.configChanges;
+    const watching = this.watchConfig();
     let stat;
     try { stat = await fs.promises.stat(this.configPath); } catch { this.configCache = null; return undefined; }
     const cached = this.configCache;
@@ -575,6 +623,7 @@ class RuntimeSupervisor {
       const value = JSON.parse((await fs.promises.readFile(this.configPath, "utf8")).replace(/^﻿/, ""));
       this.configCache = { size: stat.size, mtimeMs: stat.mtimeMs, value };
     }
+    this.configTrusted = watching && changes === this.configChanges;
     return structuredClone(this.configCache.value);
   }
 
@@ -603,7 +652,17 @@ class RuntimeSupervisor {
 
   readSetupConfig() {
     const config = this.readConfigJson();
-    if (config === undefined) return null;
+    return config === undefined ? null : this.setupConfigOf(config);
+  }
+
+  /** readSetupConfig for timers, which must not block the main process (readConfigJsonAsync). */
+  async readSetupConfigAsync() {
+    const config = await this.readConfigJsonAsync();
+    return config === undefined ? null : this.setupConfigOf(config);
+  }
+
+  /** The checks readSetupConfig makes on config.json's parsed contents. */
+  setupConfigOf(config) {
     if (!config || typeof config !== "object" || Array.isArray(config)) {
       throw new Error("Runtime configuration is not an object");
     }

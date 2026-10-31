@@ -253,7 +253,7 @@ function dispatchMcpConnectorCommand() {
   const action = pendingMcpConnectorCommand;
   pendingMcpConnectorCommand = null;
   // The private command receipt and existing operation status carry failure details.
-  void mcpConnectorCommand.request(action).catch(() => undefined);
+  void mcpConnectorCommand.request(action, "command").catch(() => undefined);
 }
 let updateController = null;
 let autoInstaller = null;
@@ -2881,7 +2881,7 @@ function registerIpc({ logger, stateStore }) {
   dispatchMcpConnectorCommand();
   handle("launcher:mcp-create-connector", event => {
     assertFocusedMainWindow(event, true);
-    return mcpConnectorCommand.request();
+    return mcpConnectorCommand.request("create", "settings");
   });
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
@@ -3766,11 +3766,11 @@ async function start() {
       await service.request("/api/v1/events/config", { proxy }, { timeout: 10_000 });
       mcpEventProxyPushed = pushed;
     },
-    bridgeHealthUrl: () => {
+    bridgeHealthUrl: async () => {
       // Probe the Codex bridge only while this launcher owns or adopted it.
       if (!runtimeSupervisor?.daemon || !runtimeHost) return null;
       try {
-        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const snapshot = await runtimeHost.runtimeConfigSnapshotAsync();
         const config = snapshot.config;
         if (!snapshot.configured || config?.host !== "127.0.0.1" || !Number.isInteger(config.port)) return null;
         return `http://127.0.0.1:${config.port}/healthz`;
@@ -4205,6 +4205,8 @@ async function start() {
       // Points per model from finished Team rounds (model-scores.cjs).
       modelScoresFile: path.join(app.getPath("userData"), "integrations", "model-scores.json"),
       knownModelsFile: path.join(app.getPath("userData"), "integrations", "cpa-known-models.json"),
+      // Models the app's own calls skip for now (spent quota, repeated failures), kept across restarts.
+      modelBenchFile: path.join(app.getPath("userData"), "integrations", "model-benches.json"),
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
         return headlessHost.request(endpoint, body, options);
@@ -4220,10 +4222,10 @@ async function start() {
         return { baseUrl: `http://127.0.0.1:${config.port}/v1` };
       },
       webBridgeReadiness: async () => {
-        if (!browserHost || !fs.existsSync(browserHost.descriptorPath)) return { authenticated: null, ready: false };
+        if (!browserHost || !(await fs.promises.access(browserHost.descriptorPath).then(() => true, () => false))) return { authenticated: null, ready: false };
         const session = await browserHost.authenticationReadiness();
         if (session.authenticated !== true || session.ready !== true) return session;
-        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const snapshot = await runtimeHost.runtimeConfigSnapshotAsync();
         const config = snapshot.config;
         if (!snapshot.configured || config?.host !== "127.0.0.1"
           || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {
@@ -4424,6 +4426,7 @@ async function start() {
     // Settings → Updates: a tunnel left running by another build is restarted, not adopted.
     reuseTunnelOnlyWhenMatching: () => resolveUpdateSettings(stateStore.read()).updateReuseMatchingOnly,
     onExtraTunnelsChange: tunnels => send("launcher:mcp-tunnels-changed", tunnels),
+    watchConfigFile: true,
   });
   runtimeHost = new RuntimeHost({
     app,
