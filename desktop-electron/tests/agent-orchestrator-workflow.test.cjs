@@ -8853,6 +8853,47 @@ test("with Retry automatically on, a turn silent past its limit is stopped so it
   assert.deepEqual(interrupts, ["sess-1", "sess-1"], "a command long past its stated timeout is stopped too");
 });
 
+test("a message queued behind a working turn is not stopped as hung: the whole session is judged", async () => {
+  // 2026-10-31: a restart's resume queued a message behind a turn still running in its chat host.
+  // The queued turn showed nothing of its own, read as hung after 10 minutes, and the stop
+  // interrupted the session, killing the working turn ("AO turn interrupted", then retries).
+  let clock = 2_000_000_000_000;
+  const interrupts = [];
+  let observed;
+  const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
+    route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
+    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single", nodes: [node] }] };
+      throw new Error(`Unexpected AO endpoint ${endpoint}`);
+    },
+    aoHarness: {
+      observe: async () => observed,
+      interrupt: async (session) => { interrupts.push(session); observed = { ...observed, turnState: "interrupted", status: "idle" }; },
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  const queued = (session) => ({ turnId: "queued-turn", turnState: "queued", status: "working",
+    lastActivityAt: clock - 15 * 60_000, timeline: [], approvals: [], ...session });
+  const look = () => workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "w" });
+
+  observed = queued({ sessionActivityAt: clock - 60_000, sessionTools: [] });
+  await look();
+  assert.deepEqual(interrupts, [], "the turn ahead of it did something a minute ago");
+
+  observed = queued({ sessionActivityAt: clock - 12 * 60_000, sessionTools: [{}] });
+  await look();
+  assert.deepEqual(interrupts, [], "a command in flight in the turn ahead, within the 30 minutes a call with no stated timeout gets");
+
+  observed = queued({ sessionActivityAt: clock - 11 * 60_000, sessionTools: [] });
+  await look();
+  assert.deepEqual(interrupts, ["sess-1"], "a session where nothing has moved for 11 minutes is still stopped");
+  workflow.dispose();
+});
+
 test("a held worker whose unspent grant names another build of the agent's program is started on a fresh grant", async () => {
   // Activity log 2026-10-24 08:31: start_run refused "AO running turn has no matching background
   // grant": Claude Code (or the app) had updated since the grant, so nothing could start on it.

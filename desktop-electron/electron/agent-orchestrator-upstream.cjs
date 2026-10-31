@@ -1399,9 +1399,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const toolStarts = (Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(item => item.turnId === turn?.id && item.status === "running" && ["command", "file_change", "mcp_tool"].includes(item.activityKind))
         .map(item => Date.parse(item.createdAt ?? "")).filter(Number.isFinite);
+      // The same, for the whole session: a message queued behind a long turn (a restart's resume, a
+      // goal round) has no activity of its own until that turn ends. Judged alone it read as hung
+      // after 10 minutes, and the stall stop interrupted the session, killing the turn doing the
+      // work: "AO turn interrupted", then retries (2026-10-31, three Clash chats). The stop judges
+      // the session by these instead: its last sign of life and its tool calls in flight, any turn.
+      const sessionActivities = Array.isArray(conversation?.activities) ? conversation.activities : [];
+      const sessionStamps = [...turns.map(entry => entry?.startedAt),
+        ...sessionActivities.filter(item => !retryNotice(item)).map(item => item.updatedAt || item.createdAt),
+        ...(Array.isArray(conversation?.messages) ? conversation.messages : []).map(item => item.updatedAt || item.createdAt)]
+        .map(value => Date.parse(value ?? "")).filter(Number.isFinite);
+      const sessionTools = sessionActivities
+        .filter(item => ["running", "pending"].includes(item.status) && ["command", "file_change", "mcp_tool"].includes(item.activityKind))
+        .map(item => { const stated = Number(item.detail?.input?.timeout); return Number.isFinite(stated) && stated > 0 ? { timeoutMs: Math.min(stated, 24 * 3600_000) } : {}; });
       return {
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
         ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
+        ...(sessionStamps.length ? { sessionActivityAt: Math.max(...sessionStamps) } : {}),
+        sessionTools,
         ...(toolStarts.length ? { toolSince: Math.min(...toolStarts) } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         // No agent process behind this session (released while idle, or it exited): nothing runs,

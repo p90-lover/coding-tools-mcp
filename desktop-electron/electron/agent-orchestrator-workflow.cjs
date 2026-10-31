@@ -1549,10 +1549,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    */
   async function stopStalledTurn(session, observed) {
     if (!chatPreferences.get().autoRetry || !Number.isFinite(observed?.lastActivityAt)) return false;
-    const idle = now() - observed.lastActivityAt;
+    // The stop interrupts the whole session, so the whole session is judged: a turn queued behind a
+    // working one shows nothing of its own (observe's sessionActivityAt and sessionTools).
+    const last = Math.max(observed.lastActivityAt, Number.isFinite(observed.sessionActivityAt) ? observed.sessionActivityAt : -Infinity);
+    const idle = now() - last;
     // "pending" too: a tool call approved but never reported as started stays pending (the pytest).
-    const tools = Array.isArray(observed.timeline) ? observed.timeline.filter(item => ["running", "pending"].includes(item?.status)
-      && !["message", "system", "reasoning", "thinking", "approval"].includes(item.kind)) : [];
+    const tools = [...(Array.isArray(observed.timeline) ? observed.timeline.filter(item => ["running", "pending"].includes(item?.status)
+      && !["message", "system", "reasoning", "thinking", "approval"].includes(item.kind)) : []),
+    ...(Array.isArray(observed.sessionTools) ? observed.sessionTools : [])];
     const stated = tools.map(item => Number(item.timeoutMs))
       .filter(value => Number.isFinite(value) && value > 0);
     const limit = !tools.length ? TURN_STALL_MS
