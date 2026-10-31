@@ -3032,11 +3032,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // "You have reached your specified API usage limits. You will regain access on 2026-11-01", and
   // every goal check tried both first again ten minutes later. Never past a week.
   const QUOTA_BENCH_MAX_MS = 7 * 86_400_000;
+  // A model that keeps failing waits twice as long each time, up to MODEL_GONE_MS: seen live
+  // 2026-10-31, commandcode-go/deepseek-v4-flash answered 503 for over an hour, and every goal check
+  // ten minutes or more after the last tried it first again.
+  const reviewerStrikes = new Map(); // model -> failures in a row
   const reviewerFailed = (model, error) => {
     const until = error?.quotaResetAt > now() ? Math.min(error.quotaResetAt, now() + QUOTA_BENCH_MAX_MS) : now() + MODEL_GONE_MS;
-    reviewerDown.set(model, error?.quota ? until : now() + (error?.status === 404 ? MODEL_GONE_MS : REVIEWER_DOWN_MS));
+    const strikes = Math.min((reviewerStrikes.get(model) ?? 0) + 1, 16);
+    reviewerStrikes.set(model, strikes);
+    if (reviewerStrikes.size > 200) reviewerStrikes.delete(reviewerStrikes.keys().next().value);
+    const down = Math.min(REVIEWER_DOWN_MS * 2 ** (strikes - 1), MODEL_GONE_MS);
+    reviewerDown.set(model, error?.quota ? until : now() + (error?.status === 404 ? MODEL_GONE_MS : down));
     if (error?.status !== 404 && !error?.quota && modelProvider(model)) providerDown.set(modelProvider(model), now() + REVIEWER_DOWN_MS);
   };
+  const reviewerAnswered = model => { reviewerDown.delete(model); reviewerStrikes.delete(model); };
   /**
    * The error for a model call CPA refused: its status, and whether the answer says the model's
    * quota is used up (an API key's spend limit comes back as 400, not 429) with the reset it names.
@@ -3217,7 +3226,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
         const decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
         if (!["allow", "deny", "ask"].includes(decision.action)) throw new Error(`Command approver ${model} gave no decision`);
-        reviewerDown.delete(model);
+        reviewerAnswered(model);
         const reason = String(decision.reason || "").slice(0, 300);
         // The reason otherwise lived only in the run's latest note, so a wrong deny could not be traced.
         logger?.info?.("ao.approval_reviewed", { model, action: decision.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
@@ -5039,6 +5048,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // the note names it.
         if (!response.ok) throw await modelCallFailure(response, `the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
         const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
+        reviewerAnswered(model);
         logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
         return { ...check, model };
       } catch (error) {
@@ -5164,7 +5174,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           signal: AbortSignal.timeout(90_000),
         });
         if (!response.ok) throw await modelCallFailure(response, `the grader returned HTTP ${response.status} for ${publicText(model, 80)}`);
-        return { grade: parseGrade((await response.json())?.choices?.[0]?.message?.content, cards.length), grader: model };
+        const grade = parseGrade((await response.json())?.choices?.[0]?.message?.content, cards.length);
+        reviewerAnswered(model);
+        return { grade, grader: model };
       } catch (error) {
         reviewerFailed(model, error);
         logger?.warn?.("ao.model_grade_failed", { model, message: publicText(error?.message || error, 200) });

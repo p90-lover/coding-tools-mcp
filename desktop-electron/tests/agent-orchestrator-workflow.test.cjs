@@ -3709,6 +3709,35 @@ test("a model whose quota is used up sits out until the reset its answer names",
   assert.equal(checks.at(-2).model, "gemini-3-flash", "asked again once its quota is back");
 });
 
+test("a model that keeps failing sits out twice as long each time, and from the start again once it answers", async () => {
+  // Seen live 2026-10-31: commandcode-go/deepseek-v4-flash answered 503 for over an hour, and every
+  // goal check ten minutes or more after the last tried it first again.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const round = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "not yet" } }] });
+  const clock = { at: Date.parse("2026-10-31T05:00:00Z") };
+  let down = true;
+  const { world, workflow, checks } = await goalChat({ refuse: (model) => model === "gemini-3-flash" && down ? 503 : 0, now: () => clock.at });
+  const asked = async (minutes) => {
+    clock.at += minutes * 60_000;
+    const before = checks.length;
+    const next = (await goalOf(workflow)).lastRunId || "r1";
+    world.runs.push(round(next));
+    await workflow.goalAfterRun("ws-1", next, "finished", null);
+    return checks.slice(before).some(check => check.model === "gemini-3-flash");
+  };
+  assert.equal(await asked(0), true, "first failure");
+  assert.equal(await asked(11), true, "ten minutes on it is asked again, and fails again");
+  assert.equal(await asked(11), false, "the second failure benches it for twenty minutes");
+  assert.equal(await asked(10), true);
+  assert.equal(await asked(30), false, "the third, for forty");
+  down = false;
+  assert.equal(await asked(11), true, "asked again, and it answers");
+  down = true;
+  assert.equal(await asked(1), true, "it fails once more");
+  assert.equal(await asked(11), true, "an answer started the count again: ten minutes, not eighty");
+});
+
 test("a provider that is down for every model costs a goal check one request, not all three", async () => {
   // Seen live 2026-10-26: Cline Pass answered 502 for every model, and each check spent its three
   // places on three of them, then waited two minutes, before gemini-3-flash answered.
