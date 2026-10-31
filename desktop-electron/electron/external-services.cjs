@@ -630,7 +630,13 @@ function createExternalServicesController({
   let unarchivedState = null;
   // A torn file is read from its last good copy (durable-state.cjs) instead of starting over with
   // every service's settings and secrets gone.
-  const read = readStateFile(filePath, (text) => JSON.parse(text));
+  let parsedText = null;
+  const read = readStateFile(filePath, (text) => { const value = JSON.parse(text); parsedText = text; return value; });
+  // What the file holds, when it was read whole from the file itself (not its copy): write() skips
+  // the same bytes. The keep-alive lease rewrote it unchanged on the first healthy check after
+  // every start and every 5 minutes after, each a flushed write that held every window up to 1.8 s
+  // on the hard disk (2026-10-31); nothing reads the file's time, so the rewrite kept nothing alive.
+  let savedText = read.source === "file" ? parsedText : null;
   if (read.source === "backup" || read.source === "unreadable") {
     logger?.warn?.("external_services.state_recovered", {
       source: read.source, setAside: read.setAside, message: read.error instanceof Error ? read.error.message : String(read.error ?? "missing"),
@@ -674,7 +680,10 @@ function createExternalServicesController({
       services: { ...unarchivedState.services, ...state.services },
       secrets: { ...unarchivedState.secrets, ...state.secrets },
     } : state;
-    writeStateFile(filePath, `${JSON.stringify(saved, null, 2)}\n`);
+    const text = `${JSON.stringify(saved, null, 2)}\n`;
+    if (text === savedText) return;
+    writeStateFile(filePath, text);
+    savedText = text;
   }
 
   function secretFor(id) {
