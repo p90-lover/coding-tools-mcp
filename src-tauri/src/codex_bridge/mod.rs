@@ -557,6 +557,15 @@ struct Memory {
 }
 
 impl Memory {
+    fn record_stop_reason(&mut self, reason: &str) {
+        // A delayed resumable writer must never undo explicit revocation.
+        if sessions::resumable_stop(self.stop_reason.as_deref())
+            || !sessions::resumable_stop(Some(reason))
+        {
+            self.stop_reason = Some(reason.into());
+        }
+    }
+
     fn ao_thread(&mut self, options: &Connection) -> Result<Option<String>> {
         let terminal = |thread: &ThreadState| {
             thread.restored
@@ -598,6 +607,47 @@ impl Memory {
             }
         }
         Ok(None)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StopTransition {
+    First,
+    Persist,
+    Unchanged,
+}
+
+fn stop_transition(
+    live: &AtomicBool,
+    ready: &AtomicBool,
+    memory: &Mutex<Memory>,
+    reason: &str,
+    only_if_live: bool,
+) -> StopTransition {
+    let first = live.swap(false, Ordering::SeqCst);
+    if !first && (only_if_live || sessions::resumable_stop(Some(reason))) {
+        return StopTransition::Unchanged;
+    }
+    if first {
+        ready.store(false, Ordering::SeqCst);
+    }
+    if let Ok(mut memory) = memory.lock() {
+        memory.record_stop_reason(reason);
+        if first {
+            for thread in memory.threads.values_mut() {
+                if !matches!(
+                    thread.status.as_str(),
+                    "completed" | "failed" | "interrupted" | "closed" | "idle"
+                ) {
+                    thread.status = "unknown_stopped".into();
+                }
+            }
+        }
+    }
+    if first {
+        StopTransition::First
+    } else {
+        StopTransition::Persist
     }
 }
 
@@ -1186,14 +1236,14 @@ impl Hub {
                     .restore_sessions()
                     .and_then(|_| bridge.save_session())
                 {
-                    bridge.stop("native_session_restore_failed");
+                    bridge.stop_if_live("native_session_restore_failed");
                     return Err(error);
                 }
                 bridge.ready.store(true, Ordering::SeqCst);
                 self.status()
             }
             Err(error) => {
-                bridge.stop("initialization_failed");
+                bridge.stop_if_live("initialization_failed");
                 Err(error)
             }
         }
@@ -1574,26 +1624,19 @@ impl Bridge {
         }
     }
     fn stop(&self, reason: &str) {
-        if !self.live.swap(false, Ordering::SeqCst) {
-            if !sessions::resumable_stop(Some(reason)) {
-                if let Ok(mut memory) = self.memory.lock() {
-                    memory.stop_reason = Some(reason.into());
-                }
+        self.stop_inner(reason, false);
+    }
+    fn stop_if_live(&self, reason: &str) {
+        self.stop_inner(reason, true);
+    }
+    fn stop_inner(&self, reason: &str, only_if_live: bool) {
+        match stop_transition(&self.live, &self.ready, &self.memory, reason, only_if_live) {
+            StopTransition::Unchanged => return,
+            StopTransition::Persist => {
                 let _ = self.save_session();
+                return;
             }
-            return;
-        }
-        self.ready.store(false, Ordering::SeqCst);
-        if let Ok(mut memory) = self.memory.lock() {
-            memory.stop_reason = Some(reason.into());
-            for thread in memory.threads.values_mut() {
-                if !matches!(
-                    thread.status.as_str(),
-                    "completed" | "failed" | "interrupted" | "closed" | "idle"
-                ) {
-                    thread.status = "unknown_stopped".into();
-                }
-            }
+            StopTransition::First => {}
         }
         let _ = self.save_session();
         if let Ok(mut pending) = self.pending.lock() {
@@ -2505,6 +2548,124 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn late_initialization_failure_preserves_an_existing_resumable_stop() {
+        for reason in [
+            "desktop_exiting",
+            "native_output_disconnected",
+            "native_request_timeout_outcome_unknown",
+        ] {
+            for failure in ["initialization_failed", "native_session_restore_failed"] {
+                let live = AtomicBool::new(true);
+                let ready = AtomicBool::new(true);
+                let memory = Mutex::new(Memory::default());
+                assert_eq!(
+                    stop_transition(&live, &ready, &memory, reason, false),
+                    StopTransition::First
+                );
+                assert_eq!(
+                    stop_transition(&live, &ready, &memory, failure, true),
+                    StopTransition::Unchanged
+                );
+                assert!(!live.load(Ordering::SeqCst));
+                assert!(!ready.load(Ordering::SeqCst));
+                let memory = lock(&memory).unwrap();
+                assert_eq!(memory.stop_reason.as_deref(), Some(reason));
+                assert!(sessions::resumable_stop(memory.stop_reason.as_deref()));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_revocation_wins_both_resumable_stop_writer_orders() {
+        for reason in ["local_disconnect", "workspace_policy_changed"] {
+            for late_write in [false, true] {
+                // In the late case, the resumable writer already won the atomic
+                // stop and cleared ready, but has not acquired memory yet.
+                let live = AtomicBool::new(!late_write);
+                let ready = AtomicBool::new(!late_write);
+                let memory = Mutex::new(Memory::default());
+                if !late_write {
+                    assert_eq!(
+                        stop_transition(&live, &ready, &memory, "desktop_exiting", false),
+                        StopTransition::First
+                    );
+                }
+                assert_eq!(
+                    stop_transition(&live, &ready, &memory, reason, false),
+                    StopTransition::Persist
+                );
+                let mut memory = lock(&memory).unwrap();
+                if late_write {
+                    memory.record_stop_reason("desktop_exiting");
+                }
+                assert_eq!(memory.stop_reason.as_deref(), Some(reason));
+                assert!(!sessions::resumable_stop(memory.stop_reason.as_deref()));
+            }
+        }
+    }
+
+    #[test]
+    fn live_initialization_failure_marks_threads_and_stops_with_poisoned_memory() {
+        let live = AtomicBool::new(true);
+        let ready = AtomicBool::new(true);
+        let mut state = Memory::default();
+        for status in [
+            "starting",
+            "inProgress",
+            "compacting",
+            "completed",
+            "failed",
+            "interrupted",
+            "closed",
+            "idle",
+        ] {
+            state.threads.insert(
+                status.into(),
+                ThreadState {
+                    id: status.into(),
+                    status: status.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let memory = Mutex::new(state);
+        assert_eq!(
+            stop_transition(&live, &ready, &memory, "initialization_failed", true),
+            StopTransition::First
+        );
+        assert!(!live.load(Ordering::SeqCst));
+        assert!(!ready.load(Ordering::SeqCst));
+        let memory = lock(&memory).unwrap();
+        assert!(!sessions::resumable_stop(memory.stop_reason.as_deref()));
+        for (before, thread) in &memory.threads {
+            if matches!(before.as_str(), "starting" | "inProgress" | "compacting") {
+                assert_eq!(thread.status, "unknown_stopped");
+            } else {
+                assert_eq!(&thread.status, before);
+            }
+        }
+
+        let poisoned = Mutex::new(Memory::default());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison stop-state fixture");
+        });
+        let live = AtomicBool::new(true);
+        let ready = AtomicBool::new(true);
+        assert_eq!(
+            stop_transition(&live, &ready, &poisoned, "initialization_failed", true),
+            StopTransition::First
+        );
+        assert!(!live.load(Ordering::SeqCst));
+        assert!(!ready.load(Ordering::SeqCst));
+        assert_eq!(
+            stop_transition(&live, &ready, &poisoned, "local_disconnect", false),
+            StopTransition::Persist
+        );
+    }
+
     #[test]
     fn web_card_approve_for_me_runs_unattended_instead_of_waiting_on_codex_review() {
         // Seen live: Codex's reviewer for a WebGPT card needed the busy ChatGPT web bridge.
