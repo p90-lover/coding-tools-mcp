@@ -143,7 +143,37 @@ function linkObsidianWikiLinks(markdown: string): string {
 
 export function chatGptHtmlToMarkdown(html: string): string {
   if (!html.trim()) return "";
-  return linkObsidianWikiLinks(preserveObsidianWikiLinks(turndown.turndown(html))).trim();
+  let source: string | HTMLElement = html;
+  const references = new Map<string, string>();
+  if (html.includes("visualize")) {
+    // Reuse Turndown's HTML parser, protecting native JSON before whitespace collapse and escaping.
+    const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+    const document = createDocument(`<x-turndown id="turndown-root">${html}</x-turndown>`);
+    const root = document.getElementById("turndown-root")!;
+    let prefix = "\uE000CODEXVISUALIZE";
+    while (root.outerHTML.includes(prefix)) prefix += "X";
+    const walker = document.createTreeWalker(root, 4); // SHOW_TEXT
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      let code = false;
+      for (let parent = node.parentNode; parent; parent = parent.parentNode) {
+        if (parent.nodeName === "CODE" || parent.nodeName === "PRE") { code = true; break; }
+      }
+      if (code) continue;
+      node.nodeValue = (node.nodeValue ?? "").replace(/visualize(\{[\s\S]*?\})/g, (reference, json: string) => {
+        try {
+          const descriptor = JSON.parse(json) as { path?: unknown } | null;
+          if (!descriptor || typeof descriptor.path !== "string") return reference;
+        } catch { return reference; }
+        const placeholder = `${prefix}${references.size}\uE001`;
+        references.set(placeholder, reference);
+        return placeholder;
+      });
+    }
+    if (references.size) source = root;
+  }
+  let markdown = linkObsidianWikiLinks(preserveObsidianWikiLinks(turndown.turndown(source)));
+  for (const [placeholder, reference] of references) markdown = markdown.replaceAll(placeholder, reference);
+  return markdown.trim();
 }
 
 export interface ChatGptMarkdownSegment {
