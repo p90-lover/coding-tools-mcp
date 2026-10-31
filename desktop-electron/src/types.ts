@@ -1036,6 +1036,8 @@ export interface LauncherApi {
   switchBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
   renameBrowserAccount(id: string, label: string): Promise<BrowserAccountsStatus>;
   removeBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
+  /** Bulk delete: removes each listed account; one that could not go is in `failed` with its reason. */
+  removeBrowserAccounts(ids: string[]): Promise<BrowserAccountsStatus & { removed: string[]; failed: { id: string; message: string }[] }>;
   onBrowserAccountsChanged(listener: (status: BrowserAccountsStatus) => void): () => void;
   setBrowserAccountProxy(id: string, profileId: string | null): Promise<BrowserAccountsStatus>;
   assignBrowserAccountProxies(): Promise<BrowserAccountsStatus & { assigned: number }>;

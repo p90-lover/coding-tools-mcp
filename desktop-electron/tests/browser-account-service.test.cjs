@@ -224,6 +224,39 @@ test("removing the account in use switches away first; the last account cannot b
   assert.equal(service.takeBridgeRefresh(id), false, "a removed account leaves no bridge refresh");
 });
 
+test("bulk delete removes every ticked account, the one in use last, and keeps the rest", async (t) => {
+  // The user (2026-10-31): "remove all account expect for matrena … and add a bulk delete account".
+  const log = logger();
+  const { registry, service, erased, host } = setup(t);
+  const kept = registry.add();
+  const others = [registry.add(), registry.add(), registry.add()];
+  await service.switchTo(others[1], {});
+  const status = await service.removeMany([FIRST_ACCOUNT_ID, ...others, others[0]], { logger: log });
+  assert.deepEqual(ids(status), [kept], "only the unticked account is left");
+  assert.equal(status.activeId, kept, "the account in use was removed last, after switching away once");
+  assert.equal(host().accountId, kept);
+  assert.deepEqual(status.removed, [FIRST_ACCOUNT_ID, others[0], others[2], others[1]], "duplicates once, the one in use last");
+  assert.deepEqual(status.failed, []);
+  assert.equal(erased.length, 4);
+  assert.deepEqual(log.lines.find(line => line.event === "browser_accounts.removed_many"), { level: "info", event: "browser_accounts.removed_many", removed: 4, failed: 0 });
+});
+
+test("bulk delete keeps an account it cannot remove, says why, and never removes them all", async (t) => {
+  const { registry, service, host } = setup(t);
+  const busy = registry.add();
+  const free = registry.add();
+  await assert.rejects(service.removeMany([FIRST_ACCOUNT_ID, busy, free], {}), /Keep at least one account/);
+  await assert.rejects(service.removeMany([], {}), /Choose the accounts to remove/);
+  assert.equal(registry.status().accounts.length, 3, "nothing was removed");
+  host().livePartitions = () => [registry.partitionOf(busy)];
+  host().blocker = "a Codex turn is running";
+  const status = await service.removeMany([busy, free], {});
+  assert.deepEqual(status.removed, [free]);
+  assert.deepEqual(status.failed.map(entry => entry.id), [busy]);
+  assert.match(status.failed[0].message, /cannot be removed while a Codex turn is running/);
+  assert.deepEqual(ids(status), [FIRST_ACCOUNT_ID, busy]);
+});
+
 test("an account in a running turn cannot be removed", async (t) => {
   const { registry, service, host, erased } = setup(t);
   const id = registry.add();

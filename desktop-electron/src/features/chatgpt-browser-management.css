@@ -119,6 +119,21 @@
   white-space: nowrap;
 }
 
+/* Bulk delete: tick boxes on the cards, this bar above them */
+.cbm-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.cbm-bulk > .cbm-muted { flex: 1; min-width: 160px; }
+.cbm-bulk-remove.is-danger { border-color: var(--red-300); color: var(--red-300); }
+.cbm-select { flex: none; width: 15px; height: 15px; margin: 0; accent-color: var(--red-300); }
+
 /* Account cards */
 .cbm-cards {
   display: grid;

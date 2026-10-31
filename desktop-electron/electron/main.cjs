@@ -2384,6 +2384,11 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     return removeBrowserAccount(id, { logger, stateStore });
   });
+  // Bulk delete (ChatGPT browser management): several accounts in one action, same focus rule.
+  handle("launcher:browser-accounts-remove", (event, ids) => {
+    assertFocusedMainWindow(event, true);
+    return browserAccountService.removeMany(ids, { logger, stateStore });
+  });
   // Browser settings: one account's (tab limit, new sessions), every account's, and a fresh look at
   // the account in use's plan. Every change needs the focused main window.
   handle("launcher:browser-account-settings", (event, input) => {
