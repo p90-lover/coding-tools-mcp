@@ -275,15 +275,15 @@ export function AgentOrchestratorComposerControls({
     </div>
     {mode === "single" ? <>
       {/* The harness shows only its logo; its name is in the tooltip and the accessible label. */}
-      <ChipMenu heading="Harness" popupClass="ao-tuning-popup ao-harness-popup" className="is-logo" ariaLabel={`Harness: ${harnessName}`} disabled={busy || isWebModel(route.model)}
+      <ChipMenu heading="Harness" showHeading={false} popupClass="ao-tuning-popup ao-harness-popup" className="is-logo" ariaLabel={`Harness: ${harnessName}`} disabled={busy || isWebModel(route.model)}
         title={isWebModel(route.model) ? `${harnessName} · WebGPT runs only on Native Codex` : `${harnessName} · the agent that runs this chat`}
         label={<HarnessLogo harnessId={route.harness_id} label={harnessName} />}>
         {(close) => {
           // One slim line per harness: its logo and name. Its state is no word on the row: a missing
-          // harness is greyed (and folded under "+N"), one that needs a sign-in has a dot on its logo;
-          // the tooltip says which.
+          // harness is greyed with a blinking red dot on its logo (and folded under "+N"), one that
+          // needs a sign-in has an amber dot.
           const row = (item: AoHarness, index: number) => <Option key={item.id} picked={item.id === route.harness_id} disabled={busy || !item.runnable} row={index}
-            title={!item.runnable ? `${item.label} · not installed` : item.authStatus === "unauthorized" ? `${item.label} · sign in to use it` : item.label}
+            title={!item.runnable ? `${item.label} · not installed` : item.label}
             onPick={() => {
               // Each harness starts on an explicit model; one without a known model shows "Choose a model".
               const model = item.id === NATIVE_HARNESS ? WEB_ROUTE.model : item.id === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
@@ -292,7 +292,8 @@ export function AgentOrchestratorComposerControls({
             }}>
             <span className={item.runnable ? "ao-harness-option" : "ao-harness-option is-missing"}>
               <span className="ao-harness-face"><HarnessLogo harnessId={item.id} label={item.label} size={18} />
-                {item.runnable && item.authStatus === "unauthorized" ? <i className="ao-harness-signin" aria-hidden="true" /> : null}</span>
+                {!item.runnable ? <i className="ao-harness-missing" aria-hidden="true" />
+                  : item.authStatus === "unauthorized" ? <i className="ao-harness-signin" aria-hidden="true" /> : null}</span>
               <strong>{item.label}</strong></span>
           </Option>;
           // The picked harness always stays in view, even if it went missing since.

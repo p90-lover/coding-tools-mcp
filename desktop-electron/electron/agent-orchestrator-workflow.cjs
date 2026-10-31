@@ -396,6 +396,23 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Background-run observations for MCP event incidents (stall, held, approval waits).
   // An observer failure must never affect the run it watches.
   function reportRun(workspaceId, runId, state, mission, attention = null) {
+    // A chat whose agent asked to move it (move_chat) moves once this turn has ended; what follows
+    // the turn (its goal, wake-up, loop, queue) then happens in the project it moved to.
+    if (pendingMoves.has(runKey(workspaceId, runId)) && (state.stopped || state.settled || ["finished", "failed"].includes(state.status))) {
+      void applyMove(workspaceId, runId).then(to => afterRun(to, runId, state, mission));
+    } else {
+      afterRun(workspaceId, runId, state, mission);
+    }
+    if (!onRunState) return;
+    try {
+      onRunState({
+        workspaceId, runId, status: state.status, detail: state.detail, stopped: state.stopped === true, attention,
+        ...(state.warning ? { warning: state.warning } : {}),
+        ...(mission ? { fingerprint: (mission.nodes ?? []).map((node) => `${node.id}:${node.state}`).join(",") } : {}),
+      });
+    } catch { /* observational only */ }
+  }
+  function afterRun(workspaceId, runId, state, mission) {
     // A settled round of a chat with a goal decides what the goal does next. Only a round that has
     // ended (the drive loop marks it `settled`) or one the person stopped counts: "held" is also
     // reported mid-run, while a step waits out its automatic retry or a lost connection.
@@ -418,14 +435,6 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (mission && mission.execution_mode !== "single" && state.settled && !state.stopped && ["finished", "failed"].includes(state.status)) {
       void scoreAfterRun(workspaceId, runId, state.status).catch((error) => logger?.warn?.("ao.model_score_failed", { runId, message: publicText(error?.message || error, 200) }));
     }
-    if (!onRunState) return;
-    try {
-      onRunState({
-        workspaceId, runId, status: state.status, detail: state.detail, stopped: state.stopped === true, attention,
-        ...(state.warning ? { warning: state.warning } : {}),
-        ...(mission ? { fingerprint: (mission.nodes ?? []).map((node) => `${node.id}:${node.state}`).join(",") } : {}),
-      });
-    } catch { /* observational only */ }
   }
   const dispatching = new Set();
   // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
@@ -3441,8 +3450,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // skips the requests after it in this pass; the request just goes to the person.
         if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
           const decision = aoDecision(approval, advice.action === "allow");
+          const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
           if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
-          else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision).then(() => true, () => false)) {
+          else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false)) {
             logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
             note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
           } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
@@ -3471,6 +3481,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const NO_ANSWER_TEXT = "No answer from the user within 20 seconds; use your best judgment and continue.";
   const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
   const autoAnswered = new Map(); // approval_id -> the verdict sent ("allow", "deny"; null for a question or plan)
+  /**
+   * What an agent reads as the result of a call the reviewer or "Approve for me" denied. Claude Code
+   * otherwise reports "User refused permission to run tool", and the agent took it as the person's
+   * own refusal and guessed at why.
+   */
+  const reviewerDenial = (reason) =>
+    `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
+    + "Try a safer way to reach the goal, or ask the user if only this will do.";
   const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
@@ -3552,7 +3570,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             const blocked = verdict === "deny";
             const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
             if (!decision) continue;
-            await harnessService().resolveApproval(approval.thread_id, id, decision);
+            const advice = approverAdvice.get(id);
+            await harnessService().resolveApproval(approval.thread_id, id, decision,
+              blocked ? reviewerDenial(advice?.action === "deny" ? advice.reason : "its safety rules block this request, or it is too long to review whole") : "");
             note = blocked ? "Denied: blocked by the command approver's safety rules or reviewer"
               : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Approve for me allowed the request once";
           } else if (approval.kind === "command") {
@@ -5697,6 +5717,78 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, taskId: task, ...await redact() };
   }
 
+  // ---- Moving a chat to another project (move_chat, chat-agent-tools.cjs) ----
+
+  // runKey(workspace, run) -> { taskId, to, session }: a chat whose agent asked, during that run's
+  // turn, to move it. The move waits for the turn to end (applyMove from reportRun).
+  const pendingMoves = new Map();
+  /**
+   * move_chat from a chat agent: the Single chat whose run holds `session` moves to the project
+   * `targetWorkspaceId` once this turn ends. The headless service re-keys the chat with its
+   * messages and replies (ao_lifecycle::move_chat), and its goal, wake-up, loop and queue follow
+   * it. The next turn starts a fresh session in the new project's folder, handed this chat's
+   * earlier replies, as after a deleted message. The person confirmed the move before this call.
+   */
+  async function chatMoveTool({ workspaceId, session, targetWorkspaceId } = {}) {
+    const id = clean(workspaceId, 128), to = clean(targetWorkspaceId, 128), thread = clean(session, 256);
+    if (!to) throw new Error("Choose the project to move this chat to");
+    if (to === id) throw new Error("This chat is already in that project");
+    const { run, latest } = await sessionChat(id, thread, "move its chat");
+    if (latest?.id !== run.id) throw new Error("A newer message was sent in this chat since this turn began; answer it instead of moving the chat");
+    // A Team chat's cards come from its project's team; v1 moves Single chats only.
+    if (run.execution_mode !== "single") throw new Error("Only a Single chat can move to another project");
+    for (const [key, pending] of pendingMoves) if (pending.taskId === run.project_id && JSON.parse(key)[0] === id) pendingMoves.delete(key);
+    pendingMoves.set(runKey(id, run.id), { taskId: run.project_id, to, session: thread });
+    return { ok: true, taskId: run.project_id, to, deferred: true };
+  }
+  /**
+   * The move `run` asked for, once its turn ended: the chat moves in the headless service, then
+   * its stores here. Resolves to the project the chat is now in (`workspaceId` when there was no
+   * move, or it failed: the chat then stays and the failure is logged).
+   */
+  async function applyMove(workspaceId, runId) {
+    const pending = pendingMoves.get(runKey(workspaceId, runId));
+    if (!pending) return workspaceId;
+    pendingMoves.delete(runKey(workspaceId, runId));
+    const { taskId, to } = pending;
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        const { revision } = await board({ workspaceId });
+        const result = await requestHeadless("/api/v1/ao/update", {
+          workspace_id: workspaceId, confirm: true,
+          change: { operation: "move_chat", task_id: taskId, target_workspace_id: to, expected_board_revision: revision },
+        }, { localConfirmation: true }).catch(error => ({ ok: false, error }));
+        if (result?.ok === true) break;
+        // A board write between the read and the move: read once more.
+        if (attempt >= 1 || !/board changed/i.test(String(result?.error?.message ?? result?.error ?? ""))) {
+          throw new Error(publicText(result?.error?.message ?? result?.error ?? "The move was refused", 300));
+        }
+      }
+    } catch (error) {
+      logger?.warn?.("ao.chat_move_failed", { workspaceId, taskId, message: publicText(error?.message || error, 300) });
+      return workspaceId;
+    }
+    goals.move(workspaceId, to, taskId);
+    disarmWakeup(workspaceId, taskId);
+    if (wakeups.move(workspaceId, to, taskId)) armWakeup(to, taskId);
+    disarmLoop(workspaceId, taskId);
+    if (loops.move(workspaceId, to, taskId)) armLoop(to, taskId);
+    chatQueue.move(workspaceId, to, taskId);
+    // The agent's session works in the old folder: the next turn starts afresh in the new one.
+    chatEdits.restore(to, taskId, { ...(chatEdits.get(workspaceId, taskId) ?? { deletedRuns: [] }), fresh: true });
+    chatEdits.restore(workspaceId, taskId, null);
+    archive.forget(workspaceId, taskId);
+    waitingTitles.delete(titleKey(workspaceId, taskId));
+    handoffSummaries.delete(JSON.stringify([workspaceId, taskId]));
+    void Promise.resolve().then(() => harnessService().exitAgent?.(pending.session)).catch(() => undefined);
+    logger?.info?.("ao.chat_moved", { from: workspaceId, to, taskId });
+    try {
+      onRunState?.({ workspaceId, runId, status: "moved", moved: { from: workspaceId, to, taskId } });
+      onRunState?.({ workspaceId: to, runId, status: "moved", moved: { from: workspaceId, to, taskId } });
+    } catch { /* observational only */ }
+    return to;
+  }
+
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
 
   // A wake-up that could not fire (AO not ready yet after a restart) is tried again a while later.
@@ -6689,7 +6781,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       read.set(id,{ saved, deleted });
       // A chat is a task with runs; a board task that never ran is not one.
       const chatTasks=new Set(saved.runs.map(run=>run.project_id));
-      for (const life of saved.task_lifecycle ?? []) {
+      const archivedNow=await archiveIdleChats(id,saved,chatTasks);
+      const lifecycles=[...(saved.task_lifecycle ?? []).filter(life=>!archivedNow.has(life.task_id)),...archivedNow.values()];
+      for (const life of lifecycles) {
         if (!chatTasks.has(life.task_id) || !["archived","deleted"].includes(life.visibility)) continue;
         let visibility=life.visibility;
         if (visibility === "archived" && archive.due(id,life.task_id)) {
@@ -6710,7 +6804,52 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Every project's chats must be known: a session is ended only when no chat still uses it.
     if (read.size === ids.length) void endOldSessions(read).catch(error =>
       logger?.warn?.("ao.old_sessions_failed",{message:publicText(error?.message||error,200)}));
-    return { ok:true, days:archive.days(), chats };
+    return { ok:true, days:archive.days(), idleDays:archive.idleDays(), chats };
+  }
+  /**
+   * Open chats with no activity for archive.idleDays() (default 7; 0 never) are archived, with no
+   * confirmation since Restore brings them back, so the project list stops loading their sessions.
+   * Returns the new lifecycle records by task id; the shared runs() response is left as it was.
+   */
+  async function archiveIdleChats(workspaceId,saved,chatTasks) {
+    const archivedNow=new Map();
+    const cutoff=archive.idleCutoff();
+    if (!cutoff) return archivedNow;
+    for (const taskId of chatTasks) {
+      const life=taskLifecycle(saved,taskId);
+      if (life.visibility !== "active") continue;
+      const followUps=goals.get(workspaceId,taskId)?.status === "active" || Boolean(wakeups.get(workspaceId,taskId))
+        || Boolean(loops.get(workspaceId,taskId)) || chatQueue.list(workspaceId,taskId).length > 0;
+      if (!idleChat(saved.runs.filter(run=>run.project_id===taskId),life,followUps,cutoff)) continue;
+      try {
+        const result=await lifecycleMutation(workspaceId,{operation:"set_visibility",task_id:taskId,expected_revision:life.revision,visibility:"archived"});
+        archive.archived(workspaceId,taskId);
+        archivedNow.set(taskId,result.lifecycle);
+        logger?.info?.("ao.idle_chat_archived",{days:archive.idleDays()});
+      } catch (error) {
+        logger?.warn?.("ao.idle_chat_archive_failed",{message:publicText(error?.message||error,200)});
+      }
+    }
+    return archivedNow;
+  }
+  /**
+   * Whether an open chat has been idle long enough to archive by itself. `chatRuns` are its runs,
+   * oldest first (each card's receipt has started_at_ms / finished_at_ms, Unix ms; runSettled(run)
+   * says a run is over); `life` its lifecycle (schedule, reconfigure); `followUps` whether a goal,
+   * wake-up, loop or queued message will still continue it; `cutoffMs` the moment its last
+   * activity must be before.
+   */
+  function idleChat(chatRuns,life,followUps,cutoffMs) {
+    if (followUps || life.reconfigure?.length || ["scheduled","claimed"].includes(life.schedule?.state)) return false;
+    if (!chatRuns.length || !chatRuns.every(runSettled)) return false;
+    let last=0;
+    for (const run of chatRuns) for (const node of run.nodes ?? []) {
+      for (const receipt of [node.receipt, ...(node.history ?? [])]) {
+        last=Math.max(last,Number(receipt?.finished_at_ms ?? receipt?.started_at_ms) || 0);
+      }
+    }
+    // A chat with no times at all (runs from before cards kept them) is left alone: unknown is not idle.
+    return last > 0 && last < cutoffMs;
   }
   /**
    * Old AO sessions leave AO's board on the archive's clock (archive.days(); 0 keeps them). The
@@ -6854,7 +6993,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "delete_task": return visibilityAction(args, "deleted");
       case "restore_task": return visibilityAction(args, "active");
       case "archived_chats": return archivedChats(args);
-      case "archive_settings": return { ok: true, days: args?.days === undefined ? archive.days() : archive.setDays(args.days) };
+      case "archive_settings": return { ok: true,
+        days: args?.days === undefined ? archive.days() : archive.setDays(args.days),
+        idleDays: args?.idleDays === undefined ? archive.idleDays() : archive.setIdleDays(args.idleDays) };
       case "control_run": return controlRun(args);
       case "run_status": return runStatus(args);
       case "approve_harness": return approveAoHarness(args);
@@ -6952,7 +7093,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

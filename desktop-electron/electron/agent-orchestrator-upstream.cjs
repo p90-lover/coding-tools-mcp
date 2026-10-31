@@ -1732,10 +1732,16 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/inputs/${encodeURIComponent(requestId)}/resolve`, body);
       return { ok: true };
     },
-    /** Answers one parked tool request with one of the decisions AO offered for it. */
-    async resolveApproval(id, requestId, decisionId) {
+    /**
+     * Answers one parked tool request with one of the decisions AO offered for it. `message`, when
+     * given, is why (a reviewer's deny reason): AO hands it to the agent as its tool result in place
+     * of Claude Code's stock "User refused permission to run tool". An older AO ignores it.
+     */
+    async resolveApproval(id, requestId, decisionId, message = "") {
       if (typeof requestId !== "string" || !requestId || typeof decisionId !== "string" || !decisionId) throw new Error("Choose an offered decision");
-      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/approvals/${encodeURIComponent(requestId)}/resolve`, { decisionId });
+      const why = typeof message === "string" ? utf8Prefix(message.trim(), 2000) : "";
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/approvals/${encodeURIComponent(requestId)}/resolve`,
+        why ? { decisionId, message: why } : { decisionId });
       forgetTail(id);
       return { ok: true };
     },

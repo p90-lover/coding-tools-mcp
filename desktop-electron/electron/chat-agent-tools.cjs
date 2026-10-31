@@ -88,7 +88,7 @@ const AGENT_TOOLS = new Set([
   "view_image", "image_info", "compare_images", "ocr_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
   "show_in_chat", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
-  "redact_message",
+  "redact_message", "move_chat",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. Seen
 // live: an agent asked to "open the browser and keep checking" started it, but nothing showed in
@@ -215,6 +215,52 @@ const RENAME_TOOL_DEFS = Object.freeze([{
     properties: { title: { type: "string", maxLength: 200, description: "The task's title, at most 6 words" } },
   },
 }]);
+// The app's own: the chat moves to another of the user's projects, whose folder its next turn works in.
+const MOVE_TOOL_DEFS = Object.freeze([{
+  name: "move_chat", title: "Move this chat to another project",
+  description: "Move this chat to another of the user's projects, so its next turns work in that project's folder. Give the "
+    + "project's name or id (chat_list with project \"all\" names them) or the absolute path of its folder; a folder that is "
+    + "no project yet is refused, so ask the user to add it first. The user is asked before anything moves. The move happens "
+    + "when this turn ends: tell the user, then end your turn. The next turn starts a fresh session in the new folder with "
+    + "this chat's history. Uncommitted work stays in the old folder. Only a Single chat moves.",
+  inputSchema: {
+    type: "object", additionalProperties: false,
+    properties: {
+      project: { type: "string", maxLength: 200, description: "The project's name or id" },
+      path: { type: "string", maxLength: 1024, description: "The project's folder, an absolute path" },
+    },
+  },
+}]);
+
+/**
+ * The project move_chat's arguments name, from the user's projects ({ id, name, path }):
+ * `given.project` is a project's id or name, `given.path` its folder. Throws, in words for the
+ * agent, when neither or both are given or nothing matches.
+ */
+function moveTarget(projects, given, platform = process.platform) {
+  const project = typeof given?.project === "string" ? given.project.trim() : "";
+  const folder = typeof given?.path === "string" ? given.path.trim() : "";
+  if (project && folder) throw new Error("Give one of project or path, not both");
+  if (!project && !folder) throw new Error("Give the project to move to: its name or id as project, or its folder as path");
+  if (project) {
+    const wanted = project.toLowerCase();
+    const found = projects.find((entry) => entry.id === project)
+      ?? projects.find((entry) => String(entry.name || "").toLowerCase() === wanted);
+    if (!found) throw new Error(`No project is named "${project}"; list the user's projects or ask which one they mean`);
+    return found;
+  }
+  const paths = platform === "win32" ? path.win32 : path.posix;
+  if (!paths.isAbsolute(folder)) throw new Error("path must be an absolute folder path");
+  const key = (value) => {
+    const resolved = paths.resolve(value).replace(/[\\/]+$/, "") || paths.sep;
+    return platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  const wanted = key(folder);
+  const found = projects.find((entry) => entry.path && key(entry.path) === wanted);
+  if (!found) throw new Error(`No project uses ${folder}; ask the user to add that folder as a project first`);
+  return found;
+}
+
 // The app's own (chat-redaction.cjs): secrets the user pasted into this chat's messages are replaced
 // in the stored chat by a marker the chat shows blurred. Offered only when the user turned it on in
 // Settings; `list` is what they named as sensitive there, so the agent hides only those kinds.
@@ -1013,7 +1059,7 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false,
-  renames = false, redacts = false, ownFileTools = false } = {}) {
+  renames = false, moves = false, redacts = false, ownFileTools = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
   // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either.
   const scriptTool = ownFileTools ? "your Write tool" : "apply_patch";
@@ -1093,6 +1139,10 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       ? "Chat name: when you start a new task (this chat's first message, or a message that moves it on to different work), "
         + "call rename_chat with a short title of that task before you begin; not again while the task stays the same. "
       : "")
+    + (moves
+      ? "Project: when the user asks to move this chat to another project or folder, call move_chat with that project's "
+        + "name or folder; it asks the user, and the chat moves when your turn ends. "
+      : "")
     + (redacts
       ? "Secrets: when a message from the user contains a secret of a kind redact_message lists (a key, a password, a token), "
         + "call redact_message with it first, so the chat stops storing and showing it; never repeat it in your reply. "
@@ -1166,6 +1216,9 @@ function createChatAgentTools({
   // redact_message's service ({ enabled(), list(), redact({ workspaceId, session, secrets, label }) }): offered
   // only while enabled() is true, with list() (the user's kinds of sensitive text) as its description.
   redaction = null,
+  // move_chat's service ({ projects(): [{ id, name, path }], move({ workspaceId, session, targetWorkspaceId }) });
+  // without it the tool is not offered.
+  chatMoves = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -1426,14 +1479,14 @@ function createChatAgentTools({
     // The preview's tools are the app's own, not headless's.
     const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
       ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
-      ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
+      ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
       ...(captureApp ? VIEW_APP_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
         && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
-        && tool?.name !== "view_app" && tool?.name !== "rename_chat" && tool?.name !== "redact_message"), ...own]
+        && tool?.name !== "view_app" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
@@ -1814,6 +1867,43 @@ function createChatAgentTools({
     }
   }
 
+  // A subagent's chat is the one that started it, not its own to move.
+  const canMove = (entry) => Boolean(chatMoves) && !entry.subagent;
+  /**
+   * move_chat: once the user agrees, the chat moves to the project the agent named when this turn
+   * ends (agent-orchestrator-workflow.cjs chatMoveTool). Always asked, even in a chat that skips
+   * approvals: the chat's history and its future work change folder.
+   */
+  async function moveChat(entry, given, signal) {
+    if (!canMove(entry)) return failedCall("Unknown tool: move_chat");
+    if (!entry.aoSession) return failedCall("This chat's session is not ready yet; try again in a moment.");
+    let target, current;
+    try {
+      const all = (await chatMoves.projects()).filter((project) => typeof project?.id === "string" && project.id);
+      current = all.find((project) => project.id === entry.workspaceId) ?? { id: entry.workspaceId, name: entry.workspaceId, path: "" };
+      target = moveTarget(all, given);
+    } catch (error) {
+      return failedCall(errorMessage(error));
+    }
+    if (target.id === entry.workspaceId) return failedCall("This chat is already in that project.");
+    const place = (project) => [{ value: String(project.name || project.id), own: true },
+      ...(project.path ? ["\n  ", { value: String(project.path), own: true }] : [])];
+    const answer = await ask("A chat agent wants to move its chat to another project",
+      dialogText([...who(entry), "Tool: move_chat\n\nFrom: ", ...place(current), "\nTo: ", ...place(target),
+        "\n\nWhen this turn ends, the chat and its history move to the new project, and its next\n"
+        + "turn works in that project's folder. Uncommitted work stays in the old folder. Allow?"]),
+      "The user did not allow moving this chat.", undefined, { entry, tool: "move_chat", signal });
+    if (answer !== true) return answer;
+    try {
+      const value = await chatMoves.move({ workspaceId: entry.workspaceId, session: entry.aoSession, targetWorkspaceId: target.id });
+      const text = `This chat moves to ${target.name || target.id} when this turn ends. Tell the user, then end your turn: the next `
+        + "turn starts a fresh session in that project's folder with this chat's history.";
+      return { content: [{ type: "text", text }], structuredContent: { ...value, project: { id: target.id, name: target.name ?? null, path: target.path ?? null } } };
+    } catch (error) {
+      return failedCall(errorMessage(error));
+    }
+  }
+
   /** The user's kinds of sensitive text (Settings), never empty: an empty list offers no tool. */
   const redactKinds = () => {
     try { return (redaction?.list() ?? []).filter((line) => typeof line === "string" && line.trim()).slice(0, 30); } catch { return []; }
@@ -1859,6 +1949,7 @@ function createChatAgentTools({
     if (name === "view_app") return viewApp(given);
     if (GOAL_TOOLS.has(name)) return goalCall(entry, name, given);
     if (name === "rename_chat") return renameChat(entry, given);
+    if (name === "move_chat") return moveChat(entry, given, signal);
     if (name === "redact_message") return redactMessage(entry, given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
@@ -2159,7 +2250,7 @@ function createChatAgentTools({
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
-              wakeups: canWake(entry), renames: canRename(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
+              wakeups: canWake(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -2678,6 +2769,7 @@ function createChatAgentTools({
 }
 
 module.exports = Object.freeze({
+  moveTarget,
   AGENT_TOOLS,
   DESKTOP_TOOLS,
   GOAL_TOOLS,
