@@ -7,7 +7,7 @@ import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptDetachedTurnIdentity, chatGptAcceptedUserTurnCount, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, ChatGptFailedSendRetrier, CHATGPT_SEND_RETRY_AFTER_MS, CHATGPT_SEND_RETRY_GIVE_UP_MS, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_FILE_INPUT_SELECTOR, ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptComposerPromptText, chatGptConnectionInterruptedAlertVisible, observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
-import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
+import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
 import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
@@ -3942,6 +3942,73 @@ test("an accepted turn survives internal observation faults instead of being tor
 
   // Chain-of-thought containment is commentary regardless of document position.
   expect(worker).toContain('candidate.closest(\'[data-testid^="cot-v5"]\') !== null');
+});
+
+test.each([
+  ["SDK Stop", "sdk", true, false], ["SDK handoff", "sdk", true, true],
+  ["DOM Stop", "dom", true, false], ["DOM handoff", "dom", true, true],
+  ["active SDK error", "sdk", false, false], ["other failure after Stop", "other", true, false],
+] as const)("browser cancellation classification preserves %s", async (label, kind, aborted, handoff) => {
+  const ts = require("typescript") as typeof import("typescript");
+  const source = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const worker = ts.createSourceFile("browser-worker.ts", source, ts.ScriptTarget.Latest, true);
+  const workerClass = worker.statements.filter(ts.isClassDeclaration).find(node => node.name?.text === "ChatGptBrowserWorker");
+  if (!workerClass) throw new Error("Browser worker class is missing");
+  const catches = Object.fromEntries(["runBrowserTurn", "runExclusive"].map(name => {
+    const method = workerClass.members.filter(ts.isMethodDeclaration).find(node => node.name.getText(worker) === name);
+    const clause = method?.body?.statements.filter(ts.isTryStatement).find(node => node.catchClause)?.catchClause;
+    if (!clause) throw new Error(`Browser worker ${name} catch is missing`);
+    return [name, clause.getText(worker)];
+  }));
+  // AbortError is private to the SDK. Run its exact shipped Error subclasses rather than
+  // replacing it with DOMException, which would hide the terminal-classification regression.
+  const sdkSource = readFileSync(require.resolve("playwright-core/lib/coreBundle"), "utf8");
+  const clientErrors = sdkSource.slice(sdkSource.indexOf("// packages/playwright-core/src/client/errors.ts"),
+    sdkSource.indexOf("// packages/playwright-core/src/client/jsHandle.ts"));
+  const sdk = ts.createSourceFile("sdk-client-errors.js", clientErrors, ts.ScriptTarget.Latest, true);
+  const assignments = new Map<string, string>();
+  const visit = (node: import("typescript").Node): void => {
+    if (ts.isBinaryExpression(node) && ["PlaywrightError", "AbortError2"].includes(node.left.getText(sdk))) {
+      assignments.set(node.left.getText(sdk), node.getText(sdk));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sdk);
+  expect(assignments.size).toBe(2);
+  const context = createContext({
+    Error, DOMException, ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError,
+    console: { info: () => {}, error: () => {} }, redactChatGptUiDiagnostic,
+  });
+  const SdkAbortError = runInContext(`let PlaywrightError, AbortError2;
+    ${assignments.get("PlaywrightError")}; ${assignments.get("AbortError2")}; AbortError2;`, context) as new () => Error;
+  const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(`
+    async function browserFailure(error, turn) {
+      const diagnosticPage = undefined;
+      const diagnostics = {capture: async () => {}};
+      try { throw error; } ${catches.runBrowserTurn}
+    }
+    async function classify(error, turn) {
+      let terminal = "completed", originalError, terminalMessage;
+      const submitted = true;
+      try { await browserFailure(error, turn); } ${catches.runExclusive}
+      finally { globalThis.lastTerminal = terminal; }
+    }
+    globalThis.classify = classify;
+  `);
+  const classify = runInContext(javascript, context) as (error: Error, turn: { abortSignal: AbortSignal }) => Promise<void>;
+  const controller = new AbortController();
+  if (aborted) controller.abort(handoff ? new ChatGptCompactionHandoffAccepted() : undefined);
+  const error = kind === "sdk" ? new SdkAbortError()
+    : kind === "dom" ? new DOMException("Turn cancelled", "AbortError") : new Error("Response reader failed");
+  if (kind === "sdk") expect(error).not.toBeInstanceOf(DOMException);
+  const surfaced = await classify(error, { abortSignal: controller.signal }).catch((failure: unknown) => failure);
+
+  expect({ label, terminal: context.lastTerminal }).toEqual({
+    label, terminal: !aborted || kind === "other" ? "failed" : handoff ? "completed" : "aborted",
+  });
+  if (handoff) expect(surfaced).toBe(controller.signal.reason);
+  else if (aborted && kind !== "other") expect(surfaced).toBeInstanceOf(DOMException);
+  else expect(surfaced).toBe(error);
 });
 
 test("stale MCP progress stops suppressing DOM health without penalising long active turns", () => {
