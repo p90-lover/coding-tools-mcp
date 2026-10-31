@@ -413,9 +413,10 @@ test("AO worker passes the managed CPA key to its child only after exact-model a
   const calls = [];
   const confirmations = [];
   const workflow = createAgentOrchestratorWorkflow({
+    nativePreviewTools: { lease: async () => { throw new Error("CPA native must not receive a WebGPT preview config"); } },
     requestHeadless: async (endpoint, body, options) => {
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
-        id: "run-1", workspace_id: "ws-1", nodes: [{
+        id: "run-1", workspace_id: "ws-1", project_id: "task", execution_mode: "single", nodes: [{
           id: "worker", role: "worker", state: "pending",
           route: { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity",
             account_id: "shared-cpa-pool", model: "gemini-3.8-flash-high",
@@ -451,8 +452,59 @@ test("AO worker passes the managed CPA key to its child only after exact-model a
   assert.deepEqual(calls[0].options, { localConfirmation: true });
   assert.equal(calls[0].body.private_proxy_api_key, sentinel);
   assert.equal(calls[0].body.connection.model, "gemini-3.8-flash-high");
+  assert.equal(calls[0].body.chat_preview_server, undefined);
   assert.equal(result.status.model, "gemini-3.8-flash-high");
   assert.equal(JSON.stringify({ result, confirmations }).includes(sentinel), false);
+});
+
+test("native chat startup attaches its preview lease and stopping one chat revokes only that owner", async () => {
+  const leases = [], attached = [];
+  let rejectReconnect = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => 1000,
+    nativePreviewTools: { lease: async options => {
+      const lease = { options, bound: [], released: [], limited: [], servers: [{ name: "coding-tools", type: "http",
+        url: `http://127.0.0.1:47991/mcp/${options.workspaceId}/abcdefghijklmnop`, headers: { Authorization: `Bearer ${"x".repeat(43)}` } }],
+        bind(owner) { this.bound.push(owner); return true; }, limitLifetime(seconds) { this.limited.push(seconds); },
+        release(options = {}) { this.released.push(options); } };
+      leases.push(lease);
+      return lease;
+    } },
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: body.workspace_id, project_id: "task", execution_mode: "single",
+        nodes: [{ id: "lead", role: "worker", state: "pending", route: { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+          model: "chatgpt-web/high", permission_profile: ":read-only" } }] }] };
+      if (endpoint === "/api/v1/ao/harness/connect") {
+        attached.push(body);
+        if (rejectReconnect) throw new Error("An existing matching native connection is retained");
+        assert.deepEqual(leases.at(-1).bound, [], "bind only after the real native connection succeeds");
+        return { ok: true, owned: true, status: { connected: true, model: "chatgpt-web/high", seconds_remaining: 100 } };
+      }
+      if (endpoint === "/api/v1/ao/harness/disconnect") return { ok: true };
+      throw new Error(`Unexpected endpoint ${endpoint}`);
+    },
+    resolveHarness: async () => ({ executable: "G:/fixture/codex.exe", expected_sha256: "0".repeat(64), codex_home: "G:/fixture/ao-home",
+      model: "chatgpt-web/high", allow_model_usage: true, allow_command_execution: false, permission_profile: ":read-only", request_limit: 2, lifetime_seconds: 120 }),
+    webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
+    confirm: async () => true,
+  });
+  try {
+    for (const workspaceId of ["ws1", "ws2"]) await workflow.call("connect_harness", { workspaceId, runId: "run", nodeId: "lead", executable: "G:/fixture/codex.exe" });
+    assert.deepEqual(leases.map(lease => lease.bound), [["native:ws1:task:single"], ["native:ws2:task:single"]]);
+    assert.ok(leases.every(lease => lease.options.previewOnly && lease.options.expiresAt === 121000));
+    assert.deepEqual(leases.map(lease => lease.limited), [[100], [100]], "never outlive the actual native grant");
+    assert.deepEqual(attached.map(body => body.chat_preview_server), leases.map(lease => lease.servers[0]));
+    rejectReconnect = true;
+    await assert.rejects(workflow.call("connect_harness", { workspaceId: "ws1", runId: "run", nodeId: "lead", executable: "G:/fixture/codex.exe" }), /existing matching native connection/);
+    assert.equal(leases.length, 2, "reconnecting the same owned card reuses its existing preview credential");
+    assert.deepEqual(leases[0].released, [], "a refused reconnect cannot revoke a healthy existing chat");
+    await workflow.call("stop_harness", { workspaceId: "ws1", runId: "run", nodeId: "lead" });
+    assert.deepEqual(leases[0].released, [{ ended: true }]);
+    assert.deepEqual(leases[1].released, []);
+  } finally { workflow.dispose(); }
+  assert.deepEqual(leases[1].released, [{ ended: true }], "closing the workflow revokes its remaining native lease");
 });
 
 test("AO WebGPT connect uses the selected Codex bundled catalog without a CPA key", async () => {
