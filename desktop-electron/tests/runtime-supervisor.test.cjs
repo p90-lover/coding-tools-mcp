@@ -520,7 +520,7 @@ test("primary and extra tunnel commands isolate native state and temp files", as
   assert.equal(mainBefore.code, 0);
   assert.equal(extra.code, 0);
   assert.deepEqual(JSON.parse(mainAfter.output), JSON.parse(mainBefore.output));
-  const primaryStateRoot = path.join(root, "tunnel", "primary-runtime");
+  const primaryStateRoot = path.join(fs.realpathSync.native(root), "tunnel", "primary-runtime");
   assert.deepEqual(JSON.parse(mainBefore.output), {
     stateRoot: primaryStateRoot,
     temp: path.join(primaryStateRoot, "temp"),
