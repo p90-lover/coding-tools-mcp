@@ -582,6 +582,8 @@ class RuntimeHost {
 
   restoreSetupCheckpoint(checkpoint) {
     if (!checkpoint) return;
+    // config.json may be written back: the next read checks it instead of the watched copy.
+    this.supervisor?.forgetConfig?.();
     const failures = [];
     for (const snapshot of [...checkpoint].reverse()) {
       try {
@@ -812,6 +814,9 @@ class RuntimeHost {
       this.publishOperation?.({ name, status: "failed", message });
       throw new Error(message);
     } finally {
+      // A runtime command (setup, integration) may have written config.json; the folder watch
+      // can report that after the caller already reads it back, so the next read checks the file.
+      this.supervisor?.forgetConfig?.();
       this.active = null;
     }
   }

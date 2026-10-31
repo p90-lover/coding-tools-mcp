@@ -4343,6 +4343,7 @@ async function start() {
     // Settings → Updates: a tunnel left running by another build is restarted, not adopted.
     reuseTunnelOnlyWhenMatching: () => resolveUpdateSettings(stateStore.read()).updateReuseMatchingOnly,
     onExtraTunnelsChange: tunnels => send("launcher:mcp-tunnels-changed", tunnels),
+    watchConfigFile: true,
   });
   runtimeHost = new RuntimeHost({
     app,
