@@ -107,9 +107,28 @@ test("the registry is read from disk once; later reads and monitor passes use th
     assert.equal(tunnels.status()[0].connectorHref, "https://chatgpt.com/connector");
   } finally { fs.readFileSync = readFileSync; }
   assert.deepEqual(reads, []);
-  // What it saved is what a new launcher reads.
+  // What it saved is what a new launcher reads, once the write it started is in place.
+  await tunnels.written();
   const next = new ExtraTunnels({ coreHome, runTunnel: async () => ({ code: 0, output: "{}" }), connectArgs: () => [] });
   assert.equal(next.entries()[0].connectorHref, "https://chatgpt.com/connector");
+  tunnels.detach();
+});
+
+test("a registry write that fails is not kept: the next read takes what is on disk", async () => {
+  const { coreHome, config, tunnels } = setup();
+  await tunnels.start(config);
+  const added = await tunnels.add({ label: "Team", tunnelId: SECOND_ID, runtimeKey: "sk", accountId: "acct-2" });
+  const registry = path.join(coreHome, "tunnel", "extra-tunnels.json");
+  const onDisk = fs.readFileSync(registry, "utf8");
+  // A folder in the file's place: replacing it fails.
+  fs.rmSync(registry);
+  fs.mkdirSync(registry);
+  tunnels.setConnector(added.id, "https://chatgpt.com/connector");
+  assert.equal(tunnels.status()[0].connectorHref, "https://chatgpt.com/connector", "shown before the write lands");
+  await tunnels.written();
+  fs.rmdirSync(registry);
+  fs.writeFileSync(registry, onDisk);
+  assert.equal(tunnels.status()[0].connectorHref, null);
   tunnels.detach();
 });
 

@@ -3520,9 +3520,24 @@ async function start() {
     onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); } });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
+  // Whether the runtime folder was removed is checked off the main thread, at most every 30 s:
+  // checking it on every call (bridge health, each runtime command, each component start) froze
+  // every window up to 2.7 s on the busy hard disk (2026-10-31). A removed runtime is restored on
+  // the first call after the background check finds it gone.
+  const runtimeRootCheck = { at: 0, gone: false, checking: false };
+  const RUNTIME_ROOT_RECHECK_MS = 30_000;
   const runtimeRootProvider = () => {
-    const packagedRuntimeWasRemoved = app.isPackaged
-      && (!installedRuntimeRoot || !fs.existsSync(installedRuntimeRoot));
+    if (app.isPackaged && installedRuntimeRoot && !runtimeRootCheck.checking
+      && Date.now() - runtimeRootCheck.at >= RUNTIME_ROOT_RECHECK_MS) {
+      const root = installedRuntimeRoot;
+      runtimeRootCheck.checking = true;
+      void fs.promises.access(root).then(() => false, () => true).then(gone => {
+        if (root === installedRuntimeRoot) runtimeRootCheck.gone = gone;
+        runtimeRootCheck.at = Date.now();
+        runtimeRootCheck.checking = false;
+      });
+    }
+    const packagedRuntimeWasRemoved = app.isPackaged && (!installedRuntimeRoot || runtimeRootCheck.gone);
     if (!runtimeRootResolved || packagedRuntimeWasRemoved) {
       installedRuntimeRoot = ensurePackagedRuntime({
         app,
@@ -3530,6 +3545,8 @@ async function start() {
         resourcesPath: process.resourcesPath,
       });
       runtimeRootResolved = true;
+      runtimeRootCheck.gone = false;
+      runtimeRootCheck.at = Date.now();
     }
     return installedRuntimeRoot;
   };
