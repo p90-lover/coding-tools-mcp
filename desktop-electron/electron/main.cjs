@@ -1074,8 +1074,16 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   const setupState = stateStore.read();
   if (IS_DEV_PROFILE || !runtimeHost || quitting || shutdownInProgress
     || setupState.coreSetupComplete !== true || setupState.browserInteractionMode !== "automatic") return;
+  // Setup checks the sign-in of the account the Browser tab shows. Switched on meanwhile (to one not
+  // signed in, it timed out "ChatGPT login was not completed"; mid-load it failed with -3, both
+  // 2026-10-31), it would check the wrong page: the next signed-in switch refreshes the bridge.
+  const shownElsewhere = () => browserHost !== host || browserAccounts.activeId() !== accountId;
   try {
     await waitForRuntimeHostIdle();
+    if (shownElsewhere()) {
+      logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "account-changed" });
+      return;
+    }
     await runtimeHost.setupCore();
     stateStore.update({ codexCatalogVerified: false, codexRestartRequired: true });
     // Setup's capability check recorded the plan it installed (onSessionInspected).
@@ -1084,6 +1092,10 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
     scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-account" });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (shownElsewhere()) {
+      logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "account-changed", message: message.slice(0, 300) });
+      return;
+    }
     logger.warn("browser_accounts.bridge_refresh_failed", { accountId, message: message.slice(0, 300) });
     publishOperation({ name: "browser-account", status: "failed", message: `The Codex bridge did not pick up this account's plan; run Install models again. ${message}` });
   }

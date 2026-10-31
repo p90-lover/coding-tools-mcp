@@ -285,3 +285,13 @@ test("sign-in reads that arrive during a read coalesce into one more read", asyn
   assert.equal(published.length, 1, "only the read that changed something publishes");
   assert.equal(service.status().accounts[0].signedIn, true);
 });
+
+test("a bridge refresh steps aside once another account is shown, and never reports that as a failure", () => {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const body = main.slice(main.indexOf("async function onBrowserAccountSignedIn"), main.indexOf("function switchBrowserAccount"));
+  const skippedBeforeSetup = body.indexOf("if (shownElsewhere())");
+  assert.ok(skippedBeforeSetup > 0 && skippedBeforeSetup < body.indexOf("await runtimeHost.setupCore()"), "checked before setup checks the shown page");
+  const failure = body.slice(body.indexOf("} catch (error) {"));
+  assert.ok(failure.indexOf("if (shownElsewhere())") < failure.indexOf("publishOperation("), "a switch during setup is no failure");
+  assert.match(body, /browserAccounts\.activeId\(\) !== accountId/);
+});
