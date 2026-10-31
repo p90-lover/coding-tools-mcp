@@ -62,17 +62,22 @@ export interface BridgeSetup {
  * (sign-in, plan, connector, proxy, tabs, sessions) and its settings, the Codex sessions bound to
  * them, and Decodo's sticky proxies to bind, one per account.
  */
-export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
+export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpenBrowser }: {
   api: LauncherApi;
   browser: BrowserState | null;
   setup: BridgeSetup;
   setError: (error: string | null) => void;
+  /** Shows the Browser tab: a new account is signed in there. */
+  onOpenBrowser?: () => void;
 }) {
   const [accounts, setAccounts] = useState<BrowserAccountsStatus | null>(null);
   const [network, setNetwork] = useState<ProviderNetworkSnapshot | null>(null);
   const [threads, setThreads] = useState<CodexThreadBinding[]>([]);
   const [tunnels, setTunnels] = useState<McpTunnel[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
+  // The actions running now, by key. Each control waits only on its own action (and the switch
+  // buttons on a switch): one busy key once greyed out the whole page, so a Remove or a proxy check,
+  // seconds on the busy hard disk, held every other button until it finished.
+  const [inFlight, setInFlight] = useState<ReadonlySet<string>>(new Set());
   // Bulk delete: the accounts ticked on their cards.
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
 
@@ -102,15 +107,20 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
 
   const run = useCallback(async (key: string, action: () => Promise<unknown>) => {
     setError(null);
-    setBusy(key);
+    setInFlight(current => new Set(current).add(key));
     try {
       await action();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setBusy(null);
+      setInFlight(current => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
     }
   }, [setError]);
+  const isRunning = useCallback((key: string) => inFlight.has(key), [inFlight]);
 
   const proxies = useMemo(() => (network?.proxyProfiles ?? [])
     .filter(profile => !profile.archivedAt)
@@ -126,7 +136,10 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
   const sessionsOf = (id: string) => threads.filter(thread => thread.accountId === id).length;
   const bound = accounts.accounts.filter(account => account.proxyProfileId).length;
   const decodoCount = proxies.filter(profile => profile.id.startsWith(DECODO_PREFIX)).length;
-  const locked = busy !== null || accounts.switching;
+  // One switch at a time (the service refuses a second): adding switches to the new account too.
+  const switching = accounts.switching || isRunning("add") || [...inFlight].some(key => key.startsWith("use:"));
+  const removing = isRunning("remove-many");
+  const full = accounts.accounts.length >= accounts.maxAccounts;
   const chatRunning = browser?.status === "running" || running > 0;
   // A ticked account that has since gone (removed elsewhere) no longer counts.
   const ticked = accounts.accounts.filter(account => selected.has(account.id)).map(account => account.id);
@@ -144,14 +157,22 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
           <h1>ChatGPT browser management</h1>
           <p className="cbm-muted">Every ChatGPT account the Browser tab holds, what it is doing, and how it runs Codex.</p>
         </div>
-        <button
-          className="cbm-button"
-          disabled={locked || accounts.accounts.length >= accounts.maxAccounts}
-          onClick={() => void run("add", () => api.addBrowserAccount())}
-          type="button"
-        >
-          Add account
-        </button>
+        {/* A disabled button shows no tooltip of its own: the wrapper carries why it is off. */}
+        <span title={full ? `The Browser tab holds ${accounts.maxAccounts} accounts at most. Remove one below to add another.` : undefined}>
+          <button
+            className="cbm-button"
+            disabled={switching || full}
+            onClick={() => {
+              // The new account opens in the Browser tab, where it signs in: go there at once and
+              // watch it load, instead of a page here where nothing seemed to happen.
+              onOpenBrowser?.();
+              void run("add", () => api.addBrowserAccount());
+            }}
+            type="button"
+          >
+            {isRunning("add") ? "Adding…" : "Add account"}
+          </button>
+        </span>
       </header>
 
       <div className="cbm-stats" role="list" aria-label="Overview">
@@ -171,7 +192,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
         <BulkRemoveBar
           total={accounts.accounts.length}
           ticked={ticked}
-          locked={locked}
+          locked={removing}
           onSelectNotSignedIn={() => setSelected(new Set(accounts.accounts.filter(account => !signedInOf(account)).map(account => account.id)))}
           onClear={() => setSelected(new Set())}
           onRemove={() => void run("remove-many", async () => {
@@ -190,12 +211,13 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
             account={account}
             api={api}
             authenticated={browser?.authenticated === true}
-            busy={busy}
+            isRunning={isRunning}
             chatRunning={chatRunning}
             canRemove={accounts.accounts.length > 1}
             inUse={account.id === activeId}
             key={account.id}
-            locked={locked}
+            removing={removing}
+            switching={switching}
             selected={selected.has(account.id)}
             onSelect={accounts.accounts.length > 1 ? (on: boolean) => toggle(account.id, on) : undefined}
             maxTabs={accounts.maxTabsPerAccount}
@@ -210,17 +232,16 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
         ))}
       </div>
 
-      <BrowserSettings accounts={accounts} locked={locked} run={run} api={api} />
+      <BrowserSettings accounts={accounts} isRunning={isRunning} run={run} api={api} />
 
       <SessionsPanel
         accounts={accounts.accounts}
-        busy={busy}
-        locked={locked}
+        isRunning={isRunning}
         onAction={(input) => run(`thread:${input.threadId}`, async () => setThreads((await api.codexThreadAction(input)).threads))}
         threads={threads}
       />
 
-      <DecodoPanel api={api} network={network} locked={locked} run={run} busy={busy} />
+      <DecodoPanel api={api} network={network} run={run} isRunning={isRunning} />
     </section>
   );
 }
@@ -283,8 +304,8 @@ function Stat({ label, value, detail, tone }: { label: string; value: string | n
 }
 
 function AccountCard({
-  account, api, authenticated, busy, chatRunning, canRemove, inUse, locked, mainTunnelReady, maxTabs, proxies, holders, run, sessions, tabs,
-  tunnel, selected = false, onSelect,
+  account, api, authenticated, isRunning, chatRunning, canRemove, inUse, removing, switching, mainTunnelReady, maxTabs, proxies, holders, run,
+  sessions, tabs, tunnel, selected = false, onSelect,
 }: {
   account: BrowserAccount;
   /** Ticked for bulk delete; no tick box without `onSelect` (a single account cannot be removed). */
@@ -292,11 +313,15 @@ function AccountCard({
   onSelect?: (on: boolean) => void;
   api: LauncherApi;
   authenticated: boolean;
-  busy: string | null;
+  /** Whether the action with this key runs now; each control waits only on its own. */
+  isRunning: (key: string) => boolean;
   chatRunning: boolean;
   canRemove: boolean;
   inUse: boolean;
-  locked: boolean;
+  /** A bulk delete runs: tick boxes and Remove wait for it. */
+  removing: boolean;
+  /** An account switch runs (one at a time): the switch buttons wait for it. */
+  switching: boolean;
   /** The main MCP tunnel is set up (it serves the accounts without a tunnel of their own). */
   mainTunnelReady: boolean;
   maxTabs: number;
@@ -346,7 +371,7 @@ function AccountCard({
             aria-label={`Select ${accountName(account)} to remove`}
             checked={selected}
             className="cbm-select"
-            disabled={locked}
+            disabled={removing}
             onChange={(event: ChangeEvent<HTMLInputElement>) => onSelect(event.target.checked)}
             type="checkbox"
           />
@@ -370,8 +395,8 @@ function AccountCard({
           <dd>
             <span className="cbm-muted">{plan.detail}</span>
             {inUse ? (
-              <button className="cbm-link" disabled={locked || chatRunning} onClick={() => void run(`plan:${account.id}`, () => api.inspectBrowserAccount())} type="button">
-                {busy === `plan:${account.id}` ? "Checking…" : "Refresh"}
+              <button className="cbm-link" disabled={isRunning(`plan:${account.id}`) || chatRunning} onClick={() => void run(`plan:${account.id}`, () => api.inspectBrowserAccount())} type="button">
+                {isRunning(`plan:${account.id}`) ? "Checking…" : "Refresh"}
               </button>
             ) : null}
           </dd>
@@ -386,8 +411,8 @@ function AccountCard({
                   {" "}· {tunnel.label}{tunnel.detail ? ` · ${tunnel.detail}` : ""}
                 </span>
                 {tunnel.state === "failed" || tunnel.state === "stopped" ? (
-                  <button className="cbm-link" disabled={locked} onClick={() => void run(`tunnel:${tunnel.id}`, () => api.reconnectMcpTunnel(tunnel.id))} type="button">
-                    {busy === `tunnel:${tunnel.id}` ? "Reconnecting…" : "Reconnect"}
+                  <button className="cbm-link" disabled={isRunning(`tunnel:${tunnel.id}`)} onClick={() => void run(`tunnel:${tunnel.id}`, () => api.reconnectMcpTunnel(tunnel.id))} type="button">
+                    {isRunning(`tunnel:${tunnel.id}`) ? "Reconnecting…" : "Reconnect"}
                   </button>
                 ) : null}
               </>
@@ -411,7 +436,7 @@ function AccountCard({
           <dd className="cbm-proxy">
             <select
               aria-label={`Proxy for ${accountName(account)}`}
-              disabled={locked || (inUse && chatRunning)}
+              disabled={isRunning(`proxy:${account.id}`) || (inUse && chatRunning)}
               onChange={event => void run(`proxy:${account.id}`, () => api.setBrowserAccountProxy(account.id, event.target.value || null))}
               value={account.proxyProfileId ?? ""}
             >
@@ -433,8 +458,8 @@ function AccountCard({
                     : "No proxy of its own"}
               </span>
               {proxy ? (
-                <button className="cbm-link" disabled={locked} onClick={() => void run(`check:${proxy.id}`, () => api.testProxyProfile(proxy.id))} type="button">
-                  {busy === `check:${proxy.id}` ? "Checking…" : "Check"}
+                <button className="cbm-link" disabled={isRunning(`check:${proxy.id}`)} onClick={() => void run(`check:${proxy.id}`, () => api.testProxyProfile(proxy.id))} type="button">
+                  {isRunning(`check:${proxy.id}`) ? "Checking…" : "Check"}
                 </button>
               ) : null}
             </div>
@@ -461,7 +486,7 @@ function AccountCard({
               <button
                 aria-checked={account.maxTabs === value}
                 className={account.maxTabs === value ? "is-selected" : undefined}
-                disabled={locked}
+                disabled={isRunning(`tabs:${account.id}`)}
                 key={value}
                 onClick={() => void run(`tabs:${account.id}`, () => api.setBrowserAccountSettings(account.id, { maxTabs: value }))}
                 role="radio"
@@ -476,7 +501,7 @@ function AccountCard({
           <span>Takes new sessions</span>
           <input
             checked={account.acceptsNewSessions}
-            disabled={locked}
+            disabled={isRunning(`accepts:${account.id}`)}
             onChange={event => void run(`accepts:${account.id}`, () => api.setBrowserAccountSettings(account.id, { acceptsNewSessions: event.target.checked }))}
             type="checkbox"
           />
@@ -485,12 +510,12 @@ function AccountCard({
 
       <footer className="cbm-card-actions">
         {!inUse ? (
-          <button className="cbm-button" disabled={locked} onClick={() => void run(`use:${account.id}`, () => api.switchBrowserAccount(account.id))} type="button">
-            {busy === `use:${account.id}` ? "Switching…" : "Use in Browser tab"}
+          <button className="cbm-button" disabled={switching || removing || isRunning(`remove:${account.id}`)} onClick={() => void run(`use:${account.id}`, () => api.switchBrowserAccount(account.id))} type="button">
+            {isRunning(`use:${account.id}`) ? "Switching…" : "Use in Browser tab"}
           </button>
         ) : null}
         {canRemove ? (
-          <button className={`cbm-link${confirmRemove ? " is-danger" : ""}`} disabled={locked || (inUse && chatRunning)} onClick={remove} type="button">
+          <button className={`cbm-link${confirmRemove ? " is-danger" : ""}`} disabled={removing || isRunning(`remove:${account.id}`) || (inUse && (chatRunning || switching))} onClick={remove} type="button">
             {confirmRemove ? "Click again to remove" : "Remove"}
           </button>
         ) : null}
@@ -499,9 +524,9 @@ function AccountCard({
   );
 }
 
-function BrowserSettings({ accounts, locked, run, api }: {
+function BrowserSettings({ accounts, isRunning, run, api }: {
   accounts: BrowserAccountsStatus;
-  locked: boolean;
+  isRunning: (key: string) => boolean;
   run: (key: string, action: () => Promise<unknown>) => Promise<void>;
   api: LauncherApi;
 }) {
@@ -517,7 +542,7 @@ function BrowserSettings({ accounts, locked, run, api }: {
         <label>
           <span>New sessions start on</span>
           <select
-            disabled={locked}
+            disabled={isRunning("settings:new")}
             onChange={event => void run("settings:new", () => api.setBrowserAccountsSettings({ newSessions: event.target.value }))}
             value={accounts.settings.newSessions}
           >
@@ -529,7 +554,7 @@ function BrowserSettings({ accounts, locked, run, api }: {
         <label>
           <span>Keep finished tabs open</span>
           <select
-            disabled={locked}
+            disabled={isRunning("settings:keep")}
             onChange={event => void run("settings:keep", () => api.setBrowserAccountsSettings({ keepFinishedTabsMinutes: Number(event.target.value) }))}
             value={accounts.settings.keepFinishedTabsMinutes}
           >
@@ -550,11 +575,10 @@ function BrowserSettings({ accounts, locked, run, api }: {
  * Codex sessions and the account each one runs on. A session keeps its account and reopens its saved
  * chat there; archiving or deleting it in Codex does the same to that chat (and so do these buttons).
  */
-function SessionsPanel({ accounts, threads, locked, busy, onAction }: {
+function SessionsPanel({ accounts, threads, isRunning, onAction }: {
   accounts: BrowserAccount[];
   threads: CodexThreadBinding[];
-  locked: boolean;
-  busy: string | null;
+  isRunning: (key: string) => boolean;
   onAction: (input: CodexThreadAction) => Promise<void>;
 }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -590,7 +614,7 @@ function SessionsPanel({ accounts, threads, locked, busy, onAction }: {
         <div className="cbm-list" role="table" aria-label="Codex sessions">
           {threads.map(thread => {
             const archived = thread.chats.length > 0 && thread.chats.every(chat => chat.archived);
-            const disabled = locked || thread.running;
+            const disabled = isRunning(`thread:${thread.threadId}`) || thread.running;
             return (
               <div className="cbm-row" key={thread.threadId} role="row">
                 <div className="cbm-account" role="cell">
@@ -617,7 +641,7 @@ function SessionsPanel({ accounts, threads, locked, busy, onAction }: {
                     {accounts.map(entry => <option key={entry.id} value={entry.id}>{accountName(entry)}</option>)}
                   </select>
                   <span className="cbm-muted">
-                    {busy === `thread:${thread.threadId}` ? "Working…" : "Moving starts a new chat on that account"}
+                    {isRunning(`thread:${thread.threadId}`) ? "Working…" : "Moving starts a new chat on that account"}
                   </span>
                 </div>
                 <div className="cbm-actions" role="cell">
@@ -650,12 +674,11 @@ function SessionsPanel({ accounts, threads, locked, busy, onAction }: {
   );
 }
 
-function DecodoPanel({ api, network, locked, run, busy }: {
+function DecodoPanel({ api, network, run, isRunning }: {
   api: LauncherApi;
   network: ProviderNetworkSnapshot | null;
-  locked: boolean;
   run: (key: string, action: () => Promise<unknown>) => Promise<void>;
-  busy: string | null;
+  isRunning: (key: string) => boolean;
 }) {
   const saved = network?.decodo;
   const [draft, setDraft] = useState({ username: "", password: "", country: "", count: "10", sessionMinutes: "60" });
@@ -698,7 +721,7 @@ function DecodoPanel({ api, network, locked, run, busy }: {
         <div className="cbm-decodo-actions">
           <button
             className="cbm-link"
-            disabled={locked}
+            disabled={isRunning("assign")}
             onClick={() => void run("assign", () => api.assignBrowserAccountProxies())}
             type="button"
           >
@@ -706,7 +729,7 @@ function DecodoPanel({ api, network, locked, run, busy }: {
           </button>
           <button
             className="cbm-button"
-            disabled={locked || !draft.username || (!draft.password && !saved?.hasPassword)}
+            disabled={isRunning("decodo-sync") || !draft.username || (!draft.password && !saved?.hasPassword)}
             onClick={() => void run("decodo-sync", async () => {
               await save();
               setDraft(current => ({ ...current, password: "" }));
@@ -714,7 +737,7 @@ function DecodoPanel({ api, network, locked, run, busy }: {
             })}
             type="button"
           >
-            {busy === "decodo-sync" ? "Syncing…" : "Sync from Decodo"}
+            {isRunning("decodo-sync") ? "Syncing…" : "Sync from Decodo"}
           </button>
         </div>
       </div>

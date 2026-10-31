@@ -890,6 +890,7 @@ function LauncherShell({
               <ChatGptBrowserManagement
                 api={api!}
                 browser={browser}
+                onOpenBrowser={() => navigateSurface("browser")}
                 setError={setError}
                 setup={{ mcpReady: snapshot.state.mcpSetupComplete === true, bridgeReady: snapshot.state.coreSetupComplete === true }}
               />

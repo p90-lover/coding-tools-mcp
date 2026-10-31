@@ -38,6 +38,10 @@
   gap: 16px;
 }
 
+/* The page starts at the window's top edge: Add account kept clear of the window's own buttons
+   (minimise, maximise, close), which covered it. 0 where there are none (a browser). */
+.cbm-header { padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)); }
+
 .cbm-decodo-actions {
   display: flex;
   flex: none;
@@ -158,12 +162,19 @@
   padding: 14px 16px 10px;
 }
 
+/* Two lines' height whether or not the account has a second line (its name under a saved email):
+   a one-line head was 8 px shorter, and every row below it sat out of line with its neighbours. */
 .cbm-card-title {
   display: flex;
   min-width: 0;
+  min-height: 34px;
   flex: 1;
   flex-direction: column;
+  justify-content: center;
 }
+
+.cbm-card-title strong { line-height: 18px; }
+.cbm-card-title .cbm-muted { line-height: 16px; }
 
 .cbm-card-title strong,
 .cbm-account strong {
