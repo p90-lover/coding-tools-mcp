@@ -20,6 +20,12 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   const more = app.slice(app.indexOf('<details className="sidebar-more"'), app.indexOf("</details>", app.indexOf('<details className="sidebar-more"')));
   assert.doesNotMatch(more, /navigateSurface\("providers"\)/, "the retired Provider Hub is not a More navigation item");
   assert.match(read("src/providers/ProviderHubIntegration.tsx"), /provider-sidebar-item/, "Connections keeps its independent Providers entry");
+  assert.match(app, /SidebarGroup label=\{copy\.connections\}>[\s\S]{0,160}<div className="sidebar-provider-slot" \/>/, "Providers is the first row of the shell's Connections group");
+  assert.match(read("src/providers/ProviderHubIntegration.tsx"), /querySelector<HTMLElement>\("\.sidebar-provider-slot"\)/);
+  // `.sidebar-item > span { flex: 1 }` is for the label; without this the icon span took half the row (seen live in 0.8.35).
+  // A bare `.provider-nav-icon` loses to that rule on specificity, so it is scoped under `.sidebar-item >`.
+  assert.match(read("src/providers/provider-manager.css"), /\.sidebar-item > \.provider-nav-icon,\s*\.provider-nav-icon\s*\{[^}]*flex:\s*none;/);
+  assert.match(more, /<small>\{moreSurfaces\.length\}<\/small>/, "More shows how many rows it folds away");
   assert.match(read("src/tokens.css"), /select option,[\s\S]*select optgroup\s*\{[^}]*background-color:[^}]*color:/, "unhovered native menu items keep explicit contrast");
   assert.match(app, /copy\.networkProxy/);
   assert.match(app, /setSidebarState\(\{ open, width \}\)/);
@@ -31,6 +37,29 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(styles, /\.content-scroll\.is-fit\s*\{[^}]*overflow-y:\s*auto;/s);
   assert.match(styles, /\.sidebar-more\s*\{/);
   assert.match(i18n, /product: "Coding Tools"/);
+});
+
+test("the error toast says a runtime timeout in words and seconds", () => {
+  // Seen live in 0.8.35: "Something went wrong · ao-web-model-catalog timed out after 20000ms".
+  const ts = require("typescript");
+  const app = read("src/App.tsx");
+  const start = app.indexOf("function readableError(");
+  const end = app.indexOf("\nfunction ErrorToast(", start);
+  assert.ok(start >= 0 && end > start, "readableError sits just above ErrorToast");
+  const js = ts.transpileModule(`${app.slice(start, end)}\nmodule.exports = readableError;`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const loaded = { exports: null };
+  new Function("module", js)(loaded);
+  const readableError = loaded.exports;
+  assert.equal(readableError("ao-web-model-catalog timed out after 20000ms"), "AO web model catalog didn't finish within 20 s");
+  assert.equal(
+    readableError("cpa-start timed out after 1500ms; the child process did not exit after forced termination"),
+    "CPA start didn't finish within 2 s; the child process did not exit after forced termination",
+  );
+  assert.equal(readableError("PowerShell timed out after 5000 ms"), "PowerShell timed out after 5000 ms", "only operation ids are rewritten");
+  assert.equal(readableError("Network unreachable"), "Network unreachable");
+  assert.match(app, /<p title=\{message\}>\{readableError\(message\)\}<\/p>/, "the full message stays in the tooltip");
 });
 
 test("a chat's head sits under the window's drag strip and is not padded by the title bar again", () => {

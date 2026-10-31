@@ -108,3 +108,14 @@ test("background dispatch detects logout after initial admission and holds witho
   assert.match(status.detail, /sign in.*ChatGPT/i);
   assert.equal(endpoints.some(endpoint => /connect|execute|reserve$/.test(endpoint)), false);
 });
+
+test("one WebGPT catalog run answers every caller for a while, and a failed one is not kept", () => {
+  // Each connect started the Bun runtime again, and the runtime host refuses a second operation
+  // while one runs: on a loaded HDD that showed as "ao-web-model-catalog timed out" (2026-10-30).
+  const main = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "electron", "main.cjs"), "utf8");
+  assert.equal(main.match(/runtimeHost\.run\("ao-web-model-catalog"/g)?.length, 1, "the catalog is run in one place");
+  assert.match(main, /const AO_WEB_CATALOG_FRESH_MS = 2 \* 60_000;/);
+  assert.match(main, /aoWebCatalogRun\?\.executable === executable && Date\.now\(\) - aoWebCatalogRun\.at < AO_WEB_CATALOG_FRESH_MS/);
+  assert.match(main, /run\.stdout\.catch\(\(\) => \{ if \(aoWebCatalogRun === run\) aoWebCatalogRun = null; \}\);/);
+  assert.match(main, /aoWebCatalogForModel\(JSON\.parse\(await aoWebCatalogOutput\(executable\)\), model\)/);
+});
