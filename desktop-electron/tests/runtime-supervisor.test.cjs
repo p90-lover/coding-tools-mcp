@@ -495,7 +495,7 @@ test("tunnel control failures preserve stderr even when stdout is also present",
   }
 });
 
-test("extra tunnel commands isolate native state and temp files without changing the main environment", async (t) => {
+test("primary and extra tunnel commands isolate native state and temp files", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-extra-tunnel-env-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const supervisor = new RuntimeSupervisor({
@@ -520,6 +520,15 @@ test("extra tunnel commands isolate native state and temp files without changing
   assert.equal(mainBefore.code, 0);
   assert.equal(extra.code, 0);
   assert.deepEqual(JSON.parse(mainAfter.output), JSON.parse(mainBefore.output));
+  const primaryStateRoot = path.join(root, "tunnel", "primary-runtime");
+  assert.deepEqual(JSON.parse(mainBefore.output), {
+    stateRoot: primaryStateRoot,
+    temp: path.join(primaryStateRoot, "temp"),
+    tmp: path.join(primaryStateRoot, "temp"),
+    service: process.env.CODING_TOOLS_EXTRA_TUNNEL_TEST ?? null,
+    inheritedPath: Boolean(process.env.PATH),
+  });
+  assert.equal(fs.statSync(path.join(primaryStateRoot, "temp")).isDirectory(), true);
   const stateRoot = path.join(root, "tunnel", "extra-runtime");
   assert.deepEqual(JSON.parse(extra.output), {
     stateRoot,
@@ -529,6 +538,52 @@ test("extra tunnel commands isolate native state and temp files without changing
     inheritedPath: JSON.parse(mainBefore.output).inheritedPath,
   });
   assert.equal(fs.statSync(path.join(stateRoot, "temp")).isDirectory(), true);
+});
+
+test("primary tunnel commands require migration only for an existing legacy alias", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-primary-tunnel-migration-"));
+  const inheritedState = process.env.TUNNEL_CLIENT_STATE_DIR;
+  t.after(() => {
+    if (inheritedState === undefined) delete process.env.TUNNEL_CLIENT_STATE_DIR;
+    else process.env.TUNNEL_CLIENT_STATE_DIR = inheritedState;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const legacyRoot = path.join(root, "legacy-state");
+  process.env.TUNNEL_CLIENT_STATE_DIR = legacyRoot;
+  fs.mkdirSync(legacyRoot, { recursive: true });
+  const alias = "owned-primary";
+  const record = { alias, tunnel_id: `tunnel_${"a".repeat(32)}` };
+  const legacyFile = path.join(legacyRoot, "aliases.yaml");
+  fs.writeFileSync(legacyFile, JSON.stringify({ [alias]: record }));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} }, sourceRoot: root, coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const tunnel = { alias, binaryPath: process.execPath, profileDir: root };
+  const args = ["-e", "process.stdout.write('ready')"];
+  const run = () => supervisor.runTunnelCommand({ tunnel }, args, 5_000, "Primary migration probe");
+  const primaryRoot = path.join(root, "tunnel", "primary-runtime");
+  const primaryFile = path.join(primaryRoot, "aliases.yaml");
+  await assert.rejects(run(), /primary tunnel.*migration/i);
+  assert.equal(fs.existsSync(primaryRoot), false, "blocked migration cannot create a new state root or launch a duplicate");
+  fs.mkdirSync(primaryRoot, { recursive: true });
+  fs.writeFileSync(primaryFile, "{}");
+  await assert.rejects(run(), /primary tunnel.*migration/i);
+  fs.writeFileSync(primaryFile, JSON.stringify({ unrelated: record }));
+  await assert.rejects(run(), /primary tunnel.*migration/i);
+  fs.writeFileSync(primaryFile, JSON.stringify({ [alias]: {} }));
+  await assert.rejects(run(), /primary tunnel.*migration/i);
+  fs.writeFileSync(primaryFile, "{}");
+  fs.writeFileSync(legacyFile, "invalid JSON");
+  await assert.rejects(run(), /primary tunnel.*(verify|migration|read)/i);
+  fs.writeFileSync(legacyFile, JSON.stringify({ [alias]: record }));
+  fs.writeFileSync(primaryFile, JSON.stringify({ [alias]: record }));
+  assert.equal((await run()).output, "ready", "a migrated alias uses its app-owned state");
+  fs.writeFileSync(primaryFile, "{}");
+  fs.writeFileSync(legacyFile, JSON.stringify({ unrelated: record }));
+  assert.equal((await run()).output, "ready", "a fresh managed alias is not blocked by unrelated legacy state");
+  assert.equal(process.env.TUNNEL_CLIENT_STATE_DIR, legacyRoot, "selection must not change the launcher environment");
 });
 
 test("saved extra tunnels require migration when their isolated native state is missing", async (t) => {

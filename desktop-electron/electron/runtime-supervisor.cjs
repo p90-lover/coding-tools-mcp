@@ -2098,8 +2098,37 @@ class RuntimeSupervisor {
   async runTunnelCommand(config, args, timeoutMs, label, env) {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
+    if (!env) {
+      const stateDir = path.join(fs.realpathSync.native(this.coreHome), "tunnel", "primary-runtime");
+      const tempDir = path.join(stateDir, "temp");
+      if (typeof tunnel.alias === "string" && tunnel.alias) {
+        const legacyRoots = [...new Set([
+          process.env.TUNNEL_CLIENT_STATE_DIR?.trim(),
+          process.env.XDG_STATE_HOME?.trim() && path.join(process.env.XDG_STATE_HOME.trim(), "tunnel-client"),
+          path.join(os.homedir(), ".local", "state", "tunnel-client"),
+          path.join(os.homedir(), ".tunnel-client"),
+        ].filter(root => root && !samePath(root, stateDir)))];
+        for (const root of [stateDir, ...legacyRoots]) {
+          let aliases;
+          try {
+            aliases = readJson(path.join(root, "aliases.yaml"));
+            if (!aliases || typeof aliases !== "object" || Array.isArray(aliases)) throw new Error("Invalid alias state");
+          } catch (error) {
+            if (error?.code === "ENOENT") continue;
+            throw new Error("Primary tunnel state could not be verified; migration is required before reconnecting.");
+          }
+          if (!Object.hasOwn(aliases, tunnel.alias)) continue;
+          const record = aliases[tunnel.alias];
+          if (root === stateDir && record?.alias === tunnel.alias
+            && typeof record.tunnel_id === "string" && record.tunnel_id.trim()) break;
+          throw new Error("Existing primary tunnel requires migration to the dedicated runtime state directory before it can be used.");
+        }
+      }
+      fs.mkdirSync(tempDir, { recursive: true, mode: 0o700 });
+      env = { TUNNEL_CLIENT_STATE_DIR: stateDir, TEMP: tempDir, TMP: tempDir };
+    }
     const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir,
-      env: env ? { ...process.env, ...env } : undefined, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
+      env: { ...process.env, ...env }, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
     if (reply.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
     if (reply.error) throw new Error(reply.error);
     return controlResult(reply.code, reply.stdout, reply.stderr);

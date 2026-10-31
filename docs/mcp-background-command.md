@@ -29,3 +29,7 @@ Write a private `secrets/mcp-tunnel-add.json` under the app's resolved core data
 This action uses the existing extra-tunnel add/reconnect path and waits for readiness. It consumes the private input only after success; a failed or replaced input remains available for retry. A successful receipt contains only `added: true`. Run `--create-mcp-connector` afterward to create the connector using this account's tunnel.
 
 Extra runtime state, logs, and temporary files use `tunnel/extra-runtime` under the core data directory. Existing extras from a legacy state directory require migration before they can start in the dedicated directory; the app reports this instead of starting duplicate runtimes.
+
+The primary tunnel uses its own `tunnel/primary-runtime` state directory and `temp` child under the core data directory. Every primary native-client call selects these paths explicitly; extra tunnels keep their separate root.
+
+If the configured primary alias exists in legacy client state but is absent from its new root, the app requires migration before running any primary client command. An empty alias file does not establish migration. Retire the verified old alias and reconnect it through the native client's explicit state-root selection during an authorized migration; do not point a live alias at an empty new root. The app does not move profiles, keys, or legacy state automatically.
