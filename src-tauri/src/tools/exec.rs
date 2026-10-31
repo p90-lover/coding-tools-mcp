@@ -944,9 +944,15 @@ mod tests {
         std::fs::create_dir_all(nested.join("same")).unwrap();
         std::fs::write(workspace.path().join("same/root-only.txt"), "root").unwrap();
         std::fs::write(nested.join("same/nested-only.txt"), "nested").unwrap();
-        let ctx = ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf()).unwrap();
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .unwrap();
         for command in ["ls same", "dir same"] {
-            let result = call_tool(&ctx, "exec_command", &json!({"cmd":command,"workdir":"nested"}));
+            let result = call_tool(
+                &ctx,
+                "exec_command",
+                &json!({"cmd":command,"workdir":"nested"}),
+            );
             assert_eq!(result["ok"], true, "{result}");
             assert_eq!(result["stdout"], "nested-only.txt\n", "{result}");
         }
