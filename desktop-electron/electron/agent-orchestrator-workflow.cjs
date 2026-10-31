@@ -6595,7 +6595,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       read.set(id,{ saved, deleted });
       // A chat is a task with runs; a board task that never ran is not one.
       const chatTasks=new Set(saved.runs.map(run=>run.project_id));
-      for (const life of saved.task_lifecycle ?? []) {
+      const archivedNow=await archiveIdleChats(id,saved,chatTasks);
+      const lifecycles=[...(saved.task_lifecycle ?? []).filter(life=>!archivedNow.has(life.task_id)),...archivedNow.values()];
+      for (const life of lifecycles) {
         if (!chatTasks.has(life.task_id) || !["archived","deleted"].includes(life.visibility)) continue;
         let visibility=life.visibility;
         if (visibility === "archived" && archive.due(id,life.task_id)) {
@@ -6616,7 +6618,52 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Every project's chats must be known: a session is ended only when no chat still uses it.
     if (read.size === ids.length) void endOldSessions(read).catch(error =>
       logger?.warn?.("ao.old_sessions_failed",{message:publicText(error?.message||error,200)}));
-    return { ok:true, days:archive.days(), chats };
+    return { ok:true, days:archive.days(), idleDays:archive.idleDays(), chats };
+  }
+  /**
+   * Open chats with no activity for archive.idleDays() (default 7; 0 never) are archived, with no
+   * confirmation since Restore brings them back, so the project list stops loading their sessions.
+   * Returns the new lifecycle records by task id; the shared runs() response is left as it was.
+   */
+  async function archiveIdleChats(workspaceId,saved,chatTasks) {
+    const archivedNow=new Map();
+    const cutoff=archive.idleCutoff();
+    if (!cutoff) return archivedNow;
+    for (const taskId of chatTasks) {
+      const life=taskLifecycle(saved,taskId);
+      if (life.visibility !== "active") continue;
+      const followUps=goals.get(workspaceId,taskId)?.status === "active" || Boolean(wakeups.get(workspaceId,taskId))
+        || Boolean(loops.get(workspaceId,taskId)) || chatQueue.list(workspaceId,taskId).length > 0;
+      if (!idleChat(saved.runs.filter(run=>run.project_id===taskId),life,followUps,cutoff)) continue;
+      try {
+        const result=await lifecycleMutation(workspaceId,{operation:"set_visibility",task_id:taskId,expected_revision:life.revision,visibility:"archived"});
+        archive.archived(workspaceId,taskId);
+        archivedNow.set(taskId,result.lifecycle);
+        logger?.info?.("ao.idle_chat_archived",{days:archive.idleDays()});
+      } catch (error) {
+        logger?.warn?.("ao.idle_chat_archive_failed",{message:publicText(error?.message||error,200)});
+      }
+    }
+    return archivedNow;
+  }
+  /**
+   * Whether an open chat has been idle long enough to archive by itself. `chatRuns` are its runs,
+   * oldest first (each card's receipt has started_at_ms / finished_at_ms, Unix ms; runSettled(run)
+   * says a run is over); `life` its lifecycle (schedule, reconfigure); `followUps` whether a goal,
+   * wake-up, loop or queued message will still continue it; `cutoffMs` the moment its last
+   * activity must be before.
+   */
+  function idleChat(chatRuns,life,followUps,cutoffMs) {
+    if (followUps || life.reconfigure?.length || ["scheduled","claimed"].includes(life.schedule?.state)) return false;
+    if (!chatRuns.length || !chatRuns.every(runSettled)) return false;
+    let last=0;
+    for (const run of chatRuns) for (const node of run.nodes ?? []) {
+      for (const receipt of [node.receipt, ...(node.history ?? [])]) {
+        last=Math.max(last,Number(receipt?.finished_at_ms ?? receipt?.started_at_ms) || 0);
+      }
+    }
+    // A chat with no times at all (runs from before cards kept them) is left alone: unknown is not idle.
+    return last > 0 && last < cutoffMs;
   }
   /**
    * Old AO sessions leave AO's board on the archive's clock (archive.days(); 0 keeps them). The
@@ -6759,7 +6806,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "delete_task": return visibilityAction(args, "deleted");
       case "restore_task": return visibilityAction(args, "active");
       case "archived_chats": return archivedChats(args);
-      case "archive_settings": return { ok: true, days: args?.days === undefined ? archive.days() : archive.setDays(args.days) };
+      case "archive_settings": return { ok: true,
+        days: args?.days === undefined ? archive.days() : archive.setDays(args.days),
+        idleDays: args?.idleDays === undefined ? archive.idleDays() : archive.setIdleDays(args.idleDays) };
       case "control_run": return controlRun(args);
       case "run_status": return runStatus(args);
       case "approve_harness": return approveAoHarness(args);
