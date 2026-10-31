@@ -10,7 +10,9 @@ use tokio::process::Command;
 use std::sync::Arc;
 
 use crate::tools::context::ToolContext;
-use crate::tools::session::{ExecSession, SessionStore, COMPLETED_COMMAND_RETENTION_SECONDS};
+use crate::tools::session::{
+    ExecSession, SessionStore, COMMAND_BUFFER_BYTES, COMPLETED_COMMAND_RETENTION_SECONDS,
+};
 use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
 pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -51,7 +53,11 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
         .unwrap_or("workspace")
         .to_string();
     validate_child_process_scope(ctx, args)?;
-    if let Some(result) = run_native_diagnostic(ctx, cmd, &workdir.path)? {
+    let max_output = args
+        .get("max_output_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(65_536) as usize;
+    if let Some(result) = run_native_diagnostic(ctx, cmd, &workdir.path, max_output)? {
         let mut result = result;
         if let Some(object) = result.as_object_mut() {
             object.insert(
@@ -70,10 +76,6 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
         return Ok(tool_ok(result));
     }
     let timeout_ms = profile.timeout_ms;
-    let max_output = args
-        .get("max_output_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(65_536) as usize;
     let yield_ms = profile.yield_time_ms;
     let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
     let stdin_text = args.get("stdin").and_then(Value::as_str).unwrap_or("");
@@ -164,6 +166,7 @@ fn run_native_diagnostic(
     ctx: &ToolContext,
     cmd: &str,
     cwd: &Path,
+    max_output: usize,
 ) -> Result<Option<Value>, WorkspaceError> {
     let parts = crate::tools::policy::split_command(cmd)
         .map_err(|_| WorkspaceError::invalid_argument("Invalid command syntax"))?;
@@ -188,7 +191,16 @@ fn run_native_diagnostic(
         _ => None,
     };
 
-    Ok(stdout.map(|stdout| {
+    Ok(stdout.map(|mut stdout| {
+        let max_output = max_output.min(COMMAND_BUFFER_BYTES);
+        let stdout_truncated = stdout.len() > max_output;
+        if stdout_truncated {
+            let mut start = stdout.len() - max_output;
+            while !stdout.is_char_boundary(start) {
+                start += 1;
+            }
+            stdout = stdout.split_off(start);
+        }
         json!({
             "command": cmd,
             "resolved_cwd": cwd.display().to_string(),
@@ -199,7 +211,7 @@ fn run_native_diagnostic(
             "exit_code": 0,
             "stdout": stdout,
             "stderr": "",
-            "stdout_truncated": false,
+            "stdout_truncated": stdout_truncated,
             "stderr_truncated": false,
             "duration_ms": 0,
             "elapsed_ms": 0,
@@ -933,6 +945,58 @@ mod tests {
             std::path::Path::new(&resolved),
             entry.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn audit_native_directory_output_honors_the_requested_byte_limit() {
+        let workspace = tempdir().unwrap();
+        let harness = tempdir().unwrap();
+        std::fs::write(workspace.path().join("a.txt"), "a").unwrap();
+        std::fs::write(workspace.path().join("b.txt"), "b").unwrap();
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .unwrap();
+        for command in ["ls", "dir"] {
+            let result = call_tool(
+                &ctx,
+                "exec_command",
+                &json!({"cmd": command, "max_output_bytes": 7}),
+            );
+            assert_eq!(result["ok"], true, "{result}");
+            assert_eq!(result["stdout"], "\nb.txt\n", "{result}");
+            assert_eq!(result["stdout_truncated"], true, "{result}");
+            assert_eq!(result["stderr_truncated"], false, "{result}");
+            assert_eq!(result["child_process"], false, "{result}");
+        }
+    }
+
+    #[test]
+    fn audit_native_output_limits_preserve_utf8_at_zero_and_character_boundaries() {
+        let workspace = tempdir().unwrap();
+        let harness = tempdir().unwrap();
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .unwrap();
+        for (limit, expected) in [
+            (0, ""),
+            (1, "\n"),
+            (2, "z\n"),
+            (3, "z\n"),
+            (6, "😊z\n"),
+            (8, "é😊z\n"),
+            (9, "aé😊z\n"),
+        ] {
+            let result = call_tool(
+                &ctx,
+                "exec_command",
+                &json!({"cmd": "echo aé😊z", "max_output_bytes": limit}),
+            );
+            assert_eq!(result["ok"], true, "{result}");
+            let stdout = result["stdout"].as_str().unwrap();
+            assert_eq!(stdout, expected, "limit {limit}: {result}");
+            assert!(stdout.len() <= limit, "limit {limit}: {result}");
+            assert_eq!(result["stdout_truncated"], limit < 9, "{result}");
+        }
     }
 
     #[test]
