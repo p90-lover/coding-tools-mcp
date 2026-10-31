@@ -361,6 +361,19 @@ const MAX_SESSION_CONTEXTS: usize = 128;
 
 type AoHubMap = HashMap<(String, String, String), Arc<AoCodexHub>>;
 
+fn remove_ao_hub_if_current(
+    hubs: &mut AoHubMap,
+    key: &(String, String, String),
+    hub: &Arc<AoCodexHub>,
+) {
+    if hubs
+        .get(key)
+        .is_some_and(|current| Arc::ptr_eq(current, hub))
+    {
+        hubs.remove(key);
+    }
+}
+
 #[derive(Clone)]
 struct ServiceState {
     lifecycle: Lifecycle,
@@ -1264,6 +1277,27 @@ fn apply_workspace_policy_update(
 #[cfg(test)]
 mod workspace_auth_tests {
     use super::*;
+
+    #[test]
+    fn ao_hub_cleanup_preserves_replacement_owner() {
+        let key = ("workspace".into(), "run".into(), "node".into());
+        let other_key = ("workspace".into(), "run".into(), "other-node".into());
+        let original = Arc::new(AoCodexHub::default());
+        let replacement = Arc::new(AoCodexHub::default());
+        let other = Arc::new(AoCodexHub::default());
+        let mut hubs = AoHubMap::from([
+            (key.clone(), original.clone()),
+            (other_key.clone(), other.clone()),
+        ]);
+        hubs.insert(key.clone(), replacement.clone());
+
+        remove_ao_hub_if_current(&mut hubs, &key, &original);
+        assert!(Arc::ptr_eq(hubs.get(&key).unwrap(), &replacement));
+
+        remove_ao_hub_if_current(&mut hubs, &key, &replacement);
+        assert!(!hubs.contains_key(&key));
+        assert!(Arc::ptr_eq(hubs.get(&other_key).unwrap(), &other));
+    }
 
     #[test]
     fn ao_team_creation_accepts_explicit_and_legacy_team_selection() {
@@ -4711,7 +4745,7 @@ async fn ao_harness_connect(
         failure => {
             hub.disconnect();
             if let Ok(mut hubs) = state.ao_hubs.lock() {
-                hubs.remove(&key);
+                remove_ao_hub_if_current(&mut hubs, &key, &hub);
             }
             let detail = match failure {
                 Ok(Err(error)) => error,
@@ -5234,12 +5268,7 @@ async fn recover_ao_web_hub(
         .and_then(|value| value);
     if let Err(error) = result {
         if let Ok(mut hubs) = state.ao_hubs.lock() {
-            if hubs
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, &hub))
-            {
-                hubs.remove(&key);
-            }
+            remove_ao_hub_if_current(&mut hubs, &key, &hub);
         }
         return Err(error);
     }
