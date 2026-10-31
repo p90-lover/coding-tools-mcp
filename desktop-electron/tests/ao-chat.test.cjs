@@ -1927,3 +1927,122 @@ test("a message stamp saved in UTC shows in this computer's own time zone", () =
   }
   assert.equal(chat.localChatStamp("earlier"), "earlier", "a stamp in any other form is shown as saved");
 });
+
+function filePane(name) {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatWorkbench.tsx"), "utf8");
+  const file = ts.createSourceFile("ChatWorkbench.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const code = file.statements.filter(node => ts.isFunctionDeclaration(node) && [name, "parseDiff"].includes(node.name?.text))
+    .map(node => node.getText(file)).join("\n") + `\nexports.Pane = ${name};`;
+  const states = [], refs = [], effects = [], memos = [], queued = [], requests = [], afterUnmount = [];
+  let stateIndex, refIndex, effectIndex, memoIndex, dirty, mounted = true;
+  const props = { sessionId: "agent", workspaceId: "project" }, exports = {};
+  const changed = (before, after) => !before || before.length !== after.length || after.some((value, i) => !Object.is(value, before[i]));
+  const effect = (work, deps, phase) => { const index = effectIndex++, previous = effects[index];
+    if (changed(previous?.deps, deps)) queued.push({ phase, work: () => { previous?.cleanup?.(); effects[index] = { deps, cleanup: work() }; } }); };
+  const jsx = (type, props) => ({ type, props: props || {} });
+  vm.runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
+    exports, Error, Icon: "Icon", paneCall: (operation, input) => { const reply = delayedReply(); requests.push({ operation, input, ...reply }); return reply.promise; },
+    useState(initial) { const index = stateIndex++; if (!(index in states)) states[index] = typeof initial === "function" ? initial() : initial;
+      return [states[index], next => { if (!mounted) afterUnmount.push(index); const value = typeof next === "function" ? next(states[index]) : next;
+        if (!Object.is(states[index], value)) { states[index] = value; dirty = true; } }]; },
+    useRef: initial => refs[refIndex++] ??= { current: initial },
+    useEffect: (work, deps) => effect(work, deps, 1), useLayoutEffect: (work, deps) => effect(work, deps, 0),
+    useMemo(work, deps) { const index = memoIndex++; if (changed(memos[index]?.deps, deps)) memos[index] = { deps, value: work() }; return memos[index].value; },
+    require: () => ({ jsx, jsxs: jsx }),
+  });
+  const nodes = tree => !tree || typeof tree !== "object" ? [] : Array.isArray(tree) ? tree.flatMap(nodes) : [tree, ...nodes(tree.props?.children)];
+  const render = (next = {}) => {
+    Object.assign(props, next);
+    for (let pass = 0; pass < 10; pass++) {
+      dirty = false; stateIndex = refIndex = effectIndex = memoIndex = 0; const tree = exports.Pane(props);
+      for (const item of queued.splice(0).sort((a, b) => a.phase - b.phase)) item.work();
+      if (!dirty) return tree;
+    }
+    throw new Error("file pane hooks did not settle");
+  };
+  const findEntry = path => nodes(render()).find(node => node.type === "button" && (node.props.title === path || node.props.children?.includes?.(path)));
+  return { requests, nodes, render, findEntry, afterUnmount,
+    select(path) { const button = findEntry(path); assert.ok(button, path); button.props.onClick(); return render(); },
+    displayed: () => nodes(render()).find(node => node.type === "code")?.props.children,
+    errors: () => nodes(render()).filter(node => node.props.role === "alert").map(node => node.props.children),
+    refresh: () => nodes(render()).find(node => node.props["aria-label"] === "Refresh changes"),
+    unmount() { for (const item of effects) item?.cleanup?.(); mounted = false; },
+    async list() { render(); requests[0].resolve(name === "FilesPane" ? { entries: ["a.txt", "b.txt"].map(path => ({ path, name: path, type: "file" })) }
+      : { entries: ["a.txt", "b.txt"].map(path => ({ path, worktree_status: "?" })), diff: "" }); await new Promise(setImmediate); render(); },
+  };
+}
+
+test("file viewers keep the newest selection after older success or failure", async t => {
+  for (const pane of ["FilesPane", "ChangesPane"]) for (const outcome of ["resolve", "reject"]) await t.test(pane + " " + outcome, async () => {
+    const ui = filePane(pane); await ui.list(); ui.select("a.txt"); ui.select("b.txt");
+    const reads = ui.requests.filter(item => item.operation === "chat_file"); assert.equal(reads.length, 2);
+    reads[1].resolve({ content: "newest B" }); await new Promise(setImmediate); assert.equal(ui.displayed(), "b.txt");
+    reads[0][outcome](outcome === "resolve" ? { content: "late A" } : new Error("old A failed")); await new Promise(setImmediate);
+    assert.equal(ui.displayed(), "b.txt"); assert.deepEqual(ui.errors(), []); ui.unmount();
+  });
+});
+
+test("Files rereads the same path and reports only the current file error", async () => {
+  const ui = filePane("FilesPane"); await ui.list(); ui.select("a.txt");
+  ui.requests.at(-1).resolve({ content: "v1" }); await new Promise(setImmediate); assert.equal(ui.displayed(), "a.txt");
+  ui.select("a.txt"); const same = ui.requests.at(-1); assert.equal(same.operation, "chat_file"); same.resolve({ content: "v2" }); await new Promise(setImmediate);
+  assert.ok(ui.nodes(ui.render()).some(node => node.props.className === "cx-diff-text" && node.props.children === "v2"));
+  ui.select("b.txt"); ui.requests.at(-1).reject(new Error("current B failed")); await new Promise(setImmediate);
+  assert.deepEqual(ui.errors(), ["current B failed"]); ui.unmount();
+});
+
+test("file viewers reset ownership and cached rows on workspace/session change and unmount", async t => {
+  for (const pane of ["FilesPane", "ChangesPane"]) for (const boundary of ["workspaceId", "sessionId", "unmount"]) await t.test(pane + " " + boundary, async () => {
+    const ui = filePane(pane); await ui.list(); const oldButton = ui.findEntry("a.txt"); ui.select("a.txt"); const oldRead = ui.requests.at(-1);
+    if (boundary === "unmount") ui.unmount();
+    else {
+      ui.render({ [boundary]: "other" }); assert.equal(ui.displayed(), undefined); assert.equal(ui.findEntry("a.txt"), undefined);
+      const listing = ui.requests.at(-1); assert.equal(listing.input[boundary], "other");
+      listing.resolve(pane === "FilesPane" ? { entries: [{ name: "b.txt", path: "b.txt", type: "file" }] }
+        : { entries: [{ path: "b.txt", worktree_status: "?" }], diff: "" }); await new Promise(setImmediate);
+      const count = ui.requests.length; oldButton.props.onClick(); ui.render(); assert.equal(ui.requests.length, count, "a retained old-scope callback cannot read in either workspace");
+      ui.select("b.txt"); ui.requests.at(-1).resolve({ content: "current scope B" }); await new Promise(setImmediate); assert.equal(ui.displayed(), "b.txt");
+    }
+    oldRead.resolve({ content: "old scope A" }); await new Promise(setImmediate);
+    if (boundary === "unmount") assert.deepEqual(ui.afterUnmount, []);
+    else { assert.equal(ui.displayed(), "b.txt"); ui.unmount(); }
+  });
+});
+
+test("file/folder/list replies after unmount cannot update either file viewer", async t => {
+  for (const pane of ["FilesPane", "ChangesPane"]) for (const outcome of ["resolve", "reject"]) await t.test(pane + " " + outcome, async () => {
+    const ui = filePane(pane); ui.render(); ui.unmount();
+    ui.requests[0][outcome](outcome === "resolve" ? { entries: [], diff: "" } : new Error("late listing failure")); await new Promise(setImmediate);
+    assert.deepEqual(ui.afterUnmount, []);
+  });
+});
+
+test("Refresh rereads a selected untracked file even when the diff stays empty", async () => {
+  const ui = filePane("ChangesPane"); await ui.list(); ui.select("a.txt"); ui.requests.at(-1).resolve({ content: "v1" }); await new Promise(setImmediate);
+  ui.refresh().props.onClick(); ui.render(); ui.requests.at(-1).resolve({ entries: [{ path: "a.txt", worktree_status: "?" }], diff: "" }); await new Promise(setImmediate); ui.render();
+  const reads = ui.requests.filter(item => item.operation === "chat_file"); assert.equal(reads.length, 2);
+  reads[1].resolve({ content: "v2" }); await new Promise(setImmediate);
+  assert.ok(ui.nodes(ui.render()).some(node => node.props.className === "cx-diff-text" && node.props.children.includes("v2"))); ui.unmount();
+});
+
+test("only the latest Changes refresh can replace data, report errors or finish loading", async t => {
+  for (const outcome of ["resolve", "reject"]) await t.test(outcome, async () => {
+    const ui = filePane("ChangesPane"); await ui.list(); const refresh = ui.refresh(); refresh.props.onClick(); refresh.props.onClick(); ui.render();
+    const reads = ui.requests.filter(item => item.operation === "chat_changes"); assert.equal(reads.length, 3);
+    reads[1][outcome](outcome === "resolve" ? { branch: "old", entries: [], diff: "" } : new Error("old refresh failed")); await new Promise(setImmediate);
+    assert.equal(ui.refresh().props.disabled, true); assert.deepEqual(ui.errors(), []);
+    reads[2].resolve({ branch: "current", entries: [{ path: "b.txt", worktree_status: "?" }], diff: "" }); await new Promise(setImmediate);
+    assert.equal(ui.refresh().props.disabled, false); assert.ok(ui.nodes(ui.render()).some(node => node.props.className === "cx-changes-branch" && node.props.children === "current")); ui.unmount();
+  });
+});
+
+test("only the latest folder read can replace its rows or report its error", async t => {
+  for (const outcome of ["resolve", "reject"]) await t.test(outcome, async () => {
+    const ui = filePane("FilesPane"); ui.render(); ui.requests[0].resolve({ entries: [{ name: "folder", path: "folder", type: "directory" }] }); await new Promise(setImmediate);
+    ui.select("folder"); ui.select("folder"); ui.select("folder");
+    const reads = ui.requests.filter(item => item.input.path === "folder"); assert.equal(reads.length, 2);
+    reads[1].resolve({ entries: [{ name: "b.txt", path: "folder/b.txt", type: "file" }] }); await new Promise(setImmediate); ui.render();
+    reads[0][outcome](outcome === "resolve" ? { entries: [{ name: "a.txt", path: "folder/a.txt", type: "file" }] } : new Error("old folder failed")); await new Promise(setImmediate);
+    assert.ok(ui.findEntry("b.txt")); assert.equal(ui.findEntry("a.txt"), undefined); assert.deepEqual(ui.errors(), []); ui.unmount();
+  });
+});

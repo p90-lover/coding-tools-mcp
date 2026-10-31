@@ -956,15 +956,27 @@ function ChangesPane({ sessionId, workspaceId }: { sessionId: string; workspaceI
   const [selected, setSelected] = useState("");
   const [filter, setFilter] = useState("");
   const [fresh, setFresh] = useState<{ path: string; content: string } | null>(null);
+  const scope = useRef<{ sessionId: string; workspaceId?: string; load: number; selected: string } | null>(null);
   const load = () => {
+    const owner = scope.current;
+    if (!owner || owner.sessionId !== sessionId || owner.workspaceId !== workspaceId) return;
+    const request = ++owner.load;
     setLoading(true);
     setError("");
     void paneCall("chat_changes", { sessionId, ...(workspaceId ? { workspaceId } : {}) })
-      .then((result) => setData({ branch: String(result.branch ?? ""), entries: (result.entries as never[]) ?? [], diff: String(result.diff ?? ""), truncated: result.truncated === true }))
-      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
-      .finally(() => setLoading(false));
+      .then((result) => {
+        if (scope.current === owner && owner.load === request) setData({ branch: String(result.branch ?? ""), entries: (result.entries as never[]) ?? [], diff: String(result.diff ?? ""), truncated: result.truncated === true });
+      })
+      .catch((cause) => { if (scope.current === owner && owner.load === request) setError(cause instanceof Error ? cause.message : String(cause)); })
+      .finally(() => { if (scope.current === owner && owner.load === request) setLoading(false); });
   };
-  useEffect(load, [sessionId]);
+  useLayoutEffect(() => {
+    const owner = { sessionId, workspaceId, load: 0, selected: "" };
+    scope.current = owner;
+    setData(null); setError(""); setSelected(""); setFilter(""); setFresh(null);
+    load();
+    return () => { if (scope.current === owner) scope.current = null; };
+  }, [sessionId, workspaceId]); // eslint-disable-line react-hooks/exhaustive-deps
   const files = useMemo(() => parseDiff(data?.diff ?? ""), [data?.diff]);
   // New files git does not track yet have no diff; they are listed and read whole when chosen.
   const untracked = (data?.entries ?? []).filter((entry) => entry.worktree_status === "?" && !files.some((file) => file.path === entry.path));
@@ -973,11 +985,16 @@ function ChangesPane({ sessionId, workspaceId }: { sessionId: string; workspaceI
     .filter((item) => !filter || item.path.toLowerCase().includes(filter.toLowerCase()));
   const current = files.find((file) => file.path === selected) ?? (selected ? null : files[0] ?? null);
   const totals = files.reduce((sum, file) => ({ added: sum.added + file.added, removed: sum.removed + file.removed }), { added: 0, removed: 0 });
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const owner = scope.current;
     setFresh(null);
-    if (!selected || files.some((file) => file.path === selected)) return;
-    void paneCall("chat_file", { sessionId, ...(workspaceId ? { workspaceId } : {}), path: selected }).then((result) => setFresh({ path: selected, content: String(result.content ?? "") })).catch(() => undefined);
-  }, [selected, sessionId, files]);
+    if (!owner || owner.selected !== selected || !selected || files.some((file) => file.path === selected)) return;
+    let live = true;
+    void paneCall("chat_file", { sessionId, ...(workspaceId ? { workspaceId } : {}), path: selected }).then((result) => {
+      if (live && scope.current === owner && owner.selected === selected) setFresh({ path: selected, content: String(result.content ?? "") });
+    }).catch(() => undefined);
+    return () => { live = false; };
+  }, [selected, sessionId, workspaceId, files, data]);
   return <div className="cx-changes">
     <div className="cx-changes-bar">
       <span className="cx-changes-branch">{data?.branch || "worktree"}</span>
@@ -1006,7 +1023,11 @@ function ChangesPane({ sessionId, workspaceId }: { sessionId: string; workspaceI
       <div className="cx-changes-files">
         <input aria-label="Filter files" placeholder="Filter files…" value={filter} onChange={(event) => setFilter(event.target.value)} />
         <ul>{listed.map((item) => <li key={item.path}>
-          <button type="button" aria-pressed={(current?.path ?? fresh?.path) === item.path} title={item.path} onClick={() => setSelected(item.path)}>
+          <button type="button" aria-pressed={(current?.path ?? fresh?.path) === item.path} title={item.path} onClick={() => {
+            const owner = scope.current;
+            if (!owner || owner.sessionId !== sessionId || owner.workspaceId !== workspaceId) return;
+            owner.selected = item.path; setSelected(item.path);
+          }}>
             <span>{item.path}</span>{item.isNew ? <small className="cx-changes-add">new</small>
               : <small><span className="cx-changes-add">+{item.added}</span> <span className="cx-changes-del">−{item.removed}</span></small>}
           </button></li>)}</ul>
@@ -1024,22 +1045,39 @@ function FilesPane({ sessionId, workspaceId }: { sessionId: string; workspaceId?
   const [file, setFile] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
-  const load = (folder: string) => {
-    if (folders[folder]) return;
+  const scope = useRef<{ sessionId: string; workspaceId?: string; file: number; folders: Map<string, object> } | null>(null);
+  const load = (folder: string, force = false) => {
+    const owner = scope.current;
+    if (!owner || owner.sessionId !== sessionId || owner.workspaceId !== workspaceId || (!force && folders[folder])) return;
+    const request = {};
+    owner.folders.set(folder, request);
     void paneCall("chat_files", { sessionId, ...(workspaceId ? { workspaceId } : {}), path: folder })
-      .then((result) => setFolders((current) => ({ ...current, [folder]: ((result.entries as FileEntry[]) ?? [])
-        .sort((left, right) => Number(right.type === "directory") - Number(left.type === "directory") || left.name.localeCompare(right.name)) })))
-      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+      .then((result) => {
+        if (scope.current === owner && owner.folders.get(folder) === request) setFolders((current) => ({ ...current, [folder]: ((result.entries as FileEntry[]) ?? [])
+          .sort((left, right) => Number(right.type === "directory") - Number(left.type === "directory") || left.name.localeCompare(right.name)) }));
+      })
+      .catch((cause) => { if (scope.current === owner && owner.folders.get(folder) === request) setError(cause instanceof Error ? cause.message : String(cause)); });
   };
-  useEffect(() => { load("."); }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    const owner = { sessionId, workspaceId, file: 0, folders: new Map<string, object>() };
+    scope.current = owner;
+    setFolders({}); setOpen(new Set(["."])); setFile(null); setFilter(""); setError("");
+    load(".", true);
+    return () => { if (scope.current === owner) scope.current = null; };
+  }, [sessionId, workspaceId]); // eslint-disable-line react-hooks/exhaustive-deps
   const toggle = (folder: string) => {
+    const owner = scope.current;
+    if (!owner || owner.sessionId !== sessionId || owner.workspaceId !== workspaceId) return;
     setOpen((current) => { const next = new Set(current); if (next.has(folder)) next.delete(folder); else { next.add(folder); load(folder); } return next; });
   };
   const view = (path: string) => {
+    const owner = scope.current;
+    if (!owner || owner.sessionId !== sessionId || owner.workspaceId !== workspaceId) return;
+    const request = ++owner.file;
     setError("");
     void paneCall("chat_file", { sessionId, ...(workspaceId ? { workspaceId } : {}), path })
-      .then((result) => setFile({ path, content: String(result.content ?? ""), truncated: result.truncated === true }))
-      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+      .then((result) => { if (scope.current === owner && owner.file === request) setFile({ path, content: String(result.content ?? ""), truncated: result.truncated === true }); })
+      .catch((cause) => { if (scope.current === owner && owner.file === request) setError(cause instanceof Error ? cause.message : String(cause)); });
   };
   const rows = (folder: string, depth: number): ReactElement[] => (folders[folder] ?? [])
     .filter((entry) => !filter || entry.type === "directory" || entry.name.toLowerCase().includes(filter.toLowerCase()))
