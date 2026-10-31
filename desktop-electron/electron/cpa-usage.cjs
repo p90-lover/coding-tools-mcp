@@ -42,6 +42,9 @@ const ENDED_TURN_CACHE_MS = 10 * 60_000;
 // A turn's records are read 500 at a time, up to 40 pages (20,000 model requests) per model.
 const TURN_PAGE_SIZE = 500;
 const TURN_RECORD_PAGES = 40;
+// Record reads in flight at once, for every turn together: opening a chat reads each ended turn's
+// foot, and 17 at once timed out together in a disk stall (2026-10-31). The rest wait their turn.
+const RECORD_CONCURRENCY = 3;
 
 const count = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0);
 const money = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
@@ -306,7 +309,20 @@ async function mapLimited(items, limit, fn) {
 
 function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = Date.now, logger = console } = {}) {
   const cache = new Map(); // range -> { at, value }
-  const pending = new Map(); // range -> Promise
+  const pending = new Map(); // range or turn key -> Promise
+  let recordReads = 0;
+  const recordQueue = [];
+
+  /** Runs one record read when fewer than RECORD_CONCURRENCY are in flight; a finished one hands its slot on. */
+  async function recordSlot(read) {
+    if (recordReads >= RECORD_CONCURRENCY) await new Promise((resolve) => recordQueue.push(resolve));
+    else recordReads += 1;
+    try { return await read(); }
+    finally {
+      const next = recordQueue.shift();
+      if (next) next(); else recordReads -= 1;
+    }
+  }
 
   function connection() {
     let value = null;
@@ -409,10 +425,10 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
     const items = [];
     const seen = new Set();
     for (let page = 1; page <= TURN_RECORD_PAGES; page += 1) {
-      const listing = await optional(target, `/cpa-helper/records?${new URLSearchParams({
+      const listing = await recordSlot(() => optional(target, `/cpa-helper/records?${new URLSearchParams({
         model: name, from: String(Math.floor(start)), ...(end ? { to: String(Math.ceil(end)) } : {}),
         page_size: String(TURN_PAGE_SIZE), page: String(page),
-      })}`);
+      })}`));
       if (!Array.isArray(listing?.items)) return page === 1 ? null : items;
       let fresh = 0;
       for (const item of listing.items) {
@@ -445,17 +461,23 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
     const key = `turn:${names.join("|")}:${start}:${end}`;
     const hit = cache.get(key);
     if (hit && now() - hit.at < (settled ? ENDED_TURN_CACHE_MS : TURN_CACHE_MS)) return hit.value;
-    const listings = await Promise.all(names.map((name) => turnRecords(target, name, start, end)));
-    const records = listings.flatMap((items) => items ?? []).filter((item) => !end || !(recordTime(item) > end));
-    const value = listings.some(Boolean)
-      ? { ok: true, available: true, ...summarizeRecords(records) }
-      : { ok: true, available: false };
-    cache.set(key, { at: now(), value });
-    for (const stale of cache.keys()) {
-      const { at } = cache.get(stale);
-      if (stale.startsWith("turn:") && now() - at > (stale.endsWith(":0") ? 60_000 : ENDED_TURN_CACHE_MS)) cache.delete(stale);
-    }
-    return value;
+    // The same turn asked again while it is read (its foot and the line under the chat box) shares the read.
+    if (pending.has(key)) return pending.get(key);
+    const read = (async () => {
+      const listings = await Promise.all(names.map((name) => turnRecords(target, name, start, end)));
+      const records = listings.flatMap((items) => items ?? []).filter((item) => !end || !(recordTime(item) > end));
+      const value = listings.some(Boolean)
+        ? { ok: true, available: true, ...summarizeRecords(records) }
+        : { ok: true, available: false };
+      cache.set(key, { at: now(), value });
+      for (const stale of cache.keys()) {
+        const { at } = cache.get(stale);
+        if (stale.startsWith("turn:") && now() - at > (stale.endsWith(":0") ? 60_000 : ENDED_TURN_CACHE_MS)) cache.delete(stale);
+      }
+      return value;
+    })().finally(() => pending.delete(key));
+    pending.set(key, read);
+    return read;
   }
 
   return Object.freeze({ read, turnStats });
