@@ -451,6 +451,26 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     });
   }
   /**
+   * Whether the chat host recorded for an AO session is known to be up: its record is there and its
+   * loopback address accepts a connection. A host deletes its record when its agent exits, so a
+   * missing record is not alive (unlike chatHostGone, which asks the opposite question). A probe
+   * that times out on a busy machine counts as alive: the card is checked again on the next read.
+   */
+  async function chatHostAlive(id) {
+    let address;
+    try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
+    catch { return false; }
+    const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
+    if (!match) return false;
+    return new Promise(resolve => {
+      const socket = net.connect({ host: "127.0.0.1", port: Number(match[1]) });
+      const settle = alive => { socket.destroy(); resolve(alive); };
+      socket.setTimeout(1500, () => settle(true));
+      socket.once("connect", () => settle(true));
+      socket.once("error", () => settle(false));
+    });
+  }
+  /**
    * How many chat hosts outlived the last app run: their recorded loopback address still accepts
    * a connection. Their agents keep working while AO is down, but a permission request or a turn
    * end waits for AO to reattach, and AO otherwise starts only when its panel is first shown.
@@ -1347,7 +1367,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const lastFailure = (Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(item => item.turnId === turn?.id && item.activityKind === "system" && item.detail?.event === "provider.failure"
           && typeof item.detail.text === "string" && item.detail.text.trim()).at(-1)?.detail.text.trim();
-      const deadAgent = agentGone && turn?.state === "running";
+      // A stopped controller alone is not proof: AO drops every controller when it shuts down (an
+      // app quit or update), while the chat hosts keep their agents and turns going for the next AO
+      // to reattach. Seen live 2026-10-31: three cards read "stopped mid-turn" at a quit and were
+      // retried, while two of the turns ran on, so each chat got a needless "you were interrupted"
+      // turn queued behind its own. An agent that really exited took its host with it.
+      const deadAgent = agentGone && turn?.state === "running" && !(await chatHostAlive(id));
       if (reconciled || deadAgent || ((settling || settled) && await chatHostGone(id))) {
         if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
         return {
@@ -1374,9 +1399,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const toolStarts = (Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(item => item.turnId === turn?.id && item.status === "running" && ["command", "file_change", "mcp_tool"].includes(item.activityKind))
         .map(item => Date.parse(item.createdAt ?? "")).filter(Number.isFinite);
+      // The same, for the whole session: a message queued behind a long turn (a restart's resume, a
+      // goal round) has no activity of its own until that turn ends. Judged alone it read as hung
+      // after 10 minutes, and the stall stop interrupted the session, killing the turn doing the
+      // work: "AO turn interrupted", then retries (2026-10-31, three Clash chats). The stop judges
+      // the session by these instead: its last sign of life and its tool calls in flight, any turn.
+      const sessionActivities = Array.isArray(conversation?.activities) ? conversation.activities : [];
+      const sessionStamps = [...turns.map(entry => entry?.startedAt),
+        ...sessionActivities.filter(item => !retryNotice(item)).map(item => item.updatedAt || item.createdAt),
+        ...(Array.isArray(conversation?.messages) ? conversation.messages : []).map(item => item.updatedAt || item.createdAt)]
+        .map(value => Date.parse(value ?? "")).filter(Number.isFinite);
+      const sessionTools = sessionActivities
+        .filter(item => ["running", "pending"].includes(item.status) && ["command", "file_change", "mcp_tool"].includes(item.activityKind))
+        .map(item => { const stated = Number(item.detail?.input?.timeout); return Number.isFinite(stated) && stated > 0 ? { timeoutMs: Math.min(stated, 24 * 3600_000) } : {}; });
       return {
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
         ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
+        ...(sessionStamps.length ? { sessionActivityAt: Math.max(...sessionStamps) } : {}),
+        sessionTools,
         ...(toolStarts.length ? { toolSince: Math.min(...toolStarts) } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         // No agent process behind this session (released while idle, or it exited): nothing runs,

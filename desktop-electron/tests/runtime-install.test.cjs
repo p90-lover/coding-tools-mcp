@@ -222,6 +222,33 @@ test("a launch after the runtime was hashed does not read its files again, and s
   }
 });
 
+test("a launch with a whole installed copy does not walk the packaged copy's files again", () => {
+  // Seen live 2026-10-31: each launch walked the runtime's 6,149 files three times on the main
+  // process, each stat up to a second on the busy hard disk; the packaged copy is only a source.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-source-walk-"));
+  const resourcesPath = runtimeFixture(root);
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  const source = path.join(resourcesPath, "runtime");
+  const originals = { lstatSync: fs.lstatSync, readdirSync: fs.readdirSync };
+  const touched = [];
+  try {
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    fs.lstatSync = function (file, ...rest) { if (String(file).startsWith(source)) touched.push(String(file)); return originals.lstatSync.call(this, file, ...rest); };
+    fs.readdirSync = function (file, ...rest) { if (String(file).startsWith(source)) touched.push(String(file)); return originals.readdirSync.call(this, file, ...rest); };
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), installed);
+    assert.deepEqual(touched, [], "only the packaged manifest is read");
+    // A damaged installed copy is still repaired from the packaged one, checked whole first.
+    Object.assign(fs, originals);
+    fs.rmSync(path.join(installed, "app", "cli.js"));
+    const repaired = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    assert.equal(fs.readFileSync(path.join(repaired, "app", "cli.js"), "utf8"), "cli");
+  } finally {
+    Object.assign(fs, originals);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("packaged runtime installation rejects a platform or version mismatch", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-mismatch-"));
   const resourcesPath = runtimeFixture(root, "0.1.0");

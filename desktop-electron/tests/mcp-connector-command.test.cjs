@@ -360,6 +360,39 @@ test("background commands coalesce, replace stale success and write only bounded
   assert(!JSON.stringify(completed).includes("DO_NOT_EXPORT"));
 });
 
+test("each MCP command is logged with its action and what asked for it, and its outcome", async t => {
+  // 2026-10-31: three failed attempts left no trace of who started them or whether any succeeded.
+  const parent = path.resolve(__dirname, "../../aiTemp");
+  fs.mkdirSync(parent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(parent, "mcp-command-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  let finish;
+  const command = createMcpConnectorCommand({
+    app: { getPath: () => root, getVersion: () => "test" },
+    logger: { info: (event, detail) => events.push({ event, ...detail }), warn: (event, detail) => events.push({ event, code: detail.code }) },
+    run: () => new Promise(resolve => { finish = resolve; }),
+  });
+  const first = command.request("create", "settings");
+  command.request("create", "command");
+  await assert.rejects(command.request("tunnel-settings", "command"), /busy with another action/);
+  await Promise.resolve();
+  finish({ created: false, name: "Coding Tools", href: "/plugins/x" });
+  await first;
+  finish = null;
+  const opened = command.request("tunnel-settings", "command");
+  await Promise.resolve();
+  finish({ opened: true, name: "Coding Tools" });
+  await opened;
+  assert.deepEqual(events, [
+    { event: "mcp.command_requested", action: "create", source: "settings" },
+    { event: "mcp.command_requested", action: "create", source: "command", joined: true },
+    { event: "mcp.command_completed", action: "create", source: "settings", created: false },
+    { event: "mcp.command_requested", action: "tunnel-settings", source: "command" },
+    { event: "mcp.command_completed", action: "tunnel-settings", source: "command" },
+  ]);
+});
+
 test("an initial receipt write failure rejects without starting or throwing through dispatch", async t => {
   const parent = path.resolve(__dirname, "../../aiTemp");
   fs.mkdirSync(parent, { recursive: true });

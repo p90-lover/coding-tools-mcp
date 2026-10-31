@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
 const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { conversationPatchScript } = require("./chatgpt-conversation-actions.cjs");
 const {
   runBrowserHelperOperation,
@@ -747,7 +747,7 @@ class BrowserHost {
     } finally {
       this.syncViewVisibility();
     }
-    this.writeDescriptor();
+    await this.writeDescriptor();
     this.logger.info("browser.initialized", { url: this.view.webContents.getURL() });
   }
 
@@ -868,7 +868,7 @@ class BrowserHost {
         this.restoreHome(leaving);
         this.unloadHome(failed);
         this.syncViewVisibility();
-        this.writeDescriptor();
+        void this.writeDescriptor();
         this.publishState?.(this.snapshot());
         throw error;
       }
@@ -877,11 +877,13 @@ class BrowserHost {
     this.parkedHomes.set(leaving.partition, leaving);
     this.trimParkedHomes();
     this.syncViewVisibility();
-    this.writeDescriptor();
+    // Shown at once; the switch settles once the bridge can read the new account's surface.
+    const published = this.writeDescriptor();
     this.publishState?.(this.snapshot());
     this.logger.info("browser.account_switched", { warm: Boolean(warm), parked: this.parkedHomes.size });
     // A parked page may have been signed out (or in) elsewhere meanwhile: check it again.
     if (warm && browserInteractionModeFor(this) === "automatic") void this.probeAuthentication().catch(() => {});
+    await published;
     return this.snapshot();
   }
 
@@ -971,7 +973,7 @@ class BrowserHost {
     for (const tab of tabs) this.removeTurnTab(tab, false);
     if (tabs.length) {
       this.publishState?.(this.snapshot());
-      this.writeDescriptor();
+      void this.writeDescriptor();
     }
     return tabs.length;
   }
@@ -1658,7 +1660,7 @@ class BrowserHost {
       void this.markOwnedSurface()
         .then(() => {
           if (this.initializationFailed) {
-            this.writeDescriptor();
+            void this.writeDescriptor();
             this.initializationFailed = false;
             this.initializationReady = Promise.resolve();
             this.logger.info("browser.initialization_recovered");
@@ -2189,7 +2191,7 @@ class BrowserHost {
     this.syncViewVisibility();
     if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
     this.publishState?.(this.snapshot());
-    this.writeDescriptor();
+    void this.writeDescriptor();
   }
 
   syncViewVisibility() {
@@ -2218,7 +2220,7 @@ class BrowserHost {
     this.syncViewVisibility();
     if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
     this.publishState?.(this.snapshot());
-    this.writeDescriptor();
+    void this.writeDescriptor();
     return this.snapshot();
   }
 
@@ -2302,7 +2304,7 @@ class BrowserHost {
     // Reached from a page's load-failure and crash events and from the turn-tab sweep timer, where a
     // throw (a full disk, the file held open) was uncaught. The next change writes it again.
     try {
-      this.writeDescriptor();
+      void this.writeDescriptor();
     } catch (error) {
       this.logger?.warn?.("browser.descriptor_write_failed", { message: error instanceof Error ? error.message : String(error) });
     }
@@ -2810,7 +2812,7 @@ class BrowserHost {
     this.showWindow();
     this.show();
     this.publishState?.(this.snapshot());
-    this.writeDescriptor();
+    void this.writeDescriptor();
     this.logger.info("browser.manual_turn_started", {
       tabId: tab.id,
       traceId,
@@ -3099,7 +3101,7 @@ class BrowserHost {
       if (reveal) this.show();
       else this.syncViewVisibility();
       this.publishState?.(this.snapshot());
-      this.writeDescriptor();
+      await this.writeDescriptor();
       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
       const conversationUrl = liveConversationUrl(existing);
       return {
@@ -3134,7 +3136,7 @@ class BrowserHost {
         if (reveal) this.show();
         else this.syncViewVisibility();
         this.publishState?.(this.snapshot());
-        this.writeDescriptor();
+        await this.writeDescriptor();
         this.logger.info("browser.tab_conversation_restored", { tabId: restored.id, traceId });
         return {
           surfaceId: restored.surfaceId, tabId: restored.id, reused: true,
@@ -3159,7 +3161,7 @@ class BrowserHost {
     else this.syncViewVisibility();
     this.publishState?.(this.snapshot());
     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
-    this.writeDescriptor();
+    await this.writeDescriptor();
     return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
   }
 
@@ -3250,7 +3252,7 @@ class BrowserHost {
       if (hideAfterTurn && !this.activeTraceId) this.hide();
       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
       this.publishState?.(this.snapshot());
-      this.writeDescriptor();
+      await this.writeDescriptor();
       return { cancelledByUser, ...(tab.conversationUrl ? { conversationUrl: tab.conversationUrl } : {}) };
     }
     // A browser tab represents an active Codex turn, not durable task history. The result already
@@ -3846,7 +3848,13 @@ class BrowserHost {
     }
   }
 
-  writeDescriptor() {
+  /**
+   * Publishes the descriptor the bridge reads, off the main thread: the synchronous write held every
+   * window 14.7 s at a turn's start and 4.8 s at a tab's close on the busy hard disk (2026-10-31).
+   * Resolves once it is in place; a caller that hands the bridge a surface awaits it. `now` writes it
+   * before returning, for the one caller that reads it straight back (launcherControlEnvironment).
+   */
+  writeDescriptor({ now = false } = {}) {
     const surfaceTargets = {};
     if (browserInteractionModeFor(this) === "automatic") {
       const surfaces = [[this.surfaceId, this.view?.webContents],
@@ -3876,12 +3884,35 @@ class BrowserHost {
     // main process (every window waits), seconds on the busy hard disk, so an unchanged descriptor
     // that this process already wrote stays as it is. Only this process writes or removes it.
     const unchanged = JSON.stringify(descriptor);
-    if (this.writtenDescriptor === unchanged) return;
+    if (this.writtenDescriptor === unchanged && !now) return this.descriptorWrites ?? Promise.resolve();
     descriptor.createdAt = new Date().toISOString();
-    writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+    const filePath = this.descriptorPath;
+    const text = `${JSON.stringify(descriptor, null, 2)}\n`;
+    if (now) {
+      writePrivateFileAtomic(filePath, text);
+      this.writtenDescriptor = unchanged;
+      // The app is back: the bridge no longer needs to wait out a restart.
+      try { fs.rmSync(restartMarkerPath(filePath), { force: true }); } catch {}
+      return Promise.resolve();
+    }
     this.writtenDescriptor = unchanged;
-    // The app is back: the bridge no longer needs to wait out a restart.
-    try { fs.rmSync(restartMarkerPath(this.descriptorPath), { force: true }); } catch {}
+    const generation = this.descriptorGeneration ?? 0;
+    const current = () => (this.descriptorGeneration ?? 0) === generation;
+    // One write at a time, in the order asked for. A write destroy() overtook removes what it wrote:
+    // the descriptor of a closed browser would send the bridge to a page that is gone.
+    const write = (this.descriptorWrites ?? Promise.resolve()).catch(() => {}).then(async () => {
+      if (!current()) return;
+      await writePrivateFileAtomicAsync(filePath, text);
+      if (!current()) await fs.promises.rm(filePath, { force: true }).catch(() => {});
+      else await fs.promises.rm(restartMarkerPath(filePath), { force: true }).catch(() => {});
+    });
+    this.descriptorWrites = write;
+    write.catch((error) => {
+      // Not on disk: the next call writes it again instead of taking it as unchanged.
+      if (this.writtenDescriptor === unchanged) this.writtenDescriptor = null;
+      this.logger?.warn?.("browser.descriptor_write_failed", { message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
+    });
+    return write;
   }
 
   async persistSession() {
@@ -3902,6 +3933,7 @@ class BrowserHost {
       if (current.pid === process.pid) fs.rmSync(this.descriptorPath, { force: true });
     } catch {}
     this.writtenDescriptor = null;
+    this.descriptorGeneration = (this.descriptorGeneration ?? 0) + 1;
     for (const [contents, handler] of this.shellZoomShortcutBindings) {
       if (!contents.isDestroyed()) contents.off("before-input-event", handler);
     }

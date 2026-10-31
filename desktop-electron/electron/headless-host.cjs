@@ -6,6 +6,7 @@ const http = require("node:http");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
+const { warmProgram } = require("./off-thread-run.cjs");
 
 const CONTROL_SCHEMA = 1;
 const CONTROL_PROTOCOL_VERSION = 1;
@@ -155,7 +156,8 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
 }
 
 class HeadlessHost {
-  constructor({ app, logger, sourceRoot, binaryRoot = null, aoWorktreesRoot = null }) {
+  constructor({ app, logger, sourceRoot, binaryRoot = null, aoWorktreesRoot = null, warm = warmProgram }) {
+    this.warm = warm;
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
@@ -222,6 +224,12 @@ class HeadlessHost {
     if (selection.ignoredOverride) {
       this.logger?.warn?.("headless.binary_override_ignored", { reason: "packaged app without CODING_TOOLS_DEV_HOME" });
     }
+    // spawn() holds every window until Windows has loaded the program and the antivirus has
+    // scanned it: 1.85 s for this start (launcher.main_blocked, 2026-10-31). The service's pipes
+    // and exit must live here, so the program is first run from a worker with an argument it
+    // refuses at once, and the start below finds it loaded and scanned.
+    await this.warm(executable, ["--version"]);
+    if (this.stopping) throw new Error("Local execution service is stopping");
     const requestedAppDataDir = path.join(this.app.getPath("userData"), "headless");
     fs.mkdirSync(requestedAppDataDir, { recursive: true, mode: 0o700 });
     const appDataDir = fs.realpathSync.native(requestedAppDataDir);
