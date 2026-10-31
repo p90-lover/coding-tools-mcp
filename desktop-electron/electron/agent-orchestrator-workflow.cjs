@@ -390,6 +390,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Background-run observations for MCP event incidents (stall, held, approval waits).
   // An observer failure must never affect the run it watches.
   function reportRun(workspaceId, runId, state, mission, attention = null) {
+    // A chat whose agent asked to move it (move_chat) moves once this turn has ended; what follows
+    // the turn (its goal, wake-up, loop, queue) then happens in the project it moved to.
+    if (pendingMoves.has(runKey(workspaceId, runId)) && (state.stopped || state.settled || ["finished", "failed"].includes(state.status))) {
+      void applyMove(workspaceId, runId).then(to => afterRun(to, runId, state, mission));
+    } else {
+      afterRun(workspaceId, runId, state, mission);
+    }
+    if (!onRunState) return;
+    try {
+      onRunState({
+        workspaceId, runId, status: state.status, detail: state.detail, stopped: state.stopped === true, attention,
+        ...(mission ? { fingerprint: (mission.nodes ?? []).map((node) => `${node.id}:${node.state}`).join(",") } : {}),
+      });
+    } catch { /* observational only */ }
+  }
+  function afterRun(workspaceId, runId, state, mission) {
     // A settled round of a chat with a goal decides what the goal does next. Only a round that has
     // ended (the drive loop marks it `settled`) or one the person stopped counts: "held" is also
     // reported mid-run, while a step waits out its automatic retry or a lost connection.
@@ -412,13 +428,6 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (mission && mission.execution_mode !== "single" && state.settled && !state.stopped && ["finished", "failed"].includes(state.status)) {
       void scoreAfterRun(workspaceId, runId, state.status).catch((error) => logger?.warn?.("ao.model_score_failed", { runId, message: publicText(error?.message || error, 200) }));
     }
-    if (!onRunState) return;
-    try {
-      onRunState({
-        workspaceId, runId, status: state.status, detail: state.detail, stopped: state.stopped === true, attention,
-        ...(mission ? { fingerprint: (mission.nodes ?? []).map((node) => `${node.id}:${node.state}`).join(",") } : {}),
-      });
-    } catch { /* observational only */ }
   }
   const dispatching = new Set();
   // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
@@ -5513,6 +5522,78 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, taskId: task, ...await redact() };
   }
 
+  // ---- Moving a chat to another project (move_chat, chat-agent-tools.cjs) ----
+
+  // runKey(workspace, run) -> { taskId, to, session }: a chat whose agent asked, during that run's
+  // turn, to move it. The move waits for the turn to end (applyMove from reportRun).
+  const pendingMoves = new Map();
+  /**
+   * move_chat from a chat agent: the Single chat whose run holds `session` moves to the project
+   * `targetWorkspaceId` once this turn ends. The headless service re-keys the chat with its
+   * messages and replies (ao_lifecycle::move_chat), and its goal, wake-up, loop and queue follow
+   * it. The next turn starts a fresh session in the new project's folder, handed this chat's
+   * earlier replies, as after a deleted message. The person confirmed the move before this call.
+   */
+  async function chatMoveTool({ workspaceId, session, targetWorkspaceId } = {}) {
+    const id = clean(workspaceId, 128), to = clean(targetWorkspaceId, 128), thread = clean(session, 256);
+    if (!to) throw new Error("Choose the project to move this chat to");
+    if (to === id) throw new Error("This chat is already in that project");
+    const { run, latest } = await sessionChat(id, thread, "move its chat");
+    if (latest?.id !== run.id) throw new Error("A newer message was sent in this chat since this turn began; answer it instead of moving the chat");
+    // A Team chat's cards come from its project's team; v1 moves Single chats only.
+    if (run.execution_mode !== "single") throw new Error("Only a Single chat can move to another project");
+    for (const [key, pending] of pendingMoves) if (pending.taskId === run.project_id && JSON.parse(key)[0] === id) pendingMoves.delete(key);
+    pendingMoves.set(runKey(id, run.id), { taskId: run.project_id, to, session: thread });
+    return { ok: true, taskId: run.project_id, to, deferred: true };
+  }
+  /**
+   * The move `run` asked for, once its turn ended: the chat moves in the headless service, then
+   * its stores here. Resolves to the project the chat is now in (`workspaceId` when there was no
+   * move, or it failed: the chat then stays and the failure is logged).
+   */
+  async function applyMove(workspaceId, runId) {
+    const pending = pendingMoves.get(runKey(workspaceId, runId));
+    if (!pending) return workspaceId;
+    pendingMoves.delete(runKey(workspaceId, runId));
+    const { taskId, to } = pending;
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        const { revision } = await board({ workspaceId });
+        const result = await requestHeadless("/api/v1/ao/update", {
+          workspace_id: workspaceId, confirm: true,
+          change: { operation: "move_chat", task_id: taskId, target_workspace_id: to, expected_board_revision: revision },
+        }, { localConfirmation: true }).catch(error => ({ ok: false, error }));
+        if (result?.ok === true) break;
+        // A board write between the read and the move: read once more.
+        if (attempt >= 1 || !/board changed/i.test(String(result?.error?.message ?? result?.error ?? ""))) {
+          throw new Error(publicText(result?.error?.message ?? result?.error ?? "The move was refused", 300));
+        }
+      }
+    } catch (error) {
+      logger?.warn?.("ao.chat_move_failed", { workspaceId, taskId, message: publicText(error?.message || error, 300) });
+      return workspaceId;
+    }
+    goals.move(workspaceId, to, taskId);
+    disarmWakeup(workspaceId, taskId);
+    if (wakeups.move(workspaceId, to, taskId)) armWakeup(to, taskId);
+    disarmLoop(workspaceId, taskId);
+    if (loops.move(workspaceId, to, taskId)) armLoop(to, taskId);
+    chatQueue.move(workspaceId, to, taskId);
+    // The agent's session works in the old folder: the next turn starts afresh in the new one.
+    chatEdits.restore(to, taskId, { ...(chatEdits.get(workspaceId, taskId) ?? { deletedRuns: [] }), fresh: true });
+    chatEdits.restore(workspaceId, taskId, null);
+    archive.forget(workspaceId, taskId);
+    waitingTitles.delete(titleKey(workspaceId, taskId));
+    handoffSummaries.delete(JSON.stringify([workspaceId, taskId]));
+    void Promise.resolve().then(() => harnessService().exitAgent?.(pending.session)).catch(() => undefined);
+    logger?.info?.("ao.chat_moved", { from: workspaceId, to, taskId });
+    try {
+      onRunState?.({ workspaceId, runId, status: "moved", moved: { from: workspaceId, to, taskId } });
+      onRunState?.({ workspaceId: to, runId, status: "moved", moved: { from: workspaceId, to, taskId } });
+    } catch { /* observational only */ }
+    return to;
+  }
+
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
 
   // A wake-up that could not fire (AO not ready yet after a restart) is tried again a while later.
@@ -6737,7 +6818,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

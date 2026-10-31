@@ -46,7 +46,7 @@ export function onWindowFocus(refresh: () => void): () => void {
  * mission's run state), so screens update without waiting for their next poll. Polls stay as the
  * fallback when the push is unavailable. Returns the unsubscribe.
  */
-export function onAoPush(refresh: (change: { sessions: string[]; runs: string[] }) => void): () => void {
+export function onAoPush(refresh: (change: { sessions: string[]; runs: string[]; moved?: { from: string; to: string; taskId: string }[] }) => void): () => void {
   const launcher = typeof window === "undefined" ? undefined : window.codexWebLauncher;
   return launcher?.onAoChanged?.(refresh) ?? (() => {});
 }

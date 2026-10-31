@@ -125,13 +125,15 @@ function createAoSessionEvents({ port, logger = console, get = http.get, setTime
 function createChangePulse(publish, { windowMs = 150, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   const sessions = new Set();
   const runs = new Set();
+  // Chats that moved to another project (move_chat): the renderer follows an open one.
+  const moved = new Map();
   let timer = null;
   let lastAt = -Infinity;
   function flush() {
     timer = null; lastAt = now();
-    if (!sessions.size && !runs.size) return;
-    const payload = { sessions: [...sessions], runs: [...runs] };
-    sessions.clear(); runs.clear();
+    if (!sessions.size && !runs.size && !moved.size) return;
+    const payload = { sessions: [...sessions], runs: [...runs], ...(moved.size ? { moved: [...moved.values()] } : {}) };
+    sessions.clear(); runs.clear(); moved.clear();
     try { publish(payload); } catch { /* the window may be closing */ }
   }
   function schedule() {
@@ -143,7 +145,10 @@ function createChangePulse(publish, { windowMs = 150, now = Date.now, setTimer =
   return {
     session(sessionId) { if (typeof sessionId === "string") { sessions.add(sessionId); schedule(); } },
     run(workspaceId, runId) { if (typeof runId === "string") { runs.add(`${workspaceId}:${runId}`); schedule(); } },
-    stop() { if (timer) clearTimer(timer); timer = null; sessions.clear(); runs.clear(); },
+    move(from, to, taskId) {
+      if ([from, to, taskId].every((value) => typeof value === "string" && value)) { moved.set(`${from}:${taskId}`, { from, to, taskId }); schedule(); }
+    },
+    stop() { if (timer) clearTimer(timer); timer = null; sessions.clear(); runs.clear(); moved.clear(); },
   };
 }
 

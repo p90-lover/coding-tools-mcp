@@ -37,7 +37,7 @@ function tempTree() {
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
-  chatTitles = null, redaction = null, computerControl = null } = {}) {
+  chatTitles = null, redaction = null, computerControl = null, chatMoves = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
@@ -47,7 +47,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
-    ...(computerControl ? { computerControl } : {}),
+    ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -1074,6 +1074,61 @@ test("rename_chat names the agent's own chat, is in its instructions, and is off
     const otherInit = await post(other.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, other.auth);
     assert.doesNotMatch(otherInit.body.result.instructions, /rename_chat/);
     assert.equal((await callTool(other.url, other.auth, "rename_chat", { title: "x" })).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
+test("moveTarget picks a project by id, name or folder, and says what is wrong otherwise", () => {
+  const projects = [
+    { id: "ws1", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" },
+    { id: "ws2", name: "Clash Macro", path: "G:\\Projects\\clash-of-clan-macro" },
+  ];
+  const { moveTarget } = require("../electron/chat-agent-tools.cjs");
+  assert.equal(moveTarget(projects, { project: "ws2" }, "win32").id, "ws2", "by id");
+  assert.equal(moveTarget(projects, { project: "clash macro" }, "win32").id, "ws2", "by name, any case");
+  assert.equal(moveTarget(projects, { path: "g:/projects/Clash-Of-Clan-Macro/" }, "win32").id, "ws2",
+    "a Windows folder matches whatever its case, slashes or trailing separator");
+  assert.throws(() => moveTarget(projects, { path: "G:\\Projects\\elsewhere" }, "win32"), /No project uses/);
+  assert.throws(() => moveTarget(projects, { path: "relative\\folder" }, "win32"), /absolute/);
+  assert.throws(() => moveTarget(projects, { project: "nope" }, "win32"), /No project/);
+  assert.throws(() => moveTarget(projects, {}, "win32"), /project.*path|path.*project/i);
+  assert.throws(() => moveTarget(projects, { project: "ws2", path: "G:\\Projects\\clash-of-clan-macro" }, "win32"), /one of/i);
+});
+
+test("move_chat asks the user, then moves the agent's own chat when its turn ends", async () => {
+  // The user: "add a allow model to move chat session and modify its path on chat tools".
+  const moves = [];
+  const chatMoves = {
+    projects: async () => [
+      { id: "ws1", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" },
+      { id: "ws2", name: "Clash Macro", path: "G:\\Projects\\clash-of-clan-macro" },
+    ],
+    move: async (request) => { moves.push(request); return { ok: true, taskId: "task-1", to: request.targetWorkspaceId, deferred: true }; },
+  };
+  let allow = true;
+  const { tools, confirmations } = fixture({ chatMoves, confirm: async () => allow });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "move-owner" });
+    assert.ok((await listed(client.url, client.auth)).includes("move_chat"));
+    const init = await post(client.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, client.auth);
+    assert.match(init.body.result.instructions, /move this chat to another project .*call move_chat/);
+    const moved = await callTool(client.url, client.auth, "move_chat", { project: "Clash Macro" });
+    assert.equal(moved.isError, undefined);
+    assert.match(moved.content[0].text, /moves to Clash Macro when this turn ends/);
+    assert.deepEqual(moves, [{ workspaceId: "ws1", session: "move-owner", targetWorkspaceId: "ws2" }],
+      "the chat and session are the server's own, never ones the agent names");
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0].message, /move its chat to another project/);
+    assert.match(JSON.stringify(confirmations[0].detail), /clash-of-clan-macro/, "the dialog shows where it goes");
+    allow = false;
+    const declined = await callTool(client.url, client.auth, "move_chat", { project: "ws2" });
+    assert.equal(declined.isError, true);
+    assert.match(declined.content[0].text, /did not allow/);
+    assert.equal((await callTool(client.url, client.auth, "move_chat", { project: "coding-tools-mcp" })).isError, true, "not to its own project");
+    assert.equal(moves.length, 1);
+    const other = await session(plain.tools, { id: "no-move" });
+    assert.equal((await listed(other.url, other.auth)).includes("move_chat"), false);
+    assert.equal((await callTool(other.url, other.auth, "move_chat", { project: "ws2" })).isError, true);
   } finally { await tools.close(); await plain.tools.close(); }
 });
 

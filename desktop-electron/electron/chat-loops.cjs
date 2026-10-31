@@ -97,6 +97,15 @@ function createLoopStore({ file = null, now = Date.now } = {}) {
       persist();
       return loop;
     },
+    /** A chat that moved to another project (move_chat) keeps its loop there. */
+    move(from, to, taskId) {
+      const saved = loops[key(from, taskId)];
+      if (!saved) return false;
+      delete loops[key(from, taskId)];
+      loops[key(to, taskId)] = { ...saved, workspaceId: to };
+      persist();
+      return true;
+    },
     /** Removes the chat's loop (only `id` when given, so a newer one is never cleared by mistake). */
     clear(workspaceId, taskId, id = null) {
       const loop = loops[key(workspaceId, taskId)];

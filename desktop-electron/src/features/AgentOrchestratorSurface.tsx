@@ -2206,6 +2206,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         switchToWorkspace(id);
       });
   };
+  // The open chat moved to another project (its agent's move_chat): follow it there.
+  useEffect(() => onAoPush((change) => {
+    const moved = change.moved?.find((entry) => entry.from === workspaceId && entry.taskId === chatTaskId);
+    if (moved) selectChatIn(moved.to, moved.taskId);
+  }), [workspaceId, chatTaskId, loadedWorkspace]);
   useEffect(() => {
     const pending = pendingSelect.current;
     if (!pending || pending.workspaceId !== workspaceId) return;
