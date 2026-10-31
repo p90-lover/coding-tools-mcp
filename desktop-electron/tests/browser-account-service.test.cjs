@@ -4,14 +4,26 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { createBrowserAccounts, FIRST_ACCOUNT_ID } = require("../electron/browser-accounts.cjs");
+const { createBrowserAccounts: openBrowserAccounts, FIRST_ACCOUNT_ID } = require("../electron/browser-accounts.cjs");
 const { createBrowserAccountService } = require("../electron/browser-account-service.cjs");
+
+// Accounts save off the main thread: a test folder goes once every store opened in it is written.
+const opened = new Set();
+function createBrowserAccounts(options) {
+  const accounts = openBrowserAccounts(options);
+  opened.add(accounts);
+  return accounts;
+}
+const accountsSaved = () => Promise.all([...opened].map((accounts) => accounts.saved()));
 
 // Test files stay in the repo's aiTemp, never the system temp folder on C: (AGENTS.md).
 function tempRoot(t) {
   const root = path.join(__dirname, "..", "..", "aiTemp", "browser-account-service-tests", crypto.randomUUID());
   fs.mkdirSync(root, { recursive: true });
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(async () => {
+    await accountsSaved();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   return path.join(root, "browser-accounts");
 }
 

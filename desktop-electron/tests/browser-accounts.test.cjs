@@ -4,17 +4,28 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID, MAX_ACCOUNTS } = require("../electron/browser-accounts.cjs");
+const { createBrowserAccounts: openBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID, MAX_ACCOUNTS } = require("../electron/browser-accounts.cjs");
 const { browserAccountPartition, isBrowserAccountPartition } = require("../electron/profile.cjs");
 const { BrowserHost, makeTabRoom } = require("../electron/browser-host.cjs");
 
 const BASE = "persist:coding-tools-chatgpt";
 
+// Accounts save off the main thread: a test's folder goes once every store it opened is written.
+const opened = new Set();
+function createBrowserAccounts(options) {
+  const accounts = openBrowserAccounts(options);
+  opened.add(accounts);
+  return accounts;
+}
+
 // Test files stay in the repo's aiTemp, never the system temp folder on C: (AGENTS.md).
 function tempRoot(t) {
   const root = path.join(__dirname, "..", "..", "aiTemp", "browser-accounts-tests", crypto.randomUUID());
   fs.mkdirSync(root, { recursive: true });
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(async () => {
+    await Promise.all([...opened].map((accounts) => accounts.saved()));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   return path.join(root, "browser-accounts");
 }
 
@@ -25,7 +36,7 @@ test("the first account keeps the original partition, so an existing sign-in car
   assert.deepEqual(accounts.status().accounts.map(entry => entry.id), [FIRST_ACCOUNT_ID]);
 });
 
-test("each added account gets its own partition, and the choice survives a restart", (t) => {
+test("each added account gets its own partition, and the choice survives a restart", async (t) => {
   const dataRoot = tempRoot(t);
   const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
   const id = accounts.add();
@@ -35,10 +46,37 @@ test("each added account gets its own partition, and the choice survives a resta
   accounts.setActive(id);
   accounts.setEmail(id, "team@example.com");
 
+  await accounts.saved();
   const reopened = createBrowserAccounts({ dataRoot, profile: "production" });
   assert.equal(reopened.activeId(), id);
   assert.equal(reopened.activePartition(), `${BASE}-${id}`);
   assert.equal(reopened.status().accounts.find(entry => entry.id === id).email, "team@example.com");
+});
+
+test("changes save off the main thread: a burst of them lands as the last state", async (t) => {
+  const dataRoot = tempRoot(t);
+  const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
+  const second = accounts.add();
+  for (const maxTabs of [1, 2, 3, 4]) accounts.setAccountSettings(second, { maxTabs });
+  accounts.setActive(second);
+  assert.equal(accounts.activeId(), second, "the change holds at once, before the write");
+  await accounts.saved();
+  const saved = JSON.parse(fs.readFileSync(path.join(dataRoot, "accounts.json"), "utf8"));
+  assert.equal(saved.activeId, second);
+  assert.equal(saved.accounts.find((entry) => entry.id === second).maxTabs, 4);
+  assert.deepEqual(fs.readdirSync(dataRoot), ["accounts.json"], "no temporary file left behind");
+});
+
+test("a save that fails is logged, and the change still holds in memory", async (t) => {
+  const root = tempRoot(t);
+  fs.mkdirSync(path.dirname(root), { recursive: true });
+  fs.writeFileSync(root, "a file where the accounts folder goes");
+  const warnings = [];
+  const accounts = createBrowserAccounts({ dataRoot: root, profile: "production", logger: { warn: (event) => warnings.push(event) } });
+  const id = accounts.add();
+  await accounts.saved();
+  assert.ok(accounts.has(id));
+  assert.deepEqual(warnings, ["browser_accounts.save_failed"]);
 });
 
 test("the active account cannot be removed in place, and removal hands back the partition to erase", (t) => {
@@ -216,7 +254,7 @@ test("a switch to a partition outside the profile is refused", async () => {
   assert.equal(host.partition, BASE);
 });
 
-test("CPA Codex sign-ins become accounts once each; a removed one stays removed", (t) => {
+test("CPA Codex sign-ins become accounts once each; a removed one stays removed", async (t) => {
   const dataRoot = tempRoot(t);
   const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
   accounts.setEmail(FIRST_ACCOUNT_ID, "Me@Example.com");
@@ -234,6 +272,7 @@ test("CPA Codex sign-ins become accounts once each; a removed one stays removed"
 
   const pro = accounts.status().accounts.find((entry) => entry.label === "pro@example.com").id;
   accounts.remove(pro);
+  await accounts.saved();
   const reopened = createBrowserAccounts({ dataRoot, profile: "production" });
   assert.deepEqual(reopened.importOauthAccounts([{ email: "pro@example.com" }]), [], "removing an imported account sticks across restarts");
 });
@@ -247,7 +286,7 @@ test("CPA sign-ins beyond the account limit wait until there is room", (t) => {
   assert.deepEqual(accounts.importOauthAccounts(emails).length, 1, "the next one not yet seen takes the freed place");
 });
 
-test("account settings: a tab limit of 1 to 5, new sessions on or off, and where new sessions start", (t) => {
+test("account settings: a tab limit of 1 to 5, new sessions on or off, and where new sessions start", async (t) => {
   const dataRoot = tempRoot(t);
   const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
   const second = accounts.add();
@@ -261,6 +300,7 @@ test("account settings: a tab limit of 1 to 5, new sessions on or off, and where
   assert.throws(() => accounts.setSettings({ newSessions: "nobody" }), /New sessions start on/);
   assert.throws(() => accounts.setSettings({ keepFinishedTabsMinutes: 7 }), /Finished tabs stay open/);
 
+  await accounts.saved();
   const reopened = createBrowserAccounts({ dataRoot, profile: "production" });
   const saved = reopened.status().accounts.find(entry => entry.id === second);
   assert.equal(saved.maxTabs, 2);

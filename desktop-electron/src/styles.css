@@ -898,10 +898,6 @@ code {
   opacity: 0.45;
 }
 
-.browser-accounts .toolbar-text-button.is-danger {
-  color: var(--red-300);
-}
-
 .browser-loading-line {
   position: absolute;
   right: 0;

@@ -29,6 +29,7 @@ const {
 } = require("electron");
 const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
 const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
+const { codexThreadStats } = require("./codex-thread-stats.cjs");
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
@@ -220,7 +221,10 @@ const browserAccountService = createBrowserAccountService({
   threads: () => threadAccounts,
   lifecycleSyncFor: (accountId, logger) => lifecycleSyncFor(accountId, logger),
   afterSwitch: async (next, { wasVisible, stateStore }) => {
-    if (wasVisible) await next.reveal(stateStore.read().browserInteractionMode === "automatic");
+    const automatic = stateStore.read().browserInteractionMode === "automatic";
+    // The account switched to opens ChatGPT whether or not the Browser tab is showing.
+    if (wasVisible) await next.reveal(automatic);
+    else await next.openHomePage?.(automatic);
     send("launcher:browser-state", next.snapshot());
   },
 });
@@ -992,11 +996,12 @@ async function resolveThreadAccount(threadId, logger) {
   return { accountId, partition, chatLifecycleSync: lifecycleSyncFor(accountId, logger) };
 }
 
-// Codex thread titles from Codex's own index (one JSON line per rename; the last one wins).
-function codexThreadTitles() {
+// Codex thread titles from Codex's own index (one JSON line per rename; the last one wins). Read
+// off the main thread: the page asking for them refreshes while it is open.
+async function codexThreadTitles() {
   const titles = new Map();
   let text = "";
-  try { text = fs.readFileSync(path.join(LAUNCHER_PROFILE.codexHome, "session_index.jsonl"), "utf8"); } catch { return titles; }
+  try { text = await fs.promises.readFile(path.join(LAUNCHER_PROFILE.codexHome, "session_index.jsonl"), "utf8"); } catch { return titles; }
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
@@ -1008,17 +1013,29 @@ function codexThreadTitles() {
   return titles;
 }
 
-function codexThreadsStatus(logger) {
+// Each bound thread with what Codex's own index says of it: its tokens, model and effort, read in a
+// worker (codex-thread-stats.cjs); a rename in session_index.jsonl names it first.
+async function codexThreadsStatus(logger) {
   if (!threadAccounts) return { threads: [] };
-  const titles = codexThreadTitles();
+  const bound = threadAccounts.list();
+  const [titles, stats] = await Promise.all([
+    codexThreadTitles(),
+    codexThreadStats(LAUNCHER_PROFILE.codexHome, bound.map((entry) => entry.threadId), { logger }),
+  ]);
   return {
-    threads: threadAccounts.list().map((entry) => ({
-      ...entry,
-      title: titles.get(entry.threadId) ?? null,
-      running: Boolean(browserHost?.threadRunning?.(entry.threadId)),
-      chats: lifecycleSyncFor(entry.accountId, logger).entriesFor(entry.threadId)
-        .map((chat) => ({ url: chat.conversationUrl, archived: chat.remoteArchived })),
-    })),
+    threads: bound.map((entry) => {
+      const stat = stats.get(entry.threadId);
+      return {
+        ...entry,
+        title: titles.get(entry.threadId) ?? stat?.title ?? null,
+        tokensUsed: stat?.tokensUsed ?? null,
+        model: stat?.model ?? null,
+        effort: stat?.effort ?? null,
+        running: Boolean(browserHost?.threadRunning?.(entry.threadId)),
+        chats: lifecycleSyncFor(entry.accountId, logger).entriesFor(entry.threadId)
+          .map((chat) => ({ url: chat.conversationUrl, archived: chat.remoteArchived })),
+      };
+    }),
   };
 }
 
@@ -3392,9 +3409,12 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
-    // A goal change still being saved (off the main thread) lands before the app goes; a disk that
-    // hangs holds the quit 5 s at most, and the goals file keeps the change before.
-    await Promise.race([missionWorkflowRuntime?.goalsSaved(), new Promise((resolve) => setTimeout(resolve, 5_000).unref?.())]);
+    // A goal or browser-account change still being saved (off the main thread) lands before the app
+    // goes; a disk that hangs holds the quit 5 s at most, and each file keeps the change before.
+    await Promise.race([
+      Promise.all([missionWorkflowRuntime?.goalsSaved(), browserAccounts.saved()]),
+      new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
+    ]);
     const runtimeOperation = runtimeHost?.currentOperation();
     if (runtimeOperation) {
       throw new Error(`Wait for ${runtimeOperation} to finish before quitting Coding Tools`);
