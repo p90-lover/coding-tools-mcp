@@ -1,4 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
+import type { ComputerAllowedApp } from "../api/contracts";
+import { getCodingToolsClient } from "../api/client";
 import type { LauncherState, UpdateSettings, UpdateSettingValues, UpdateState } from "../types";
 import { ChatGlyph } from "./ChatMenu";
 import "./chat-settings.css";
@@ -11,12 +13,42 @@ import "./chat-settings.css";
  * sidebar's Settings row or Ctrl+, (pressed again, it closes, as in Codex).
  */
 
-type Section = "general" | "updates";
+type Section = "general" | "computer-use" | "updates";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "general", label: "General" },
+  { id: "computer-use", label: "Computer use" },
   { id: "updates", label: "Updates" },
 ];
+const SECTION_GLYPHS = { general: "gear", "computer-use": "monitor", updates: "update" } as const;
+
+/**
+ * Codex's "Always-allowed apps" (settings.computerUse.allowedApps): the apps a chat agent may use
+ * without asking, each with Remove; the agent asks again the next time it wants a removed one.
+ */
+function AllowedApps({ onError }: { onError: (message: string) => void }) {
+  const [apps, setApps] = useState<ComputerAllowedApp[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    try {
+      void getCodingToolsClient().computer.allowedApps().then((result) => { if (live) setApps(result.apps ?? []); }, () => { if (live) setFailed(true); });
+    } catch { setFailed(true); }
+    return () => { live = false; };
+  }, []);
+  const remove = (app: ComputerAllowedApp) => {
+    if (!window.confirm(`Remove “${app.name}” from always allowed apps?\n\nThe agent will ask to use “${app.name}” the next time it needs it.`)) return;
+    void getCodingToolsClient().computer.forgetApp({ app: app.app })
+      .then((result) => { if (result.ok && result.apps) setApps(result.apps); else onError(result.error || "Unable to save allowed apps"); },
+        () => onError("Unable to save allowed apps"));
+  };
+  if (failed) return <Row label="Unable to load allowed apps."><span /></Row>;
+  if (!apps) return <Row label="Loading allowed apps…"><span /></Row>;
+  if (!apps.length) return <Row label="None yet"><span /></Row>;
+  return <>{apps.map((app) => <Row key={app.app} label={app.name} description={app.app}>
+    <button type="button" className="cxs-button" aria-label={`Remove ${app.name}`} onClick={() => remove(app)}>Remove</button>
+  </Row>)}</>;
+}
 
 // The choices the minute settings offer; main (state.cjs) accepts any whole minute within the limits.
 const IDLE_CHOICES = [0, 5, 10, 15, 30, 60, 120];
@@ -107,7 +139,7 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
         </button>
         {SECTIONS.map((item) => <button key={item.id} type="button" aria-current={section === item.id ? "page" : undefined}
           className={section === item.id ? "cxs-nav-item is-active" : "cxs-nav-item"} onClick={() => setSection(item.id)}>
-          <span className="cxs-nav-icon"><ChatGlyph name={item.id === "general" ? "gear" : "update"} size={16} /></span>
+          <span className="cxs-nav-icon"><ChatGlyph name={SECTION_GLYPHS[item.id]} size={16} /></span>
           <span className="cxs-nav-label">{item.label}</span>
         </button>)}
       </nav>
@@ -128,6 +160,10 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
                 <Toggle label="Keep running when the window is closed" checked={state?.keepRunningOnClose === true} disabled={!state}
                   onChange={(next) => run(api?.setPreference("keepRunningOnClose", next).then(setState))} />
               </Row>
+            </Group>
+          </div> : section === "computer-use" ? <div className="cxs-sections">
+            <Group title="Always-allowed apps">
+              <AllowedApps onError={setError} />
             </Group>
           </div> : <div className="cxs-sections">
             <Group title="App updates">

@@ -3247,6 +3247,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * With auto-decide on it answers allow/deny itself; otherwise it only recommends, and "ask" always
    * goes to the person. The hard deny list wins over the model.
    */
+  /**
+   * Codex's auto-review of one of the app's own tool calls that sees or drives the screen (computer
+   * use, chat-agent-tools.cjs). Every such call is reviewed, whatever the chat's approval mode: by
+   * the chat's own approver when it has one, else by Codex's auto-review on the card's route.
+   * Resolves { action: "allow"|"deny"|"ask", reason }; a reviewer that cannot answer is "ask", and
+   * the call then waits for the person.
+   */
+  async function reviewToolCall({ workspaceId, session, tool, args, reason = "" } = {}) {
+    const id = clean(workspaceId, 128), thread = clean(session, 256);
+    let run;
+    try { ({ run } = await sessionChat(id, thread, "have its screen actions reviewed")); } catch (error) {
+      return { action: "ask", reason: publicText(error?.message || error, 200) };
+    }
+    const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
+    const node = (run.nodes || []).find(holds);
+    const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true } };
+    const approval = { kind: "tool", tool: `${APP_TOOL_PREFIX}${clean(tool, 80)}`, thread_id: thread,
+      toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
+    try {
+      return await askApprover({ approver, mission: run, approval, partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT });
+    } catch (error) {
+      logger?.warn?.("ao.tool_review_failed", { tool: approval.tool, message: publicText(error?.message || error, 200) });
+      return { action: "ask", reason: "The reviewer could not answer" };
+    }
+  }
   /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
   function cardApprover(mission, own) {
     const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
@@ -6906,7 +6931,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

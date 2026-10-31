@@ -24,18 +24,35 @@ export interface WorkspaceSummary {
   readonly actionsUseSharedSecrets: boolean | null;
 }
 
-/** A chat agent asking to control a window (electron/computer-control.cjs requests()). */
+/**
+ * A chat agent asking to use an app through computer use (electron/computer-control.cjs requests()):
+ * Codex's "Allow <agent> to use <app>?".
+ */
 export interface ComputerRequest {
   readonly id: string;
   readonly workspaceId: string;
-  /** The AO sessions of the chats that asked (several chats asking at once share one request). */
+  /** The AO session of the chat that asked. */
   readonly sessions: readonly string[];
-  readonly chat: string;
+  /** Who asks ("Claude Code"). */
+  readonly agent: string;
+  /** The app's name ("Google Chrome") and the window it asked for. */
+  readonly app: string;
+  readonly window: string;
   readonly project: string;
-  /** Screen capture is off for the project: starting control turns it on, with the person's tick. */
+  /** Screen capture is off for the project: allowing the app turns it on. */
   readonly captureOff: boolean;
-  readonly windows: readonly { readonly title: string; readonly pid: number }[];
-  readonly durations: readonly { readonly id: string; readonly label: string }[];
+  /** No app was ever allowed: Codex's first-use notice is shown. */
+  readonly firstUse: boolean;
+  /** The request was rated high risk. */
+  readonly elevated: boolean;
+  readonly persistModes: readonly ("always" | "conversation")[];
+}
+
+/** Settings > Computer use > Always-allowed apps. */
+export interface ComputerAllowedApp {
+  readonly app: string;
+  readonly name: string;
+  readonly at: number;
 }
 
 export interface PageRequest {
@@ -115,7 +132,9 @@ export interface CodingToolsApi {
     status(): Promise<JsonObject>;
     /** A chat's request for computer control, waiting for the person (a card in that chat). */
     requests(): Promise<{ requests: ComputerRequest[] }>;
-    answer(input: { id: string; cancel?: boolean; window?: number; duration?: string; capture?: boolean }): Promise<{ ok: boolean; error?: string }>;
+    answer(input: { id: string; decision: "always" | "conversation" | "deny" }): Promise<{ ok: boolean; error?: string }>;
+    allowedApps(): Promise<{ apps: ComputerAllowedApp[] }>;
+    forgetApp(input: { app: string }): Promise<{ ok: boolean; apps?: ComputerAllowedApp[]; error?: string }>;
     onRequests(listener: (requests: ComputerRequest[]) => void): () => void;
   };
   readonly tasks: {

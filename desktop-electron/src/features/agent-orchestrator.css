@@ -638,13 +638,15 @@ pre.cdx-command:focus-visible { outline: 2px solid var(--ao-blue, #2f6fdd); outl
 .cdx-badge { flex: none; padding: 0 6px; border-radius: 6px; background: color-mix(in srgb, var(--ao-blue, #2f6fdd) 12%, transparent); color: var(--ao-blue, #2f6fdd); font-size: 11px; line-height: 18px; }
 .cdx-input { width: 100%; min-height: 32px; padding: 6px 10px; border: 1px solid var(--cdx-line); border-radius: 12px; background: var(--color-bg-primary); color: var(--cdx-text); font: inherit; }
 .cdx-input:focus { border-color: color-mix(in srgb, var(--cdx-text) 35%, transparent); outline: none; }
-/* A chat asking to control a window (ComputerControlCard): a scrolling list of windows, the capture
-   tick, and the duration beside Deny and Start. */
-.cx-computer-windows { max-height: 220px; overflow-y: auto; }
-.cx-computer-windows .cdx-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cx-computer-check { display: flex; align-items: center; gap: 8px; color: var(--cdx-text); font-size: 13px; }
+/* A chat asking to use an app (ComputerControlCard), as Codex's app-approval card: the Computer Use
+   header (or Elevated Risk), the question, the notice, and Always allow on the left of Deny and
+   Allow this conversation. */
+.cx-computer-head { display: inline-flex; align-items: center; gap: 6px; }
+.cx-computer-head.is-elevated { color: var(--color-text-warning, #b26b00); font-weight: 500; }
+.cx-computer-mark { flex: none; }
+.cx-computer-subtitle { white-space: pre-line; }
 .cx-computer-error { color: var(--color-text-error); }
-.cdx-foot .cx-computer-duration { width: auto; min-height: 28px; margin-right: auto; padding: 2px 10px; }
+.cdx-foot .cx-computer-lead { margin-right: auto; }
 /* Codex's footer: px-3 pb-3 with gap-2, composer-size buttons. */
 .cdx-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 0 12px 12px; }
 .cdx-button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 999px;
