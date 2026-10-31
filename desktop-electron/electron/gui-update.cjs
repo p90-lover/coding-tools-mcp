@@ -147,6 +147,8 @@ function createGuiUpdateController({
       const scratch = path.join(root, "aiTemp");
       fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
       const stage = fs.mkdtempSync(path.join(scratch, "update-"));
+      let destination = null;
+      let keepDestination = false;
       try {
         const checksums = await deps.downloadText(available.checksumsUrl);
         const expected = expectedChecksum(checksums, available.assetName);
@@ -158,7 +160,7 @@ function createGuiUpdateController({
           shellVersion: currentVersion, shellHash, revision: available.revision,
         });
         const directory = `r${available.revision}-${crypto.randomBytes(6).toString("hex")}`;
-        const destination = path.join(root, "bundles", directory);
+        destination = path.join(root, "bundles", directory);
         const stagedRenderer = path.join(stage, "renderer");
         for (const file of files) {
           const output = path.join(stagedRenderer, file.path);
@@ -171,11 +173,12 @@ function createGuiUpdateController({
         current = { entry: path.join(destination, "index.html"), revision: available.revision };
         transition({ status: "installing", version });
         try {
+          keepDestination = true;
           await reloadRenderer(current.entry);
           writePrivateFileAtomic(pointer, JSON.stringify({ directory, revision: current.revision, shellHash }));
         } catch (error) {
           current = previous;
-          try { await reloadRenderer(previous.entry); } catch (rollback) {
+          try { await reloadRenderer(previous.entry); keepDestination = false; } catch (rollback) {
             logger?.warn("launcher.gui_rollback_load_failed", { message: rollback.message });
           }
           throw error;
@@ -183,10 +186,29 @@ function createGuiUpdateController({
         candidate = null;
         logger?.info("launcher.gui_updated", { revision: current.revision });
         transition({ status: "up-to-date" });
+        try {
+          const bundles = path.join(root, "bundles");
+          const kept = new Set([path.dirname(current.entry), path.dirname(previous.entry)]);
+          for (const entry of await fs.promises.readdir(bundles, { withFileTypes: true })) {
+            const target = path.join(bundles, entry.name);
+            if (entry.isDirectory() && /^r[1-9]\d*-[a-f0-9]{12}$/.test(entry.name) && !kept.has(target)) {
+              await fs.promises.rm(target, { recursive: true, force: true });
+            }
+          }
+        } catch (error) {
+          logger?.warn("launcher.gui_cleanup_failed", { message: error.message });
+        }
         return true;
       } catch (error) {
+        if (destination && !keepDestination) {
+          await fs.promises.rm(destination, { recursive: true, force: true }).catch(() => {});
+        }
         transition({ status: "available", version });
         throw error;
+      } finally {
+        await fs.promises.rm(stage, { recursive: true, force: true }).catch(error => {
+          logger?.warn("launcher.gui_cleanup_failed", { message: error.message });
+        });
       }
     })();
     try { return await pending; } finally { pending = null; }
