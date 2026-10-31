@@ -3737,6 +3737,66 @@ test("after a round without the goal achieved, the chat runs the next round with
   assert.equal(world.updates.length, updatesBefore + 1);
 });
 
+test("a goal whose next round finds its chat still busy tries again shortly, and stalls with a note if it stays busy", async () => {
+  // Seen live 2026-10-31: a goal judged not met at 12:11 left its next round unstarted (the chat
+  // still read busy) without a word, and nothing tried again until the window was opened at 15:17.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  let clock = 1_000_000;
+  const timers = [];
+  const { world, workflow } = await goalChat({ timers, now: () => clock });
+  // An older turn whose card still reads running, with nothing driving it, keeps the chat busy.
+  const stale = { id: "r0", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "zero", role: "planner", parents: [], state: "running", route, receipt: {} }] };
+  world.runs.push(stale, { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Fixed 3 of 5." } }] });
+  const before = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "r1", "finished");
+  let goal = await goalOf(workflow);
+  assert.equal(world.updates.length, before, "no round while the chat reads busy");
+  assert.deepEqual(goal.retry, { at: clock + 60_000, runId: "r1", check: false }, "it tries again in a minute");
+  assert.equal(goal.status, "active");
+  assert.equal(goal.round, 1);
+
+  // Still busy a minute later: it waits again, counting from the first try.
+  clock += 60_000;
+  timers.shift().callback();
+  await goalSettle(() => timers.length > 0);
+  assert.equal(world.updates.length, before);
+  assert.equal((await goalOf(workflow)).deferred.since, 1_000_000);
+
+  // The turn lets go: the next try starts the round.
+  stale.nodes[0].state = "finished";
+  clock += 60_000;
+  timers.shift().callback();
+  await goalSettle(() => world.updates.length > before);
+  assert.equal(world.updates.length, before + 1, "the next round started");
+  goal = await goalOf(workflow);
+  assert.equal(goal.round, 2);
+  assert.equal(goal.deferred, null);
+
+  // A chat that stays busy for half an hour stalls the goal with a note instead of trying forever.
+  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "two", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Fixed 4 of 5." } }] });
+  stale.nodes[0].state = "running";
+  const second = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "r2", "finished");
+  let tries = 0;
+  while (timers.length && tries < 40) {
+    tries += 1;
+    clock += 60_000;
+    timers.shift().callback();
+    // The last try stalls the goal and arms nothing; reading the goal waits for it.
+    await goalSettle(() => timers.length > 0 || tries === 30);
+  }
+  goal = await goalOf(workflow);
+  assert.equal(tries, 30, "one try a minute for half an hour");
+  assert.equal(world.updates.length, second, "no round ever started on the busy chat");
+  assert.equal(goal.status, "stalled");
+  assert.match(goal.note, /still shows a turn running/);
+  assert.equal(timers.length, 0, "nothing left to try");
+  workflow.dispose();
+});
+
 test("a goal check a model refuses is asked of the next model; all refusing waits to check again", async () => {
   // Seen live 2026-10-23: "The goal could not be checked (the evaluator returned HTTP 404)".
   const route = { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" };
