@@ -37,7 +37,7 @@ function tempTree() {
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
-  chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, previewEnabled = () => true,
+  chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, reviewCall = null, previewEnabled = () => true,
   registry = [{ id: "ws1", path: path.join(os.tmpdir(), "task") }, { id: "ws2", path: path.join(os.tmpdir(), "other") }] } = {}) {
   const calls = [];
   const asked = [];
@@ -48,7 +48,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
-    ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}),
+    ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}), ...(reviewCall ? { reviewCall } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -2051,7 +2051,8 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
     assert.deepEqual((await listed(opted.url, opted.auth)).filter((name) => !["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"].includes(name)),
       ["capture_screenshot", "list_windows", "computer_snapshot", "computer_action", "vision_status", "capture_process"]);
     const init = await post(opted.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, opted.auth);
-    assert.match(init.body.result.instructions, /confirms each screen capture/);
+    assert.match(init.body.result.instructions, /each call is reviewed before it runs/);
+    assert.match(init.body.result.instructions, /computer_select_window/);
 
     const shot = await callTool(opted.url, opted.auth, "capture_screenshot", { max_bytes: 4096 });
     assert.equal(shot.isError, false);
@@ -2070,21 +2071,17 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
     await callTool(opted.url, opted.auth, "computer_snapshot", { session_id: "lease" });
     assert.equal(calls.at(-1).body.tool, "computer_snapshot");
     assert.equal(confirmations.length, 4);
-    // Computer control needs the user's local enable (its lease, shared by the workspace) and,
-    // once per chat, the user's leave for this chat to use it.
+    // With no reviewer to answer, every control action is the person's, each time.
     approve = false;
-    assert.match((await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" })).content[0].text, /did not allow this chat/);
+    assert.match((await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" })).content[0].text, /declined computer_action/);
     assert.equal(calls.at(-1).body.tool, "computer_snapshot");
     approve = true;
     await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" });
     assert.equal(calls.at(-1).body.tool, "computer_action");
-    assert.match(confirmations.at(-1).detail, /every chat you allow here/);
+    assert.match(confirmations.at(-1).detail, /reviewer could not decide/);
     const asked = confirmations.length;
     await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" });
-    assert.equal(confirmations.length, asked, "asked once per chat, not per action");
-    const another = await session(tools, { id: "ao-3" });
-    await callTool(another.url, another.auth, "computer_action", { session_id: "lease" });
-    assert.equal(confirmations.length, asked + 1, "another chat is asked for itself");
+    assert.equal(confirmations.length, asked + 1, "asked per action, not once per chat");
 
     desktop = false;
     assert.match((await callTool(opted.url, opted.auth, "computer_action", {})).content[0].text, /Unknown tool/,
@@ -2183,58 +2180,115 @@ test("capture_process is a reviewed screen observation that returns the window a
   } finally { await tools.close(); tree.cleanup(); }
 });
 
-test("a chat asking for computer control while it is off is shown the window picker; picking a window allows that chat", async () => {
-  // Seen live: every chat's computer_status read "stopped" and the agent asked the person to "enable
-  // it in the app", which the Electron app had no way to do.
+test("every screen call goes to the chat's reviewer first, in any approval mode: allow runs it, deny refuses it, ask is the person's", async () => {
   const tree = tempTree();
-  let state = "stopped";
-  let answer = { started: true };
-  const picks = [];
-  let clock = 1_000_000;
-  const computerControl = {
-    status: async () => ({ state }),
-    pick: async (request) => { picks.push(request); if (answer.started) state = "active"; return answer; },
-  };
-  const { tools, calls, confirmations } = fixture({ root: tree.root, desktop: () => true, computerControl, now: () => clock });
+  let verdict = { action: "allow", reason: "" };
+  const reviewed = [];
+  const reviewCall = async (input) => { reviewed.push(input); return verdict; };
+  const { tools, calls, confirmations } = fixture({ root: tree.root, desktop: () => true, reviewCall, confirm: async () => true });
   try {
-    const chat = await session(tools, { id: "ao-1" });
-    assert.equal((await callTool(chat.url, chat.auth, "computer_status", {})).isError, false);
-    assert.equal(picks.length, 1, "the picker is shown");
-    assert.equal(picks[0].workspaceId, "ws1");
-    assert.equal((await callTool(chat.url, chat.auth, "computer_action", { session_id: "s", action: "click" })).isError, false);
-    assert.equal(confirmations.length, 0, "picking the window allowed this chat: no second question");
-    assert.equal(picks.length, 1, "control is on: no picker");
+    const chat = await session(tools, { id: "ao-1", approvalMode: "bypass-permissions" });
+    assert.equal((await callTool(chat.url, chat.auth, "capture_screenshot", {})).isError, false);
+    assert.deepEqual(reviewed.map(({ workspaceId, session: id, tool }) => [workspaceId, id, tool]), [["ws1", "ao-1", "capture_screenshot"]],
+      "reviewed even with permissions bypassed");
+    assert.equal(confirmations.length, 0, "the reviewer's allow is the approval");
+    assert.equal(calls.at(-1).body.tool, "capture_screenshot");
 
-    // Turned down: a control call is refused and reaches nothing; status reads on without asking again.
-    state = "stopped";
-    answer = { started: false, reason: "the user cancelled" };
-    const other = await session(tools, { id: "ao-2" });
-    const before = calls.filter((call) => call.endpoint === "/api/v1/tools/call").length;
-    const refused = await callTool(other.url, other.auth, "computer_action", { session_id: "s", action: "click" });
-    assert.equal(refused.isError, true);
-    assert.match(refused.content[0].text, /did not start computer control \(the user cancelled\)/);
-    assert.equal(calls.filter((call) => call.endpoint === "/api/v1/tools/call").length, before, "nothing reached the screen");
-    assert.equal((await callTool(other.url, other.auth, "computer_status", {})).isError, false);
-    assert.equal(picks.length, 2, "a declined chat's status reads do not ask again at once");
-    clock += 6 * 60_000;
-    await callTool(other.url, other.auth, "computer_status", {});
-    assert.equal(picks.length, 3, "after a while it may ask again");
+    verdict = { action: "deny", reason: "nothing in the task needs the screen" };
+    const before = calls.length;
+    const denied = await callTool(chat.url, chat.auth, "computer_action", { session_id: "lease", action: "click" });
+    assert.match(denied.content[0].text, /reviewer denied computer_action: nothing in the task needs the screen/);
+    assert.equal(calls.length, before, "a denied call never reaches the screen");
+    assert.equal(confirmations.length, 0);
+
+    verdict = { action: "ask", reason: "a password field" };
+    await callTool(chat.url, chat.auth, "computer_action", { session_id: "lease", action: "type" });
+    assert.equal(confirmations.length, 1, "what the reviewer cannot decide is the person's");
+    assert.match(confirmations[0].detail, /reviewer could not decide \(a password field\)/);
+
+    // Status, stop, route and vision see and touch nothing: never reviewed.
+    const count = reviewed.length;
+    for (const name of ["computer_status", "computer_stop", "computer_route", "vision_status"]) await callTool(chat.url, chat.auth, name, {});
+    assert.equal(reviewed.length, count);
   } finally { await tools.close(); tree.cleanup(); }
 });
 
-test("computer control is asked on a card in the chat, never in a window of its own that takes the focus", async () => {
+test("computer use asks to use the app, as Codex does: the agent names a window, the person allows its app, control starts on it", async () => {
+  const tree = tempTree();
+  const windows = [{ window_id: 7, pid: 70, title: "notes.txt - Notepad", app: "notepad.exe", appName: "Notepad" },
+    { window_id: 8, pid: 80, title: "Inbox - Google Chrome", app: "chrome.exe", appName: "Google Chrome" }];
+  let state = "stopped";
+  let controlled = null;
+  let answer = { allowed: true };
+  const asks = [];
+  const starts = [];
+  const allowed = new Set();
+  const computerControl = {
+    status: async () => ({ state, session_id: "lease-1" }),
+    targets: async () => windows,
+    controlled: () => controlled,
+    appName: (app) => windows.find((item) => item.app === app)?.appName ?? app,
+    appAllowed: (app, workspaceId, session) => allowed.has(`${workspaceId}:${session}:${app}`),
+    askApp: async (request) => {
+      asks.push(request);
+      if (answer.allowed) allowed.add(`${request.workspaceId}:${request.aoSession}:${request.target.app}`);
+      return answer;
+    },
+    start: async ({ target }) => { starts.push(target); state = "active"; controlled = target; return { state, session_id: "lease-1" }; },
+  };
+  const { tools, calls } = fixture({ root: tree.root, desktop: () => true, computerControl, reviewCall: async () => ({ action: "allow" }) });
+  try {
+    const chat = await session(tools, { agent: "claude-code", id: "ao-1" });
+    const listed = (await callTool(chat.url, chat.auth, "computer_list_windows", {})).structuredContent;
+    assert.deepEqual(listed.windows.map((item) => [item.window_id, item.app_name]), [[7, "Notepad"], [8, "Google Chrome"]],
+      "each window with its program, listed by the app itself");
+    assert.equal(calls.filter((call) => call.endpoint === "/api/v1/tools/call").length, 0);
+
+    const off = await callTool(chat.url, chat.auth, "computer_action", { session_id: "x", action: "click" });
+    assert.match(off.content[0].text, /Computer use is off\. Call computer_list_windows, then computer_select_window/);
+    assert.equal(asks.length, 0, "nothing is asked until the agent names a window");
+
+    const picked = await callTool(chat.url, chat.auth, "computer_select_window", { window_id: 7, pid: 70 });
+    assert.equal(picked.isError, false);
+    assert.equal(asks.length, 1);
+    assert.deepEqual([asks[0].agent, asks[0].target.app, asks[0].workspaceId, asks[0].aoSession], ["Claude Code", "notepad.exe", "ws1", "ao-1"]);
+    assert.deepEqual(starts.map((item) => item.window_id), [7], "control starts on the window it asked for");
+    assert.equal(picked.structuredContent.session_id, "lease-1");
+    assert.equal(picked.structuredContent.app, "Notepad");
+
+    assert.equal((await callTool(chat.url, chat.auth, "computer_action", { session_id: "lease-1", action: "click" })).isError, false);
+    assert.equal(calls.at(-1).body.tool, "computer_action");
+    assert.equal(asks.length, 1, "the allowed app is not asked again");
+
+    // Another chat using the same control is asked for itself.
+    const other = await session(tools, { agent: "codex", id: "ao-2" });
+    answer = { allowed: false, reason: "the user denied it" };
+    const before = calls.length;
+    const refused = await callTool(other.url, other.auth, "computer_action", { session_id: "lease-1", action: "click" });
+    assert.match(refused.content[0].text, /did not allow Codex to use Notepad \(the user denied it\)/);
+    assert.equal(calls.length, before, "nothing reached the screen");
+
+    const gone = await callTool(chat.url, chat.auth, "computer_select_window", { window_id: 99, pid: 1 });
+    assert.match(gone.content[0].text, /not open any more/);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("computer use asks on a card in the chat, Codex's own, and keeps Always allow across restarts", async () => {
   const { createComputerControl, barPage } = require("../electron/computer-control.cjs");
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "computer-approvals-"));
+  const approvalsFile = path.join(folder, "computer-app-approvals.json");
   const calls = [];
   const published = [];
   const windows = [];
   const request = async (endpoint, body) => {
     calls.push([endpoint, body]);
     if (endpoint === "/api/v1/computer/targets") {
-      return { targets: [{ window_id: 7, pid: 70, title: "<img src=x onerror=alert(1)>" }, { window_id: 8, pid: 1, title: "Coding Tools" }] };
+      return { targets: [{ window_id: 7, pid: 70, title: "<img src=x onerror=alert(1)>", app: "Chrome.exe" }, { window_id: 8, pid: 1, title: "Coding Tools", app: "coding tools.exe" }] };
     }
     if (endpoint === "/api/v1/workspaces") {
       return { workspaces: [{ id: "ws", name: "proj", screen_capture_enabled: false, permission_mode: "p", approval_mode: "a", tool_profile: "t" }] };
     }
+    if (endpoint === "/api/v1/computer/start") return { status: { state: "active", session_id: "lease-1" } };
     return {};
   };
   class FakeWindow {
@@ -2244,45 +2298,64 @@ test("computer control is asked on a card in the chat, never in a window of its 
     isDestroyed() { return false; }
     isVisible() { return true; }
   }
-  const control = createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1], onRequests: (list) => published.push(list),
+  const make = () => createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1], onRequests: (list) => published.push(list), approvalsFile,
     screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+  const control = make();
   const settle = async () => { for (let tick = 0; tick < 50 && !control.requests().length; tick += 1) await new Promise(setImmediate); };
   try {
-    const asked = control.pick({ workspaceId: "ws", aoSession: "s1", chat: "codex" });
+    const targets = await control.targets();
+    assert.deepEqual(targets.map((item) => [item.window_id, item.app, item.appName]), [[7, "chrome.exe", "Google Chrome"]], "never the app's own windows");
+    const asked = control.askApp({ workspaceId: "ws", aoSession: "s1", agent: "Claude Code", target: targets[0] });
     await settle();
     const [card] = control.requests();
     assert.equal(windows.length, 0, "no window comes up to ask");
-    assert.deepEqual(JSON.parse(JSON.stringify(card.windows)), [{ title: "<img src=x onerror=alert(1)>", pid: 70 }],
-      "the app's own windows are not offered; titles stay plain text for the card to show as text");
-    assert.equal(card.captureOff, true);
-    assert.deepEqual([...card.sessions], ["s1"]);
-    assert.equal(control.pick({ workspaceId: "ws", aoSession: "s2", chat: "other" }), asked, "a chat asking meanwhile shares the request");
-    assert.deepEqual([...control.requests()[0].sessions], ["s1", "s2"], "and its card shows in that chat too");
+    assert.deepEqual([card.agent, card.app, card.window, card.project, card.captureOff, card.firstUse], ["Claude Code", "Google Chrome", "<img src=x onerror=alert(1)>", "proj", true, true]);
+    assert.deepEqual([...card.persistModes], ["always", "conversation"]);
+    const again = control.askApp({ workspaceId: "ws", aoSession: "s1", target: targets[0] });
+    await new Promise(setImmediate);
+    assert.equal(control.requests().length, 1, "asking again while it waits shares the card");
 
-    assert.match((await control.answer({ id: card.id, window: 0 })).error, /screen capture/, "capture off needs the tick");
-    assert.equal((await control.answer({ id: "another", window: 0, capture: true })).ok, false, "a stale card starts nothing");
-    assert.deepEqual(await control.answer({ id: card.id, window: 0, duration: "300", capture: true }), { ok: true });
-    assert.deepEqual(await asked, { started: true });
-    assert.equal(calls.find(([endpoint]) => endpoint === "/api/v1/workspaces/policy")[1].screen_capture_enabled, true);
-    const start = calls.find(([endpoint]) => endpoint === "/api/v1/computer/start")[1];
-    assert.deepEqual([start.window_id, start.pid, start.duration_seconds], [7, 70, 300]);
+    assert.equal((await control.answer({ id: "another", decision: "always" })).ok, false, "a stale card allows nothing");
+    assert.deepEqual(await control.answer({ id: card.id, decision: "conversation" }), { ok: true });
+    assert.deepEqual(await asked, { allowed: true });
+    assert.deepEqual(await again, { allowed: true }, "and its answer");
+    assert.equal(calls.find(([endpoint]) => endpoint === "/api/v1/workspaces/policy")[1].screen_capture_enabled, true, "allowing turns capture on");
     assert.deepEqual(control.requests(), [], "the card goes once answered");
-    assert.deepEqual(published.at(-1), []);
+    assert.equal(control.appAllowed("chrome.exe", "ws", "s1"), true);
+    assert.equal(control.appAllowed("chrome.exe", "ws", "s2"), false, "this conversation only");
+
+    const status = await control.start({ workspaceId: "ws", target: targets[0] });
+    assert.equal(status.session_id, "lease-1");
+    const start = calls.find(([endpoint]) => endpoint === "/api/v1/computer/start")[1];
+    assert.deepEqual([start.window_id, start.pid, start.always_enabled], [7, 70, true], "until stopped on the control bar");
     assert.equal(windows.length, 1, "only the control bar is a window, shown without the focus (showInactive)");
+    assert.equal(control.controlled().app, "chrome.exe");
     await control.stop();
 
-    const declined = control.pick({ workspaceId: "ws", aoSession: "s1" });
+    const always = control.askApp({ workspaceId: "ws", aoSession: "s2", agent: "Codex", target: targets[0] });
     await settle();
-    assert.deepEqual(await control.answer({ id: control.requests()[0].id, cancel: true }), { ok: true });
-    assert.deepEqual(await declined, { started: false, reason: "the user cancelled" });
+    assert.equal(control.requests()[0].firstUse, false, "the notice shows until an app was allowed once");
+    assert.deepEqual(await control.answer({ id: control.requests()[0].id, decision: "always" }), { ok: true });
+    assert.deepEqual(await always, { allowed: true });
+
+    const restarted = make();
+    assert.deepEqual(await restarted.askApp({ workspaceId: "ws", aoSession: "s9", target: targets[0] }), { allowed: true }, "Always allow survives a restart");
+    assert.deepEqual(restarted.allowedApps().map((item) => [item.app, item.name]), [["chrome.exe", "Google Chrome"]]);
+    assert.equal(restarted.forgetApp("chrome.exe"), true);
+    assert.deepEqual(restarted.allowedApps(), []);
+
+    const denied = control.askApp({ workspaceId: "ws", aoSession: "s3", target: { ...targets[0], app: "notepad.exe" } });
+    await settle();
+    assert.deepEqual(await control.answer({ id: control.requests()[0].id, decision: "deny" }), { ok: true });
+    assert.deepEqual(await denied, { allowed: false, reason: "the user denied it" });
 
     const stopping = new AbortController();
-    const stopped = control.pick({ workspaceId: "ws", aoSession: "s1", signal: stopping.signal });
+    const stopped = control.askApp({ workspaceId: "ws", aoSession: "s4", target: { ...targets[0], app: "paint.exe" }, signal: stopping.signal });
     await settle();
     stopping.abort();
-    assert.deepEqual(await stopped, { started: false, reason: "the chat stopped" });
+    assert.deepEqual(await stopped, { allowed: false, reason: "the chat stopped" });
     assert.deepEqual(control.requests(), [], "a stopped chat's card goes");
-  } finally { control.dispose(); }
+  } finally { control.dispose(); fs.rmSync(folder, { recursive: true, force: true }); }
   assert.ok(!barPage({ title: "</span><script>" }).includes("</span><script>"));
 });
 
@@ -2317,10 +2390,8 @@ test("the control bar's Stop reaches the app on a data: page: it renames the pag
   const control = createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1],
     screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
   try {
-    const asked = control.pick({ workspaceId: "ws", aoSession: "s1" });
-    for (let tick = 0; tick < 50 && !control.requests().length; tick += 1) await new Promise(setImmediate);
-    assert.deepEqual(await control.answer({ id: control.requests()[0].id, window: 0, duration: "300" }), { ok: true });
-    await asked;
+    // The bar opens once the person has let the chat use the app (askApp's card, tested above).
+    await control.start({ workspaceId: "ws", target: { window_id: 7, pid: 70, title: "Calculator", app: "calc.exe" } });
     let prevented = false;
     handlers["page-title-updated"]({ preventDefault: () => { prevented = true; } }, document.title);
     await new Promise(setImmediate);

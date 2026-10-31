@@ -3395,6 +3395,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * With auto-decide on it answers allow/deny itself; otherwise it only recommends, and "ask" always
    * goes to the person. The hard deny list wins over the model.
    */
+  /**
+   * Codex's auto-review of one of the app's own tool calls that sees or drives the screen (computer
+   * use, chat-agent-tools.cjs). Every such call is reviewed, whatever the chat's approval mode: by
+   * the chat's own approver when it has one, else by Codex's auto-review on the card's route.
+   * Resolves { action: "allow"|"deny"|"ask", reason }; a reviewer that cannot answer is "ask", and
+   * the call then waits for the person.
+   */
+  async function reviewToolCall({ workspaceId, session, tool, args, reason = "" } = {}) {
+    const id = clean(workspaceId, 128), thread = clean(session, 256);
+    let run;
+    try { ({ run } = await sessionChat(id, thread, "have its screen actions reviewed")); } catch (error) {
+      return { action: "ask", reason: publicText(error?.message || error, 200) };
+    }
+    const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
+    const node = (run.nodes || []).find(holds);
+    const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true } };
+    const approval = { kind: "tool", tool: `${APP_TOOL_PREFIX}${clean(tool, 80)}`, thread_id: thread,
+      toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
+    try {
+      return await askApprover({ approver, mission: run, approval, partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT });
+    } catch (error) {
+      logger?.warn?.("ao.tool_review_failed", { tool: approval.tool, message: publicText(error?.message || error, 200) });
+      return { action: "ask", reason: "The reviewer could not answer" };
+    }
+  }
   /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
   function cardApprover(mission, own) {
     const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
@@ -5165,17 +5190,44 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // round message twice and ran two turns at once on one agent: one failed "restoration could not
   // be confirmed" and stalled the goal. One start at a time; the other caller leaves it to the first.
   const goalStarts = new Set();
+  // A next round that could not start because the chat still read busy tries again after
+  // GOAL_DEFER_MS, for up to GOAL_DEFER_LIMIT_MS, then stalls with a note. It used to give up
+  // without a word: seen live 2026-10-31, a goal judged not met at 12:11 started its next round at
+  // 15:17, when the window was opened again and its read ran the sweep.
+  const GOAL_DEFER_MS = 60_000;
+  const GOAL_DEFER_LIMIT_MS = 30 * 60_000;
+  function deferGoalRound(id, task, previous, reason) {
+    const goal = goals.get(id, task);
+    if (goal?.status !== "active" || !previous?.id) return;
+    const fresh = goal.deferred?.runId !== previous.id;
+    const since = fresh ? now() : goal.deferred.since;
+    if (now() - since >= GOAL_DEFER_LIMIT_MS) {
+      goals.update(id, task, { status: "stalled", deferred: null,
+        note: "The next round could not start: the chat still shows a turn running. Stop it, then /goal resume" });
+      logger?.warn?.("ao.goal_round_stalled", { task: task.slice(0, 8), round: goal.round, reason });
+      return;
+    }
+    if (fresh) logger?.info?.("ao.goal_round_deferred", { task: task.slice(0, 8), round: goal.round, reason });
+    goals.update(id, task, { deferred: { runId: previous.id, since } });
+    goalLater(id, task, GOAL_DEFER_MS, previous.id);
+  }
   async function continueGoal(id, task, goal, previous) {
     const key = JSON.stringify([id, task]);
     if (goalStarts.has(key)) return;
     goalStarts.add(key);
+    let busy = false;
     try {
-      // Read again inside the guard: a round another caller started meanwhile is the next round.
+      // Read again inside the guard: a round another caller started meanwhile is the next round, and
+      // its settle is judged; only a chat that still reads busy with no newer turn waits to retry.
       const saved = await runs({ workspaceId: id });
       const latest = saved.runs.filter(run => run.project_id === task).at(-1);
-      if (chatWorking(id, task, saved.runs) || (previous && latest && latest.id !== previous.id)) return;
+      if (previous && latest && latest.id !== previous.id) return;
+      if (chatWorking(id, task, saved.runs)) { busy = true; return; }
       await startGoalRound(id, task, goals.get(id, task) ?? goal, previous);
-    } finally { goalStarts.delete(key); }
+    } finally {
+      goalStarts.delete(key);
+      if (busy) deferGoalRound(id, task, previous, "chat_working");
+    }
   }
   async function startGoalRound(id, task, goal, previous) {
     const round = goal.round + 1;
@@ -5190,13 +5242,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Started in the background: a failed start settles the run, which marks the goal stalled.
       const result = await chatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true });
       if (result?.ok === false) { goals.update(id, task, { status: "stalled", note: String(result.reason || "The next round could not start") }); return; }
-      goals.update(id, task, { lastRunId: String(result.runId || ""), note: result.status === "failed" ? String(result.detail || "The next round could not start") : "" });
+      goals.update(id, task, { lastRunId: String(result.runId || ""), deferred: null, note: result.status === "failed" ? String(result.detail || "The next round could not start") : "" });
       if (result.status === "failed") goals.update(id, task, { status: "stalled" });
     } catch (error) {
       const message = String(error?.message || error);
       // Another turn started first (a wakeup, a queued message; see chatSend): that turn is the
-      // goal's to judge once it settles (goalAfterRun), so this round is not counted or stalled.
-      if (/still running/.test(message)) { goals.update(id, task, { round: goal.round }); return; }
+      // goal's to judge once it settles (goalAfterRun), so this round is not counted or stalled. A
+      // run that only reads busy (no newer turn) is tried again shortly (deferGoalRound).
+      if (/still running/.test(message)) {
+        goals.update(id, task, { round: goal.round });
+        deferGoalRound(id, task, previous, "still_running");
+        return;
+      }
       // A full chat says why it could not compact (the note was only "use /compact" before).
       goals.update(id, task, { status: "stalled", note: /chat is full/.test(message) ? `${message.slice(0, 240)} Use /compact, then /goal resume.` : message.slice(0, 300) });
     }
@@ -5252,12 +5309,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!response.ok) throw await modelCallFailure(response, `the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
         const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
         reviewerAnswered(model);
-        logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
+        logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round, task: String(mission?.project_id ?? "").slice(0, 8) });
         return { ...check, model };
       } catch (error) {
         failure = error;
         reviewerFailed(model, error);
-        logger?.warn?.("ao.goal_check_failed", { model, message: publicText(error?.message || error, 200) });
+        logger?.warn?.("ao.goal_check_failed", { model, task: String(mission?.project_id ?? "").slice(0, 8), message: publicText(error?.message || error, 200) });
       }
     }
     throw failure;
@@ -7172,7 +7229,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

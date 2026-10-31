@@ -6597,7 +6597,19 @@ async fn computer_targets(State(state): State<ServiceState>, headers: HeaderMap)
         Ok(lease) => lease,
         Err(response) => return *response,
     };
-    match tokio::task::spawn_blocking(tools::computer::list_local_targets).await {
+    // Each window names its program (`app`), which the app asks the person to allow by.
+    let listed = tokio::task::spawn_blocking(|| {
+        tools::computer::list_local_targets().map(|targets| {
+            targets
+                .into_iter()
+                .map(|target| {
+                    let app = tools::computer::local_target_app(target.pid);
+                    json!({"window_id": target.window_id, "pid": target.pid, "title": target.title, "app": app})
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    match listed.await {
         Ok(Ok(targets)) => Json(json!({"ok": true, "targets": targets})).into_response(),
         Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, "COMPUTER_TARGETS_FAILED", error.message()),
         Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "COMPUTER_TARGETS_FAILED", text_error(error)),

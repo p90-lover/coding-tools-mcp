@@ -12,6 +12,17 @@ try {
   snapshot = () => ipcRenderer.invoke("launcher:snapshot");
 }
 
+// Whether the app window is shown (not minimized or hidden), as main reports it. A minimized window's
+// page still reads "visible" here, so its pollers kept calling the apps host about 20 times a second;
+// main's window check refused each one and logged it as an error (about 1,200 a minute, 2026-11-01).
+// While the window is away the call is refused here, with main's own words, before any IPC.
+let windowShown = true;
+ipcRenderer.on("launcher:window-shown", (_event, shown) => { windowShown = shown !== false; });
+function callApps(input) {
+  if (!windowShown) return Promise.reject(new Error("Open the Coding Tools window (not minimized) to do this"));
+  return invokeContract(ipcRenderer, "apps.call", input);
+}
+
 function subscription(channel, listener) {
   const wrapped = (_event, value) => listener(value);
   ipcRenderer.on(channel, wrapped);
@@ -299,6 +310,8 @@ const codingToolsApi = Object.freeze({
     status: () => invokeContract(ipcRenderer, "computer.status"),
     requests: () => invokeContract(ipcRenderer, "computer.requests"),
     answer: (input) => invokeContract(ipcRenderer, "computer.answer", input),
+    allowedApps: () => invokeContract(ipcRenderer, "computer.allowedApps"),
+    forgetApp: (input) => invokeContract(ipcRenderer, "computer.forgetApp", input),
     onRequests: (listener) => subscription("launcher:computer-requests", listener),
   }),
   tasks: Object.freeze({
@@ -333,8 +346,8 @@ const codingToolsApi = Object.freeze({
   apps: Object.freeze({
     list: () => invokeContract(ipcRenderer, "apps.list"),
     catalog: () => invokeContract(ipcRenderer, "apps.catalog"),
-    call: (input) => invokeContract(ipcRenderer, "apps.call", input),
-    invoke: (input) => invokeContract(ipcRenderer, "apps.call", {
+    call: (input) => callApps(input),
+    invoke: (input) => callApps({
       moduleId: input.handle || input.moduleId,
       operation: input.operation,
       ...(typeof input.requestId === "string" && input.requestId

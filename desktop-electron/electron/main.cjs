@@ -29,6 +29,7 @@ const {
 } = require("electron");
 const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
 const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
+const { codexThreadStats } = require("./codex-thread-stats.cjs");
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
@@ -220,7 +221,10 @@ const browserAccountService = createBrowserAccountService({
   threads: () => threadAccounts,
   lifecycleSyncFor: (accountId, logger) => lifecycleSyncFor(accountId, logger),
   afterSwitch: async (next, { wasVisible, stateStore }) => {
-    if (wasVisible) await next.reveal(stateStore.read().browserInteractionMode === "automatic");
+    const automatic = stateStore.read().browserInteractionMode === "automatic";
+    // The account switched to opens ChatGPT whether or not the Browser tab is showing.
+    if (wasVisible) await next.reveal(automatic);
+    else await next.openHomePage?.(automatic);
     send("launcher:browser-state", next.snapshot());
   },
 });
@@ -992,11 +996,12 @@ async function resolveThreadAccount(threadId, logger) {
   return { accountId, partition, chatLifecycleSync: lifecycleSyncFor(accountId, logger) };
 }
 
-// Codex thread titles from Codex's own index (one JSON line per rename; the last one wins).
-function codexThreadTitles() {
+// Codex thread titles from Codex's own index (one JSON line per rename; the last one wins). Read
+// off the main thread: the page asking for them refreshes while it is open.
+async function codexThreadTitles() {
   const titles = new Map();
   let text = "";
-  try { text = fs.readFileSync(path.join(LAUNCHER_PROFILE.codexHome, "session_index.jsonl"), "utf8"); } catch { return titles; }
+  try { text = await fs.promises.readFile(path.join(LAUNCHER_PROFILE.codexHome, "session_index.jsonl"), "utf8"); } catch { return titles; }
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
@@ -1008,17 +1013,29 @@ function codexThreadTitles() {
   return titles;
 }
 
-function codexThreadsStatus(logger) {
+// Each bound thread with what Codex's own index says of it: its tokens, model and effort, read in a
+// worker (codex-thread-stats.cjs); a rename in session_index.jsonl names it first.
+async function codexThreadsStatus(logger) {
   if (!threadAccounts) return { threads: [] };
-  const titles = codexThreadTitles();
+  const bound = threadAccounts.list();
+  const [titles, stats] = await Promise.all([
+    codexThreadTitles(),
+    codexThreadStats(LAUNCHER_PROFILE.codexHome, bound.map((entry) => entry.threadId), { logger }),
+  ]);
   return {
-    threads: threadAccounts.list().map((entry) => ({
-      ...entry,
-      title: titles.get(entry.threadId) ?? null,
-      running: Boolean(browserHost?.threadRunning?.(entry.threadId)),
-      chats: lifecycleSyncFor(entry.accountId, logger).entriesFor(entry.threadId)
-        .map((chat) => ({ url: chat.conversationUrl, archived: chat.remoteArchived })),
-    })),
+    threads: bound.map((entry) => {
+      const stat = stats.get(entry.threadId);
+      return {
+        ...entry,
+        title: titles.get(entry.threadId) ?? stat?.title ?? null,
+        tokensUsed: stat?.tokensUsed ?? null,
+        model: stat?.model ?? null,
+        effort: stat?.effort ?? null,
+        running: Boolean(browserHost?.threadRunning?.(entry.threadId)),
+        chats: lifecycleSyncFor(entry.accountId, logger).entriesFor(entry.threadId)
+          .map((chat) => ({ url: chat.conversationUrl, archived: chat.remoteArchived })),
+      };
+    }),
   };
 }
 
@@ -1491,6 +1508,14 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       mainWindowReadyToShow = false;
     }
   });
+  // The page cannot tell a minimized window (it stays "visible"), so its preload is told: while the
+  // window is away, app calls it would refuse anyway stop there (preload.cjs) instead of flooding
+  // the log with refusals.
+  const sendShown = () => {
+    if (!window.isDestroyed()) window.webContents.send("launcher:window-shown", window.isVisible() && !window.isMinimized());
+  };
+  for (const event of ["minimize", "restore", "hide", "show"]) window.on(event, sendShown);
+  window.webContents.on("did-finish-load", sendShown);
   for (const event of ["enter-full-screen", "leave-full-screen", "maximize", "unmaximize"]) {
     window.on(event, () => send("launcher:window-state-changed", windowStateSnapshot(window)));
   }
@@ -1905,11 +1930,21 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, false);
     return { requests: computerControlService?.requests() ?? [] };
   });
-  // Its answer starts control of a window, so it must be the person's click in the focused window.
+  // Its answer allows an app, so it must be the person's click in the focused window.
   handle("coding-tools:computer:answer", (event, input) => {
     assertFocusedMainWindow(event, true);
     if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
     return computerControlService.answer(input);
+  });
+  // Settings > Computer use > Always-allowed apps.
+  handle("coding-tools:computer:allowed-apps", (event) => {
+    assertFocusedMainWindow(event, false);
+    return { apps: computerControlService?.allowedApps() ?? [] };
+  });
+  handle("coding-tools:computer:forget-app", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
+    return { ok: computerControlService.forgetApp(input.app), apps: computerControlService.allowedApps() };
   });
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
@@ -3455,9 +3490,12 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
-    // A goal change still being saved (off the main thread) lands before the app goes; a disk that
-    // hangs holds the quit 5 s at most, and the goals file keeps the change before.
-    await Promise.race([missionWorkflowRuntime?.goalsSaved(), new Promise((resolve) => setTimeout(resolve, 5_000).unref?.())]);
+    // A goal or browser-account change still being saved (off the main thread) lands before the app
+    // goes; a disk that hangs holds the quit 5 s at most, and each file keeps the change before.
+    await Promise.race([
+      Promise.all([missionWorkflowRuntime?.goalsSaved(), browserAccounts.saved()]),
+      new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
+    ]);
     const runtimeOperation = runtimeHost?.currentOperation();
     if (runtimeOperation) {
       throw new Error(`Wait for ${runtimeOperation} to finish before quitting Coding Tools`);
@@ -4076,6 +4114,8 @@ async function start() {
       const computerControl = createComputerControl({
         request: (endpoint, body, options) => headlessHost.request(endpoint, body, options),
         BrowserWindow, screen, logger,
+        // The apps the person allowed (Always allow), kept across restarts.
+        approvalsFile: path.join(app.getPath("userData"), "integrations", "computer-app-approvals.json"),
         // The app's own windows are never offered as a target.
         ownPids: () => app.getAppMetrics().map((metric) => metric.pid),
         onRequests: (requests) => {
@@ -4091,6 +4131,8 @@ async function start() {
         previews: chatPreviews,
         sandbox: chatSandbox,
         computerControl,
+        // Every call that sees or drives the screen goes to the chat's reviewer first (Codex's auto-review).
+        reviewCall: (input) => missionWorkflowRuntime?.reviewToolCall?.(input) ?? { action: "ask", reason: "" },
         // "Approve for me" runs the same routine project commands through the app's terminal as it
         // allows from the agent's own shell (the workflow's list), without a dialog each.
         // The workflow running now: these tools outlive the backend start that created them, and

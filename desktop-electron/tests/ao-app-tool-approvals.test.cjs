@@ -26,12 +26,13 @@ test("every tool the app serves is covered by Approve for me as it is added; onl
   }
   for (const name of CHAT_HISTORY_TOOLS) assert.match(routineAppTool(`mcp__coding-tools__${name}`), /read-only/, name);
   // Seen in the log: the reviewer answered "ask" for these; they start, type and see nothing.
-  for (const name of ["kill_command", "kill_session", "read_output", "check_exec_environment", "computer_status", "computer_stop", "vision_status"]) {
+  // computer_route only says which computer tool fits a task.
+  for (const name of ["kill_command", "kill_session", "read_output", "check_exec_environment", "computer_status", "computer_stop", "vision_status", "computer_route"]) {
     assert.ok(routineAppTool(`mcp__coding-tools__${name}`), name);
   }
   // A command, typed input, every screen observation and every control action stay reviewed.
   for (const name of ["exec_command", "write_stdin", "capture_screenshot", "capture_window", "capture_process", "list_windows",
-    "list_displays", "computer_list_windows", "computer_snapshot", "computer_action", "computer_sequence", "computer_route",
+    "list_displays", "computer_list_windows", "computer_snapshot", "computer_action", "computer_sequence",
     "computer_select_window", "computer_find_control", "computer_wait"]) {
     assert.equal(routineAppTool(`mcp__coding-tools__${name}`), null, `${name} is reviewed, not routine`);
   }

@@ -11,6 +11,7 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { browserPartitionForLauncherProfile, isBrowserAccountPartition } = require("./profile.cjs");
+const { cleanUserAgent } = require("./gpt-browser.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
@@ -76,10 +77,11 @@ const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 // A finished turn's tab (and its saved ChatGPT chat) is kept this long for the next round of the same
 // task, then let go and the chat deleted. 30 minutes left finished task chats in the user's ChatGPT
-// history for half an hour; a later round simply starts a new chat with the task's context.
-const RETAINED_TURN_TAB_TTL_MS = 10 * 60 * 1000;
+// history for half an hour; a later round simply starts a new chat with the task's context. The
+// time counts from the tab's last use: one being looked at does not run out.
+const RETAINED_TURN_TAB_TTL_MS = 5 * 60 * 1000;
 
-/** How long a finished turn's tab stays open for the next turn: the setting, or ten minutes. */
+/** How long a finished turn's tab stays open for the next turn: the setting, or five minutes. */
 function retainedTabTtl(host) {
   const ms = typeof host.retainedTabTtlMs === "function" ? host.retainedTabTtlMs() : null;
   return Number.isFinite(ms) && ms > 0 ? ms : RETAINED_TURN_TAB_TTL_MS;
@@ -207,6 +209,17 @@ function keepPageOutOfWindowFrame(contents) {
   contents.on("dom-ready", () => {
     if (!contents.isDestroyed()) void contents.insertCSS(PAGE_NO_DRAG_CSS, { cssOrigin: "user" }).catch(() => {});
   });
+}
+
+// Sign-in pages (Google in particular) refuse a browser that announces itself as Electron: GPT
+// Browser drops it and signs in; the Browser tab's accounts did not. The session's agent covers
+// pages made later (sign-in popups too); a page that already exists keeps its own, so it is set too.
+function signInFriendlyUserAgent(contents) {
+  const browserSession = contents?.session;
+  if (typeof browserSession?.getUserAgent !== "function") return;
+  const clean = cleanUserAgent(browserSession.getUserAgent());
+  if (clean !== browserSession.getUserAgent()) browserSession.setUserAgent(clean);
+  if (typeof contents.setUserAgent === "function") contents.setUserAgent(clean);
 }
 
 const CHATGPT_VIEWPORT_CSS = `
@@ -720,6 +733,7 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    signInFriendlyUserAgent(view.webContents);
     this.window.contentView.addChildView(view);
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
@@ -996,6 +1010,9 @@ class BrowserHost {
       id: tab.id,
       traceId: tab.traceId,
       ...(tab.accountId ? { accountId: tab.accountId } : {}),
+      // A Codex turn on an account the Browser tab is not showing: listed for ChatGPT browser
+      // management, kept out of the shown account's tab strip.
+      ...((tab.partition ?? this.partition) !== this.partition ? { otherAccount: true } : {}),
       ...(tab.nativeThreadId ? { threadId: tab.nativeThreadId } : {}),
       ...(conversationUrl ? { conversationUrl } : {}),
       title: tab.label,
@@ -1003,6 +1020,11 @@ class BrowserHost {
       loading: tab.loading === true,
       active: this.selectedTabId === tab.id,
       closable: true,
+      // For ChatGPT browser management: how long the tab ran, and when a finished one closes.
+      ...(tab.startedAt ? { startedAt: tab.startedAt } : {}),
+      ...(tab.finishedAt ? { finishedAt: tab.finishedAt } : {}),
+      ...(tab.status === "ready" && this.turnTabs?.get(tab.id) === tab && Number.isFinite(tab.lastHeartbeatAt)
+        ? { closesAt: tab.lastHeartbeatAt + retainedTabTtl(this) } : {}),
     };
     if (tab.interactionMode === "manual") {
       Object.assign(snapshot, {
@@ -1045,6 +1067,7 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    signInFriendlyUserAgent(view.webContents);
     const tab = {
       id,
       surfaceId,
@@ -1056,6 +1079,7 @@ class BrowserHost {
       conversationKey,
       connectorIdentity,
       connectorBound: false,
+      startedAt: Date.now(),
       helperPid,
       view,
       status: "running",
@@ -1115,9 +1139,7 @@ class BrowserHost {
     if (full) throw new Error(`ChatGPT Web already has ${full} browser tabs; close one before opening another`);
     if (!this.surfaceActive) throw new Error("Open the Browser before creating a tab");
     if (this.manualOperation) throw new Error(`Browser tabs cannot open during ${this.manualOperation}`);
-    if (browserInteractionModeFor(this) === "automatic" && this.state.authenticated !== true) {
-      throw new Error("Sign in to ChatGPT before opening another tab");
-    }
+    // A signed-out account opens tabs too, as in GPT Browser: the new tab is ChatGPT's own sign-in.
     const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values(), ...this.userTabs.values()]
         .some(tab => tab.ordinal === candidate));
@@ -1133,8 +1155,10 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    signInFriendlyUserAgent(view.webContents);
     const tab = {
       id: randomBytes(12).toString("base64url"),
+      startedAt: Date.now(),
       traceId: null,
       ordinal,
       label: `ChatGPT ${ordinal}`,
@@ -1185,9 +1209,11 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    signInFriendlyUserAgent(view.webContents);
     const tab = {
       id,
       surfaceId: null,
+      startedAt: Date.now(),
       traceId,
       // Kept: the Browser tab may show another account while this turn waits.
       partition: this.partition,
@@ -1947,7 +1973,10 @@ class BrowserHost {
       activeTabId: this.selectedTabId,
       tabs: this.turnTabs.size + (this.userTabs?.size ?? 0) > 0
         ? [
-            ...(this.selectedTabId === "home" || (this.userTabs?.size ?? 0) > 0 ? [homeTab] : []),
+            // Home is listed while chosen, beside tabs of the user's own, and whenever the chosen
+            // tab is a turn on another account (left out of the strip, which would show nothing).
+            ...(this.selectedTabId === "home" || (this.userTabs?.size ?? 0) > 0
+              || (selected && (selected.partition ?? this.partition) !== this.partition) ? [homeTab] : []),
             ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
             ...[...(this.userTabs?.values() ?? [])].map((tab) => this.tabSnapshot(tab)),
           ]
@@ -2048,6 +2077,8 @@ class BrowserHost {
         continue;
       }
       if (tab.status === "ready") {
+        // The tab on screen is in use, not idle: its time starts again once it is left.
+        if (this.visible && this.selectedTabId === tab.id) tab.lastHeartbeatAt = now;
         if (now - (tab.lastHeartbeatAt ?? 0) < retainedTabTtl(this)) continue;
         this.logger.info("browser.retained_tab_expired", { tabId: tab.id, traceId: tab.traceId });
         this.removeTurnTab(tab, false);
@@ -2559,11 +2590,18 @@ class BrowserHost {
   async reveal(inspectSession = true) {
     if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
     this.show();
-    if (!this.selectedTurnTab() && this.view.webContents.getURL() === IDLE_BROWSER_URL) {
-      await this.view.webContents.loadURL(newChatUrlFor(this));
-      if (inspectSession) await this.probeAuthentication();
-    }
+    await this.openHomePage(inspectSession);
     return this.snapshot();
+  }
+
+  /**
+   * Puts ChatGPT on the shown account's page while it still holds the blank idle document. An
+   * account switched to while the Browser tab was hidden stayed blank: only reveal loaded it.
+   */
+  async openHomePage(inspectSession = true) {
+    if (this.selectedTurnTab() || this.view.webContents.getURL() !== IDLE_BROWSER_URL) return;
+    await this.view.webContents.loadURL(newChatUrlFor(this));
+    if (inspectSession) await this.probeAuthentication();
   }
 
   hide() {
@@ -3209,6 +3247,7 @@ class BrowserHost {
     tab.message = status === "completed" ? "Task completed"
       : status === "superseded" ? "Continuing this Codex task" : message || `ChatGPT turn ${status}`;
     tab.loading = false;
+    tab.finishedAt = Date.now();
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
@@ -3254,6 +3293,22 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
       await this.writeDescriptor();
       return { cancelledByUser, ...(tab.conversationUrl ? { conversationUrl: tab.conversationUrl } : {}) };
+    }
+    // A finished tab that cannot carry the task on (its page left the conversation: a link was
+    // followed, or ChatGPT moved the chat) vanished the moment its turn ended. It now stays for the
+    // idle time like a kept tab, closing (and its chat let go) as one when that runs out, but no
+    // later turn can match it: it has no trace or conversation left, and the bridge no longer sees it.
+    if ((status === "completed" || status === "superseded") && retain && !retainedLocation && !tab.view.webContents.isDestroyed()) {
+      tab.traceId = null;
+      tab.conversationKey = null;
+      tab.retainedLocation = null;
+      tab.lingering = true;
+      tab.lastHeartbeatAt = Date.now();
+      if (hideAfterTurn && !this.activeTraceId) this.hide();
+      this.logger.info("browser.tab_lingering", { tabId: tab.id, traceId });
+      this.publishState?.(this.snapshot());
+      await this.writeDescriptor();
+      return { cancelledByUser };
     }
     // A browser tab represents an active Codex turn, not durable task history. The result already
     // lives in Codex, so release the terminal browser document without touching concurrent turns.
@@ -3858,7 +3913,7 @@ class BrowserHost {
     const surfaceTargets = {};
     if (browserInteractionModeFor(this) === "automatic") {
       const surfaces = [[this.surfaceId, this.view?.webContents],
-        ...[...this.turnTabs.values()].filter(tab => tab.interactionMode === "automatic")
+        ...[...this.turnTabs.values()].filter(tab => tab.interactionMode === "automatic" && !tab.lingering)
           .map(tab => [tab.surfaceId, tab.view.webContents])];
       for (const [surfaceId, contents] of surfaces) {
         if (!contents || contents.isDestroyed()) continue;

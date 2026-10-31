@@ -1482,7 +1482,17 @@ class RuntimeSupervisor {
           signalCode: null,
           managed: true,
         };
-        await this.waitForTunnelMcpTransport(config);
+        try {
+          await this.waitForTunnelMcpTransport(config);
+        } catch (error) {
+          // The tunnel reported ready (it outlived the app's quit); only finding its MCP endpoint
+          // timed out, on a machine still busy starting the app. Torn down here, MCP tools were gone
+          // until the watchdog started a new tunnel (seen live 2026-10-30 16:16, 2026-10-31 08:22).
+          // It is kept: the monitor finds the endpoint from the inventory and replaces the tunnel
+          // only on evidence that it failed.
+          if (!/health discovery timed out/.test(errorMessage(error))) throw error;
+          this.logger.warn("runtime.tunnel_adopted_unverified", { pid: existing.pid, detail: errorMessage(error).slice(0, 300) });
+        }
         this.startTunnelMonitor(config);
         this.logger.info("runtime.tunnel_adopted", { pid: existing.pid });
         return;
