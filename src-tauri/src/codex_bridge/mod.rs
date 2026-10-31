@@ -18,7 +18,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -34,6 +34,8 @@ const MAX_THREADS: usize = 4;
 const MAX_LEDGER: usize = 64;
 const LEDGER_RETENTION: Duration = Duration::from_secs(90 * 60);
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
+const INITIALIZATION_RETIRED: &str =
+    "Native connection stopped or was replaced; use a fresh local Connect";
 type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -632,6 +634,11 @@ fn stop_transition(
         ready.store(false, Ordering::SeqCst);
     }
     if let Ok(mut memory) = memory.lock() {
+        // A completion may have passed its live check before this stop.
+        // Serialize the final clear with mark_initialized's memory guard.
+        if first {
+            ready.store(false, Ordering::SeqCst);
+        }
         memory.record_stop_reason(reason);
         if first {
             for thread in memory.threads.values_mut() {
@@ -651,12 +658,41 @@ fn stop_transition(
     }
 }
 
+fn require_current_owner<T>(current: &Option<Arc<T>>, expected: &Arc<T>) -> Result<()> {
+    if current
+        .as_ref()
+        .is_none_or(|current| !Arc::ptr_eq(current, expected))
+    {
+        return Err(INITIALIZATION_RETIRED.into());
+    }
+    Ok(())
+}
+
+fn mark_initialized(
+    live: &AtomicBool,
+    ready: &AtomicBool,
+    memory: &Mutex<Memory>,
+    before_store: impl FnOnce(),
+) -> Result<()> {
+    let _memory = lock(memory)?;
+    if !live.load(Ordering::SeqCst) {
+        return Err(INITIALIZATION_RETIRED.into());
+    }
+    before_store();
+    ready.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 /// Owned by an actual authenticated listener, never keyed only by a filesystem path.
 #[derive(Default)]
 pub struct Hub {
     current: Mutex<Option<Arc<Bridge>>>,
     state_file: Option<PathBuf>,
     recovery: Mutex<()>,
+}
+#[must_use = "Initialize the admitted native connection with this ticket"]
+pub struct ConnectionTicket {
+    owner: Weak<Bridge>,
 }
 pub struct Ticket {
     bridge: Arc<Bridge>,
@@ -1041,7 +1077,7 @@ fn native_child_command(
 impl Hub {
     /// Local desktop admission only. Caller must hold the listener's current policy fence.
     /// Returns before the handshake; a later policy change can cancel the provisional child.
-    pub fn connect(&self, root: &Path, options: Connection) -> Result<()> {
+    pub fn connect(&self, root: &Path, options: Connection) -> Result<ConnectionTicket> {
         self.connect_inner(root, options, None, false, None, false)
     }
     pub fn connect_ao_with_cpa_key(
@@ -1049,7 +1085,7 @@ impl Hub {
         root: &Path,
         options: Connection,
         key: String,
-    ) -> Result<()> {
+    ) -> Result<ConnectionTicket> {
         if key.len() < 32 || key.len() > 512 || key.chars().any(char::is_control) {
             return Err("AO CPA proxy key is unavailable or invalid".into());
         }
@@ -1058,7 +1094,7 @@ impl Hub {
         }
         self.connect_inner(root, options, Some(key), false, None, false)
     }
-    pub fn connect_ao_web(&self, root: &Path, options: Connection) -> Result<()> {
+    pub fn connect_ao_web(&self, root: &Path, options: Connection) -> Result<ConnectionTicket> {
         self.connect_inner(root, options, None, true, None, false)
     }
     fn connect_inner(
@@ -1069,7 +1105,7 @@ impl Hub {
         ao_web: bool,
         recovery_deadline: Option<u64>,
         preserve_budget: bool,
-    ) -> Result<()> {
+    ) -> Result<ConnectionTicket> {
         if ao_web {
             let tier = options.model.strip_prefix("chatgpt-web/");
             if !tier.is_some_and(|tier| crate::integrations::ao::WEB_TIERS.contains(&tier))
@@ -1215,38 +1251,50 @@ impl Hub {
                 std::thread::sleep(Duration::from_secs(1));
             });
         }
-        Ok(())
+        Ok(ConnectionTicket {
+            owner: Arc::downgrade(&bridge),
+        })
     }
-    pub fn initialize(&self) -> Result<Value> {
-        let bridge = self.bridge()?;
-        let result = bridge.rpc(
-            "initialize",
-            json!({"clientInfo":{"name":"coding_tools_mcp",
-            "title":"Coding Tools MCP","version":env!("CARGO_PKG_VERSION")},
-            "capabilities":{"experimentalApi":true}}),
-        );
-        match result {
-            Ok(value) => {
-                if let Ok(mut memory) = bridge.memory.lock() {
-                    memory.native_identity =
-                        bounded(value["userAgent"].as_str().unwrap_or("initialized"), 300);
+    pub fn initialize(&self, ticket: ConnectionTicket) -> Result<Value> {
+        let bridge = ticket
+            .owner
+            .upgrade()
+            .ok_or_else(|| INITIALIZATION_RETIRED.to_string())?;
+        let result = (|| {
+            {
+                let current = lock(&self.current)?;
+                require_current_owner(&current, &bridge)?;
+                if !bridge.live.load(Ordering::SeqCst) {
+                    return Err(INITIALIZATION_RETIRED.into());
                 }
-                bridge.enqueue(json!({"method":"initialized","params":{}}))?;
-                if let Err(error) = bridge
-                    .restore_sessions()
-                    .and_then(|_| bridge.save_session())
-                {
-                    bridge.stop_if_live("native_session_restore_failed");
-                    return Err(error);
-                }
-                bridge.ready.store(true, Ordering::SeqCst);
-                self.status()
             }
-            Err(error) => {
-                bridge.stop_if_live("initialization_failed");
-                Err(error)
+            let value = bridge.rpc(
+                "initialize",
+                json!({"clientInfo":{"name":"coding_tools_mcp",
+                "title":"Coding Tools MCP","version":env!("CARGO_PKG_VERSION")},
+                "capabilities":{"experimentalApi":true}}),
+            )?;
+            if let Ok(mut memory) = bridge.memory.lock() {
+                memory.native_identity =
+                    bounded(value["userAgent"].as_str().unwrap_or("initialized"), 300);
             }
+            bridge.enqueue(json!({"method":"initialized","params":{}}))?;
+            if let Err(error) = bridge
+                .restore_sessions()
+                .and_then(|_| bridge.save_session())
+            {
+                bridge.stop_if_live("native_session_restore_failed");
+                return Err(error);
+            }
+            let current = lock(&self.current)?;
+            require_current_owner(&current, &bridge)?;
+            mark_initialized(&bridge.live, &bridge.ready, &bridge.memory, || {})?;
+            Self::status_for_current(&current)
+        })();
+        if result.is_err() {
+            bridge.stop_if_live("initialization_failed");
         }
+        result
     }
     fn bridge(&self) -> Result<Arc<Bridge>> {
         lock(&self.current)?
@@ -1255,6 +1303,9 @@ impl Hub {
     }
     pub fn status(&self) -> Result<Value> {
         let current = lock(&self.current)?;
+        Self::status_for_current(&current)
+    }
+    fn status_for_current(current: &Option<Arc<Bridge>>) -> Result<Value> {
         let Some(bridge) = current.as_ref() else {
             return Ok(
                 json!({"connected":false,"initializing":false,"model_usage_enabled":false,"command_execution_enabled":false,"command_runtime_sha256":native_command::COMMAND_RUNTIME_SHA256,"implementation":"native_app_server_opt_in",
@@ -2550,6 +2601,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn initialization_owner_cannot_follow_a_replacement_connection() {
+        let first = Arc::new(());
+        let waiting = Arc::downgrade(&first);
+        assert_eq!(Arc::strong_count(&first), 1);
+        let captured = waiting.upgrade().unwrap();
+        let mut current = Some(first.clone());
+        require_current_owner(&current, &captured).unwrap();
+        current = None;
+        assert!(require_current_owner(&current, &captured).is_err());
+        let replacement = Arc::new(());
+        current = Some(replacement.clone());
+        assert!(require_current_owner(&current, &captured).is_err());
+        require_current_owner(&current, &replacement).unwrap();
+        drop(first);
+        drop(captured);
+        assert!(waiting.upgrade().is_none());
+    }
+
+    #[test]
+    fn stopped_or_poisoned_initialization_cannot_become_ready() {
+        let live = AtomicBool::new(false);
+        let ready = AtomicBool::new(false);
+        let memory = Mutex::new(Memory::default());
+        assert_eq!(
+            mark_initialized(&live, &ready, &memory, || panic!("stopped callback")).unwrap_err(),
+            INITIALIZATION_RETIRED
+        );
+        assert!(!ready.load(Ordering::SeqCst));
+
+        let poisoned = Mutex::new(Memory::default());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison readiness fixture");
+        });
+        let live = AtomicBool::new(true);
+        assert!(mark_initialized(&live, &ready, &poisoned, || {}).is_err());
+        assert_eq!(
+            stop_transition(&live, &ready, &poisoned, "initialization_failed", true),
+            StopTransition::First
+        );
+        assert!(!live.load(Ordering::SeqCst));
+        assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stop_wins_over_an_initialization_ready_store_in_progress() {
+        let live = Arc::new(AtomicBool::new(true));
+        let ready = Arc::new(AtomicBool::new(false));
+        let memory = Arc::new(Mutex::new(Memory::default()));
+        let (before_store, paused) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let initializer = std::thread::spawn({
+            let live = live.clone();
+            let ready = ready.clone();
+            let memory = memory.clone();
+            move || {
+                mark_initialized(&live, &ready, &memory, || {
+                    before_store.send(()).unwrap();
+                    resumed.recv_timeout(Duration::from_secs(10)).unwrap();
+                })
+            }
+        });
+        paused.recv_timeout(Duration::from_secs(10)).unwrap();
+        let stopper = std::thread::spawn({
+            let live = live.clone();
+            let ready = ready.clone();
+            let memory = memory.clone();
+            move || stop_transition(&live, &ready, &memory, "local_disconnect", false)
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while live.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let stop_started = !live.load(Ordering::SeqCst);
+        // Always release and join both workers before an assertion can fail.
+        let _ = resume.send(());
+        let initialized = initializer.join();
+        let stopped = stopper.join();
+        assert!(stop_started, "Stop did not reach its atomic invalidation");
+        initialized.unwrap().unwrap();
+        assert_eq!(stopped.unwrap(), StopTransition::First);
+        assert!(!live.load(Ordering::SeqCst));
+        assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn late_initialization_failure_preserves_an_existing_resumable_stop() {
         for reason in [
             "desktop_exiting",
@@ -3591,26 +3728,27 @@ mod tests {
         let root = root.canonicalize().unwrap();
         let home = home.canonicalize().unwrap();
         let hub = Hub::default();
-        hub.connect(
-            &root,
-            Connection {
-                executable,
-                expected_sha256,
-                codex_home: home,
-                allow_model_usage: false,
-                allow_command_execution: false,
-                permission_profile: default_permission_profile(),
-                approval_policy: None,
-                approvals_reviewer: None,
-                model: "no-model-request".into(),
-                request_limit: 1,
-                lifetime_seconds: 30,
-                effort: None,
-                context_window: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(hub.initialize().unwrap()["connected"], true);
+        let ticket = hub
+            .connect(
+                &root,
+                Connection {
+                    executable,
+                    expected_sha256,
+                    codex_home: home,
+                    allow_model_usage: false,
+                    allow_command_execution: false,
+                    permission_profile: default_permission_profile(),
+                    approval_policy: None,
+                    approvals_reviewer: None,
+                    model: "no-model-request".into(),
+                    request_limit: 1,
+                    lifetime_seconds: 30,
+                    effort: None,
+                    context_window: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(hub.initialize(ticket).unwrap()["connected"], true);
         let metadata = hub.permission_profiles().unwrap();
         assert_eq!(metadata["supported"], true);
         assert!(metadata["profiles"]

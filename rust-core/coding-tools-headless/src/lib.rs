@@ -4695,12 +4695,12 @@ async fn ao_harness_connect(
     }
     let running = hub.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        if let Some(key) = private_key {
-            running.connect_ao_with_cpa_key(&root, connection, key)?;
+        let ticket = if let Some(key) = private_key {
+            running.connect_ao_with_cpa_key(&root, connection, key)?
         } else {
-            running.connect_ao_web(&root, connection)?;
-        }
-        running.initialize()
+            running.connect_ao_web(&root, connection)?
+        };
+        running.initialize(ticket)
     })
     .await;
     match outcome {

@@ -194,21 +194,25 @@ impl Hub {
     }
 
     /// Rejoin an existing locally approved process/session; this never starts a model turn.
-    pub fn restore_workspace(&self, root: &Path, writable: bool) -> Result<bool> {
+    pub fn restore_workspace(
+        &self,
+        root: &Path,
+        writable: bool,
+    ) -> Result<Option<ConnectionTicket>> {
         let Some(path) = &self.state_file else {
-            return Ok(false);
+            return Ok(None);
         };
         let Ok(_recovery) = self.recovery.try_lock() else {
-            return Ok(false);
+            return Ok(None);
         };
         if lock(&self.current)?
             .as_ref()
             .is_some_and(|bridge| bridge.live.load(Ordering::SeqCst))
         {
-            return Ok(false);
+            return Ok(None);
         }
         let Some((options, deadline)) = connection(path, root)? else {
-            return Ok(false);
+            return Ok(None);
         };
         if options.permission_profile == ":workspace" && !writable {
             return Err(
@@ -217,8 +221,8 @@ impl Hub {
         }
         // Replacing a stopped child must not revoke its still-valid saved grant.
         lock(&self.current)?.take();
-        self.connect_inner(root, options, None, false, deadline, true)?;
-        Ok(true)
+        let ticket = self.connect_inner(root, options, None, false, deadline, true)?;
+        Ok(Some(ticket))
     }
 
     pub fn saved_connection(root: &Path, home: &Path) -> Result<Option<Connection>> {
@@ -226,14 +230,14 @@ impl Hub {
     }
 
     pub fn recover_ao_web(&self, root: &Path, options: Connection) -> Result<Value> {
-        {
+        let ticket = {
             let _recovery = lock(&self.recovery)?;
             let Some((_, deadline)) = connection(&default_path(&options.codex_home), root)? else {
                 return Err("Saved AO native grant no longer permits recovery".into());
             };
-            self.connect_inner(root, options, None, true, deadline, true)?;
-        }
-        self.initialize()
+            self.connect_inner(root, options, None, true, deadline, true)?
+        };
+        self.initialize(ticket)
     }
 }
 
@@ -585,26 +589,27 @@ mod tests {
         let home = home.canonicalize().unwrap();
         let file = default_path(&home);
         let hub = Hub::with_state_file(file.clone());
-        hub.connect(
-            &root,
-            Connection {
-                executable,
-                expected_sha256,
-                codex_home: home,
-                allow_model_usage: true,
-                allow_command_execution: false,
-                permission_profile: ":read-only".into(),
-                approval_policy: None,
-                approvals_reviewer: None,
-                model: "mock-default".into(),
-                request_limit: 6,
-                lifetime_seconds: 120,
-                effort: None,
-                context_window: None,
-            },
-        )
-        .unwrap();
-        hub.initialize().unwrap();
+        let ticket = hub
+            .connect(
+                &root,
+                Connection {
+                    executable,
+                    expected_sha256,
+                    codex_home: home,
+                    allow_model_usage: true,
+                    allow_command_execution: false,
+                    permission_profile: ":read-only".into(),
+                    approval_policy: None,
+                    approvals_reviewer: None,
+                    model: "mock-default".into(),
+                    request_limit: 6,
+                    lifetime_seconds: 120,
+                    effort: None,
+                    context_window: None,
+                },
+            )
+            .unwrap();
+        hub.initialize(ticket).unwrap();
         let original_deadline = read(&file).unwrap().unwrap().consent_until_ms;
         let wait = |hub: &Hub, id: &str| {
             let until = Instant::now() + Duration::from_secs(15);
@@ -638,8 +643,8 @@ mod tests {
         hub.cancel("desktop_exiting");
         drop(hub);
         let restored = Hub::with_state_file(file.clone());
-        assert!(restored.restore_workspace(&root, false).unwrap());
-        restored.initialize().unwrap();
+        let ticket = restored.restore_workspace(&root, false).unwrap().unwrap();
+        restored.initialize(ticket).unwrap();
         assert_eq!(
             fixture.calls.load(Ordering::SeqCst),
             2,
@@ -688,9 +693,10 @@ mod tests {
             .store(false, Ordering::SeqCst);
         restored.disconnect();
         assert!(
-            !Hub::with_state_file(file)
+            Hub::with_state_file(file)
                 .restore_workspace(&root, false)
-                .unwrap(),
+                .unwrap()
+                .is_none(),
             "Stop revokes restart consent"
         );
     }
