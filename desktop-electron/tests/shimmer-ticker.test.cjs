@@ -119,7 +119,27 @@ test("shimmer ticker rests while the preload marks a minimized window away", () 
   doc.timeline.currentTime = 4000;
   [...timers.values()][0].fn();
   assert.equal(shimmer.currentTime, 0, "a minimized window still reads visible, but is not stepped");
+  assert.equal(shimmer.playState, "paused", "a shimmer started while minimized cannot keep repainting");
   away.clear();
   [...timers.values()][0].fn();
   assert.equal(shimmer.currentTime, 4000, "shown again, it steps");
+  away.add("data-window-away");
+  host.isConnected = false;
+  [...timers.values()][0].fn();
+  assert.equal(timers.size, 0, "a removed shimmer stops its timer even while away");
+});
+
+test("shimmer ticker pauses an animation started in a hidden document without advancing its clock", () => {
+  const { install, doc, timers, element, animation, start } = setup();
+  doc.hidden = true;
+  install(doc);
+  const host = element(), shimmer = animation("cx-shimmer", host);
+  start("cx-shimmer", host);
+  doc.timeline.currentTime = 5000;
+  [...timers.values()][0].fn();
+  assert.equal(shimmer.playState, "paused");
+  assert.equal(shimmer.currentTime, 0);
+  doc.hidden = false;
+  [...timers.values()][0].fn();
+  assert.equal(shimmer.currentTime, 5000);
 });
