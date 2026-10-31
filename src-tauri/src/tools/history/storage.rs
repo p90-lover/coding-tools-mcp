@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
@@ -19,6 +19,7 @@ const STATE_ITEM_LIMIT: usize = 12;
 const STATE_TEXT_LIMIT: usize = 512;
 const STATE_FOCUS_LIMIT: usize = 2_048;
 const STATE_REFERENCE_LIMIT: usize = 8;
+const MISSING_NUMBER_SAMPLE_LIMIT: usize = 128;
 
 pub struct HistoryLock {
     file: File,
@@ -148,26 +149,13 @@ pub fn scan(workspace: &Workspace, history_dir: &Path) -> WorkspaceResult<ScanRe
             continue;
         }
         let number = number.expect("validated number");
-        let bytes =
-            fs::read(&path).map_err(|error| io_error("HISTORY_READ_FAILED", error, true))?;
-        let content = String::from_utf8(bytes).map_err(|error| WorkspaceError::ToolDetails {
-            code: "HISTORY_INVALID_UTF8",
-            message: "History Markdown must be UTF-8.".into(),
-            category: "validation",
-            retryable: false,
-            details: serde_json::json!({"file": name, "error": error.to_string()}),
-        })?;
-        if content.trim().is_empty() {
+        let Some(document) = read_document(workspace, history_dir, number)? else {
+            continue;
+        };
+        if document.content.trim().is_empty() {
             report.empty_files.push(name.clone());
         }
-        report.documents.push(HistoryDocument {
-            number,
-            path: relative_display(workspace.root(), &path),
-            session_key: markdown::metadata(&content, "Session key"),
-            created_at: markdown::metadata(&content, "Created"),
-            updated_at: markdown::metadata(&content, "Updated"),
-            content,
-        });
+        report.documents.push(document);
     }
     report.documents.sort_by_key(|document| document.number);
     report.invalid_files.sort();
@@ -178,10 +166,16 @@ pub fn scan(workspace: &Workspace, history_dir: &Path) -> WorkspaceResult<ScanRe
         .map(|document| document.number)
         .collect();
     if let Some(latest) = report.latest_number() {
-        let present = report.numbers.iter().copied().collect::<BTreeSet<_>>();
-        report.missing_numbers = (1..=latest)
-            .filter(|number| !present.contains(number))
-            .collect();
+        report.missing_number_count = latest.saturating_sub(report.numbers.len() as u64);
+        let mut next = 1_u64;
+        for &number in &report.numbers {
+            let remaining = MISSING_NUMBER_SAMPLE_LIMIT - report.missing_numbers.len();
+            report.missing_numbers.extend((next..number).take(remaining));
+            if report.missing_numbers.len() == MISSING_NUMBER_SAMPLE_LIMIT {
+                break;
+            }
+            next = number.saturating_add(1);
+        }
     }
     let mut keys = BTreeMap::<String, usize>::new();
     for key in report
@@ -196,6 +190,47 @@ pub fn scan(workspace: &Workspace, history_dir: &Path) -> WorkspaceResult<ScanRe
         .filter_map(|(key, count)| (count > 1).then_some(key))
         .collect();
     Ok(report)
+}
+
+pub fn read_document(
+    workspace: &Workspace,
+    history_dir: &Path,
+    number: u64,
+) -> WorkspaceResult<Option<HistoryDocument>> {
+    if number == 0 || !history_dir.exists() {
+        return Ok(None);
+    }
+    ensure_safe_candidate(workspace, history_dir)?;
+    let path = history_dir.join(format!("{number}.md"));
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("HISTORY_READ_FAILED", error, true)),
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(None);
+    }
+    ensure_safe_candidate(workspace, &path)?;
+    let mut file = File::open(&path).map_err(|error| io_error("HISTORY_READ_FAILED", error, true))?;
+    Workspace::isolated(workspace.root().to_path_buf())?.verify_opened(&file, &path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| io_error("HISTORY_READ_FAILED", error, true))?;
+    let content = String::from_utf8(bytes).map_err(|error| WorkspaceError::ToolDetails {
+        code: "HISTORY_INVALID_UTF8",
+        message: "History Markdown must be UTF-8.".into(),
+        category: "validation",
+        retryable: false,
+        details: serde_json::json!({"file": format!("{number}.md"), "error": error.to_string()}),
+    })?;
+    Ok(Some(HistoryDocument {
+        number,
+        path: relative_display(workspace.root(), &path),
+        session_key: markdown::metadata(&content, "Session key"),
+        created_at: markdown::metadata(&content, "Created"),
+        updated_at: markdown::metadata(&content, "Updated"),
+        content,
+    }))
 }
 
 pub fn rebuild_index(report: &ScanReport) -> HistoryIndex {
