@@ -489,7 +489,8 @@ test("app-handler tree does not add listen ports and IPC names stay list/catalog
   assert.match(main, /handle\("coding-tools:apps:call"/);
   assert.doesNotMatch(main, /coding-tools:apps:invoke/);
   assert.match(schema, /channel: "coding-tools:apps:call"/);
-  assert.match(preload, /invoke: \(input\) => invokeContract\(ipcRenderer, "apps.call"/);
+  assert.match(preload, /invoke: \(input\) => callApps\(/);
+  assert.match(preload, /return invokeContract\(ipcRenderer, "apps.call", input\);/);
   assert.match(main, /appsHost\.call\(input\.moduleId, input\.operation, input\.arguments/);
 });
 

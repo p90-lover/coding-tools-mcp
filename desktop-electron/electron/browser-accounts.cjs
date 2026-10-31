@@ -7,6 +7,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomBytes } = require("node:crypto");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { BROWSER_ACCOUNT_ID, browserAccountPartition } = require("./profile.cjs");
 
 const MAX_ACCOUNTS = 12;
@@ -95,18 +96,16 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
 
   // Saved off the main thread: a synchronous save held Electron's main thread, and every window,
   // 38 s on a switch and 75 s on a removal on a busy disk. The state in memory is the truth; one
-  // write runs at a time, and changes made while it runs are written together once it ends.
+  // write runs at a time, and changes made while it runs are written together once it ends. Each
+  // write is flushed to disk before it replaces the old file, so a power cut leaves the old list or
+  // the new one, never a torn file; a rename Windows holds for a moment is retried.
   let writing = null;
   let dirty = false;
   async function writeAll() {
     while (dirty) {
       dirty = false;
-      const text = `${JSON.stringify(state, null, 2)}\n`;
-      const temporary = `${statePath}.${process.pid}.tmp`;
       try {
-        await fs.promises.mkdir(dataRoot, { recursive: true });
-        await fs.promises.writeFile(temporary, text);
-        await fs.promises.rename(temporary, statePath);
+        await writePrivateFileAtomicAsync(statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true, protectDirectory: false });
       } catch (error) {
         logger?.warn?.("browser_accounts.save_failed", { message: error instanceof Error ? error.message : String(error) });
       }
