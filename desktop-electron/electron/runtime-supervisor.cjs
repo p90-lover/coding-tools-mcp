@@ -2128,7 +2128,8 @@ class RuntimeSupervisor {
       env = { TUNNEL_CLIENT_STATE_DIR: stateDir, TEMP: tempDir, TMP: tempDir };
     }
     const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir,
-      env: { ...process.env, ...env }, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
+      env: { ...process.env, ...env, CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath },
+      timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
     if (reply.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
     if (reply.error) throw new Error(reply.error);
     return controlResult(reply.code, reply.stdout, reply.stderr);

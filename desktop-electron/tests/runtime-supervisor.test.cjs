@@ -497,14 +497,24 @@ test("tunnel control failures preserve stderr even when stdout is also present",
 
 test("primary and extra tunnel commands isolate native state and temp files", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-extra-tunnel-env-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const descriptorPath = path.join(root, "launcher.json");
+  const inheritedDescriptor = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR;
+  process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR = path.join(root, "stale-inherited.json");
+  t.after(() => {
+    if (inheritedDescriptor === undefined) delete process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR;
+    else process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR = inheritedDescriptor;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: root,
     coreHome: root,
-    browserDescriptorPath: path.join(root, "launcher.json"),
-    getRuntimeEnvironment: () => ({ CODING_TOOLS_EXTRA_TUNNEL_TEST: "runtime-service" }),
+    browserDescriptorPath: descriptorPath,
+    getRuntimeEnvironment: () => ({
+      CODING_TOOLS_EXTRA_TUNNEL_TEST: "runtime-service",
+      CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: path.join(root, "stale-supplied.json"),
+    }),
   });
   const tunnel = { binaryPath: process.execPath, profileDir: root };
   const args = ["-e", `process.stdout.write(JSON.stringify({
@@ -512,6 +522,7 @@ test("primary and extra tunnel commands isolate native state and temp files", as
     temp: process.env.TEMP ?? null,
     tmp: process.env.TMP ?? null,
     service: process.env.CODING_TOOLS_EXTRA_TUNNEL_TEST ?? null,
+    descriptor: process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR ?? null,
     inheritedPath: Boolean(process.env.PATH),
   }))`];
   const mainBefore = await supervisor.runTunnelCommand({ tunnel }, args, 5_000, "Main environment probe");
@@ -526,6 +537,7 @@ test("primary and extra tunnel commands isolate native state and temp files", as
     temp: path.join(primaryStateRoot, "temp"),
     tmp: path.join(primaryStateRoot, "temp"),
     service: process.env.CODING_TOOLS_EXTRA_TUNNEL_TEST ?? null,
+    descriptor: descriptorPath,
     inheritedPath: Boolean(process.env.PATH),
   });
   assert.equal(fs.statSync(path.join(primaryStateRoot, "temp")).isDirectory(), true);
@@ -535,6 +547,7 @@ test("primary and extra tunnel commands isolate native state and temp files", as
     temp: path.join(stateRoot, "temp"),
     tmp: path.join(stateRoot, "temp"),
     service: "runtime-service",
+    descriptor: descriptorPath,
     inheritedPath: JSON.parse(mainBefore.output).inheritedPath,
   });
   assert.equal(fs.statSync(path.join(stateRoot, "temp")).isDirectory(), true);
