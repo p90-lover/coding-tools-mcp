@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const os = require("node:os");
 const path = require("node:path");
 const fs = require("node:fs");
+const vm = require("node:vm");
 const test = require("node:test");
 
 const {
@@ -14,7 +15,7 @@ const {
   positiveId,
   pageSize,
 } = require("../electron/email-host.cjs");
-const { parseMessage, sanitizeHtml, stripDangerous } = require("../electron/email-mime.cjs");
+const { parseMessage, bodyPreview, sanitizeHtml, stripDangerous } = require("../electron/email-mime.cjs");
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "email-host-"));
@@ -214,4 +215,57 @@ test("sanitizeHtml keeps email formatting and drops forms, svg and unknown attri
   assert.ok(html.includes('<a href="https://example.com">link</a>'), html);
   assert.ok(html.includes('<img src="data:image/png;base64,AA" alt="logo">'), html);
   assert.doesNotMatch(html, /<form|<input|<svg|<circle|class=|id=|onclick/);
+});
+
+test("malformed HTML stays bounded in the actual inbox normalizer and sanitizer", async t => {
+  for (const [name, preview, html, expected] of [
+    ["preview block openers", true, "<style>".repeat(32_000), null],
+    ["sanitizer block openers", false, "<style>".repeat(32_000), ""],
+    ["unclosed comments", false, "<!--".repeat(65_536), ""],
+    ["preview less-than signs", true, "<".repeat(65_536), "<".repeat(240)],
+    ["unclosed allowed tags", false, "<a".repeat(16_384), ""],
+    ["unassigned attribute", false, `<p ${"x".repeat(65_536)}>Visible</p>`, "<p>Visible</p>"],
+  ]) await t.test(name, () => {
+    const raw = preview ? `Content-Type: text/html\r\n\r\n${html}` : html;
+    const value = vm.runInNewContext(preview ? "normalizeMessageListRow({ id: 1, raw }).preview" : "sanitizeHtml(raw)",
+      { normalizeMessageListRow, sanitizeHtml, raw }, { timeout: 1_000 });
+    assert.equal(value, expected);
+  });
+});
+
+test("metadata void tags keep the following body, including a head without an explicit close", () => {
+  const metadata = '<meta charset="utf-8"><link rel="stylesheet" href="https://example.test/style"><base href="https://example.test/"><embed src="https://example.test/x">';
+  assert.equal(sanitizeHtml(`${metadata}<p>Body</p>`), "<p>Body</p>");
+  assert.equal(bodyPreview(`Content-Type: text/html\r\n\r\n<head>${metadata}<body><p>Body</p>`), "Body");
+});
+
+test("quoted greater-than signs and multiline attributes retain formatting and stay out of previews", () => {
+  const html = `<table border=1><tr><td title="left > right" style='color:red;\nwhite-space:pre-wrap' colspan="2">First<br />Second</td></tr></table>`;
+  const cleaned = sanitizeHtml(html);
+  assert.ok(cleaned.includes('<table border=1>'));
+  assert.ok(cleaned.includes('title="left > right"'));
+  assert.ok(cleaned.includes("style='color:red;\nwhite-space:pre-wrap'"));
+  assert.ok(cleaned.includes('colspan="2"'));
+  assert.equal(bodyPreview(`Content-Type: text/html\r\n\r\n${html}`), "First Second");
+});
+
+test("raw script and style bodies end at their first closing tag regardless of quotes inside", () => {
+  const html = `<script>const x = "<a title='unfinished";</ScRiPt><p>After script</p><style>.x{content:"<a title='unfinished"}</STYLE><p>After style</p>`;
+  assert.equal(sanitizeHtml(html), "<p>After script</p><p>After style</p>");
+  assert.equal(bodyPreview(`Content-Type: text/html\r\n\r\n${html}`), "After script After style");
+});
+
+test("nested blocked containers retain first-close behavior and unmatched openers keep following content", () => {
+  assert.equal(sanitizeHtml('<object>outer<object>inner</object><p>After first</p></object><p>After all</p>'), '<p>After first</p><p>After all</p>');
+  assert.equal(sanitizeHtml('<script>unclosed<p>Following content</p>'), 'unclosed<p>Following content</p>');
+  assert.equal(sanitizeHtml('<p>Before</p><!-- unclosed <p>Hidden comment</p>'), '<p>Before</p>');
+  assert.equal(sanitizeHtml('<p>Before</p><a title="unclosed'), '<p>Before</p>');
+});
+
+test("the HTML safety floor still removes handlers and unsafe URLs while keeping data images", () => {
+  const html = sanitizeHtml('<p ONCLICK="go()">Hello</p><a href=" javascript:go()">Bad link</a>'
+    + '<img src="data:text/html,bad"><img src="data:image/png;base64,AA" alt="image">');
+  assert.doesNotMatch(html, /onclick|javascript:|data:text\/html/i);
+  assert.ok(html.includes('src="data:image/png;base64,AA"'));
+  assert.ok(html.includes('<p>Hello</p>'));
 });

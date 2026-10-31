@@ -123,14 +123,102 @@ async function parseMessage(raw) {
 // A list row's one-line preview: the body's first words (plain text, else the HTML's text), not its
 // headers. Parses at most the first PREVIEW_SCAN characters, so a large message costs no more.
 const PREVIEW_SCAN = 256 * 1024;
+const PREVIEW_BODIES = new Set(["style", "script", "head"]);
+const HTML_SPACE = /\s/;
+const HTML_NAME = /[a-z0-9:_-]/i;
+
+// Move forward once through tags and quoted attributes. A missing body close is searched only
+// once per blocked name: repeated unclosed <style> tags must not rescan the remaining message.
+function* htmlParts(html, blockedBodies) {
+  const unclosed = new Set();
+  const endTag = /<\s*\/\s*([a-z0-9:_-]+)\s*>/gi;
+  let index = 0;
+  while (index < html.length) {
+    const start = html.indexOf("<", index);
+    if (start === -1) { yield html.slice(index); return; }
+    if (start > index) yield html.slice(index, start);
+    if (html.startsWith("<!--", start)) {
+      const end = html.indexOf("-->", start + 4);
+      yield null;
+      if (end === -1) return; // An unterminated comment hides the remainder.
+      index = end + 3; continue;
+    }
+    let cursor = start + 1;
+    while (HTML_SPACE.test(html[cursor] ?? "")) cursor += 1;
+    const declaration = html[cursor] === "!" || html[cursor] === "?";
+    const closing = html[cursor] === "/";
+    if (declaration || closing) cursor += 1;
+    while (HTML_SPACE.test(html[cursor] ?? "")) cursor += 1;
+    const nameStart = cursor;
+    if (!declaration && !/[a-z]/i.test(html[cursor] ?? "")) {
+      yield { literal: true }; index = start + 1; continue;
+    }
+    while (HTML_NAME.test(html[cursor] ?? "")) cursor += 1;
+    const name = html.slice(nameStart, cursor).toLowerCase();
+    const attrsStart = cursor;
+    let quote = "";
+    for (; cursor < html.length; cursor += 1) {
+      const char = html[cursor];
+      if (quote) { if (char === quote) quote = ""; }
+      else if (char === '"' || char === "'") quote = char;
+      else if (char === ">" || char === "<") break;
+    }
+    if (cursor === html.length) { yield null; return; } // Incomplete markup is neutralized.
+    index = cursor + 1;
+    if (html[cursor] === "<") { yield null; index = cursor; continue; }
+    if (declaration) { yield null; continue; }
+    if (!closing && blockedBodies?.has(name)) {
+      if (!unclosed.has(name)) {
+        endTag.lastIndex = index;
+        let end;
+        while ((end = endTag.exec(html))) if (end[1].toLowerCase() === name) break;
+        if (end) index = endTag.lastIndex;
+        else unclosed.add(name);
+      }
+      yield null; continue;
+    }
+    yield { name, closing, attrs: html.slice(attrsStart, cursor) };
+  }
+}
+
+// Unlike an unanchored attribute regex, a bare name with no '=' is consumed as one token.
+function htmlAttributes(source, allowedOnly = false) {
+  const kept = [];
+  let index = 0;
+  while (index < source.length) {
+    while (HTML_SPACE.test(source[index] ?? "")) index += 1;
+    const start = index;
+    while (HTML_NAME.test(source[index] ?? "")) index += 1;
+    const name = source.slice(start, index), lower = name.toLowerCase();
+    if (!name) { while (index < source.length && !HTML_SPACE.test(source[index])) index += 1; continue; }
+    while (HTML_SPACE.test(source[index] ?? "")) index += 1;
+    if (source[index] !== "=") continue;
+    index += 1;
+    while (HTML_SPACE.test(source[index] ?? "")) index += 1;
+    const valueStart = index, quote = source[index] === '"' || source[index] === "'" ? source[index] : "";
+    if (quote) {
+      const end = source.indexOf(quote, index + 1);
+      if (end === -1) break;
+      index = end + 1;
+    } else while (index < source.length && !HTML_SPACE.test(source[index])) index += 1;
+    let raw = source.slice(valueStart, index);
+    if (!raw || /^on[a-z]+$/i.test(name) || (allowedOnly && !ALLOWED_ATTRS.has(lower))) continue;
+    const value = quote ? raw.slice(1, -1) : raw;
+    if (["href", "src", "xlink:href"].includes(lower) && /^(?:javascript:|data:(?!image\/))/i.test(value.trimStart())) raw = '"#"';
+    kept.push(`${name}=${raw}`);
+  }
+  return kept.length ? ` ${kept.join(" ")}` : "";
+}
 
 function bodyPreview(raw, max = 200) {
   const out = { text: null, html: null, attachments: [] };
   try { parseSection(String(raw ?? "").slice(0, PREVIEW_SCAN), out); } catch { return null; }
-  const text = out.text ?? (out.html
-    ? out.html.replace(/<(style|script|head)\b[\s\S]*?<\/\1\s*>/gi, " ").replace(/<[^>]*>/g, " ")
-      .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&#39;|&apos;/gi, "'").replace(/&quot;/gi, "\"")
-    : "");
+  let text = out.text;
+  if (text === null) {
+    const parts = [];
+    for (const part of htmlParts(out.html || "", PREVIEW_BODIES)) parts.push(typeof part === "string" ? part : part?.literal ? "<" : " ");
+    text = parts.join("").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&#39;|&apos;/gi, "'").replace(/&quot;/gi, "\"");
+  }
   const line = text.replace(/\s+/g, " ").trim();
   return line ? line.slice(0, max) : null;
 }
@@ -153,14 +241,17 @@ function parseHeaderSummary(raw) {
 // The hard safety floor, always enforced regardless of the allowlist below:
 // strip whole <script>/<style>/<iframe>/<object> subtrees, on* handlers, and javascript:/data:
 // URLs, and neutralize external resource loads (src/href to remote hosts).
+const BLOCKED_BODIES = new Set(["script", "style", "iframe", "object"]);
+const BLOCKED_TAGS = new Set([...BLOCKED_BODIES, "embed", "link", "meta", "base"]);
+
 function stripDangerous(html) {
-  return html
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<\s*(script|style|iframe|object|embed|link|meta|base)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, "")
-    .replace(/<\s*(script|style|iframe|object|embed|link|meta|base)\b[^>]*\/?>/gi, "")
-    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
-    .replace(/(href|src|xlink:href)\s*=\s*("|')?\s*javascript:[^"'>\s]*/gi, "$1=\"#\"")
-    .replace(/(href|src|xlink:href)\s*=\s*("|')?\s*data:(?!image\/)[^"'>\s]*/gi, "$1=\"#\"");
+  const parts = [];
+  for (const part of htmlParts(html, BLOCKED_BODIES)) {
+    if (typeof part === "string") parts.push(part);
+    else if (part?.literal) parts.push("&lt;");
+    else if (part && !BLOCKED_TAGS.has(part.name)) parts.push(`<${part.closing ? "/" : ""}${part.name}${htmlAttributes(part.attrs)}>`);
+  }
+  return parts.join("");
 }
 
 // The element/attribute allowlist decides which formatting SURVIVES after the safety floor —
@@ -182,15 +273,13 @@ const ALLOWED_ATTRS = new Set([
 
 function applyAllowlist(html) {
   if (ALLOWED_TAGS.size === 0) return html; // no allowlist yet: safety floor still applied above
-  return html.replace(/<\s*\/?\s*([a-z0-9]+)((?:[^>"']|"[^"]*"|'[^']*')*)>/gi, (whole, tag, attrs) => {
-    if (!ALLOWED_TAGS.has(tag.toLowerCase())) return "";
-    const kept = [];
-    for (const m of attrs.matchAll(/([a-z0-9:-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi)) {
-      if (ALLOWED_ATTRS.has(m[1].toLowerCase())) kept.push(`${m[1]}=${m[2]}`);
-    }
-    const close = whole.trim().startsWith("</") ? "/" : "";
-    return `<${close}${tag.toLowerCase()}${kept.length ? " " + kept.join(" ") : ""}>`;
-  });
+  const parts = [];
+  for (const part of htmlParts(html)) {
+    if (typeof part === "string") parts.push(part);
+    else if (part?.literal) parts.push("&lt;");
+    else if (part && ALLOWED_TAGS.has(part.name)) parts.push(`<${part.closing ? "/" : ""}${part.name}${htmlAttributes(part.attrs, true)}>`);
+  }
+  return parts.join("");
 }
 
 function sanitizeHtml(html) {
