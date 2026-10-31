@@ -15,6 +15,8 @@ export type ScoreStats = { count: number; average: number | null; recent: number
 export type ModelScoreSummary = {
   model: string; missions: number; lastAt: string | null; overall: ScoreStats;
   categories: Partial<Record<ScoreCategory, ScoreStats>>;
+  /** Its missions' record: finished and failed, and the finished share (0-1). Missing from older backends. */
+  finished?: number; failed?: number; passRate?: number;
 };
 export type ScoredCard = {
   role: string; title: string; model: string; harness: string | null; attempts: number; note?: string;
@@ -24,7 +26,32 @@ export type ScoredRound = {
   id: string; workspaceId: string | null; taskId: string | null; at: string; outcome: "finished" | "failed";
   categories: ScoreCategory[]; grader: string | null; message: string; cards: ScoredCard[];
 };
-export type ModelScoresResult = { ok: true; summary: ModelScoreSummary[]; recent: ScoredRound[]; total: number };
+/** One mission a model worked in, for its history: the round, and only that model's cards; `score` averages them. */
+export type ModelMission = Omit<ScoredRound, "cards"> & { score: number | null; cards: ScoredCard[] };
+export type ModelScoresResult = { ok: true; summary: ModelScoreSummary[]; recent: ScoredRound[]; total: number; history?: ModelMission[] };
+
+/** The fewest missions a model needs to rank: below it, one lucky round would top the board. */
+export const RANK_MIN_MISSIONS = 3;
+export type RankView = "average" | "recent" | "best";
+export type RankedModel = ModelScoreSummary & { rank: number | null };
+
+/**
+ * The leaderboard, as a benchmark ranks: by the chosen view's overall score, then the finished
+ * share, then how many missions back it. Models under RANK_MIN_MISSIONS come after the ranked ones,
+ * unranked (rank null), as provisional.
+ */
+export function rankModels(summary: readonly ModelScoreSummary[], view: RankView): RankedModel[] {
+  const score = (entry: ModelScoreSummary) => entry.overall[view] ?? -1;
+  const order = (a: ModelScoreSummary, b: ModelScoreSummary) =>
+    score(b) - score(a) || (b.passRate ?? 0) - (a.passRate ?? 0) || b.missions - a.missions || a.model.localeCompare(b.model);
+  const ranked = summary.filter((entry) => entry.missions >= RANK_MIN_MISSIONS).sort(order);
+  const provisional = summary.filter((entry) => entry.missions < RANK_MIN_MISSIONS).sort(order);
+  return [...ranked.map((entry, index) => ({ ...entry, rank: index + 1 })), ...provisional.map((entry) => ({ ...entry, rank: null }))];
+}
+
+/** "80% (4/5)", or "–" when the backend did not say. */
+export const passText = (entry: Pick<ModelScoreSummary, "passRate" | "finished" | "missions">) =>
+  typeof entry.passRate === "number" ? `${Math.round(entry.passRate * 100)}% (${entry.finished ?? 0}/${entry.missions})` : "–";
 
 export const scoreText = (value: number | null | undefined) => (typeof value === "number" ? value.toFixed(1) : "–");
 

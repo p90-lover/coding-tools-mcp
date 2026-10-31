@@ -47,6 +47,21 @@
 .ao-score-finished { background: color-mix(in srgb, var(--ao-green) 18%, transparent); color: var(--ao-green); }
 .ao-score-failed { background: color-mix(in srgb, var(--ao-red) 18%, transparent); color: var(--ao-red); }
 .ao-scores-request { margin: 6px 0; color: var(--color-text-primary); font-size: 12px; overflow-wrap: anywhere; }
+/* The leaderboard: a rank column (the top three in gold, silver and bronze), rows that open a
+   model's missions, and that model's own mission list. */
+.ao-scores-table .ao-score-rank-head, .ao-scores-table td.ao-score-rank { width: 32px; text-align: center; color: var(--ao-muted); font-weight: 600; }
+.ao-scores-table td.ao-score-rank.is-top-1 { color: #d4a72c; }
+.ao-scores-table td.ao-score-rank.is-top-2 { color: #a3acb9; }
+.ao-scores-table td.ao-score-rank.is-top-3 { color: #c47e3f; }
+.ao-scores-table td.ao-score-rank small { margin: 0; font-size: 10px; font-weight: 400; text-transform: uppercase; }
+.ao-score-row { cursor: pointer; }
+.ao-score-row:hover > *, .ao-score-row:focus-visible > * { background: color-mix(in srgb, var(--color-text-primary) 5%, transparent); }
+.ao-score-row:focus-visible { outline: none; }
+.ao-scores-model { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.ao-scores-model-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px 0; font-size: 13px; }
+.ao-score-pill { padding: 1px 6px; border: 1px solid var(--ao-line); border-radius: 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.ao-score-pill.ao-score-good { color: var(--ao-green); }
+.ao-score-pill.ao-score-weak { color: var(--ao-red); }
 .ao-score-note .ao-score-pick { height: 22px; margin: 2px 4px 0 0; padding: 0 8px; font-size: 11px; }
 /* The role editor opens beside the clicked block and closes on a press outside it. */
 .ao-team-popover { position: absolute; z-index: 30; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; border: 1px solid var(--ao-line);
