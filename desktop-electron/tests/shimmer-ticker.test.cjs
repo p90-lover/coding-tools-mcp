@@ -107,3 +107,19 @@ test("shimmer ticker also steps the deep-dive transcript shimmer", () => {
   assert.equal(timers.size, 1);
   assert.deepEqual([deep.playState, deep.currentTime], ["paused", 1000]);
 });
+
+test("shimmer ticker rests while the preload marks a minimized window away", () => {
+  const { install, doc, timers, element, animation, start } = setup();
+  const away = new Set(["data-window-away"]);
+  doc.documentElement = { hasAttribute: (name) => away.has(name) };
+  install(doc);
+  const host = element();
+  const shimmer = animation("cx-shimmer", host);
+  start("cx-shimmer", host);
+  doc.timeline.currentTime = 4000;
+  [...timers.values()][0].fn();
+  assert.equal(shimmer.currentTime, 0, "a minimized window still reads visible, but is not stepped");
+  away.clear();
+  [...timers.values()][0].fn();
+  assert.equal(shimmer.currentTime, 4000, "shown again, it steps");
+});

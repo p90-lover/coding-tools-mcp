@@ -57,3 +57,32 @@ test("while main says the window is away, app calls stop in the preload instead 
   await call().catch(() => {});
   assert.deepEqual(invoked, ["coding-tools:apps:call"], "calls go through again once it is shown");
 });
+
+test("the page learns the window is away from <html> data-window-away, with a visibilitychange each time it flips", () => {
+  const code = buildSync({ entryPoints: [path.join(__dirname, "../electron/preload.cjs")], bundle: true,
+    platform: "node", format: "cjs", target: "node22", external: ["electron"], write: false,
+  }).outputFiles[0].text;
+  const listeners = new Map();
+  const electron = {
+    contextBridge: { exposeInMainWorld() {} },
+    ipcRenderer: { invoke: async () => null, send() {}, on(channel, listener) { listeners.set(channel, listener); }, removeListener() {} },
+  };
+  const attributes = new Set();
+  const events = [];
+  const document = {
+    documentElement: { hasAttribute: (name) => attributes.has(name), toggleAttribute: (name, on) => { if (on) attributes.add(name); else attributes.delete(name); } },
+    dispatchEvent: (event) => { events.push(event.type); return true; },
+  };
+  vm.runInNewContext(code, {
+    require(name) { if (name !== "electron") throw Error(`Sandbox cannot require ${name}`); return electron; },
+    console, setTimeout, clearTimeout, TextEncoder, structuredClone, document, Event: class { constructor(type) { this.type = type; } },
+  });
+  const shown = listeners.get("launcher:window-shown");
+  shown({}, false);
+  assert.ok(attributes.has("data-window-away"), "minimized: marked away");
+  shown({}, false);
+  assert.deepEqual(events, ["visibilitychange"], "the same state again fires nothing");
+  shown({}, true);
+  assert.ok(!attributes.has("data-window-away"), "restored: no longer away");
+  assert.deepEqual(events, ["visibilitychange", "visibilitychange"]);
+});
