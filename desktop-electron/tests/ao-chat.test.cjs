@@ -1306,7 +1306,8 @@ test("opening a project resumes a team whose loop died with the app, once per se
   };
   const settle = rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", context);
   settle(); for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
-  assert.deepEqual(calls, ["run_status", "runs", "start_run"]);
+  // Checked again right before acting: the app's own restart resume may have picked it up meanwhile.
+  assert.deepEqual(calls, ["run_status", "runs", "run_status", "start_run"]);
   context.settledRuns.current.clear();
   settle(); for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
   assert.equal(calls.filter((call) => call === "start_run").length, 1, "resumed once per app session");
@@ -1353,7 +1354,7 @@ test("with Retry automatically on, opening a project retries a single chat's fai
   // Seen live: "Launch failed: The operation was aborted due to timeout", held for hours, driven: false.
   const mission = { id: "r", workspace_id: "a", execution_mode: "single", cancelled: false, nodes: [
     { id: "p", role: "planner", state: "held", history: [], receipt: { error: "Launch failed: The operation was aborted due to timeout", started_at_ms: Date.now() - 3_600_000 } }] };
-  for (const [autoRetry, expected] of [[true, ["run_status", "chat_auto_retry", "runs", "control_run", "start_run"]], [false, ["run_status", "chat_auto_retry", "runs"]]]) {
+  for (const [autoRetry, expected] of [[true, ["run_status", "chat_auto_retry", "runs", "run_status", "control_run", "start_run"]], [false, ["run_status", "chat_auto_retry", "runs"]]]) {
     const calls = [];
     const context = {
       workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
@@ -1369,7 +1370,7 @@ test("with Retry automatically on, opening a project retries a single chat's fai
       loadMissions: async () => {}, setTimeout,
     };
     rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", context)();
-    for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
+    for (let i = 0; i < 8; i += 1) await new Promise(setImmediate);
     assert.deepEqual(calls, expected, autoRetry ? "retried and started" : "switch off: left for the person");
   }
   // While a loop of this session holds it (waiting out its retry pause), it is looked at again later.

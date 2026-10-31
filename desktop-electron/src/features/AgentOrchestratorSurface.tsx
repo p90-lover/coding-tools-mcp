@@ -853,9 +853,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           if (!document.hasFocus()) {
             await new Promise<void>((resolve) => window.addEventListener("focus", () => resolve(), { once: true }));
             if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
-            const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
-            if (now.driven !== false || ["starting", "running"].includes(String(now.status)) || resumedRuns.current.has(key)) return;
           }
+          // The app's own restart resume may have picked it up while this one observed: both retried
+          // the same chat, and one lost on the revision. Checked last, right before retrying.
+          const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
+          if (now.driven !== false || ["starting", "running"].includes(String(now.status)) || resumedRuns.current.has(key)) return;
           resumedRuns.current.add(key);
           if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
           await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });

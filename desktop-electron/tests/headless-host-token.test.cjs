@@ -50,7 +50,8 @@ function startupFixture(t, source) {
   t.after(() => {
     if (saved === undefined) delete process.env.CODING_TOOLS_HEADLESS_BINARY;
     else process.env.CODING_TOOLS_HEADLESS_BINARY = saved;
-    fs.rmSync(base, { recursive: true, force: true });
+    // Windows may hold the service's program a moment after it exits (EPERM on a CI runner, 2026-10-31).
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   });
   return { base, binaryRoot };
 }

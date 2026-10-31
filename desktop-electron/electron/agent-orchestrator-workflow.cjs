@@ -2496,6 +2496,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const id = clean(workspaceId, 128);
     const run = clean(runId, 80);
     const current = backgroundRuns.get(runKey(id, run));
+    // A restart resume is retrying it and starting its loop: as good as started.
+    if (!current && restartResuming.has(runKey(id, run))) return { ok: true, status: "starting", driven: true };
     // `driven`: this app session's loop is observing the run right now. A card a previous session
     // left "running" is only ever settled by an observe, so callers need to tell the two apart.
     if (current) return { ok: true, status: current.status, driven: current.driving === true, ...(current.detail ? { detail: current.detail } : {}),
@@ -4536,6 +4538,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * automatically" on, on a fresh one, as that switch's own retries do. Anything else still waits
    * for the person in the window.
    */
+  // Runs a restart resume is retrying or starting right now, by runKey. Backend start and the
+  // bridge's connect each recover, and the newer pass met a run the older one was mid-way through:
+  // both retried it, one lost on the revision ("Mission control failed", 2026-10-31 11:24). The chat
+  // view's own resume reads it through run_status as starting.
+  const restartResuming = new Set();
   async function resumeInterrupted(workspaceIds) {
     const generation = recoveryGeneration;
     const autoRetry = chatPreferences.get().autoRetry;
@@ -4547,21 +4554,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Chats only, and only a chat's newest run: an older one gave way to the message after it.
         if (!run.project_id || saved.runs.filter(entry => entry.project_id === run.project_id).at(-1)?.id !== run.id) continue;
         const resume = restartResume(run, now(), { autoRetry });
-        const live = backgroundRuns.get(runKey(workspaceId, run.id));
-        if (!resume || (live && (live.starting || live.driving || live.status === "running"))) continue;
+        const key = runKey(workspaceId, run.id);
+        const live = backgroundRuns.get(key);
+        if (!resume || restartResuming.has(key) || (live && (live.starting || live.driving || live.status === "running"))) continue;
         // startRun resumes on the run's own grant only while a card is still running under it.
         const onItsGrant = resume === "continue" && Boolean(run.grant) && !grantSpent(run.grant)
           && (run.nodes ?? []).some(node => node.state === "running");
         if (!onItsGrant && !autoRetry) { logger?.info?.("ao.restart_resume_waits", { workspaceId, runId: run.id, how: resume }); continue; }
+        restartResuming.add(key);
         try {
           if (resume === "retry") await controlRun({ workspaceId, runId: run.id, action: "retry" });
           await startRun({ workspaceId, runId: run.id });
           resumed += 1;
           logger?.info?.("ao.restart_resumed", { workspaceId, runId: run.id, how: resume });
-          await resumeLaunched(workspaceId, run.id, generation);
         } catch (error) {
           logger?.warn?.("ao.restart_resume_failed", { runId: run.id, message: publicText(error?.message || error, 200) });
+          continue;
+        } finally {
+          restartResuming.delete(key);
         }
+        await resumeLaunched(workspaceId, run.id, generation);
       }
     }
     return { resumed };

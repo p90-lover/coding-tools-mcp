@@ -9361,3 +9361,56 @@ test("after a restart the interrupted chats launch their agents one after anothe
   assert.equal((await resuming).resumed, 2);
   workflow.dispose();
 });
+
+test("two recoveries at once resume an interrupted chat once, and the chat view sees it starting", async () => {
+  // Seen 2026-10-31 11:24: backend start and the bridge's connect each recovered; the second pass
+  // retried a chat the first was still resuming, and one of them failed on the revision.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const restarted = "the agent's process ended before it finished (the app restarted)";
+  const run = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1, cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { error: restarted, started_at_ms: Date.now() - 60_000 } }] };
+  const world = chatWorld();
+  let controls = 0;
+  let releaseControl;
+  const controlled = new Promise(resolve => { releaseControl = resolve; });
+  const request = async (endpoint, body, options) => {
+    const node = run.nodes[0];
+    if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { r1: 1 } };
+    if (endpoint === "/api/v1/ao/control") {
+      controls += 1;
+      await controlled;
+      node.history.push(node.receipt); node.state = "pending"; node.receipt = undefined; return { ok: true, run };
+    }
+    if (endpoint === "/api/v1/ao/grant") { run.grant = { executable_sha256: "a".repeat(64) }; return { ok: true, run, grant: run.grant }; }
+    if (endpoint === "/api/v1/ao/external/reserve") { node.state = "reserved"; return { ok: true, request_key: "key-r1", prompt: "continue r1" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { node.state = "running"; node.receipt = { thread_id: body.session_id }; return { ok: true, run }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { node.state = "finished"; return { ok: true, run }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const spawned = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      spawn: async input => { spawned.push(input.prompt); return "session-1"; },
+      continuable: async () => false,
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "done" }),
+      warmSessions: async () => [],
+      kill: async () => ({ ok: true }),
+    },
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  const first = workflow.resumeInterrupted(["ws-1"]);
+  await until(() => controls === 1);
+  const second = workflow.resumeInterrupted(["ws-1"]);
+  assert.deepEqual(await workflow.call("run_status", { workspaceId: "ws-1", runId: "r1" }), { ok: true, status: "starting", driven: true },
+    "the chat view's own resume leaves it alone");
+  releaseControl();
+  const [one, two] = await Promise.all([first, second]);
+  assert.equal(controls, 1, "retried once");
+  assert.equal(one.resumed + two.resumed, 1);
+  await until(() => spawned.length === 1);
+  assert.deepEqual(spawned, ["continue r1"]);
+  workflow.dispose();
+});
