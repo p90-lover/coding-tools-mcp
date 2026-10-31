@@ -162,15 +162,17 @@ const average = (values) => (values.length ? round1(values.reduce((sum, value) =
 /**
  * Per model, from the log (oldest first): for each category its `average`, `recent` (average of the
  * last `window` scores), `best`, `last` and `count`; `overall` is the same over every score; `role`
- * keeps it to one role. Sorted best first by recent overall.
+ * keeps it to one role. Also its missions' record, as a benchmark keeps one: how many it took part
+ * in, `finished` and `failed`, and `passRate` (finished share, 0-1). Sorted best first by recent overall.
  */
 function summarize(records, { window = RECENT_WINDOW, role = null } = {}) {
   const byModel = new Map();
   for (const record of records) {
     for (const card of record.cards ?? []) {
       if (role && card.role !== role) continue;
-      const entry = byModel.get(card.model) ?? { model: card.model, missions: new Set(), lastAt: null, scores: {}, all: [] };
+      const entry = byModel.get(card.model) ?? { model: card.model, missions: new Set(), finished: new Set(), lastAt: null, scores: {}, all: [] };
       entry.missions.add(record.id);
+      if (record.outcome === "finished") entry.finished.add(record.id);
       entry.lastAt = record.at;
       const values = Object.values(card.scores ?? {});
       if (values.length) entry.all.push(values.reduce((sum, value) => sum + value, 0) / values.length);
@@ -188,10 +190,34 @@ function summarize(records, { window = RECENT_WINDOW, role = null } = {}) {
   return [...byModel.values()].map((entry) => ({
     model: entry.model,
     missions: entry.missions.size,
+    finished: entry.finished.size,
+    failed: entry.missions.size - entry.finished.size,
+    passRate: Math.round((entry.finished.size / entry.missions.size) * 100) / 100,
     lastAt: entry.lastAt,
     overall: stats(entry.all),
     categories: Object.fromEntries(CATEGORIES.filter((category) => entry.scores[category]).map((category) => [category, stats(entry.scores[category])])),
   })).sort((a, b) => (b.overall.recent ?? 0) - (a.overall.recent ?? 0) || b.missions - a.missions);
+}
+
+/**
+ * One model's missions, newest first (at most `limit`): each scored round it worked in, with the
+ * request, how the mission ended and only that model's cards (in `role` when given), for the scores
+ * page's per-model history.
+ */
+function modelHistory(records, model, { role = null, limit = 100 } = {}) {
+  const missions = [];
+  for (let index = records.length - 1; index >= 0 && missions.length < limit; index -= 1) {
+    const record = records[index];
+    const cards = (record.cards ?? []).filter((card) => card.model === model && (!role || card.role === role));
+    if (!cards.length) continue;
+    const values = cards.flatMap((card) => Object.values(card.scores ?? {}));
+    missions.push({
+      id: record.id, workspaceId: record.workspaceId ?? null, taskId: record.taskId ?? null, at: record.at, outcome: record.outcome,
+      categories: record.categories ?? [], grader: record.grader ?? null, message: record.message ?? "",
+      score: average(values), cards,
+    });
+  }
+  return missions;
 }
 
 /** The model picker's hint per model: `{ overall, recent, missions, strengths }` (its best categories by average, at most 2). */
@@ -243,6 +269,7 @@ module.exports = {
   createModelScoreStore,
   gradePrompt,
   keywordCategories,
+  modelHistory,
   parseGrade,
   pickerHints,
   scoreRound,

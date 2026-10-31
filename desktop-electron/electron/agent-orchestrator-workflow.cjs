@@ -12,7 +12,7 @@ const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, crea
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { userMessages } = require("./chat-history.cjs");
-const { createModelScoreStore, gradePrompt, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
+const { createModelScoreStore, gradePrompt, modelHistory, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
 
@@ -5177,12 +5177,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       scoring.delete(guard);
     }
   }
-  /** The score log summarised for the picker and the scores page: per model, and per role when `role` is given. */
-  function modelScoreSummary({ role = null, window, limit = 50 } = {}) {
+  /**
+   * The score log summarised for the picker and the scores page: per model, and per role when `role`
+   * is given; with `model`, also that model's own missions (`history`, newest first).
+   */
+  function modelScoreSummary({ role = null, window, limit = 50, model = null } = {}) {
     const records = modelScores.records();
-    const summary = summarize(records, { role: typeof role === "string" && role ? role : null, ...(Number.isSafeInteger(window) && window > 0 ? { window } : {}) });
+    const only = typeof role === "string" && role ? role : null;
+    const summary = summarize(records, { role: only, ...(Number.isSafeInteger(window) && window > 0 ? { window } : {}) });
     const count = Math.max(0, Math.min(200, Number.isSafeInteger(limit) ? limit : 50));
-    return { ok: true, summary, recent: count ? records.slice(-count).reverse() : [], total: records.length };
+    const history = typeof model === "string" && model ? { history: modelHistory(records, model, { role: only, limit: 200 }) } : {};
+    return { ok: true, summary, recent: count ? records.slice(-count).reverse() : [], total: records.length, ...history };
   }
   /**
    * When a chat's latest round has settled, its goal is achieved, stalled, limited, paused, or goes

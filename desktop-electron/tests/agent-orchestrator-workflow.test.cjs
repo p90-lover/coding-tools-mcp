@@ -8848,6 +8848,15 @@ test("a Team round that settles by itself scores its models once, graded by a fr
   assert.deepEqual(scores.summary.map((entry) => entry.model), ["cpa/glm-5", "cpa/kimi-k3"]);
   assert.equal(scores.summary[1].categories.command_follow.average, 4);
   assert.deepEqual((await workflow.call("model_scores", { role: "worker" })).summary.map((entry) => entry.model), ["cpa/kimi-k3"]);
+  // The leaderboard's record per model, and one model's own missions.
+  assert.deepEqual([scores.summary[1].finished, scores.summary[1].failed, scores.summary[1].passRate], [1, 0, 1]);
+  assert.equal(scores.history, undefined, "missions only when a model is asked for");
+  const { history } = await workflow.call("model_scores", { model: "cpa/kimi-k3" });
+  assert.deepEqual(history.map((mission) => [mission.id, mission.outcome, mission.cards.map((card) => card.model)]), [["r1", "finished", ["cpa/kimi-k3"]]],
+    "its missions hold only its own cards");
+  assert.match(history[0].message, /Restyle the dashboard UI/);
+  assert.equal(typeof history[0].score, "number");
+  assert.deepEqual((await workflow.call("model_scores", { model: "cpa/kimi-k3", role: "planner" })).history, []);
   await workflow.call("model_scores_clear", {});
   assert.equal((await workflow.call("model_scores", {})).total, 0);
   workflow.dispose();
