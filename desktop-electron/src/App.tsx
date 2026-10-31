@@ -73,6 +73,8 @@ export function App() {
   const [apiReady, setApiReady] = useState(() => Boolean(api));
   const [apiTimedOut, setApiTimedOut] = useState(false);
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const [snapshotAttempt, setSnapshotAttempt] = useState(0);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
   const lastOperationRef = useRef<OperationState | null>(null);
@@ -113,7 +115,7 @@ export function App() {
   }, [documentLanguage]);
 
   useEffect(() => {
-    if (!api) return undefined;
+    if (!apiReady || !api) return undefined;
     let cancelled = false;
     void api.snapshot().then((next) => {
       if (cancelled) return;
@@ -125,7 +127,12 @@ export function App() {
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
         setError(next.operation.message);
       }
-    }).catch((cause) => setError(messageOf(cause)));
+    }).catch((cause) => { if (!cancelled) setSnapshotError(messageOf(cause)); });
+    return () => { cancelled = true; };
+  }, [apiReady, snapshotAttempt]);
+
+  useEffect(() => {
+    if (!apiReady || !api) return undefined;
     const unsubscribeState = api.onStateChanged((state) => {
       setSnapshot((current) => current
         ? {
@@ -153,7 +160,6 @@ export function App() {
       setSnapshot((current) => current ? { ...current, update } : current);
     });
     return () => {
-      cancelled = true;
       unsubscribeState();
       unsubscribeBrowser();
       unsubscribeOperation();
@@ -178,7 +184,10 @@ export function App() {
       ? <FatalMessage message="Can't reach the launcher. Restart the app." />
       : <LaunchLoading />;
   }
-  if (!snapshot) return <LaunchLoading />;
+  if (!snapshot) return snapshotError === null ? <LaunchLoading /> : <FatalMessage
+    message={`Couldn't load the launcher. ${snapshotError}`}
+    onRetry={() => { setSnapshotError(null); setSnapshotAttempt((current) => current + 1); }}
+  />;
 
   const language = snapshot.state.language ?? "en";
   const copy = copyFor(language);
@@ -3435,12 +3444,13 @@ function LaunchLoading() {
   );
 }
 
-function FatalMessage({ message }: { message: string }) {
+function FatalMessage({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <main className="fatal-message">
+    <main className="fatal-message" role="alert">
       <BrandMark />
       <h1>Coding Tools</h1>
       <p>{message}</p>
+      {onRetry ? <SecondaryButton onClick={onRetry}>Try again</SecondaryButton> : null}
     </main>
   );
 }
