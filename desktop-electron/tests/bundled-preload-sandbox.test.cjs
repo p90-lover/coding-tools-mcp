@@ -26,3 +26,34 @@ test("packaged preload exposes the module API with Electron sandbox restrictions
   assert.equal(exposed.codingTools.invoke, undefined);
   assert.equal(exposed.codingTools.readFile, undefined);
 });
+
+test("while main says the window is away, app calls stop in the preload instead of flooding main with refusals", async () => {
+  const code = buildSync({ entryPoints: [path.join(__dirname, "../electron/preload.cjs")], bundle: true,
+    platform: "node", format: "cjs", target: "node22", external: ["electron"], write: false,
+  }).outputFiles[0].text;
+  const exposed = {};
+  const listeners = new Map();
+  const invoked = [];
+  const electron = {
+    contextBridge: { exposeInMainWorld: (name, api) => { exposed[name] = api; } },
+    ipcRenderer: {
+      invoke: async (channel) => { invoked.push(channel); return { ok: true }; },
+      send() {}, on(channel, listener) { listeners.set(channel, listener); }, removeListener() {},
+    },
+  };
+  const sandbox = vm.createContext({
+    require(name) { if (name !== "electron") throw Error(`Sandbox cannot require ${name}`); return electron; },
+    console, setTimeout, clearTimeout, TextEncoder, structuredClone,
+  });
+  vm.runInContext(code, sandbox);
+  // Made in the preload's own realm, as contextBridge hands the page's arguments over.
+  const call = () => exposed.codingTools.apps.call(vm.runInContext('({ moduleId: "agent-orchestrator", operation: "activity" })', sandbox));
+
+  listeners.get("launcher:window-shown")({}, false);
+  await assert.rejects(call(), /not minimized/);
+  assert.deepEqual(invoked, [], "nothing reached main while the window was minimized");
+
+  listeners.get("launcher:window-shown")({}, true);
+  await call().catch(() => {});
+  assert.deepEqual(invoked, ["coding-tools:apps:call"], "calls go through again once it is shown");
+});
