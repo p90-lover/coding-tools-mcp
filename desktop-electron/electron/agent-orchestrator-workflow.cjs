@@ -3980,6 +3980,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         else await pause();
       }
     } catch (error) {
+      // The app is closing (dispose): a call that fails now ("Local execution service is stopping") says
+      // nothing about the run. Held and reported, every chat raised needs-attention, scheduled a retry
+      // and could stall its goal or send its queue into the stopping service (19 at one quit, 2026-10-31).
+      // The run is left as AO has it; the next app's recovery picks it up.
+      if (autoRetryDisposed) return;
       // A call to a local service timed out (the busy hard disk held the headless service, or it was
       // restarting): the run's cards are fine, only this call took too long. The chat showed "Step
       // failed: Headless request timed out" and waited for a click with "Retry automatically" on,
@@ -4019,7 +4024,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           + `checking the run again in ${Math.round(delay / 1000)}s`;
         reportRun(workspaceId, runId, state, null);
         logger?.warn?.("ao.drive_socket_retry", { attempt: state.socketRestarts, code: String(error?.code ?? error?.cause?.code ?? "") });
-        setTimeout(() => { if (!state.stopped) void driveRun(workspaceId, runId, executable, state); }, delay);
+        // Tracked like the timeout retry above, so dispose() cancels it: a bare setTimeout drove the run
+        // again into a service the closing app had already stopped.
+        const timer = setTimer(() => { autoRetryTimers.delete(timer); if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); }, delay);
+        timer?.unref?.();
+        autoRetryTimers.add(timer);
         return;
       }
       state.status = "held"; state.detail = publicText(error?.message || error, 500);

@@ -2445,6 +2445,9 @@ function registerIpc({ logger, stateStore }) {
   // in the ChatGPT view is never interrupted; only a session that is signed in is then refreshed
   // in the view. Nothing runs under a login, smoke test or turn.
   handle("launcher:browser-check-auth", async () => {
+    // Setup asks as soon as it shows, which can be before the browser exists (handlers are registered
+    // first): that failed with "Cannot read properties of null (reading 'snapshot')" on every launch.
+    if (!browserHost) return null;
     const current = browserHost.snapshot();
     if (stateStore.read().browserInteractionMode === "manual" || current?.authenticated === true
       || browserHost.currentOperation?.() || browserHost.activeTraceId) return current;
