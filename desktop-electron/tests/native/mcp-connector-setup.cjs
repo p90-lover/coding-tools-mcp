@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { app, BrowserWindow, session } = require("electron");
 const moduleRoot = process.env.MCP_CONNECTOR_TEST_APP_ROOT || path.resolve(__dirname, "../..");
-const { createConfiguredConnector } = require(path.join(moduleRoot, "electron/mcp-connector-setup.cjs"));
+const { createConfiguredConnector, openConfiguredTunnelSettings } = require(path.join(moduleRoot, "electron/mcp-connector-setup.cjs"));
 const { createMcpConnectorCommand } = require(path.join(moduleRoot, "electron/mcp-connector-command.cjs"));
 
 const root = process.env.MCP_CONNECTOR_TEST_ROOT;
@@ -20,8 +20,9 @@ app.setPath("logs", path.join(root, "logs"));
 app.setPath("crashDumps", path.join(root, "crashes"));
 app.on("window-all-closed", () => {});
 const deadline = setTimeout(() => { console.error("MCP_NATIVE_TIMEOUT"); app.exit(2); }, 180_000);
+console.log("MCP_NATIVE_START");
 
-function fixture({ legacy, publicTab, menu, existing, denied, notification }) {
+function fixture({ legacy, publicTab, menu, existing, denied, notification, labelledBy, unrelatedLabel }) {
   return `<!doctype html><title>Plugins | ChatGPT</title><main>
     <div role="tablist"><button id="public" role="tab" aria-selected="${Boolean(publicTab)}">Public</button>
     <button id="personal" role="tab" aria-selected="${!publicTab}">Personal</button></div>
@@ -29,12 +30,21 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification }) {
     <section id="list"></section><button id="add">${legacy ? "Create app" : "Add"}</button></main>
     ${notification ? '<div role="alert">Unrelated notification</div>' : ''}
     <script>
-    const scenario = ${JSON.stringify({ legacy, publicTab, menu, existing, denied })};
+    const scenario = ${JSON.stringify({ legacy, publicTab, menu, existing, denied, labelledBy, unrelatedLabel })};
     let personalClicks = 0, submits = 0;
+    function card(id, name = 'Coding Tools Native2') {
+      if (!scenario.labelledBy) return '<article><a aria-label="Open Coding Tools Native2" href="/plugins/plugins~Plugin_' + id + '"><h2>Coding Tools Native2</h2></a></article>';
+      // Observed ChatGPT row: an empty overlay link names its sibling title, not its description.
+      return '<div style="position:relative;width:320px;height:140px" tabindex="-1">'
+        + '<a style="position:absolute;inset:0" aria-labelledby="_r_18_" href="/plugins/plugin_asdk_app_' + id + '?directoryTab=personal" data-discover="true"></a>'
+        + '<div id="_r_18_" class="text-default truncate font-medium"><span class="inline-flex max-w-full flex-wrap items-center gap-2"><span class="truncate">' + name + '</span> </span></div>'
+        + '<div class="line-clamp-1">Coding Tools Native2</div></div>';
+    }
     function list() {
       document.querySelector('#list').innerHTML = scenario.existing
-        ? '<article><a aria-label="Open Coding Tools Native2" href="/plugins/plugins~Plugin_existing"><h2>Coding Tools Native2</h2></a></article>'
-        : '<p>' + (scenario.legacy ? 'No apps yet' : 'No plugins found') + '</p>';
+        ? card('existing')
+        : scenario.unrelatedLabel ? card('other', 'Build Web Apps')
+          : '<p>' + (scenario.legacy ? 'No apps yet' : 'No plugins found') + '</p>';
     }
     if (!scenario.publicTab) list();
     else document.querySelector('#list').innerHTML = '<article><a aria-label="Open Coding Tools Native2" href="/plugins/plugins~Plugin_public"><h2>Coding Tools Native2</h2></a></article>';
@@ -91,7 +101,7 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification }) {
           dialog.insertAdjacentHTML('beforeend', '<div role="alert">The MCP server denied access. Check your authentication settings and, if using a tunnel, its workspace access.</div>');
         } else {
           dialog.remove();
-          document.querySelector('#list').innerHTML = '<article><a aria-label="Open Coding Tools Native2" href="/plugins/plugins~Plugin_created"><h2>Coding Tools Native2</h2></a></article>';
+          document.querySelector('#list').innerHTML = card('created');
         }
       };
     }
@@ -111,21 +121,46 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification }) {
     </script>`;
 }
 
+function detailFixture({ connected, ambiguous, disabledConnect }) {
+  return `<!doctype html><title>Coding Tools Native2 | ChatGPT</title><main>
+    <h1>Coding Tools Native2</h1><button>Try in chat</button>
+    <div role="button" tabindex="0"><div id="_r_t_">Coding Tools Native2</div><div>No description</div></div>
+    ${ambiguous ? '<div role="button" tabindex="0"><div id="_r_u_">Coding Tools Native2</div><div>No description</div></div>' : ""}
+    ${connected ? "" : '<button id="connect" ' + (disabledConnect ? 'disabled' : '') + '>Connect</button>'}</main><script>
+    ${disabledConnect ? "setTimeout(() => { document.querySelector('#connect').disabled = false; }, 250);" : ""}
+    document.querySelector('#connect')?.addEventListener('click', () => {
+      document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><h2>Connect Coding Tools Native2</h2><button id="consent">Connect Coding Tools Native2</button></div>');
+      document.querySelector('#consent').onclick = async () => {
+        await fetch('/__fixture/connection', { method: 'POST', body: JSON.stringify({ name: 'Coding Tools Native2' }) });
+        document.querySelector('#connect').remove();
+        document.querySelector('[role="dialog"]').remove();
+      };
+    });
+    </script>`;
+}
+
 app.whenReady().then(async () => {
+  console.log("MCP_NATIVE_READY");
   const cases = [
     { name: "personal-current" },
     { name: "business-current", publicTab: true, menu: true },
     { name: "legacy", legacy: true },
     { name: "existing-private", publicTab: true, existing: true },
+    { name: "existing-labelled-title", existing: true, labelledBy: true },
+    { name: "existing-connected", existing: true, labelledBy: true, connected: true },
+    { name: "disabled-connect-loading", existing: true, labelledBy: true, disabledConnect: true },
+    { name: "ambiguous-connected-rows", existing: true, labelledBy: true, connected: true, ambiguous: true },
+    { name: "created-labelled-title", labelledBy: true },
+    { name: "unrelated-labelled-description", labelledBy: true, unrelatedLabel: true },
     { name: "access-denied", denied: true },
     { name: "unrelated-notification", notification: true },
-  ];
+  ].filter(scenario => !process.env.MCP_CONNECTOR_TEST_CASE || scenario.name === process.env.MCP_CONNECTOR_TEST_CASE);
   for (const scenario of cases) {
     const data = path.join(root, scenario.name);
     fs.mkdirSync(data, { recursive: true });
     const partition = `mcp-setup-fixture-${scenario.name}`;
     const isolated = session.fromPartition(partition);
-    const receipts = [], windows = [];
+    const receipts = [], connections = [], windows = [];
     let shown = 0, focused = 0, operations = 0;
     await isolated.protocol.handle("https", async request => {
       const url = new URL(request.url);
@@ -134,11 +169,18 @@ app.whenReady().then(async () => {
         receipts.push(await request.json());
         return new Response("ok");
       }
-      return new Response(fixture(scenario), { headers: { "Content-Type": "text/html" } });
+      if (url.pathname === "/__fixture/connection") {
+        connections.push(await request.json());
+        return new Response("ok");
+      }
+      return new Response(url.pathname.startsWith("/plugins/") ? detailFixture(scenario) : fixture(scenario), {
+        headers: { "Content-Type": "text/html" },
+      });
     });
     function TrackedWindow(options) {
       assert.equal(options.show, false);
       assert.equal(options.webPreferences.partition, partition);
+      assert.equal(options.webPreferences.offscreen, true);
       const window = new BrowserWindow(options);
       windows.push(window);
       window.on("show", () => shown++);
@@ -163,13 +205,16 @@ app.whenReady().then(async () => {
       },
     };
     const command = createMcpConnectorCommand({ app: options.app, run: () => createConfiguredConnector(options) });
+    const expectedHref = `/plugins/${scenario.labelledBy ? "plugin_asdk_app_" : "plugins~Plugin_"}${scenario.existing ? "existing" : "created"}${scenario.labelledBy ? "?directoryTab=personal" : ""}`;
     try {
       if (scenario.denied) {
         await assert.rejects(command.request(), /MCP server denied access.*workspace access/);
+      } else if (scenario.ambiguous) {
+        await assert.rejects(command.request(), /more than one matching app row/);
       } else {
         const result = await command.request();
         assert.equal(result.created, !scenario.existing);
-        assert.equal(result.href, `/plugins/plugins~Plugin_${scenario.existing ? "existing" : "created"}`);
+        assert.equal(result.href, expectedHref);
       }
       assert.equal(operations, 1);
       assert.equal(shown, 0, "setup must never show its window");
@@ -177,8 +222,10 @@ app.whenReady().then(async () => {
       assert.equal(windows.length, 1);
       assert(windows.every(window => window.isDestroyed()), "setup must dispose its window");
       assert.equal(receipts.length, scenario.existing ? 0 : 1, "only one submission is allowed");
+      assert.equal(connections.length, scenario.denied || scenario.connected ? 0 : 1, "connect once and reuse an existing connection");
+      if (connections.length) assert.deepEqual(connections[0], { name: "Coding Tools Native2" });
       const commandReport = JSON.parse(fs.readFileSync(path.join(data, "mcp-connector-command.json")));
-      assert.equal(commandReport.status, scenario.denied ? "failed" : "completed");
+      assert.equal(commandReport.status, scenario.denied || scenario.ambiguous ? "failed" : "completed");
       if (scenario.denied) assert.equal(commandReport.error.code, "mcp_access_denied");
       if (receipts.length) assert.deepEqual(receipts[0], {
         name: "Coding Tools Native2", tunnelId, authentication: "NONE", trusted: true,
@@ -186,15 +233,74 @@ app.whenReady().then(async () => {
       });
       const binding = path.join(data, "mcp-connector-binding.json");
       assert.equal(fs.existsSync(binding), !scenario.existing && !scenario.denied);
-      if (fs.existsSync(binding)) assert.equal(JSON.parse(fs.readFileSync(binding)).href, "/plugins/plugins~Plugin_created");
+      if (fs.existsSync(binding)) assert.equal(JSON.parse(fs.readFileSync(binding)).href, expectedHref);
       console.log(`MCP_NATIVE_PASS ${scenario.name}`);
     } finally {
       for (const window of windows) if (!window.isDestroyed()) window.destroy();
       await isolated.protocol.unhandle("https");
     }
   }
+  const partition = "mcp-platform-settings-fixture";
+  const isolated = session.fromPartition(partition);
+  let settingsWindow, shown = 0, focused = 0, held = false;
+  await isolated.protocol.handle("https", request => {
+    assert.equal(new URL(request.url).origin, "https://platform.openai.com");
+    return new Response(`<!doctype html><title>MCP Platform frame verification</title>
+      <button id="create" hidden>Create tunnel</button><script>
+      window.frameCount = 0;
+      function frame() { frameCount++; document.querySelector('#create').hidden = false; requestAnimationFrame(frame); }
+      requestAnimationFrame(frame);
+      </script>`, { headers: { "Content-Type": "text/html" } });
+  });
+  const settings = openConfiguredTunnelSettings({
+    BrowserWindow: function (options) {
+      assert.equal(options.show, false);
+      assert.equal(options.webPreferences.partition, partition);
+      assert.equal(options.webPreferences.offscreen, true);
+      assert.equal(options.webPreferences.backgroundThrottling, false);
+      settingsWindow = new BrowserWindow(options);
+      settingsWindow.on("show", () => shown++);
+      settingsWindow.on("focus", () => focused++);
+      return settingsWindow;
+    },
+    browserHost: { partition, withManualOperation: async (_label, work) => {
+      held = true;
+      try { return await work(); } finally { held = false; }
+    } },
+    runtimeHost: {
+      runtimeConfigSnapshot: () => ({ configured: true, owner: "launcher", config: {
+        mode: "full", browserInteractionMode: "automatic", automaticTunnel: { tunnelId: "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      } }),
+      mcpCredentialsConfigured: () => true,
+      mcpConnectorName: () => "Coding Tools Native2",
+    },
+  });
+  try {
+    let state;
+    const until = Date.now() + 4000;
+    do {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      state = await settingsWindow.webContents.executeJavaScript(`({ frames: window.frameCount || 0, ready: document.querySelector('#create')?.hidden === false })`);
+    } while (state.frames < 2 && Date.now() < until);
+    assert(state.frames >= 2, `hidden settings must receive animation frames (observed ${state.frames})`);
+    assert.equal(settingsWindow.webContents.isOffscreen(), true);
+    assert.equal(settingsWindow.webContents.isPainting(), true);
+    assert.equal(state.ready, true, "frame-dependent Platform controls must become ready");
+    assert.equal(held, true, "the operation must stay owned until the settings window closes");
+    await settingsWindow.webContents.executeJavaScript(`location.href = 'https://not-allowed.invalid/'`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(new URL(settingsWindow.webContents.getURL()).origin, "https://platform.openai.com");
+    assert.equal(shown, 0);
+    assert.equal(focused, 0);
+    console.log(`MCP_NATIVE_PASS platform-settings frames=${state.frames} hidden=true focused=false offscreen=true`);
+  } finally {
+    if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.destroy();
+    await settings;
+    await isolated.protocol.unhandle("https");
+  }
+  assert.equal(held, false);
   clearTimeout(deadline);
-  console.log(`MCP_NATIVE_ALL_PASS hidden=true focused=false cases=${cases.length}`);
+  console.log(`MCP_NATIVE_ALL_PASS hidden=true focused=false cases=${cases.length + 1}`);
   app.exit(0);
 }).catch(error => {
   console.error("MCP_NATIVE_FAILED", error.stack || error);
