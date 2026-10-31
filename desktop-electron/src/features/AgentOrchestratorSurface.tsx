@@ -495,6 +495,7 @@ const chatModelName = (model: string) => modelShortLabel(model.replace(/\((?:\d+
  * hears which chat it opened (`onChat`); a new chat asked for inside it opens another pane.
  */
 export type SplitPaneLink = {
+  id: string;
   workspaceId: string;
   taskId: string;
   onChat: (workspaceId: string, taskId: string) => void;
@@ -2713,7 +2714,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
           onMovePane={pane ? undefined : moveSplitPane}
           panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError}
-            pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
+            pane={{ id: item.id, workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
               onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
         {view === "chat" ? (
           !workspaceId && workspaceReady
@@ -2722,6 +2723,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                 onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
                 runs={chatRuns}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
+                draftScope={pane?.id ?? "main"}
                 projectLoadError={projectLoadError} onRetryProject={() => setProjectLoadRevision((value) => value + 1)} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}

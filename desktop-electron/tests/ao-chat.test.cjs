@@ -1103,6 +1103,84 @@ function rendererCallback(file, name, globals) {
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
 
+test("blank chat drafts and files stay with their pane and project across Board roundtrips", () => {
+  const maps = { CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(), CHAT_ANNOTATIONS: new Map() };
+  const scopes = [["project-a", "main"], ["project-a", "right"], ["project-b", "main"]];
+  const keys = scopes.map(([projectId, draftScope]) => rendererCallback("AgentOrchestratorChat.tsx", "draftKey", { selectedTaskId: "", projectId, draftScope }));
+  assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "draftKey", { selectedTaskId: "saved-task", projectId: "project-b", draftScope: "right" }), "saved-task");
+  const files = scopes.map((_, index) => [{ path: `G:/fixture-${index}.png`, preview: `blob:fixture-${index}` }]);
+  const mount = key => ({ selectedTaskId: "", draftKey: key, ...maps, useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] });
+  for (const [index, key] of keys.entries()) {
+    assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[draft, setDraft]", mount(key))[0], "", "another new composer starts empty");
+    const composing = { current: { taskId: "", cacheKey: key, draft: `Draft ${index}`, attachments: files[index], annotations: [] } };
+    rendererCallback("AgentOrchestratorChat.tsx", "effect:composing.current", { composing, ...maps })()();
+  }
+  for (const [index, key] of keys.entries()) {
+    assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[draft, setDraft]", mount(key))[0], `Draft ${index}`);
+    assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[attachments, setAttachments]", mount(key))[0], files[index]);
+  }
+  const draftOwner = { current: keys[0] }, restored = {};
+  rendererCallback("AgentOrchestratorChat.tsx", "effect:if (draftOwner.current", {
+    draftOwner, draftKey: keys[2], selectedTaskId: "", composing: { current: {} }, draft: "Updated first draft", attachments: files[0], annotations: [], ...maps,
+    setDraft: value => { restored.draft = value; }, setAttachments: value => { restored.attachments = value; }, setAnnotations() {}, setAttachNote() {},
+  })();
+  assert.equal(draftOwner.current, keys[2]);
+  assert.equal(restored.draft, "Draft 2");
+  assert.equal(restored.attachments, files[2]);
+  assert.equal(maps.CHAT_DRAFTS.get(keys[0]), "Updated first draft");
+  assert.equal(maps.CHAT_DRAFTS.has(""), false);
+});
+
+test("unsent chat text, attachments and annotations survive unmount and remount", () => {
+  const selectedTaskId = "draft-navigation", attachments = [{ path: "G:/fixture.png", preview: "blob:fixture" }], annotations = [{ id: 1, text: "Selected words" }];
+  const maps = { CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(), CHAT_ANNOTATIONS: new Map() };
+  const composing = { current: { taskId: selectedTaskId, cacheKey: selectedTaskId, draft: "Unfinished message", attachments, annotations } };
+  const cleanup = rendererCallback("AgentOrchestratorChat.tsx", "effect:composing.current", { composing, ...maps })();
+  cleanup();
+  assert.equal(maps.CHAT_DRAFTS.get(selectedTaskId), "Unfinished message");
+  assert.equal(maps.CHAT_ATTACHMENTS.get(selectedTaskId), attachments);
+  const globals = { draftKey: selectedTaskId, ...maps, useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
+  assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[draft, setDraft]", globals)[0], "Unfinished message");
+  assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[attachments, setAttachments]", globals)[0], attachments);
+  assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[annotations, setAnnotations]", globals)[0], annotations);
+  composing.current = { taskId: selectedTaskId, cacheKey: selectedTaskId, draft: "", attachments: [], annotations: [] };
+  cleanup();
+  assert.equal(maps.CHAT_DRAFTS.has(selectedTaskId), false, "an empty composer cannot resurrect old text");
+  assert.equal(maps.CHAT_ATTACHMENTS.has(selectedTaskId), false);
+  assert.equal(maps.CHAT_ANNOTATIONS.has(selectedTaskId), false);
+});
+
+test("a chat switch preserves its restored draft if unmount wins the queued state render", () => {
+  for (const taskId of ["task-b", ""]) {
+    const previousKey = taskId ? "task-a" : JSON.stringify(["new", "project-a", "main"]);
+    const draftKey = taskId || JSON.stringify(["new", "project-b", "main"]);
+    const oldFiles = [{ path: "G:/old.png" }], files = [{ path: "G:/restored.png" }], annotations = [{ id: 1, text: "Restored quote" }];
+    const maps = { CHAT_DRAFTS: new Map([[draftKey, "Restored draft"]]), CHAT_ATTACHMENTS: new Map([[draftKey, files]]), CHAT_ANNOTATIONS: new Map([[draftKey, annotations]]) };
+    const composing = { current: { taskId, cacheKey: previousKey, draft: "Previous draft", attachments: oldFiles, annotations: [] } };
+    const queued = {};
+    rendererCallback("AgentOrchestratorChat.tsx", "effect:if (draftOwner.current", {
+      draftOwner: { current: previousKey }, draftKey, selectedTaskId: taskId, composing, draft: "Previous draft", attachments: oldFiles, annotations: [], ...maps,
+      setDraft: value => { queued.draft = value; }, setAttachments: value => { queued.attachments = value; }, setAnnotations: value => { queued.annotations = value; }, setAttachNote() {},
+    })();
+    assert.equal(queued.draft, "Restored draft", "the next state is scheduled but has not rendered");
+    rendererCallback("AgentOrchestratorChat.tsx", "effect:composing.current", { composing, ...maps })()();
+    assert.equal(maps.CHAT_DRAFTS.get(previousKey), "Previous draft");
+    assert.equal(maps.CHAT_DRAFTS.get(draftKey), "Restored draft", "unmount keeps the newly restored draft");
+    assert.equal(maps.CHAT_ATTACHMENTS.get(draftKey), files);
+    assert.equal(maps.CHAT_ANNOTATIONS.get(draftKey), annotations);
+    assert.equal(composing.current.taskId, taskId);
+    assert.equal(composing.current.cacheKey, draftKey);
+  }
+});
+
+test("chat attachment previews stay alive while another draft keeps them", () => {
+  const freed = [], shownPreviews = { current: new Set(["blob:kept", "blob:removed"]) };
+  rendererCallback("AgentOrchestratorChat.tsx", "effect:const now = new Set(attachments", {
+    attachments: [], shownPreviews, CHAT_ATTACHMENTS: new Map([["other-chat", [{ preview: "blob:kept" }]]]), freePreview: value => freed.push(value),
+  })();
+  assert.deepEqual(freed, ["blob:removed"]);
+});
+
 test("an unsent split chat can switch projects and finish choosing its new chat", () => {
   const paneWanted = { current: { workspaceId: "old-project", taskId: "" } };
   const state = { workspaceId: "old-project", taskId: null };
@@ -1278,6 +1356,26 @@ test("send completion preserves the next chat's draft and edits typed during the
     reply.resolve(); assert.equal(await sending, true);
     assert.equal(state.draft, "new unsent text", taskId);
   }
+});
+
+test("a pending new-chat send keeps its real API identity and leaves the next project's composer alone", async () => {
+  const reply = delayedReply(), attachments = [], annotations = [], calls = [];
+  const composing = { current: { taskId: "", cacheKey: "project-a/main", draft: "sent text", attachments, annotations } };
+  const state = { draft: "sent text", title: "First project" };
+  const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
+    selectedTaskId: "", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
+    setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: input => { calls.push(input); return reply.promise; },
+    setDraft: value => { state.draft = value; }, setTitle: value => { state.title = value; }, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+    setOutgoing() {}, setAnnotations() {},
+  });
+  const sending = deliver("sent text");
+  state.draft = "Next project's draft"; state.title = "Next project";
+  composing.current = { taskId: "", cacheKey: "project-b/main", draft: state.draft, attachments, annotations };
+  reply.resolve(); assert.equal(await sending, true);
+  assert.equal(state.draft, "Next project's draft");
+  assert.equal(state.title, "Next project");
+  assert.equal(calls[0].taskId, undefined, "a new chat is sent without a synthetic cache identity");
+  assert.equal(calls[0].message, "sent text");
 });
 
 test("approval callbacks refuse a request displayed by a previous run and still send the current request", async () => {
