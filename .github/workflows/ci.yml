@@ -128,6 +128,9 @@ jobs:
           toolchain: '1.98.1'
           components: clippy
 
+      - name: Headless library regression tests
+        run: cargo test --locked --lib --manifest-path rust-core/coding-tools-headless/Cargo.toml
+
       - name: Cargo test
         working-directory: src-tauri
         run: cargo test --locked

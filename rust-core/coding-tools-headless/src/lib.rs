@@ -346,7 +346,9 @@ impl OperationStore {
         self.records.insert(id, receipt);
         while self.order.len() > MAX_OPERATION_RECORDS {
             let Some(index) = self.order.iter().position(|id| {
-                self.records.get(id).is_some_and(|item| item.state != "running")
+                self.records
+                    .get(id)
+                    .is_some_and(|item| item.state != "running")
             }) else {
                 break;
             };
@@ -379,8 +381,14 @@ mod operation_audit_tests {
             });
         }
         assert!(store.records.len() <= MAX_OPERATION_RECORDS);
-        assert!(store.records.contains_key("0"), "running work must remain queryable");
-        assert!(!store.records.contains_key("1"), "the oldest completed row must expire");
+        assert!(
+            store.records.contains_key("0"),
+            "running work must remain queryable"
+        );
+        assert!(
+            !store.records.contains_key("1"),
+            "the oldest completed row must expire"
+        );
     }
 
     #[tokio::test]
@@ -3395,45 +3403,75 @@ mod session_root_tests {
         let root = base.path().join("project");
         fs::create_dir_all(&root).unwrap();
         let state = context_lifecycle_fixture(&root);
-        let profile = state.core
+        let profile = state
+            .core
             .with_data(|store| Ok(store.get("ws-1").unwrap().clone()))
             .unwrap();
-        let mut context = tools::ToolContext::for_test(root.clone(), base.path().join("harness"))
-            .unwrap();
+        let mut context =
+            tools::ToolContext::for_test(root.clone(), base.path().join("harness")).unwrap();
         context.auth = profile.auth.clone();
         context.policy = tools::PolicySettings::from_runtime(&profile.runtime);
         context.tool_profile = profile.runtime.tool_profile.clone();
         context.permission_mode = context.policy.canonical_permission_mode().into();
         context.bind_workspace_id("ws-1");
         let context = Arc::new(context);
-        let fingerprint = format!("{:x}", Sha256::digest(
-            serde_json::to_vec(&(&profile.path, &profile.auth)).unwrap()
-        ));
-        state.contexts.lock().unwrap().insert("ws-1".into(), ContextEntry {
-            fingerprint,
-            context: context.clone(),
-            used: std::time::Instant::now(),
-        });
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(&profile.path, &profile.auth)).unwrap())
+        );
+        state.contexts.lock().unwrap().insert(
+            "ws-1".into(),
+            ContextEntry {
+                fingerprint,
+                context: context.clone(),
+                used: std::time::Instant::now(),
+            },
+        );
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (continue_tx, continue_rx) = std::sync::mpsc::channel();
         let owner_state = state.clone();
         let handle = tokio::runtime::Handle::current();
         let owner = std::thread::spawn(move || {
-            BEFORE_TOOL_CONTEXT.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
-                entered_tx.send(()).unwrap();
-                continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            })));
-            handle.block_on(call(&owner_state, "same-request", "update_plan", json!({"plan":[]}), None))
+            BEFORE_TOOL_CONTEXT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    entered_tx.send(()).unwrap();
+                    continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }))
+            });
+            handle.block_on(call(
+                &owner_state,
+                "same-request",
+                "update_plan",
+                json!({"plan":[]}),
+                None,
+            ))
         });
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let duplicate = call(&state, "same-request", "update_plan", json!({"plan":[]}), None).await;
+        let duplicate = call(
+            &state,
+            "same-request",
+            "update_plan",
+            json!({"plan":[]}),
+            None,
+        )
+        .await;
         continue_tx.send(()).unwrap();
         let original = owner.join().unwrap();
         assert_eq!(original.0, StatusCode::OK);
         assert_eq!(duplicate.0, StatusCode::OK);
         let saved = tools::dispatch::call_tool_mcp(&context, "get_plan", &json!({}));
-        assert_eq!(saved["revision"], 1, "the same request dispatched twice: {saved}");
-        let conflict = call(&state, "same-request", "update_plan", json!({"plan":[],"explanation":"different"}), None).await;
+        assert_eq!(
+            saved["revision"], 1,
+            "the same request dispatched twice: {saved}"
+        );
+        let conflict = call(
+            &state,
+            "same-request",
+            "update_plan",
+            json!({"plan":[],"explanation":"different"}),
+            None,
+        )
+        .await;
         assert_eq!(conflict.0, StatusCode::CONFLICT);
     }
 
@@ -3443,7 +3481,10 @@ mod session_root_tests {
         let state = context_lifecycle_fixture(&base.path().join("missing"));
         let failed = call(&state, "context-failure", "get_plan", json!({}), None).await;
         assert_eq!(failed.0, StatusCode::BAD_REQUEST);
-        assert_eq!(state.operations.lock().unwrap().records["context-failure"].state, "failed");
+        assert_eq!(
+            state.operations.lock().unwrap().records["context-failure"].state,
+            "failed"
+        );
         let retry = call(&state, "context-failure", "get_plan", json!({}), None).await;
         assert_eq!(retry.1["operation"]["state"], "failed");
     }
@@ -6815,7 +6856,9 @@ async fn tool_call(
     } {
         Ok(context) => context,
         Err(error) => {
-            state.operations.lock()
+            state
+                .operations
+                .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .insert(OperationReceipt {
                     state: "failed".into(),
