@@ -252,7 +252,7 @@ function dispatchMcpConnectorCommand() {
   if (!pendingMcpConnectorCommand || !launcherReadyForMcpCommand || !mcpConnectorCommand) return;
   pendingMcpConnectorCommand = false;
   // The private command receipt and existing operation status carry failure details.
-  void mcpConnectorCommand.request().catch(() => undefined);
+  void mcpConnectorCommand.request("command").catch(() => undefined);
 }
 let updateController = null;
 let autoInstaller = null;
@@ -2799,7 +2799,7 @@ function registerIpc({ logger, stateStore }) {
   dispatchMcpConnectorCommand();
   handle("launcher:mcp-create-connector", event => {
     assertFocusedMainWindow(event, true);
-    return mcpConnectorCommand.request();
+    return mcpConnectorCommand.request("settings");
   });
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());

@@ -15,8 +15,17 @@ function createMcpConnectorCommand({ app, run, logger }) {
     appVersion: app.getVersion(), startedAt: new Date().toISOString() });
   const save = report => writePrivateFileAtomic(reportFile, JSON.stringify(report));
   return {
-    request() {
-      if (inFlight) return inFlight;
+    /**
+     * `source`: what asked ("settings": the main window's button, "command": a launch with
+     * --create-mcp-connector). Logged with the outcome: three failed attempts on 2026-10-31 left
+     * no trace of who started them, or whether any had succeeded.
+     */
+    request(source = "unknown") {
+      if (inFlight) {
+        logger?.info?.("mcp.connector_creation_requested", { source, joined: true });
+        return inFlight;
+      }
+      logger?.info?.("mcp.connector_creation_requested", { source });
       const operation = begin();
       try {
         save({ ...operation, status: "running" });
@@ -29,6 +38,7 @@ function createMcpConnectorCommand({ app, run, logger }) {
           name: String(result.name || "").slice(0, 120),
           href: String(result.href || "").slice(0, 512),
         } });
+        logger?.info?.("mcp.connector_created", { source, created: result.created === true });
         return result;
       }).catch(error => {
         // Keep arbitrary errors, filesystem paths and credentials out of the automation receipt.
