@@ -3203,6 +3203,91 @@ test("auto-approval recognizes the observed non-dialog approval card", async () 
   expect(fixture.pressed).toEqual(["Allow once:Enter"]);
 });
 
+test.each([
+  ["automatic", "before observation"], ["automatic", "initial visibility"], ["automatic", "visible callback"],
+  ["automatic", "button wait"], ["manual", "visible callback"], ["manual", "final visibility"],
+  ["manual", "button wait"],
+] as const)("%s connector approval stops when cancelled at %s", async (mode, checkpoint) => {
+  const autoApprove = mode === "automatic";
+  const fixture = toolConfirmationPage();
+  const controller = new AbortController();
+  const dialog = fixture.page.locator('[role="dialog"]').last();
+  let reads = 0;
+  const isVisible = dialog.isVisible.bind(dialog);
+  dialog.isVisible = async (options) => {
+    const visible = await isVisible(options);
+    reads += 1;
+    if (checkpoint === "initial visibility" || (checkpoint === "final visibility" && reads === 2)) controller.abort();
+    return visible;
+  };
+  const getByRole = dialog.getByRole.bind(dialog);
+  dialog.getByRole = (role, options) => {
+    const button = getByRole(role, options).last();
+    button.last = () => button;
+    const waitFor = button.waitFor.bind(button);
+    button.waitFor = async (options) => {
+      await waitFor(options);
+      if (checkpoint === "button wait") controller.abort();
+    };
+    return button;
+  };
+  if (checkpoint === "before observation") controller.abort();
+
+  await expect(resolveChatGptToolConfirmation(
+    fixture.page, "Codex Native", autoApprove, controller.signal, 0,
+    checkpoint === "visible callback" ? async () => { await Promise.resolve(); controller.abort(); } : undefined,
+  )).rejects.toMatchObject({ name: "AbortError" });
+  expect(fixture.pressed).toEqual([]);
+});
+
+test.each([
+  ["automatic", "button wait"], ["automatic", "button press"],
+  ["manual", "button wait"], ["manual", "button press"], ["manual", "hidden wait"],
+] as const)("%s connector approval cancels an in-flight %s", async (mode, checkpoint) => {
+  const autoApprove = mode === "automatic";
+  const fixture = toolConfirmationPage();
+  const controller = new AbortController();
+  const dialog = fixture.page.locator('[role="dialog"]').last();
+  let entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const waitForAbort = async (options?: { signal?: AbortSignal }) => {
+    entered();
+    if (!options?.signal) throw new Error("Approval action did not receive the turn's signal");
+    expect(options.signal).toBe(controller.signal);
+    await new Promise<never>((_resolve, reject) => options.signal!.addEventListener(
+      "abort", () => reject(new DOMException("Approval cancelled", "AbortError")), { once: true },
+    ));
+  };
+  const hiddenWait = dialog.waitFor.bind(dialog);
+  dialog.waitFor = async (options) => {
+    if (checkpoint === "hidden wait") await waitForAbort(options);
+    else await hiddenWait(options);
+  };
+  const getByRole = dialog.getByRole.bind(dialog);
+  dialog.getByRole = (role, options) => {
+    const button = getByRole(role, options).last();
+    button.last = () => button;
+    const waitFor = button.waitFor.bind(button);
+    const press = button.press.bind(button);
+    button.waitFor = async (options) => {
+      if (checkpoint === "button wait") await waitForAbort(options);
+      else await waitFor(options);
+    };
+    button.press = async (key, options) => {
+      if (checkpoint === "button press") await waitForAbort(options);
+      else await press(key, options);
+    };
+    return button;
+  };
+  const pending = resolveChatGptToolConfirmation(fixture.page, "Codex Native", autoApprove, controller.signal, 0)
+    .catch(error => error);
+  await waiting;
+  controller.abort();
+
+  expect(await pending).toMatchObject({ name: "AbortError" });
+  expect(fixture.pressed).toEqual(checkpoint === "hidden wait" ? ["Deny:Enter"] : []);
+});
+
 test("browser preflight separates model context from one-message transport limits", () => {
   const plus = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
   const pro = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
