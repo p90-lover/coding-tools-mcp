@@ -50,7 +50,10 @@ function extensionHelpersSource() {
   function personalPluginsLoaded() {
     const selected = [...document.querySelectorAll('main [role="tab"][aria-selected="true"]')]
       .some(tab => textMatches(tab, PERSONAL_VIEW_LABELS, true));
-    return selected && !document.querySelector('main [data-testid="plugin-source-tabs-placeholder"],main [data-testid="directory-section-heading-skeleton"],main [data-testid="plugin-row-skeleton-icon-frame"]');
+    const loading = [...document.querySelectorAll('main *')].some(element =>
+      ['loading plugins', 'loading plugins…', 'loading plugins...'].includes(normalize(element.innerText ?? element.textContent))
+      && visible(element));
+    return selected && !loading && !document.querySelector('main [data-testid="plugin-source-tabs-placeholder"],main [data-testid="directory-section-heading-skeleton"],main [data-testid="plugin-row-skeleton-icon-frame"]');
   }
   function findManagedAppCard(name) {
     if (!personalPluginsLoaded()) return null;
@@ -96,7 +99,10 @@ function extensionHelpersSource() {
       if (!personalPluginsLoaded()) return null;
       const card = findManagedAppCard(settings.name);
       if (card) return { card };
-      if (pluginCardLinks().length || pluginsPageRenderState(settings.name) === 'empty') return { absent: true };
+      const directoryCard = pluginCardLinks().some(link => link.closest('article,[role="article"]')
+        || link.getAttribute('aria-labelledby') || link.querySelector('h1,h2,h3,h4')
+        || normalize(link.getAttribute('aria-label')).startsWith('open '));
+      if (directoryCard || pluginsPageRenderState(settings.name) === 'empty') return { absent: true };
       const main = document.querySelector('main');
       if (/no plugins found/i.test(main?.innerText || '')
         && allClickable(main).some(el => textMatches(el, ['Add'], true))) return { absent: true };
@@ -160,6 +166,8 @@ function extensionHelpersSource() {
     if (!create) throw new Error('ChatGPT did not expose one enabled Create action.');
     const previousErrors = new Set([...form.querySelectorAll('[role="alert"],[data-slot="form-message"]')]
       .map(el => normalize(el.innerText || el.textContent)));
+    const previousPluginPaths = new Set([...document.querySelectorAll('a[href]')]
+      .filter(link => link.origin === location.origin).map(link => link.pathname));
     create.click();
     const created = await waitFor(() => {
       const surface = activeSurface();
@@ -173,13 +181,17 @@ function extensionHelpersSource() {
         if (error) throw new Error('ChatGPT connector creation failed: ' + (error.innerText || error.textContent).trim().slice(0, 600));
       }
       const card = findManagedAppCard(settings.name);
-      if (card) return { created: true, href: card.getAttribute('href') };
-      if (location.pathname.startsWith('/plugins/')) {
+      let href = card?.getAttribute('href');
+      if (!href && location.pathname.startsWith('/plugins/')) {
         const heading = [...document.querySelectorAll('main h1,main h2,main h3')].find(el =>
           canonicalAppIdentity(el.innerText || el.textContent) === canonicalAppIdentity(settings.name));
-        if (heading) return { created: true, href: location.pathname + location.search };
+        if (heading) href = location.pathname + location.search;
       }
-      return null;
+      if (!href) return null;
+      if (previousPluginPaths.has(new URL(href, location.href).pathname)) {
+        throw new Error('ChatGPT showed an existing connector after Create; creation was not confirmed.');
+      }
+      return { created: true, href };
     }, 15000);
     if (!created) throw new Error('ChatGPT did not confirm connector creation.');
     return created;
