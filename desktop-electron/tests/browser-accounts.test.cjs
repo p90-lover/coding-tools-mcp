@@ -25,7 +25,7 @@ test("the first account keeps the original partition, so an existing sign-in car
   assert.deepEqual(accounts.status().accounts.map(entry => entry.id), [FIRST_ACCOUNT_ID]);
 });
 
-test("each added account gets its own partition, and the choice survives a restart", (t) => {
+test("each added account gets its own partition, and the choice survives a restart", async (t) => {
   const dataRoot = tempRoot(t);
   const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
   const id = accounts.add();
@@ -34,6 +34,7 @@ test("each added account gets its own partition, and the choice survives a resta
   assert.equal(accounts.activeId(), FIRST_ACCOUNT_ID, "adding does not switch by itself");
   accounts.setActive(id);
   accounts.setEmail(id, "team@example.com");
+  await accounts.saved();
 
   const reopened = createBrowserAccounts({ dataRoot, profile: "production" });
   assert.equal(reopened.activeId(), id);
@@ -216,7 +217,7 @@ test("a switch to a partition outside the profile is refused", async () => {
   assert.equal(host.partition, BASE);
 });
 
-test("CPA Codex sign-ins become accounts once each; a removed one stays removed", (t) => {
+test("CPA Codex sign-ins become accounts once each; a removed one stays removed", async (t) => {
   const dataRoot = tempRoot(t);
   const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
   accounts.setEmail(FIRST_ACCOUNT_ID, "Me@Example.com");
@@ -234,8 +235,34 @@ test("CPA Codex sign-ins become accounts once each; a removed one stays removed"
 
   const pro = accounts.status().accounts.find((entry) => entry.label === "pro@example.com").id;
   accounts.remove(pro);
+  await accounts.saved();
   const reopened = createBrowserAccounts({ dataRoot, profile: "production" });
   assert.deepEqual(reopened.importOauthAccounts([{ email: "pro@example.com" }]), [], "removing an imported account sticks across restarts");
+});
+
+test("the list is saved off the main thread: a burst of changes lands as the latest state, and a failed save only warns", async (t) => {
+  // A synchronous write and rename held every window up to 76 s on the busy hard disk (2026-11-01).
+  const dataRoot = tempRoot(t);
+  const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
+  const ids = [accounts.add(), accounts.add(), accounts.add()];
+  for (const id of ids) accounts.setActive(id);
+  accounts.setEmail(ids[2], "last@example.com");
+  await accounts.saved();
+  const reopened = createBrowserAccounts({ dataRoot, profile: "production" });
+  assert.equal(reopened.activeId(), ids[2], "the last change is the one on disk");
+  assert.equal(reopened.status().accounts.length, 4);
+  assert.equal(reopened.status().accounts.find((entry) => entry.id === ids[2]).email, "last@example.com");
+
+  // A data folder that cannot be written (a file stands in its place) leaves the accounts working.
+  const blocked = tempRoot(t);
+  fs.writeFileSync(blocked, "");
+  const warnings = [];
+  const unsaved = createBrowserAccounts({ dataRoot: blocked, profile: "production", logger: { warn: (event) => warnings.push(event) } });
+  const added = unsaved.add();
+  unsaved.setActive(added);
+  await unsaved.saved();
+  assert.equal(unsaved.activeId(), added);
+  assert.ok(warnings.includes("browser_accounts.save_failed"));
 });
 
 test("CPA sign-ins beyond the account limit wait until there is room", (t) => {
@@ -247,7 +274,7 @@ test("CPA sign-ins beyond the account limit wait until there is room", (t) => {
   assert.deepEqual(accounts.importOauthAccounts(emails).length, 1, "the next one not yet seen takes the freed place");
 });
 
-test("account settings: a tab limit of 1 to 5, new sessions on or off, and where new sessions start", (t) => {
+test("account settings: a tab limit of 1 to 5, new sessions on or off, and where new sessions start", async (t) => {
   const dataRoot = tempRoot(t);
   const accounts = createBrowserAccounts({ dataRoot, profile: "production" });
   const second = accounts.add();
@@ -260,6 +287,7 @@ test("account settings: a tab limit of 1 to 5, new sessions on or off, and where
   accounts.setSettings({ newSessions: second, keepFinishedTabsMinutes: 30 });
   assert.throws(() => accounts.setSettings({ newSessions: "nobody" }), /New sessions start on/);
   assert.throws(() => accounts.setSettings({ keepFinishedTabsMinutes: 7 }), /Finished tabs stay open/);
+  await accounts.saved();
 
   const reopened = createBrowserAccounts({ dataRoot, profile: "production" });
   const saved = reopened.status().accounts.find(entry => entry.id === second);

@@ -7,6 +7,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomBytes } = require("node:crypto");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { BROWSER_ACCOUNT_ID, browserAccountPartition } = require("./profile.cjs");
 
 const MAX_ACCOUNTS = 12;
@@ -93,11 +94,21 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     if (error?.code !== "ENOENT") logger?.warn?.("browser_accounts.unreadable", { message: error instanceof Error ? error.message : String(error) });
   }
 
+  // Written off the main thread: the synchronous write and rename held every window up to 76 s on
+  // the busy hard disk while accounts were removed and switched (2026-11-01), and one that never
+  // came back left the app "not responding" until Windows closed it. The accounts in memory are
+  // the truth; a burst of changes is one save plus at most one more with the latest state, flushed
+  // to disk before it replaces the old file so a power cut leaves the old list or the new one.
+  let saving = null;
+  let saveAgain = false;
   function save() {
-    fs.mkdirSync(dataRoot, { recursive: true });
-    const temporary = `${statePath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`);
-    fs.renameSync(temporary, statePath);
+    if (saving) { saveAgain = true; return; }
+    saving = writePrivateFileAtomicAsync(statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true, protectDirectory: false })
+      .catch((error) => logger?.warn?.("browser_accounts.save_failed", { message: error instanceof Error ? error.message : String(error) }))
+      .finally(() => {
+        saving = null;
+        if (saveAgain) { saveAgain = false; save(); }
+      });
   }
 
   function account(id) {
@@ -122,6 +133,8 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
   }
 
   return {
+    /** Resolves once every change so far is on disk (the app's quit, and tests reopening the file). */
+    async saved() { while (saving) await saving; },
     status() {
       return {
         activeId: state.activeId,

@@ -3457,6 +3457,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     await step("chatgpt-desktop", () => chatgptDesktop?.shutdown().catch(() => {}));
     // Generous: closing views before the ChatGPT session is saved could cost the sign-in.
     await step("browser-session", () => browserHost?.persistSession(), 30_000);
+    // The account list is saved off the main thread; the last change reaches the disk before exit.
+    await step("browser-accounts", () => browserAccounts.saved(), 10_000);
     browserHost?.destroy();
     await step("browser-control", () => browserControl?.close(), 5_000);
     // Last: everything above may still reach the network through Nova's gateway.
