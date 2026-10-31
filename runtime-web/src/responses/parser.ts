@@ -404,12 +404,13 @@ export function parseRequest(body: unknown): CodexParsedRequest {
       if (effectiveType === "additional_tools") {
         // Codex Desktop responses_lite WS path: tools ride INSIDE input as an
         // `additional_tools` item ({type, role, tools:[...]}) instead of body.tools.
-        // Same spec wire shapes (function/namespace/custom/tool_search) — collect and
-        // merge through the exact buildTools path so surface detection (collabSurface)
-        // and chat-model tool listing see them. The item itself never becomes a message;
-        // the native passthrough keeps it verbatim in _rawBody.
+        // An explicit request-level tools list is the current native inventory, including [].
+        // Older additional_tools can remain in replay after a model switch; merging them back
+        // would expose handlers (such as Code Mode exec) the current native router no longer has.
+        // When tools is omitted, retain the Responses Lite inventory for normal continuations.
+        // The item never becomes a message; native passthrough keeps it verbatim in _rawBody.
         const at = item as { tools?: unknown[] };
-        if (Array.isArray(at.tools)) loadedToolSpecs.push(...at.tools);
+        if (data.tools === undefined && Array.isArray(at.tools)) loadedToolSpecs.push(...at.tools);
         continue;
       }
 

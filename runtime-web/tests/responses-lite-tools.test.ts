@@ -54,6 +54,46 @@ test("Responses Lite exposes native exec from the default functions namespace on
   expect(parsed.context.tools?.some(tool => tool.name === "run_script")).toBe(false);
 });
 
+test("current request tools replace historical Code Mode declarations after a model switch", () => {
+  const command = { type: "function", name: "exec_command", parameters: { type: "object", properties: {} } };
+  for (const tools of [[command], []]) {
+    const parsed = parseRequest({
+      model: "chatgpt-web/high",
+      tools,
+      input: [
+        { type: "additional_tools", role: "developer", tools: responsesLiteTools() },
+        { type: "custom_tool_call", call_id: "previous_exec", name: "exec", input: "text('previous result')" },
+        { type: "custom_tool_call_output", call_id: "previous_exec", output: "previous result" },
+        { type: "message", role: "user", content: "Continue with the current model" },
+      ],
+    });
+    expect((parsed.context.tools ?? []).map(tool => tool.name)).toEqual(tools.map(tool => tool.name));
+    expect(parsed.context.messages.some(message => message.role === "toolResult"
+      && message.toolCallId === "previous_exec" && message.content === "previous result")).toBe(true);
+  }
+});
+
+test("omitted request tools retain Code Mode and discovered tools during a continuation", () => {
+  const parsed = parseRequest({
+    model: "chatgpt-web/high",
+    input: [
+      { type: "additional_tools", role: "developer", tools: responsesLiteTools() },
+      { type: "custom_tool_call", call_id: "previous_exec", name: "exec", input: "text('previous result')" },
+      { type: "custom_tool_call_output", call_id: "previous_exec", output: "previous result" },
+      { type: "tool_search_call", call_id: "search", execution: "client", arguments: { query: "preview" } },
+      { type: "tool_search_output", call_id: "search", status: "completed", tools: [{
+        type: "namespace", name: "panel_verification", tools: [{
+          type: "function", name: "preview_read", parameters: { type: "object", properties: {} },
+        }],
+      }] },
+      { type: "message", role: "user", content: "Continue using the same tools" },
+    ],
+  });
+  expect(parsed.context.tools).toContainEqual(expect.objectContaining({ name: "exec", freeform: true }));
+  expect(parsed.context.tools).toContainEqual(expect.objectContaining({ name: "wait" }));
+  expect(parsed.context.tools).toContainEqual(expect.objectContaining({ name: "preview_read", namespace: "panel_verification" }));
+});
+
 test("Responses Lite native tools preserve declared namespaces in JSON and SSE without qualifying legacy calls", async () => {
   const config = defaultConfig("full");
   config.solAvailable = false;
