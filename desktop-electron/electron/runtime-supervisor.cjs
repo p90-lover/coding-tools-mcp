@@ -506,15 +506,30 @@ class RuntimeSupervisor {
     // Where an older build kept that output; removed when a persistent daemon starts.
     this.daemonLogPath = path.join(coreHome, "runtime", "daemon.log");
     // Tunnels for further ChatGPT accounts; each runs beside the main tunnel and stops with it.
+    const extraStateDir = path.join(coreHome, "tunnel", "extra-runtime");
+    const extraTempDir = path.join(extraStateDir, "temp");
     this.extraTunnels = new ExtraTunnels({
       coreHome,
       logger,
-      runTunnel: (tunnel, args, timeoutMs, label) => this.runTunnelCommand({ tunnel }, args, timeoutMs, label),
+      runTunnel: (tunnel, args, timeoutMs, label) => {
+        // A new state root cannot see legacy runtimes; starting them again would create duplicates.
+        if (savedExtraTunnels && !fs.existsSync(path.join(extraStateDir, "aliases.yaml"))) {
+          throw new Error("Existing extra tunnels require migration to the dedicated runtime state directory before they can be started.");
+        }
+        fs.mkdirSync(extraTempDir, { recursive: true, mode: 0o700 });
+        return this.runTunnelCommand({ tunnel }, args, timeoutMs, label, {
+          ...this.getRuntimeEnvironment(),
+          TUNNEL_CLIENT_STATE_DIR: extraStateDir,
+          TEMP: extraTempDir,
+          TMP: extraTempDir,
+        });
+      },
       connectArgs: (config, tunnel) => managedTunnelConnectArgs({ ...config, tunnel }, this.tunnelMcpInvocation(config)),
       diagnostic: tunnelControlDiagnostic,
       absent: tunnelRuntimeAbsent,
       onChange: onExtraTunnelsChange,
     });
+    const savedExtraTunnels = this.extraTunnels.entries().length > 0;
   }
 
   /** Starts the extra tunnels in the background; a failing one never holds up the bridge. */
@@ -2080,10 +2095,11 @@ class RuntimeSupervisor {
    * up to 1.4 s each, while the tunnel restarted on 0.8.35 (launcher.main_blocked, 2026-10-30).
    * A timeout ends the command's whole process tree and rejects with "<label> timed out after N ms".
    */
-  async runTunnelCommand(config, args, timeoutMs, label) {
+  async runTunnelCommand(config, args, timeoutMs, label, env) {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
-    const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
+    const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir,
+      env: env ? { ...process.env, ...env } : undefined, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
     if (reply.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
     if (reply.error) throw new Error(reply.error);
     return controlResult(reply.code, reply.stdout, reply.stderr);
