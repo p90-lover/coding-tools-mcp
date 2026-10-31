@@ -131,6 +131,8 @@ export interface CodexTool {
   strict?: boolean;
   /** MCP namespace (e.g. "mcp__context7") for tools flattened out of a Responses "namespace" tool. */
   namespace?: string;
+  /** Declared native namespace when the model-facing wire name stays unqualified. */
+  nativeNamespace?: string;
   /** Freeform/custom tool (e.g. apply_patch): the model's call must be relayed as a custom_tool_call. */
   freeform?: boolean;
   /** Client-executed tool discovery (tool_search): the model's call must be relayed as a tool_search_call. */

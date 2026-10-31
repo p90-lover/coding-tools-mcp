@@ -285,6 +285,10 @@ interface GatewayToolCatalogPage {
   total: number;
 }
 
+const GATEWAY_CATALOG_BEGIN = "CODEX_NATIVE_TOOL_CATALOG_V1_BEGIN";
+const GATEWAY_CATALOG_END = "CODEX_NATIVE_TOOL_CATALOG_V1_END";
+const MAX_GATEWAY_CATALOG_BYTES = 1024 * 1024;
+
 function gatewayToolDescription(tool: GatewayToolDescriptor): string {
   if (!isGatewayAgentWaitTool(tool.name)) return tool.description;
   return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}`;
@@ -311,12 +315,14 @@ function gatewayToolCatalogProgram(options: {
     "    ...Object.fromEntries([\"outputSchema\", \"annotations\", \"_meta\"].filter(key => tool[key] && typeof tool[key] === \"object\" && !Array.isArray(tool[key])).map(key => [key, tool[key]])) }))",
     "  .filter(tool => inventoryMatches(tool.name + \"\\n\" + tool.description, needle));",
     `const page = matches.slice(${options.offset}, ${options.offset + options.limit});`,
-    "text(JSON.stringify({ tools: page, total: matches.length }));",
+    // Native exec adds its own text envelope; only this explicit frame carries the catalog.
+    `text(${JSON.stringify(`${GATEWAY_CATALOG_BEGIN}\n`)} + JSON.stringify({ tools: page, total: matches.length }) + ${JSON.stringify(`\n${GATEWAY_CATALOG_END}`)});`,
   ].join("\n");
 }
 
 function gatewayToolCatalogPage(response: {
   content: unknown[];
+  structuredContent?: unknown;
   isError?: boolean;
 }, excludedNames: ReadonlySet<string>): GatewayToolCatalogPage {
   const textBlocks = response.content
@@ -328,14 +334,38 @@ function gatewayToolCatalogPage(response: {
   if (response.isError) {
     throw new Error(`Native nested tool inventory failed: ${textBlocks.join("\n") || "unknown error"}`);
   }
-  if (textBlocks.length !== 1) {
-    throw new Error("Native nested tool inventory returned an invalid text response");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(textBlocks[0]!);
-  } catch {
-    throw new Error("Native nested tool inventory returned invalid JSON");
+  const structured = response.structuredContent;
+  let parsed: unknown = structured && typeof structured === "object" && !Array.isArray(structured)
+    && "tools" in structured && "total" in structured ? structured : undefined;
+  if (parsed !== undefined) {
+    const serialized = JSON.stringify(parsed);
+    if (typeof serialized !== "string" || Buffer.byteLength(serialized) > MAX_GATEWAY_CATALOG_BYTES) {
+      throw new Error("Native nested tool inventory exceeded the catalog size limit");
+    }
+  } else {
+    if (textBlocks.length !== 1) {
+      throw new Error("Native nested tool inventory returned an invalid text response");
+    }
+    if (Buffer.byteLength(textBlocks[0]!) > MAX_GATEWAY_CATALOG_BYTES) {
+      throw new Error("Native nested tool inventory exceeded the catalog size limit");
+    }
+    let text = textBlocks[0]!.replace(/\r\n/g, "\n");
+    const begin = `${GATEWAY_CATALOG_BEGIN}\n`;
+    const end = `\n${GATEWAY_CATALOG_END}`;
+    const start = text.indexOf(begin);
+    if (start >= 0) {
+      const finish = text.indexOf(end, start + begin.length);
+      if ((start > 0 && text[start - 1] !== "\n") || finish < 0
+        || text.indexOf(begin, start + begin.length) >= 0 || text.slice(finish + end.length).trim()) {
+        throw new Error("Native nested tool inventory returned an invalid catalog frame");
+      }
+      text = text.slice(start + begin.length, finish);
+    }
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error("Native nested tool inventory returned invalid JSON");
+    }
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Native nested tool inventory returned an invalid catalog");

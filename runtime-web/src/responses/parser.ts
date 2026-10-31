@@ -148,13 +148,15 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
       parameters: (t.parameters ?? {}) as Record<string, unknown>,
     };
     if (t.strict !== undefined) tool.strict = t.strict as boolean;
-    if (namespace) tool.namespace = namespace;
+    const ns = normalizedToolNamespace(namespace);
+    if (ns) tool.namespace = ns;
+    if (namespace === DEFAULT_FUNCTION_NAMESPACE) tool.nativeNamespace = namespace;
     if (isObj(t.outputSchema)) tool.outputSchema = t.outputSchema;
     if (isObj(t.annotations)) tool.annotations = t.annotations;
     if (isObj(t._meta)) tool._meta = t._meta;
     out.push(tool);
   };
-  const pushFreeform = (t: Record<string, unknown>) => {
+  const pushFreeform = (t: Record<string, unknown>, nativeNamespace?: string) => {
     const tool: CodexTool = {
       name: t.name as string,
       description: (t.description as string) ?? "",
@@ -169,6 +171,7 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
         required: ["input"],
       },
       freeform: true,
+      ...(nativeNamespace ? { nativeNamespace } : {}),
       ...(isObj(t.outputSchema) ? { outputSchema: t.outputSchema } : {}),
       ...(isObj(t.annotations) ? { annotations: t.annotations } : {}),
       ...(isObj(t._meta) ? { _meta: t._meta } : {}),
@@ -181,14 +184,15 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
       pushFn(t);
     } else if (t.type === "namespace" && Array.isArray(t.tools)) {
       // Responses Lite groups ordinary native functions and the native freeform `exec` tool under
-      // the default `functions` namespace. Flatten normal functions from every namespace, and the
+      // the default `functions` namespace. Keep its native target while leaving model-facing names
+      // unqualified. Flatten normal functions from every namespace, and the
       // official freeform variant only from that default namespace. Non-default custom namespaces
       // need a distinct round-trip contract and must not be silently exposed as function calls.
-      const ns = normalizedToolNamespace(t.name);
+      const ns = typeof t.name === "string" ? t.name : undefined;
       for (const inner of t.tools as unknown[]) {
         if (!isObj(inner) || typeof inner.name !== "string") continue;
         if (inner.type === "function") pushFn(inner, ns);
-        else if (t.name === DEFAULT_FUNCTION_NAMESPACE && inner.type === "custom") pushFreeform(inner);
+        else if (t.name === DEFAULT_FUNCTION_NAMESPACE && inner.type === "custom") pushFreeform(inner, ns);
       }
     }
     else if (t.type === "custom" && typeof t.name === "string") {
