@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { readStateFile, removeStateFile, writeStateFile } = require("../electron/durable-state.cjs");
+const { createStateFileWriter, readStateFile, removeStateFile, writeStateFile } = require("../electron/durable-state.cjs");
 const { createStateStore } = require("../electron/state.cjs");
 const { createSecretCodec } = require("../electron/external-services.cjs");
 
@@ -99,4 +99,38 @@ test("a torn fallback key is read from its copy, so secrets it encrypted stay re
   tear(`${keyPath}.bak`);
   createSecretCodec({ safeStorage: null, keyPath }).encrypt({ apiKey: "sk-new" });
   assert.equal(setAside(), 2);
+});
+
+test("a state file saved as the app is used flushes off the main thread, one write per burst", async () => {
+  // 2026-10-31: the chat queue and score log flushed on the main thread, holding every window
+  // 0.5-2.4 s on the hard disk.
+  const root = tempRoot();
+  const file = path.join(root, "queue.json");
+  const sync = [];
+  const spied = ["fsyncSync", "writeFileSync", "writeSync", "renameSync"];
+  const originals = Object.fromEntries(spied.map((name) => [name, fs[name]]));
+  for (const name of spied) fs[name] = (...args) => { sync.push(name); return originals[name](...args); };
+  const opened = [];
+  const open = fs.promises.open;
+  fs.promises.open = (target, ...rest) => { opened.push(path.basename(String(target)).replace(/.tmp-.*/, "")); return open(target, ...rest); };
+  try {
+    const writer = createStateFileWriter(file);
+    for (let n = 1; n <= 5; n += 1) writer.save(JSON.stringify({ n }));
+    await writer.saved();
+    assert.deepEqual(sync, [], "nothing is written or flushed on the main thread");
+    assert.deepEqual(opened, ["queue.json", "queue.json"], "five saves in a row are the first plus the latest");
+  } finally {
+    Object.assign(fs, originals);
+    fs.promises.open = open;
+  }
+  assert.deepEqual(readStateFile(file, parse).value, { n: 5 });
+  assert.equal(fs.readFileSync(`${file}.bak`, "utf8"), JSON.stringify({ n: 5 }), "its copy is kept too");
+
+  const errors = [];
+  const blocked = path.join(root, "blocked");
+  fs.writeFileSync(blocked, "a file where the folder should be");
+  const failing = createStateFileWriter(path.join(blocked, "state.json"), { onError: (error) => errors.push(error.code) });
+  failing.save("{}");
+  await failing.saved();
+  assert.equal(errors.length, 1, "a failed save is reported, not thrown at whoever changed the state");
 });

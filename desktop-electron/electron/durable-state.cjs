@@ -10,7 +10,7 @@
 // paging errors and lost $Mft writes on the G:/H: drive, 2026-10-30).
 
 const fs = require("node:fs");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const BACKUP_SUFFIX = ".bak";
 
@@ -21,6 +21,34 @@ const BACKUP_SUFFIX = ".bak";
 function writeStateFile(filePath, content, options = {}) {
   writePrivateFileAtomic(filePath, content, { ...options, durable: true });
   try { writePrivateFileAtomic(`${filePath}${BACKUP_SUFFIX}`, content, options); } catch { /* the main copy is in place */ }
+}
+
+/**
+ * writeStateFile for a file saved as the app is used (a chat queue change, a scored round): the
+ * flush waits on a pool thread, not the main one. Synchronously it held every window 0.5-2.4 s on
+ * the hard disk (2026-10-31). A burst of saves is one write plus at most one more with the latest
+ * content; `saved()` resolves once everything asked for so far is on disk. A failed write leaves
+ * the old file and calls `onError`.
+ */
+function createStateFileWriter(filePath, { onError = null, ...options } = {}) {
+  let saving = null;
+  let next = null;
+  const write = (content) => writePrivateFileAtomicAsync(filePath, content, { ...options, durable: true })
+    .then(() => writePrivateFileAtomicAsync(`${filePath}${BACKUP_SUFFIX}`, content, options).catch(() => { /* the main copy is in place */ }))
+    .catch((error) => { onError?.(error); /* the old file stays; the next change saves everything again */ });
+  const run = (content) => {
+    saving = write(content).finally(() => {
+      saving = null;
+      if (next !== null) { const latest = next; next = null; run(latest); }
+    });
+  };
+  return {
+    save(content) {
+      if (saving) next = content;
+      else run(content);
+    },
+    async saved() { while (saving) await saving; },
+  };
 }
 
 /** Removes a state file and its copy. */
@@ -74,4 +102,4 @@ function readStateFile(filePath, parse, { now = Date.now } = {}) {
   return { value: undefined, source: main.missing && backup.missing ? "none" : "unreadable", error, setAside };
 }
 
-module.exports = { BACKUP_SUFFIX, readStateFile, removeStateFile, writeStateFile };
+module.exports = { BACKUP_SUFFIX, createStateFileWriter, readStateFile, removeStateFile, writeStateFile };

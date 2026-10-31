@@ -17,7 +17,7 @@ function tempFile(t) {
   return path.join(root, "chat-queue.json");
 }
 
-test("a chat's queue keeps its order, takes a message at the front, and survives a restart", (t) => {
+test("a chat's queue keeps its order, takes a message at the front, and survives a restart", async (t) => {
   const file = tempFile(t);
   const store = createChatQueueStore({ file });
   const first = store.add("ws", "task", { what: "Message", message: "run the tests", selection: { executionMode: "single", singleRoute: { model: "m" } } });
@@ -28,6 +28,7 @@ test("a chat's queue keeps its order, takes a message at the front, and survives
   assert.equal(store.update("ws", "task", "gone", { message: "x" }), null, "a message already sent is not brought back");
   assert.throws(() => store.add("ws", "task", { what: "Message", message: "   " }), /Type a message/);
 
+  await store.saved();
   const reopened = createChatQueueStore({ file });
   assert.deepEqual(reopened.list("ws", "task").map(item => item.message), ["refused for now", "run the tests\n\nand lint", "ship it"]);
   assert.deepEqual(reopened.list("ws", "task")[1].selection, { executionMode: "single", singleRoute: { model: "m" } });
@@ -36,12 +37,15 @@ test("a chat's queue keeps its order, takes a message at the front, and survives
   assert.deepEqual(reopened.chats(), [{ workspaceId: "ws", taskId: "task" }]);
   assert.equal(reopened.remove("ws", "task", [first.id]), 1);
   assert.equal(reopened.remove("ws", "task", null), 2);
+  await reopened.saved();
   assert.deepEqual(createChatQueueStore({ file }).chats(), [], "an emptied queue leaves nothing behind");
 });
 
-test("a torn queue file is read back from its copy (power cut, failing disk)", (t) => {
+test("a torn queue file is read back from its copy (power cut, failing disk)", async (t) => {
   const file = tempFile(t);
-  createChatQueueStore({ file }).add("ws", "task", { what: "Message", message: "keep going" });
+  const store = createChatQueueStore({ file });
+  store.add("ws", "task", { what: "Message", message: "keep going" });
+  await store.saved();
   fs.writeFileSync(file, Buffer.alloc(64));
   const warnings = [];
   const reopened = createChatQueueStore({ file, logger: { warn: (event) => warnings.push(event) } });
