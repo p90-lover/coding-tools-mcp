@@ -9648,3 +9648,62 @@ test("after a restart the interrupted chats launch their agents one after anothe
   assert.equal((await resuming).resumed, 2);
   workflow.dispose();
 });
+
+test("a delayed goal team pick preserves a newer pick or replacement goal", async (t) => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local",
+    model: "cpa/newer-model", permission_profile: ":ao-default" };
+  for (const action of ["single", "team", "replacement"]) await t.test(action, async (child) => {
+    let waiting = null, release, entered = false;
+    const { world, workflow } = await goalChat({ now: () => 1_000_000, request: state => async (endpoint, body, options) => {
+      const result = await state.requestHeadless(endpoint, body, options);
+      if (endpoint !== "/api/v1/ao/read") return result;
+      if (waiting) {
+        const pending = waiting;
+        waiting = null;
+        entered = true;
+        await pending;
+      }
+      return { ...result, teams: [{ ...result.team, id: "team-old" }, { ...result.team, id: "team-new" }] };
+    } });
+    child.after(() => workflow.dispose());
+    await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+    waiting = new Promise(resolve => { release = resolve; });
+    const picking = workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "route", teamId: "team-old" });
+    try {
+      await goalSettle(() => entered);
+      assert.equal(entered, true, "the old team pick is waiting for validation");
+      if (action === "replacement") {
+        await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" });
+        world.runs.push({ id: "owned-run", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single",
+          nodes: [{ id: "one", role: "planner", state: "finished", receipt: { thread_id: "sess-1" } }] });
+        await workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", action: "create", objective: "replacement objective" });
+        await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+      }
+      await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "route",
+        ...(action === "team" ? { teamId: "team-new" } : { singleRoute: route }) });
+    } finally { release(); }
+    await picking;
+    const goal = await goalOf(workflow);
+    assert.equal(goal.status, "paused", "a route choice never resumes the goal");
+    assert.equal(goal.objective, action === "replacement" ? "replacement objective" : "build green");
+    assert.deepEqual(goal.team, action === "team" ? { id: "team-new" } : null, "the old team cannot replace the newer choice");
+    assert.deepEqual(goal.route, action === "team" ? null : route);
+  });
+});
+
+test("a paused goal accepts a validated team and leaves its route intact when validation fails", async (t) => {
+  const { workflow } = await goalChat({ now: () => 1_000_000 });
+  t.after(() => workflow.dispose());
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  const picked = (await workflow.call("chat_goal", {
+    workspaceId: "ws-1", taskId: "task-1", action: "route", teamId: "team-1",
+  })).goal;
+  assert.equal(picked.status, "paused");
+  assert.deepEqual(picked.team, { id: "team-1" });
+  assert.equal(picked.route, null);
+  const before = structuredClone(picked);
+  await assert.rejects(workflow.call("chat_goal", {
+    workspaceId: "ws-1", taskId: "task-1", action: "route", teamId: "missing",
+  }), /Saved team was not found/);
+  assert.deepEqual(await goalOf(workflow), before);
+});

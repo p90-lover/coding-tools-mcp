@@ -5198,6 +5198,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   // A control change retires pending work even when the clock has not advanced.
   const goalChanges = new WeakMap();
+  const goalRouteIntents = new WeakMap();
   function invalidateGoal(goal) {
     if (goal) goalChanges.set(goal, {});
   }
@@ -5703,10 +5704,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!goal) throw new Error("No goal set");
     // The model or team picker changed while the goal runs: its next round uses the new pick.
     if (action === "route") {
+      const intent = {}, revision = goalChanges.get(goal);
+      goalRouteIntents.set(goal, intent);
       if (teamId !== undefined) {
         const team = clean(teamId, 80);
         const saved = await runs({ workspaceId: id });
         if (!(saved.teams ?? (saved.team ? [saved.team] : [])).some(item => item?.id === team)) throw new Error("Saved team was not found; refresh before choosing it");
+        if (goalsDisposed || goals.get(id, task) !== goal || goalChanges.get(goal) !== revision || goalRouteIntents.get(goal) !== intent) {
+          return { ok: true, goal: goals.get(id, task) };
+        }
         invalidateGoal(goal);
         return { ok: true, goal: goals.update(id, task, { team: { id: team }, route: null }) };
       }
