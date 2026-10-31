@@ -41,7 +41,7 @@ function createMcpConnectorCommand({ app, run, logger }) {
               ? ["busy", "Finish the active browser or setup operation before creating the connector."]
               : /too long|timed? out/i.test(text)
                 ? ["timeout", "ChatGPT connector creation timed out."]
-                : /configuration|automatic MCP harness|tunnel ID|production profile/i.test(text)
+                : /active MCP configuration|saved automatic MCP harness|production profile/i.test(text)
                   ? ["configuration_required", "Configure the saved automatic MCP harness first."]
                   : ["creation_failed", "Connector creation failed. Check Configuration in Coding Tools."];
         logger?.warn("mcp.connector_creation_failed", { code, message: text });

@@ -97,6 +97,25 @@ function tabsOnPartition(host, partition) {
   return ownPages + [...host.turnTabs.values()].filter((tab) => (tab.partition ?? host.partition) === partition).length;
 }
 
+// Accounts the Browser tab keeps loaded, the shown one included (GPT Browser keeps 4 as well).
+const MAX_WARM_HOMES = 4;
+// What a parked account's page keeps of the Browser tab's state.
+const HOME_STATE_FIELDS = ["status", "message", "url", "title", "authenticated", "loading", "canGoBack", "canGoForward"];
+
+/**
+ * The parked account to unload when more than MAX_WARM_HOMES are loaded, or null to keep them all.
+ * `parked`: [{ partition, userTabs: Map, parkedAt: ms, state: { authenticated } }].
+ * `turnPartitions`: Set of the partitions Codex turn tabs run on right now.
+ */
+function parkedHomeToUnload(parked, turnPartitions) {
+  // An account a Codex turn runs on stays: unloading it would take the turn's session with it. Of
+  // the rest, a page with no tabs of the user's and no sign-in goes first (it costs nothing to
+  // load again), then the one parked longest.
+  const cost = (home) => (home.userTabs?.size ? 2 : 0) + (home.state?.authenticated ? 1 : 0);
+  return parked.filter((home) => !turnPartitions.has(home.partition))
+    .sort((a, b) => cost(a) - cost(b) || a.parkedAt - b.parkedAt)[0] ?? null;
+}
+
 /**
  * Makes room for one more tab on an account: frees that account's oldest reclaimable tab while it
  * is at its limit, then any account's while all of them together are at the ceiling. Returns null,
@@ -667,27 +686,16 @@ class BrowserHost {
       canGoForward: false,
       zoomFactor: 1,
     };
-    this.view = new WebContentsView({
-      webPreferences: {
-        partition: this.partition,
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        spellcheck: true,
-        backgroundThrottling: true,
-      },
-    });
-    keepPageOutOfWindowFrame(this.view.webContents);
-    window.contentView.addChildView(this.view);
+    // Accounts the Browser tab showed before, kept loaded and hidden so switching back is instant
+    // (switchAccount): partition -> { view, surfaceId, userTabs, state, ... }.
+    this.parkedHomes = new Map();
+    this.recoverySessions = new Set();
+    this.view = this.createHomeView(this.partition);
     this.windowVisibilityListener = () => this.syncViewVisibility();
     for (const event of WINDOW_VISIBILITY_EVENTS) {
       this.window.on(event, this.windowVisibilityListener);
     }
-    this.view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(this.window.webContents);
-    this.bindShellZoomShortcuts(this.view.webContents);
-    this.bindChatGptBackendRecovery();
-    this.bindWebContents();
     this.initializationFailed = false;
     this.initializationReady = this.initializePrimaryView().catch((error) => {
       this.initializationFailed = true;
@@ -697,6 +705,27 @@ class BrowserHost {
       this.setState({ status: "error", message: "Embedded browser failed to initialize" });
       throw error;
     });
+  }
+
+  // One account's home page. The shown account's is `this.view`; the others wait in parkedHomes.
+  createHomeView(partition) {
+    const view = new WebContentsView({
+      webPreferences: {
+        partition,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: true,
+        backgroundThrottling: true,
+      },
+    });
+    keepPageOutOfWindowFrame(view.webContents);
+    this.window.contentView.addChildView(view);
+    view.webContents.setZoomFactor(this.state.zoomFactor);
+    this.bindShellZoomShortcuts(view.webContents);
+    this.bindChatGptBackendRecovery(view.webContents.session);
+    this.bindWebContents(view.webContents);
+    return view;
   }
 
   async ready() {
@@ -783,6 +812,146 @@ class BrowserHost {
     return null;
   }
 
+  /**
+   * Why the Browser tab cannot show another account right now, or null. Codex turns keep running
+   * in their own tabs on their own accounts, so only what owns the shown account's page blocks it.
+   */
+  homeSwitchBlocker() {
+    if (this.manualOperation) return `${this.manualOperation} is running`;
+    if (this.loginOperation || this.authView) return "sign-in is in progress";
+    if ([...this.turnTabs.values()].some((tab) => tab.interactionMode === "manual" && tab.status === "running")) {
+      return "a Zero Risk turn is waiting to be sent";
+    }
+    return null;
+  }
+
+  /**
+   * Shows another account in place. The account left is parked: its page and its own tabs stay
+   * loaded and hidden, so switching back is instant (as GPT Browser does). An account not parked
+   * gets a new page. If that page cannot load, the account left comes back.
+   */
+  async switchAccount(partition, { chatLifecycleSync = null } = {}) {
+    if (partition === this.partition) return this.snapshot();
+    if (!isBrowserAccountPartition(this.profile, partition)) {
+      throw new Error("Browser host partition does not match its profile");
+    }
+    const blocker = this.homeSwitchBlocker();
+    if (blocker) throw new Error(`The Browser tab cannot change account while ${blocker}`);
+    await this.initializationReady.catch(() => {});
+    let warm = this.parkedHomes.get(partition) ?? null;
+    if (warm?.view.webContents.isDestroyed()) {
+      // Its page closed while parked (a renderer crash): the account starts on a new page.
+      this.parkedHomes.delete(partition);
+      this.unloadHome(warm);
+      warm = null;
+    }
+    const leaving = this.parkHome();
+    if (warm) {
+      this.parkedHomes.delete(partition);
+      this.restoreHome(warm);
+    } else {
+      this.restoreHome({
+        partition,
+        view: this.createHomeView(partition),
+        surfaceId: randomBytes(24).toString("base64url"),
+        userTabs: new Map(),
+        selectedTabId: "home",
+        chatLifecycleSync,
+        lastAuthenticatedAt: 0,
+        viewportCssKey: null,
+        state: { status: "idle", message: "No active task", url: "about:blank", title: "ChatGPT", authenticated: false, loading: false },
+      });
+      try {
+        await this.initializePrimaryView();
+      } catch (error) {
+        const failed = this.parkHome();
+        this.restoreHome(leaving);
+        this.unloadHome(failed);
+        this.syncViewVisibility();
+        this.writeDescriptor();
+        this.publishState?.(this.snapshot());
+        throw error;
+      }
+    }
+    if (chatLifecycleSync) this.chatLifecycleSync = chatLifecycleSync;
+    this.parkedHomes.set(leaving.partition, leaving);
+    this.trimParkedHomes();
+    this.syncViewVisibility();
+    this.writeDescriptor();
+    this.publishState?.(this.snapshot());
+    this.logger.info("browser.account_switched", { warm: Boolean(warm), parked: this.parkedHomes.size });
+    // A parked page may have been signed out (or in) elsewhere meanwhile: check it again.
+    if (warm && browserInteractionModeFor(this) === "automatic") void this.probeAuthentication().catch(() => {});
+    return this.snapshot();
+  }
+
+  // Takes the shown account's page and tabs off screen, kept loaded; returns them as a home.
+  parkHome() {
+    this.clearHomeNavigationTimeout();
+    const home = {
+      partition: this.partition,
+      view: this.view,
+      surfaceId: this.surfaceId,
+      userTabs: this.userTabs,
+      selectedTabId: this.userTabs.has(this.selectedTabId) ? this.selectedTabId : "home",
+      chatLifecycleSync: this.chatLifecycleSync,
+      lastAuthenticatedAt: this.lastAuthenticatedAt ?? 0,
+      viewportCssKey: this.viewportCssKey,
+      state: Object.fromEntries(HOME_STATE_FIELDS.map((field) => [field, this.state[field]])),
+      parkedAt: Date.now(),
+    };
+    if (!home.view.webContents.isDestroyed()) home.view.setVisible(false);
+    for (const tab of home.userTabs.values()) tab.view.setVisible(false);
+    return home;
+  }
+
+  restoreHome(home) {
+    this.partition = home.partition;
+    this.view = home.view;
+    this.surfaceId = home.surfaceId;
+    this.userTabs = home.userTabs;
+    this.chatLifecycleSync = home.chatLifecycleSync ?? this.chatLifecycleSync;
+    this.lastAuthenticatedAt = home.lastAuthenticatedAt;
+    this.viewportCssKey = home.viewportCssKey;
+    // A Codex turn's tab stays selected; otherwise the account opens where it was left.
+    if (!this.turnTabs.has(this.selectedTabId)) this.selectedTabId = home.selectedTabId;
+    this.state = { ...this.state, ...home.state, visible: this.visible, surfaceActive: this.surfaceActive };
+    // Zoom is the Browser tab's, not the account's: a parked page takes the current one.
+    for (const view of [home.view, ...[...home.userTabs.values()].map((tab) => tab.view)]) {
+      if (!view.webContents.isDestroyed()) view.webContents.setZoomFactor(this.state.zoomFactor);
+    }
+  }
+
+  unloadHome(home) {
+    for (const view of [...[...home.userTabs.values()].map((tab) => tab.view), home.view]) {
+      try { this.window.contentView.removeChildView(view); } catch {}
+      if (!view.webContents.isDestroyed()) view.webContents.close();
+    }
+    home.userTabs.clear();
+  }
+
+  // At most MAX_WARM_HOMES accounts stay loaded, the shown one included.
+  trimParkedHomes() {
+    while (this.parkedHomes.size > MAX_WARM_HOMES - 1) {
+      const turnPartitions = new Set([...this.turnTabs.values()].map((tab) => tab.partition).filter(Boolean));
+      const home = parkedHomeToUnload([...this.parkedHomes.values()], turnPartitions);
+      if (!home) return;
+      this.parkedHomes.delete(home.partition);
+      this.unloadHome(home);
+      this.logger.info("browser.parked_home_unloaded", { userTabs: home.userTabs.size });
+    }
+  }
+
+  /** Closes a parked account's page and tabs (the account is being removed). */
+  releaseAccountHome(partition) {
+    if (partition === this.partition) throw new Error("Switch to another account before releasing this one");
+    const home = this.parkedHomes.get(partition);
+    if (!home) return false;
+    this.parkedHomes.delete(partition);
+    this.unloadHome(home);
+    return true;
+  }
+
   /** The tabs an account's partition holds here (browser-accounts.cjs spreads sessions by it). */
   tabCount(partition) {
     return tabsOnPartition(this, partition);
@@ -807,9 +976,16 @@ class BrowserHost {
     return tabs.length;
   }
 
-  /** Every partition this host's pages use: its own and those of the accounts its turn tabs run on. */
+  /**
+   * Every partition this host's pages use: its own, the parked accounts', and those of the
+   * accounts its turn tabs run on.
+   */
   livePartitions() {
-    return [...new Set([this.partition, ...[...this.turnTabs.values()].map((tab) => tab.partition)].filter(Boolean))];
+    return [...new Set([
+      this.partition,
+      ...(this.parkedHomes?.keys() ?? []),
+      ...[...this.turnTabs.values()].map((tab) => tab.partition),
+    ].filter(Boolean))];
   }
 
   tabSnapshot(tab) {
@@ -1011,6 +1187,8 @@ class BrowserHost {
       id,
       surfaceId: null,
       traceId,
+      // Kept: the Browser tab may show another account while this turn waits.
+      partition: this.partition,
       conversationKey,
       connectorIdentity: null,
       connectorBound: false,
@@ -1419,8 +1597,10 @@ class BrowserHost {
     });
   }
 
-  bindWebContents() {
-    const contents = this.view.webContents;
+  bindWebContents(contents = this.view.webContents) {
+    // A parked account's page keeps loading off screen; only the shown account's page sets state.
+    const shown = () => this.view?.webContents === contents;
+    const on = (event, handler) => contents.on(event, (...args) => { if (shown()) handler(...args); });
     contents.setWindowOpenHandler(({ url }) => {
       if (allowedAuthUrl(url)) {
         return {
@@ -1441,7 +1621,7 @@ class BrowserHost {
       }
       return { action: "deny" };
     });
-    contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
+    on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
       if (!mainFrame || isFailurePageUrl(url)) return;
       if (inPlace) {
         this.setState({ url });
@@ -1458,7 +1638,7 @@ class BrowserHost {
         ? { url, loading: true }
         : { status: "loading", message: "Opening ChatGPT", url, loading: true });
     });
-    contents.on("did-finish-load", () => {
+    on("did-finish-load", () => {
       this.clearHomeNavigationTimeout();
       // The failure page is not ChatGPT: keep the error state and its URL.
       if (isFailurePageUrl(contents.getURL())) return;
@@ -1492,8 +1672,8 @@ class BrowserHost {
           this.setState({ status: "error", message: "Embedded browser ownership could not be established" });
         });
     });
-    contents.on("did-start-loading", () => this.setState({ loading: true }));
-    contents.on("did-stop-loading", () => {
+    on("did-start-loading", () => this.setState({ loading: true }));
+    on("did-stop-loading", () => {
       this.clearHomeNavigationTimeout();
       if (browserInteractionModeFor(this) === "manual"
         && this.state.status === "loading"
@@ -1509,14 +1689,14 @@ class BrowserHost {
       }
       this.setState({ loading: false });
     });
-    contents.on("page-title-updated", (_event, title) => {
+    on("page-title-updated", (_event, title) => {
       if (browserInteractionModeFor(this) === "manual") return;
       this.setState({ title: typeof title === "string" && title.trim() ? title.trim() : "ChatGPT" });
     });
-    contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
+    on("did-navigate-in-page", (_event, url, mainFrame) => {
       if (mainFrame) this.setState({ url });
     });
-    contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
+    on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
       if (!mainFrame || errorCode === -3 || isFailurePageUrl(url)) return;
       this.clearHomeNavigationTimeout();
       this.logger.error(
@@ -1534,7 +1714,7 @@ class BrowserHost {
       // Show why in the view itself instead of a blank page; the state above keeps the real URL.
       void contents.loadURL(navigationFailurePage({ url, errorCode, errorDescription })).catch(() => {});
     });
-    contents.on("render-process-gone", (_event, details) => {
+    on("render-process-gone", (_event, details) => {
       this.clearHomeNavigationTimeout();
       this.logger.error("browser.renderer_gone", { reason: details.reason, exitCode: details.exitCode });
       this.setState({ status: "error", message: `Browser renderer stopped: ${details.reason}`, loading: false });
@@ -1640,8 +1820,12 @@ class BrowserHost {
     await this.waitForAuthenticated(60_000);
   }
 
-  bindChatGptBackendRecovery() {
-    this.view.webContents.session.webRequest.onCompleted(
+  bindChatGptBackendRecovery(browserSession = this.view.webContents.session) {
+    // A session holds one onCompleted listener (another call replaces it): one per account. The
+    // handler answers only for the shown account's page.
+    if (this.recoverySessions.has(browserSession)) return;
+    this.recoverySessions.add(browserSession);
+    browserSession.webRequest.onCompleted(
       CHATGPT_BACKEND_REQUEST_FILTER,
       details => browserInteractionModeFor(this) === "automatic"
         ? this.handleChatGptBackendResponse(details)
@@ -3171,7 +3355,8 @@ class BrowserHost {
   async clearOwnedSessionForPasskey() {
     if (!(this.turnTabs instanceof Map)) throw new Error("Owned ChatGPT tab registry is unavailable");
     if (this.authView) this.closeAuthView(this.authView, true, false);
-    const tabs = [...this.turnTabs.values()];
+    // Only the shown account's: turn tabs on other accounts keep their own sign-in.
+    const tabs = [...this.turnTabs.values()].filter((tab) => (tab.partition ?? this.partition) === this.partition);
     const userTabs = [...(this.userTabs?.values() ?? [])];
     const contents = [this.view, ...tabs.map(tab => tab.view), ...userTabs.map(tab => tab.view)]
       .map(view => view?.webContents)
@@ -3700,11 +3885,15 @@ class BrowserHost {
   }
 
   async persistSession() {
-    const contents = this.view?.webContents;
-    if (!contents || contents.isDestroyed()) return;
-    const browserSession = contents.session;
-    browserSession.flushStorageData();
-    await browserSession.cookies.flushStore();
+    // Every loaded account's sign-in: the shown one's and the parked ones'.
+    const sessions = new Set([this.view, ...[...(this.parkedHomes?.values() ?? [])].map((home) => home.view)]
+      .map((view) => view?.webContents)
+      .filter((contents) => contents && !contents.isDestroyed())
+      .map((contents) => contents.session));
+    for (const browserSession of sessions) {
+      browserSession.flushStorageData();
+      await browserSession.cookies.flushStore();
+    }
   }
 
   destroy() {
@@ -3750,6 +3939,8 @@ class BrowserHost {
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     }
     this.userTabs?.clear();
+    for (const home of this.parkedHomes?.values() ?? []) this.unloadHome(home);
+    this.parkedHomes?.clear();
     if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.close();
   }
 }
@@ -3786,7 +3977,9 @@ module.exports = {
   CHATGPT_VIEWPORT_CSS,
   deleteConversationScript,
   makeTabRoom,
+  MAX_WARM_HOMES,
   ownedSavedConversationId,
+  parkedHomeToUnload,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,

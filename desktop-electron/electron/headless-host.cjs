@@ -13,6 +13,15 @@ const START_TIMEOUT_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 // Waits before sending a request again that the headless service turned away as full.
 const CAPACITY_RETRY_MS = [100, 250, 600];
+// The launcher's own requests in flight at once, below the service's 16 request slots
+// (coding-tools-headless ServiceConfig). The rest wait their turn here instead of being turned away:
+// after each restart since 0.8.30, chats restoring at once sent more than 16 and the service
+// refused 15-39 in a burst (turn_timeline, runs, observe, chat_prewarm, board), each a failed call
+// that left a chat's Worked rows or the board empty. A slot held by a slow read on the HDD outlasted
+// the retries above (under a second in all).
+const MAX_IN_FLIGHT = 12;
+// How long a request may wait for one of those turns before it fails as the service would have.
+const QUEUE_WAIT_MS = 15_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_STARTUP_STDERR_BYTES = 4096;
 
@@ -378,28 +387,62 @@ class HeadlessHost {
     return token;
   }
 
+  /** Resolves once this request may be sent: at once below MAX_IN_FLIGHT, else in arrival order. */
+  takeTurn() {
+    this.turns ??= { active: 0, waiting: [] };
+    const turns = this.turns;
+    if (turns.active < (this.maxInFlight ?? MAX_IN_FLIGHT)) {
+      turns.active += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const entry = { resolve, timer: null };
+      entry.timer = setTimeout(() => {
+        turns.waiting.splice(turns.waiting.indexOf(entry), 1);
+        reject(new Error("HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)"));
+      }, this.queueWaitMs ?? QUEUE_WAIT_MS);
+      turns.waiting.push(entry);
+    });
+  }
+
+  /** A finished request's turn passes straight to the oldest one waiting. */
+  releaseTurn() {
+    const next = this.turns.waiting.shift();
+    if (!next) {
+      this.turns.active -= 1;
+      return;
+    }
+    clearTimeout(next.timer);
+    next.resolve();
+  }
+
   async request(pathname, body = null, options = {}) {
     const control = await this.ensureStarted();
     const method = options.method || (body == null ? "GET" : "POST");
-    // Admission is refused before any work runs ("HEADLESS_CAPACITY: request admission is full",
-    // seen on Activity in a burst of chat polls after a project switch), so the same request is
-    // safe to send again after a short wait, POST included.
-    for (const wait of [...CAPACITY_RETRY_MS, null]) {
-      try {
-        return await requestJson({
-          endpoint: control.endpoint,
-          token: control.token,
-          localUiToken: options.localConfirmation === true ? control.uiToken : null,
-          pathname,
-          method,
-          body,
-          timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
-        });
-      } catch (error) {
-        const message = safeErrorMessage(error);
-        if (wait === null || !message.includes("HEADLESS_CAPACITY")) throw new Error(message);
-        await sleep(wait);
+    await this.takeTurn();
+    try {
+      // Admission is refused before any work runs ("HEADLESS_CAPACITY: request admission is full",
+      // seen on Activity in a burst of chat polls after a project switch), so the same request is
+      // safe to send again after a short wait, POST included.
+      for (const wait of [...CAPACITY_RETRY_MS, null]) {
+        try {
+          return await requestJson({
+            endpoint: control.endpoint,
+            token: control.token,
+            localUiToken: options.localConfirmation === true ? control.uiToken : null,
+            pathname,
+            method,
+            body,
+            timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
+          });
+        } catch (error) {
+          const message = safeErrorMessage(error);
+          if (wait === null || !message.includes("HEADLESS_CAPACITY")) throw new Error(message);
+          await sleep(wait);
+        }
       }
+    } finally {
+      this.releaseTurn();
     }
   }
 

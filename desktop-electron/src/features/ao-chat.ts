@@ -1720,8 +1720,10 @@ export function goalFeedback(text: string): { objective: string; reason: string 
 /**
  * Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's
  * message. `typed` is a command as the person typed it ("/goal …"), which its queued bubble shows.
+ * The app keeps the queue (chat-queue.cjs): `id` is its item's, `steer` steers it into the working
+ * agent rather than waiting for the turn, and `note` says why its last send failed.
  */
-export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string };
+export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string; id?: string; steer?: boolean; note?: string };
 /**
  * Adds to one chat's queue. A plain message joins a plain message queued just before it (they are
  * sent together); anything else (a command, a goal) waits for a turn of its own. Nothing is replaced.

@@ -106,6 +106,31 @@ test("switching replaces the host, marks the account active and tells the lists 
   assert.equal(service.takeBridgeRefresh(id), false, "the bridge refresh is handed out once");
 });
 
+test("a host that switches in place keeps running: only what owns its page holds the switch", async (t) => {
+  const { registry, service, hosts, host } = setup(t);
+  const warm = host();
+  const shown = [];
+  warm.homeBlocker = null;
+  warm.homeSwitchBlocker = function () { return this.homeBlocker; };
+  warm.switchAccount = async (partition, { chatLifecycleSync }) => { shown.push([partition, chatLifecycleSync]); };
+  warm.blocker = "a ChatGPT chat turn is running"; // a Codex turn elsewhere no longer holds the switch
+  const id = registry.add();
+  assert.equal((await service.switchTo(id, { logger: logger() })).activeId, id);
+  assert.equal(host(), warm, "the same host shows the other account");
+  assert.equal(warm.destroyed, false);
+  assert.equal(hosts.length, 1, "no host is built");
+  assert.deepEqual(shown, [[registry.partitionOf(id), null]]);
+  assert.equal(service.bridgeRefreshPending(id), true, "the account's sign-in may refresh the bridge");
+
+  warm.homeBlocker = "sign-in is in progress";
+  await assert.rejects(service.switchTo(FIRST_ACCOUNT_ID, {}), /cannot change account while sign-in is in progress/);
+  warm.homeBlocker = null;
+  warm.switchAccount = async () => { throw new Error("page failed"); };
+  await assert.rejects(service.switchTo(FIRST_ACCOUNT_ID, {}), /page failed/);
+  assert.equal(registry.activeId(), id, "a failed switch leaves the account it was on");
+  assert.equal(service.bridgeRefreshPending(id), true, "and the refresh it was waiting for");
+});
+
 test("a switch is refused while another runs, while the browser starts, or while a turn runs", async (t) => {
   const { registry, service, host } = setup(t);
   const id = registry.add();

@@ -105,14 +105,14 @@ function extensionHelpersSource() {
       && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
     if (add.length > 1) throw new Error('ChatGPT exposed more than one Add action.');
     if (add.length === 1) {
-      add[0].click();
+      await pointerActivateMenu(add[0]);
       const opened = await waitFor(() => {
         if (createFormPresent()) return { form: true };
         const entries = allClickable(document).filter(el => textMatches(el,
           ['Add MCP server', 'Add custom MCP server', 'Add a custom MCP server'], true));
         return entries.length === 1 ? { entry: entries[0] } : null;
       }, 5000);
-      if (opened?.entry) opened.entry.click();
+      if (opened?.entry) await pointerActivateMenu(opened.entry);
       if (!opened || !await waitFor(() => createFormPresent(), 7000)) {
         throw new Error('ChatGPT did not open its custom MCP server form.');
       }
@@ -122,11 +122,14 @@ function extensionHelpersSource() {
     const tunnelModes = allClickable(form).filter(el => textMatches(el, ['Tunnel', 'Secure MCP Tunnel'], true)
       && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
     if (tunnelModes.length !== 1) throw new Error('ChatGPT did not expose one Tunnel option.');
-    tunnelModes[0].click();
-    const useId = allClickable(activeSurface()).filter(el => textMatches(el, ['Use tunnel ID instead'], true));
-    if (useId.length === 1) useId[0].click();
-    const tunnelField = await waitFor(() => [...activeSurface().querySelectorAll('input[type="text"]')].find(el =>
-      visible(el) && /tunnel.*id|^tunnel_[a-f0-9]/i.test([el.id, el.name, el.getAttribute('aria-label'), el.getAttribute('placeholder')].join(' '))), 4000);
+    pointerActivate(tunnelModes[0]);
+    const useId = await waitFor(() => {
+      const controls = allClickable(activeSurface()).filter(el => textMatches(el, ['Use tunnel ID instead'], true));
+      return controls.length === 1 ? controls[0] : null;
+    }, 4000);
+    if (useId) pointerActivate(useId);
+    const tunnelField = await waitFor(() => inputs(activeSurface()).find(el =>
+      /tunnel.*id|^tunnel_[a-f0-9]/i.test([el.id, el.name, el.getAttribute('aria-label'), el.getAttribute('placeholder')].join(' '))), 4000);
     form = activeSurface();
     const nameField = findInput('name', form);
     if (!nameField || !tunnelField) throw new Error('ChatGPT did not expose the name and Tunnel ID fields.');

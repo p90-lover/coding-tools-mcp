@@ -470,12 +470,14 @@ test("every operation the renderer calls is one the AO module accepts (the chat'
   for (const file of fs.readdirSync(features).filter(name => /\.tsx?$/.test(name))) {
     for (const match of fs.readFileSync(path.join(features, file), "utf8").matchAll(/moduleCall\("([a-z_]+)"/g)) called.add(match[1]);
   }
-  for (const operation of ["chat_send", "chat_goal", "chat_loop", "compact_chat", "chat_diff", "chat_delete_message", "runs"]) assert.ok(called.has(operation), `${operation} is called`);
+  for (const operation of ["chat_send", "chat_goal", "chat_loop", "chat_queue", "compact_chat", "chat_diff", "chat_delete_message", "runs"]) assert.ok(called.has(operation), `${operation} is called`);
   const unknown = [...called].filter(operation => !handler.operations.includes(operation));
   assert.deepEqual(unknown, [], "an operation missing here fails in the app as \"Unknown Agent Orchestrator operation\"");
   assert.equal(handler.isReadOnly("chat_diff"), true);
   assert.equal(handler.isReadOnly("chat_goal"), false);
   assert.equal(handler.isReadOnly("chat_loop"), false);
+  // Queuing is the person's typing: it needs the focused window, as a send does.
+  assert.equal(handler.isReadOnly("chat_queue"), false);
   assert.equal(handler.isReadOnly("compact_chat"), false);
   assert.equal(handler.isReadOnly("chat_delete_message"), false);
 });
@@ -974,7 +976,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   const turns = { old: [{ state: "completed", completedAt: ago(90) }], recent: [{ state: "completed", completedAt: ago(10) }],
     typed: [{ state: "completed", completedAt: ago(90) }], warm: [] };
   const calls = [], resumeWaits = [];
-  let resumeOk = true, exitOk = true, resumeTimesOut = false, busyAnswers = 0;
+  let resumeOk = true, exitOk = true, resumeTimesOut = false, busyAnswers = 0, exitBusy = 0;
   let status = "exited";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise, agentTools: null,
@@ -991,6 +993,10 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
       const id = endpoint.split("/")[4];
       if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
       if (endpoint.endsWith("/exit-agent")) {
+        if (exitBusy > 0) {
+          exitBusy -= 1;
+          throw Object.assign(new Error("The agent is already exiting"), { status: 409, code: "AGENT_EXIT_IN_PROGRESS" });
+        }
         if (!exitOk) throw new Error("exit failed");
         return { ok: true, session: { id, status: "exited" } };
       }
@@ -1002,6 +1008,13 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
     "only a chat agent idle past the limit; a recent turn or message, a never-used (pre-warmed), working, TUI or terminated session is kept");
   await upstream.exitAgent("old");
   assert.deepEqual(calls.at(-1), ["POST", "/api/v1/sessions/old/exit-agent"]);
+  exitBusy = 3; calls.length = 0;
+  assert.equal((await upstream.exitAgent("old")).ok, true,
+    "a stop or start already holding the agent is waited out, not failed: that failed every launch retry on 2026-10-30");
+  assert.equal(calls.filter(([, endpoint]) => endpoint.endsWith("/exit-agent")).length, 4);
+  exitBusy = 99;
+  await assert.rejects(upstream.exitAgent("old"), error => error.code === "AGENT_EXIT_IN_PROGRESS", "the wait is bounded");
+  exitBusy = 0;
   assert.equal(await upstream.continuable("old"), true, "a released agent is resumed for the next message");
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
   status = "exited"; busyAnswers = 2; calls.length = 0;

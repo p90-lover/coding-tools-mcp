@@ -468,7 +468,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
-      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [] }
+      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
         TurnRestart: react.createContext({ restarting: false }) } : {},
   });
@@ -1373,19 +1373,6 @@ test("late start, restart, retry and pause replies cannot change another selecte
         : { selected: "run-b", status: "idle" }, name);
     }
   }
-});
-
-test("a queued message survives an unmount while its delivery fails", async () => {
-  const reply = delayedReply(), next = { what: "Message", message: "queued text" }, queues = new Map([["task-a", [next]]]);
-  const alive = { current: true }, attachments = [];
-  const flush = rendererCallback("AgentOrchestratorChat.tsx", "effect:void deliver(next.message", {
-    selectedTaskId: "task-a", queueOf: task => queues.get(task) || [], setQueue: (task, value) => queues.set(task, value),
-    accepts: true, busy: false, sending: false, sentWhileFree: { current: false }, windowFocused: true, alive,
-    composing: { current: { taskId: "task-a", draft: "", attachments } }, deliver: () => reply.promise,
-    setCard() {}, setDraft() { throw new Error("unmounted composer"); }, say() {},
-  });
-  flush(); alive.current = false; reply.resolve(false); await new Promise(setImmediate);
-  assert.deepEqual(plain(queues.get("task-a")), [next]);
 });
 
 test("a turn's activity drops answered approvals, keeps every tool call, and folds runs of calls and thinking", () => {

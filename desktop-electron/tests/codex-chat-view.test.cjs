@@ -57,19 +57,52 @@ function mount(props) {
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
-        : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" }
+        : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
           : name === "./AgentOrchestratorRoleEditor" ? { modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
-          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [] }
+          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
             // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
               SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox", SecretText: "SecretText",
               SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
+  props.queue?.attach?.(module.syncChatQueues);
   return {
     render: (next = {}) => { frame = "root"; cursor = 0; seen = {}; return module.AgentOrchestratorChat({ ...props, ...next }); },
     // The queued-message bar alone, for a queue the chat itself rarely builds (two separate messages).
     bar: (barProps) => { frame = "bar"; cursor = 0; seen = {}; return module.QueuedMessageBar(barProps); },
+  };
+}
+
+/**
+ * The app's queue (chat-queue.cjs) as the chat reaches it through the surface's chat_queue calls:
+ * kept per chat, with each change shown back through the chat's syncChatQueues.
+ */
+function appQueue() {
+  const chats = new Map();
+  let sync = () => {};
+  let ids = 0;
+  const show = (taskId) => sync("ws", { [taskId]: chats.get(taskId) ?? [] }, taskId);
+  return {
+    chats,
+    attach(next) { sync = next; },
+    add: async (taskId, item, front = false) => {
+      const entry = { ...item, id: item.id ?? `queued-${++ids}` };
+      const rest = (chats.get(taskId) ?? []).filter((queued) => queued.id !== entry.id);
+      chats.set(taskId, front ? [entry, ...rest] : [...rest, entry]);
+      show(taskId);
+    },
+    update: async (taskId, id, message) => {
+      const list = chats.get(taskId) ?? [];
+      if (!list.some((queued) => queued.id === id)) return false;
+      chats.set(taskId, list.map((queued) => (queued.id === id ? { ...queued, message } : queued)));
+      show(taskId);
+      return true;
+    },
+    remove: async (taskId, removed) => {
+      chats.set(taskId, removed === null ? [] : (chats.get(taskId) ?? []).filter((queued) => !removed.includes(queued.id)));
+      show(taskId);
+    },
   };
 }
 
@@ -79,7 +112,7 @@ function base(extra = {}) {
     calls,
     props: {
       runs: [], tasks: [], selectedTaskId: "", busy: false, loadDescription: async () => "", openStructure() {}, approvals: [], approve() {},
-      describeRoute: () => "", retryStart() {}, projectName: "Alpha",
+      describeRoute: () => "", retryStart() {}, projectName: "Alpha", queue: appQueue(),
       send: async (input) => { calls.push(["send", input]); }, stop: (id) => calls.push(["stop", id]), restart: (id) => calls.push(["restart", id]),
       ...extra,
     },
@@ -724,21 +757,29 @@ test("Retry waits only on its own chat, and goal actions leave no card in the ch
   }
 });
 
-test("each chat has its own queue: queuing in another chat never replaces one, and the view closing keeps them", () => {
+test("each chat has its own queue, kept by the app: it is sent with the chat closed, and queuing in another chat never replaces one", async () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
-  // The store lives at module level, outside the component, keyed by the chat's task id.
+  // The view shows the app's queues (chat-queue.cjs), keyed by the chat's task id, outside the component.
   assert.ok(source.includes("const CHAT_QUEUES = new Map<string, QueuedChatMessage[]>();"));
   assert.ok(source.indexOf("const CHAT_QUEUES") < source.indexOf("export function AgentOrchestratorChat"), "it outlives the chat view");
-  const queue = source.slice(source.indexOf("const [queueVersion, setQueueVersion]"), source.indexOf("const dispatch = async"));
-  assert.ok(queue.includes("queueOf(task)") && queue.includes("setQueue(task, rest)"), "a chat's queue is sent only into that chat, one item at a time");
-  assert.ok(queue.includes("sentWhileFree.current"), "one item per finished turn, never two into the same free spell");
-  assert.ok(queue.includes("setDraft((typed) => (typed.trim() ? `${typed}\\n\\n${next.message}` : next.message))"), "a queued message that can't be sent goes back into the composer, after what is typed");
-  assert.equal(queue.split("deliver(next.message, next.goal, false)").length, 3, "a background send or steer leaves the composer alone");
-  assert.ok(!queue.includes('next.what !== "Message"'), "a queued command steers in like a message");
-  // A failed steer waits a growing pause (15 s, 30 s, 60 s) before the next try, never a loop.
-  assert.ok(queue.includes("steerRetry.current = { attempts, until: Date.now() + wait }") && queue.includes("Date.now() < steerRetry.current.until"),
-    "a steer that fails is not retried in a loop");
-  assert.ok(source.includes("setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message,"), "commands queue in their own chat too");
+  // The view no longer sends the queue itself: that ran only for the open chat with the window focused.
+  assert.ok(!source.includes("deliver(next.message, next.goal, false)") && !source.includes("windowFocused"), "the app sends it, not the view");
+  assert.ok(source.includes("await queue.add(taskId, entry, front)"), "a queued message goes to the app's queue");
+  assert.ok(source.includes("await enqueue(selectedTaskId, { what, message,"), "commands queue in their own chat too");
+  // Two chats queue side by side; switching chats keeps both.
+  const app = appQueue();
+  const busy = (task) => run(`r-${task}`, task, [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" });
+  const { props } = base({ selectedTaskId: "t-a", working: true, runs: [busy("t-a"), busy("t-b")], queue: app, steer: async () => { throw new Error("not steerable"); } });
+  const view = mount(props);
+  const queueIn = async (task, message) => {
+    walk(view.render({ selectedTaskId: task })).find((element) => element.type === "textarea").props.onChange({ target: { value: message } });
+    await walk(view.render({ selectedTaskId: task })).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  };
+  await queueIn("t-a", "check the logs");
+  await queueIn("t-b", "run the tests");
+  assert.deepEqual([...app.chats].map(([task, items]) => [task, items.map((item) => item.message)]), [["t-a", ["check the logs"]], ["t-b", ["run the tests"]]]);
+  assert.equal(app.chats.get("t-a")[0].steer, true, "in steer mode the app steers it in once the agent can take it");
+  assert.match(text(walk(view.render({ selectedTaskId: "t-a" })).find((element) => element.props?.["aria-label"] === "Queued messages")), /check the logs/);
 });
 
 test("rewind resends the selected message into the same chat without filling or switching the composer", async () => {

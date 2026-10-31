@@ -395,6 +395,11 @@ a.cx-details-row, p.cx-details-row { box-sizing: border-box; margin: 0; text-dec
 .cx-details-dot.is-waiting { background: #d97706; }
 .cx-details-dot.is-failed { background: #dc2626; }
 .cx-details-dot.is-done { background: #16a34a; }
+/* Processes: a solid centre with a soft halo of the same colour, green while running, red once offline. */
+.cx-process-row > small { flex: none; margin-left: auto; color: var(--color-text-secondary); font-size: 11px; }
+.cx-process-dot { flex: none; width: 8px; height: 8px; margin: 0 2px; border-radius: 50%; }
+.cx-process-dot.is-running { background: #22c55e; box-shadow: 0 0 0 3px rgb(34 197 94 / .22), 0 0 8px 2px rgb(34 197 94 / .45); }
+.cx-process-dot.is-offline { background: #ef4444; box-shadow: 0 0 0 3px rgb(239 68 68 / .2), 0 0 8px 2px rgb(239 68 68 / .35); }
 .cx-details-line, .cx-details-empty { margin: 4px 6px; color: var(--color-text-secondary); overflow-wrap: anywhere; }
 .cx-icon-button:disabled { cursor: default; opacity: .4; }
 
@@ -706,7 +711,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-answer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
 .cx-answer-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 12px; }
 .cx-answer-meta > span:first-child { color: var(--color-text-primary); font-weight: 500; }
-.cx-answer-detail { overflow-wrap: anywhere; }
+.cx-answer-meta > .cx-answer-name { color: var(--color-text-primary); font-weight: 500; }
+.cx-answer-meta > .ao-model-logo { display: inline-grid; place-items: center; line-height: 0; }
+.cx-answer-mode { padding: 0 6px; border: 1px solid var(--ao-line); border-radius: 9px; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; }
 .cx-verdict { padding: 1px 7px; border-radius: 9px; background: var(--cx-hover); font-size: 11px; font-weight: 600; }
 .cx-verdict.is-approved { color: var(--ao-green); }
 .cx-verdict.is-changes_required { color: var(--ao-amber); }
@@ -1281,6 +1288,16 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-pet-float { position: absolute; bottom: 40px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
 /* Home: Clawd shows in its open house; a click there knocks on the house, not on Clawd. */
 .cx-pet.is-home .cx-pet-body { pointer-events: none; }
+/* Inside it is half size, one house pixel per glyph cell, so it fits its bed, tub and table
+   (chat-pet-home.ts); it shrinks as it walks in through the open front and grows again on the way out. */
+.cx-pet-body { transition: transform .9s ease-in-out; }
+.cx-pet.is-home .cx-pet-body { transform: scale(.5); transform-origin: 50% 100%; }
+.cx-pet.is-home .cx-pet-bubble { bottom: 30px; font-size: 11px; }
+.cx-pet.is-home .cx-pet-float { bottom: 22px; font-size: 10px; }
+/* Each piece of furniture is a button: Clawd comes over and uses it. */
+.cx-pet-furniture { position: absolute; padding: 0; border: 0; border-radius: 2px; background: transparent; cursor: pointer; pointer-events: auto; }
+.cx-pet-furniture:hover { background: rgba(255, 255, 255, .16); box-shadow: inset 0 0 0 1px rgba(31, 30, 29, .3); }
+.cx-pet-furniture:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 1px; }
 /* Clawd's house, standing beside the box's right side (on its top edge near the right end when the
    window leaves no room there): a doll's house with its front
    open. Its room is drawn behind Clawd and its roof and side walls in front, so Clawd shows inside. */
@@ -1291,7 +1308,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   cursor: pointer; pointer-events: auto; }
 .cx-pet-house svg { display: block; }
 .cx-pet-house:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }
-.cx-pet-house-z { position: absolute; top: -6px; right: 18px; display: flex; gap: 3px; color: var(--ao-muted, #8a8986); font-size: 12px; font-weight: 700; }
+/* Over its pillow, tucked into bed downstairs. */
+.cx-pet-house-z { position: absolute; top: 98px; left: 26px; display: flex; gap: 3px; color: var(--ao-muted, #8a8986); font-size: 12px; font-weight: 700; }
 .cx-pet-house-z span { animation: cx-pet-z 2.4s ease-in-out infinite; opacity: 0; }
 .cx-pet-house-z span:nth-child(2) { animation-delay: .8s; }
 .cx-pet-house-z span:nth-child(3) { animation-delay: 1.6s; font-size: 14px; }

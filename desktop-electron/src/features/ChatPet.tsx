@@ -24,6 +24,7 @@ import { createPortal } from "react-dom";
 import type { PetMood } from "./ao-chat";
 import { petCall, petFlight, petStage, type PetArrival } from "./chat-pet-stage";
 import { advancePetWalk, petToolSide } from "./chat-pet-motion";
+import { ENTRY, FLOOR_LINE, choreBeats, exitBeats, pickChore, type Chore, type Doing, type HomeBeat, type HomeMemory } from "./chat-pet-home";
 import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, ROWS, pickOne, useClawdPlayer,
   type AnimationName, type Arms as ClawdArms, type Eyes, type Feet, type Frame } from "./Clawd";
 
@@ -65,9 +66,13 @@ const HOUSE_COLS = 40;
 const HOUSE_ROWS = 20;
 const HOUSE_W = HOUSE_COLS * PIXEL_W;
 const HOUSE_H = HOUSE_ROWS * PIXEL_H;
-/** Clawd's spot at home, px from the house's left: the ground floor's middle (columns 12-29),
- *  between the bed and the kitchen. */
-const HOME_X = 21 * PIXEL_W;
+/** Clawd's spot as it comes in, px from the house's left: the ground floor, between the table and
+ *  the stove, clear of everything that stands in front of it (chat-pet-home.ts ENTRY). */
+const HOME_X = ENTRY.x * PIXEL_W;
+/** A hop up onto (or down off) the bed, a chair or the tub: up first, then down onto it. */
+const HOP_EASE = "cubic-bezier(.3,-.6,.6,1)";
+/** Chores on a visit, before it goes back out to the box (a click on furniture adds one). */
+const VISIT_CHORES = 2;
 /** On the top edge (no room beside the box), this far in from its right end. */
 const HOUSE_INSET = 18;
 /** The entrance plays once per window, as the CLI plays one once per version. */
@@ -123,10 +128,14 @@ const P = { frame: "#3d3d3a", screen: "#1f2a33", glow: "#7fd1ff", key: "#b4b2a7"
   shelf: "#5a3a26", sky: "#9fd3f0", leaf: "#5f9a4c", leafDark: "#3f7a34",
   // The washroom's tiles and porcelain, the bed's linen, and the kitchen's fridge and flame.
   tile: "#cfe3ea", tileEdge: "#a9c6d1", porcelain: "#f4f3ee", porcelainEdge: "#c9c7bd", water: "#6fb3dc",
-  blanket: "#6a9bcc", pillow: "#faf9f5", fridge: "#e8ebe6", flame: "#e8743b" };
+  blanket: "#6a9bcc", pillow: "#faf9f5", fridge: "#e8ebe6", flame: "#e8743b",
+  // Home life: the turned-down blanket, the open fridge's light, the night sky, a cookie and its chips,
+  // and the stew it cooks.
+  blanketFold: "#9cc0e4", fridgeLight: "#fff6d6", night: "#22314a", cookie: "#c08a4a", chip: "#5a3a26", stew: "#c0563f" };
 
-/** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. */
-export type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read";
+/** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. At home it also
+ *  stirs a pot (cook), eats a cookie (snack) and carries its plate to the table (serve). */
+export type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read" | "cook" | "snack" | "serve";
 type Arms = "down" | "left" | "right" | "both" | "reach";
 export type Pose = { look: -1 | 0 | 1; arms: Arms; walking: boolean; sit: boolean };
 /** On the pointer: leaping on, riding along, or leaping back home to the box (screen px). */
@@ -147,7 +156,7 @@ export function restFrame({ mood, asleep, step, pose, blink, job, toolSide }: { 
     return { pose: { facing: toolSide === "left" ? "left-12" : "right-12" }, offset: pose.sit ? 1 : 0 };
   }
   const eyes: Eyes = asleep || blink ? "closed"
-    : job !== "none" && job !== "carry" ? toolSide
+    : job !== "none" && job !== "carry" && job !== "serve" ? toolSide
     : pose.look < 0 ? "left" : pose.look > 0 ? "right" : "open";
   let arms: ClawdArms = "down";
   if (!asleep) {
@@ -155,7 +164,7 @@ export function restFrame({ mood, asleep, step, pose, blink, job, toolSide }: { 
     // side the tool was on, with the tool down by its feet, and with no tool at all it "typed" in the
     // air: it read as Clawd checking its watch (the user, 2026-10-30).
     const holding: ClawdArms = toolSide === "left" ? "left-up" : "one-up";
-    if (job === "carry" || (mood === "ask" && !pose.walking) || pose.arms === "both") arms = "up";
+    if (job === "carry" || job === "serve" || (mood === "ask" && !pose.walking) || pose.arms === "both") arms = "up";
     else if (job !== "none" && job !== "laptop") arms = holding;
     else if (pose.arms === "left") arms = "left-up";
     else if (pose.arms !== "down") arms = "one-up";
@@ -168,87 +177,139 @@ const houseSvg = (parts: ReactElement[]) =>
   <svg viewBox={`0 0 ${HOUSE_COLS} ${HOUSE_ROWS}`} width={HOUSE_W} height={HOUSE_H} preserveAspectRatio="none" aria-hidden="true"
     shapeRendering="crispEdges">{parts}</svg>;
 
+/** What the house shows: whether Clawd is in, asleep, what it is doing there, and the beat it is on. */
+type HomeView = { home: boolean; asleep: boolean; doing: Doing | null; tick: number; step: boolean; bites: number };
+
 /**
  * Clawd's house is a doll's house with its front swung open, so you can see in: its rooms are drawn
- * behind Clawd (HouseInside) and its roof and side walls in front (House). Two storeys, each a row
- * taller than Clawd:
- * - downstairs (rows 13-19), Clawd stands in the middle (columns 12-29 of its 3-36), on a rug, in
- *   front of a framed landscape, with its bed to its left and the kitchen to its right: a stove
- *   with a pot (its flame and steam on while Clawd is home awake) and a fridge;
- * - upstairs (rows 6-12), a tiled washroom (a tub, a toilet, a mirror and a towel) and a study
- *   (the bookshelf with its plant, a desk with a laptop, a window over a cabinet).
- * Nothing stands behind Clawd's own spot but the picture, which it hides while home. Each piece is a
- * few pixels across, in colours that stand out from the walls (the user: at a pixel each, the room
- * read as having no furniture).
+ * behind Clawd (HouseInside), and its roof, walls and the furniture it gets into in front (House).
+ * Inside, Clawd is half size, as wide as its bed (chat-pet-home.ts), and uses everything:
+ * - downstairs (rows 13-19): its bed with a lamp, a ladder up through a hatch, the table it eats at
+ *   under a framed landscape, and the kitchen: a stove whose pot bubbles while it cooks, and a
+ *   fridge that opens, lit inside, for a snack;
+ * - upstairs (rows 6-12): a tiled washroom with a tub it bathes in, the bookshelf it reads from,
+ *   the desk with a laptop it works at, and a window, sky by day and the moon while it sleeps.
+ * The lamp, laptop and window light up while it is home and awake.
  */
-function HouseInside({ home, asleep }: { home: boolean; asleep: boolean }) {
+function HouseInside({ home, asleep, doing, tick, step }: HomeView) {
   const r = rect;
   const lit = home && !asleep;
+  const cooking = home && doing === "cook";
+  const fridgeOpen = home && doing === "fridge";
+  const working = home && doing === "work";
   return houseSvg([
-    // Upstairs: back wall with a skirting board, and its planked floor, the ground floor's ceiling.
-    r(3, 6, 34, 6, P.inside, "up-back"), r(3, 11, 34, 1, P.insideEdge, "up-skirting"), r(3, 12, 34, 1, P.floor, "up-floor"),
-    ...[6, 17, 26, 33].map((x) => r(x, 12, 1, 1, P.plank, `up-plank${x}`)),
-    // The washroom (columns 3-13), tiled, behind a partition: a tub of water on its feet with a mirror
-    // over it, a towel on its rail, and a toilet.
-    r(3, 6, 11, 6, P.tile, "bath-tiles"), ...[5, 8, 11].map((x) => r(x, 7, 1, 1, P.tileEdge, `bath-grout${x}`)),
-    r(14, 6, 1, 6, P.wallEdge, "bath-partition"),
+    // Upstairs: back wall with a skirting board, and its planked floor (the ground floor's ceiling)
+    // with the hatch the ladder comes up through.
+    r(3, 6, 34, 6, P.inside, "up-back"), r(3, 11, 34, 1, P.insideEdge, "up-skirting"),
+    r(3, 12, 10, 1, P.floor, "up-floor-l"), r(16, 12, 21, 1, P.floor, "up-floor-r"),
+    ...[6, 20, 26, 33].map((x) => r(x, 12, 1, 1, P.plank, `up-plank${x}`)),
+    // The washroom (columns 3-11), tiled, under a lintel: a mirror, a towel on its rail, the tap and
+    // the tub's back (its front stands in front of Clawd, in House).
+    r(3, 6, 9, 6, P.tile, "bath-tiles"), ...[5, 8].map((x) => r(x, 8, 1, 1, P.tileEdge, `bath-grout${x}`)),
+    r(12, 6, 1, 2, P.wallEdge, "bath-lintel"),
     r(4, 6, 3, 2, P.frameLight, "mirror-frame"), r(5, 7, 1, 1, P.lens, "mirror"),
-    r(3, 9, 7, 2, P.porcelain, "tub"), r(4, 9, 5, 1, P.water, "tub-water"), r(3, 10, 7, 1, P.porcelainEdge, "tub-side"),
-    r(4, 11, 1, 1, P.metal, "tub-foot-l"), r(8, 11, 1, 1, P.metal, "tub-foot-r"), r(3, 8, 1, 1, P.metal, "tub-tap"),
-    r(9, 7, 1, 2, P.rugEdge, "towel"), r(11, 8, 2, 2, P.porcelain, "toilet-tank"), r(11, 10, 3, 1, P.porcelain, "toilet-bowl"),
-    r(12, 11, 1, 1, P.porcelainEdge, "toilet-foot"),
-    // The study: the bookshelf with a plant on top, a desk with a laptop (its screen on with the
-    // window), and the window over a cabinet.
-    r(15, 7, 5, 5, P.shelf, "shelf"),
-    r(16, 8, 1, 1, P.cover, "book-1"), r(17, 8, 1, 1, P.roof, "book-2"), r(18, 8, 1, 1, P.knob, "book-3"),
-    r(16, 10, 1, 1, P.leaf, "book-4"), r(17, 10, 1, 1, P.page, "book-5"), r(18, 10, 1, 1, P.cover, "book-6"),
-    r(16, 6, 3, 1, P.leaf, "plant"), r(17, 6, 1, 1, P.leafDark, "plant-middle"),
-    r(22, 9, 7, 1, P.wood, "desk"), r(22, 10, 1, 2, P.wood, "desk-leg-l"), r(28, 10, 1, 2, P.wood, "desk-leg-r"),
-    r(24, 8, 3, 1, P.frame, "laptop"), r(24, 7, 3, 1, lit ? P.glow : P.screen, "laptop-screen"),
-    r(31, 6, 4, 3, P.frameLight, "window-frame"), r(32, 7, 2, 1, lit ? P.lit : P.sky, "window"), r(31, 9, 4, 1, P.wood, "window-sill"),
-    r(31, 10, 4, 2, P.shelf, "cabinet"), r(33, 10, 1, 1, P.knob, "cabinet-knob"),
-    // Downstairs: back wall with a skirting board, a planked floor and the rug Clawd stands on.
+    r(9, 7, 2, 1, P.metal, "towel-rail"), r(10, 7, 1, 2, P.rugEdge, "towel"),
+    r(3, 8, 1, 1, P.metal, "tub-tap"), r(3, 9, 9, 1, P.porcelainEdge, "tub-back"),
+    // The study: the bookshelf with a plant on top, and the window, sky by day, the moon at night.
+    r(15, 7, 4, 5, P.shelf, "shelf"),
+    r(15, 8, 1, 1, P.cover, "book-1"), r(16, 8, 1, 1, P.roof, "book-2"), r(17, 8, 1, 1, P.knob, "book-3"),
+    r(15, 10, 1, 1, P.leaf, "book-4"), r(16, 10, 1, 1, P.page, "book-5"), r(17, 10, 1, 1, P.cover, "book-6"),
+    r(15, 6, 3, 1, P.leaf, "plant"), r(16, 6, 1, 1, P.leafDark, "plant-middle"),
+    r(31, 7, 5, 3, P.frameLight, "window-frame"), r(32, 8, 3, 1, home && asleep ? P.night : P.sky, "window"),
+    ...(home && asleep ? [r(34, 8, 1, 1, P.knob, "moon")] : [r(32, 8, 1, 1, P.page, "cloud")]),
+    // Downstairs: back wall with a skirting board, a planked floor and a rug in the middle.
     r(3, 13, 34, 6, P.inside, "back"), r(3, 18, 34, 1, P.insideEdge, "skirting"), r(3, 19, 34, 1, P.floor, "floor"),
     ...[5, 9, 31, 35].map((x) => r(x, 19, 1, 1, P.plank, `plank${x}`)),
-    r(13, 19, 16, 1, P.rug, "rug"), r(13, 19, 1, 1, P.rugEdge, "rug-l"), r(28, 19, 1, 1, P.rugEdge, "rug-r"),
-    // Middle: a framed landscape over where Clawd stands, so the room is not bare while it is out.
-    r(17, 14, 8, 4, P.wood, "picture"), r(18, 15, 6, 2, P.sky, "picture-sky"), r(18, 16, 6, 1, P.leaf, "picture-hill"),
-    r(21, 15, 2, 1, P.leaf, "picture-hilltop"),
-    // Left: the bed, head to the wall, a pillow and a blanket, with a lamp over it (on with the window).
-    r(3, 15, 1, 4, P.shelf, "bed-head"), r(11, 17, 1, 2, P.shelf, "bed-foot"), r(4, 18, 7, 1, P.wood, "bed-frame"),
-    r(4, 17, 2, 1, P.pillow, "pillow"), r(6, 17, 5, 1, P.blanket, "blanket"), r(6, 16, 4, 1, P.blanket, "blanket-fold"),
-    r(5, 14, 1, 1, lit ? P.lit : P.porcelainEdge, "bed-lamp"),
-    // Right: the cooking station, a stove with a pot on it (its flame and steam on while Clawd is home
-    // awake) and an oven door, beside a tall fridge.
-    r(30, 16, 4, 3, P.metal, "stove"), r(31, 17, 2, 1, P.glass, "oven-door"), r(30, 15, 4, 1, P.frame, "hob"),
-    r(31, 14, 2, 1, P.metal, "pot"), ...(lit ? [r(31, 15, 2, 1, P.flame, "flame"), r(32, 13, 1, 1, P.steam, "pot-steam")] : []),
-    r(35, 13, 2, 6, P.fridge, "fridge"), r(35, 15, 2, 1, P.porcelainEdge, "fridge-door"), r(35, 14, 1, 1, P.metal, "fridge-handle"),
+    r(23, 19, 6, 1, P.rug, "rug"), r(23, 19, 1, 1, P.rugEdge, "rug-l"), r(28, 19, 1, 1, P.rugEdge, "rug-r"),
+    // The ladder, from the floor up through the hatch.
+    r(13, 10, 1, 10, P.wood, "ladder-l"), r(15, 10, 1, 10, P.wood, "ladder-r"),
+    ...[11, 13, 15, 17].map((y) => r(14, y, 1, 1, P.wood, `rung${y}`)),
+    // A framed landscape over the table.
+    r(17, 13, 5, 3, P.wood, "picture"), r(18, 14, 3, 1, P.sky, "picture-sky"), r(19, 14, 1, 1, P.leaf, "picture-hill"),
+    // The bed, head to the wall: headboard, a mattress and its pillow, a footboard, and the lamp over
+    // it (on while Clawd is up). The blanket is in House, over Clawd when it is tucked in.
+    r(3, 14, 1, 6, P.shelf, "bed-head"), r(4, 18, 8, 1, P.porcelain, "mattress"), r(4, 19, 8, 1, P.wood, "bed-frame"),
+    r(4, 17, 2, 1, P.pillow, "pillow"), r(12, 17, 1, 3, P.shelf, "bed-foot"),
+    r(5, 13, 1, 1, lit ? P.lit : P.porcelainEdge, "bed-lamp"),
+    // The stove: a pot on the hob, its lid lifting and steam rising while Clawd cooks over the flame.
+    r(30, 18, 4, 2, P.metal, "stove"), r(31, 18, 2, 1, P.glass, "oven-door"), r(30, 17, 4, 1, P.frame, "hob"),
+    r(31, 15, 2, 2, P.metal, "pot"), r(31, cooking && step ? 14 : 15, 2, 1, P.rim, "pot-lid"),
+    ...(cooking ? [r(31, 17, 2, 1, P.flame, "flame"), r(31 + (tick % 2), 13, 1, 1, P.steam, "pot-steam")] : []),
+    // The fridge: shut, its two doors and handles; open, lit inside with milk, an apple and the cookie
+    // jar, its door swung out to the left.
+    ...(fridgeOpen
+      ? [r(34, 13, 3, 7, P.fridgeLight, "fridge-inside"), r(34, 15, 3, 1, P.porcelainEdge, "fridge-shelf-1"),
+        r(34, 17, 3, 1, P.porcelainEdge, "fridge-shelf-2"), r(35, 13, 1, 2, P.page, "milk"), r(34, 14, 1, 1, P.roof, "apple"),
+        r(36, 16, 1, 1, P.cookie, "cookie-jar"), r(33, 13, 1, 7, P.fridge, "fridge-door-open")]
+      : [r(34, 13, 3, 7, P.fridge, "fridge"), r(34, 15, 3, 1, P.porcelainEdge, "fridge-door"),
+        r(34, 14, 1, 1, P.metal, "fridge-handle-1"), r(34, 17, 1, 1, P.metal, "fridge-handle-2")]),
+    // The desk chair's back, behind Clawd at the desk.
+    r(21, 8, 1, 2, P.shelf, "chair-back"),
+    // The laptop's screen faces Clawd, lines of code running down it while it works.
+    ...(working ? [r(27 + (tick % 2), 7, 1, 1, P.glow, "screen-line")] : []),
   ]);
 }
 
+/** Furniture you can click: the chore Clawd goes there to do, and where it stands (house pixels). */
+const FURNITURE: readonly { chore: Chore; label: string; x: number; y: number; w: number; h: number }[] = [
+  { chore: "sleep", label: "the bed: Clawd tucks itself in for a nap", x: 3, y: 14, w: 10, h: 6 },
+  { chore: "cook", label: "the table: Clawd cooks something and eats it here", x: 16, y: 15, w: 6, h: 5 },
+  { chore: "cook", label: "the stove: Clawd cooks something and eats it at the table", x: 30, y: 14, w: 4, h: 6 },
+  { chore: "snack", label: "the fridge: Clawd grabs a cookie", x: 33, y: 13, w: 4, h: 7 },
+  { chore: "bath", label: "the tub: Clawd takes a bath", x: 3, y: 8, w: 9, h: 5 },
+  { chore: "read", label: "the bookshelf: Clawd reads a book", x: 15, y: 6, w: 4, h: 6 },
+  { chore: "work", label: "the desk: Clawd works on its laptop", x: 21, y: 7, w: 9, h: 6 },
+  { chore: "window", label: "the window: Clawd looks outside", x: 31, y: 7, w: 5, h: 3 },
+];
+
 /**
- * The front of Clawd's house, standing beside the box's right side and drawn over Clawd:
- * a clay roof with its chimney, the side walls, and the front wall swung open on its hinge at the
- * left. Asleep inside, z's rise from it.
+ * The front of Clawd's house, drawn over Clawd: a clay roof with its chimney, the side walls, the
+ * front wall swung open on its hinge at the left, and the furniture Clawd gets into or behind: the
+ * blanket on its bed, the table with its plate, the tub with its water and bubbles, and the desk with
+ * its laptop. Each piece of furniture is a button: Clawd comes over and uses it. Asleep, z's rise
+ * over its bed.
  */
-function House({ home, asleep, onKnock }: { home: boolean; asleep: boolean; onKnock: () => void }) {
+function House({ home, asleep, doing, tick, step, bites, onKnock, onUse }: HomeView & { onKnock: () => void; onUse: (chore: Chore) => void }) {
   const r = rect;
   const parts: ReactElement[] = [r(30, 0, 2, 3, P.roofEdge, "chimney")];
   // The roof, three pixels wider each side each row down, with an eave line under it.
   [[14, 12], [11, 18], [8, 24], [5, 30], [2, 36]].forEach(([x, w], row) => parts.push(r(x!, row, w!, 1, P.roof, `roof${row}`)));
   parts.push(r(1, 5, 38, 1, P.roofEdge, "eave"));
+  // A puff from the chimney while the stove is on.
+  if (home && doing === "cook") parts.push(r(30 + (tick % 2), tick % 2 ? -1 : 0, 1, 1, P.steam, "chimney-puff"));
   // The side walls, edged darker outside, up both storeys; between them the rooms are open.
   parts.push(r(2, 6, 1, 14, P.wall, "wall-l"), r(1, 6, 1, 14, P.wallEdge, "wall-l-edge"),
     r(37, 6, 1, 14, P.wall, "wall-r"), r(38, 6, 1, 14, P.wallEdge, "wall-r-edge"));
   // The front wall, swung open on its left hinge so its edge shows, with the door's knob on it.
   parts.push(r(0, 6, 1, 14, P.wall, "front"), r(0, 16, 1, 1, P.knob, "front-knob"));
-  return <button type="button" className={`cx-pet-house${home ? " is-home" : ""}${asleep ? " is-asleep" : ""}`}
-    title={home ? (asleep ? "Clawd is napping. Click to wake it" : "Clawd is home") : "Clawd's house. Click to call Clawd home"}
-    aria-label={home ? (asleep ? "Clawd's house: Clawd is napping inside" : "Clawd's house: Clawd is home") : "Clawd's house"}
-    onClick={onKnock}>
-    {houseSvg(parts)}
-    {home && asleep ? <span className="cx-pet-house-z" aria-hidden="true"><span>z</span><span>z</span><span>Z</span></span> : null}
-  </button>;
+  // The blanket, turned down at the pillow end: tucked in, Clawd's feet are under it.
+  parts.push(r(6, 17, 6, 1, P.blanket, "blanket"), r(6, 17, 1, 1, P.blanketFold, "blanket-fold"));
+  // The table, its plate with what is left of the meal while Clawd eats.
+  parts.push(r(16, 17, 6, 1, P.wood, "table"), r(16, 18, 1, 2, P.wood, "table-leg-l"), r(21, 18, 1, 2, P.wood, "table-leg-r"));
+  if (home && doing === "eat") {
+    parts.push(r(16.5, 16, 5, 1, P.porcelain, "plate"));
+    if (bites > 0) parts.push(r(17.5, 16, bites, 1, P.stew, "food"));
+  }
+  // The tub on its feet: its water up to the rim and bubbles round Clawd while it bathes.
+  const bathing = home && doing === "bath";
+  parts.push(r(3, 10, 9, 2, P.porcelain, "tub"), r(3, 10, 9, 1, bathing ? P.water : P.porcelainEdge, "tub-rim"),
+    r(4, 12, 1, 1, P.metal, "tub-foot-l"), r(10, 12, 1, 1, P.metal, "tub-foot-r"));
+  if (bathing) parts.push(...[3, 6, 9].map((x, index) => r(x + ((tick + index) % 2), step === (index % 2 === 0) ? 9 : 10, 1, 1, P.page, `bubble${x}`)));
+  // The desk with its laptop, the screen turned to Clawd's seat.
+  parts.push(r(21, 10, 9, 1, P.wood, "desk"), r(21, 11, 1, 2, P.wood, "desk-leg-l"), r(29, 11, 1, 2, P.wood, "desk-leg-r"),
+    r(26, 9, 3, 1, P.key, "laptop-base"), r(28, 7, 1, 2, P.frame, "laptop-lid"));
+  return <>
+    <button type="button" className={`cx-pet-house${home ? " is-home" : ""}${asleep ? " is-asleep" : ""}`}
+      title={home ? (asleep ? "Clawd is napping. Click to wake it" : "Clawd is home") : "Clawd's house. Click to call Clawd home"}
+      aria-label={home ? (asleep ? "Clawd's house: Clawd is napping inside" : "Clawd's house: Clawd is home") : "Clawd's house"}
+      onClick={onKnock}>
+      {houseSvg(parts)}
+      {home && asleep ? <span className="cx-pet-house-z" aria-hidden="true"><span>z</span><span>z</span><span>Z</span></span> : null}
+    </button>
+    {FURNITURE.map((piece) => <button key={`${piece.chore}-${piece.x}`} type="button" className="cx-pet-furniture"
+      style={{ left: piece.x * PIXEL_W, top: piece.y * PIXEL_H, width: piece.w * PIXEL_W, height: piece.h * PIXEL_H }}
+      title={`Clawd's ${piece.label}`} aria-label={`Clawd's ${piece.label}`} onClick={() => onUse(piece.chore)} />)}
+  </>;
 }
 
 /** A file box carried over its head, held up in both hands. */
@@ -259,14 +320,22 @@ export function CarriedBox() {
   </svg>;
 }
 
+/** Its plate held up in both hands on the way to the table, the stew steaming. */
+export function CarriedPlate({ tick }: { tick: number }) {
+  const r = rect;
+  return <svg className="cx-pet-box" viewBox="0 0 8 3" width={8 * PIXEL_W} height={3 * PIXEL_H} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">
+    {[r(1, 2, 6, 1, P.porcelain, "plate"), r(2, 1, 4, 1, P.stew, "stew"), r(3 + (tick % 2), 0, 1, 1, P.steam, "steam")]}
+  </svg>;
+}
+
 /**
  * The tool beside it, on a 9×7 grid of the same pixels, its bottom on the same ground line. Clawd's
  * raised hand (restFrame) is at the grid's row 2, just left of column 0 (mirrored on its left side),
  * so a tool it holds starts there: the mug, magnifier, hammer and book were drawn by its feet while
  * the arm went up empty, and the mug's steam and the loose hammer's sparks read as fireworks.
  */
-export function Prop({ job, step, tick }: { job: Job; step: boolean; tick: number }) {
-  if (job === "none" || job === "carry") return null;
+export function Prop({ job, step, tick, bites = 3 }: { job: Job; step: boolean; tick: number; bites?: number }) {
+  if (job === "none" || job === "carry" || job === "serve") return null;
   const r = rect;
   const parts: ReactElement[] = [];
   if (job === "laptop") {
@@ -293,6 +362,18 @@ export function Prop({ job, step, tick }: { job: Job; step: boolean; tick: numbe
     // An open book held up in its hand, a page turning now and then.
     parts.push(r(0, 1, 3, 2, P.page, "page-l"), r(4, 1, 3, 2, P.page, "page-r"), r(3, 1, 1, 3, P.cover, "spine"), r(0, 3, 7, 1, P.cover, "cover"));
     if (tick % 6 === 0) parts.push(r(3, 0, 2, 1, P.page, "turn"));
+  } else if (job === "cook") {
+    // A ladle by its handle, its bowl dipping into the pot and coming up again.
+    parts.push(r(0, 2, 2, 1, P.wood, "ladle-handle"), r(2, step ? 3 : 2, 1, 1, P.wood, "ladle-neck"),
+      r(3, step ? 4 : 3, 2, 1, P.metal, "ladle-bowl"));
+    if (!step) parts.push(r(3, 2, 1, 1, P.stew, "ladle-stew"));
+  } else if (job === "snack") {
+    // A cookie in its hand, a bite gone each time (bites left: 3 whole, 0 gone).
+    // The far side goes first; the bit in its hand (column 0) is never bitten off.
+    const gone = [[2, 1], [2, 2], [1, 1]].slice(0, 3 - Math.max(0, Math.min(3, bites)));
+    for (const [x, y] of [[0, 1], [1, 1], [2, 1], [0, 2], [1, 2], [2, 2]] as const) {
+      if (!gone.some(([gx, gy]) => gx === x && gy === y)) parts.push(r(x, y, 1, 1, (x + y) % 3 === 0 ? P.chip : P.cookie, `cookie${x}${y}`));
+    }
   }
   return <svg className="cx-pet-prop" viewBox="0 0 9 7" width={9 * PIXEL_W} height={7 * PIXEL_H} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
 }
@@ -415,6 +496,13 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const [bubble, setBubble] = useState<string | null>(null);
   const [floaters, setFloaters] = useState<Floater[]>([]);
   const [fed, setFed] = useState(0);
+  // At home: the beat it is on (where in the house it stands and what it is doing there), null while
+  // it comes in at the entry; what it has done there lately; and the chores left before it goes out.
+  const [scene, setScene] = useState<HomeBeat | null>(null);
+  const sceneNow = useRef(scene);
+  sceneNow.current = scene;
+  const homeMemory = useRef<HomeMemory>({ last: null, sinceMeal: 0, hour: 0 });
+  const visitLeft = useRef(0);
   const drag = useRef<{ moved: boolean; x: number; y: number; lastX: number; lastY: number } | null>(null);
   // The window listeners of a drag in progress (removed on drop or unmount), and its fall's timer.
   const dragEnd = useRef<(() => void) | null>(null);
@@ -746,10 +834,11 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     const along = Math.max(WIDTH / 2, Math.min(frame.width - WIDTH / 2, x));
     return { x: frame.left + along, y: frame.top, along };
   };
-  /** Its feet in its room in the house under the chat list, on the screen. */
+  /** Its feet in its house under the chat list, on the screen: where it stands in there now. */
   const roomFeet = (): Point | null => {
     const spot = lot.current?.getBoundingClientRect();
-    return spot ? { x: spot.left + HOME_X, y: spot.top + HOUSE_H } : null;
+    const place = sceneNow.current ?? ENTRY;
+    return spot ? { x: spot.left + place.x * PIXEL_W, y: spot.top + (FLOOR_LINE[place.storey] - place.lift) * PIXEL_H } : null;
   };
   /**
    * A leap across the screen, feet from `from` to `to` (an arc: up first, then down onto the spot),
@@ -796,13 +885,16 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     if (!still && current && !leapNow.current) walkTo(freeNear(nearLap(current, current.width - WIDTH / 2, atNow.current)), SCURRY * 1.4, () => play("jump"));
   };
 
-  /** Bedtime: it walks home to its house on the box's top edge, goes in and falls asleep there. A
-   *  visit (`nap` false) stays a moment and comes back out. */
-  const goHome = (nap = true) => {
+  /** Bedtime: it walks home to its house, goes in, climbs into bed and falls asleep there. A visit
+   *  (`nap` false) does a couple of chores, or `chore` first when you clicked a piece of furniture,
+   *  and comes back out. */
+  const goHome = (nap = true, chore?: Chore) => {
     cancelPlans();
     window.clearTimeout(doorTimer.current);
     setDoor(false);
     setJob("none");
+    sceneNow.current = null;
+    setScene(null);
     if (!loopNow.current) return;
     say(nap ? "Home time…" : "Coming!", 1300);
     const inside = () => {
@@ -810,8 +902,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       setDoor(false);
       setHome(true);
       setPose(REST);
-      if (nap) later(still ? 0 : 700, () => setAsleep(true));
-      else later(2500, () => leaveHome());
+      visitLeft.current = nap ? 0 : VISIT_CHORES;
+      later(still ? 0 : 400, () => homeLife(nap ? "sleep" : chore));
     };
     // Beside the box it steps down off the box's side onto its doorstep, then walks in through the
     // open front to the middle of its room, the walls passing in front of it.
@@ -837,6 +929,9 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     if (!homeNow.current && !doorNow.current) return;
     window.clearTimeout(doorTimer.current);
     const room = homeNow.current && yardNow.current && split ? roomFeet() : null;
+    sceneNow.current = null;
+    setScene(null);
+    setJob("none");
     if (room && split) {
       const focused = petStage.focused();
       const pane = toward ?? (focused && petStage.seats().has(focused) ? focused : split.pane);
@@ -877,6 +972,45 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     setHome(false);
     doorTimer.current = window.setTimeout(out, DOOR_MS);
   };
+  /** Plays home beats one after another, each for its ms (a move takes that long to get there), then `done`. */
+  const homeRun = (beats: HomeBeat[], done?: () => void) => {
+    const [beat, ...rest] = beats;
+    if (!beat) { done?.(); return; }
+    sceneNow.current = beat;
+    setScene(beat);
+    const moving = beat.doing === "walk" || beat.doing === "climb" || beat.doing === "serve";
+    setPose({ ...REST, look: beat.look, walking: moving, arms: beat.doing === "climb" ? "both" : "down" });
+    setJob(beat.doing === "cook" || beat.doing === "snack" || beat.doing === "serve" || beat.doing === "read" ? beat.doing : "none");
+    if (beat.say) say(beat.say, Math.min(1800, beat.ms + 600));
+    if (beat.float) float(beat.float, 26);
+    later(still && (moving || beat.doing === "hop") ? 0 : beat.ms, () => homeRun(rest, done));
+  };
+  const homePlace = (): HomeBeat => sceneNow.current ?? { ...ENTRY, doing: "stand", look: 0, ms: 0 };
+  /** One chore (`chore`, else one it picks), then the next until the visit is over, then out to the
+   *  box. Sleep ends in bed, asleep, until something wakes it. */
+  const homeLife = (chore?: Chore) => {
+    if (!homeNow.current || asleepNow.current) return;
+    if (!chore && visitLeft.current <= 0) { homeRun(exitBeats(homePlace()), () => leaveHome()); return; }
+    if (!chore) visitLeft.current -= 1;
+    const memory = homeMemory.current;
+    const next = chore ?? pickChore({ ...memory, hour: new Date().getHours() });
+    homeRun(choreBeats(next, homePlace()), () => {
+      homeMemory.current = { last: next, sinceMeal: next === "cook" || next === "snack" ? 0 : memory.sinceMeal + 1, hour: 0 };
+      if (next === "sleep") { setAsleep(true); return; }
+      homeLife();
+    });
+  };
+  /** A piece of furniture clicked: Clawd comes home if it is out (to bed for a nap), and goes to use it. */
+  const toFurniture = (chore: Chore) => {
+    poke();
+    if (!homeNow.current) { goHome(chore === "sleep", chore === "sleep" ? undefined : chore); return; }
+    if (asleepNow.current && chore === "sleep") return;
+    cancelPlans();
+    // Up now, not at the next render: homeLife reads it right away.
+    if (asleepNow.current) { asleepNow.current = false; setAsleep(false); say("Huh? Okay!", 1200); }
+    visitLeft.current = Math.max(visitLeft.current, 1);
+    homeLife(chore);
+  };
   // Nothing running for a while: it goes home to sleep. Any touch, or the agent starting, wakes it.
   const poke = () => {
     window.clearTimeout(napTimer.current);
@@ -891,7 +1025,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     say("Huh? I'm up.", 1500);
     poke();
     cancelPlans();
-    if (homeNow.current) leaveHome(); else wander();
+    // Out of bed (or off whatever it is on, down the ladder), across to the front, and out.
+    if (homeNow.current) homeRun(exitBeats(homePlace()), () => leaveHome()); else wander();
     return true;
   };
 
@@ -1008,7 +1143,9 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   useEffect(() => { if (full) say("I'm getting full. Compact soon?", 2600); }, [full]);
 
   // Legs cycle while it walks; at work, its arms and tools keep the same beat.
-  const walking = !asleep && (pose.walking || mood === "working" || job !== "none");
+  // At home its chores keep the beat too: the pot's lid, the bubbles, the bites, the laptop's lines.
+  const homeBusy = home && scene !== null && scene.doing !== "stand";
+  const walking = !asleep && (pose.walking || mood === "working" || job !== "none" || homeBusy);
   useEffect(() => {
     if (!walking) { setStep(false); return undefined; }
     const beat = pose.walking ? 120 : job === "build" ? 260 : job === "coffee" || job === "read" ? 900 : 200;
@@ -1255,7 +1392,12 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   // stands in the house on the top edge (its walk ends sideways at the foot of the box's right side).
   // Home in its house under the chat list (split view): in the middle of the room there.
   const inLot = Boolean(yard && home && !ride && !held && !leap);
-  const inRoom = home && !ride && !held && !leap && (yard ? { left: 0, top: 0 } : loop?.beside ? housePlace(loop) : null) || null;
+  const inRoom = home && !ride && !held && !leap && (yard ? { left: 0, top: 0 } : loop ? housePlace(loop) : null) || null;
+  // Inside, where it stands in the house now (half size, see codex-chat.css), moving there over the
+  // beat: walking along a floor, climbing the ladder, or hopping up onto or down off a piece.
+  const place = scene ?? ENTRY;
+  const homeMove: CSSProperties = still || !scene ? {}
+    : { transition: `left ${scene.ms}ms linear, top ${scene.ms}ms ${scene.doing === "hop" ? HOP_EASE : "linear"}, transform .18s ease-out` };
   // On its doorstep in the yard: upright on the ground, just out from the box's right side, facing the
   // open front. Between there and the room it walks at DOOR_MS (the walls are drawn over it).
   const atDoor = door && !home && !ride && !held && !leap && !yard && loop?.beside ? { left: loop.width + 2, top: loop.height - HEIGHT } : null;
@@ -1267,11 +1409,14 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const side = loop && !Number.isNaN(at) && !ride && !held && !leap && !inRoom && !atDoor ? spotAt(loop, at).side : 0;
   // Keep tools on the inward side of the composer so a computer cannot disappear
   // through its right edge. Clawd turns toward whichever side holds the tool.
-  const toolSide = loop && !Number.isNaN(at) ? petToolSide(spotAt(loop, at).x, loop.width) : "left";
+  // At home it holds things on the side it faces: the ladle toward the stove, the cookie toward the fridge.
+  const toolSide = home && scene ? (scene.look < 0 ? "left" : "right")
+    : loop && !Number.isNaN(at) ? petToolSide(spotAt(loop, at).x, loop.width) : "left";
   // On the box: feet on the outline, body outward, so upright on top, sideways on the sides and
   // upside down under it. On the pointer or held: upright, above everything.
   const placement: CSSProperties = inRoom
-    ? { left: inRoom.left + HOME_X - WIDTH / 2, top: inRoom.top + HOUSE_H - HEIGHT, ...upright, ...doorWalk }
+    ? { left: inRoom.left + place.x * PIXEL_W - WIDTH / 2, top: inRoom.top + (FLOOR_LINE[place.storey] - place.lift) * PIXEL_H - HEIGHT,
+      ...upright, ...homeMove, ...doorWalk }
     : atDoor
     ? { ...atDoor, ...upright, ...doorWalk }
     : leap
@@ -1323,18 +1468,22 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       }}
       onContextMenu={(event) => { event.preventDefault(); onHide(); }}>
       {!asleep && job === "carry" ? <CarriedBox /> : null}
-      <ClawdFrame frame={clawd.frame ?? restFrame({ mood: shown, asleep, step, blink, job, toolSide,
+      {!asleep && job === "serve" ? <CarriedPlate tick={tick} /> : null}
+      <ClawdFrame frame={clawd.frame ?? restFrame({ mood: shown, asleep, step, job, toolSide,
+        // Chewing at the table: its eyes squeeze shut on each bite.
+        blink: blink || (home && scene?.doing === "eat" && step),
         pose: ride ? { ...pose, walking: ride.mode === "riding", look: ride.look } : pose })} />
-      <Prop job={asleep || ride ? "none" : job} step={step} tick={tick} />
+      <Prop job={asleep || ride ? "none" : job} step={step} tick={tick} bites={scene?.bites ?? 3} />
     </button>
   </div>;
   // The room behind Clawd, the roof and walls in front of it: with the front open, it shows inside.
   // In split view the house stands in its yard under the chat list, with Clawd in it when home.
-  const rooms = (place: CSSProperties, inside: ReactElement | null) => <>
-    <div className="cx-pet-house-spot is-inside" style={place}><HouseInside home={home} asleep={asleep} /></div>
+  const view: HomeView = { home, asleep, doing: home ? scene?.doing ?? null : null, tick, step, bites: scene?.bites ?? 3 };
+  const rooms = (spot: CSSProperties, inside: ReactElement | null) => <>
+    <div className="cx-pet-house-spot is-inside" style={spot}><HouseInside {...view} /></div>
     {inside}
-    <div className="cx-pet-house-spot" style={place}>
-      <House home={home} asleep={asleep} onKnock={() => { if (!wake()) goHome(false); }} />
+    <div className="cx-pet-house-spot" style={spot}>
+      <House {...view} onKnock={() => { if (!wake()) goHome(false); }} onUse={toFurniture} />
     </div>
   </>;
   const house = yard ? createPortal(<div ref={lot} className="cx-pet-lot">{rooms({ left: 0, top: 0 }, inLot ? pet : null)}</div>, yard)

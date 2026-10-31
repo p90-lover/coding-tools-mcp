@@ -470,13 +470,17 @@ function LauncherShell({
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(compactAtMount ? false : snapshot.state.sidebarOpen !== false);
   const [sidebarWidth, setSidebarWidth] = useState(snapshot.state.sidebarWidth || 252);
-  const extraSurfaceActive = surface === "providers"
-    || surface === "agent-orchestrator-original"
-    || surface === "antigravity-cli"
-    || surface === "integrations"
-    || surface === "cpa"
-
-    || surface === "network";
+  // Rarely used surfaces, folded under "More" so the everyday ones stay in view.
+  const moreSurfaces = [
+    { surface: "activity", icon: "activity", label: copy.activity },
+    { surface: "rtk", icon: "gauge", label: "RTK" },
+    { surface: "agent-orchestrator-original", icon: "orchestrator", label: "Agent Orchestrator" },
+    { surface: "antigravity-cli", icon: "terminal", label: "Antigravity CLI" },
+    { surface: "integrations", icon: "link", label: copy.integrations },
+    { surface: "cpa", icon: "providers", label: "CPA" },
+    { surface: "network", icon: "globe", label: copy.networkProxy },
+  ] as const;
+  const extraSurfaceActive = surface === "providers" || moreSurfaces.some((item) => item.surface === surface);
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
@@ -758,6 +762,12 @@ function LauncherShell({
             </div>
 
             <nav className="sidebar-nav" aria-label={copy.workspace}>
+              <SidebarGroup label={copy.runtime}>
+                <SidebarItem active={surface === "agent-orchestrator"} icon="chat" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
+                <SidebarItem active={surface === "agent-orchestrator-teams"} icon="team" label="Orchestrator Team" onClick={() => navigateSurface("agent-orchestrator-teams")} />
+                <SidebarItem active={surface === "subagents"} icon="git" label="Subagents" onClick={() => navigateSurface("subagents")} />
+                <SidebarItem active={surface === "native-codex"} icon="terminal" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
+              </SidebarGroup>
               <SidebarGroup label={copy.workspace}>
                 <SidebarItem
                   active={surface === "browser"}
@@ -772,19 +782,19 @@ function LauncherShell({
                 />
                 <SidebarItem
                   active={surface === "chatgpt-browser-management"}
-                  icon="browser"
+                  icon="layers"
                   label="ChatGPT browser management"
                   onClick={() => navigateSurface("chatgpt-browser-management")}
                 />
                 <SidebarItem
                   active={surface === "gpt-browser"}
-                  icon="browser"
+                  icon="globe"
                   label="GPT Browser"
                   onClick={() => navigateSurface("gpt-browser")}
                 />
                 <SidebarItem
                   active={surface === "chatgpt-desktop"}
-                  icon="browser"
+                  icon="monitor"
                   label="ChatGPT Desktop"
                   onClick={() => navigateSurface("chatgpt-desktop")}
                 />
@@ -813,60 +823,36 @@ function LauncherShell({
                     navigateSurface("mcp");
                   }}
                 />
-                <SidebarItem active={surface === "plugins"} icon="mcp" label="Plugins" onClick={() => navigateSurface("plugins")} />
-              </SidebarGroup>
-              <SidebarGroup label={copy.runtime}>
-                <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
-                <SidebarItem active={surface === "agent-orchestrator-teams"} icon="orchestrator" label="Orchestrator Team" onClick={() => navigateSurface("agent-orchestrator-teams")} />
-                <SidebarItem active={surface === "subagents"} icon="orchestrator" label="Subagents" onClick={() => navigateSurface("subagents")} />
-                <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
-                <SidebarItem active={surface === "rtk"} icon="activity" label="RTK" onClick={() => navigateSurface("rtk")} />
+                <SidebarItem active={surface === "plugins"} icon="plug" label="Plugins" onClick={() => navigateSurface("plugins")} />
                 <SidebarItem
                   active={surface === "instant-mcp"}
-                  icon="mcp"
+                  icon="bolt"
                   label={copy.liveMcpTools}
                   onClick={() => navigateSurface("instant-mcp")}
                 />
-                <SidebarItem active={surface === "workspace-auth"} icon="mcp" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
-                <SidebarItem active={surface === "native-codex"} icon="orchestrator" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
-                <SidebarItem active={surface === "oauth"} icon="providers" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
-                <SidebarItem active={surface === "register"} icon="providers" label={copy.register} onClick={() => navigateSurface("register")} />
-
-
+              </SidebarGroup>
+              <SidebarGroup label={copy.connections}>
+                {/* ProviderHubIntegration portals its Providers row into this slot. */}
+                <div className="sidebar-provider-slot" />
+                <SidebarItem active={surface === "oauth"} icon="key" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
+                <SidebarItem active={surface === "register"} icon="userPlus" label={copy.register} onClick={() => navigateSurface("register")} />
+                <SidebarItem active={surface === "workspace-auth"} icon="shield" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
               </SidebarGroup>
               <details className="sidebar-more" open={extraSurfaceActive}>
-                <summary>{copy.moreTools}</summary>
-                <SidebarItem
-                  active={surface === "agent-orchestrator-original"}
-                  icon="orchestrator"
-                  label="Agent Orchestrator"
-                  onClick={() => navigateSurface("agent-orchestrator-original")}
-                />
-                <SidebarItem
-                  active={surface === "antigravity-cli"}
-                  icon="setup"
-                  label="Antigravity CLI"
-                  onClick={() => navigateSurface("antigravity-cli")}
-                />
-                <SidebarItem
-                  active={surface === "integrations"}
-                  icon="globe"
-                  label={copy.integrations}
-                  onClick={() => navigateSurface("integrations")}
-                />
-                <SidebarItem
-                  active={surface === "cpa"}
-                  icon="providers"
-                  label="CPA"
-                  onClick={() => navigateSurface("cpa")}
-                />
-
-                <SidebarItem
-                  active={surface === "network"}
-                  icon="globe"
-                  label={copy.networkProxy}
-                  onClick={() => navigateSurface("network")}
-                />
+                <summary>
+                  <Icon name="chevron" className="sidebar-more-caret" width={12} height={12} />
+                  <span>{copy.moreTools}</span>
+                  <small>{moreSurfaces.length}</small>
+                </summary>
+                {moreSurfaces.map((item) => (
+                  <SidebarItem
+                    key={item.surface}
+                    active={surface === item.surface}
+                    icon={item.icon}
+                    label={item.label}
+                    onClick={() => navigateSurface(item.surface)}
+                  />
+                ))}
               </details>
             </nav>
             {sidebarOpen && !compactSidebar ? (
@@ -1411,7 +1397,8 @@ function BrowserSurface({
           />
           <IconButton disabled={navigationLocked || !visible} icon="reload" label={copy.reload} onClick={() => void navigate("reload")} />
         </div>
-        <BrowserAccountSwitcher api={api!} busy={navigationLocked} copy={copy} setError={setError} />
+        {/* Turns keep running on their own accounts across a switch; only a check or test of the shown page holds it. */}
+        <BrowserAccountSwitcher api={api!} busy={browser?.status === "testing"} copy={copy} setError={setError} />
         <div className="browser-address" title={browser?.url || copy.browserAddress}>
           <Icon name="globe" />
           <span>{formatBrowserAddress(browser?.url, copy)}</span>
@@ -3337,6 +3324,18 @@ function BrandMark({ small = false }: { small?: boolean }) {
   );
 }
 
+/**
+ * Runtime commands time out as "<operation-id> timed out after 20000ms" (runtime.cjs). The toast
+ * says it in seconds with words a person can read; the error itself keeps its id for the logs.
+ */
+function readableError(message: string): string {
+  const timeout = /^([a-z0-9]+(?:-[a-z0-9]+)+) timed out after (\d+) ?ms\b([\s\S]*)$/.exec(message);
+  if (!timeout) return message;
+  const [, operation, ms, rest] = timeout;
+  const words = operation.split("-").map((word) => (word === "ao" ? "AO" : word === "cpa" ? "CPA" : word)).join(" ");
+  return `${words[0].toUpperCase()}${words.slice(1)} didn't finish within ${Math.round(Number(ms) / 1000)} s${rest}`;
+}
+
 function ErrorToast({ copy, message, onDismiss }: { copy: Copy; message: string; onDismiss: () => void }) {
   return (
     <motion.div
@@ -3349,7 +3348,7 @@ function ErrorToast({ copy, message, onDismiss }: { copy: Copy; message: string;
       <StateDot state="error" />
       <span>
         <strong>{copy.error}</strong>
-        <p>{message}</p>
+        <p title={message}>{readableError(message)}</p>
       </span>
       <button onClick={onDismiss} type="button">{copy.dismiss}</button>
     </motion.div>

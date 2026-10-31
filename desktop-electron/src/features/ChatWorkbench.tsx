@@ -57,18 +57,65 @@ function rememberPage(sessionId: string, url: string, title: string) {
 
 /**
  * Which tab the side panel should show for what a chat's agents just did (`fresh`: new pages,
- * `page:...`, and new commands, `cmd:...`), or null to leave the panel as it is. A page the agent
- * opens always brings the Preview pane forward, opening the panel or switching it from another tab:
- * agents start their dev server first, which opened the Terminal, and the page they then opened
- * with preview_open stayed behind it, so the user never saw the browser. A new command opens the
- * Terminal only while the panel is closed, never taking the place of what the user looks at.
+ * `page:...`, new commands, `cmd:...`, and show_in_chat requests, `show:<id>:<pane>`), or null to
+ * leave the panel as it is. A page the agent opens, or asks to show, brings the Preview pane forward.
+ * A command never opens the Terminal by itself, not even on the agent's request: it popped over the
+ * chat on every dev server. Running ones are listed in the chat details' Processes (chatProcessRows),
+ * a click from the Terminal.
  */
-export function autoOpenTab(fresh: string[], open: boolean): WorkbenchTab | null {
-  // The agent asked to show a pane (show_in_chat, `show:<id>:<pane>`): that pane, open or not.
-  const shown = fresh.filter((item) => item.startsWith("show:")).at(-1);
-  if (shown) return shown.endsWith(":preview") ? "preview" : "terminal";
-  if (fresh.some((item) => item.startsWith("page:"))) return "preview";
-  return !open && fresh.length ? "terminal" : null;
+export function autoOpenTab(fresh: string[], _open: boolean): WorkbenchTab | null {
+  return fresh.some((item) => item.startsWith("page:") || (item.startsWith("show:") && item.endsWith(":preview"))) ? "preview" : null;
+}
+
+/** A row of the chat details' Processes: an app or terminal of this chat, running or offline. */
+export type ChatProcessRow = { key: string; kind: "app" | "terminal"; label: string; title: string; running: boolean };
+/** Processes rows past this many offline ones are left out: the Terminal's history has them all. */
+const OFFLINE_PROCESS_ROWS = 4;
+/**
+ * The chat details' Processes: the page the agent's browser shows (an app), then every command still
+ * running, then the servers, app launchers and the user's shells that ended (offline), newest first.
+ * A one-off command that ended is no process: the chat shows it with its output.
+ */
+export function chatProcessRows(commands: Command[], page: LivePage | null): ChatProcessRow[] {
+  const rows: ChatProcessRow[] = [];
+  if (page) {
+    const host = page.url.replace(/^[a-z][\w+.-]*:\/\//i, "").split(/[/?#]/)[0] || page.url;
+    rows.push({ key: `page:${page.sessionId}`, kind: "app", label: page.title || host, title: page.url, running: true });
+  }
+  const newest = [...commands].sort((a, b) => b.startedAt - a.startedAt);
+  // A server started again and again shows once, as its newest run; each shell of the user's is its own.
+  const seen = new Set<string>();
+  const first = (command: Command) => { const id = command.user ? command.id : command.cmd; return !seen.has(id) && Boolean(seen.add(id)); };
+  const row = (command: Command): ChatProcessRow => ({ key: `cmd:${command.id}`, kind: "terminal", label: command.user ? "Your terminal" : command.cmd,
+    title: `${command.cmd}\n${command.workdir}`, running: isLive(command) });
+  const running = newest.filter((command) => isLive(command) && first(command));
+  const ended = newest.filter((command) => !isLive(command) && (command.user || opensTerminal({ ...command, status: "running" }, 0)) && first(command));
+  return [...rows, ...running.map(row), ...ended.slice(0, OFFLINE_PROCESS_ROWS).map(row)];
+}
+
+const PROCESSES_POLL_MS = 4000;
+/** The commands this chat's agents and the user ran (chat_processes), read while `wanted` (the details panel is open). */
+export function useChatProcesses(sessionIds: string[], wanted: boolean, workspaceId?: string): Command[] {
+  const [commands, setCommands] = useState<Command[]>([]);
+  const key = sessionIds.join(",");
+  useEffect(() => {
+    if (!wanted || !sessionIds.length) { setCommands([]); return undefined; }
+    let live = true;
+    const tick = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const result = await paneCall("chat_processes", { sessionIds, ...(workspaceId ? { workspaceId } : {}) });
+        if (!live) return;
+        const next = ((result.sessions as { commands: Command[] }[] | undefined) ?? []).flatMap((session) => session.commands);
+        setCommands((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
+      } catch { /* the next tick tries again */ }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), PROCESSES_POLL_MS);
+    return () => { live = false; window.clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, wanted, workspaceId]);
+  return commands;
 }
 
 /**

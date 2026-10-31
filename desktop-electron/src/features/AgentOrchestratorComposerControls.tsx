@@ -6,7 +6,7 @@ import {
   NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, WEB_TIERS, isWebModel, modelLabel, modelShortLabel, nativePermission, webTier, workerRoute, withTuning,
   type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
 } from "./AgentOrchestratorRoleEditor";
-import { HarnessLogo } from "./HarnessLogo";
+import { HarnessLogo, ModelLogo } from "./HarnessLogo";
 
 /** A loader may return a plain id list or a catalog with capabilities; the list needs only ids. */
 const modelIds = (items: string[] | AoModelCatalog) => Array.isArray(items) ? items : items.models;
@@ -106,10 +106,14 @@ export function useComposerPopover() {
   return { open, setOpen, root, trigger, panel, close, onKeyDown };
 }
 
+/** The model list's group for the WebGPT tiers, apart from the API models. */
+const WEB_GROUP = "Web GPT Model";
+
 /** One composer chip and the menu it opens: the chip shows what is picked, the menu the choices. */
-function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClass, heading, onOpen, children }: {
+function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClass, heading, showHeading = true, onOpen, children }: {
   label: ReactNode; ariaLabel: string; title?: string; disabled: boolean; className?: string; popupClass: string; heading: string;
-  onOpen?: () => void; children: (close: () => void) => ReactNode;
+  /** False: no title bar (the heading stays the menu's accessible name); Escape or a click away closes it. */
+  showHeading?: boolean; onOpen?: () => void; children: (close: () => void) => ReactNode;
 }) {
   const popup = useComposerPopover();
   return <div className="ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
@@ -118,9 +122,9 @@ function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClas
       {label}<Caret />
     </button>
     {popup.open ? <section ref={popup.panel} role="dialog" aria-label={heading} className={`ao-composer-popover ${popupClass}`}>
-      <header><h3>{heading}</h3>
+      {showHeading ? <header><h3>{heading}</h3>
         <button type="button" className="ao-popover-close" aria-label="Close selector" onClick={popup.close}><Icon name="close" width="18" height="18" /></button>
-      </header>
+      </header> : null}
       {children(popup.close)}
     </section> : null}
   </div>;
@@ -202,12 +206,17 @@ export function AgentOrchestratorComposerControls({
   const viaPool = (model: string) => route.harness_id === NATIVE_HARNESS && !isWebModel(model);
   const query = search.toLowerCase();
   // Search reads the id, the full label and the short name, so shortening never hides a model.
-  const matching = (models ?? []).filter(model => model !== "default" && [model, modelLabel(model, viaPool(model)), modelShortLabel(model, viaPool(model)).name]
+  // A list row: its maker's logo and the model's own name, under who serves it. WebGPT's tiers sit
+  // apart under "Web GPT Model", each named by its tier alone ("High"), as the effort chip names it.
+  const listLabel = (model: string) => isWebModel(model)
+    ? { group: WEB_GROUP, name: webTier(model)?.label ?? modelLabel(model).replace(/^(?:WebGPT|ChatGPT Web) /, "") }
+    : modelShortLabel(model, viaPool(model));
+  const matching = (models ?? []).filter(model => model !== "default" && [model, modelLabel(model, viaPool(model)), listLabel(model).name, listLabel(model).group]
     .some(text => text.toLowerCase().includes(query)));
   // Rows sit under their provider ("Claude · CPA"), in the order the catalog first lists each one.
   const groups = new Map<string, string[]>();
   for (const model of matching) {
-    const group = modelShortLabel(model, viaPool(model)).group;
+    const group = listLabel(model).group;
     groups.set(group, [...(groups.get(group) ?? []), model]);
   }
   const harness = harnesses.find(item => item.id === route.harness_id);
@@ -300,7 +309,7 @@ export function AgentOrchestratorComposerControls({
           </div>;
         }}
       </ChipMenu>
-      <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}
+      <ChipMenu heading="Model" showHeading={false} popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}
         onOpen={() => setReload(value => value + 1)}
         title={unlisted ? `${modelName} is not offered right now: ${gaps[route.model] ?? gaps[baseModel] ?? "choose another model"}`
           : route.model ? [modelName, held[route.model] ?? held[baseModel]].filter(Boolean).join("\n") : undefined}
@@ -318,7 +327,7 @@ export function AgentOrchestratorComposerControls({
                 return <Option key={model} picked={route.model === model} disabled={busy}
                   title={[modelLabel(model, viaPool(model)), model, full, held[model]].filter(Boolean).join("\n")}
                   onPick={() => { pickModel(model); close(); }}>
-                  {modelShortLabel(model, viaPool(model)).name}
+                  <span className="ao-model-row"><ModelLogo model={model} label={listLabel(model).name} /><span>{listLabel(model).name}</span></span>
                 </Option>;
               })}
             </div>)}

@@ -32,9 +32,9 @@ test("Chat mounts the AO chat surface and the original AO UI links back to it", 
   assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
 });
 
-test("Register keeps its Runtime destination and native overlay visibility gate", () => {
-  const runtime = appSource.slice(appSource.indexOf("<SidebarGroup label={copy.runtime}>"), appSource.indexOf('<details className="sidebar-more"'));
-  assert.match(runtime, /active=\{surface === "register"\}[\s\S]*?label=\{copy.register\}[\s\S]*?navigateSurface\("register"\)/);
+test("Register keeps its Connections destination and native overlay visibility gate", () => {
+  const connections = appSource.slice(appSource.indexOf("<SidebarGroup label={copy.connections}>"), appSource.indexOf('<details className="sidebar-more"'));
+  assert.match(connections, /active=\{surface === "register"\}[\s\S]*?label=\{copy.register\}[\s\S]*?navigateSurface\("register"\)/);
   assert.ok(appSource.includes('{keepAlive("register"'));
   const gate = /<RegisterSurface[\s\S]*?active=\{([^}]+)\}/.exec(appSource)?.[1];
   assert.equal(gate, 'surface === "register" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen && !sessionReminderDue && !refreshMenuOpen');
@@ -276,8 +276,9 @@ test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", 
 });
 
 test("AO is the sole Runtime orchestrator and lets workers pick an AO harness", () => {
-  // The Runtime entry is named Chat and sits first, then its saved teams and its subagents, above Activity.
-  assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\} \/>\s*<SidebarItem active=\{surface === "agent-orchestrator-teams"\}[^\n]*label="Orchestrator Team"[^\n]*\/>\s*<SidebarItem active=\{surface === "subagents"\}[^\n]*label="Subagents"[^\n]*\/>\s*<SidebarItem active=\{surface === "activity"\}/);
+  // The Runtime entry is named Chat and sits first in the sidebar, then its saved teams, its subagents and Native Codex.
+  assert.match(appSource, /<nav className="sidebar-nav"[^>]*>\s*<SidebarGroup label=\{copy\.runtime\}>\s*<SidebarItem active=\{surface === "agent-orchestrator"\}/);
+  assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\} \/>\s*<SidebarItem active=\{surface === "agent-orchestrator-teams"\}[^\n]*label="Orchestrator Team"[^\n]*\/>\s*<SidebarItem active=\{surface === "subagents"\}[^\n]*label="Subagents"[^\n]*\/>\s*<SidebarItem active=\{surface === "native-codex"\}/);
   assert.doesNotMatch(appSource, /label=\{copy\.structuredOrchestrator\}|surface === "orchestrator"|surface === "paseo"|navigateSurface\("paseo"\)/);
   assert.match(appSource, /setError\(`\$\{next\} is retired and unavailable\.`\)/);
   assert.match(aoSource, /moduleCall\("harnesses"\)/);
@@ -478,10 +479,11 @@ test("Zero Risk setup commits state after the runtime transaction and preserves 
   assert.ok(runtimeMcpCommit >= 0 && runtimeMcpCommit < mcpTransaction);
   assert.ok(mcpTransaction < stateMcpCommit);
   assert.match(browserHostSource, /bindManualTurnContents\(tab\)/);
-  const manualBinding = browserHostSource.slice(
-    browserHostSource.indexOf("bindManualTurnContents(tab)"),
-    browserHostSource.indexOf("bindWebContents()"),
-  );
+  // The method itself, up to the next one (the call site comes first in the file).
+  const manualBindingStart = browserHostSource.indexOf("  bindManualTurnContents(tab) {");
+  const manualBindingEnd = browserHostSource.indexOf("  bindWebContents(", manualBindingStart);
+  assert.ok(manualBindingStart >= 0 && manualBindingEnd > manualBindingStart);
+  const manualBinding = browserHostSource.slice(manualBindingStart, manualBindingEnd);
   assert.doesNotMatch(manualBinding, /executeJavaScript|insertCSS|querySelector|runBrowserHelperOperation|enableDeviceEmulation/);
   assert.match(browserHostSource, /requireAutomaticBrowserInspection\(this, "ChatGPT authentication probe"\)/);
   assert.match(browserHostSource, /requireAutomaticBrowserInspection\(this, "ChatGPT session and capability inspection"\)/);

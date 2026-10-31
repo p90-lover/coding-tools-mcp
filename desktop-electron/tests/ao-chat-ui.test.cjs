@@ -26,7 +26,8 @@ const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": me
 const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
 const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const clawd = load("Clawd.tsx");
-const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts") });
+const petHome = load("chat-pet-home.ts");
+const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts"), "./chat-pet-home": petHome });
 const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
@@ -36,12 +37,13 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
   // controls and approval cards render only when a composer or an approval is passed.
   "./ChatBranchBar": { ChatBranchBar: () => null },
+  "./HarnessLogo": { ModelLogo: () => null },
   // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
   "./ChatAnnotations": load("ChatAnnotations.tsx", { "./ao-chat": chat }),
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
-  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [] },
+  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
 test("a project switch keeps its chat pane readable while loading and offers Retry after a failed read", () => {
@@ -74,6 +76,14 @@ test("a DeepSeek turn renders as DeepSeek Desktop's Standard view: a live group 
   assert.doesNotMatch(running, /dsh-title">Think</, "its rows stay folded under the heading (group bodies start collapsed)");
   assert.match(running, /Deep diving for 1m [45]s ···/, "the running status, with its clock");
   assert.doesNotMatch(running, /dsh-turn-process/, "no Completed header while it runs");
+  // A steer on its way sits above "Deep diving", which stays the turn's last row (it showed under it).
+  const steer = React.createElement("div", { className: "cx-user cx-steer" }, "its a resource monster");
+  const steering = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: false, useWork, beforeStatus: steer }));
+  assert.match(steering, /its a resource monster<\/div><div class="dsh-running"/, "the steer, then the running line");
+  const starting = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: { ...turn, steps: [] }, live: true, expanded: false, useWork, beforeStatus: steer }));
+  assert.match(starting, /its a resource monster<\/div><div class="dsh-running"/, "before its first step too");
+  const ended = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: { ...turn, status: "done" }, live: false, expanded: false, useWork, beforeStatus: steer }));
+  assert.doesNotMatch(ended, /resource monster/, "an ended turn leaves its steers to the chat, under its work");
   // A reply closes the group before it: that one reads what it did, the one after it what it is doing.
   const replied = [timeline[0], timeline[1], { id: "m1", kind: "message", status: "completed", text: "Health is fine." }, timeline[3]];
   const split = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: { ...turn, steps: [{ ...step, working: { ...step.working, timeline: replied } }] }, live: true, expanded: false, useWork }));
@@ -552,19 +562,39 @@ test("the Terminal pane opens for a server or the project's app launcher, never 
   assert.equal(workbench.opensTerminal(command("npm run dev", { status: "exited", exitCode: 0 }), now), false, "an ended command never does");
 });
 
+test("the details' Processes list the app page and running commands green, ended servers and shells red", () => {
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
+  const command = (id, cmd, startedAt, extra = {}) => ({ id, cmd, workdir: "G:/p", startedAt, status: "running", exitCode: null, source: "agent", ...extra });
+  const rows = workbench.chatProcessRows([
+    command("a", "git status", 1, { status: "exited", exitCode: 0 }),
+    command("b", "npm run dev", 2, { status: "exited", exitCode: 1 }),
+    command("c", "npm run dev", 3),
+    command("d", "pytest -q", 4),
+    command("e", "pwsh", 5, { user: true, status: "exited", exitCode: 0 }),
+    command("f", "scripts/run_app.cmd", 6, { status: "exited", exitCode: 1 }),
+  ], { sessionId: "ao-1", url: "http://localhost:5173/", title: "" });
+  assert.deepEqual(JSON.parse(JSON.stringify(rows.map((row) => [row.label, row.kind, row.running]))), [
+    ["localhost:5173", "app", true],
+    ["pytest -q", "terminal", true],
+    ["npm run dev", "terminal", true],
+    ["scripts/run_app.cmd", "terminal", false],
+    ["Your terminal", "terminal", false],
+  ], "a one-off that ended is left out, and a server that runs again shows once");
+});
+
 test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {
   // Seen live: the agent started its dev server (the Terminal opened), then preview_open'd the page,
   // and the panel stayed on the Terminal: the user never saw the browser.
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
   assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000"], false), "preview", "a closed panel opens on the page");
   assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "cmd:c1"], true), "preview", "an open one switches to it");
-  assert.equal(workbench.autoOpenTab(["cmd:c1"], false), "terminal", "a command opens a closed panel on the Terminal");
-  assert.equal(workbench.autoOpenTab(["cmd:c1"], true), null, "but never takes the place of what the user looks at");
+  // The Terminal never pops up by itself: running commands are listed in the chat details' Processes.
+  assert.equal(workbench.autoOpenTab(["cmd:c1"], false), null, "a command leaves a closed panel closed");
+  assert.equal(workbench.autoOpenTab(["cmd:c1"], true), null, "and an open one as it is");
   assert.equal(workbench.autoOpenTab([], false), null);
-  // The agent asked to show a pane (show_in_chat): that pane, even over what the user looks at.
-  assert.equal(workbench.autoOpenTab(["show:show-1:terminal"], true), "terminal");
-  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "show:show-2:terminal"], false), "terminal", "an explicit request wins");
-  assert.equal(workbench.autoOpenTab(["show:show-3:preview"], true), "preview");
+  assert.equal(workbench.autoOpenTab(["show:show-1:terminal"], true), null, "not even on the agent's show_in_chat");
+  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "show:show-2:terminal"], false), "preview", "its page still shows");
+  assert.equal(workbench.autoOpenTab(["show:show-3:preview"], true), "preview", "as does a preview it asks to show");
   // Only a server process opens it: the agent's one-off commands (a status poll, a build, a test)
   // put the Terminal over the chat while it worked.
   const server = (cmd, extra = {}) => workbench.isServerProcess({ cmd, status: "running", ...extra });
@@ -689,7 +719,7 @@ test("Clawd holds its tool up in the hand on the tool's side, never an empty rai
   // air, and the mug's steam and a ✦ rising from every hammer blow looked like fireworks.
   const stand = { look: 0, arms: "down", walking: false, sit: false };
   const frame = (job, toolSide, step = false, mood = "working") => pet.restFrame({ mood, asleep: false, step, pose: stand, blink: false, job, toolSide });
-  for (const job of ["search", "build", "coffee", "read"]) {
+  for (const job of ["search", "build", "coffee", "read", "cook", "snack"]) {
     for (const step of [false, true]) {
       assert.equal(frame(job, "right", step).pose.arms, "one-up", `${job}: the right hand, on the tool's side`);
       assert.equal(frame(job, "left", step).pose.arms, "left-up", `${job}: the left hand, on the tool's side`);
@@ -701,8 +731,9 @@ test("Clawd holds its tool up in the hand on the tool's side, never an empty rai
   const left = clawd.clawdCells({ eyes: "open", arms: "left-up", feet: "both" });
   assert.equal(left.filter((cell) => cell.row === 0 && cell.col < 2).map((cell) => cell.glyph).join(""), "▗▟");
   assert.equal(left.filter((cell) => cell.row === 1 && cell.col >= 7).map((cell) => cell.glyph).join(""), "█▀");
+  assert.equal(frame("serve", "left").pose.arms, "up", "its plate is carried up in both hands");
   // Each held tool fills the cell its hand is in: column 0, row 2 of the prop's grid.
-  for (const job of ["search", "build", "coffee", "read"]) {
+  for (const job of ["search", "build", "coffee", "read", "cook", "snack"]) {
     for (const step of [false, true]) {
       const svg = renderToStaticMarkup(React.createElement(pet.Prop, { job, step, tick: 1 }));
       const rects = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map((m) => m.slice(1).map(Number));
@@ -712,6 +743,60 @@ test("Clawd holds its tool up in the hand on the tool's side, never an empty rai
   }
   const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
   assert.doesNotMatch(source, /float\("✦"/, "no star rises from each hammer blow");
+});
+
+test("at home Clawd climbs into bed, cooks and eats, bathes and works, using the furniture where it stands", () => {
+  // The user (2026-10-30): "the bed clawd can move/jump to it and sleep with it, cooking furniture that
+  // let clawd to cook with eat". Full size Clawd was as tall as a storey and twice as wide as its bed.
+  const { pathBeats, choreBeats, exitBeats, pickChore, ENTRY, LADDER_X, SPOTS, CHORES } = petHome;
+  const bed = { ...SPOTS.sleep };
+  // From bed to the tub upstairs: down off the bed, along to the ladder, up it, along to the tub.
+  const toTub = pathBeats(bed, SPOTS.bath);
+  assert.equal(toTub.map((beat) => beat.doing).join(), "hop,walk,climb,walk");
+  assert.equal(toTub[0].lift, 0);
+  assert.deepEqual([toTub[2].x, toTub[2].storey], [LADDER_X, "up"]);
+  assert.equal(toTub.at(-1).x, SPOTS.bath.x);
+  // Bedtime ends tucked into bed, lifted onto the mattress; a nap is never left standing.
+  const sleep = choreBeats("sleep", ENTRY);
+  assert.equal(sleep.at(-1).doing, "sleep");
+  assert.deepEqual([sleep.at(-1).x, sleep.at(-1).lift], [bed.x, bed.lift]);
+  assert.equal(sleep.at(-2).doing, "hop", "it hops up into bed");
+  // Cooking: at the stove, then the plate to the table, three bites, and down off the chair.
+  const cook = choreBeats("cook", ENTRY);
+  const doing = cook.map((beat) => beat.doing);
+  assert.ok(doing.indexOf("cook") < doing.indexOf("serve") && doing.indexOf("serve") < doing.indexOf("eat"));
+  assert.equal(cook.filter((beat) => beat.doing === "eat").map((beat) => beat.bites).join(), "3,2,1,0");
+  assert.equal(cook.find((beat) => beat.doing === "cook").look, 1, "it faces the stove");
+  // Every chore but sleep ends standing on a floor, ready for the next; leaving ends at the entry.
+  for (const chore of CHORES.filter((name) => name !== "sleep")) {
+    for (const from of [ENTRY, bed, { ...SPOTS.work }]) {
+      const beats = choreBeats(chore, from);
+      assert.equal(beats.at(-1).lift, 0, `${chore} from ${from.x}: back on the floor`);
+      assert.ok(beats.every((beat) => beat.ms > 0), `${chore}: every beat takes time`);
+      const out = exitBeats(beats.at(-1));
+      const last = out.at(-1) ?? beats.at(-1);
+      assert.deepEqual([last.x, last.storey, last.lift], [ENTRY.x, ENTRY.storey, 0], `${chore}: out by the entry`);
+    }
+  }
+  // It picks its own chores while home, never bed (that is the nap's, or a click on the bed).
+  for (let roll = 0; roll < 50; roll += 1) {
+    const memory = { last: CHORES[roll % CHORES.length], sinceMeal: roll % 7, hour: roll % 24 };
+    const next = pickChore(memory, () => (roll * 0.137) % 1);
+    assert.ok(CHORES.includes(next) && next !== "sleep", `picked ${next}`);
+  }
+});
+
+test("the house shows what Clawd is doing in it, and every piece of furniture is a button that sends it there", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  for (const piece of ["bed", "table", "stove", "fridge", "tub", "bookshelf", "desk", "window"]) {
+    assert.match(source, new RegExp(`label: "the ${piece}: Clawd`), `${piece} is clickable`);
+  }
+  assert.match(source, /onClick=\{\(\) => onUse\(piece\.chore\)\}/);
+  // Woken in bed by a click elsewhere, it gets up then and there (homeLife reads the ref right away).
+  const toFurniture = source.slice(source.indexOf("const toFurniture ="), source.indexOf("// Nothing running for a while"));
+  assert.match(toFurniture, /asleepNow\.current = false; setAsleep\(false\)/);
+  const css = fs.readFileSync(path.join(__dirname, "../src/features/codex-chat.css"), "utf8");
+  assert.match(css, /\.cx-pet\.is-home \.cx-pet-body \{ transform: scale\(\.5\);/, "half size at home, as big as its furniture");
 });
 
 test("the pet stays where it stands while the chat box grows and shrinks a line at a time", () => {

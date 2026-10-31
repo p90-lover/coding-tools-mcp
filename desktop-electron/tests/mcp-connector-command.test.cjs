@@ -164,3 +164,22 @@ test("background failures retain failure state without exporting private error d
     assert.deepEqual(warnings, [{ event: "mcp.connector_creation_failed", code: "mcp_access_denied" }]);
   }
 });
+
+test("missing ChatGPT form fields do not request a harness configuration change", async t => {
+  const parent = path.resolve(__dirname, "../../aiTemp");
+  fs.mkdirSync(parent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(parent, "mcp-command-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const app = { getPath: () => root, getVersion: () => "test" };
+  for (const [message, code] of [
+    ["ChatGPT did not expose the name and Tunnel ID fields.", "creation_failed"],
+    ["The active MCP configuration has no tunnel ID.", "configuration_required"],
+    ["Connect the saved automatic MCP harness before creating its ChatGPT connector.", "configuration_required"],
+  ]) {
+    const failure = new Error(message);
+    const command = createMcpConnectorCommand({ app, run: async () => { throw failure; } });
+    await assert.rejects(command.request(), failure);
+    const report = JSON.parse(fs.readFileSync(path.join(root, "mcp-connector-command.json")));
+    assert.equal(report.error.code, code);
+  }
+});

@@ -4,10 +4,11 @@ import { Caret, Icon } from "../icons";
 import { ModelJudgesToggle } from "./ModelJudgesToggle";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
+import { ModelLogo } from "./HarnessLogo";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatWorkbench, navigatePreview, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
@@ -95,10 +96,35 @@ function FailedStepCard({ step, notice, busy, onRetry }: {
 const previewOf = (file: File): string | undefined => (typeof URL !== "undefined" && URL.createObjectURL ? URL.createObjectURL(file) : undefined);
 const freePreview = (url: string | undefined) => { if (url && typeof URL !== "undefined") URL.revokeObjectURL?.(url); };
 /**
- * Each chat's queued messages (task id → queue), kept for the app's lifetime outside the chat view so
- * they survive the view closing (another page, the board) and switching chats.
+ * Each chat's queued messages (task id → queue) as this view shows them. The app keeps the queues
+ * (chat-queue.cjs) and sends them with the chat closed or the window in the background; this copy
+ * is updated from every read of a project's runs (syncChatQueues) and from each change made here.
  */
 const CHAT_QUEUES = new Map<string, QueuedChatMessage[]>();
+const QUEUE_PROJECTS = new Map<string, string>(); // task id -> its project
+const queueListeners = new Set<() => void>();
+/**
+ * The app's queues for one project: every chat's (`queues` from a runs read), or with `only` the
+ * one chat a change was made in. A chat of that project left out has nothing queued.
+ */
+export function syncChatQueues(workspaceId: string, queues: Record<string, QueuedChatMessage[]>, only?: string) {
+  for (const [task, project] of QUEUE_PROJECTS) {
+    if (project === workspaceId && (only === undefined || only === task) && !queues[task]?.length) { CHAT_QUEUES.delete(task); QUEUE_PROJECTS.delete(task); }
+  }
+  for (const [task, items] of Object.entries(queues)) {
+    if ((only === undefined || only === task) && Array.isArray(items) && items.length) { CHAT_QUEUES.set(task, items); QUEUE_PROJECTS.set(task, workspaceId); }
+  }
+  for (const listener of queueListeners) listener();
+}
+/** The app's queue for the chats of the open project (AgentOrchestratorSurface's chat_queue calls). */
+export type ChatQueueActions = {
+  /** `front`: ahead of the rest (a message that was refused for now, or a Send now that failed). */
+  add: (taskId: string, item: QueuedChatMessage, front?: boolean) => Promise<void>;
+  /** Replaces a queued message's text (a message joined to it); false when it was already sent. */
+  update: (taskId: string, id: string, message: string) => Promise<boolean>;
+  /** Removes the items `ids`, or all of the chat's with null. */
+  remove: (taskId: string, ids: string[] | null) => Promise<void>;
+};
 /** Each chat's unsent draft (task id → text; "" is the new-chat composer), kept while another chat is open. */
 const CHAT_DRAFTS = new Map<string, string>();
 /** Each chat's unsent attachments, kept alongside its draft so a file never rides into another chat. */
@@ -564,7 +590,7 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
 const WorkGroup = memo(WorkGroupView, sameWork);
 /** A DeepSeek turn's work (DshTranscript), skipped on re-render by the same check as WorkGroup. */
 const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live
-  && prev.useWork === next.useWork && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
+  && prev.useWork === next.useWork && prev.beforeStatus === next.beforeStatus && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
 
 function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
   const working = turn.steps.find((step) => step.working);
@@ -779,8 +805,10 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
 }: {
+  /** The app's queue of this project's chats: a message typed while a turn runs waits there. */
+  queue?: ChatQueueActions;
   /** Close split view: set on every pane while the window is split (ChatSplit). */
   onClosePane?: () => void;
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
@@ -1047,6 +1075,9 @@ export function AgentOrchestratorChat({
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
+  const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
+  const processRows = useMemo(() => detailsOpen ? chatProcessRows(processCommands, livePage) : [], [detailsOpen, processCommands, livePage]);
   // A subagent starting opens the panel on its Subagents tab, as Codex's panel shows a thread's
   // subagents; a Preview, Terminal or diff the person has open stays (the line above the chat box says it).
   const subagents = useChatSubagents(selectedTaskId ? agentSessionIds : [],
@@ -1297,7 +1328,9 @@ export function AgentOrchestratorChat({
         // steering would cancel that request, so the message waits for the turn like a queued one.
         // Or its turn had hung, or sat in a long command that would have kept it from reading the
         // message, and was stopped: the message goes as the same agent's next turn once it settles.
-        setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), goal ? { what: "Goal", message, goal } : { what: "Message", message }));
+        // The app keeps it (chat-queue.cjs): a waiting steer is steered in once the agent can take
+        // it, and anything else goes as the next turn, with this chat closed too.
+        await enqueue(selectedTaskId, { ...(goal ? { what: "Goal", message, goal } : { what: "Message", message }), steer: waits });
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         // The queued-message bar shows a waiting steer, as Claude Code does; only a stopped turn is told.
         if (here() && !waits) {
@@ -1353,12 +1386,9 @@ export function AgentOrchestratorChat({
       // sent as soon as it can be, or once the window is back in front.
       const why = String((error as Error)?.message ?? error);
       const busyNow = /still running/i.test(why), unfocused = /focused app window/i.test(why);
-      if (selectedTaskId && (busyNow || unfocused)) {
-        // Held until the chat's state changes (sentWhileFree): the chat could still read as free for a
-        // moment, and the queue would send it again and again into the same refusal.
-        if (busyNow) sentWhileFree.current = true;
-        setQueue(selectedTaskId, [{ what: "Message", message, ...(goal ? { goal } : {}) }, ...queueOf(selectedTaskId)]);
-        if (unfocused) setWindowFocused(false);
+      // The app queues it at the front and sends it when the chat is free (a queue refused while the
+      // window is not in front leaves it to come back below).
+      if (selectedTaskId && (busyNow || unfocused) && await enqueue(selectedTaskId, { what: "Message", message, ...(goal ? { goal } : {}) }, true).then(() => true, () => false)) {
         // It shows in the queued-message bar above the composer (#466), which has no notice cards.
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         return true;
@@ -1395,101 +1425,48 @@ export function AgentOrchestratorChat({
     }
     if (queueing || queueWhileSending) {
       // Several messages typed during one turn go together, in order.
-      setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message: text }));
       setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
+      // Not queued: it goes back into the composer, ahead of anything typed since.
+      void enqueue(selectedTaskId, { what: "Message", message: text }).catch((error) => {
+        setDraft((typed) => (typed.trim() ? `${text}\n\n${typed}` : text));
+        say("Message", `Couldn't queue the message: ${error instanceof Error ? error.message : String(error)}`);
+      });
       return;
     }
     await deliver(text);
   };
 
-  // Messages (or commands' messages) waiting for their chat's turn to end, as Codex queues them. Each
-  // chat has its own queue in CHAT_QUEUES, outside this component, so opening another chat or another
-  // view keeps it; a queue is sent only into its own chat, one item per finished turn.
-  const [queueVersion, setQueueVersion] = useState(0);
-  const queueOf = (taskId: string) => CHAT_QUEUES.get(taskId) ?? [];
-  const setQueue = (taskId: string, queue: QueuedChatMessage[]) => {
-    if (queue.length) CHAT_QUEUES.set(taskId, queue); else CHAT_QUEUES.delete(taskId);
-    setQueueVersion((value) => value + 1);
-  };
-  const queued = queueOf(selectedTaskId);
-  // One queued item per free spell: right after a send the chat may still read as free for a moment,
-  // and the next item must wait for the turn that send started.
-  const sentWhileFree = useRef(false);
-  // Also on a new run: a send refused as "still running" while the chat read free held the queue
-  // until `accepts` changed, and when it never did, the message sat queued for no reason.
-  useEffect(() => { sentWhileFree.current = false; }, [accepts, selectedTaskId, latest?.id]);
-  // A send runs only from the focused app window. A turn that ended while the user was in another
-  // app had its queued message refused and dropped back into the composer; it now waits for focus.
-  const [windowFocused, setWindowFocused] = useState(() => typeof document === "undefined" || typeof document.hasFocus !== "function" || document.hasFocus());
+  // Messages (or commands' messages) waiting for their chat's turn to end, as Codex queues them. The
+  // app keeps each chat's queue (chat-queue.cjs): it sends the next item when the chat's turn settles,
+  // and steers a waiting one in once the agent can take it (15 s, 30 s, then every minute), with this
+  // chat closed, another one open or the window in the background. Before, this view sent the queue
+  // itself, only for the chat on screen and only with the window focused, and a restart lost it.
+  const [, setQueueVersion] = useState(0);
   useEffect(() => {
-    if (typeof window === "undefined" || typeof window.addEventListener !== "function") return undefined;
-    const on = () => setWindowFocused(true), off = () => setWindowFocused(false);
-    window.addEventListener("focus", on); window.addEventListener("blur", off);
-    return () => { window.removeEventListener("focus", on); window.removeEventListener("blur", off); };
+    const changed = () => setQueueVersion((value) => value + 1);
+    queueListeners.add(changed);
+    return () => { queueListeners.delete(changed); };
   }, []);
-  // Marked out of focus by a refused send while the window was in front all along, no focus event
-  // would ever come: the queue checks again every two seconds.
-  useEffect(() => {
-    if (windowFocused || typeof document === "undefined" || typeof document.hasFocus !== "function") return undefined;
-    const timer = window.setInterval(() => { if (document.hasFocus()) setWindowFocused(true); }, 2_000);
-    return () => window.clearInterval(timer);
-  }, [windowFocused]);
-  useEffect(() => {
-    const task = selectedTaskId, [next, ...rest] = queueOf(task);
-    if (!task || !next || !accepts || busy || sending || sentWhileFree.current || !windowFocused) return;
-    sentWhileFree.current = true;
-    setQueue(task, rest);
-    const owner = composing.current;
-    void deliver(next.message, next.goal, false).then((sent) => {
-      if (sent) { if (alive.current && composing.current.taskId === task && !rest.length) setCard(null); return; }
-      if (!alive.current || composing.current.taskId !== task || composing.current.draft !== owner.draft || composing.current.attachments !== owner.attachments) {
-        setQueue(task, [next, ...queueOf(task)]);
-        return;
-      }
-      // Nothing is lost: a plain message goes back into the composer to send again, after anything
-      // already typed there.
-      if (next.what === "Message") setDraft((typed) => (typed.trim() ? `${typed}\n\n${next.message}` : next.message));
-      say(next.what, next.what === "Message" ? "Couldn't send the queued message. It's back in the composer." : "Couldn't send the queued message. Run the command again.");
-    });
-  }, [queueVersion, selectedTaskId, accepts, busy, sending, windowFocused]);
-  // In steer mode a queued message (the agent was waiting on a request, or still starting) is
-  // steered in as soon as the agent can take it, not held until the whole turn ends. A steer that
-  // still finds it waiting comes back to the queue; the backend waits up to half a minute each time.
-  // A steer that fails outright (a refused send, a timeout) is tried again after 15 s, 30 s, then
-  // every minute while the agent works. Giving up after one failure parked the message until the
-  // whole turn ended, an hour on a long turn, so a typed "keep going" looked ignored.
-  const steeringQueue = useRef(false);
-  const steerRetry = useRef({ attempts: 0, until: 0 });
-  const steerRetryTimer = useRef<number | undefined>(undefined);
-  const [steerRetryTick, setSteerRetryTick] = useState(0);
-  useEffect(() => {
-    steerRetry.current = { attempts: 0, until: 0 };
-    window.clearTimeout(steerRetryTimer.current);
-  }, [accepts, steering, selectedTaskId]);
-  useEffect(() => () => window.clearTimeout(steerRetryTimer.current), []);
-  useEffect(() => {
-    const task = selectedTaskId, [next, ...rest] = queueOf(task);
-    // A queued command (/goal, /review, /init) steers in like a message, as Claude Code's do.
-    if (!task || !next || accepts || !steering || awaitingAnswer
-      || busy || sending || steeringQueue.current || Date.now() < steerRetry.current.until || !windowFocused) return;
-    steeringQueue.current = true;
-    setQueue(task, rest);
-    void deliver(next.message, next.goal, false).then((sent) => {
-      const here = alive.current && composing.current.taskId === task;
-      if (sent) {
-        steerRetry.current = { attempts: 0, until: 0 };
-        if (here && !queueOf(task).length) setCard(null);
-        return;
-      }
-      const attempts = steerRetry.current.attempts + 1;
-      const wait = attempts === 1 ? 15_000 : attempts === 2 ? 30_000 : 60_000;
-      steerRetry.current = { attempts, until: Date.now() + wait };
-      window.clearTimeout(steerRetryTimer.current);
-      steerRetryTimer.current = window.setTimeout(() => setSteerRetryTick((value) => value + 1), wait);
-      // Back at the head of the queued-message bar, where it stays until the agent can take it.
-      setQueue(task, [next, ...queueOf(task)]);
-    }).finally(() => { steeringQueue.current = false; });
-  }, [queueVersion, selectedTaskId, accepts, steering, awaitingAnswer, busy, sending, windowFocused, steerRetryTick]);
+  const queueOf = (taskId: string) => CHAT_QUEUES.get(taskId) ?? [];
+  const queued = queueOf(selectedTaskId);
+  /**
+   * Queues `item` with the app, to steer in while the agent works (in steer mode) or else to send as
+   * the next turn. A plain message joins one queued just before it (chatQueueAdd).
+   */
+  const enqueue = async (taskId: string, item: QueuedChatMessage, front = false) => {
+    if (!queue) throw new Error("Queued messages are unavailable here");
+    const entry = { ...item, steer: item.steer ?? steerOn };
+    const current = queueOf(taskId), joined = front ? null : chatQueueAdd(current, entry);
+    const last = joined && joined.length === current.length ? joined.at(-1) : undefined;
+    if (last?.id && await queue.update(taskId, last.id, last.message)) return;
+    await queue.add(taskId, entry, front);
+  };
+  // Gone from the bar at once; the app's answer confirms it.
+  const dequeue = (taskId: string, ids: string[] | null) => {
+    const project = QUEUE_PROJECTS.get(taskId);
+    if (project) syncChatQueues(project, { [taskId]: ids === null ? [] : queueOf(taskId).filter((item) => !item.id || !ids.includes(item.id)) }, taskId);
+    void queue?.remove(taskId, ids).catch(() => undefined);
+  };
   /**
    * Sends a command's message now when the chat is free, steers it into the working agent when it
    * can be steered (a goal too, as its first round), and otherwise queues it for when the current turn finishes.
@@ -1499,7 +1476,12 @@ export function AgentOrchestratorChat({
     if (accepts || steering) return await deliver(message, goal) ? "sent" : false;
     // Queued as Claude Code queues a command: it joins the queued messages above the composer, as
     // typed. The "Queued. It's sent when this turn finishes" card is gone.
-    setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message, ...(goal ? { goal } : {}), typed }));
+    try {
+      await enqueue(selectedTaskId, { what, message, ...(goal ? { goal } : {}), typed });
+    } catch (error) {
+      say(what, `Couldn't queue it: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
     setCard(null);
     return "queued";
   };
@@ -1511,8 +1493,8 @@ export function AgentOrchestratorChat({
     : accepts || (steering && !awaitingAnswer) ? undefined
     : awaitingAnswer ? "Answer the agent's request first" : "Sent when the current turn finishes";
   const takeQueued = (index: number) => {
-    const queue = queueOf(selectedTaskId), item = queue[index];
-    if (item) setQueue(selectedTaskId, queue.filter((_, at) => at !== index));
+    const item = queueOf(selectedTaskId)[index];
+    if (item?.id) dequeue(selectedTaskId, [item.id]);
     return item;
   };
   // A steer is in the chat from the moment it is sent (steersByTurn), not in this bar. One that waits
@@ -1533,7 +1515,7 @@ export function AgentOrchestratorChat({
       onSendNow: () => {
         const task = selectedTaskId, taken = takeQueued(index);
         if (!taken) return;
-        void deliver(taken.message, taken.goal, false).then((sent) => { if (!sent) setQueue(task, [taken, ...queueOf(task)]); });
+        void deliver(taken.message, taken.goal, false).then((sent) => { if (!sent) void enqueue(task, taken, true).catch(() => undefined); });
       },
     }];
   });
@@ -1555,7 +1537,7 @@ export function AgentOrchestratorChat({
       onSendNow: () => {
         const task = selectedTaskId, taken = takeQueued(index);
         if (!taken) return;
-        void deliver(taken.message, undefined, false).then((sent) => { if (!sent) setQueue(task, [taken, ...queueOf(task)]); });
+        void deliver(taken.message, undefined, false).then((sent) => { if (!sent) void enqueue(task, taken, true).catch(() => undefined); });
       },
     };
   }
@@ -1607,7 +1589,7 @@ export function AgentOrchestratorChat({
           if (["pause", "resume", "clear"].includes(action)) {
             setCard(null);
             if (action === "clear" && queued.some((item) => item.goal)) {
-              setQueue(selectedTaskId, queued.filter((item) => !item.goal)); break;
+              dequeue(selectedTaskId, queued.flatMap((item) => (item.goal && item.id ? [item.id] : []))); break;
             }
             if (!commands) break;
             if (!goal) { say("Goal", "No goal set."); break; }
@@ -1838,6 +1820,9 @@ export function AgentOrchestratorChat({
     }
     return byTurn;
   }, [pendingSteers, selectedTaskId, turns]);
+  // Each turn's steers on their way as one element, kept while they are unchanged so a DeepSeek turn's
+  // memoized work (DshWork) does not draw again for them.
+  const steerViews = useMemo(() => new Map([...steersByTurn].map(([at, list]) => [at, <PendingSteers steers={list} />])), [steersByTurn]);
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
     // A turn on a DeepSeek model shows as DeepSeek Harness shows one (DshTranscript); others as Claude Code.
     const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
@@ -1849,6 +1834,11 @@ export function AgentOrchestratorChat({
     const idle = notStarted && turn.runId === latest?.id;
     // A goal's next round is its Stop hook's feedback, shown as Claude Code shows it, not as a message the person sent.
     const feedback = turn.user ? goalFeedback(turn.user.text) : null;
+    // Who answered, said once and plainly: a single chat's model (its maker's mark and name), or a
+    // team's answering card marked Team. How it ran (harness, provider, effort, window) is the tooltip.
+    const answerRun = chatRuns.find((run) => run.id === turn.runId);
+    const answerModel = turn.final ? answerRun?.nodes.find((node) => node.id === turn.final?.nodeId)?.route?.model : undefined;
+    const teamAnswer = Boolean(answerRun) && answerRun?.execution_mode !== "single";
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
     return <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
@@ -1878,17 +1868,21 @@ export function AgentOrchestratorChat({
                 </div>)}</SteerReader.Provider> : null}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
-                  errorShownBelow={turn === failedTurn} refusal={!idle && liveTurn(turn) ? cpaRefusal : null} />
+                  errorShownBelow={turn === failedTurn} refusal={!idle && liveTurn(turn) ? cpaRefusal : null}
+                  beforeStatus={!idle && liveTurn(turn) ? steerViews.get(turnIndex) : undefined} />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
-              {steersByTurn.has(turnIndex) ? <PendingSteers steers={steersByTurn.get(turnIndex)!} /> : null}
+              {/* A steer on its way sits above the turn's running line ("Deep diving", "Working"), never
+                  under it: a running DeepSeek turn draws it inside its work, right above that line. */}
+              {steerViews.has(turnIndex) && !(dsh && readWork && !idle && liveTurn(turn)) ? steerViews.get(turnIndex) : null}
               {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
                 {dsh ? (turn.final.verdict ? <div className="cx-answer-meta"><span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span></div> : null)
-                  : <div className="cx-answer-meta">
-                    <span>{turn.final.name}</span>
+                  : <div className="cx-answer-meta" title={turn.final.detail || undefined}>
+                    {answerModel ? <ModelLogo model={answerModel} label={turn.final.name} size={14} /> : null}
+                    <span className="cx-answer-name">{turn.final.name}</span>
+                    {teamAnswer ? <span className="cx-answer-mode">Team</span> : null}
                     {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
-                    {turn.final.detail ? <span className="cx-answer-detail">{turn.final.detail}</span> : null}
                   </div>}
                 {/* A finished reviewer becomes the answer; its earlier cycles stay above it (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
@@ -1906,7 +1900,7 @@ export function AgentOrchestratorChat({
                 ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={!dsh}
                   to={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs} /> : null}
             </article></PartErrorBoundary>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steersByTurn]);
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>
@@ -1989,6 +1983,16 @@ export function AgentOrchestratorChat({
                 <span className="cx-details-dots" aria-hidden="true">{agents.dots.slice(0, 8).map((state, index) =>
                   <span key={index} className={`cx-details-dot is-${state}`} />)}</span><span>{agents.text}</span></button>
                 : <p className="cx-details-empty">No agents yet. They start with your first message.</p>}
+              {/* Apps and terminals: a lit green dot while one runs, a red one once it is offline. A
+                  click shows it (the Preview or the Terminal), which no longer opens by itself. */}
+              <p className="cx-details-label">Processes</p>
+              {processRows.length ? processRows.map((row) => <button key={row.key} type="button" className="cx-details-row cx-process-row"
+                title={`${row.title}
+${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWorkbench(row.kind === "app" ? "preview" : "terminal")}>
+                <span className={`cx-process-dot ${row.running ? "is-running" : "is-offline"}`} role="img" aria-label={row.running ? "Running" : "Offline"} />
+                <Icon name={row.kind === "app" ? "globe" : "logs"} width="14" height="14" />
+                <span>{row.label}</span><small>{row.running ? "Running" : "Offline"}</small></button>)
+                : <p className="cx-details-empty">Apps and terminals the agents start show here.</p>}
               <p className="cx-details-label">Setup</p>
               {lead ? <>
                 <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>
@@ -2085,7 +2089,7 @@ export function AgentOrchestratorChat({
         <QueuedMessageBar items={queuedBar}
           onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
           // Queued commands and goals show in the bar too now, so Clear all clears all of them.
-          onClearAll={() => setQueue(selectedTaskId, [])} />
+          onClearAll={() => dequeue(selectedTaskId, null)} />
         {goalEditing !== null && commands?.goal ? (() => {
           // The goal bar opened for editing: its target and "Edit goal", the objective in a box that
           // grows with it, then how long it may be, Cancel and Save. Ctrl+Enter saves, Esc cancels.
