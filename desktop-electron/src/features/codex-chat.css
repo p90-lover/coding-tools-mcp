@@ -587,6 +587,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-step-body { margin: 2px 0 8px 22px; color: var(--color-text-primary); }
 .cx-step-detail { margin: 0 0 4px; color: var(--ao-muted); font-size: 12px; overflow-wrap: anywhere; }
 .cx-step-error { margin: 0; color: var(--ao-red); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A tool call that timed out while the chat carries on: one red line in the conversation. */
+.cx-timeout-line { margin: 2px 0 10px; }
 /* A card's earlier rounds (a reviewer's past cycles), folded: a one-line summary each, opening on its answer. */
 .cx-step-earlier { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; margin: 0 0 8px; }
 .cx-step-round > summary { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--ao-muted); font-size: 12px; cursor: pointer; list-style: none; }

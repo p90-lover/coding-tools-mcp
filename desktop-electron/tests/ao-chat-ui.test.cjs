@@ -224,6 +224,17 @@ test("normal asynchronous startup detail is not shown as a failed launch", () =>
   assert.ok(failed.includes("start the run"));
 });
 
+test("a tool call that timed out is a red line in a running chat, not the failed-step card", () => {
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [{ id: "lead", role: "planner", state: "running" }] }],
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [], working: true,
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const warning = "A tool call timed out (Headless request timed out). The chat keeps going by itself.";
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, warning }));
+  assert.match(html, /<p class="cx-step-error cx-timeout-line" role="status">A tool call timed out \(Headless request timed out\)\. The chat keeps going by itself\.<\/p>/);
+  assert.equal(html.includes("Step failed"), false, "nothing waits for a click");
+  assert.equal(renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props)).includes("cx-timeout-line"), false);
+});
+
 test("terminal failed work never becomes a successful chat just because review finished", () => {
   const status = chat.chatRunStatus({ id: "run", project_id: "task", cancelled: false, nodes: [
     { id: "lead", role: "planner", state: "finished" },
