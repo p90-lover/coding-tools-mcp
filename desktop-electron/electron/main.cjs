@@ -320,13 +320,41 @@ function publishOperation(operation) {
   send("launcher:operation", operation);
 }
 
-function cpaAuthDirectory() {
+// CPA's auth folder, from the auth-dir line of its config.yaml. Read off the main thread: the
+// account sync's timer read it synchronously and held every window 15.7 s on the busy hard disk
+// (2026-10-31 13:47).
+const CPA_AUTH_DIR_RECHECK_MS = 15_000;
+const cpaAuthDir = { known: null, at: 0, reading: null };
+function cpaAuthDirectoryFrom(text) {
   const stateDirectory = path.join(app.getPath("userData"), "integrations", "state", "cpa");
   try {
-    const line = fs.readFileSync(path.join(stateDirectory, "config.yaml"), "utf8").match(/^auth-dir:\s*(.+)$/m);
+    const line = text?.match(/^auth-dir:\s*(.+)$/m);
     if (line) return path.resolve(JSON.parse(line[1]));
   } catch {}
   return path.join(stateDirectory, "auth");
+}
+const cpaConfigPath = () => path.join(app.getPath("userData"), "integrations", "state", "cpa", "config.yaml");
+async function readCpaAuthDirectory() {
+  const text = await fs.promises.readFile(cpaConfigPath(), "utf8").catch(() => null);
+  cpaAuthDir.known = cpaAuthDirectoryFrom(text);
+  cpaAuthDir.at = Date.now();
+  return cpaAuthDir.known;
+}
+/**
+ * The same folder for a caller that must answer at once (the ChatGPT desktop's account watch, every
+ * 15 s): the last one read, refreshed in the background. Only a first use before any read is read
+ * synchronously; the account sync at startup usually reads it first.
+ */
+function cpaAuthDirectory() {
+  if (cpaAuthDir.known === null) {
+    let text = null;
+    try { text = fs.readFileSync(cpaConfigPath(), "utf8"); } catch {}
+    cpaAuthDir.known = cpaAuthDirectoryFrom(text);
+    cpaAuthDir.at = Date.now();
+  } else if (!cpaAuthDir.reading && Date.now() - cpaAuthDir.at >= CPA_AUTH_DIR_RECHECK_MS) {
+    cpaAuthDir.reading = readCpaAuthDirectory().finally(() => { cpaAuthDir.reading = null; });
+  }
+  return cpaAuthDir.known;
 }
 
 // The docked ChatGPT desktop window follows the main window; it must hide whenever the main
@@ -1173,7 +1201,7 @@ async function assignBrowserAccountProxies({ logger }) {
 const CPA_BROWSER_ACCOUNT_SYNC_MS = 5 * 60_000;
 const cpaBrowserAccountFiles = new Map(); // file -> { size, mtimeMs, account }
 async function syncBrowserAccountsFromCpa(logger) {
-  const directory = cpaAuthDirectory();
+  const directory = await readCpaAuthDirectory();
   let names;
   try { names = await fs.promises.readdir(directory); } catch { return []; }
   const files = names.filter((name) => /\.json$/i.test(name)).map((name) => [name, path.join(directory, name)]);
