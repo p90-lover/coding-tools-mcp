@@ -151,6 +151,15 @@ function createChatQueueStore({ file = null, now = Date.now, logger = null } = {
       return Object.entries(chats).filter(([name]) => name.startsWith(prefix))
         .flatMap(([, entry]) => (entry.delivered ?? []).filter(steer => steer.runId === runId).map(steer => ({ ...steer, taskId: entry.taskId })));
     },
+    /** A chat that moved to another project (move_chat) keeps its queue there. */
+    move(from, to, taskId) {
+      const saved = chat(from, taskId);
+      if (!saved) return false;
+      delete chats[key(from, taskId)];
+      chats[key(to, taskId)] = { ...saved, workspaceId: to };
+      persist();
+      return true;
+    },
     forgetDelivered(workspaceId, taskId, ids) {
       const current = delivered(workspaceId, taskId);
       const keep = current.filter(entry => !ids.includes(entry.id));

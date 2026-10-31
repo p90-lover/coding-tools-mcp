@@ -2253,6 +2253,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         switchToWorkspace(id);
       });
   };
+  // The open chat moved to another project (its agent's move_chat): follow it there.
+  useEffect(() => onAoPush((change) => {
+    const moved = change.moved?.find((entry) => entry.from === workspaceId && entry.taskId === chatTaskId);
+    if (moved) selectChatIn(moved.to, moved.taskId);
+  }), [workspaceId, chatTaskId, loadedWorkspace]);
   useEffect(() => {
     const pending = pendingSelect.current;
     if (!pending || pending.workspaceId !== workspaceId) return;
@@ -2472,13 +2477,13 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // Archived chats of every project, for the list's Archived section (grouped by project there).
   // Reading them also moves chats archived longer than the set days to "deleted", so it runs when
   // the list opens, after any chat is archived or restored here, and hourly.
-  const [archivedAll, setArchivedAll] = useState<{ days: number; chats: ArchivedChat[] } | null>(null);
+  const [archivedAll, setArchivedAll] = useState<{ days: number; idleDays: number; chats: ArchivedChat[] } | null>(null);
   const workspaceIds = workspaces.map((item) => item.id).join("\n");
   const archivedKey = taskLifecycle.map((item) => `${item.task_id}:${item.visibility}`).join(",");
   const loadArchived = useCallback(async () => {
     if (!workspaceIds) return;
     const result = await moduleCall("archived_chats", { workspaceIds: workspaceIds.split("\n") }).catch(() => null);
-    if (result && Array.isArray(result.chats)) setArchivedAll({ days: Number(result.days) || 0, chats: result.chats as ArchivedChat[] });
+    if (result && Array.isArray(result.chats)) setArchivedAll({ days: Number(result.days) || 0, idleDays: Number(result.idleDays) || 0, chats: result.chats as ArchivedChat[] });
   }, [workspaceIds]);
   useEffect(() => {
     void loadArchived();
@@ -2490,9 +2495,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     await moduleCall("restore_task", { workspaceId: id, taskId });
     await loadArchived();
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-  const setArchiveDays = (days: number) => void (async () => {
-    const result = await moduleCall("archive_settings", { days });
-    setArchivedAll((current) => current && { ...current, days: Number(result.days) });
+  const setArchiveDays = (change: { days?: number; idleDays?: number }) => void (async () => {
+    const result = await moduleCall("archive_settings", change);
+    setArchivedAll((current) => current && { ...current, days: Number(result.days), idleDays: Number(result.idleDays) });
     await loadArchived();
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
 

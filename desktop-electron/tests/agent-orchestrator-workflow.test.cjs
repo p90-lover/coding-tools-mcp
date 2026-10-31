@@ -4625,6 +4625,29 @@ test("rename_chat names the agent's own chat after its task, and a team chat onl
   assert.equal(task().title, "The person's name", "the person's Rename wins over a waiting one");
 });
 
+test("move_chat moves a Single chat to another project once its turn ends, and its goal goes with it", async () => {
+  // The user: "add a allow model to move chat session and modify its path on chat tools".
+  const { world, workflow } = wakeChat();
+  const move = (to, session = "sess-1") => workflow.chatMoveTool({ workspaceId: "ws-1", session, targetWorkspaceId: to });
+  await assert.rejects(move("ws-1"), /already in that project/);
+  await assert.rejects(move("ws-2", "someone-else"), /not one of this project's chats/);
+  await workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", action: "create", objective: "make CI green" });
+  assert.deepEqual(await move("ws-2"), { ok: true, taskId: "task-1", to: "ws-2", deferred: true });
+  assert.equal(world.updates.some((change) => change.operation === "move_chat"), false, "nothing moves during the turn");
+
+  assert.equal(await workflow.moveAfterRun("ws-1", "r1"), "ws-2");
+  assert.deepEqual(world.updates.find((change) => change.operation === "move_chat"),
+    { operation: "move_chat", task_id: "task-1", target_workspace_id: "ws-2", expected_board_revision: 3 });
+  assert.equal((await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"], undefined);
+  assert.equal((await workflow.call("runs", { workspaceId: "ws-2" })).goals["task-1"].objective, "make CI green");
+  assert.equal(await workflow.moveAfterRun("ws-1", "r1"), "ws-1", "a move applies once");
+  assert.equal(world.updates.filter((change) => change.operation === "move_chat").length, 1);
+
+  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 },
+    nodes: [{ id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: "sess-2" } }] });
+  await assert.rejects(move("ws-2", "sess-2"), /Only a Single chat/);
+});
+
 test("redact_message hides a secret in the chat's messages, and in a team chat only once its open cards have started", async () => {
   const { world, workflow, advance } = wakeChat();
   const task = () => world.tasks.find((entry) => entry.id === "task-1");

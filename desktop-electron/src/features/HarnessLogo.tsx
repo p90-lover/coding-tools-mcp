@@ -1,8 +1,28 @@
 import type { ReactElement } from "react";
+import aiderLogo from "../assets/harness/aider.png";
+import ampLogo from "../assets/harness/amp.svg";
 import antigravityLogo from "../assets/harness/antigravity.png";
+import augmentLogo from "../assets/harness/augment.png";
+import autohandLogo from "../assets/harness/autohand.png";
+import charmLogo from "../assets/harness/charm.png";
 import claudeCodeLogo from "../assets/harness/claude-code.png";
+import clineLogo from "../assets/harness/cline.svg";
+import continueLogo from "../assets/harness/continue.png";
+import cursorLogo from "../assets/harness/cursor.svg";
+import devinLogo from "../assets/harness/devin.svg";
+import earendilLogo from "../assets/harness/earendil.png";
+import factoryLogo from "../assets/harness/factory.png";
+import githubCopilotLogo from "../assets/harness/github-copilot.svg";
+import gooseLogo from "../assets/harness/goose.svg";
+import kilocodeLogo from "../assets/harness/kilocode.svg";
+import kimiLogo from "../assets/harness/kimi.svg";
+import kiroLogo from "../assets/harness/kiro.svg";
+import metaLogo from "../assets/harness/meta.svg";
+import mistralLogo from "../assets/harness/mistral.svg";
 import openaiLogo from "../assets/harness/openai.png";
 import opencodeLogo from "../assets/harness/opencode.png";
+import qwenLogo from "../assets/harness/qwen.svg";
+import unrealLogo from "../assets/harness/unreal.svg";
 import claudeLogo from "../assets/models/claude.svg";
 import deepseekLogo from "../assets/models/deepseek.svg";
 import grokLogo from "../assets/models/grok.svg";
@@ -10,8 +30,11 @@ import grokLogo from "../assets/models/grok.svg";
 // The mark shown beside each harness in the composer, so a harness reads at a glance the way
 // Claude Code's own picker does. Claude Code, Codex (Native Codex too), Antigravity (agy) and
 // opencode show their own app icons, taken from the installed apps (the hand-drawn marks read as
-// the wrong brands: a Gemini sparkle for Antigravity, an approximate knot for OpenAI); any other
-// agent gets a lettered badge.
+// the wrong brands: a Gemini sparkle for Antigravity, an approximate knot for OpenAI). The other
+// agents show their maker's mark: LobeHub's brand icons (MIT; Mistral for Vibe, Meta for Muse
+// Code), Simple Icons' Unreal Engine (CC0), and the makers' GitHub avatars for Aider, Augment
+// (Auggie), Autohand, Continue, Charm (Crush), Factory (Droid) and Earendil (Pi). An agent with no
+// known mark (OMP, Kimchi, Prime Agent) gets a lettered badge.
 
 type Mark = (size: number) => ReactElement;
 
@@ -37,11 +60,17 @@ const gemini: Mark = (size) => (
   </svg>
 );
 
-const cursor: Mark = (size) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-    <path fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" d="M12 2.5 20.5 7.3v9.4L12 21.5 3.5 16.7V7.3Z M12 2.5v19 M3.5 7.3 20.5 16.7" />
-  </svg>
-);
+// Harness id (without "ao:") or lower-case name → its mark.
+const HARNESS_BRANDS: Record<string, Mark> = {
+  aider: image(aiderLogo), amp: image(ampLogo), auggie: image(augmentLogo), autohand: image(autohandLogo),
+  cline: image(clineLogo, true), continue: image(continueLogo), crush: image(charmLogo), cursor: image(cursorLogo, true),
+  devin: image(devinLogo), droid: image(factoryLogo), goose: image(gooseLogo, true), grok: image(grokLogo, true),
+  "grok build": image(grokLogo, true), kilocode: image(kilocodeLogo, true), "kilo code": image(kilocodeLogo, true),
+  kimi: image(kimiLogo), kiro: image(kiroLogo), muse: image(metaLogo), "muse code": image(metaLogo), pi: image(earendilLogo),
+  qwen: image(qwenLogo), "qwen code": image(qwenLogo), copilot: image(githubCopilotLogo, true),
+  "github copilot": image(githubCopilotLogo, true), "unreal-agent": image(unrealLogo, true), "unreal agent": image(unrealLogo, true),
+  vibe: image(mistralLogo),
+};
 
 /** A neutral badge with the harness's initial, for agents without a known mark. */
 function badge(label: string): Mark {
@@ -62,8 +91,7 @@ export function harnessMark(harnessId: string, label: string): Mark {
   if (agent === "agy" || agent === "antigravity") return antigravityMark;
   if (agent === "opencode") return opencodeMark;
   if (agent === "gemini") return gemini;
-  if (agent === "cursor") return cursor;
-  return badge(label);
+  return HARNESS_BRANDS[agent] ?? HARNESS_BRANDS[label.trim().toLowerCase()] ?? badge(label);
 }
 
 export function HarnessLogo({ harnessId, label, size = 16 }: { harnessId: string; label: string; size?: number }) {

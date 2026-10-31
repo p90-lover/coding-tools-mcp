@@ -179,9 +179,11 @@ test("the harness menu is slim: no state words on rows, missing harnesses fold u
   const list = menu.props.children(() => {});
   assert.doesNotMatch(text(list), /not installed|sign in/i, "no state words on the rows");
   const rows = optionsIn(menu);
-  assert.deepEqual(rows.map(row => row.props.title), ["Claude Code · sign in to use it", "Codex", "Aider · not installed", "Amp · not installed", "Cline · not installed"],
-    "the state moved to the tooltip; the picked missing harness stays up top");
+  assert.deepEqual(rows.map(row => row.props.title), ["Claude Code", "Codex", "Aider · not installed", "Amp · not installed", "Cline · not installed"],
+    "a missing harness says so on hover; one that needs a sign-in shows only its dot; the picked missing harness stays up top");
+  assert.equal(menu.props.showHeading, false, "no Harness title over the list");
   assert.equal(elements(list, item => item.props?.className === "ao-harness-signin").length, 1, "a sign-in dot on the one harness that needs it");
+  assert.equal(elements(list, item => item.props?.className === "ao-harness-missing").length, 3, "a red dot on each missing harness");
   const fold = elements(list, item => item.type === "details")[0];
   assert.equal(elements(fold, item => item.type === "summary")[0].props["aria-label"], "2 more, not installed", "the other two missing harnesses fold under +2");
   assert.equal(elements(fold, item => typeof item.type === "function" && item.type.name === "Option").length, 2);
