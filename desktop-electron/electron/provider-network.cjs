@@ -2,7 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { readStateFile, writeStateFile } = require("./durable-state.cjs");
 const {
   CPA_LOGIN_ADAPTERS,
   inspectCpaAccount,
@@ -287,7 +287,7 @@ function normalizeAccountDefaults(accounts) {
   }));
 }
 
-function createSecretCodec({ safeStorage, keyPath }) {
+function createSecretCodec({ safeStorage, keyPath, canCreateKey }) {
   let fallbackKey = null;
 
   function encryptionAvailable() {
@@ -298,19 +298,20 @@ function createSecretCodec({ safeStorage, keyPath }) {
     }
   }
 
-  function loadFallbackKey() {
+  function loadFallbackKey(create = false) {
     if (fallbackKey) return fallbackKey;
-    try {
-      const encoded = fs.readFileSync(keyPath, "utf8").trim();
-      const existing = Buffer.from(encoded, "base64");
-      if (existing.length === 32) {
-        fallbackKey = existing;
-        return fallbackKey;
-      }
-    } catch {}
-    fallbackKey = crypto.randomBytes(32);
-    writePrivateFileAtomic(keyPath, `${fallbackKey.toString("base64")}\n`);
-    return fallbackKey;
+    const read = readStateFile(keyPath, text => {
+      const key = Buffer.from(text.trim(), "base64");
+      if (key.length !== 32) throw new Error("Invalid encryption key");
+      return key;
+    }, { preserveUnreadable: true });
+    if (read.value) return (fallbackKey = read.value);
+    if (read.source !== "none" || !create || !canCreateKey()) {
+      throw new Error("Saved encryption key is unavailable; restore it before changing credentials");
+    }
+    const key = crypto.randomBytes(32);
+    writeStateFile(keyPath, `${key.toString("base64")}\n`);
+    return (fallbackKey = key);
   }
 
   function encrypt(value) {
@@ -321,7 +322,7 @@ function createSecretCodec({ safeStorage, keyPath }) {
         data: safeStorage.encryptString(plain).toString("base64"),
       };
     }
-    const key = loadFallbackKey();
+    const key = loadFallbackKey(true);
     const iv = crypto.randomBytes(12);
     const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
     const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
@@ -333,27 +334,31 @@ function createSecretCodec({ safeStorage, keyPath }) {
     };
   }
 
-  function decrypt(envelope) {
-    if (!envelope || typeof envelope !== "object") return null;
+  function decrypt(envelope, required = false) {
+    if (envelope === undefined || envelope === null) return null;
     try {
+      let plain;
       if (envelope.scheme === "electron-safe-storage-v1" && encryptionAvailable()) {
-        const plain = safeStorage.decryptString(Buffer.from(envelope.data, "base64"));
-        return JSON.parse(plain);
+        plain = safeStorage.decryptString(Buffer.from(envelope.data, "base64"));
+      } else {
+        if (envelope.scheme !== "aes-256-gcm-v1") throw new Error("Unsupported saved credential");
+        const key = loadFallbackKey();
+        const decipher = crypto.createDecipheriv(
+          "aes-256-gcm",
+          key,
+          Buffer.from(envelope.iv, "base64"),
+        );
+        decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
+        plain = Buffer.concat([
+          decipher.update(Buffer.from(envelope.data, "base64")),
+          decipher.final(),
+        ]).toString("utf8");
       }
-      if (envelope.scheme !== "aes-256-gcm-v1") return null;
-      const key = loadFallbackKey();
-      const decipher = crypto.createDecipheriv(
-        "aes-256-gcm",
-        key,
-        Buffer.from(envelope.iv, "base64"),
-      );
-      decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
-      const plain = Buffer.concat([
-        decipher.update(Buffer.from(envelope.data, "base64")),
-        decipher.final(),
-      ]).toString("utf8");
-      return JSON.parse(plain);
+      const value = JSON.parse(plain);
+      if (required && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error("Invalid saved credential");
+      return value;
     } catch {
+      if (required) throw new Error("Saved provider credentials are unavailable; restore them before changing credentials");
       return null;
     }
   }
@@ -362,21 +367,37 @@ function createSecretCodec({ safeStorage, keyPath }) {
 }
 
 function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
-  const codec = createSecretCodec({ safeStorage, keyPath });
-  let state;
-  try {
-    state = normalizeState(JSON.parse(fs.readFileSync(filePath, "utf8")));
-  } catch {
-    state = defaultState();
+  const readStore = () => readStateFile(filePath, text => {
+    const value = JSON.parse(text);
+    if (!value || Object.prototype.toString.call(value) !== "[object Object]"
+      || value.version !== STORE_VERSION) throw new Error("Invalid provider settings");
+    return normalizeState(value);
+  }, { preserveUnreadable: true });
+  let stateRead = readStore();
+  let state = stateRead.value || defaultState();
+  function recoverState() {
+    if (stateRead.source !== "unreadable") return;
+    const read = readStore();
+    if (read.value) { stateRead = read; state = read.value; }
   }
+  const codec = createSecretCodec({ safeStorage, keyPath,
+    canCreateKey: () => stateRead.source !== "unreadable" && ![...Object.values(state.secrets.accounts), ...Object.values(state.secrets.proxies), state.secrets.decodo]
+      .some(envelope => envelope?.scheme === "aes-256-gcm-v1"),
+  });
 
   function write() {
-    writePrivateFileAtomic(filePath, `${JSON.stringify(state, null, 2)}\n`);
+    if (stateRead.source === "unreadable") {
+      recoverState();
+      throw new Error("Saved provider settings were unavailable; retry after restoring or reloading them");
+    }
+    writeStateFile(filePath, `${JSON.stringify(state, null, 2)}\n`);
   }
 
   function publicSnapshot() {
+    recoverState();
     return {
       version: STORE_VERSION,
+      ...(stateRead.source === "unreadable" ? { error: "Saved provider settings are unavailable; restore them before making changes" } : {}),
       accounts: state.accounts.map((account) => ({
         ...clone(account),
         hasCredential: Boolean(state.secrets.accounts[account.id]),
@@ -418,7 +439,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       )))
       : null;
     if (suppliedSecret && Object.keys(suppliedSecret).length > 0) {
-      const previousSecret = codec.decrypt(state.secrets.accounts[id]) || {};
+      const previousSecret = codec.decrypt(state.secrets.accounts[id], true) || {};
       state.secrets.accounts[id] = codec.encrypt({
         ...previousSecret,
         ...suppliedSecret,
@@ -551,7 +572,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     const password = typeof input.password === "string" ? input.password : undefined;
     if (username !== undefined || password !== undefined) {
       // A field left out keeps the saved one: a new password alone keeps the username, and back.
-      const saved = codec.decrypt(state.secrets.proxies[id]) ?? {};
+      const saved = codec.decrypt(state.secrets.proxies[id], true) ?? {};
       state.secrets.proxies[id] = codec.encrypt({
         username: username ?? saved.username ?? "",
         password: password ?? saved.password ?? "",
@@ -802,13 +823,15 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   }
 
   function accountSecret(accountId) {
+    recoverState();
     return codec.decrypt(state.secrets.accounts[accountId]);
   }
 
   function mergeAccountSecret(accountId, patch = {}) {
+    recoverState();
     const account = findAccount(accountId);
     if (!account || account.archivedAt) throw new Error("Provider account was not found");
-    const current = accountSecret(accountId) || {};
+    const current = codec.decrypt(state.secrets.accounts[accountId], true) || {};
     for (const key of [
       "antigravityAuthName",
       "antigravityAuthIndex",
@@ -827,6 +850,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   }
 
   function proxySecret(profileId) {
+    recoverState();
     return codec.decrypt(state.secrets.proxies[profileId]);
   }
 
@@ -841,6 +865,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   }
 
   function decodoSettings() {
+    recoverState();
     return { ...clone(state.decodo), password: codec.decrypt(state.secrets.decodo)?.password ?? "" };
   }
 

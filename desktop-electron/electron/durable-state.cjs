@@ -80,12 +80,13 @@ function attempt(file, parse) {
  * - "unreadable": the file is unusable and so is its copy; `value` is undefined.
  * An unusable file is renamed to `<filePath>.corrupt-<time>` (`setAside`) before anything is
  * written over it, so its bytes stay for recovery by hand. `error` says why the file was unusable.
+ * `preserveUnreadable` leaves it in place so a later credential read can retry a transient failure.
  */
-function readStateFile(filePath, parse, { now = Date.now } = {}) {
+function readStateFile(filePath, parse, { now = Date.now, preserveUnreadable = false } = {}) {
   const main = attempt(filePath, parse);
   if (!main.error) return { value: main.value, source: "file", error: null, setAside: null };
   let setAside = null;
-  if (!main.missing) {
+  if (!main.missing && !preserveUnreadable) {
     // A second torn copy set aside in the same millisecond gets its own name: a rename onto the
     // first would replace it.
     const stamp = `${filePath}.corrupt-${now()}`;

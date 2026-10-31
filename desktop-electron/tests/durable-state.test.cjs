@@ -13,6 +13,17 @@ const parse = (text) => JSON.parse(text);
 // What a power cut or a failing disk left behind: the file's size, all NUL bytes.
 const tear = (file) => fs.writeFileSync(file, Buffer.alloc(fs.statSync(file).size));
 
+test("a credential read can preserve unreadable bytes in place for a later retry", () => {
+  const root = tempRoot(), file = path.join(root, "credential.json");
+  fs.writeFileSync(file, "torn");
+  const read = readStateFile(file, parse, { preserveUnreadable: true });
+  assert.equal(read.source, "unreadable");
+  assert.equal(read.setAside, null);
+  assert.equal(fs.readFileSync(file, "utf8"), "torn");
+  fs.writeFileSync(file, JSON.stringify({ recovered: true }));
+  assert.deepEqual(readStateFile(file, parse, { preserveUnreadable: true }).value, { recovered: true });
+});
+
 test("a state file is written with a copy and read back from the copy when torn", () => {
   const root = tempRoot();
   const file = path.join(root, "state.json");
