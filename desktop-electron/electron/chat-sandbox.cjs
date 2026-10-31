@@ -184,13 +184,17 @@ function createSandboxRunner({
     }
   }
 
-  /** Starts `cmd` in `cwd` under the sandbox; `writable` is the worktree. Returns the command's id. */
-  function start({ cmd, cwd, writable, stdin = "" }) {
+  /**
+   * Starts `cmd` in `cwd` under the sandbox; `writable` is the worktree. Resolves to the command's id.
+   * The script is written without blocking: on the app's busy hard disk, writing it synchronously
+   * held every window for 0.5 s on an agent's command (2026-10-31).
+   */
+  async function start({ cmd, cwd, writable, stdin = "" }) {
     const found = sandbox();
     if (!found) throw new Error("Codex's Windows sandbox is not installed");
     if (typeof cmd !== "string" || !cmd.trim() || cmd.includes("\0")) throw new Error("A command is required");
     const id = `sbx-${crypto.randomBytes(9).toString("base64url").replace(/[^A-Za-z0-9]/g, "x")}`;
-    fs.mkdirSync(scriptDir, { recursive: true });
+    await fs.promises.mkdir(scriptDir, { recursive: true });
     const script = path.join(scriptDir, `${id}.cmd`);
     // Codex's unelevated sandbox never starts a command whose working folder is not exactly one of
     // its writable roots (even `echo` hangs), so it starts in the worktree and the script moves to
@@ -199,7 +203,7 @@ function createSandboxRunner({
     const enter = cwd && path.resolve(cwd) !== path.resolve(home)
       ? `cd /d "${path.resolve(cwd).replace(/%/g, "%%")}" || exit /b 1\r\n` : "";
     // UTF-8 code page, so non-ASCII paths and output survive; the command exactly as written.
-    fs.writeFileSync(script, `@echo off\r\nchcp 65001 >nul\r\n${enter}${cmd.replace(/\r?\n/g, "\r\n")}\r\n`, "utf8");
+    await fs.promises.writeFile(script, `@echo off\r\nchcp 65001 >nul\r\n${enter}${cmd.replace(/\r?\n/g, "\r\n")}\r\n`, "utf8");
     const writableRoots = [...new Set([writable, ...roots()].filter(Boolean))];
     const args = [
       "sandbox",

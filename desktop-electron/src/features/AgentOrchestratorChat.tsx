@@ -27,7 +27,7 @@ import {
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
-  chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
+  autoCompactArg, chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -1669,9 +1669,22 @@ export function AgentOrchestratorChat({
         case "compact":
           if (!commands || !selectedTaskId) break;
           if (!accepts) { say("Compact", "Can't compact while the chat is running."); break; }
-          say("Compact", "Compacting this chat's context…");
-          say("Compact", await commands.compact());
+          say("Compact", arg ? `Compacting this chat's context, focused on: ${arg}` : "Compacting this chat's context…");
+          say("Compact", await commands.compact(arg));
           break;
+        case "autocompact": {
+          if (!commands?.autoCompact) break;
+          const change = autoCompactArg(arg);
+          if (change && "error" in change) { say("Auto-compact", change.error); setDraft(`/autocompact ${arg}`); break; }
+          const setting = await commands.autoCompact(change ?? {});
+          const now = setting.autoCompact
+            ? `Auto-compact is on: before a message that would fill ${setting.percent}% of the chat's ${setting.limit.toLocaleString("en-US")}-byte limit, the earlier conversation becomes a summary.`
+            : "Auto-compact is off: a full chat stops until you /compact it.";
+          say("Auto-compact", change ? now : `${now}
+Change it with /autocompact on, off, or a share like /autocompact 80.`);
+          break;
+        }
+        case "context": if (commands?.context) setCard(await commands.context()); break;
         case "review":
           if (await dispatch("Review", reviewPrompt(arg), undefined, arg ? `/review ${arg}` : "/review") === "sent" && !accepts) say("Review", "Sent to the working agent.");
           break;
@@ -1721,13 +1734,17 @@ export function AgentOrchestratorChat({
           setCard(await commands.mcp());
           break;
         case "resume": if (commands) setCard(commands.recent()); break;
-        case "new": thread?.newChat(); break;
+        case "new": case "clear": thread?.newChat(); break;
         case "stop": if (latest && runOpen) stop?.(latest.id); break;
         case "retry": if (latest) restart?.(latest.id); break;
         case "model":
           // This chat's own picker: in split view every pane has one.
           ((chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose model"]')
             ?? (chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose saved team"]'))?.click();
+          break;
+        case "effort":
+          // This chat's own effort chip, as /model opens its model chip.
+          (chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label^="Reasoning effort"]')?.click();
           break;
         case "structure": setShowStructure((value) => !value); break;
         case "board": onOpenMissionBoard?.(); break;

@@ -944,6 +944,29 @@ test("observe says when the tool call still running began, so a steer can stop a
   assert.equal(idle.toolSince, undefined, "no tool call in flight");
 });
 
+test("observe reports the whole session's last sign of life and tool calls, for a turn queued behind another", async () => {
+  // A message queued behind a working turn has no activity of its own (2026-10-31).
+  const at = minutes => new Date(Date.parse("2026-10-31T11:00:00Z") + minutes * 60_000).toISOString();
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
+      turns: [{ id: "working", state: "running", createdAt: at(0), startedAt: at(0) }, { id: "queued", state: "queued", createdAt: at(9) }],
+      messages: [{ id: "m", turnId: "working", role: "assistant", text: "Checking the window.", streaming: false, createdAt: at(1), updatedAt: at(1) }],
+      activities: [
+        { id: "a1", turnId: "working", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "Read", createdAt: at(10), updatedAt: at(14), detail: {} },
+        { id: "a2", turnId: "working", sequence: 3, activityKind: "mcp_tool", status: "running", summary: "Bash", createdAt: at(15), updatedAt: at(15),
+          detail: { input: { command: "python macro.py", timeout: 600_000 } } },
+        { id: "r1", turnId: "working", sequence: 4, activityKind: "system", status: "running", summary: "Retrying Claude", createdAt: at(16), updatedAt: at(20),
+          detail: { event: "provider.failure", text: "API error 503." } },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const observed = await upstream.observe("s", "queued");
+  assert.equal(observed.turnState, "queued");
+  assert.equal(observed.lastActivityAt, Date.parse(at(9)), "the queued turn alone shows only when it was asked");
+  assert.equal(observed.sessionActivityAt, Date.parse(at(15)), "the session's newest real step, not the retry notice after it");
+  assert.deepEqual(JSON.parse(JSON.stringify(observed.sessionTools)), [{ timeoutMs: 600_000 }], "the command in flight in the turn ahead, with its own timeout");
+});
+
 test("exitAgent requires the selected agent's acknowledged exited state", async () => {
   for (const outcome of [{ ok: false }, { ok: true }, { ok: true, session: { id: "s", status: "working" } }, { ok: true, session: { id: "other", status: "exited" } }]) {
     const upstream = observeHarness({ internalApi: async () => outcome });
@@ -1752,6 +1775,40 @@ test("a running turn with no agent process behind it is over: interrupted, with 
   const coming = await starting.observe("s");
   assert.equal(coming.turnState, "running", "an agent still starting has no controller yet, and is not gone");
   assert.equal(coming.agentGone, undefined);
+});
+
+test("a running turn whose controller stopped while its chat host is still up keeps running", async () => {
+  // Seen live 2026-10-31: at an app quit AO dropped every controller, and three cards read "stopped
+  // mid-turn" and were retried while two of the turns ran on in their hosts, so each chat got a
+  // needless "you were interrupted" turn queued behind its own.
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-ao-host-up-"));
+  const live = require("node:net").createServer().listen(0, "127.0.0.1");
+  await new Promise(resolve => live.once("listening", resolve));
+  const hostFile = path.join(dataRoot, "chat-hosts", "s", "host.json");
+  fs.mkdirSync(path.dirname(hostFile), { recursive: true });
+  fs.writeFileSync(hostFile, JSON.stringify({ address: `127.0.0.1:${live.address().port}`, pid: 1 }));
+  const interrupts = [];
+  const upstream = observeHarness({ dataRoot,
+    internalApi: async (_method, endpoint) => {
+      if (endpoint.includes("/conversation?limit=100&includePending=1")) return { controller: "stopped", turns: [{ id: "t", state: "running" }], messages: [], activities: [] };
+      if (endpoint.endsWith("/interrupt")) { interrupts.push(endpoint); return {}; }
+      return { session: { id: "s", mode: "chat", status: "working", provisionState: "ready" } };
+    },
+  });
+  try {
+    const kept = await upstream.observe("s");
+    assert.equal(kept.turnState, "running", "the host still runs the agent: the next AO reattaches it");
+    assert.equal(kept.error, undefined, "the card is not failed");
+    assert.deepEqual(interrupts, [], "nothing is interrupted");
+    // An agent that exits takes its host with it, and the host deletes its record.
+    fs.rmSync(hostFile);
+    const ended = await upstream.observe("s");
+    assert.equal(ended.turnState, "interrupted");
+    assert.equal(ended.agentGone, true);
+  } finally {
+    live.close();
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  }
 });
 
 test("a request left pending by an agent that is gone shows no card, since nothing can take the answer", async () => {

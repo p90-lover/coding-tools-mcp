@@ -24,9 +24,19 @@ function createMcpConnectorCommand({ app, run, logger }) {
     appVersion: app.getVersion(), startedAt: new Date().toISOString() });
   const save = report => writePrivateFileAtomic(reportFile, JSON.stringify(report));
   return {
-    request(action = "create") {
+    /**
+     * `source`: what asked ("settings": the main window's button, "command": a launch with one of
+     * the MCP flags). Logged with the outcome: three failed connector attempts on 2026-10-31 left no
+     * trace of who started them, or whether any had succeeded.
+     */
+    request(action = "create", source = "unknown") {
       if (!["create", "tunnel-settings", "primary-tunnel-settings", "add-tunnel"].includes(action)) return Promise.reject(new Error("Invalid MCP command action"));
-      if (inFlight) return action === inFlightAction ? inFlight : Promise.reject(new Error("MCP setup is busy with another action"));
+      if (inFlight) {
+        if (action !== inFlightAction) return Promise.reject(new Error("MCP setup is busy with another action"));
+        logger?.info?.("mcp.command_requested", { action, source, joined: true });
+        return inFlight;
+      }
+      logger?.info?.("mcp.command_requested", { action, source });
       const operation = begin(action);
       try {
         save({ ...operation, status: "running" });
@@ -45,6 +55,7 @@ function createMcpConnectorCommand({ app, run, logger }) {
           name: String(result.name || "").slice(0, 120),
           href: String(result.href || "").slice(0, 512),
         } });
+        logger?.info?.("mcp.command_completed", { action, source, ...(action === "create" ? { created: result.created === true } : {}) });
         return result;
       }).catch(error => {
         // Keep arbitrary errors, filesystem paths and credentials out of the automation receipt.

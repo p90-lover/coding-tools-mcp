@@ -2091,7 +2091,7 @@ function createChatAgentTools({
       }
       if (name === "exec_command") {
         const workdir = typeof args.workdir === "string" ? args.workdir : typeof args.cwd === "string" ? args.cwd : ".";
-        const id = sandbox.start({ cmd: String(args.cmd ?? ""), cwd: path.resolve(root.path, workdir), writable: root.path,
+        const id = await sandbox.start({ cmd: String(args.cmd ?? ""), cwd: path.resolve(root.path, workdir), writable: root.path,
           stdin: typeof args.stdin === "string" ? args.stdin : "" });
         track(entry, name, args, toolResult(name, args, { ok: true, command_id: id, status: "running" }), true);
         await sandbox.wait(id, yieldOf(args.yield_time_ms, 1000));
