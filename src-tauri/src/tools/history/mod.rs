@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use crate::tools::context::ToolContext;
-use crate::tools::workspace::{tool_ok, WorkspaceError, WorkspaceResult};
+use crate::tools::workspace::{relative_display, tool_ok, WorkspaceError, WorkspaceResult};
 
 use self::model::{InitialInputRecord, SearchHit};
 
@@ -32,7 +32,9 @@ pub fn bootstrap(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
             "History numbering contains gaps; run history_session_validate before creating a session.",
             "validation",
             true,
-            json!({"missing_numbers": report.missing_numbers}),
+            json!({"missing_numbers": report.missing_numbers,
+                "missing_number_count": report.missing_number_count,
+                "missing_numbers_truncated": report.missing_number_count > report.missing_numbers.len() as u64}),
         ));
     }
 
@@ -216,11 +218,11 @@ pub fn checkpoint(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
         return Err(session_not_bootstrapped());
     }
     let _lock = storage::lock_directory(&history_dir)?;
-    let report = storage::scan(&ctx.workspace, &history_dir)?;
+    let mut report = storage::scan(&ctx.workspace, &history_dir)?;
     reject_ambiguous_history(&report)?;
     let document = report
         .documents
-        .iter()
+        .iter_mut()
         .find(|document| document.session_key.as_deref() == Some(session_key.as_str()))
         .ok_or_else(session_not_bootstrapped)?;
     if document.path != expected_path {
@@ -271,9 +273,14 @@ pub fn checkpoint(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
             &history_dir.join(format!("{}.md", document.number)),
             &final_content,
         )?;
+        document.content = final_content.clone();
+        document.updated_at = markdown::metadata(&document.content, "Updated");
     }
 
-    let refreshed = storage::scan(&ctx.workspace, &history_dir)?;
+    let current_number = document.number;
+    let current_path = document.path.clone();
+    // The directory lock serializes checkpoints; validate remains the full repair path for external edits.
+    let refreshed = report;
     let manifest = storage::build_manifest(&refreshed);
     let state_revision = storage::read_state(&history_dir)
         .ok()
@@ -283,7 +290,7 @@ pub fn checkpoint(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
     let state = storage::build_state(
         &refreshed,
         &manifest,
-        Some(document.number),
+        Some(current_number),
         &now_timestamp(),
         state_revision,
     );
@@ -305,8 +312,8 @@ pub fn checkpoint(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
         );
     }
     Ok(tool_ok(json!({
-        "session_number": document.number,
-        "path": document.path,
+        "session_number": current_number,
+        "path": current_path,
         "session_key": session_key,
         "expected_path": expected_path,
         "host_session_key_mismatch": host_session_key_mismatch,
@@ -392,19 +399,28 @@ pub fn search(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
 
 pub fn read(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
     let history_dir = resolve_dir(ctx, args)?;
-    let report = storage::scan(&ctx.workspace, &history_dir)?;
-    let document = if let Some(number) = args.get("number").and_then(Value::as_u64) {
-        report
-            .documents
-            .iter()
-            .find(|document| document.number == number)
-    } else if let Some(path) = args.get("path").and_then(Value::as_str) {
-        report
-            .documents
-            .iter()
-            .find(|document| document.path == path)
+    let number = if let Some(number) = args.get("number").and_then(Value::as_u64) {
+        Some(number)
     } else {
-        None
+        args.get("path").and_then(Value::as_str).and_then(|path| {
+            let stem = std::path::Path::new(path)
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".md")?;
+            let number = stem.parse::<u64>().ok()?;
+            (number > 0
+                && stem == number.to_string()
+                && path
+                    == relative_display(
+                        ctx.workspace.root(),
+                        &history_dir.join(format!("{number}.md")),
+                    ))
+            .then_some(number)
+        })
+    };
+    let document = match number {
+        Some(number) => storage::read_document(&ctx.workspace, &history_dir, number)?,
+        None => None,
     }
     .ok_or_else(|| {
         history_error(
@@ -516,6 +532,8 @@ pub fn validate(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
         "sequence_valid": report.sequence_valid(),
         "numbers": report.numbers,
         "missing_numbers": report.missing_numbers,
+        "missing_number_count": report.missing_number_count,
+        "missing_numbers_truncated": report.missing_number_count > report.missing_numbers.len() as u64,
         "duplicate_session_keys": report.duplicate_session_keys,
         "invalid_files": report.invalid_files,
         "empty_files": report.empty_files,

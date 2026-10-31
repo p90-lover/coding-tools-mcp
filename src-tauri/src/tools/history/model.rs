@@ -42,6 +42,7 @@ pub struct ScanReport {
     pub documents: Vec<HistoryDocument>,
     pub numbers: Vec<u64>,
     pub missing_numbers: Vec<u64>,
+    pub missing_number_count: u64,
     pub duplicate_session_keys: Vec<String>,
     pub invalid_files: Vec<String>,
     pub empty_files: Vec<String>,
