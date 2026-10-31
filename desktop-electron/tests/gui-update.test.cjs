@@ -67,6 +67,30 @@ test("GUI update failure removes partial downloads and a rolled-back renderer", 
   });
 });
 
+test("GUI staging creation failures return to available and can be retried", async t => {
+  for (const phase of ["scratch", "stage"]) await t.test(phase, async t => {
+    const f = fixture(t);
+    await f.controller.checkNow();
+    const method = phase === "scratch" ? "mkdirSync" : "mkdtempSync", original = fs[method];
+    const target = path.join(f.versionRoot, "aiTemp", ...(phase === "stage" ? ["update-"] : []));
+    let injected = false;
+    fs[method] = function (directory, ...args) {
+      if (!injected && String(directory) === target) {
+        injected = true;
+        throw Object.assign(new Error("fixture staging disk full"), { code: "ENOSPC" });
+      }
+      return original.call(this, directory, ...args);
+    };
+    try { await assert.rejects(f.controller.beginInstall(), { code: "ENOSPC" }); }
+    finally { fs[method] = original; }
+    assert.ok(injected);
+    assert.equal(f.controller.getState().status, "available", "a setup failure cannot leave an active download");
+    assert.equal(await f.controller.beginInstall(), true, "the same candidate can retry after storage recovers");
+    assert.equal(f.controller.getState().status, "up-to-date");
+    assert.deepEqual(fs.readdirSync(path.join(f.versionRoot, "aiTemp")), []);
+  });
+});
+
 test("GUI update keeps a possibly active renderer when rollback cannot load", async t => {
   const f = fixture(t, { failRollback: true });
   await f.controller.checkNow();

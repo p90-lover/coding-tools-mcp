@@ -144,12 +144,13 @@ function createGuiUpdateController({
       if (!available) throw new Error("No compatible GUI update is available");
       const version = `r${available.revision}`;
       transition({ status: "downloading", version });
-      const scratch = path.join(root, "aiTemp");
-      fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-      const stage = fs.mkdtempSync(path.join(scratch, "update-"));
+      let stage = null;
       let destination = null;
       let keepDestination = false;
       try {
+        const scratch = path.join(root, "aiTemp");
+        fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
+        stage = fs.mkdtempSync(path.join(scratch, "update-"));
         const checksums = await deps.downloadText(available.checksumsUrl);
         const expected = expectedChecksum(checksums, available.assetName);
         const archive = path.join(stage, available.assetName);
@@ -206,7 +207,7 @@ function createGuiUpdateController({
         transition({ status: "available", version });
         throw error;
       } finally {
-        await fs.promises.rm(stage, { recursive: true, force: true }).catch(error => {
+        if (stage) await fs.promises.rm(stage, { recursive: true, force: true }).catch(error => {
           logger?.warn("launcher.gui_cleanup_failed", { message: error.message });
         });
       }
