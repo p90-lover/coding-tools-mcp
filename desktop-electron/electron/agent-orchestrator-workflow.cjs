@@ -3450,8 +3450,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // skips the requests after it in this pass; the request just goes to the person.
         if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
           const decision = aoDecision(approval, advice.action === "allow");
+          const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
           if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
-          else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision).then(() => true, () => false)) {
+          else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false)) {
             logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
             note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
           } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
@@ -3480,6 +3481,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const NO_ANSWER_TEXT = "No answer from the user within 20 seconds; use your best judgment and continue.";
   const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
   const autoAnswered = new Map(); // approval_id -> the verdict sent ("allow", "deny"; null for a question or plan)
+  /**
+   * What an agent reads as the result of a call the reviewer or "Approve for me" denied. Claude Code
+   * otherwise reports "User refused permission to run tool", and the agent took it as the person's
+   * own refusal and guessed at why.
+   */
+  const reviewerDenial = (reason) =>
+    `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
+    + "Try a safer way to reach the goal, or ask the user if only this will do.";
   const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
@@ -3561,7 +3570,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             const blocked = verdict === "deny";
             const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
             if (!decision) continue;
-            await harnessService().resolveApproval(approval.thread_id, id, decision);
+            const advice = approverAdvice.get(id);
+            await harnessService().resolveApproval(approval.thread_id, id, decision,
+              blocked ? reviewerDenial(advice?.action === "deny" ? advice.reason : "its safety rules block this request, or it is too long to review whole") : "");
             note = blocked ? "Denied: blocked by the command approver's safety rules or reviewer"
               : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Approve for me allowed the request once";
           } else if (approval.kind === "command") {
