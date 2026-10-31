@@ -1922,11 +1922,21 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, false);
     return { requests: computerControlService?.requests() ?? [] };
   });
-  // Its answer starts control of a window, so it must be the person's click in the focused window.
+  // Its answer allows an app, so it must be the person's click in the focused window.
   handle("coding-tools:computer:answer", (event, input) => {
     assertFocusedMainWindow(event, true);
     if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
     return computerControlService.answer(input);
+  });
+  // Settings > Computer use > Always-allowed apps.
+  handle("coding-tools:computer:allowed-apps", (event) => {
+    assertFocusedMainWindow(event, false);
+    return { apps: computerControlService?.allowedApps() ?? [] };
+  });
+  handle("coding-tools:computer:forget-app", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
+    return { ok: computerControlService.forgetApp(input.app), apps: computerControlService.allowedApps() };
   });
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
@@ -4033,6 +4043,8 @@ async function start() {
       const computerControl = createComputerControl({
         request: (endpoint, body, options) => headlessHost.request(endpoint, body, options),
         BrowserWindow, screen, logger,
+        // The apps the person allowed (Always allow), kept across restarts.
+        approvalsFile: path.join(app.getPath("userData"), "integrations", "computer-app-approvals.json"),
         // The app's own windows are never offered as a target.
         ownPids: () => app.getAppMetrics().map((metric) => metric.pid),
         onRequests: (requests) => {
@@ -4048,6 +4060,8 @@ async function start() {
         previews: chatPreviews,
         sandbox: chatSandbox,
         computerControl,
+        // Every call that sees or drives the screen goes to the chat's reviewer first (Codex's auto-review).
+        reviewCall: (input) => missionWorkflowRuntime?.reviewToolCall?.(input) ?? { action: "ask", reason: "" },
         // "Approve for me" runs the same routine project commands through the app's terminal as it
         // allows from the agent's own shell (the workflow's list), without a dialog each.
         // The workflow running now: these tools outlive the backend start that created them, and

@@ -9327,6 +9327,35 @@ test("after a restart the app resumes interrupted chats in every project, with n
   assert.deepEqual(retrying.started.sort(), ["live", "r1"]);
   retrying.workflow.dispose();
 });
+test("a chat's screen calls are reviewed by Codex's auto-review whatever its approval mode, and an unknown session is the person's", async () => {
+  // No approvals_reviewer: the card asks the person for its own requests, but computer use is still reviewed.
+  const route = { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model", permission_profile: ":ao-default" };
+  const mission = { id: "run", workspace_id: "ws", project_id: "task", revision: 3, execution_mode: "single", nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const prompts = [];
+  let outcome = { risk_level: "high", user_authorization: "low", outcome: "deny", rationale: "Typing into a banking site is not part of the task" };
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: ["test-model", "codex-auto-review"].map((id) => ({ id })) }) };
+      const body = JSON.parse(init.body);
+      prompts.push({ model: body.model, text: body.messages[0].content });
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(outcome) } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission] } : { ok: true },
+    aoHarness: { observe: async () => ({ timeline: [] }) },
+  });
+  const denied = await workflow.reviewToolCall({ workspaceId: "ws", session: "session-1", tool: "computer_action", args: { action: "type", text: "hunter2" } });
+  assert.deepEqual(denied, { action: "deny", reason: "Typing into a banking site is not part of the task" });
+  assert.equal(prompts[0].model, "codex-auto-review");
+  assert.match(prompts[0].text, /mcp__coding-tools__computer_action/);
+  assert.match(prompts[0].text, /hunter2/, "the reviewer sees what would be typed");
+  outcome = { risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "Reads the window the user asked about" };
+  assert.equal((await workflow.reviewToolCall({ workspaceId: "ws", session: "session-1", tool: "computer_snapshot", args: {} })).action, "allow");
+  assert.equal((await workflow.reviewToolCall({ workspaceId: "ws", session: "elsewhere", tool: "computer_snapshot", args: {} })).action, "ask",
+    "a session that is no chat of this project is left to the person");
+});
+
 test("a reviewer's deny tells the agent why, and that the user did not refuse it", async () => {
   // Claude Code reported every such deny as "User refused permission to run tool"; the agent then
   // guessed the person had refused and why.

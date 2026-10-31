@@ -21,8 +21,8 @@ const load = (file, modules = {}) => {
   return exports;
 };
 const card = load("ComputerControlCard.tsx", { "../api/client": { getCodingToolsClient: () => { throw new Error("no preload"); } } });
-const request = (over = {}) => ({ id: "r1", workspaceId: "ws", sessions: ["s1"], chat: "codex (session s1)", project: "proj", captureOff: true,
-  windows: [{ title: "<img src=x onerror=alert(1)>", pid: 70 }], durations: [{ id: "900", label: "15 minutes" }], ...over });
+const request = (over = {}) => ({ id: "r1", workspaceId: "ws", sessions: ["s1"], agent: "Claude Code", app: "Google Chrome",
+  window: "<img src=x onerror=alert(1)>", project: "proj", captureOff: true, firstUse: true, elevated: false, persistModes: ["always", "conversation"], ...over });
 
 test("a request shows in the chat whose agent asked, and in no other", () => {
   const ids = (list) => list.map((item) => item.id);
@@ -33,14 +33,17 @@ test("a request shows in the chat whose agent asked, and in no other", () => {
   assert.deepEqual(ids(card.chatComputerRequests([request({ sessions: [] })], [], "other")), []);
 });
 
-test("the card names who asks, lists each window as text, and asks for the capture tick", () => {
+test("the card is Codex's app approval: who asks for which app, the first-use notice, and its three answers", () => {
   const html = renderToStaticMarkup(React.createElement(card.ComputerControlCard, { request: request() }));
-  assert.match(html, /Let the agent control a window\?/);
-  assert.match(html, /codex \(session s1\) asked to control your screen in proj/);
+  assert.match(html, /Computer Use<\/span>/);
+  assert.match(html, /Allow Claude Code to use Google Chrome\?/);
+  assert.match(html, /Computer Use lets the agent use apps on your computer\. It may take screenshots of app contents while working\./);
   assert.ok(!html.includes("<img src=x"), "a window title is text, never markup");
-  assert.match(html, /role="radio" aria-checked="false"/);
-  assert.match(html, /Turn on screen capture for proj/);
-  assert.match(html, /<button[^>]*disabled=""[^>]*>Start<\/button>/, "Start waits for a window (and the tick)");
-  assert.match(html, /<option value="900"[^>]*>15 minutes<\/option>/);
-  assert.doesNotMatch(renderToStaticMarkup(React.createElement(card.ComputerControlCard, { request: request({ captureOff: false }) })), /screen capture/);
+  assert.match(html, /Allowing it turns on screen capture for proj\./);
+  const buttons = [...html.matchAll(/<button[^>]*>([^<]+)<\/button>/g)].map((match) => match[1]);
+  assert.deepEqual(buttons, ["Always allow", "Deny", "Allow this conversation"]);
+  const later = renderToStaticMarkup(React.createElement(card.ComputerControlCard, { request: request({ firstUse: false, captureOff: false }) }));
+  assert.doesNotMatch(later, /may take screenshots|screen capture/, "the notice shows until an app was allowed once");
+  assert.match(renderToStaticMarkup(React.createElement(card.ComputerControlCard, { request: request({ elevated: true }) })), /Elevated Risk/);
+  assert.doesNotMatch(renderToStaticMarkup(React.createElement(card.ComputerControlCard, { request: request({ persistModes: ["conversation"] }) })), /Always allow/);
 });
