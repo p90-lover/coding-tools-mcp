@@ -132,6 +132,15 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked
 
+      - name: Headless private preview regressions
+        env:
+          TEMP: ${{ github.workspace }}/aiTemp/headless-tests
+          TMP: ${{ github.workspace }}/aiTemp/headless-tests
+          CODEX_HOME: ${{ github.workspace }}/aiTemp/headless-tests/codex-home
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml --locked --lib -- ao_preview_home_is_bound_to_its_workspace_loopback_server listener_status_is_readable_but_start_requires_local_confirmation a_project_folder_session_works_in_the_workspace_folder_and_nowhere_else
+
       - name: Cargo clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
