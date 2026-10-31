@@ -11,7 +11,7 @@ function item(overrides = {}) {
   return {
     name: "codex-a.json", auth_index: "a1", email: "me@example.com", plan: "plus", priority: 0, disabled: false,
     access_token: "should-not-pass", // never in CPA Helper's list, but must not leak if it were
-    quota: { plan: "plus", checked_ms: NOW - 60_000,
+    quota: { plan: "plus", checked_ms: NOW - 10_000,
       primary: { used_percent: 42.4, reset_at_ms: NOW + 3_600_000, window_seconds: 18_000 },
       secondary: { used_percent: 97.5, reset_at_ms: NOW + 86_400_000, window_seconds: 604_800 } },
     ...overrides,
@@ -41,7 +41,7 @@ test("reads CPA Helper's Codex accounts with the management key and returns only
     id: "a1", label: "me@example.com", plan: "plus", disabled: false, paused: false,
     session: { usedPercent: 42.4, resetsAt: NOW + 3_600_000, windowSeconds: 18_000 },
     week: { usedPercent: 97.5, resetsAt: NOW + 86_400_000, windowSeconds: 604_800 },
-    credits: null, checkedAt: NOW - 60_000, error: null,
+    credits: null, checkedAt: NOW - 10_000, error: null,
   }]);
   const text = JSON.stringify(result);
   assert.ok(!text.includes(KEY) && !text.includes("should-not-pass"), "no key or token reaches the renderer");
@@ -70,6 +70,18 @@ test("a fresh read is cached; a stale or unchecked account is refreshed once per
   assert.equal(calls.filter((call) => call.method === "POST").length, 3, "after STALE_MS both enabled accounts are stale");
 });
 
+test("quota refresh is minute-paced, bounded and fair across more than four accounts", async () => {
+  assert.equal(STALE_MS, 60_000);
+  const items = Array.from({ length: 9 }, (_, i) => item({ auth_index: `key${i}`, quota: null }));
+  const { quota, calls, advance } = fixture({ items });
+  for (let i = 0; i < 3; i++) {
+    await quota.read(); await new Promise((resolve) => setImmediate(resolve)); advance(30_000);
+  }
+  const refreshed = calls.filter((c) => c.method === "POST").map((c) => c.body.auth_index);
+  assert.equal(new Set(refreshed).size, 9, "later accounts must not starve behind retries");
+  assert.ok(refreshed.length <= 12, "at most four accounts per read");
+});
+
 test("working accounts come first, so many signed-out ones cannot hide them past the cap", async () => {
   // Seen live 2026-10-24: nine signed-out and three unchecked accounts filled the first 12, and the
   // one working Plus account, at 100% of its 5-hour window, was never shown.
@@ -78,7 +90,7 @@ test("working accounts come first, so many signed-out ones cannot hide them past
   const unchecked = item({ auth_index: "new", email: "new@example.com", quota: null });
   const disabled = item({ auth_index: "off", email: "off@example.com", disabled: true });
   const plus = item({ auth_index: "plus", email: "plus@example.com", priority: -1,
-    quota: { plan: "plus", checked_ms: NOW - 60_000, primary: { used_percent: 100 }, secondary: { used_percent: 16 } } });
+    quota: { plan: "plus", checked_ms: NOW - 10_000, primary: { used_percent: 100 }, secondary: { used_percent: 16 } } });
   const { quota, calls, advance } = fixture({ items: [...signedOut, disabled, unchecked, plus] });
   const { accounts } = await quota.read();
   assert.equal(accounts.length, 12);
@@ -96,7 +108,8 @@ test("working accounts come first, so many signed-out ones cannot hide them past
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.ok(refreshed().includes("out11"), "an account past the cap is re-checked too");
-  assert.ok(!refreshed().includes("plus") && !refreshed().includes("off"), "not a fresh one, nor a disabled one");
+  assert.ok(!refreshed().includes("off"), "never refresh a disabled account");
+  assert.ok(refreshed().includes("plus"), "the working account also refreshes after one minute");
 });
 
 test("an account's credits (CPA Helper 0.1.1) reach the meter exactly as chatgpt.com sent them", () => {

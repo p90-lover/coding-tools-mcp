@@ -488,8 +488,21 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   const react = { useMemo: calculate => calculate(), useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
     createContext: value => ({ Provider: ({ children }) => children, value }), useContext: context => context.value,
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
+  const replyHead = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatReplyHead.tsx"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+  { exports: replyHead, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat : {} });
+  const replyPlan = {};
+  const replyPlanView = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/chat-reply-plan.ts"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: replyPlan, require: name => name === "./ao-chat" ? chat : {} });
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatReplyPlan.tsx"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+  { exports: replyPlanView, require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {} });
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
+      : name === "./ChatReplyHead" ? replyHead
+      : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView
       : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
       : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
@@ -1009,6 +1022,26 @@ test("a chat's AO agent sessions for its Preview and Terminal panes: newest firs
   const nameless = chat.chatAgentSessions([{ nodes: [{ id: "x", route: { harness_id: "ao:claude-code" }, receipt: { thread_id: "s9" } }] }, { id: "r", nodes: undefined }]);
   assert.deepEqual(plain(nameless), [{ id: "s9", label: "Agent" }]);
   assert.equal(nameless[0].label.split(" · ")[0], "Agent");
+});
+
+test("native chat previews keep one owner across follow-ups and remain separate from AO workspaces", () => {
+  const runs = ["first", "followup"].map(id => ({ id, execution_mode: "single", nodes: [{
+    id: `node-${id}`, role: "worker", route: { harness_id: "codex-native", model: "chatgpt-web/high" },
+    receipt: { thread_id: `thread-${id}` },
+  }] }));
+  assert.deepEqual(plain(chat.chatAgentSessions(runs)), [], "native threads do not become AO file/terminal sessions");
+  const first = plain(chat.chatAgentSessions(runs, { workspaceId: "ws1", taskId: "task" }));
+  assert.deepEqual(first, [{ id: "native:ws1:task:single", label: "worker · chatgpt-web/high", model: "chatgpt-web/high", previewOnly: true }]);
+  assert.notEqual(chat.chatAgentSessions(runs, { workspaceId: "ws2", taskId: "task" })[0].id, first[0].id);
+  assert.notEqual(chat.chatAgentSessions(runs, { workspaceId: "ws1", taskId: "other" })[0].id, first[0].id);
+  const { nativeChatPreviewSessionId } = require("../electron/chat-agent-tools.cjs");
+  const team = [{ execution_mode: "team", nodes: ["role:one", "role:two"].map(template_role_id => ({
+    ...runs[0].nodes[0], template_role_id,
+  })) }];
+  const owners = chat.chatAgentSessions(team, { workspaceId: "ws:one", taskId: "task:one" }).map(item => item.id);
+  assert.deepEqual(plain(owners), ["role:two", "role:one"].map(role => nativeChatPreviewSessionId("ws:one", "task:one", role)), "frontend and native launch use the same escaped role owner");
+  const cpa = [{ ...runs[0], nodes: [{ ...runs[0].nodes[0], route: { harness_id: "codex-native", model: "gemini-3.8-flash-high" } }] }];
+  assert.deepEqual(plain(chat.chatAgentSessions(cpa, { workspaceId: "ws1", taskId: "task" })), [], "unsupported CPA native previews keep their previous behavior");
 });
 
 test("the context meter's numbers: short token counts, and fullness only when the agent gives its window", () => {

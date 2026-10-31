@@ -9,7 +9,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { createStateFileWriter } = require("./durable-state.cjs");
 
 const HOME_URL = "https://chatgpt.com/";
 const MAX_ACCOUNTS = 12;
@@ -68,11 +68,15 @@ function createGptBrowserHost({
   prepareSession = async () => {},
   openExternal = async () => {},
   onChange = () => {},
+  // accounts.json as read off the main thread (readGptBrowserState): its text, or null when there is
+  // none. Left out, the file is read here.
+  savedText,
 }) {
   const statePath = path.join(dataRoot, "accounts.json");
   let state = { activeId: null, accounts: [] };
   try {
-    const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (savedText === null) throw Object.assign(new Error("No saved accounts"), { code: "ENOENT" });
+    const saved = JSON.parse(savedText ?? fs.readFileSync(statePath, "utf8"));
     const accounts = Array.isArray(saved?.accounts)
       ? saved.accounts.filter((entry) => ACCOUNT_ID.test(entry?.id)).slice(0, MAX_ACCOUNTS).map((entry) => ({
         id: entry.id,
@@ -92,9 +96,13 @@ function createGptBrowserHost({
   let bounds = null;
   let attachedId = null;
 
+  // Saved off the main thread: each switch, rename or removal wrote it with an fsync while every
+  // window waited. A burst of changes writes the newest once more after the one in flight.
+  const writer = createStateFileWriter(statePath, {
+    onError: (error) => logger?.warn?.("gpt_browser.state_save_failed", { message: error.message }),
+  });
   function persist() {
-    fs.mkdirSync(dataRoot, { recursive: true });
-    writePrivateFileAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    writer.save(`${JSON.stringify(state, null, 2)}\n`);
   }
 
   function status() {
@@ -250,6 +258,8 @@ function createGptBrowserHost({
 
   return {
     status,
+    /** Resolves once every change so far is on disk. */
+    saved: () => writer.saved(),
     async addAccount() {
       if (state.accounts.length >= MAX_ACCOUNTS) throw new Error(`GPT Browser holds up to ${MAX_ACCOUNTS} accounts`);
       let id;
@@ -318,4 +328,18 @@ function createGptBrowserHost({
   };
 }
 
-module.exports = { createGptBrowserHost, browsableUrl, cleanUserAgent, partitionFor, MAX_ACCOUNTS };
+/**
+ * accounts.json read off the main thread, for createGptBrowserHost's savedText: its text, or null
+ * when it is missing or cannot be read (logged, as the host's own read logs it). The synchronous read
+ * held every window 21.6 s on the busy hard disk when the GPT Browser first opened (2026-10-31).
+ */
+async function readGptBrowserState(dataRoot, logger) {
+  try {
+    return await fs.promises.readFile(path.join(dataRoot, "accounts.json"), "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") logger?.warn?.("gpt_browser.state_unreadable", { message: error.message });
+    return null;
+  }
+}
+
+module.exports = { createGptBrowserHost, readGptBrowserState, browsableUrl, cleanUserAgent, partitionFor, MAX_ACCOUNTS };

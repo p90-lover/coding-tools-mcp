@@ -37,17 +37,17 @@ function tempTree() {
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
-  chatTitles = null, redaction = null, computerControl = null } = {}) {
+  chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory, appProcesses, captureApp,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory, appProcesses, captureApp, previews,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
-    ...(computerControl ? { computerControl } : {}),
+    ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -97,6 +97,97 @@ function post(url, body, headers = {}) {
     if (headers[":method"] !== "GET") request.end(payload); else request.end();
   });
 }
+
+test("native preview leases expose only their own panel and expire without workspace tools", async () => {
+  let stamp = 10_000;
+  const panels = new Map(), closed = [];
+  const previews = {
+    call: async (owner, name, args) => {
+      if (name === "preview_render") panels.set(owner, args.html);
+      return { isError: false, content: [{ type: "text", text: panels.get(owner) || "" }] };
+    },
+    close: owner => { closed.push(owner); panels.delete(owner); },
+  };
+  const { tools, asked, calls } = fixture({ previews, now: () => stamp });
+  try {
+    const first = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: stamp + 30_000, nativeScope: { runId: "old", nodeId: "lead" } });
+    const second = await tools.lease({ agent: "codex", workspaceId: "ws2", previewOnly: true, expiresAt: stamp + 90_000, nativeScope: { runId: "other", nodeId: "lead" } });
+    assert.equal(first.bind("native:ws1:task:single"), true);
+    assert.equal(second.bind("native:ws2:task:single"), true);
+    let a = first.servers[0];
+    const b = second.servers[0];
+    const list = await post(a.url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, a.headers);
+    assert.ok(list.body.result.tools.some(tool => tool.name === "preview_render"));
+    assert.ok(list.body.result.tools.every(tool => tool.name.startsWith("preview_")), "no workspace, command, app or other-chat tools");
+    const call = (server, name, args = {}) => post(server.url, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } }, server.headers);
+    assert.equal((await call(a, "preview_render", { html: "first" })).body.result.isError, false);
+    assert.equal((await call(b, "preview_render", { html: "second" })).body.result.isError, false);
+    assert.deepEqual([...panels], [["native:ws1:task:single", "first"], ["native:ws2:task:single", "second"]]);
+    assert.equal((await post(b.url, { jsonrpc: "2.0", id: 3, method: "tools/list" }, a.headers)).status, 401);
+    assert.equal((await call(a, "read_file", { path: "secret" })).body.result.isError, true);
+    assert.equal(await tools.renew("native:ws1:task:single"), null, "an AO resume cannot turn a native preview lease into workspace tools");
+    assert.deepEqual(asked, [], "native previews never resolve an unrelated AO worktree");
+    assert.deepEqual(calls, [], "preview-only tools never query the workspace tool catalog");
+    const followup = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: stamp + 30_000, nativeScope: { runId: "followup", nodeId: "lead" } });
+    assert.equal(followup.bind("native:ws1:task:single"), true);
+    assert.equal((await call(a, "preview_read")).status, 401, "the follow-up retires the previous credential");
+    first.release({ ended: true });
+    assert.deepEqual(closed, [], "stopping an old run cannot close its follow-up's panel");
+    a = followup.servers[0];
+    assert.equal((await call(a, "preview_read")).body.result.content[0].text, "first", "the follow-up retains the same panel");
+    stamp += 30_001;
+    assert.equal((await call(a, "preview_read")).status, 401);
+    assert.deepEqual(closed, ["native:ws1:task:single"]);
+    assert.equal((await call(b, "preview_read")).body.result.isError, false);
+    second.release({ ended: true });
+    assert.equal((await call(b, "preview_read")).status, 401);
+  } finally { await tools.close(); }
+});
+
+test("restored native preview leases revoke by exact run and node without a workflow cache", async () => {
+  const tree = tempTree();
+  const statePath = path.join(tree.base, "native-preview-leases.json");
+  const panels = new Map(), closed = [];
+  const previews = { call: async (owner, name, args) => {
+    if (name === "preview_render") panels.set(owner, args.html);
+    return { isError: false, content: [{ type: "text", text: panels.get(owner) || "" }] };
+  }, close: owner => { closed.push(owner); panels.delete(owner); } };
+  const first = fixture({ previews, statePath });
+  let restored, workflow;
+  try {
+    const create = async (runId, nodeId, owner) => {
+      const lease = await first.tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true,
+        expiresAt: Date.now() + 120_000, nativeScope: { runId, nodeId } });
+      assert.equal(lease.bind(owner), true);
+      return lease.servers[0];
+    };
+    const previous = await create("old", "lead", "native:ws1:task:single");
+    const current = await create("current", "lead", "native:ws1:task:single");
+    const other = await create("current", "worker", "native:ws1:task:worker");
+    const call = (server, name, args = {}) => post(server.url, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, server.headers);
+    assert.equal((await call(previous, "preview_read")).status, 401);
+    await first.tools.close();
+    const saved = JSON.parse(fs.readFileSync(statePath));
+    const legacy = { ...saved.sessions[0], key: `${saved.sessions[0].key}x`, aoSession: "native:ws1:legacy:single" };
+    delete legacy.nativeScope;
+    saved.sessions.push(legacy);
+    fs.writeFileSync(statePath, JSON.stringify(saved));
+    restored = fixture({ previews, statePath });
+    await restored.tools.listen();
+    assert.equal((await call({ ...current, url: current.url.replace(/[^/]+$/, legacy.key) }, "preview_read")).status, 401, "unassociated legacy native credentials fail closed");
+    assert.equal((await call(current, "preview_render", { html: "restored" })).body.result.isError, false);
+    assert.equal((await call(other, "preview_render", { html: "other role" })).body.result.isError, false);
+    assert.equal(restored.tools.revokeNativePreviews({ workspaceId: "ws1", runId: "old", nodeId: "lead" }), 0);
+    assert.equal((await call(current, "preview_read")).body.result.isError, false, "stopping an old run preserves its restored follow-up");
+    const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
+    workflow = createAgentOrchestratorWorkflow({ nativePreviewTools: restored.tools, confirm: async () => true,
+      requestHeadless: async endpoint => { assert.equal(endpoint, "/api/v1/ao/harness/disconnect"); return { ok: true }; } });
+    await workflow.call("stop_harness", { workspaceId: "ws1", runId: "current", nodeId: "lead" });
+    assert.equal((await call(current, "preview_read")).status, 401);
+    assert.deepEqual(closed, ["native:ws1:task:single"]);
+    assert.equal((await call(other, "preview_read")).body.result.isError, false, "another role remains authorized");
+  } finally { workflow?.dispose(); await first.tools.close(); await restored?.tools.close(); tree.cleanup(); }
+});
 
 /** Dialog text with its hard wraps undone. */
 const unwrapped = (text) => text.replace(/\n↪ /g, "");
@@ -1074,6 +1165,61 @@ test("rename_chat names the agent's own chat, is in its instructions, and is off
     const otherInit = await post(other.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, other.auth);
     assert.doesNotMatch(otherInit.body.result.instructions, /rename_chat/);
     assert.equal((await callTool(other.url, other.auth, "rename_chat", { title: "x" })).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
+test("moveTarget picks a project by id, name or folder, and says what is wrong otherwise", () => {
+  const projects = [
+    { id: "ws1", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" },
+    { id: "ws2", name: "Clash Macro", path: "G:\\Projects\\clash-of-clan-macro" },
+  ];
+  const { moveTarget } = require("../electron/chat-agent-tools.cjs");
+  assert.equal(moveTarget(projects, { project: "ws2" }, "win32").id, "ws2", "by id");
+  assert.equal(moveTarget(projects, { project: "clash macro" }, "win32").id, "ws2", "by name, any case");
+  assert.equal(moveTarget(projects, { path: "g:/projects/Clash-Of-Clan-Macro/" }, "win32").id, "ws2",
+    "a Windows folder matches whatever its case, slashes or trailing separator");
+  assert.throws(() => moveTarget(projects, { path: "G:\\Projects\\elsewhere" }, "win32"), /No project uses/);
+  assert.throws(() => moveTarget(projects, { path: "relative\\folder" }, "win32"), /absolute/);
+  assert.throws(() => moveTarget(projects, { project: "nope" }, "win32"), /No project/);
+  assert.throws(() => moveTarget(projects, {}, "win32"), /project.*path|path.*project/i);
+  assert.throws(() => moveTarget(projects, { project: "ws2", path: "G:\\Projects\\clash-of-clan-macro" }, "win32"), /one of/i);
+});
+
+test("move_chat asks the user, then moves the agent's own chat when its turn ends", async () => {
+  // The user: "add a allow model to move chat session and modify its path on chat tools".
+  const moves = [];
+  const chatMoves = {
+    projects: async () => [
+      { id: "ws1", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" },
+      { id: "ws2", name: "Clash Macro", path: "G:\\Projects\\clash-of-clan-macro" },
+    ],
+    move: async (request) => { moves.push(request); return { ok: true, taskId: "task-1", to: request.targetWorkspaceId, deferred: true }; },
+  };
+  let allow = true;
+  const { tools, confirmations } = fixture({ chatMoves, confirm: async () => allow });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "move-owner" });
+    assert.ok((await listed(client.url, client.auth)).includes("move_chat"));
+    const init = await post(client.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, client.auth);
+    assert.match(init.body.result.instructions, /move this chat to another project .*call move_chat/);
+    const moved = await callTool(client.url, client.auth, "move_chat", { project: "Clash Macro" });
+    assert.equal(moved.isError, undefined);
+    assert.match(moved.content[0].text, /moves to Clash Macro when this turn ends/);
+    assert.deepEqual(moves, [{ workspaceId: "ws1", session: "move-owner", targetWorkspaceId: "ws2" }],
+      "the chat and session are the server's own, never ones the agent names");
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0].message, /move its chat to another project/);
+    assert.match(JSON.stringify(confirmations[0].detail), /clash-of-clan-macro/, "the dialog shows where it goes");
+    allow = false;
+    const declined = await callTool(client.url, client.auth, "move_chat", { project: "ws2" });
+    assert.equal(declined.isError, true);
+    assert.match(declined.content[0].text, /did not allow/);
+    assert.equal((await callTool(client.url, client.auth, "move_chat", { project: "coding-tools-mcp" })).isError, true, "not to its own project");
+    assert.equal(moves.length, 1);
+    const other = await session(plain.tools, { id: "no-move" });
+    assert.equal((await listed(other.url, other.auth)).includes("move_chat"), false);
+    assert.equal((await callTool(other.url, other.auth, "move_chat", { project: "ws2" })).isError, true);
   } finally { await tools.close(); await plain.tools.close(); }
 });
 

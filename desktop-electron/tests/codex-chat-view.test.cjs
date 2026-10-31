@@ -54,8 +54,15 @@ function mount(props) {
     frame = `${name}#${seen[name]}`; cursor = 0;
     try { return type(props || {}); } finally { [frame, cursor] = outer; }
   };
+  const timers = { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true };
+  // The reply's head renders inline too, so a turn's who, status and files can be read.
+  const replyHead = transpile("ChatReplyHead.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
+    : name === "./ao-chat" ? chat : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
+  // The reply's steps (chat-reply-plan) and their views, real too.
+  const replyPlan = transpile("chat-reply-plan.ts", (name) => name === "./ao-chat" ? chat : {});
+  const replyPlanView = transpile("ChatReplyPlan.tsx", (name) => name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {});
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
+    : name === "./ao-chat" ? chat : name === "./ChatReplyHead" ? replyHead : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
@@ -66,7 +73,7 @@ function mount(props) {
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
               SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox", SecretText: "SecretText",
               SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
-  { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
+  { window: timers, document: { querySelector: () => null }, navigator: {} });
   props.queue?.attach?.(module.syncChatQueues);
   return {
     render: (next = {}) => { frame = "root"; cursor = 0; seen = {}; return module.AgentOrchestratorChat({ ...props, ...next }); },
@@ -736,8 +743,9 @@ test("a failed step's card names the step and its error, and its turn leaves the
   assert.ok(card.includes("notice || step?.error ||"), "the reason is the run's notice, else the step's own error");
   assert.ok(card.includes("<span className=\"cx-fail-step\">{step.name}</span>"), "the card names the step");
   assert.ok(source.includes("<FailedStepCard step={failedStep} notice={notice}"));
-  assert.ok(source.includes("errorShownBelow={turn === failedTurn}") && source.includes("prev.errorShownBelow === next.errorShownBelow"),
-    "the failed turn is told, and its memo sees the change");
+  assert.ok(source.includes("errorShownBelow={Boolean(failing)}") && source.includes("prev.errorShownBelow === next.errorShownBelow"),
+    "a failed DeepSeek turn leaves its error to the reply head, and its memo sees the change");
+  assert.ok(source.includes("const headError = failing && turn !== failedTurn"), "the head says the error unless the failed-step card does");
   assert.ok(dsh.includes("{errorShownBelow ? null : steps.filter((step) => step.error)"), "the DeepSeek turn drops its own copy of the error");
   assert.ok(source.includes("<input type=\"checkbox\" role=\"switch\""), "automatic retry is a switch");
 });

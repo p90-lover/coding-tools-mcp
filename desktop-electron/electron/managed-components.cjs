@@ -99,6 +99,8 @@ const RETRYABLE_DOWNLOAD_CODES = new Set([
 ]);
 const DEFAULT_COMMAND_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_STOP_TIMEOUT_MS = 8_000;
+// How often a component's shown install state is rechecked on disk, off the main thread.
+const SOURCE_RECHECK_MS = 30_000;
 const MARKER_NAME = ".coding-tools-managed-component.json";
 const SECRET_VERSION = 1;
 
@@ -519,6 +521,7 @@ function createManagedComponentController({
   // or update, and are adopted by the next launcher when their version and health match.
   persistentComponents = [],
   healthProbe = null,
+  sourceRecheckMs = SOURCE_RECHECK_MS,
 } = {}) {
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
   const downloadFetch = typeof fetchImpl === "function" ? fetchImpl : null;
@@ -701,13 +704,14 @@ function createManagedComponentController({
 
   // Every services snapshot projects each component, and projecting read its folder with
   // existsSync/statSync on the main thread: on the busy hard disk one existsSync held the main
-  // process, and every window with it, for 2 s (launcher.main_blocked, 2026-10-31). Status now
+  // process, and every window with it, for 2 s from mergeService and 28.8 s from cpaConnection
+  // (launcher.main_blocked, 2026-10-31). Rechecking only running components left stopped ones and
+  // runtimeConfiguration (every snapshot of an installed service) reading synchronously. Status now
   // answers from the state remembered here. The disk is read off the main thread: at startup,
   // whenever an install, repair or update ends or a version moves to Trash, by every start and stop,
-  // and in the background once the remembered state is older than this, so a file removed by hand
-  // still shows as "repair-required" shortly after. Only a version never read before (status asked
-  // ahead of the startup read) is read synchronously, once.
-  const SOURCE_STATE_TTL_MS = 30_000;
+  // and in the background once the remembered state is sourceRecheckMs old, so a file removed by
+  // hand still shows as "repair-required" shortly after. Only a version never read before (status
+  // asked ahead of the startup read) is read synchronously, once.
 
   function rememberSource(value, seq) {
     const current = sourceStates.get(value.home);
@@ -744,7 +748,7 @@ function createManagedComponentController({
   function sourceState(manifest) {
     const cached = sourceStates.get(componentHome(manifest));
     if (!cached) return rememberSource(readSourceStateSync(manifest), ++sourceReadSeq);
-    if (Date.now() - cached.at > SOURCE_STATE_TTL_MS) void revalidateSource(manifest);
+    if (Date.now() - cached.at >= sourceRecheckMs) void revalidateSource(manifest);
     return cached.value;
   }
 
@@ -1027,7 +1031,7 @@ function createManagedComponentController({
   // thread; one of them took 430 ms in resolveBundleRoot (launcher.main_blocked, 2026-10-31). The
   // bundle ships with this build, so each version is looked up once, at startup off the main thread.
   function bundledRuntimeKey(manifest) {
-    return `${manifest.id}@${manifest.version}`;
+    return `${manifest.id}@${manifest.version}@${manifest.strategy}`;
   }
 
   async function readBundledRuntime(manifest) {

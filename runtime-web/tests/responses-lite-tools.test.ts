@@ -46,6 +46,7 @@ test("Responses Lite exposes native exec from the default functions namespace on
   expect(parsed.context.tools).toContainEqual(expect.objectContaining({
     name: "exec",
     freeform: true,
+    nativeNamespace: "functions",
   }));
   const waitTool = parsed.context.tools?.find(tool => tool.name === "wait");
   expect(waitTool).toEqual(expect.objectContaining({ name: "wait" }));
@@ -53,47 +54,65 @@ test("Responses Lite exposes native exec from the default functions namespace on
   expect(parsed.context.tools?.some(tool => tool.name === "run_script")).toBe(false);
 });
 
-test("Responses Lite native exec survives a complete server request as one custom call", async () => {
+test("Responses Lite native tools preserve declared namespaces in JSON and SSE without qualifying legacy calls", async () => {
   const config = defaultConfig("full");
   config.solAvailable = false;
   config.proAvailable = false;
-  const turnId = "turn_responses_lite_exec_regression";
-  const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "chatgpt-web/luna",
-      stream: false,
-      metadata: { turn_id: turnId, thread_id: "thread_responses_lite_exec_regression" },
-      input: [{
-        type: "additional_tools",
-        role: "developer",
-        tools: responsesLiteTools().slice(0, 1),
-      }, {
-        type: "message",
-        id: "msg_responses_lite_exec_regression",
-        role: "user",
-        content: [{ type: "input_text", text: "Use the native exec tool" }],
-        internal_chat_message_metadata_passthrough: { turn_id: turnId },
-      }],
-    }),
-  }), config, () => ({
-    name: "responses-lite-exec-regression",
-    async runTurn(parsed, _incoming, emit) {
-      expect(parsed.context.tools).toContainEqual(expect.objectContaining({ name: "exec", freeform: true }));
-      emit({ type: "tool_call_start", id: "call_exec", name: "exec" });
-      emit({ type: "tool_call_delta", arguments: JSON.stringify({ input: "text('ok')" }) });
-      emit({ type: "tool_call_end" });
-      emit({ type: "done", endTurn: false });
-    },
-  }), { rememberState: false });
+  for (const declaredNamespace of [true, false]) for (const stream of [false, true]) {
+    const turnId = `turn_responses_lite_exec_${declaredNamespace}_${stream}`;
+    const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "chatgpt-web/luna",
+        stream,
+        metadata: { turn_id: turnId, thread_id: "thread_responses_lite_exec_regression" },
+        input: [{
+          type: "additional_tools",
+          role: "developer",
+          tools: declaredNamespace ? responsesLiteTools().slice(0, 1) : responsesLiteTools()[0]!.tools,
+        }, {
+          type: "message",
+          id: "msg_responses_lite_exec_regression",
+          role: "user",
+          content: [{ type: "input_text", text: "Use the native exec tool" }],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId },
+        }],
+      }),
+    }), config, () => ({
+      name: "responses-lite-exec-regression",
+      async runTurn(parsed, _incoming, emit) {
+        expect(parsed.context.tools).toContainEqual(expect.objectContaining({ name: "exec", freeform: true }));
+        emit({ type: "tool_call_start", id: "call_exec", name: "exec" });
+        emit({ type: "tool_call_delta", arguments: JSON.stringify({ input: "text('ok')" }) });
+        emit({ type: "tool_call_end" });
+        emit({ type: "tool_call_start", id: "call_wait", name: "wait" });
+        emit({ type: "tool_call_delta", arguments: "{}" });
+        emit({ type: "tool_call_end" });
+        emit({ type: "done", endTurn: false });
+      },
+    }), { rememberState: false });
 
-  expect(response.status).toBe(200);
-  const body = await response.json() as { output: Array<Record<string, unknown>> };
-  const calls = body.output.filter(item => item.type === "custom_tool_call");
-  expect(calls).toEqual([expect.objectContaining({
-    call_id: "call_exec",
-    name: "exec",
-    input: "text('ok')",
-  })]);
+    expect(response.status).toBe(200);
+    const outputs: Array<Array<Record<string, unknown>>> = [];
+    if (stream) {
+      const events = (await response.text()).split("\n").filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+        .map(line => JSON.parse(line.slice(6)));
+      for (const type of ["response.output_item.added", "response.output_item.done"]) {
+        outputs.push(events.filter(event => event.type === type).map(event => event.item));
+      }
+      outputs.push(events.find(event => event.type === "response.completed").response.output);
+    } else {
+      const body = await response.json() as { output: Array<Record<string, unknown>> };
+      outputs.push(body.output);
+    }
+    for (const calls of outputs) {
+      expect(calls.map(({ type, name, namespace }) => ({ type, name, namespace }))).toEqual([
+        { type: "custom_tool_call", name: "exec", namespace: declaredNamespace ? "functions" : undefined },
+        { type: "function_call", name: "wait", namespace: declaredNamespace ? "functions" : undefined },
+      ]);
+      if (!declaredNamespace) for (const call of calls) expect(call).not.toHaveProperty("namespace");
+    }
+    expect(outputs.at(-1)![0]).toMatchObject({ call_id: "call_exec", input: "text('ok')" });
+  }
 });

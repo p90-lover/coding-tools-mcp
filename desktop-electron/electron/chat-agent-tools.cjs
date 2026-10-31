@@ -76,6 +76,16 @@ const TOOL_CALL_TIMEOUT_MS = 120_000;
 const MCP_HTTP_AGENTS = new Set(["claude-code", "codex", "opencode"]);
 const WORKSPACE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const SESSION_KEY = /^[A-Za-z0-9_-]{16,64}$/;
+const SESSION_ID = /^(?:[a-zA-Z0-9_-]{1,128}|native:[^:\s]{1,1152}:[^:\s]{1,1152}:[^:\s]{1,1152})$/;
+function nativeChatPreviewSessionId(workspaceId, taskId, roleId = "single") {
+  if (![workspaceId, taskId, roleId].every(value => typeof value === "string" && value.length > 0 && value.length <= 128)) return null;
+  return `native:${[workspaceId, taskId, roleId].map(encodeURIComponent).join(":")}`;
+}
+function nativePreviewScope(value) {
+  return value && Object.keys(value).length === 2
+    && [value.runId, value.nodeId].every(id => typeof id === "string" && WORKSPACE_ID.test(id))
+    ? { runId: value.runId, nodeId: value.nodeId } : null;
+}
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const IMAGE_TOOLS = new Set(["view_image", "capture_screenshot", "capture_window", "capture_process"]);
 const WINDOWS = process.platform === "win32";
@@ -88,7 +98,7 @@ const AGENT_TOOLS = new Set([
   "view_image", "image_info", "compare_images", "ocr_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
   "show_in_chat", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
-  "redact_message",
+  "redact_message", "move_chat",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. Seen
 // live: an agent asked to "open the browser and keep checking" started it, but nothing showed in
@@ -215,6 +225,52 @@ const RENAME_TOOL_DEFS = Object.freeze([{
     properties: { title: { type: "string", maxLength: 200, description: "The task's title, at most 6 words" } },
   },
 }]);
+// The app's own: the chat moves to another of the user's projects, whose folder its next turn works in.
+const MOVE_TOOL_DEFS = Object.freeze([{
+  name: "move_chat", title: "Move this chat to another project",
+  description: "Move this chat to another of the user's projects, so its next turns work in that project's folder. Give the "
+    + "project's name or id (chat_list with project \"all\" names them) or the absolute path of its folder; a folder that is "
+    + "no project yet is refused, so ask the user to add it first. The user is asked before anything moves. The move happens "
+    + "when this turn ends: tell the user, then end your turn. The next turn starts a fresh session in the new folder with "
+    + "this chat's history. Uncommitted work stays in the old folder. Only a Single chat moves.",
+  inputSchema: {
+    type: "object", additionalProperties: false,
+    properties: {
+      project: { type: "string", maxLength: 200, description: "The project's name or id" },
+      path: { type: "string", maxLength: 1024, description: "The project's folder, an absolute path" },
+    },
+  },
+}]);
+
+/**
+ * The project move_chat's arguments name, from the user's projects ({ id, name, path }):
+ * `given.project` is a project's id or name, `given.path` its folder. Throws, in words for the
+ * agent, when neither or both are given or nothing matches.
+ */
+function moveTarget(projects, given, platform = process.platform) {
+  const project = typeof given?.project === "string" ? given.project.trim() : "";
+  const folder = typeof given?.path === "string" ? given.path.trim() : "";
+  if (project && folder) throw new Error("Give one of project or path, not both");
+  if (!project && !folder) throw new Error("Give the project to move to: its name or id as project, or its folder as path");
+  if (project) {
+    const wanted = project.toLowerCase();
+    const found = projects.find((entry) => entry.id === project)
+      ?? projects.find((entry) => String(entry.name || "").toLowerCase() === wanted);
+    if (!found) throw new Error(`No project is named "${project}"; list the user's projects or ask which one they mean`);
+    return found;
+  }
+  const paths = platform === "win32" ? path.win32 : path.posix;
+  if (!paths.isAbsolute(folder)) throw new Error("path must be an absolute folder path");
+  const key = (value) => {
+    const resolved = paths.resolve(value).replace(/[\\/]+$/, "") || paths.sep;
+    return platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  const wanted = key(folder);
+  const found = projects.find((entry) => entry.path && key(entry.path) === wanted);
+  if (!found) throw new Error(`No project uses ${folder}; ask the user to add that folder as a project first`);
+  return found;
+}
+
 // The app's own (chat-redaction.cjs): secrets the user pasted into this chat's messages are replaced
 // in the stored chat by a marker the chat shows blurred. Offered only when the user turned it on in
 // Settings; `list` is what they named as sensitive there, so the agent hides only those kinds.
@@ -1013,7 +1069,7 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false,
-  renames = false, redacts = false, ownFileTools = false } = {}) {
+  renames = false, moves = false, redacts = false, ownFileTools = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
   // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either.
   const scriptTool = ownFileTools ? "your Write tool" : "apply_patch";
@@ -1093,6 +1149,10 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       ? "Chat name: when you start a new task (this chat's first message, or a message that moves it on to different work), "
         + "call rename_chat with a short title of that task before you begin; not again while the task stays the same. "
       : "")
+    + (moves
+      ? "Project: when the user asks to move this chat to another project or folder, call move_chat with that project's "
+        + "name or folder; it asks the user, and the chat moves when your turn ends. "
+      : "")
     + (redacts
       ? "Secrets: when a message from the user contains a secret of a kind redact_message lists (a key, a password, a token), "
         + "call redact_message with it first, so the chat stops storing and showing it; never repeat it in your reply. "
@@ -1166,6 +1226,9 @@ function createChatAgentTools({
   // redact_message's service ({ enabled(), list(), redact({ workspaceId, session, secrets, label }) }): offered
   // only while enabled() is true, with list() (the user's kinds of sensitive text) as its description.
   redaction = null,
+  // move_chat's service ({ projects(): [{ id, name, path }], move({ workspaceId, session, targetWorkspaceId }) });
+  // without it the tool is not offered.
+  chatMoves = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -1206,6 +1269,7 @@ function createChatAgentTools({
   // A group is usable only if the session got it and the setting still allows it.
   const allowed = (entry, group) => entry.groups.includes(group) && currentGroups().includes(group);
   const unavailable = (entry, name, signal = entry.lifetime.signal) => {
+    if (entry.previewOnly && now() >= entry.expiresAt) forget(entry.key, { ended: true });
     if (closing || !entry.expected || sessions.get(entry.key) !== entry) {
       return failedCall("This chat's session has ended; its tools are no longer available.");
     }
@@ -1235,7 +1299,7 @@ function createChatAgentTools({
     }
   }
 
-  function mint({ agent, workspaceId, approvalMode, autoReview = false, subagent = false }) {
+  function mint({ agent, workspaceId, approvalMode, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null }) {
     while (sessions.size >= MAX_SESSIONS) {
       const oldest = [...sessions.values()].sort((left, right) => left.usedAt - right.usedAt)[0];
       forget(oldest.key);
@@ -1245,7 +1309,8 @@ function createChatAgentTools({
     const entry = {
       // Only the credential's hash is held (and kept on disk), never the credential itself.
       // A subagent's own session never starts subagents (one level only).
-      key, agent, workspaceId, groups: currentGroups().filter((group) => !subagent || group !== "subagents"), expected: hashBearer(`Bearer ${token}`),
+      key, agent, workspaceId, groups: currentGroups().filter((group) => previewOnly ? group === "preview" : !subagent || group !== "subagents"), expected: hashBearer(`Bearer ${token}`),
+      previewOnly, expiresAt, nativeScope,
       subagent: subagent === true,
       // Only a session launched to bypass permissions runs commands without a confirmation each.
       // Captured once, at spawn time, from the mode the session was launched with: changing the
@@ -1268,6 +1333,7 @@ function createChatAgentTools({
   }
 
   function authorized(request, entry) {
+    if (entry?.previewOnly && now() >= entry.expiresAt) forget(entry.key, { ended: true });
     const given = hashBearer(String(request.headers.authorization || ""));
     const expected = entry?.expected ?? crypto.randomBytes(32);
     return crypto.timingSafeEqual(given, expected) && Boolean(entry?.expected);
@@ -1297,6 +1363,7 @@ function createChatAgentTools({
       sessions: [...sessions.values()].filter((entry) => entry.expected).map((entry) => ({
         key: entry.key, hash: entry.expected.toString("hex"), agent: entry.agent, workspaceId: entry.workspaceId, aoSession: entry.aoSession,
         groups: entry.groups, bypass: entry.bypass, autoReview: entry.autoReview, subagent: entry.subagent === true, createdAt: entry.createdAt, usedAt: entry.usedAt,
+        ...(entry.previewOnly ? { previewOnly: true, expiresAt: entry.expiresAt, nativeScope: entry.nativeScope } : {}),
         origins: [...entry.origins].slice(0, 50),
       })),
     };
@@ -1337,12 +1404,17 @@ function createChatAgentTools({
     const entries = (Array.isArray(data.sessions) ? data.sessions : []).slice(0, MAX_SESSIONS)
       .filter((saved) => SESSION_KEY.test(String(saved?.key)) && /^[0-9a-f]{64}$/.test(String(saved?.hash))
         && MCP_HTTP_AGENTS.has(saved.agent) && WORKSPACE_ID.test(String(saved.workspaceId))
-        && (saved.aoSession === null || /^[a-zA-Z0-9_-]{1,128}$/.test(String(saved.aoSession)))
+        && (saved.aoSession === null || SESSION_ID.test(String(saved.aoSession)))
+        && (saved.previewOnly !== true || saved.agent === "codex" && nativePreviewScope(saved.nativeScope)
+          && Number.isFinite(saved.expiresAt) && saved.expiresAt > now() && saved.expiresAt <= now() + 900_000
+          && (saved.aoSession === null || String(saved.aoSession).startsWith(`native:${encodeURIComponent(saved.workspaceId)}:`)))
         && Number.isFinite(saved.usedAt) && now() - saved.usedAt < LEASE_MAX_IDLE_MS)
       .map((saved) => ({
         key: saved.key, agent: saved.agent, workspaceId: saved.workspaceId, expected: Buffer.from(saved.hash, "hex"),
-        groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group)),
+        groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group) && (saved.previewOnly !== true || group === "preview")),
         bypass: saved.bypass === true, controlAllowed: false, autoReview: saved.autoReview === true, subagent: saved.subagent === true,
+        previewOnly: saved.previewOnly === true, expiresAt: saved.previewOnly === true ? saved.expiresAt : null,
+        nativeScope: saved.previewOnly === true ? nativePreviewScope(saved.nativeScope) : null,
         aoSession: saved.aoSession ?? null, root: null, checkedAt: 0, createdAt: Number(saved.createdAt) || now(), usedAt: saved.usedAt,
         commands: new Map(), commandState: { ended: false }, origins: new Set((Array.isArray(saved.origins) ? saved.origins : []).filter((origin) => typeof origin === "string").slice(0, 50)), lifetime: new AbortController(),
         chatProjects: new Set(),
@@ -1422,18 +1494,19 @@ function createChatAgentTools({
   }
 
   async function listTools(entry) {
+    if (entry.previewOnly) return allowed(entry, "preview") ? [...PREVIEW_TOOL_DEFS] : [];
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
     const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
       ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
-      ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
+      ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
       ...(captureApp ? VIEW_APP_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
         && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
-        && tool?.name !== "view_app" && tool?.name !== "rename_chat" && tool?.name !== "redact_message"), ...own]
+        && tool?.name !== "view_app" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
@@ -1814,6 +1887,43 @@ function createChatAgentTools({
     }
   }
 
+  // A subagent's chat is the one that started it, not its own to move.
+  const canMove = (entry) => Boolean(chatMoves) && !entry.subagent;
+  /**
+   * move_chat: once the user agrees, the chat moves to the project the agent named when this turn
+   * ends (agent-orchestrator-workflow.cjs chatMoveTool). Always asked, even in a chat that skips
+   * approvals: the chat's history and its future work change folder.
+   */
+  async function moveChat(entry, given, signal) {
+    if (!canMove(entry)) return failedCall("Unknown tool: move_chat");
+    if (!entry.aoSession) return failedCall("This chat's session is not ready yet; try again in a moment.");
+    let target, current;
+    try {
+      const all = (await chatMoves.projects()).filter((project) => typeof project?.id === "string" && project.id);
+      current = all.find((project) => project.id === entry.workspaceId) ?? { id: entry.workspaceId, name: entry.workspaceId, path: "" };
+      target = moveTarget(all, given);
+    } catch (error) {
+      return failedCall(errorMessage(error));
+    }
+    if (target.id === entry.workspaceId) return failedCall("This chat is already in that project.");
+    const place = (project) => [{ value: String(project.name || project.id), own: true },
+      ...(project.path ? ["\n  ", { value: String(project.path), own: true }] : [])];
+    const answer = await ask("A chat agent wants to move its chat to another project",
+      dialogText([...who(entry), "Tool: move_chat\n\nFrom: ", ...place(current), "\nTo: ", ...place(target),
+        "\n\nWhen this turn ends, the chat and its history move to the new project, and its next\n"
+        + "turn works in that project's folder. Uncommitted work stays in the old folder. Allow?"]),
+      "The user did not allow moving this chat.", undefined, { entry, tool: "move_chat", signal });
+    if (answer !== true) return answer;
+    try {
+      const value = await chatMoves.move({ workspaceId: entry.workspaceId, session: entry.aoSession, targetWorkspaceId: target.id });
+      const text = `This chat moves to ${target.name || target.id} when this turn ends. Tell the user, then end your turn: the next `
+        + "turn starts a fresh session in that project's folder with this chat's history.";
+      return { content: [{ type: "text", text }], structuredContent: { ...value, project: { id: target.id, name: target.name ?? null, path: target.path ?? null } } };
+    } catch (error) {
+      return failedCall(errorMessage(error));
+    }
+  }
+
   /** The user's kinds of sensitive text (Settings), never empty: an empty list offers no tool. */
   const redactKinds = () => {
     try { return (redaction?.list() ?? []).filter((line) => typeof line === "string" && line.trim()).slice(0, 30); } catch { return []; }
@@ -1853,12 +1963,17 @@ function createChatAgentTools({
     const stopped = unavailable(entry, name, signal);
     if (stopped) return stopped;
     const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
+    if (entry.previewOnly && group === "preview") {
+      if (!entry.aoSession) return failedCall("This native chat's preview is not bound yet.");
+      return previews.call(entry.aoSession, name, withoutConsent(given), { permit: (origin) => permitOrigin(entry, origin, signal), signal });
+    }
     if (name === "show_in_chat") return showInChat(entry, given);
     if (name === "schedule_wakeup") return scheduleWakeup(entry, given);
     if (name === "app_processes") return listProcesses(given);
     if (name === "view_app") return viewApp(given);
     if (GOAL_TOOLS.has(name)) return goalCall(entry, name, given);
     if (name === "rename_chat") return renameChat(entry, given);
+    if (name === "move_chat") return moveChat(entry, given, signal);
     if (name === "redact_message") return redactMessage(entry, given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
@@ -2159,7 +2274,7 @@ function createChatAgentTools({
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
-              wakeups: canWake(entry), renames: canRename(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
+              wakeups: canWake(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -2253,6 +2368,10 @@ function createChatAgentTools({
   /** Forgets credentials never bound to a session, and those whose session AO reports ended. */
   async function sweep() {
     for (const entry of [...sessions.values()]) {
+      if (entry.previewOnly) {
+        if (now() >= entry.expiresAt) forget(entry.key, { ended: true });
+        continue;
+      }
       if (!entry.aoSession) {
         if (now() - entry.createdAt >= UNBOUND_TTL_MS) forget(entry.key);
         continue;
@@ -2265,7 +2384,6 @@ function createChatAgentTools({
 
   // The chat's Terminal and Preview panes act for the user, never for the agent.
 
-  const SESSION_ID = /^[a-zA-Z0-9_-]{1,128}$/;
   /** The live credential of an AO session (the newest one), or null. */
   function entryFor(sessionId) {
     if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return null;
@@ -2438,16 +2556,21 @@ function createChatAgentTools({
      * is the session's AO permission mode: only "bypass-permissions" runs every command unconfirmed;
      * `autoReview` (the card is set to "Approve for me") runs its routine project commands unconfirmed.
      */
-    async lease({ agent, workspaceId, approvalMode = null, autoReview = false, subagent = false } = {}) {
+    async lease({ agent, workspaceId, approvalMode = null, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null } = {}) {
       if (!isEnabled() || !MCP_HTTP_AGENTS.has(agent) || typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
+      if (previewOnly && (agent !== "codex" || !currentGroups().includes("preview"))) return null;
+      if (previewOnly && (!Number.isFinite(expiresAt) || expiresAt <= now() || expiresAt > now() + 900_000)) throw new Error("Native preview lease must expire within its native connection lifetime");
+      const scope = nativePreviewScope(nativeScope);
+      if (previewOnly && !scope) throw new Error("Native preview lease requires its owning run and node");
       await listen();
-      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview, subagent });
+      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview, subagent, previewOnly, expiresAt, nativeScope: scope });
       const url = `http://127.0.0.1:${port}/mcp/${encodeURIComponent(workspaceId)}/${entry.key}`;
       return Object.freeze({
         servers: [{ name: SERVER_NAME, type: "http", url, headers: { Authorization: `Bearer ${token}` } }],
         bind(sessionId) {
           if (sessions.get(entry.key) !== entry) return false;
-          if (typeof sessionId !== "string" || !sessionId || (entry.aoSession && entry.aoSession !== sessionId)) {
+          if (typeof sessionId !== "string" || !sessionId || (entry.aoSession && entry.aoSession !== sessionId)
+            || entry.previewOnly && (!SESSION_ID.test(sessionId) || !sessionId.startsWith(`native:${encodeURIComponent(entry.workspaceId)}:`))) {
             forget(entry.key);
             return false;
           }
@@ -2470,7 +2593,14 @@ function createChatAgentTools({
           save();
           return true;
         },
-        release() { forget(entry.key); },
+        limitLifetime(seconds) {
+          if (entry.previewOnly && Number.isFinite(seconds) && seconds >= 0) {
+            entry.expiresAt = Math.min(entry.expiresAt, now() + seconds * 1000);
+            if (now() >= entry.expiresAt) forget(entry.key, { ended: true });
+            save();
+          }
+        },
+        release({ ended = false } = {}) { forget(entry.key, { ended }); },
       });
     },
     /**
@@ -2482,7 +2612,7 @@ function createChatAgentTools({
      */
     async renew(sessionId) {
       const previous = entryFor(sessionId);
-      if (!previous || !isEnabled() || !MCP_HTTP_AGENTS.has(previous.agent)) return null;
+      if (!previous || previous.previewOnly || !isEnabled() || !MCP_HTTP_AGENTS.has(previous.agent)) return null;
       await listen();
       const { entry, token } = mint({ agent: previous.agent, workspaceId: previous.workspaceId,
         approvalMode: previous.bypass ? "bypass-permissions" : null, autoReview: previous.autoReview, subagent: previous.subagent === true });
@@ -2515,6 +2645,20 @@ function createChatAgentTools({
       for (const entry of [...sessions.values()]) if (entry.aoSession === sessionId) forget(entry.key, { ended: true });
       const retained = paneEntries.get(sessionId);
       if (retained) endCommands(retained);
+    },
+    /** Also reaches restored native credentials, without relying on the workflow's local handles. */
+    revokeNativePreviews({ workspaceId, runId, nodeId = null } = {}) {
+      if (typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)
+        || typeof runId !== "string" || !WORKSPACE_ID.test(runId)
+        || nodeId !== null && (typeof nodeId !== "string" || !WORKSPACE_ID.test(nodeId))) return 0;
+      let revoked = 0;
+      for (const entry of [...sessions.values()]) {
+        if (!entry.previewOnly || entry.workspaceId !== workspaceId || entry.nativeScope?.runId !== runId
+          || nodeId !== null && entry.nativeScope.nodeId !== nodeId) continue;
+        forget(entry.key, { ended: true });
+        revoked++;
+      }
+      return revoked;
     },
     /**
      * What a launch would attach now: the tool groups (agent[+terminal][+desktop]) and this
@@ -2678,10 +2822,12 @@ function createChatAgentTools({
 }
 
 module.exports = Object.freeze({
+  moveTarget,
   AGENT_TOOLS,
   DESKTOP_TOOLS,
   GOAL_TOOLS,
   MCP_HTTP_AGENTS,
+  nativeChatPreviewSessionId,
   SERVER_NAME,
   TERMINAL_TOOLS,
   createChatAgentTools,

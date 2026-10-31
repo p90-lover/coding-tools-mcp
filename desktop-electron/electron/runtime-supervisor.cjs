@@ -4,7 +4,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { execFile, spawn } = require("node:child_process");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
 const {
   DETACH_OWNED_CHILD,
@@ -1469,7 +1469,7 @@ class RuntimeSupervisor {
     try {
       const existing = await this.waitForKnownTunnelStatus(config);
       const matches = !existing.ready || this.reuseTunnelOnlyWhenMatching?.() !== true
-        || this.tunnelOwnerMatches(config, existing.pid);
+        || await this.tunnelOwnerMatches(config, existing.pid);
       if (existing.ready && !matches) {
         // Left running by another build (or by a version before this check): restarted, so it runs
         // the tunnel program this version ships. A 0.8.28 bridge once ran on under 0.8.29.
@@ -1512,7 +1512,7 @@ class RuntimeSupervisor {
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
       await this.waitForTunnelMcpTransport(config);
       this.startTunnelMonitor(config);
-      this.recordTunnelOwner(config, this.tunnel.pid);
+      await this.recordTunnelOwner(config, this.tunnel.pid);
     } catch (error) {
       let cleanupError;
       try {
@@ -1537,19 +1537,21 @@ class RuntimeSupervisor {
   }
 
   /** Which tunnel program a started tunnel runs: its size and change time (a release ships a new one). */
-  tunnelProgramSignature(config) {
+  // The owner record is read and written off the main thread: its synchronous write held every
+  // window 16.4 s on the busy hard disk as a tunnel started (2026-10-31).
+  async tunnelProgramSignature(config) {
     try {
-      const stat = fs.statSync(config.tunnel.binaryPath);
+      const stat = await fs.promises.stat(config.tunnel.binaryPath);
       return `${stat.size}:${Math.round(stat.mtimeMs)}`;
     } catch {
       return null;
     }
   }
 
-  recordTunnelOwner(config, pid) {
+  async recordTunnelOwner(config, pid) {
     try {
-      writePrivateFileAtomic(this.tunnelOwnerPath, `${JSON.stringify({
-        pid, program: this.tunnelProgramSignature(config), appVersion: this.app?.getVersion?.() ?? null,
+      await writePrivateFileAtomicAsync(this.tunnelOwnerPath, `${JSON.stringify({
+        pid, program: await this.tunnelProgramSignature(config), appVersion: this.app?.getVersion?.() ?? null,
       })}\n`);
     } catch (error) {
       this.logger.warn("runtime.tunnel_owner_unrecorded", { message: errorMessage(error) });
@@ -1557,10 +1559,10 @@ class RuntimeSupervisor {
   }
 
   /** Whether the running tunnel `pid` is one this app started, with the tunnel program it ships now. */
-  tunnelOwnerMatches(config, pid) {
+  async tunnelOwnerMatches(config, pid) {
     let owner;
-    try { owner = JSON.parse(fs.readFileSync(this.tunnelOwnerPath, "utf8")); } catch { return false; }
-    const program = this.tunnelProgramSignature(config);
+    try { owner = JSON.parse(await fs.promises.readFile(this.tunnelOwnerPath, "utf8")); } catch { return false; }
+    const program = await this.tunnelProgramSignature(config);
     return Boolean(program) && owner?.pid === pid && owner.program === program;
   }
 

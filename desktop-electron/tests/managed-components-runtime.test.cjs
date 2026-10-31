@@ -142,6 +142,37 @@ function controllerFixture({ fetchImpl, allowNetworkInstall = true, createContro
   return { controller, dataRoot, payload, children };
 }
 
+test("a running component's shown state is read once and rechecked off the main thread", async () => {
+  const published = [];
+  const { controller, dataRoot } = controllerFixture({ sourceRecheckMs: 0, publish: (value) => published.push(value) });
+  try {
+    const first = await controller.startComponent("cpa");
+    const artifact = path.join(first.managedHome, "cpa.bin");
+    const statSync = fs.statSync;
+    const existsSync = fs.existsSync;
+    let reads = 0;
+    fs.statSync = (...args) => { reads += 1; return statSync(...args); };
+    fs.existsSync = (...args) => { reads += 1; return existsSync(...args); };
+    try {
+      // Running: the snapshot answers from what was read, and the recheck runs on fs.promises.
+      fs.renameSync(artifact, path.join(dataRoot, "moved-cpa.bin"));
+      assert.equal(controller.project("cpa").installState, "installed");
+      assert.equal(reads, 0, "no synchronous disk call on the main thread");
+    } finally {
+      fs.statSync = statSync;
+      fs.existsSync = existsSync;
+    }
+    // The recheck finds the missing file and publishes the change.
+    for (let tries = 0; tries < 50 && controller.project("cpa").installState !== "repair-required"; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(controller.project("cpa").installState, "repair-required");
+    assert.equal(published.at(-1).components[0].installState, "repair-required");
+  } finally {
+    controller.dispose();
+  }
+});
+
 test("CPA remains launchable as the sole managed component", async () => {
   const { controller, children } = controllerFixture();
   try {
