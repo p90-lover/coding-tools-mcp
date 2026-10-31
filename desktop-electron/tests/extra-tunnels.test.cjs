@@ -92,6 +92,47 @@ test("adding a tunnel connects it under its own alias and key, and its status ca
   tunnels.detach();
 });
 
+test("the registry is read from disk once; later reads and monitor passes use the saved copy", async () => {
+  const { coreHome, config, tunnels } = setup();
+  await tunnels.start(config);
+  const added = await tunnels.add({ label: "Team", tunnelId: SECOND_ID, runtimeKey: "sk", accountId: "acct-2" });
+  const registry = path.join(coreHome, "tunnel", "extra-tunnels.json");
+  const readFileSync = fs.readFileSync;
+  const reads = [];
+  fs.readFileSync = (file, ...rest) => { if (file === registry) reads.push(file); return readFileSync(file, ...rest); };
+  try {
+    await tunnels.check();
+    assert.deepEqual(tunnels.status().map(entry => entry.id), [added.id]);
+    await tunnels.setConnector(added.id, "https://chatgpt.com/connector");
+    assert.equal(tunnels.status()[0].connectorHref, "https://chatgpt.com/connector");
+  } finally { fs.readFileSync = readFileSync; }
+  assert.deepEqual(reads, []);
+  // What it saved is what a new launcher reads, once the write it started is in place.
+  await tunnels.written();
+  const next = new ExtraTunnels({ coreHome, runTunnel: async () => ({ code: 0, output: "{}" }), connectArgs: () => [] });
+  assert.equal(next.entries()[0].connectorHref, "https://chatgpt.com/connector");
+  tunnels.detach();
+});
+
+test("a registry write that fails is not kept: the next read takes what is on disk", async () => {
+  const { coreHome, config, tunnels } = setup();
+  await tunnels.start(config);
+  const added = await tunnels.add({ label: "Team", tunnelId: SECOND_ID, runtimeKey: "sk", accountId: "acct-2" });
+  const registry = path.join(coreHome, "tunnel", "extra-tunnels.json");
+  const onDisk = fs.readFileSync(registry, "utf8");
+  // A folder in the file's place: replacing it fails.
+  fs.rmSync(registry);
+  fs.mkdirSync(registry);
+  const failedWrite = tunnels.setConnector(added.id, "https://chatgpt.com/connector");
+  assert.equal(tunnels.status()[0].connectorHref, "https://chatgpt.com/connector", "shown before the write lands");
+  await assert.rejects(failedWrite);
+  await tunnels.written();
+  fs.rmdirSync(registry);
+  fs.writeFileSync(registry, onDisk);
+  assert.equal(tunnels.status()[0].connectorHref, null);
+  tunnels.detach();
+});
+
 test("a tunnel that does not connect is not kept", async () => {
   const { coreHome, config, tunnels } = setup({ connectFails: true });
   await tunnels.start(config);
@@ -218,10 +259,10 @@ test("connector bindings keep Personal and Business identities distinct without 
   const businessId = "602b5d8d-e211-49b1-9762-206108d52954";
   const personalId = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122";
   const binding = workspaceId => ({ userId: "user-fixture", workspaceId, tunnelId: SECOND_ID, runtimeKey: "DO_NOT_RETURN" });
-  tunnels.setConnector(added.id, "/plugins/legacy-display");
+  await tunnels.setConnector(added.id, "/plugins/legacy-display");
   assert.deepEqual(tunnels.status()[0].connectorBindings, [], "old scalar links do not establish a workspace binding");
-  tunnels.setConnector(added.id, "/plugins/business", binding(businessId));
-  tunnels.setConnector(added.id, "/plugins/personal?directoryTab=personal", binding(personalId));
+  await tunnels.setConnector(added.id, "/plugins/business", binding(businessId));
+  await tunnels.setConnector(added.id, "/plugins/personal?directoryTab=personal", binding(personalId));
   const status = tunnels.status()[0];
   assert.equal(status.connectorHref, "/plugins/personal?directoryTab=personal", "the scalar remains available to the existing UI");
   assert.deepEqual(status.connectorBindings, [
@@ -229,8 +270,8 @@ test("connector bindings keep Personal and Business identities distinct without 
     { userId: "user-fixture", workspaceId: personalId, tunnelId: SECOND_ID, href: "/plugins/personal" },
   ]);
   assert.doesNotMatch(JSON.stringify(status), /PRIVATE_KEY|DO_NOT_RETURN|runtimeKey/);
-  assert.throws(() => tunnels.setConnector(added.id, "/plugins/wrong", { ...binding(personalId), tunnelId: THIRD_ID }), /binding.*tunnel/i);
-  assert.throws(() => tunnels.setConnector(added.id, "https://other.example/plugins/wrong", binding(personalId)), /binding/i);
+  await assert.rejects(tunnels.setConnector(added.id, "/plugins/wrong", { ...binding(personalId), tunnelId: THIRD_ID }), /binding.*tunnel/i);
+  await assert.rejects(tunnels.setConnector(added.id, "https://other.example/plugins/wrong", binding(personalId)), /binding/i);
   assert.equal(tunnels.status()[0].connectorBindings.length, 2, "invalid bindings cannot replace either workspace");
 });
 

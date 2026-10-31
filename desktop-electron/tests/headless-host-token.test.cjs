@@ -73,6 +73,29 @@ test("startup resolves a junction profile before passing private paths to the se
   } finally { await host.shutdown("junction-test"); }
 });
 
+test("the service's program is warmed off the main thread before it is started", async (t) => {
+  // 2026-10-31: spawning it cold held every window 1.85 s while Windows loaded and scanned it.
+  const { base, binaryRoot } = startupFixture(t, FAKE_SERVICE);
+  const profile = path.join(base, "profile");
+  const logger = { info() {}, warn() {}, error() {} };
+  const warmed = [];
+  const { warmProgram } = require("../electron/off-thread-run.cjs");
+  const host = new HeadlessHost({ app: { getPath: () => profile, isPackaged: false }, logger, sourceRoot: base, binaryRoot,
+    warm: async (file, args) => {
+      const tokens = path.join(profile, "headless", "aiTemp", "headless-control");
+      warmed.push({ file, args, started: Boolean(host.child), tokens: fs.existsSync(tokens) ? fs.readdirSync(tokens).length : 0 });
+      await warmProgram(file, args);
+    } });
+  try {
+    await host.ensureStarted();
+    assert.equal(warmed.length, 1, "warmed once");
+    assert.equal(path.dirname(warmed[0].file), path.join(binaryRoot, "coding-tools"));
+    assert.deepEqual({ ...warmed[0], file: undefined }, { file: undefined, args: ["--version"], started: false, tokens: 0 },
+      "with an argument it exits on, before the service or its token exists");
+    assert.equal((await host.request("/api/v1/anything")).ok, true, "the service then starts as before");
+  } finally { await host.shutdown("warm-test"); }
+});
+
 test("a failed startup reports bounded sanitized stderr without exposing control credentials", async (t) => {
   const secret = "S".repeat(64);
   const source = `process.stdin.once("data", data => {

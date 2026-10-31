@@ -844,6 +844,113 @@ fn cancel_pending(data: &mut AppData, workspace_id: &str, task_id: &str) {
     }
 }
 
+/// Moves a chat (a board task with its runs and lifecycle) from `source` to the `target`
+/// workspace, whose folder its next session then works in. Task and run ids are global, so they
+/// stay: the chat keeps every message and reply. Only an idle chat moves: no card reserved or
+/// running, nothing scheduled or being reconfigured, no execution mission of its own. A failed
+/// move changes nothing.
+pub fn move_chat(
+    data: &mut AppData,
+    source: &str,
+    target: &str,
+    task_id: &str,
+    expected_board_revision: u64,
+    now_ms: u64,
+) -> AppResult<Value> {
+    valid_id(source)?;
+    valid_id(target)?;
+    valid_id(task_id)?;
+    if source == target {
+        return Err(err("The chat is already in this project"));
+    }
+    if !data.profiles.iter().any(|profile| profile.id == target) {
+        return Err(err("The target project does not exist"));
+    }
+    if data.control_board.revision != expected_board_revision {
+        return Err(err("The board changed; refresh before moving the chat"));
+    }
+    let mut next = data.clone();
+    let task = next
+        .control_board
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == task_id && task.workspace_id == source)
+        .ok_or_else(|| err("Task is not registered in this workspace"))?;
+    if task.state == "archived" {
+        return Err(err("An archived chat cannot move; restore it first"));
+    }
+    if active_work(data, source, task_id) {
+        return Err(err(
+            "The chat is still working; move it once its turn has ended",
+        ));
+    }
+    if let Some(item) = data
+        .ao_task_lifecycle
+        .iter()
+        .find(|item| item.workspace_id == source && item.task_id == task_id)
+    {
+        if item.visibility != Visibility::Active {
+            return Err(err(
+                "An archived or deleted chat cannot move; restore it first",
+            ));
+        }
+        if !item.reconfigure.is_empty() {
+            return Err(err(
+                "The chat is being reconfigured; move it once that finishes",
+            ));
+        }
+        if item.schedule.as_ref().is_some_and(|schedule| {
+            matches!(
+                schedule.state,
+                ScheduleState::Scheduled | ScheduleState::Claimed
+            )
+        }) {
+            return Err(err(
+                "The chat has a scheduled start; cancel it before moving the chat",
+            ));
+        }
+    }
+    if data.execution_book.missions.iter().any(|entry| {
+        entry.mission.spec.workspace_id == source && entry.mission.spec.task_id == task_id
+    }) {
+        return Err(err(
+            "The chat has an execution mission, which stays with its project",
+        ));
+    }
+    task.workspace_id = target.into();
+    task.updated_at = now_ms;
+    next.control_board.revision += 1;
+    let mut runs = Vec::new();
+    for run in next
+        .ao_runs
+        .iter_mut()
+        .filter(|run| run.workspace_id == source && run.project_id == task_id)
+    {
+        run.workspace_id = target.into();
+        // A settled run's grant was for the old folder; it is never spent again.
+        run.grant = None;
+        run.revision += 1;
+        if let Some(team) = run.team.as_mut().filter(|team| team.workspace_id == source) {
+            team.workspace_id = target.into();
+        }
+        runs.push(run.id.clone());
+    }
+    for item in next
+        .ao_task_lifecycle
+        .iter_mut()
+        .filter(|item| item.workspace_id == source && item.task_id == task_id)
+    {
+        item.workspace_id = target.into();
+        item.revision += 1;
+    }
+    let board_revision = next.control_board.revision;
+    *data = next;
+    Ok(
+        json!({"ok":true,"task_id":task_id,"from":source,"to":target,
+        "runs":runs,"board_revision":board_revision}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1196,5 +1303,94 @@ mod tests {
             .nodes
             .iter()
             .all(|n| n.state == ao::State::Pending));
+    }
+
+    fn with_second_project(mut data: AppData) -> AppData {
+        data.profiles.push(
+            serde_json::from_value(json!({"id":"qb","name":"QB",
+            "path":env!("CARGO_MANIFEST_DIR"),"tunnel":{},"auth":{"type":"bearer"},
+            "runtime":{},"actions":{}}))
+            .unwrap(),
+        );
+        data
+    }
+
+    #[test]
+    fn an_idle_chat_moves_with_its_runs_and_lifecycle() {
+        let mut data = with_second_project(fixture());
+        // Archived and restored: the chat has a lifecycle record to move too.
+        change(
+            &mut data,
+            json!({"operation":"set_visibility","task_id":"goal","expected_revision":0,"visibility":"archived"}),
+            50,
+        )
+        .unwrap();
+        change(
+            &mut data,
+            json!({"operation":"restore_task","task_id":"goal","expected_revision":1}),
+            60,
+        )
+        .unwrap();
+        assert_eq!(data.ao_task_lifecycle.len(), 1);
+        let revision = data.control_board.revision;
+        let moved = move_chat(&mut data, "qa", "qb", "goal", revision, 100).unwrap();
+        assert_eq!(moved["runs"], json!(["old"]));
+        assert_eq!(moved["board_revision"], revision + 1);
+        let task = &data.control_board.tasks[0];
+        assert_eq!((task.workspace_id.as_str(), task.updated_at), ("qb", 100));
+        let run = data.ao_runs.iter().find(|run| run.id == "old").unwrap();
+        assert_eq!(run.workspace_id, "qb");
+        assert!(run.grant.is_none());
+        assert_eq!(run.team.as_ref().unwrap().workspace_id, "qb");
+        assert!(data
+            .ao_task_lifecycle
+            .iter()
+            .all(|item| item.workspace_id == "qb"));
+        assert!(read_runs(&data, "qa", None).unwrap().is_empty());
+        assert_eq!(read_runs(&data, "qb", None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_chat_moves_only_when_idle_to_another_known_project() {
+        let base = with_second_project(fixture());
+        let revision = base.control_board.revision;
+        let refused = |data: &mut AppData, target: &str, revision: u64| {
+            let before = serde_json::to_value(&*data).unwrap();
+            let error = move_chat(data, "qa", target, "goal", revision, 1)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                serde_json::to_value(&*data).unwrap(),
+                before,
+                "a refused move changes nothing"
+            );
+            error
+        };
+        let mut data = base.clone();
+        assert!(refused(&mut data, "qa", revision).contains("already in this project"));
+        assert!(refused(&mut data, "nowhere", revision).contains("does not exist"));
+        assert!(refused(&mut data, "qb", revision + 1).contains("board changed"));
+        data.ao_runs[0].nodes[0].state = ao::State::Running;
+        assert!(refused(&mut data, "qb", revision).contains("still working"));
+        let mut data = base.clone();
+        change(
+            &mut data,
+            json!({"operation":"schedule_start","task_id":"goal","intent_id":"job",
+            "expected_revision":0,"run_id":"delayed","team_id":"team","team_revision":1,
+            "due_at_ms":1000}),
+            10,
+        )
+        .unwrap();
+        let revision = data.control_board.revision;
+        assert!(refused(&mut data, "qb", revision).contains("scheduled start"));
+        let mut data = base;
+        change(
+            &mut data,
+            json!({"operation":"set_visibility","task_id":"goal","expected_revision":0,"visibility":"archived"}),
+            10,
+        )
+        .unwrap();
+        let revision = data.control_board.revision;
+        assert!(refused(&mut data, "qb", revision).contains("archived"));
     }
 }

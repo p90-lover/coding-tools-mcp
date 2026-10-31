@@ -6,7 +6,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const TUNNEL_ID = /^tunnel_[a-f0-9]{32}$/;
 const ENTRY_ID = /^[a-f0-9]{8}$/;
@@ -85,6 +85,8 @@ class ExtraTunnels {
     this.monitorTimer = null;
     this.monitorInFlight = false;
     this.queue = Promise.resolve();
+    this.saved = null; // the registry's entries once read (entries())
+    this.writes = Promise.resolve(); // registry writes, in order (writeEntries)
   }
 
   /** Mutating work runs one at a time: starts, adds, removals, reconnects and monitor restarts. */
@@ -94,18 +96,45 @@ class ExtraTunnels {
     return run;
   }
 
+  // Only this class writes the registry, so it is read from disk once and kept: the monitor read it
+  // every 10 s and the Tunnels page on each refresh, and one read held every window 23.7 s on the
+  // busy hard disk (ExtraTunnels.check, 2026-10-31). A read that fails for another reason than a
+  // missing file is not kept, so the next call tries again.
   entries() {
-    let parsed;
-    try {
-      parsed = JSON.parse(fs.readFileSync(this.registryPath, "utf8"));
-    } catch {
-      return [];
+    if (!this.saved) {
+      let parsed;
+      try {
+        parsed = JSON.parse(fs.readFileSync(this.registryPath, "utf8"));
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) return [];
+        parsed = null;
+      }
+      this.saved = Array.isArray(parsed?.tunnels) ? parsed.tunnels.filter(validEntry) : [];
     }
-    return Array.isArray(parsed?.tunnels) ? parsed.tunnels.filter(validEntry) : [];
+    return [...this.saved];
   }
 
+  /**
+   * Keeps `tunnels` as the registry now and writes it off the main thread, one write at a time in
+   * the order asked: the synchronous write held every window 14.5 s when a connector was recorded
+   * on the busy hard disk (2026-10-31). Resolves once this write is in place; a failed write drops
+   * the kept copy, so the next read takes what is on disk.
+   */
   writeEntries(tunnels) {
-    writePrivateFileAtomic(this.registryPath, `${JSON.stringify({ version: 1, tunnels }, null, 2)}\n`);
+    const saved = tunnels.filter(validEntry);
+    this.saved = saved;
+    const text = `${JSON.stringify({ version: 1, tunnels }, null, 2)}\n`;
+    const write = this.writes.catch(() => undefined).then(() => writePrivateFileAtomicAsync(this.registryPath, text));
+    this.writes = write.catch(error => {
+      if (this.saved === saved) this.saved = null;
+      this.logger?.warn?.("runtime.extra_tunnels_save_failed", { message: message(error) });
+    });
+    return write;
+  }
+
+  /** Resolves once every registry write asked for so far is done (or failed). */
+  written() {
+    return this.writes;
   }
 
   keyPath(id) {
@@ -293,12 +322,12 @@ class ExtraTunnels {
       let entryId;
       do entryId = crypto.randomBytes(4).toString("hex"); while (entries.some(entry => entry.id === entryId));
       const entry = { id: entryId, label: name, tunnelId: id, accountId };
-      writePrivateFileAtomic(this.keyPath(entryId), key);
-      this.writeEntries([...entries, entry]);
+      await writePrivateFileAtomicAsync(this.keyPath(entryId), key);
+      await this.writeEntries([...entries, entry]);
       try {
         await this.connect(entry, config);
       } catch (error) {
-        this.writeEntries(this.entries().filter(candidate => candidate.id !== entryId));
+        await this.writeEntries(this.entries().filter(candidate => candidate.id !== entryId)).catch(() => undefined);
         fs.rmSync(this.keyPath(entryId), { force: true });
         this.runtime.delete(entryId);
         this.onChange(this.status());
@@ -314,7 +343,7 @@ class ExtraTunnels {
       const entry = this.entries().find(candidate => candidate.id === id);
       if (!entry) throw new Error("That tunnel is not configured.");
       if (this.config) await this.stopAlias(this.tunnelFor(entry, this.config));
-      this.writeEntries(this.entries().filter(candidate => candidate.id !== id));
+      await this.writeEntries(this.entries().filter(candidate => candidate.id !== id));
       fs.rmSync(this.keyPath(id), { force: true });
       this.runtime.delete(id);
       this.onChange(this.status());
@@ -335,7 +364,7 @@ class ExtraTunnels {
   }
 
   /** Records scoped connector identities; saved records still require fresh remote verification. */
-  setConnector(id, href, context) {
+  async setConnector(id, href, context) {
     const entries = this.entries();
     const entry = entries.find(entry => entry.id === id);
     if (!entry) throw new Error("That tunnel is not configured.");
@@ -345,7 +374,7 @@ class ExtraTunnels {
       .map(saved => connectorBinding(saved, entry.tunnelId)).filter(Boolean);
     const next = binding ? bindings.filter(saved => saved.userId !== binding.userId || saved.workspaceId !== binding.workspaceId)
       .concat(binding).slice(-MAX_CONNECTOR_BINDINGS) : bindings;
-    this.writeEntries(entries.map(entry => (entry.id === id ? { ...entry, connectorHref: href, connectorBindings: next } : entry)));
+    await this.writeEntries(entries.map(entry => (entry.id === id ? { ...entry, connectorHref: href, connectorBindings: next } : entry)));
     this.onChange(this.status());
   }
 
@@ -354,7 +383,7 @@ class ExtraTunnels {
     const entries = this.entries();
     const owned = entries.filter(entry => entry.accountId === accountId).length;
     if (!owned) return 0;
-    this.writeEntries(entries.map(entry => (entry.accountId === accountId ? { ...entry, accountId: null } : entry)));
+    void this.writeEntries(entries.map(entry => (entry.accountId === accountId ? { ...entry, accountId: null } : entry))).catch(() => undefined);
     this.onChange(this.status());
     return owned;
   }

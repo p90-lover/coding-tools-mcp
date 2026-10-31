@@ -488,8 +488,21 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   const react = { useMemo: calculate => calculate(), useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
     createContext: value => ({ Provider: ({ children }) => children, value }), useContext: context => context.value,
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
+  const replyHead = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatReplyHead.tsx"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+  { exports: replyHead, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat : {} });
+  const replyPlan = {};
+  const replyPlanView = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/chat-reply-plan.ts"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: replyPlan, require: name => name === "./ao-chat" ? chat : {} });
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatReplyPlan.tsx"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+  { exports: replyPlanView, require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {} });
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
+      : name === "./ChatReplyHead" ? replyHead
+      : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView
       : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
       : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
@@ -631,7 +644,7 @@ function surfaceComposer(seed = {}) {
   return { state, calls, render, walk, currentChat };
 }
 
-test("split view: Split view and New chat add panes, the sidebar fills the focused pane, and closing the window's chat promotes the next", () => {
+test("split view: Split view adds a pane, New chat opens in the focused pane, the sidebar fills it, and closing the window's chat promotes the next", () => {
   const fixture = surfaceComposer({ chatTaskId: "t1" });
   const list = () => fixture.walk(fixture.render()).find(item => item.props?.actions?.openSplit);
   const panes = () => plain(fixture.state.splitPanes.map(item => [item.taskId, item.col, item.row]));
@@ -644,28 +657,42 @@ test("split view: Split view and New chat add panes, the sidebar fills the focus
   assert.equal(fixture.state.focusedPane, "main", "a chat already open is focused, never opened twice");
   assert.deepEqual(plain(list().props.openTaskIds), ["t1", "t2"], "the sidebar offers no Split view for them");
 
-  // The user's rule: New chat in a split window opens one more pane instead of replacing a chat.
+  // The user's rule (2026-10-31, replacing "New chat opens one more pane"): New chat opens in the
+  // focused pane, in place of its chat; it never adds a screen.
+  fixture.state.focusedPane = fixture.state.splitPanes[0].id;
   list().props.actions.newChat();
-  assert.deepEqual(panes(), [["t2", 1, 0], ["", 0, 1]], "two columns full: below the window's chat");
+  assert.deepEqual(panes(), [["", 1, 0]], "the focused pane shows a new chat; no pane is added");
   assert.equal(fixture.state.chatTaskId, "t1", "the window's own chat stays");
-  const draft = fixture.state.splitPanes[1];
+  const draft = fixture.state.splitPanes[0];
   assert.equal(fixture.state.focusedPane, draft.id);
+  const host0 = fixture.walk(fixture.render()).find(item => Array.isArray(item.props?.panes));
+  host0.props.panes[0].content.props.pane.onNewChat("w");
+  assert.equal(fixture.state.splitPanes.length, 1, "a pane's own New chat stays in that pane");
+  list().props.actions.select("t2");
+  fixture.state.focusedPane = "main";
+  list().props.actions.newChat();
+  assert.equal(fixture.state.chatTaskId, "", "with the window's chat focused, New chat replaces that one");
+  assert.deepEqual(panes(), [["t2", 1, 0]], "and the panes stay as they were");
+  list().props.actions.select("t1");
+  fixture.state.focusedPane = fixture.state.splitPanes[0].id;
+  list().props.actions.newChat();
 
   // A sidebar click goes to the focused pane.
   list().props.actions.select("t3");
-  assert.deepEqual(panes(), [["t2", 1, 0], ["t3", 0, 1]]);
+  assert.deepEqual(panes(), [["t3", 1, 0]]);
   assert.equal(list().props.selectedTaskId, "t3", "the sidebar marks the focused pane's chat");
 
   const host = fixture.walk(fixture.render()).find(item => Array.isArray(item.props?.panes));
-  assert.deepEqual(plain(host.props.panes.map(item => [item.content.props.pane.workspaceId, item.content.props.pane.taskId])), [["w", "t2"], ["w", "t3"]],
+  assert.deepEqual(plain(host.props.panes.map(item => [item.content.props.pane.workspaceId, item.content.props.pane.taskId])), [["w", "t3"]],
     "each pane is a Surface of its own, told which chat to show");
   assert.equal(typeof fixture.currentChat().props.onClosePane, "function", "while split the window's chat has Close split view too");
 
   // Closing the window's chat: the first pane with a chat, by column then row, takes its place.
   fixture.currentChat().props.onClosePane();
   assert.equal(fixture.state.chatTaskId, "t3");
-  assert.deepEqual(panes(), [["t2", 1, 0]]);
-  host.props.panes[0].content.props.pane.onClose();
+  assert.deepEqual(panes(), []);
+  list().props.actions.openSplit("w", "t2");
+  fixture.walk(fixture.render()).find(item => Array.isArray(item.props?.panes)).props.panes[0].content.props.pane.onClose();
   assert.deepEqual(panes(), [], "closing the last pane leaves one chat");
 });
 

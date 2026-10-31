@@ -37,7 +37,7 @@ function tempTree() {
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
-  chatTitles = null, redaction = null, computerControl = null, previews = null, previewEnabled = () => true,
+  chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, previewEnabled = () => true,
   registry = [{ id: "ws1", path: path.join(os.tmpdir(), "task") }, { id: "ws2", path: path.join(os.tmpdir(), "other") }] } = {}) {
   const calls = [];
   const asked = [];
@@ -48,7 +48,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
-    ...(computerControl ? { computerControl } : {}),
+    ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -1319,6 +1319,61 @@ test("rename_chat names the agent's own chat, is in its instructions, and is off
   } finally { await tools.close(); await plain.tools.close(); }
 });
 
+test("moveTarget picks a project by id, name or folder, and says what is wrong otherwise", () => {
+  const projects = [
+    { id: "ws1", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" },
+    { id: "ws2", name: "Clash Macro", path: "G:\\Projects\\clash-of-clan-macro" },
+  ];
+  const { moveTarget } = require("../electron/chat-agent-tools.cjs");
+  assert.equal(moveTarget(projects, { project: "ws2" }, "win32").id, "ws2", "by id");
+  assert.equal(moveTarget(projects, { project: "clash macro" }, "win32").id, "ws2", "by name, any case");
+  assert.equal(moveTarget(projects, { path: "g:/projects/Clash-Of-Clan-Macro/" }, "win32").id, "ws2",
+    "a Windows folder matches whatever its case, slashes or trailing separator");
+  assert.throws(() => moveTarget(projects, { path: "G:\\Projects\\elsewhere" }, "win32"), /No project uses/);
+  assert.throws(() => moveTarget(projects, { path: "relative\\folder" }, "win32"), /absolute/);
+  assert.throws(() => moveTarget(projects, { project: "nope" }, "win32"), /No project/);
+  assert.throws(() => moveTarget(projects, {}, "win32"), /project.*path|path.*project/i);
+  assert.throws(() => moveTarget(projects, { project: "ws2", path: "G:\\Projects\\clash-of-clan-macro" }, "win32"), /one of/i);
+});
+
+test("move_chat asks the user, then moves the agent's own chat when its turn ends", async () => {
+  // The user: "add a allow model to move chat session and modify its path on chat tools".
+  const moves = [];
+  const chatMoves = {
+    projects: async () => [
+      { id: "ws1", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" },
+      { id: "ws2", name: "Clash Macro", path: "G:\\Projects\\clash-of-clan-macro" },
+    ],
+    move: async (request) => { moves.push(request); return { ok: true, taskId: "task-1", to: request.targetWorkspaceId, deferred: true }; },
+  };
+  let allow = true;
+  const { tools, confirmations } = fixture({ chatMoves, confirm: async () => allow });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "move-owner" });
+    assert.ok((await listed(client.url, client.auth)).includes("move_chat"));
+    const init = await post(client.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, client.auth);
+    assert.match(init.body.result.instructions, /move this chat to another project .*call move_chat/);
+    const moved = await callTool(client.url, client.auth, "move_chat", { project: "Clash Macro" });
+    assert.equal(moved.isError, undefined);
+    assert.match(moved.content[0].text, /moves to Clash Macro when this turn ends/);
+    assert.deepEqual(moves, [{ workspaceId: "ws1", session: "move-owner", targetWorkspaceId: "ws2" }],
+      "the chat and session are the server's own, never ones the agent names");
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0].message, /move its chat to another project/);
+    assert.match(JSON.stringify(confirmations[0].detail), /clash-of-clan-macro/, "the dialog shows where it goes");
+    allow = false;
+    const declined = await callTool(client.url, client.auth, "move_chat", { project: "ws2" });
+    assert.equal(declined.isError, true);
+    assert.match(declined.content[0].text, /did not allow/);
+    assert.equal((await callTool(client.url, client.auth, "move_chat", { project: "coding-tools-mcp" })).isError, true, "not to its own project");
+    assert.equal(moves.length, 1);
+    const other = await session(plain.tools, { id: "no-move" });
+    assert.equal((await listed(other.url, other.auth)).includes("move_chat"), false);
+    assert.equal((await callTool(other.url, other.auth, "move_chat", { project: "ws2" })).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
 test("redact_message hides secrets in the agent's own chat, lists the user's kinds, and follows the setting", async () => {
   // The user: tools "that allow model to edit the message that user sent on chat when it contain secret",
   // with "a options on settings and with a list that tell ai what input message to blurr".
@@ -2228,6 +2283,49 @@ test("computer control is asked on a card in the chat, never in a window of its 
     assert.deepEqual(control.requests(), [], "a stopped chat's card goes");
   } finally { control.dispose(); }
   assert.ok(!barPage({ title: "</span><script>" }).includes("</span><script>"));
+});
+
+// Seen live on 0.8.39 (2026-10-31): a data: page never navigates in-page, so the picker's Start and
+// the bar's Stop, both sent as a hash change, never reached the app.
+test("the control bar's Stop reaches the app on a data: page: it renames the page, not its hash", async () => {
+  const vm = require("node:vm");
+  const { createComputerControl, barPage } = require("../electron/computer-control.cjs");
+  const page = barPage({ title: "Calculator" });
+  assert.doesNotMatch(page, /location\.hash/, "a hash change never fires on a data: page");
+  // The page's own script, run against a stand-in document: Stop renames the page.
+  const elements = { stop: {}, left: {} };
+  const document = { title: "Computer control is on", getElementById: (id) => elements[id] };
+  vm.runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document, window: {} });
+  elements.stop.onclick();
+
+  const calls = [];
+  const handlers = {};
+  class FakeWindow {
+    constructor() { this.webContents = { on: (name, handler) => { handlers[name] = handler; }, setWindowOpenHandler() {}, executeJavaScript: async () => undefined }; }
+    setAlwaysOnTop() {} on() {} showInactive() {} destroy() {}
+    loadURL() { return Promise.resolve(); }
+    isDestroyed() { return false; }
+    isVisible() { return true; }
+  }
+  const request = async (endpoint, body) => {
+    calls.push(endpoint);
+    if (endpoint === "/api/v1/computer/targets") return { targets: [{ window_id: 7, pid: 70, title: "Calculator" }] };
+    if (endpoint === "/api/v1/workspaces") return { workspaces: [{ id: "ws", name: "proj", screen_capture_enabled: true }] };
+    return {};
+  };
+  const control = createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1],
+    screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+  try {
+    const asked = control.pick({ workspaceId: "ws", aoSession: "s1" });
+    for (let tick = 0; tick < 50 && !control.requests().length; tick += 1) await new Promise(setImmediate);
+    assert.deepEqual(await control.answer({ id: control.requests()[0].id, window: 0, duration: "300" }), { ok: true });
+    await asked;
+    let prevented = false;
+    handlers["page-title-updated"]({ preventDefault: () => { prevented = true; } }, document.title);
+    await new Promise(setImmediate);
+    assert.ok(calls.includes("/api/v1/computer/stop"), "Stop on the bar stops control");
+    assert.ok(prevented, "and the bar keeps its own title");
+  } finally { control.dispose(); }
 });
 
 test("turning the app's tools off refuses calls in running sessions", async () => {

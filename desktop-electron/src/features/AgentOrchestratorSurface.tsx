@@ -1913,6 +1913,12 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setSplitPanes((current) => normalizeSplit([...current, added]));
     setFocusedPane(added.id);
   };
+  /** A new chat in this pane, in place of the chat it showed. */
+  const newChatInPane = (paneId: string, id: string) => {
+    setView("chat"); setSheet("");
+    setSplitPanes((current) => current.map((item) => item.id === paneId ? { ...item, workspaceId: id, taskId: "" } : item));
+    setFocusedPane(paneId);
+  };
   /**
    * A pane dragged by its grip (Claude Code's pane move): to a new column or another cell, trading
    * places with the pane there; dropped in front of the window's own chat, it becomes that chat and
@@ -2049,10 +2055,14 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     }
     if (id === workspaceId) selectChat(taskId); else selectChatIn(id, taskId);
   };
-  /** New chat: in a split window it opens a pane of its own; otherwise it replaces the open chat. */
+  /**
+   * New chat: in the focused pane, in place of its chat. It opened a pane of its own in a split
+   * window, so each New chat added one more screen (2026-10-31: the user asked for it to open where
+   * they were). Ctrl+Alt+\ / Ctrl+Alt+- and dragging a chat still open more panes.
+   */
   const openNewChat = (id = workspaceId) => {
     if (pane) { pane.onNewChat(id); return; }
-    if (splitPanes.length) { openInSplit(id, ""); return; }
+    if (focusedSplit) { newChatInPane(focusedSplit.id, id); return; }
     if (id === workspaceId) startNewChat();
     else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); }
   };
@@ -2246,6 +2256,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         switchToWorkspace(id);
       });
   };
+  // The open chat moved to another project (its agent's move_chat): follow it there.
+  useEffect(() => onAoPush((change) => {
+    const moved = change.moved?.find((entry) => entry.from === workspaceId && entry.taskId === chatTaskId);
+    if (moved) selectChatIn(moved.to, moved.taskId);
+  }), [workspaceId, chatTaskId, loadedWorkspace]);
   useEffect(() => {
     const pending = pendingSelect.current;
     if (!pending || pending.workspaceId !== workspaceId) return;
@@ -2404,14 +2419,32 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       await moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "edit", objective });
       await loadMissions(workspaceId);
     },
-    compact: async () => {
+    compact: async (instructions = "") => {
       if (!chatTaskId) throw new Error("Open a chat first");
-      const result = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId });
+      const result = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId, ...(instructions ? { instructions } : {}) });
       await loadBoard(workspaceId);
       const full = (size: number) => Math.round(size / CHAT_CONTEXT_LIMIT * 100);
       return result.compacted
         ? `Context compacted from ${Number(result.before).toLocaleString("en-US")} to ${Number(result.after).toLocaleString("en-US")} characters, now ${full(Number(result.after))}% full.`
         : `Nothing to compact yet. The context is ${Number(result.before).toLocaleString("en-US")} characters, ${full(Number(result.before))}% full.`;
+    },
+    autoCompact: async (change = {}) => {
+      const result = await moduleCall("chat_auto_compact", change);
+      return { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || 95, limit: Number(result.limit) || CHAT_CONTEXT_LIMIT };
+    },
+    context: async () => {
+      const description = board?.tasks.find(task => task.id === chatTaskId)?.description ?? "";
+      const setting = await moduleCall("chat_auto_compact", {});
+      const percent = Number(setting.percent) || 95;
+      const used = Math.round(description.length / CHAT_CONTEXT_LIMIT * 100);
+      // A compacted chat starts with its summary's heading (compactChat), which says when.
+      const compacted = /^Summary of the earlier conversation \(compacted ([^)]+) UTC\)/.exec(description)?.[1];
+      const rows: [string, string][] = [
+        ["Context", `${description.length.toLocaleString("en-US")} of ${CHAT_CONTEXT_LIMIT.toLocaleString("en-US")} characters (${used}% full)`],
+        ["Auto-compact", setting.autoCompact === false ? "Off: a full chat stops until you /compact" : `On: compacts before a message that would fill ${percent}%`],
+        ["Last compacted", compacted ? `${compacted} UTC` : "Never"],
+      ];
+      return { title: "Context", rows, text: "The chat's context is its messages, sent to every new agent session. Each agent also compacts its own session by itself." };
     },
     diff: async () => {
       const result = await moduleCall("chat_diff", { workspaceId });
@@ -2453,13 +2486,13 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // Archived chats of every project, for the list's Archived section (grouped by project there).
   // Reading them also moves chats archived longer than the set days to "deleted", so it runs when
   // the list opens, after any chat is archived or restored here, and hourly.
-  const [archivedAll, setArchivedAll] = useState<{ days: number; chats: ArchivedChat[] } | null>(null);
+  const [archivedAll, setArchivedAll] = useState<{ days: number; idleDays: number; chats: ArchivedChat[] } | null>(null);
   const workspaceIds = workspaces.map((item) => item.id).join("\n");
   const archivedKey = taskLifecycle.map((item) => `${item.task_id}:${item.visibility}`).join(",");
   const loadArchived = useCallback(async () => {
     if (!workspaceIds) return;
     const result = await moduleCall("archived_chats", { workspaceIds: workspaceIds.split("\n") }).catch(() => null);
-    if (result && Array.isArray(result.chats)) setArchivedAll({ days: Number(result.days) || 0, chats: result.chats as ArchivedChat[] });
+    if (result && Array.isArray(result.chats)) setArchivedAll({ days: Number(result.days) || 0, idleDays: Number(result.idleDays) || 0, chats: result.chats as ArchivedChat[] });
   }, [workspaceIds]);
   useEffect(() => {
     void loadArchived();
@@ -2471,9 +2504,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     await moduleCall("restore_task", { workspaceId: id, taskId });
     await loadArchived();
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-  const setArchiveDays = (days: number) => void (async () => {
-    const result = await moduleCall("archive_settings", { days });
-    setArchivedAll((current) => current && { ...current, days: Number(result.days) });
+  const setArchiveDays = (change: { days?: number; idleDays?: number }) => void (async () => {
+    const result = await moduleCall("archive_settings", change);
+    setArchivedAll((current) => current && { ...current, days: Number(result.days), idleDays: Number(result.idleDays) });
     await loadArchived();
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
 
@@ -2689,7 +2722,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
           onMovePane={pane ? undefined : moveSplitPane}
           panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError}
-            pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => openInSplit(id, ""), onClose: () => closeSplitPane(item.id),
+            pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
               onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
         {view === "chat" ? (
           !workspaceId && workspaceReady

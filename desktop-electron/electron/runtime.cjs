@@ -467,6 +467,37 @@ class RuntimeHost {
     };
   }
 
+  /**
+   * runtimeConfigSnapshot for timers and async callers, without a synchronous disk call: the MCP
+   * events monitor's 30 s check of the bridge went through the synchronous one, whose statSync of
+   * config.json froze every window for up to 7.9 s on the busy hard disk (2026-10-31). The same
+   * result, step for step.
+   */
+  async runtimeConfigSnapshotAsync() {
+    const supervisor = this.supervisor;
+    const readConfig = () => (supervisor.readConfigAsync ? supervisor.readConfigAsync() : supervisor.readConfig());
+    const setupConfig = supervisor.readSetupConfig
+      ? await (supervisor.readSetupConfigAsync ? supervisor.readSetupConfigAsync() : supervisor.readSetupConfig())
+      : await readConfig();
+    if (!setupConfig) {
+      return {
+        configured: false,
+        owner: "none",
+        mode: "browser-only",
+        serialized: null,
+      };
+    }
+    const launcherOwned = setupConfig.browserHost === "launcher";
+    const config = launcherOwned ? await readConfig() : setupConfig;
+    return {
+      configured: true,
+      owner: launcherOwned ? "launcher" : "external",
+      mode: config.mode === "full" ? "full" : "browser-only",
+      serialized: JSON.stringify(config),
+      config: structuredClone(config),
+    };
+  }
+
   mcpCredentialsConfigured(requestedMode) {
     const tunnel = this.credentialTunnel(this.runtimeConfigSnapshot().config, requestedMode);
     return Boolean(tunnel && fs.existsSync(tunnel.runtimeKeyFile));
@@ -551,6 +582,8 @@ class RuntimeHost {
 
   restoreSetupCheckpoint(checkpoint) {
     if (!checkpoint) return;
+    // config.json may be written back: the next read checks it instead of the watched copy.
+    this.supervisor?.forgetConfig?.();
     const failures = [];
     for (const snapshot of [...checkpoint].reverse()) {
       try {
@@ -781,6 +814,9 @@ class RuntimeHost {
       this.publishOperation?.({ name, status: "failed", message });
       throw new Error(message);
     } finally {
+      // A runtime command (setup, integration) may have written config.json; the folder watch
+      // can report that after the caller already reads it back, so the next read checks the file.
+      this.supervisor?.forgetConfig?.();
       this.active = null;
     }
   }

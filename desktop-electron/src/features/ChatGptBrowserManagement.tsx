@@ -73,6 +73,8 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
   const [threads, setThreads] = useState<CodexThreadBinding[]>([]);
   const [tunnels, setTunnels] = useState<McpTunnel[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  // Bulk delete: the accounts ticked on their cards.
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
     let live = true;
@@ -126,6 +128,14 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
   const decodoCount = proxies.filter(profile => profile.id.startsWith(DECODO_PREFIX)).length;
   const locked = busy !== null || accounts.switching;
   const chatRunning = browser?.status === "running" || running > 0;
+  // A ticked account that has since gone (removed elsewhere) no longer counts.
+  const ticked = accounts.accounts.filter(account => selected.has(account.id)).map(account => account.id);
+  const signedInOf = (account: BrowserAccount) => (account.id === activeId ? browser?.authenticated === true : account.signedIn === true);
+  const toggle = (id: string, on: boolean) => setSelected(previous => {
+    const next = new Set(previous);
+    if (on) next.add(id); else next.delete(id);
+    return next;
+  });
 
   return (
     <section className="cbm">
@@ -157,6 +167,23 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
         <Stat label="Proxies" value={`${bound}/${accounts.accounts.length}`} detail={`accounts bound · ${decodoCount} from Decodo`} />
       </div>
 
+      {accounts.accounts.length > 1 ? (
+        <BulkRemoveBar
+          total={accounts.accounts.length}
+          ticked={ticked}
+          locked={locked}
+          onSelectNotSignedIn={() => setSelected(new Set(accounts.accounts.filter(account => !signedInOf(account)).map(account => account.id)))}
+          onClear={() => setSelected(new Set())}
+          onRemove={() => void run("remove-many", async () => {
+            const result = await api.removeBrowserAccounts(ticked);
+            setSelected(new Set(result.failed.map(entry => entry.id)));
+            if (result.failed.length) {
+              throw new Error(`${result.removed.length} removed; ${result.failed.length} kept: ${result.failed[0].message}`);
+            }
+          })}
+        />
+      ) : null}
+
       <div className="cbm-cards">
         {accounts.accounts.map(account => (
           <AccountCard
@@ -169,6 +196,8 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
             inUse={account.id === activeId}
             key={account.id}
             locked={locked}
+            selected={selected.has(account.id)}
+            onSelect={accounts.accounts.length > 1 ? (on: boolean) => toggle(account.id, on) : undefined}
             maxTabs={accounts.maxTabsPerAccount}
             mainTunnelReady={setup.mcpReady}
             proxies={proxies}
@@ -196,6 +225,53 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
   );
 }
 
+/**
+ * Bulk delete: tick accounts on their cards (or every account that is not signed in), then remove
+ * them in one action, confirmed by a second click as a single Remove is. The Browser tab keeps at
+ * least one account, so all of them ticked cannot be removed.
+ */
+function BulkRemoveBar({ total, ticked, locked, onSelectNotSignedIn, onClear, onRemove }: {
+  total: number;
+  ticked: string[];
+  locked: boolean;
+  onSelectNotSignedIn: () => void;
+  onClear: () => void;
+  onRemove: () => void;
+}) {
+  const [confirm, setConfirm] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const count = ticked.length;
+  const all = count >= total;
+  const remove = () => {
+    if (!confirm) {
+      setConfirm(true);
+      window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setConfirm(false), CONFIRM_WINDOW_MS);
+      return;
+    }
+    window.clearTimeout(timer.current);
+    setConfirm(false);
+    onRemove();
+  };
+  return (
+    <div className="cbm-bulk" role="toolbar" aria-label="Remove several accounts">
+      <span className="cbm-muted">{count ? `${count} selected` : "Tick accounts to remove several at once"}</span>
+      <button className="cbm-link" disabled={locked} onClick={onSelectNotSignedIn} type="button">Select not signed in</button>
+      {count ? <button className="cbm-link" disabled={locked} onClick={onClear} type="button">Clear</button> : null}
+      <button
+        className={`cbm-button cbm-bulk-remove${confirm ? " is-danger" : ""}`}
+        disabled={locked || !count || all}
+        onClick={remove}
+        title={all ? "Keep at least one account: the Browser tab needs one" : undefined}
+        type="button"
+      >
+        {confirm ? `Click again to remove ${count}` : count ? `Remove ${count} selected` : "Remove selected"}
+      </button>
+    </div>
+  );
+}
+
 function Stat({ label, value, detail, tone }: { label: string; value: string | number; detail: string; tone?: "ok" | "warn" }) {
   return (
     <div className="cbm-stat" role="listitem">
@@ -208,9 +284,12 @@ function Stat({ label, value, detail, tone }: { label: string; value: string | n
 
 function AccountCard({
   account, api, authenticated, busy, chatRunning, canRemove, inUse, locked, mainTunnelReady, maxTabs, proxies, holders, run, sessions, tabs,
-  tunnel,
+  tunnel, selected = false, onSelect,
 }: {
   account: BrowserAccount;
+  /** Ticked for bulk delete; no tick box without `onSelect` (a single account cannot be removed). */
+  selected?: boolean;
+  onSelect?: (on: boolean) => void;
   api: LauncherApi;
   authenticated: boolean;
   busy: string | null;
@@ -262,6 +341,16 @@ function AccountCard({
   return (
     <article className={`cbm-card${inUse ? " is-active" : ""}`} aria-label={accountName(account)}>
       <header className="cbm-card-head">
+        {onSelect ? (
+          <input
+            aria-label={`Select ${accountName(account)} to remove`}
+            checked={selected}
+            className="cbm-select"
+            disabled={locked}
+            onChange={(event: ChangeEvent<HTMLInputElement>) => onSelect(event.target.checked)}
+            type="checkbox"
+          />
+        ) : null}
         <i className={`cbm-dot${signedIn === null ? "" : signedIn ? " is-on" : " is-warn"}`} aria-hidden />
         <div className="cbm-card-title">
           <strong title={account.label}>{accountName(account)}</strong>

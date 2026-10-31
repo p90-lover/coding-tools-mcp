@@ -6,6 +6,12 @@ const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
 
+// The receipt is written off the main thread: wait for it, then for the command to start running.
+async function ran(command) {
+  await command.written();
+  await new Promise(resolve => setImmediate(resolve));
+}
+
 test("only the exact background connector flag requests creation", () => {
   assert.equal(isMcpConnectorCommand(["app", "--hidden", "--create-mcp-connector"]), true);
   assert.equal(isMcpConnectorCommand(["app", "--hidden", "--open-mcp-tunnel-settings"]), true);
@@ -74,6 +80,7 @@ test("the real main action selects the captured account's tunnel and waits for r
     { name: "aborts when the account switches during reconnect", accountId: "account-2", state: "stopped", switches: true },
     { name: "rejects a tunnel that is still unready after reconnect", accountId: "account-2", state: "failed", staysUnready: true },
     { name: "does not record a binding if the account switches during setup", accountId: "account-2", state: "ready", extra: true, switchesDuringSetup: true },
+    { name: "aborts completion if the account switches while the binding is saved", accountId: "account-2", state: "ready", extra: true, switchesDuringBinding: true },
   ]) await t.test(scenario.name, async () => {
     let run, monitors = 0;
     const created = [], bindings = [], reconnected = [], stateUpdates = [];
@@ -88,7 +95,11 @@ test("the real main action selects the captured account's tunnel and waits for r
         if (scenario.switches) host.partition = "persist:account-1";
         return { ...tunnel };
       },
-      setConnector: (...args) => bindings.push(args),
+      setConnector: async (...args) => {
+        await new Promise(resolve => setImmediate(resolve));
+        bindings.push(args);
+        if (scenario.switchesDuringBinding) host.partition = "persist:account-1";
+      },
     };
     const context = {
       app: {}, BrowserWindow: function () {}, mcpConnectorCommand: null, mcpConnectorCommandFailure,
@@ -107,10 +118,10 @@ test("the real main action selects the captured account's tunnel and waits for r
       startCatalogVerificationMonitor: () => { monitors++; }, automaticMcpAttemptPid: 1,
     };
     vm.runInNewContext(source.slice(start, end), context);
-    if (scenario.switches || scenario.staysUnready || scenario.switchesDuringSetup) {
+    if (scenario.switches || scenario.staysUnready || scenario.switchesDuringSetup || scenario.switchesDuringBinding) {
       await assert.rejects(run(), scenario.staysUnready ? /ready/ : /switch|account/);
-      assert.equal(created.length, scenario.switchesDuringSetup ? 1 : 0, "changed or unready accounts cannot proceed");
-      assert.equal(bindings.length, 0);
+      assert.equal(created.length, scenario.switchesDuringSetup || scenario.switchesDuringBinding ? 1 : 0, "changed or unready accounts cannot proceed");
+      assert.equal(bindings.length, scenario.switchesDuringBinding ? 1 : 0);
     } else {
       await run();
       assert.equal(created.length, 1);
@@ -143,7 +154,10 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
   const context = { handle: (_name, callback) => { action = callback; },
     assertFocusedMainWindow: () => { focused++; }, browserHost: host, quitting: false, shutdownInProgress: false,
     browserAccountsStatus: () => ({ switching: false }), browserAccounts: { partitionOf: () => "persist:account-2" },
-    runtimeSupervisor: { extraTunnels: { status: () => [tunnel], setConnector: (...args) => recorded.push(args) } },
+    runtimeSupervisor: { extraTunnels: { status: () => [tunnel], setConnector: async (...args) => {
+      await new Promise(resolve => setImmediate(resolve));
+      recorded.push(args);
+    } } },
     runtimeHost: { currentOperation: () => null }, app: {}, BrowserWindow: function () {}, mcpConnectorCommandFailure,
     publishOperation: value => published.push(value),
     createConfiguredConnector: async options => {
@@ -324,7 +338,7 @@ test("tunnel settings commands preserve their intent and do not claim connector 
   const first = command.request("tunnel-settings");
   assert.equal(first, command.request("tunnel-settings"));
   const otherAction = assert.rejects(command.request(), /busy/);
-  await Promise.resolve();
+  await ran(command);
   const reportFile = path.join(root, "mcp-connector-command.json");
   const runningAction = JSON.parse(fs.readFileSync(reportFile)).action;
   finish({ opened: true, created: true, name: "Coding Tools Native2", token: "DO_NOT_EXPORT" });
@@ -387,6 +401,7 @@ test("background commands coalesce, replace stale success and write only bounded
   const first = command.request();
   const second = command.request();
   assert.equal(first, second);
+  await ran(command);
   const running = JSON.parse(fs.readFileSync(reportFile));
   assert.equal(running.status, "running");
   assert.notEqual(running.id, "stale");
@@ -401,6 +416,39 @@ test("background commands coalesce, replace stale success and write only bounded
   assert.equal(completed.pid, process.pid);
   assert(completed.startedAt && completed.finishedAt);
   assert(!JSON.stringify(completed).includes("DO_NOT_EXPORT"));
+});
+
+test("each MCP command is logged with its action and what asked for it, and its outcome", async t => {
+  // 2026-10-31: three failed attempts left no trace of who started them or whether any succeeded.
+  const parent = path.resolve(__dirname, "../../aiTemp");
+  fs.mkdirSync(parent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(parent, "mcp-command-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  let finish;
+  const command = createMcpConnectorCommand({
+    app: { getPath: () => root, getVersion: () => "test" },
+    logger: { info: (event, detail) => events.push({ event, ...detail }), warn: (event, detail) => events.push({ event, code: detail.code }) },
+    run: () => new Promise(resolve => { finish = resolve; }),
+  });
+  const first = command.request("create", "settings");
+  command.request("create", "command");
+  await assert.rejects(command.request("tunnel-settings", "command"), /busy with another action/);
+  await ran(command);
+  finish({ created: false, name: "Coding Tools", href: "/plugins/x" });
+  await first;
+  finish = null;
+  const opened = command.request("tunnel-settings", "command");
+  await ran(command);
+  finish({ opened: true, name: "Coding Tools" });
+  await opened;
+  assert.deepEqual(events, [
+    { event: "mcp.command_requested", action: "create", source: "settings" },
+    { event: "mcp.command_requested", action: "create", source: "command", joined: true },
+    { event: "mcp.command_completed", action: "create", source: "settings", created: false },
+    { event: "mcp.command_requested", action: "tunnel-settings", source: "command" },
+    { event: "mcp.command_completed", action: "tunnel-settings", source: "command" },
+  ]);
 });
 
 test("an initial receipt write failure rejects without starting or throwing through dispatch", async t => {
