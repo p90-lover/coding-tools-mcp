@@ -17,7 +17,7 @@ test("rc.12 identity source reads stay LF-normalized on Windows checkouts", () =
 
 test("current product and package identities are aligned", () => {
   const manifest = JSON.parse(read("desktop-electron/package.json"));
-  assert.equal(manifest.version, "0.8.39");
+  assert.equal(manifest.version, "0.8.40");
   assert.ok(read("desktop-electron/electron/product.cjs").includes(`version: "${manifest.version}"`));
   assert.ok(read("desktop-electron/scripts/prepare-package-resources.cjs").includes(`PRODUCT_VERSION = "${manifest.version}"`));
   assert.ok(read("desktop-electron/scripts/verify-package.cjs").includes(`version: "${manifest.version}"`));
