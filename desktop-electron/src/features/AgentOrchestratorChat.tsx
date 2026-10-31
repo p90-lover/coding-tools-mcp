@@ -1077,11 +1077,14 @@ export function AgentOrchestratorChat({
   const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
+  const previewSessions = useMemo(() => chatAgentSessions(chatRuns, projectId && selectedTaskId
+    ? { workspaceId: projectId, taskId: selectedTaskId } : undefined), [chatRuns, projectId, selectedTaskId]);
+  const previewSessionIds = useMemo(() => previewSessions.map(session => session.id), [previewSessions]);
   // An agent of this chat asking to control a window: asked here, beside its other requests.
   const allComputerRequests = useComputerRequests();
   const computerRequests = useMemo(() => selectedTaskId ? chatComputerRequests(allComputerRequests, agentSessionIds, projectId) : [],
     [selectedTaskId, allComputerRequests, agentSessionIds, projectId]);
-  const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  const livePage = useWorkbenchAutoOpen(selectedTaskId ? previewSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
   // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
   const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
   const processRows = useMemo(() => detailsOpen ? chatProcessRows(processCommands, livePage) : [], [detailsOpen, processCommands, livePage]);
@@ -2367,7 +2370,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
-      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
+      {workbench && selectedTaskId ? <ChatWorkbench sessions={workbench === "preview" ? previewSessions : agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
         subagents={subagents} renderWork={renderSubagentWork} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>

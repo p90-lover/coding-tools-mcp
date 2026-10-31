@@ -799,6 +799,8 @@ struct AoHarnessConnectRequest {
     web_bridge_base_url: Option<String>,
     #[serde(default)]
     web_model_catalog: Option<Value>,
+    #[serde(default)]
+    chat_preview_server: Option<Value>,
     confirm: bool,
 }
 
@@ -1599,6 +1601,47 @@ mod workspace_auth_tests {
             fs::read_to_string(&config).unwrap(),
             "unexpected provider config"
         );
+    }
+
+    #[test]
+    fn ao_preview_home_is_bound_to_its_workspace_loopback_server() {
+        let app_data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../aiTemp/ao-preview-home-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let home = app_data.join("ao-homes/chat");
+        fs::create_dir_all(&home).unwrap();
+        let config_path = home.join("config.toml");
+        let base = "model = \"chatgpt-web/high\"\n";
+        fs::write(&config_path, base).unwrap();
+        let server = json!({"name":"coding-tools","type":"http",
+            "url":"http://127.0.0.1:47991/mcp/ws1/abcdefghijklmnop",
+            "headers":{"Authorization":format!("Bearer {}", "x".repeat(43))}});
+        prepare_ao_preview_home(&home, &app_data, "ws1", &server).unwrap();
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("[mcp_servers.coding-tools]"));
+        assert!(config.contains("http_headers = { Authorization ="));
+        for invalid in [
+            {
+                let mut value = server.clone();
+                value["url"] = json!("https://example.com/mcp/ws1/abcdefghijklmnop");
+                value
+            },
+            {
+                let mut value = server.clone();
+                value["url"] = json!("http://127.0.0.1:47991/mcp/ws2/abcdefghijklmnop");
+                value
+            },
+            {
+                let mut value = server.clone();
+                value["headers"]["Other"] = json!("not allowed");
+                value
+            },
+        ] {
+            fs::write(&config_path, base).unwrap();
+            assert!(prepare_ao_preview_home(&home, &app_data, "ws1", &invalid).is_err());
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), base);
+        }
+        fs::remove_dir_all(&app_data).unwrap();
     }
 
     #[test]
@@ -4203,6 +4246,65 @@ supports_websockets = false\n",
     Ok(())
 }
 
+fn prepare_ao_preview_home(
+    home: &Path,
+    app_data_dir: &Path,
+    workspace_id: &str,
+    server: &Value,
+) -> Result<(), String> {
+    let invalid = || "Invalid native chat preview server".to_string();
+    let fields = server.as_object().ok_or_else(invalid)?;
+    if fields.len() != 4 || server["name"] != "coding-tools" || server["type"] != "http" {
+        return Err(invalid());
+    }
+    let address = server["url"].as_str().ok_or_else(invalid)?;
+    let url = url::Url::parse(address).map_err(|_| invalid())?;
+    let segment: String = url::form_urlencoded::byte_serialize(workspace_id.as_bytes()).collect();
+    let prefix = format!("/mcp/{segment}/");
+    let key = url.path().strip_prefix(&prefix).ok_or_else(invalid)?;
+    if url.scheme() != "http"
+        || url.host_str() != Some("127.0.0.1")
+        || url.port().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !(16..=64).contains(&key.len())
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    {
+        return Err(invalid());
+    }
+    let headers = server["headers"].as_object().ok_or_else(invalid)?;
+    let bearer = headers
+        .get("Authorization")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let token = bearer.strip_prefix("Bearer ").ok_or_else(invalid)?;
+    if headers.len() != 1
+        || token.len() != 43
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    {
+        return Err(invalid());
+    }
+    let config_path = home.join("config.toml");
+    let mut config = fs::read_to_string(&config_path).map_err(text_error)?;
+    config.push_str(&format!(
+        "\n[mcp_servers.coding-tools]\nurl = {}\nhttp_headers = {{ Authorization = {} }}\n",
+        serde_json::to_string(address).map_err(text_error)?,
+        serde_json::to_string(bearer).map_err(text_error)?,
+    ));
+    write_private_file(
+        &config_path,
+        config.as_bytes(),
+        app_data_dir,
+        "ao-preview-tools",
+    )
+}
+
 fn ao_connect_policy(
     node: &integrations::ao::Node,
     connection: &AoCodexConnection,
@@ -4428,6 +4530,13 @@ async fn ao_harness_connect(
         Ok(worker) => worker,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, "AO_ROUTE_MISMATCH", error),
     };
+    if worker && body.chat_preview_server.is_some() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "AO_PREVIEW_PROVIDER_UNSUPPORTED",
+            "Native preview tools are supported on the WebGPT route only",
+        );
+    }
     // As with a native Codex session: a writable card needs a workspace-write workspace.
     if node.route.permission_profile == ":workspace"
         && !state
@@ -4508,6 +4617,24 @@ async fn ao_harness_connect(
                 StatusCode::BAD_REQUEST,
                 "AO_WEB_HOME_INVALID",
                 "AO WebGPT bridge catalog is unavailable or changed",
+            );
+        }
+    }
+    if let Some(server) = body.chat_preview_server.as_ref() {
+        let Some(app_data_dir) = state.ao_home_root.parent() else {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_HOME_UNAVAILABLE",
+                "AO app data is unavailable",
+            );
+        };
+        if prepare_ao_preview_home(&selected_home, app_data_dir, &body.workspace_id, server)
+            .is_err()
+        {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_PREVIEW_CONFIG_INVALID",
+                "Native chat preview config is invalid",
             );
         }
     }

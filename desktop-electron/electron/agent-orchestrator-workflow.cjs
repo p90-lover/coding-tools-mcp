@@ -15,6 +15,7 @@ const { userMessages } = require("./chat-history.cjs");
 const { createModelScoreStore, gradePrompt, modelHistory, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
+const { nativeChatPreviewSessionId } = require("./chat-agent-tools.cjs");
 
 function clean(value, limit, required = true) {
   if (typeof value !== "string") throw new Error("Expected text");
@@ -348,7 +349,16 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
+  const nativePreviewLeases = new Map();
+  function releaseNativePreviews(workspaceId, runId, nodeId = null) {
+    nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
+    for (const [key, entry] of nativePreviewLeases) {
+      if (entry.workspaceId !== workspaceId || entry.runId !== runId || nodeId && entry.nodeId !== nodeId) continue;
+      nativePreviewLeases.delete(key);
+      entry.lease.release({ ended: true });
+    }
+  }
   // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
   // working chat's activity poll, the run loop and their per-node checks each read the same run
   // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
@@ -2227,17 +2237,46 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       webBridge.catalog = catalog;
     }
-    const response = await requestHeadless("/api/v1/ao/harness/connect", {
-      workspace_id: workspaceId, run_id: runId, node_id: nodeId,
-      connection: selected, ...(worker ? { private_proxy_api_key: connection().key }
-        : { web_bridge_base_url: webBridge.baseUrl, web_model_catalog: webBridge.catalog }),
-      confirm: !granted,
-    }, granted ? undefined : { localConfirmation: true });
-    if (response?.ok === true && response.waiting === true) return response;
-    if (response?.ok !== true || response.status?.model !== route.model) {
-      throw new Error("Couldn't confirm the connection. Check the status before you retry.");
+    const owner = nativeChatPreviewSessionId(workspaceId, mission.project_id,
+      node.template_role_id || (mission.execution_mode === "single" ? "single" : node.id));
+    const leaseKey = JSON.stringify([workspaceId, runId, nodeId]);
+    for (const [key, entry] of nativePreviewLeases) if (entry.expiresAt <= now()) {
+      nativePreviewLeases.delete(key);
+      entry.lease.release({ ended: true });
     }
-    return { ok: true, owned: response.owned === true, route_verified: false, status: response.status };
+    const expiresAt = now() + Math.min(900, Number(selected.lifetime_seconds) || 900) * 1000;
+    const retained = !worker ? nativePreviewLeases.get(leaseKey) : null;
+    const lease = retained?.lease ?? (!worker && owner && nativePreviewTools ? await nativePreviewTools.lease({
+      agent: "codex", workspaceId, previewOnly: true, expiresAt, nativeScope: { runId, nodeId },
+    }) : null);
+    const preview = retained ?? (lease ? { workspaceId, runId, nodeId, lease, expiresAt } : null);
+    if (preview) nativePreviewLeases.set(leaseKey, preview);
+    let bound = false;
+    try {
+      const response = await requestHeadless("/api/v1/ao/harness/connect", {
+        workspace_id: workspaceId, run_id: runId, node_id: nodeId,
+        connection: selected, ...(worker ? { private_proxy_api_key: connection().key }
+          : { web_bridge_base_url: webBridge.baseUrl, web_model_catalog: webBridge.catalog }),
+        ...(lease ? { chat_preview_server: lease.servers[0] } : {}),
+        confirm: !granted,
+      }, granted ? undefined : { localConfirmation: true });
+      if (response?.ok === true && response.waiting === true) return response;
+      if (response?.ok !== true || response.status?.model !== route.model) {
+        throw new Error("Couldn't confirm the connection. Check the status before you retry.");
+      }
+      if (lease) {
+        lease.limitLifetime(response.status.seconds_remaining);
+        if (Number.isFinite(response.status.seconds_remaining)) preview.expiresAt = Math.min(preview.expiresAt, now() + response.status.seconds_remaining * 1000);
+        if (nativePreviewLeases.get(leaseKey) !== preview || !lease.bind(owner)) throw new Error("Native chat preview ownership ended during connection");
+        bound = true;
+      }
+      return { ok: true, owned: response.owned === true, route_verified: false, status: response.status };
+    } finally {
+      if (lease && !bound && !retained) {
+        lease.release();
+        if (nativePreviewLeases.get(leaseKey) === preview) nativePreviewLeases.delete(leaseKey);
+      }
+    }
   }
 
   async function stopAoHarness({ workspaceId, runId, nodeId } = {}) {
@@ -2252,6 +2291,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       workspace_id: id, run_id: run, node_id: node, confirm: true,
     }, { localConfirmation: true });
     if (response?.ok !== true) throw new Error("Couldn't confirm the session stopped. Check its status.");
+    releaseNativePreviews(id, run, node);
     return response;
   }
 
@@ -2538,6 +2578,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
       result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
     }
+    if (action === "stop") releaseNativePreviews(id, run);
     // A retried single-model chat continues its agent's own session, which already holds the
     // conversation and what it read and ran: launching a fresh one began the task again from
     // nothing. The retry moved the card's receipt into its history; a session that is gone or
@@ -6491,6 +6532,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   // Replacement and hide paths retain proof for every owned external turn.
   async function stopOwned(workspaceId, mission, { hiding = false } = {}) {
+    releaseNativePreviews(workspaceId, mission.id);
     const state = backgroundRuns.get(runKey(workspaceId, mission.id));
     if (state) { state.stopped = true; state.status = "held"; }
     const keys = () => [...dispatching].some(key => {
@@ -6884,6 +6926,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return ended;
   }
   function dispose() {
+    for (const entry of nativePreviewLeases.values()) entry.lease.release({ ended: true });
+    nativePreviewLeases.clear();
     stopTracking();
     schedulerDisposed = true;
     sessionOwners.clear();

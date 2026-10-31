@@ -1016,6 +1016,26 @@ test("a chat's AO agent sessions for its Preview and Terminal panes: newest firs
   assert.equal(nameless[0].label.split(" · ")[0], "Agent");
 });
 
+test("native chat previews keep one owner across follow-ups and remain separate from AO workspaces", () => {
+  const runs = ["first", "followup"].map(id => ({ id, execution_mode: "single", nodes: [{
+    id: `node-${id}`, role: "worker", route: { harness_id: "codex-native", model: "chatgpt-web/high" },
+    receipt: { thread_id: `thread-${id}` },
+  }] }));
+  assert.deepEqual(plain(chat.chatAgentSessions(runs)), [], "native threads do not become AO file/terminal sessions");
+  const first = plain(chat.chatAgentSessions(runs, { workspaceId: "ws1", taskId: "task" }));
+  assert.deepEqual(first, [{ id: "native:ws1:task:single", label: "worker · chatgpt-web/high", model: "chatgpt-web/high", previewOnly: true }]);
+  assert.notEqual(chat.chatAgentSessions(runs, { workspaceId: "ws2", taskId: "task" })[0].id, first[0].id);
+  assert.notEqual(chat.chatAgentSessions(runs, { workspaceId: "ws1", taskId: "other" })[0].id, first[0].id);
+  const { nativeChatPreviewSessionId } = require("../electron/chat-agent-tools.cjs");
+  const team = [{ execution_mode: "team", nodes: ["role:one", "role:two"].map(template_role_id => ({
+    ...runs[0].nodes[0], template_role_id,
+  })) }];
+  const owners = chat.chatAgentSessions(team, { workspaceId: "ws:one", taskId: "task:one" }).map(item => item.id);
+  assert.deepEqual(plain(owners), ["role:two", "role:one"].map(role => nativeChatPreviewSessionId("ws:one", "task:one", role)), "frontend and native launch use the same escaped role owner");
+  const cpa = [{ ...runs[0], nodes: [{ ...runs[0].nodes[0], route: { harness_id: "codex-native", model: "gemini-3.8-flash-high" } }] }];
+  assert.deepEqual(plain(chat.chatAgentSessions(cpa, { workspaceId: "ws1", taskId: "task" })), [], "unsupported CPA native previews keep their previous behavior");
+});
+
 test("the context meter's numbers: short token counts, and fullness only when the agent gives its window", () => {
   assert.equal(chat.tokensShort(537523), "537.5k");
   assert.equal(chat.tokensShort(1_000_000), "1M");

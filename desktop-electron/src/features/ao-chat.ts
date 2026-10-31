@@ -12,6 +12,7 @@ export type ChatNode = {
   state: string;
   x: number;
   settings?: { name?: string; role_name?: string };
+  template_role_id?: string;
   route?: { harness_id: string; model: string; effort?: string; context_window?: number };
   /** `thread_id` is the card's AO session id when its harness is an AO agent ("ao:…"). */
   receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; finished_at_ms?: number; thread_id?: string };
@@ -19,27 +20,34 @@ export type ChatNode = {
   history?: { answer?: string; verdict?: string; error?: string; started_at_ms?: number }[];
 };
 
-/** One AO agent session of a chat, for its Preview and Terminal panes. */
-export type ChatAgentSession = { id: string; label: string; model?: string; contextWindow?: number };
+/** An AO session, or a native chat owner used only by the Preview pane. */
+export type ChatAgentSession = { id: string; label: string; model?: string; contextWindow?: number; previewOnly?: boolean };
 
 /**
  * The chat's AO agent sessions, newest first, each once (a follow-up reuses its session): the cards
- * whose harness is an AO agent and that have started one. Native Codex threads are not AO sessions.
+ * whose harness is an AO agent and that have started one. With nativePreview, include native panel
+ * owners too; the default list still keeps native threads out of AO's file and terminal tools.
  */
-export function chatAgentSessions(runs: { nodes: ChatNode[] }[]): ChatAgentSession[] {
+export function chatAgentSessions(runs: { nodes: ChatNode[]; execution_mode?: string }[], nativePreview?: { workspaceId: string; taskId: string }): ChatAgentSession[] {
   const seen = new Map<string, ChatAgentSession>();
   for (const run of [...runs].reverse()) {
     for (const node of [...(run.nodes ?? [])].reverse()) {
-      const id = node.receipt?.thread_id;
-      if (!id || seen.has(id) || !node.route?.harness_id?.startsWith("ao:")) continue;
+      const route = node.route;
+      if (!route) continue;
+      const native = route.harness_id === "codex-native" && route.model.startsWith("chatgpt-web/")
+        && Boolean(nativePreview?.workspaceId && nativePreview.taskId);
+      if (!node.receipt?.thread_id || !native && !route.harness_id?.startsWith("ao:")) continue;
+      const id = native ? `native:${[nativePreview!.workspaceId, nativePreview!.taskId,
+        node.template_role_id || (run.execution_mode === "single" ? "single" : node.id)].map(encodeURIComponent).join(":")}` : node.receipt.thread_id;
+      if (seen.has(id)) continue;
       // Always a string: the chat reads these labels while rendering (the context meter splits
       // them), and a card saved with no name, role name or role would otherwise throw there.
       const name = node.settings?.name || node.settings?.role_name || node.role || "Agent";
       // The window the card asked for is the one the agent runs with (Claude Code's
       // CLAUDE_CODE_MAX_CONTEXT_TOKENS), even when its usage report still names the model's default.
-      const contextWindow = node.route.context_window;
-      seen.set(id, { id, label: node.route.model ? `${name} · ${node.route.model}` : name, ...(node.route.model ? { model: node.route.model } : {}),
-        ...(typeof contextWindow === "number" && contextWindow > 0 ? { contextWindow } : {}) });
+      const contextWindow = route.context_window;
+      seen.set(id, { id, label: route.model ? `${name} · ${route.model}` : name, ...(route.model ? { model: route.model } : {}),
+        ...(typeof contextWindow === "number" && contextWindow > 0 ? { contextWindow } : {}), ...(native ? { previewOnly: true } : {}) });
     }
   }
   // The same agent in several sessions (a follow-up that started a fresh one): the newest is the
