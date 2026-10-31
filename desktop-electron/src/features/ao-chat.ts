@@ -1497,10 +1497,17 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
   const MINUTE = 60_000;
   let messageIndex = 0;
   let spare = said.length - runs.filter((run) => !run.restarts_run_id && !run.replaces_run_id).length;
+  // A compacted chat (/compact, or a long chat compacting itself to send) keeps one summary in place of
+  // its earlier messages but every run, so it has more runs than messages. Paired from the start, each
+  // new message showed beside an old run far up the chat and the newest turn had none: the user's
+  // "the message doesnt sent to chat" in goal chats, whose rounds fill the chat and compact it often.
+  // The oldest runs are the ones whose messages were summarized; they show without one.
+  let summarized = Math.max(0, -spare);
   const turns: ChatTurn[] = [];
   for (const run of runs) {
     let index = -1;
-    if (!run.restarts_run_id && !run.replaces_run_id) {
+    if (!run.restarts_run_id && !run.replaces_run_id && summarized > 0) summarized -= 1;
+    else if (!run.restarts_run_id && !run.replaces_run_id) {
       const started = runStartedMs(run);
       while (started !== undefined && spare > 0 && messageIndex + 1 < said.length) {
         const next = stampMs(said[messageIndex + 1].stamp);
