@@ -28,7 +28,9 @@ function callerOf(stack) {
   return String(stack || "").split("\n").slice(1)
     .map((line) => line.trim().replace(/^at /u, ""))
     .filter((line) => !line.includes(here) && !line.includes("node:"))
-    .slice(0, 3)
+    // Six frames: with three, a 26 s statSync of config.json ended at a helper 13 paths share
+    // (RuntimeHost.runtimeConfigSnapshot, 2026-10-31), and which one froze the app stayed unknown.
+    .slice(0, 6)
     .map((line) => line.replace(/\(?(?:[A-Za-z]:)?[^():]*[\\/]([^\\/():]+:\d+):\d+\)?/u, "$1"))
     .join(" < ");
 }
