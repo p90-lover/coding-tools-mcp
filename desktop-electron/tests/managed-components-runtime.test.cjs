@@ -207,14 +207,17 @@ test("CPA runtime exit preserves installed bytes while missing files and invalid
     const missingArtifact = path.join(dataRoot, "Trash", "missing-cpa.bin");
     fs.mkdirSync(path.dirname(missingArtifact), { recursive: true });
     fs.renameSync(artifact, missingArtifact);
-    assert.equal(controller.project("cpa").installState, "repair-required");
+    // Status answers from memory; a read of the disk (here, the background one) shows the loss.
+    assert.equal((await controller.refreshInstallState("cpa")).installState, "repair-required");
     await controller.startComponent("cpa");
     assert.deepEqual(fs.readFileSync(artifact), payload);
     assert.equal(downloads, 2);
+    assert.equal(controller.project("cpa").installState, "installed");
 
     await controller.stopComponent("cpa");
     writeJson(markerPath, { schemaVersion: 1, id: "wrong-component" });
-    assert.equal(controller.project("cpa").installState, "repair-required");
+    // A start reads the disk itself, so it repairs even while status still remembers "installed".
+    assert.equal(controller.project("cpa").installState, "installed");
     await controller.startComponent("cpa");
     assert.equal(controller.project("cpa").installState, "installed");
     assert.deepEqual(fs.readFileSync(artifact), payload);
@@ -222,6 +225,32 @@ test("CPA runtime exit preserves installed bytes while missing files and invalid
   } finally {
     controller.dispose();
   }
+});
+
+test("status reads no file synchronously once the install state is known", async () => {
+  // One existsSync from project() held the main process for 2 s on a busy disk (2026-10-31).
+  const { controller } = controllerFixture();
+  const syncNames = ["existsSync", "statSync", "lstatSync", "readFileSync", "readdirSync", "accessSync"];
+  const originals = Object.fromEntries(syncNames.map((name) => [name, fs[name]]));
+  const calls = [];
+  try {
+    await controller.installComponent("cpa");
+    controller.runtimeSecrets("cpa");
+    await controller.refreshInstallState("cpa");
+    for (const name of syncNames) {
+      fs[name] = (...args) => {
+        calls.push(`${name} ${args[0]}`);
+        throw new Error(`${name} on the status path`);
+      };
+    }
+    assert.equal(controller.project("cpa").installState, "installed");
+    assert.equal(controller.snapshot().components[0].installState, "installed");
+    assert.ok(controller.runtimeConfiguration("cpa").home.includes("cpa"));
+  } finally {
+    Object.assign(fs, originals);
+    controller.dispose();
+  }
+  assert.deepEqual(calls, []);
 });
 
 test("CPA peer environment reentry through runtimeConfiguration does not overflow", async () => {
