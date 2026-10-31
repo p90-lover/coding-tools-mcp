@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { bridgeToResponsesSSE, buildResponseJSON } from "../src/bridge";
@@ -1344,6 +1344,92 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(browserStarts).toBe(1);
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    }
+  });
+
+  test("submitted failure diagnostics preserve sanitized provenance before cancellation and never replace the public error", async () => {
+    const secrets = ["PRIVATE_PROMPT", "PRIVATE_HEADER", "PRIVATE_COOKIE", "PRIVATE_PASSWORD", "PRIVATE_BODY",
+      "sk-abcdefghijklmnopqrstuvwx", "ghp_abcdefghijklmnopqrstuvwx", "turn_abcdefghijklmnopqrstuvwx",
+      "binding_abcdefghijklmnopqrstuvwx", "request_abcdefghijklmnopqrstuvwx", "PRIVATE_JSON_PASSWORD_SUFFIX",
+      "PRIVATE_JSON_SECRET_SUFFIX", "PRIVATE_SINGLE_PASSWORD_SUFFIX", "PRIVATE_SINGLE_SECRET_SUFFIX"];
+    for (const scenario of [
+      { name: "redacted", message: `Broker boundary failed. ${secrets.slice(5, 10).join(" ")}
+<codex_context_json>${secrets[0]}</codex_context_json>
+password=${secrets[3]}
+${JSON.stringify({ password: `prefix"${secrets[10]}`, SERVICE_SECRET: `prefix"${secrets[11]}` })}
+password='prefix\\'${secrets[12]}'
+SERVICE_SECRET='prefix\\'${secrets[13]}'
+Authorization: Bearer ${secrets[1]}
+Cookie: ${secrets[2]}
+prompt: ${secrets[4]}` },
+      { name: "bounded", message: `Broker boundary failed. ${secrets[5]} ${"safe detail ".repeat(300)}` },
+      { name: "unwritable", message: "Broker boundary failed.", unwritable: true },
+    ]) {
+      const diagnosticsRoot = join(tempRoot, `source-failure-${scenario.name}`);
+      if (scenario.unwritable) writeFileSync(diagnosticsRoot, "not a directory");
+      const socketPath = brokerTestEndpoint(`cgw-source-failure-${scenario.name}-${process.pid}-${Date.now()}`);
+      const broker = TurnBroker.forSocket(socketPath);
+      const provider: CodexProviderConfig = {
+        adapter: "chatgpt-web", baseUrl: `browser://source-failure-${scenario.name}-${Date.now()}`,
+        chatgptWeb: { brokerSocketPath: socketPath, browserDiagnosticsPath: diagnosticsRoot,
+          localToolsEnabled: true, solAvailable: true, proAvailable: true },
+      };
+      const worker = ChatGptBrowserWorker.forProvider(provider);
+      const originalRun = worker.run;
+      const originalNextToolBatch = broker.nextToolBatch;
+      const original = Object.assign(new Error(scenario.message), { name: "BrokerBoundaryError", code: "E_NATIVE_BOUNDARY" });
+      let submitted!: () => void;
+      const submission = new Promise<void>(resolve => { submitted = resolve; });
+      let recordAtCancellation: Record<string, any> | undefined;
+      broker.nextToolBatch = async () => { await submission; throw original; };
+      worker.run = async turn => {
+        const prepared = await turn.prepare();
+        try {
+          turn.onSendActivated?.();
+          turn.onSubmitted?.();
+          submitted();
+          return await new Promise<string>((_resolve, reject) => {
+            turn.abortSignal?.addEventListener("abort", () => {
+              if (!scenario.unwritable && existsSync(diagnosticsRoot)) {
+                const directory = readdirSync(diagnosticsRoot)[0];
+                recordAtCancellation = JSON.parse(readFileSync(join(diagnosticsRoot, directory, "00-source-failure.json"), "utf8"));
+              }
+              reject(new DOMException("secondary browser abort", "AbortError"));
+            }, { once: true });
+          });
+        } finally { prepared.release(); }
+      };
+      try {
+        const events: AdapterEvent[] = [];
+        await createChatGptWebAdapter(provider, { broker }).runTurn!(rawWireRequest(environmentXml),
+          { headers: new Headers() }, event => events.push(event));
+        expect(events.at(-1)).toMatchObject({
+          type: "error", code: "chatgpt_submitted_turn_failed", status: 502, retryable: false,
+          message: "ChatGPT stopped responding after the task started. Check the ChatGPT tab before continuing.",
+        });
+        expect(original.message).toBe(scenario.message);
+        if (scenario.unwritable) {
+          expect(recordAtCancellation).toBeUndefined();
+          expect(readFileSync(diagnosticsRoot, "utf8")).toBe("not a directory");
+        } else {
+          expect(recordAtCancellation).toMatchObject({
+            version: 2, checkpoint: "source-failure", source: "submittedTurnFailure", phase: "accepted",
+            error: { name: "BrokerBoundaryError", code: "E_NATIVE_BOUNDARY" },
+          });
+          expect(recordAtCancellation!.error.message).toStartWith("Broker boundary failed.");
+          expect(recordAtCancellation!.error.message.length).toBeLessThanOrEqual(1_200);
+          if (scenario.name === "bounded") expect(recordAtCancellation!.error.message.length).toBe(1_200);
+          const diagnostic = JSON.stringify(recordAtCancellation);
+          for (const secret of secrets) expect(diagnostic).not.toContain(secret);
+          expect(diagnostic).not.toContain("secondary browser abort");
+          expect(diagnostic.length).toBeLessThan(2_000);
+        }
+      } finally {
+        worker.run = originalRun;
+        broker.nextToolBatch = originalNextToolBatch;
+        chatGptTurnSessions.clear();
+        await broker.close();
+      }
     }
   });
 

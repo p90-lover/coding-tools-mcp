@@ -4053,6 +4053,15 @@ async function start() {
             return missionWorkflowRuntime.chatRedactTool(request);
           },
         },
+        // move_chat: with the user's yes, the agent moves its chat to another project (by name or folder).
+        chatMoves: {
+          projects: async () => (await listHeadlessWorkspaces()).map(item => ({ id: item?.id, path: typeof item?.path === "string" ? item.path : "",
+            name: item?.name || item?.display_name || String(item?.path || "").split(/[\\/]/).filter(Boolean).at(-1) || item?.id })),
+          move: (request) => {
+            if (!missionWorkflowRuntime?.chatMoveTool) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.chatMoveTool(request);
+          },
+        },
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
         previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,
@@ -4269,6 +4278,7 @@ async function start() {
       onRunState: (update) => {
         mcpEventMonitor.runState(update);
         if (runChanged(update)) aoPulse.run(update.workspaceId, update.runId);
+        if (update.moved) aoPulse.move(update.moved.from, update.moved.to, update.moved.taskId);
         noticeAoApproval(update);
       },
     });

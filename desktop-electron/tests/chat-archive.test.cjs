@@ -6,7 +6,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createChatArchiveStore, DEFAULT_ARCHIVE_DAYS } = require("../electron/chat-archive.cjs");
+const { createChatArchiveStore, DEFAULT_ARCHIVE_DAYS, DEFAULT_IDLE_DAYS } = require("../electron/chat-archive.cjs");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
 const DAY = 86_400_000;
@@ -35,11 +35,14 @@ test("the archive times and the days setting survive a restart", () => {
   const file = path.join(folder, "chat-archive.json");
   let now = 5_000;
   const first = createChatArchiveStore({ file, now: () => now });
+  assert.equal(first.idleDays(), DEFAULT_IDLE_DAYS, "open chats are archived after 7 days unless set");
   first.setDays(2);
+  first.setIdleDays(30);
   first.archived("ws", "t");
   now += 3 * DAY;
   const second = createChatArchiveStore({ file, now: () => now });
   assert.equal(second.days(), 2);
+  assert.equal(second.idleDays(), 30);
   assert.equal(second.since("ws", "t"), 5_000);
   assert.equal(second.due("ws", "t"), true);
   fs.rmSync(folder, { recursive: true, force: true });
@@ -68,6 +71,7 @@ test("listing archived chats moves those past their days to recoverable deletion
     }
     throw new Error(`Unexpected ${endpoint}`);
   } });
+  await workflow.call("archive_settings", { idleDays: 0 }); // only the deleted clock here
   let listed = await workflow.call("archived_chats", { workspaceIds: ["ws"] });
   assert.equal(listed.days, 5);
   assert.deepEqual(listed.chats.map((chat) => [chat.taskId, chat.visibility, chat.title]), [["old", "archived", "Old chat"]], "only chats; the board task is left out");
@@ -113,7 +117,7 @@ test("old AO sessions no chat still has leave the board on the archive's clock, 
       kill: async (session) => { killed.push(session); return { ok: true }; },
     },
   });
-  await workflow.call("archive_settings", { days: 7 });
+  await workflow.call("archive_settings", { days: 7, idleDays: 0 });
   await workflow.call("archived_chats", { workspaceIds: ["ws"] });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(asked, [[["ws"], 7 * DAY]], "unused for the archive's days");
@@ -127,4 +131,45 @@ test("old AO sessions no chat still has leave the board on the archive's clock, 
   await workflow.call("archived_chats", { workspaceIds: ["ws"] });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(asked.length, 1, "0 days keeps them for good");
+});
+
+test("open chats with no activity for the idle days are archived when the list is read; working, scheduled and recent ones stay", async () => {
+  let now = 100 * DAY;
+  const card = (state, startedAgo, finishedAgo) => ({ id: "n", role: "planner", state,
+    receipt: { thread_id: "t", started_at_ms: now - startedAgo, ...(finishedAgo === undefined ? {} : { finished_at_ms: now - finishedAgo }) } });
+  const runs = [
+    { id: "r1", workspace_id: "ws", project_id: "stale", revision: 1, cancelled: false, execution_mode: "single", nodes: [card("finished", 11 * DAY, 10 * DAY)] },
+    { id: "r2", workspace_id: "ws", project_id: "recent", revision: 1, cancelled: false, execution_mode: "single", nodes: [card("finished", 3 * DAY, 2 * DAY)] },
+    { id: "r3", workspace_id: "ws", project_id: "working", revision: 1, cancelled: false, execution_mode: "single", nodes: [card("running", 10 * DAY)] },
+    { id: "r4", workspace_id: "ws", project_id: "scheduled", revision: 1, cancelled: false, execution_mode: "single", nodes: [card("finished", 11 * DAY, 10 * DAY)] },
+  ];
+  const lives = {
+    stale: { workspace_id: "ws", task_id: "stale", revision: 1, visibility: "active", title: "Stale chat" },
+    recent: { workspace_id: "ws", task_id: "recent", revision: 1, visibility: "active", title: "Recent chat" },
+    working: { workspace_id: "ws", task_id: "working", revision: 1, visibility: "active", title: "Working chat" },
+    scheduled: { workspace_id: "ws", task_id: "scheduled", revision: 1, visibility: "active", title: "Scheduled chat",
+      schedule: { id: "s", run_id: "r4", due_at_ms: now + DAY, state: "scheduled", revision: 1 } },
+  };
+  const updates = [];
+  const workflow = createAgentOrchestratorWorkflow({ now: () => now, requestHeadless: async (endpoint, body) => {
+    if (endpoint === "/api/v1/ao/read") return { ok: true, runs: structuredClone(runs), task_lifecycle: Object.values(lives).map((life) => structuredClone(life)) };
+    if (endpoint === "/api/v1/ao/update") {
+      const change = body.change.change;
+      updates.push([change.task_id, change.visibility]);
+      const life = lives[change.task_id];
+      assert.equal(change.expected_revision, life.revision);
+      life.visibility = change.visibility;
+      life.revision += 1;
+      return { ok: true, lifecycle: structuredClone(life) };
+    }
+    throw new Error(`Unexpected ${endpoint}`);
+  } });
+  await workflow.call("archive_settings", { idleDays: 0 });
+  assert.equal((await workflow.call("archived_chats", { workspaceIds: ["ws"] })).idleDays, 0);
+  assert.equal(updates.length, 0, "0 never archives an open chat");
+  assert.equal((await workflow.call("archive_settings", { idleDays: 7 })).idleDays, 7);
+  const listed = await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+  assert.deepEqual(updates, [["stale", "archived"]], "only the chat idle for over 7 days, not working, not scheduled");
+  assert.deepEqual(listed.chats.map((chat) => [chat.taskId, chat.visibility, chat.title]), [["stale", "archived", "Stale chat"]]);
+  assert.equal(listed.chats[0].archivedAt, now, "its archive days count from now");
 });

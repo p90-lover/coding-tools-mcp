@@ -4,7 +4,6 @@ import { Caret, Icon } from "../icons";
 import { ModelJudgesToggle } from "./ModelJudgesToggle";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
-import { ModelLogo } from "./HarnessLogo";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
@@ -15,6 +14,7 @@ import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotati
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
+import { ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
@@ -590,7 +590,7 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
 
 const WorkGroup = memo(WorkGroupView, sameWork);
 /** A DeepSeek turn's work (DshTranscript), skipped on re-render by the same check as WorkGroup. */
-const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live
+const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live && prev.headed === next.headed
   && prev.useWork === next.useWork && prev.beforeStatus === next.beforeStatus && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
 
 function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
@@ -1096,12 +1096,12 @@ export function AgentOrchestratorChat({
   const renderSubagentWork = useMemo(() => (items: ChatLiveItem[], live: boolean, reply?: string) =>
     <LiveTimeline items={items} live={live} finished={!live} reply={reply} />, []);
   useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
-  // The details panel's Outputs and Sources: the cards' work this window has seen (CHAT_WORK holds
-  // live polls and turns read back), plus the newest turns' finished cards, read back once each
-  // while the panel is open. Older turns count once their work is opened in the chat.
+  // The details panel's Outputs and Sources, and each reply head's changed files: the cards' work
+  // this window has seen (CHAT_WORK holds live polls and turns read back), plus the newest turns'
+  // finished cards, read back once each. Older turns count once their work is opened in the chat.
   const [detailsWorkTick, setDetailsWorkTick] = useState(0);
   useEffect(() => {
-    if (!detailsOpen || !loadWork) return;
+    if (!loadWork) return;
     for (const turn of turns.slice(-DETAILS_READ_TURNS)) {
       for (const step of [...turn.steps, ...(turn.final ? [turn.final] : [])]) {
         const key = stepWorkKey(step);
@@ -1114,7 +1114,7 @@ export function AgentOrchestratorChat({
         }).catch(() => undefined);
       }
     }
-  }, [detailsOpen, loadWork, turns]);
+  }, [loadWork, turns]);
   const detailLinks = useMemo(() => detailsOpen ? chatDetailLinks(turns.flatMap((turn) => [...turn.steps, ...(turn.final ? [turn.final] : [])])
     .flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])) : null,
   // CHAT_WORK changes with the polls that change turns, or with a read back (the tick).
@@ -1871,8 +1871,25 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
     // Who answered, said once and plainly: a single chat's model (its maker's mark and name), or a
     // team's answering card marked Team. How it ran (harness, provider, effort, window) is the tooltip.
     const answerRun = chatRuns.find((run) => run.id === turn.runId);
-    const answerModel = turn.final ? answerRun?.nodes.find((node) => node.id === turn.final?.nodeId)?.route?.model : undefined;
     const teamAnswer = Boolean(answerRun) && answerRun?.execution_mode !== "single";
+    // The reply's head (ReplyHead): who answered, how it stands, why it failed and what it changed.
+    const live = !idle && liveTurn(turn);
+    const cards = [...turn.steps, ...(turn.final ? [turn.final] : [])];
+    const modelOf = (step: ChatStep) => answerRun?.nodes.find((node) => node.id === step.nodeId)?.route?.model;
+    const lead = turn.final ?? cards[0];
+    const leadModel = lead ? modelOf(lead) : undefined;
+    const members: ReplyMember[] = teamAnswer ? cards.map((step) => {
+      const model = modelOf(step);
+      const tone = cardTone(step);
+      return { key: step.key, name: step.name, model, modelName: model ? modelShortLabel(model).name || model : undefined, tone,
+        state: step.verdict || (tone === "working" ? step.working?.activity || "Working" : tone === "failed" ? "Failed" : tone === "done" ? "Done"
+          : tone === "stopped" ? "Stopped" : tone === "stalled" ? "May be stuck" : "Waiting") };
+    }) : [];
+    const failing = cards.find((step) => step.error);
+    // The chat's failed-step card says this turn's error already (FailedStepCard).
+    const headError = failing && turn !== failedTurn ? { step: failing.name, message: failing.error! } : undefined;
+    const changes = turnChanges(cards.flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? []));
+    const hasReply = Boolean(cards.length || live);
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
     return <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
@@ -1900,25 +1917,22 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
                     <MessageActions text={chatMessageReadable(steer.text)} /></div>
                   <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
                 </div>)}</SteerReader.Provider> : null}
+              {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} aria-label="Reply">
+              <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
+                startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
+                verdict={turn.final?.verdict} error={headError} members={members} changes={changes} />
+              {/* The head says the error, so the DeepSeek turn leaves its own copy out. */}
               {dsh && readWork
-                ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
-                  errorShownBelow={turn === failedTurn} refusal={!idle && liveTurn(turn) ? cpaRefusal : null}
-                  beforeStatus={!idle && liveTurn(turn) ? steerViews.get(turnIndex) : undefined} />
+                ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={live} expanded={showWork} useWork={readWork}
+                  errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null}
+                  beforeStatus={live ? steerViews.get(turnIndex) : undefined} headed />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
               {/* A steer on its way sits above the turn's running line ("Deep diving", "Working"), never
                   under it: a running DeepSeek turn draws it inside its work, right above that line. */}
-              {steerViews.has(turnIndex) && !(dsh && readWork && !idle && liveTurn(turn)) ? steerViews.get(turnIndex) : null}
-              {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
+              {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
+              {!dsh && live ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
-                {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
-                {dsh ? (turn.final.verdict ? <div className="cx-answer-meta"><span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span></div> : null)
-                  : <div className="cx-answer-meta" title={turn.final.detail || undefined}>
-                    {answerModel ? <ModelLogo model={answerModel} label={turn.final.name} size={14} /> : null}
-                    <span className="cx-answer-name">{turn.final.name}</span>
-                    {teamAnswer ? <span className="cx-answer-mode">Team</span> : null}
-                    {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
-                  </div>}
-                {/* A finished reviewer becomes the answer; its earlier cycles stay above it (DeepSeek's row shows them). */}
+                {/* Who answered and its verdict are in the head; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
                 <ChatMarkdown text={turn.final.text ?? ""} />
                 <MessageActions text={turn.final.text ?? ""}>
@@ -1927,14 +1941,15 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
               </div> : null}
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
-              {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p>
-                : turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
+              {/* How long it worked is in the head; the foot keeps the turn's model requests. */}
               {turn.runId && turn.startedAtMs && !liveTurn(turn)
-                ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={!dsh}
+                ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={false}
                   to={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs} /> : null}
+              </section> : null}
+              {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews]);
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>

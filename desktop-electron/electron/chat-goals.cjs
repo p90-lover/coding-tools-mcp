@@ -194,6 +194,15 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
       persist();
       return goal;
     },
+    /** A chat that moved to another project (move_chat) keeps its goal there. */
+    move(from, to, taskId) {
+      const goal = goals[key(from, taskId)];
+      if (!goal) return false;
+      delete goals[key(from, taskId)];
+      goals[key(to, taskId)] = goal;
+      persist();
+      return true;
+    },
     clear(workspaceId, taskId) {
       const had = Boolean(goals[key(workspaceId, taskId)]);
       delete goals[key(workspaceId, taskId)];

@@ -4677,6 +4677,29 @@ test("rename_chat names the agent's own chat after its task, and a team chat onl
   assert.equal(task().title, "The person's name", "the person's Rename wins over a waiting one");
 });
 
+test("move_chat moves a Single chat to another project once its turn ends, and its goal goes with it", async () => {
+  // The user: "add a allow model to move chat session and modify its path on chat tools".
+  const { world, workflow } = wakeChat();
+  const move = (to, session = "sess-1") => workflow.chatMoveTool({ workspaceId: "ws-1", session, targetWorkspaceId: to });
+  await assert.rejects(move("ws-1"), /already in that project/);
+  await assert.rejects(move("ws-2", "someone-else"), /not one of this project's chats/);
+  await workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", action: "create", objective: "make CI green" });
+  assert.deepEqual(await move("ws-2"), { ok: true, taskId: "task-1", to: "ws-2", deferred: true });
+  assert.equal(world.updates.some((change) => change.operation === "move_chat"), false, "nothing moves during the turn");
+
+  assert.equal(await workflow.moveAfterRun("ws-1", "r1"), "ws-2");
+  assert.deepEqual(world.updates.find((change) => change.operation === "move_chat"),
+    { operation: "move_chat", task_id: "task-1", target_workspace_id: "ws-2", expected_board_revision: 3 });
+  assert.equal((await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"], undefined);
+  assert.equal((await workflow.call("runs", { workspaceId: "ws-2" })).goals["task-1"].objective, "make CI green");
+  assert.equal(await workflow.moveAfterRun("ws-1", "r1"), "ws-1", "a move applies once");
+  assert.equal(world.updates.filter((change) => change.operation === "move_chat").length, 1);
+
+  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 },
+    nodes: [{ id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: "sess-2" } }] });
+  await assert.rejects(move("ws-2", "sess-2"), /Only a Single chat/);
+});
+
 test("redact_message hides a secret in the chat's messages, and in a team chat only once its open cards have started", async () => {
   const { world, workflow, advance } = wakeChat();
   const task = () => world.tasks.find((entry) => entry.id === "task-1");
@@ -9301,6 +9324,44 @@ test("after a restart the app resumes interrupted chats in every project, with n
   assert.deepEqual(retrying.controls, [["r1", "retry"]], "not an abandoned chat, nor one whose sign-in failed");
   assert.deepEqual(retrying.started.sort(), ["live", "r1"]);
   retrying.workflow.dispose();
+});
+test("a reviewer's deny tells the agent why, and that the user did not refuse it", async () => {
+  // Claude Code reported every such deny as "User refused permission to run tool"; the agent then
+  // guessed the person had refused and why.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "allow", kind: "allow_once", label: "Allow Once" }, { id: "reject", kind: "reject_once", label: "Deny" }];
+  async function answered(verdict) {
+    const request = { approval_id: "req", source: "ao", kind: "command", command: "python tools/migrate.py --apply", tool: "Bash", decisions };
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const resolved = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async (url) => String(url).endsWith("/models")
+        ? { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) }
+        : { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) },
+      requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+      aoHarness: {
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+        resolveApproval: async (_session, _requestId, decisionId, message) => { resolved.push([decisionId, message]); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    mission.nodes[0].state = "finished";
+    return resolved;
+  }
+  const [[denied, why]] = await answered({ action: "deny", reason: "reads a file outside the project" });
+  assert.equal(denied, "reject");
+  assert.match(why, /not by the user/);
+  assert.match(why, /reads a file outside the project/);
+  const [[allowed, none]] = await answered({ action: "allow", reason: "reads the project's own files" });
+  assert.equal(allowed, "allow");
+  assert.equal(none, "", "an allowed call needs no explanation");
 });
 
 test("after a restart the interrupted chats launch their agents one after another, not all at once", async () => {

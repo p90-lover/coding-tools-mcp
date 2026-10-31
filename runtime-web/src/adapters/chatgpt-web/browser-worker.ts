@@ -2037,8 +2037,15 @@ export function stripChatGptTraceControlSuffix(block: ChatGptVisibleTraceBlock):
 
 export function redactChatGptUiDiagnostic(value: string): string {
   return value
-    .replace(/<codex_context_json>[\s\S]*?<\/codex_context_json>/gi, "<codex_context_json>[redacted]</codex_context_json>")
-    .replace(/\b(turn|binding|call)_[A-Za-z0-9_-]{12,}\b/g, "$1_[redacted]");
+    .replace(/<codex_context_json>[\s\S]*?(?:<\/codex_context_json>|$)/gi, "<codex_context_json>[redacted]</codex_context_json>")
+    .replace(/\b(turn|binding|call)_[A-Za-z0-9_-]{12,}\b/g, "$1_[redacted]")
+    .replace(/-----BEGIN[^\r\n]{0,80}PRIVATE KEY-----[\s\S]*?(?:-----END[^\r\n]{0,80}PRIVATE KEY-----|$)/g, "[redacted private key]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, "Bearer [redacted]")
+    .replace(/\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{20,}|github_pat_[\w]{20,}|(?:request|activity)_[\w-]{12,})\b/g, "[redacted]")
+    .replace(/\b([A-Z][A-Z0-9_]*_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS)(?:_ID)?)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;]+)/g, "$1=[redacted]")
+    .replace(/(\b(?:api[_ -]?key|(?:access|refresh|turn|control|session)[_ -]?token|token|password|passwd|pwd)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;]+)/gi, "$1[redacted]")
+    .replace(/((?:https?|socks5):\/\/)[^\s/"'`<>]+@/gi, "$1[redacted]@")
+    .replace(/\b((?:proxy-)?authorization|(?:set-)?cookie|headers?|prompt|(?:system|user)[_-]?prompt|input_text|messages|request_body)["']?\s*[:=][\s\S]*/gi, "$1: [redacted]");
 }
 
 const CHATGPT_DIAGNOSTIC_SAFE_STRING_KEYS = new Set([
@@ -2127,6 +2134,24 @@ export class ChatGptBrowserDiagnostics {
     privateDirectory(this.directory);
     pruneBrowserDiagnostics(this.root);
     this.initialized = true;
+  }
+
+  captureFailureCause(phase: "send_activated" | "accepted", error: Error): void {
+    const code = (error as Error & { code?: unknown }).code;
+    this.ensureDirectory();
+    atomicWriteFile(join(this.directory, "00-source-failure.json"), `${JSON.stringify({
+      version: 2,
+      capturedAt: new Date().toISOString(),
+      traceId: this.traceId,
+      checkpoint: "source-failure",
+      source: "submittedTurnFailure",
+      phase,
+      error: {
+        name: redactChatGptUiDiagnostic(error.name).slice(0, 80),
+        message: redactChatGptUiDiagnostic(error.message).slice(0, 1_200),
+        ...(typeof code === "string" ? { code: redactChatGptUiDiagnostic(code).slice(0, 80) } : {}),
+      },
+    }, null, 2)}\n`);
   }
 
   async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {

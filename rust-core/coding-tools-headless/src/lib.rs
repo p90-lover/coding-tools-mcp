@@ -753,6 +753,8 @@ enum AoMutation {
         #[serde(default)] permission_selection: Option<integrations::ao_team::PermissionSelection>,
     },
     SetLimits { expected_revision: u64, max_workers: u8, run_id: Option<String>, run_revision: Option<u64>, worker_limit: Option<u8> },
+    /// An idle chat (board task, its runs and lifecycle) moves to another workspace.
+    MoveChat { task_id: String, target_workspace_id: String, expected_board_revision: u64 },
 }
 
 #[derive(Deserialize)]
@@ -6155,6 +6157,7 @@ async fn ao_update(
         } => Some(ids.clone()),
         _ => None,
     };
+    let moving = matches!(body.change, AoMutation::MoveChat { .. });
     let lifecycle_state = state.clone();
     let workspace_id = body.workspace_id;
     let outcome = tokio::task::spawn_blocking(move || {
@@ -6166,6 +6169,7 @@ async fn ao_update(
             .map_err(|error| error.message().to_string())?;
         let mut result = coding_tools_core::data::DataStore::update_file(|data| match body.change {
             AoMutation::Lifecycle { change } => integrations::ao_lifecycle::apply_change(data, &workspace_id, change, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis() as u64).unwrap_or(0)),
+            AoMutation::MoveChat { task_id, target_workspace_id, expected_board_revision } => integrations::ao_lifecycle::move_chat(data, &workspace_id, &target_workspace_id, &task_id, expected_board_revision, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis() as u64).unwrap_or(0)),
             AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, team_id, execution_mode, single_route, worker_limit } =>
                 integrations::ao_team::create_selected_run(data, &workspace_id, run_id, task_id, expected_board_revision, worker_limit,
                     integrations::ao_team::CreateSelection { execution_mode, team_id, team_revision, single_route: single_route.map(|route| *route) })
@@ -6214,6 +6218,19 @@ async fn ao_update(
             } => integrations::ao::cancel(data, &workspace_id, &run_id, expected_revision).map(|run| json!({"ok":true,"run":run})),
         })
         .map_err(text_error)?;
+        if moving {
+            // The moved runs' native connections were keyed by the old workspace; the chat's next
+            // turn starts a fresh session in the new project's folder.
+            let runs: Vec<String> = serde_json::from_value(result["runs"].clone()).unwrap_or_default();
+            if let Ok(mut hubs) = lifecycle_state.ao_hubs.lock() {
+                let gone: Vec<_> = hubs.keys().filter(|key| key.0 == workspace_id && runs.contains(&key.1)).cloned().collect();
+                for key in gone {
+                    if let Some(hub) = hubs.remove(&key) {
+                        hub.disconnect();
+                    }
+                }
+            }
+        }
         if let Some(roles) = scoped_roles {
             let run: integrations::ao::Run = serde_json::from_value(result["run"].clone()).map_err(|_| "Native policy was saved but readback is unavailable; refresh before reconnecting")?;
             match retire_idle_policy_hubs(&lifecycle_state, &run, &roles) {
