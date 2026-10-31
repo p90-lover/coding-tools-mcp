@@ -14,7 +14,7 @@ const MAX_LABEL = 60;
 const FIRST_ACCOUNT_ID = "main";
 // Browser tabs one account may hold at once (its Codex turns, and the Browser tab's own pages).
 const MAX_TABS_PER_ACCOUNT = 5;
-const DEFAULT_SETTINGS = Object.freeze({ newSessions: "active", keepFinishedTabsMinutes: 10 });
+const DEFAULT_SETTINGS = Object.freeze({ newSessions: "active", keepFinishedTabsMinutes: 5 });
 const KEEP_FINISHED_TABS_MINUTES = [5, 10, 20, 30, 60];
 const MAX_ERROR = 300;
 const MAX_IMPORTED_EMAILS = 500;
@@ -93,11 +93,29 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     if (error?.code !== "ENOENT") logger?.warn?.("browser_accounts.unreadable", { message: error instanceof Error ? error.message : String(error) });
   }
 
+  // Saved off the main thread: a synchronous save held Electron's main thread, and every window,
+  // 38 s on a switch and 75 s on a removal on a busy disk. The state in memory is the truth; one
+  // write runs at a time, and changes made while it runs are written together once it ends.
+  let writing = null;
+  let dirty = false;
+  async function writeAll() {
+    while (dirty) {
+      dirty = false;
+      const text = `${JSON.stringify(state, null, 2)}\n`;
+      const temporary = `${statePath}.${process.pid}.tmp`;
+      try {
+        await fs.promises.mkdir(dataRoot, { recursive: true });
+        await fs.promises.writeFile(temporary, text);
+        await fs.promises.rename(temporary, statePath);
+      } catch (error) {
+        logger?.warn?.("browser_accounts.save_failed", { message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    writing = null;
+  }
   function save() {
-    fs.mkdirSync(dataRoot, { recursive: true });
-    const temporary = `${statePath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`);
-    fs.renameSync(temporary, statePath);
+    dirty = true;
+    writing ??= writeAll();
   }
 
   function account(id) {
@@ -134,6 +152,10 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
         maxTabsPerAccount: MAX_TABS_PER_ACCOUNT,
         settings: { ...state.settings },
       };
+    },
+    /** Settles once every change made so far is on disk (or its write failed and was logged). */
+    async saved() {
+      while (writing) await writing;
     },
     activeId: () => state.activeId,
     activePartition: () => partitionOf(state.activeId),

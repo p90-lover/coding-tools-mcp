@@ -738,11 +738,24 @@ const CONTRACTS = Object.freeze({
       required: Object.freeze(["id"]),
       properties: Object.freeze({
         id: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+        decision: Object.freeze({ type: "string", enum: Object.freeze(["always", "conversation", "deny"]) }),
         cancel: Object.freeze({ type: "boolean" }),
-        window: Object.freeze({ type: "integer", minimum: 0, maximum: 10_000 }),
-        duration: Object.freeze({ type: "string", minLength: 1, maxLength: 16 }),
-        capture: Object.freeze({ type: "boolean" }),
       }),
+      additionalProperties: false,
+    }),
+    response: genericObject,
+  }),
+  "computer.allowedApps": Object.freeze({
+    channel: "coding-tools:computer:allowed-apps",
+    request: emptyObject,
+    response: genericObject,
+  }),
+  "computer.forgetApp": Object.freeze({
+    channel: "coding-tools:computer:forget-app",
+    request: Object.freeze({
+      type: "object",
+      required: Object.freeze(["app"]),
+      properties: Object.freeze({ app: Object.freeze({ type: "string", minLength: 1, maxLength: 260 }) }),
       additionalProperties: false,
     }),
     response: genericObject,
