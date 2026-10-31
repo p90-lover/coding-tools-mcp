@@ -1508,9 +1508,6 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       mainWindowReadyToShow = false;
     }
   });
-  for (const event of ["enter-full-screen", "leave-full-screen", "maximize", "unmaximize"]) {
-    window.on(event, () => send("launcher:window-state-changed", windowStateSnapshot(window)));
-  }
   // The page cannot tell a minimized window (it stays "visible"), so its preload is told: while the
   // window is away, app calls it would refuse anyway stop there (preload.cjs) instead of flooding
   // the log with refusals.
@@ -1519,6 +1516,9 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   };
   for (const event of ["minimize", "restore", "hide", "show"]) window.on(event, sendShown);
   window.webContents.on("did-finish-load", sendShown);
+  for (const event of ["enter-full-screen", "leave-full-screen", "maximize", "unmaximize"]) {
+    window.on(event, () => send("launcher:window-state-changed", windowStateSnapshot(window)));
+  }
   window.once("ready-to-show", () => {
     if (!state.onboardingComplete && !Number.isFinite(windowState.bounds.x)) window.center();
     const restoreLayout = () => {
