@@ -6661,8 +6661,10 @@ test("the idle sweep stops agents stranded as working, never one a run being dri
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
     nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "driven", request_key: "k" } }] };
-  let readFails = false;
+  let readFails = false, refuse = null;
+  const warnings = [];
   const workflow = createAgentOrchestratorWorkflow({ releaseIdleAgents: true,
+    logger: { info() {}, warn: (event, fields) => warnings.push([event, fields]) },
     findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     requestHeadless: async endpoint => {
@@ -6675,7 +6677,7 @@ test("the idle sweep stops agents stranded as working, never one a run being dri
       observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }),
       idleChatSessions: async () => ["idle-1"],
       quietWorkingChatSessions: async quietMs => { quietAsked.push(quietMs); return ["stranded", "driven", "idle-1"]; },
-      exitAgent: async id => { released.push(id); return { ok: true }; },
+      exitAgent: async id => { if (refuse?.[id]) throw refuse[id]; released.push(id); return { ok: true }; },
     },
     confirm: async () => true,
   });
@@ -6692,6 +6694,14 @@ test("the idle sweep stops agents stranded as working, never one a run being dri
   released.length = 0; readFails = true;
   await sweep();
   assert.deepEqual(released, ["idle-1"]);
+  // Seen live 2026-10-31: a stranded chat was tried every sweep for hours and nothing said why it
+  // stayed. What AO answered is logged.
+  released.length = 0; readFails = false;
+  refuse = { stranded: Object.assign(new Error("exit agent stranded: interface transition in progress"), { code: "INTERFACE_TRANSITION_IN_PROGRESS" }) };
+  await sweep();
+  assert.deepEqual(released, ["idle-1"]);
+  assert.deepEqual(warnings.filter(([event]) => event === "ao.idle_release_failed").map(([, fields]) => fields),
+    [{ session: "stranded", stale: true, code: "INTERFACE_TRANSITION_IN_PROGRESS", message: "exit agent stranded: interface transition in progress" }]);
   workflow.dispose();
   mission.nodes[0].state = "finished";
 });

@@ -789,7 +789,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const released = [];
     for (const id of [...idle, ...stale]) {
       if (ours.has(id) || released.includes(id)) continue;
-      if (await harnessService().exitAgent?.(id).then(() => true, () => false)) released.push(id);
+      // Why a stop failed is logged: seen live 2026-10-31, a chat left unreachable by an update was
+      // tried every sweep for hours ("count": 0), and nothing said what AO answered.
+      const stopped = await harnessService().exitAgent?.(id).then(() => true, (error) => {
+        logger?.warn?.("ao.idle_release_failed", { session: id, stale: stale.includes(id),
+          code: error?.code ?? null, message: publicText(error?.message || error, 200) });
+        return false;
+      });
+      if (stopped) released.push(id);
     }
     if (stale.length) logger?.info?.("ao.stale_working_released", { count: released.filter(id => stale.includes(id)).length, quiet: quiet.length });
     return released;
