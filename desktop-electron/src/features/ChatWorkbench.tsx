@@ -7,7 +7,7 @@ import { chatSubagents, contextFraction, subagentActive, subagentTitle, tokensSh
 import { ChatMarkdown } from "./ChatMarkdown";
 import { petFlight, petOverlaps } from "./chat-pet-stage";
 import { costLabel, costSourceLabel, readCpaUsage, type CpaUsage, type CpaUsageRange } from "./cpa-usage";
-import { onWindowFocus, windowUnfocused } from "./page-visibility";
+import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibility";
 
 // The chat's side panel, as Codex shows one beside a thread: tabs for the page the chat's agent
 // opened in its own browser (a native view drawn over the pane's slot), the changes in its
@@ -96,13 +96,14 @@ export function chatProcessRows(commands: Command[], page: LivePage | null): Cha
 const PROCESSES_POLL_MS = 4000;
 /** The commands this chat's agents and the user ran (chat_processes), read while `wanted` (the details panel is open). */
 export function useChatProcesses(sessionIds: string[], wanted: boolean, workspaceId?: string): Command[] {
+  const hidden = useSurfaceHidden();
   const [commands, setCommands] = useState<Command[]>([]);
   const key = sessionIds.join(",");
   useEffect(() => {
     if (!wanted || !sessionIds.length) { setCommands([]); return undefined; }
     let live = true;
     const tick = async () => {
-      if (document.visibilityState !== "visible") return;
+      if (!live || hidden()) return;
       try {
         const result = await paneCall("chat_processes", { sessionIds, ...(workspaceId ? { workspaceId } : {}) });
         if (!live) return;
@@ -114,7 +115,7 @@ export function useChatProcesses(sessionIds: string[], wanted: boolean, workspac
     const timer = window.setInterval(() => void tick(), PROCESSES_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, wanted, workspaceId]);
+  }, [key, wanted, workspaceId, hidden]);
   return commands;
 }
 
@@ -152,6 +153,7 @@ export function startsNewChat(sessionIds: string[], polled: Set<string>): boolea
  * once; closing the panel is respected until the agent does something new (see autoOpenTab).
  */
 export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string): LivePage | null {
+  const hidden = useSurfaceHidden();
   // The page an agent's browser shows now, if any: the chat offers it back when the panel is hidden.
   const [livePage, setLivePage] = useState<LivePage | null>(null);
   const seen = useRef(new Set<string>());
@@ -168,7 +170,7 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
     if (!sessionIds.length) return undefined;
     let live = true;
     const tick = async () => {
-      if (document.visibilityState !== "visible") return;
+      if (!live || hidden()) return;
       try {
         const [previews, processes] = await Promise.all([
           paneCall("chat_preview_state", { sessionIds }), paneCall("chat_processes", { sessionIds, ...(workspaceId ? { workspaceId } : {}) }),
@@ -205,7 +207,7 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
     const timer = window.setInterval(() => void tick(), 4000);
     return () => { live = false; window.clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, hidden]);
   return livePage;
 }
 
@@ -221,6 +223,7 @@ const SUBAGENTS_POLL_MS = 3000;
  * was working, and its work could not be read.
  */
 export function useChatSubagents(sessionIds: string[], onStarted: () => void): ChatSubagent[] {
+  const hidden = useSurfaceHidden();
   const [runs, setRuns] = useState<ChatSubagent[]>([]);
   const seen = useRef<Set<string> | null>(null);
   const onStartedNow = useRef(onStarted);
@@ -232,7 +235,7 @@ export function useChatSubagents(sessionIds: string[], onStarted: () => void): C
     if (!sessionIds.length) return undefined;
     let live = true;
     const tick = async () => {
-      if (document.visibilityState !== "visible") return;
+      if (!live || hidden()) return;
       try {
         const result = await paneCall("subagents_runs");
         if (!live) return;
@@ -249,7 +252,7 @@ export function useChatSubagents(sessionIds: string[], onStarted: () => void): C
     const offFocus = onWindowFocus(() => void tick());
     return () => { live = false; window.clearInterval(timer); offFocus(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, hidden]);
   return runs;
 }
 
@@ -451,6 +454,7 @@ function OverviewPane({ session, sessionId, workspaceId, onTool, subagents = [],
   session?: ChatAgentSession; sessionId: string; workspaceId?: string; onTool: (kind: WorkbenchTab) => void;
   subagents?: ChatSubagent[]; onSubagent?: (id: string) => void;
 }) {
+  const hidden = useSurfaceHidden();
   const [context, setContext] = useState<{ used: number | null; window: number | null; controller: string | null } | null>(null);
   const [changes, setChanges] = useState<{ root: string; branch: string; count: number } | null>(null);
   const [tasks, setTasks] = useState<Command[]>([]);
@@ -471,7 +475,7 @@ function OverviewPane({ session, sessionId, workspaceId, onTool, subagents = [],
       }).catch(() => undefined).finally(() => { counting = false; });
     };
     const read = () => {
-      if (document.visibilityState !== "visible") return;
+      if (!live || hidden()) return;
       void paneCall("chat_context", { sessionIds: [sessionId] }).then((result) => {
         const found = (result.sessions as Record<string, { controller?: string | null; usage?: { contextUsed: number | null; contextWindow: number | null } | null }> | undefined)?.[sessionId];
         if (live) setContext({ used: found?.usage?.contextUsed ?? null, window: found?.usage?.contextWindow ?? session?.contextWindow ?? null, controller: found?.controller ?? null });
@@ -485,15 +489,18 @@ function OverviewPane({ session, sessionId, workspaceId, onTool, subagents = [],
     const timer = window.setInterval(read, OVERVIEW_POLL_MS);
     const offFocus = onWindowFocus(read);
     return () => { live = false; window.clearInterval(timer); offFocus(); };
-  }, [sessionId, workspaceId, session?.contextWindow]);
+  }, [sessionId, workspaceId, session?.contextWindow, hidden]);
   // Usage changes slowly and the main process caches it for 20 s: once per range, then each minute.
   useEffect(() => {
     let live = true;
-    const read = () => { void readCpaUsage(range).then((next) => { if (live) setUsage(next); }).catch(() => undefined); };
+    const read = () => {
+      if (!live || hidden()) return;
+      void readCpaUsage(range).then((next) => { if (live) setUsage(next); }).catch(() => undefined);
+    };
     read();
     const timer = window.setInterval(read, 60_000);
     return () => { live = false; window.clearInterval(timer); };
-  }, [range]);
+  }, [range, hidden]);
 
   const fraction = contextFraction(context ? { contextUsed: context.used, contextWindow: context.window } : null);
   const busy = Boolean(context?.controller && /busy|running|working/i.test(context.controller));
@@ -578,6 +585,7 @@ const SUBAGENT_WORK_POLL_MS = 2000;
  * seconds while it works and once whole when it ends, then its report. It can be stopped from here.
  */
 function SubagentWork({ run, onBack, renderWork }: { run: ChatSubagent; onBack: () => void; renderWork?: RenderWork }) {
+  const hidden = useSurfaceHidden();
   const [items, setItems] = useState<ChatLiveItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -585,18 +593,18 @@ function SubagentWork({ run, onBack, renderWork }: { run: ChatSubagent; onBack: 
   useEffect(() => {
     let live = true;
     const read = () => {
-      if (document.visibilityState !== "visible") return;
+      if (!live || hidden()) return;
+      if (!active) window.clearInterval(timer);
       void paneCall("subagent_transcript", { subagentId: run.subagent_id }).then((result) => {
         if (!live) return;
         setItems(Array.isArray(result.timeline) ? result.timeline as ChatLiveItem[] : []);
         setError(null);
       }).catch((cause) => { if (live) setError(cause instanceof Error ? cause.message : String(cause)); });
     };
-    read();
-    if (!active) return () => { live = false; };
     const timer = window.setInterval(read, SUBAGENT_WORK_POLL_MS);
+    read();
     return () => { live = false; window.clearInterval(timer); };
-  }, [run.subagent_id, active]);
+  }, [run.subagent_id, active, hidden]);
   const stop = () => {
     setStopping(true);
     void paneCall("subagents_stop", { subagentId: run.subagent_id })
@@ -621,6 +629,7 @@ function SubagentWork({ run, onBack, renderWork }: { run: ChatSubagent; onBack: 
 }
 
 function PreviewPane({ sessionId }: { sessionId: string }) {
+  const hidden = useSurfaceHidden();
   const slot = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<PreviewState | null>(null);
   const [address, setAddress] = useState("");
@@ -629,18 +638,21 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     let live = true;
-    const tick = () => void paneCall("chat_preview_state", { sessionIds: [sessionId] })
-      .then((result) => {
-        if (!live) return;
-        const next = (result.previews as Record<string, PreviewState> | undefined)?.[sessionId] ?? null;
-        if (next) rememberPage(sessionId, next.url, next.title);
-        setState(next);
-      })
-      .catch(() => undefined);
+    const tick = () => {
+      if (!live || hidden()) return;
+      void paneCall("chat_preview_state", { sessionIds: [sessionId] })
+        .then((result) => {
+          if (!live) return;
+          const next = (result.previews as Record<string, PreviewState> | undefined)?.[sessionId] ?? null;
+          if (next) rememberPage(sessionId, next.url, next.title);
+          setState(next);
+        })
+        .catch(() => undefined);
+    };
     tick();
     const timer = window.setInterval(tick, PREVIEW_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
-  }, [sessionId]);
+  }, [sessionId, hidden]);
   useEffect(() => { if (!editing) setAddress(state?.url && state.url !== "about:blank" ? state.url : ""); }, [state?.url, editing]);
 
   // The page is a native view: keep it on the slot while the pane shows, and take it off after.
@@ -747,6 +759,7 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
 }
 
 function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspaceId?: string }) {
+  const hidden = useSurfaceHidden();
   const [commands, setCommands] = useState<Command[]>([]);
   const [selected, setSelected] = useState("");
   const [output, setOutput] = useState("");
@@ -763,8 +776,7 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
   useEffect(() => {
     let live = true;
     const tick = () => {
-      // A minimized or hidden window does not poll.
-      if (document.visibilityState !== "visible") return;
+      if (!live || hidden()) return;
       void paneCall("chat_processes", { sessionIds: [sessionId], ...(workspaceId ? { workspaceId } : {}) }).then((result) => {
         if (!live) return;
         const listed = (result.sessions as { commands: Command[]; show?: ShowRequest }[] | undefined)?.[0];
@@ -794,7 +806,7 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
     tick();
     const timer = window.setInterval(tick, COMMANDS_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
-  }, [sessionId]);
+  }, [sessionId, hidden]);
 
   const command = commands.find((item) => item.id === selected);
   const running = isLive(command);
@@ -810,7 +822,7 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
     let busy = false;
     let started = false;
     const read = async () => {
-      if (busy) return;
+      if (!live || busy || hidden()) return;
       busy = true;
       try {
         let added = "";
@@ -840,7 +852,7 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
     void read();
     const timer = window.setInterval(() => void read(), OUTPUT_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
-  }, [sessionId, selected]);
+  }, [sessionId, selected, hidden]);
   const shown = agentShell ? plain(command?.output ?? "") : output;
   useLayoutEffect(() => {
     if (pinned.current && screen.current) screen.current.scrollTop = screen.current.scrollHeight;
