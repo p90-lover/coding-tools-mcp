@@ -4496,6 +4496,8 @@ async function start() {
     missionWorkflowRuntime = agentOrchestratorWorkflow;
     void listHeadlessWorkspaces().then(items => agentOrchestratorWorkflow.restoreSchedules(items))
       .catch(() => logger.warn("ao.schedule_restore_failed", { detail: "Saved delayed starts need inspection; none were replayed." }));
+    // Goals carry on with the window minimized (its reads, which sweep them, stop then).
+    if (!LAUNCHER_SMOKE_TEST) agentOrchestratorWorkflow.startGoalWatch();
     // Chats a restart interrupted resume now, in every project, without waiting for the window or
     // the ChatGPT bridge (whose connect observes their cards again): resumeInterrupted says which.
     if (!LAUNCHER_SMOKE_TEST) {
