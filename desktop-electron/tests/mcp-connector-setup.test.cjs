@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const vm = require("node:vm");
 const path = require("node:path");
-const { currentConnectorSettings, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { createConfiguredConnector, currentConnectorSettings, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
 
 function runtime() {
   const config = {
@@ -151,4 +151,118 @@ test("current configuration creates a Tunnel connector from the observed ChatGPT
   } finally {
     await browser.close();
   }
+});
+
+test("account setup preserves its partition, verifies details and refuses an untrusted same-name tunnel", async (t) => {
+  const fs = require("node:fs");
+  const work = path.resolve(__dirname, "../../aiTemp/account-mcp-bindings");
+  fs.mkdirSync(work, { recursive: true });
+  const userData = fs.mkdtempSync(path.join(work, "case-"));
+  t.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+  const windows = [];
+  let created = true, connectionError = null, changeConfiguration = false;
+  class Window {
+    constructor(options) {
+      this.options = options; this.urls = []; this.closed = false;
+      this.webContents = { setWindowOpenHandler() {}, on() {}, executeJavaScript: async script => {
+        if (script.startsWith("globalThis.__codingToolsConnectorHelpers.createTunnelConnector(")) return { created, href: "/plugins/plugins~Plugin_managed" };
+        if (script.startsWith("globalThis.__codingToolsConnectorHelpers.ensureTunnelConnectorConnected(")) {
+          if (connectionError) throw new Error(connectionError);
+          if (changeConfiguration) host.config.automaticTunnel.tunnelId = "tunnel_dddddddddddddddddddddddddddddddd";
+        }
+      } };
+      windows.push(this);
+    }
+    async loadURL(url) { this.urls.push(url); }
+    isDestroyed() { return this.closed; }
+    destroy() { this.closed = true; }
+  }
+  const host = runtime();
+  const options = { app: { getPath: () => userData }, BrowserWindow: Window,
+    browserHost: { partition: "persist:active", withManualOperation: (_label, action) => action(), probeAuthentication: async () => ({ authenticated: true }) },
+    runtimeHost: host, target: { partition: "persist:other", requireTunnelMatch: true },
+  };
+  const first = await createConfiguredConnector(options);
+  assert.equal(first.connected, true);
+  assert.equal(windows[0].options.webPreferences.partition, "persist:other");
+  assert.equal(windows[0].urls[1], "https://chatgpt.com/plugins/plugins~Plugin_managed");
+  assert.equal(fs.existsSync(path.join(userData, "mcp-connector-binding.json")), false, "background setup cannot replace the main binding");
+  created = false;
+  assert.equal((await createConfiguredConnector(options)).connected, true, "a previously created exact binding is reusable");
+  created = true;
+  await createConfiguredConnector({ ...options, target: { partition: "persist:configured" } });
+  created = false;
+  assert.equal((await createConfiguredConnector({ ...options, target: { partition: "persist:configured", requireTunnelMatch: true } })).connected, true,
+    "Configuration creation also leaves trusted per-account provenance");
+  host.config.automaticTunnel.tunnelId = "tunnel_cccccccccccccccccccccccccccccccc";
+  await assert.rejects(createConfiguredConnector(options), /could not be matched/);
+  assert.equal(windows.at(-1).urls.length, 1, "a wrong tunnel cannot be connected or marked successful");
+  assert.equal(windows.at(-1).closed, true);
+  created = true; connectionError = "Consent was not confirmed";
+  await assert.rejects(createConfiguredConnector(options), /Consent/);
+  created = false; connectionError = null;
+  assert.equal((await createConfiguredConnector(options)).connected, true, "creation is retained for retry after consent fails");
+  changeConfiguration = true;
+  await assert.rejects(createConfiguredConnector(options), /configuration changed/);
+  changeConfiguration = false;
+  let checks = 0;
+  created = true;
+  await assert.rejects(createConfiguredConnector({ ...options, target: { partition: "persist:removed", requireTunnelMatch: true,
+    assertCurrent() { if (++checks === 2) throw new Error("Account removed"); },
+  } }), /Account removed/);
+  const saved = JSON.parse(fs.readFileSync(path.join(userData, "mcp-account-connector-bindings.json"), "utf8"));
+  assert.equal(saved.bindings["persist:removed"], undefined);
+  created = false;
+  assert.equal((await createConfiguredConnector({ ...options, target: undefined })).connected, true, "legacy creation keeps its existing detail verification");
+  created = true;
+  assert.equal((await createConfiguredConnector({ ...options, target: undefined })).connected, true, "new primary connectors also retain creation provenance");
+  assert.equal(fs.existsSync(path.join(userData, "mcp-connector-binding.json")), true);
+  assert(windows.every(window => window.closed));
+});
+
+test("account IPC preserves legacy arbitration and records only the requested, still-existing account", async () => {
+  const fs = require("node:fs");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const snippet = source.slice(source.indexOf('  handle("launcher:mcp-create-connector"'), source.indexOf('  handle("launcher:doctor"'));
+  let handler, failure = null, signedIn = true, removeDuringSetup = false;
+  const accounts = new Set(["main", "other"]), calls = [], records = [];
+  const tunnels = [{ id: "extra", accountId: "other", tunnelId: "tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", state: "stopped" }];
+  const context = {
+    Error, handle: (_name, action) => { handler = action; }, assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+    quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
+    mcpConnectorCommand: { request: (...args) => { calls.push(args); return "legacy"; } },
+    browserAccounts: { partitionOf(id) { if (!accounts.has(id)) throw new Error("Unknown account"); return `persist:${id}`; },
+      recordConnector(id, result) { if (!accounts.has(id)) return false; records.push({ id, ...result }); return true; } },
+    session: { fromPartition: partition => ({ cookies: { get: async () => { calls.push(partition); return []; } } }) },
+    signedInFromCookies: () => signedIn, routeIdleAccountPartition: async partition => calls.push(`route:${partition}`), logger: {},
+    runtimeSupervisor: { extraTunnels: { status: () => tunnels,
+      reconnect: async id => { calls.push(`reconnect:${id}`); tunnels[0].state = "ready"; },
+      setConnector: id => calls.push(`connector:${id}`) } },
+    createConfiguredConnector: async options => {
+      calls.push(JSON.parse(JSON.stringify(options))); options.target.assertCurrent();
+      if (failure) throw new Error(failure);
+      if (removeDuringSetup) accounts.delete("other");
+      return { created: false, href: "/plugins/plugins~Plugin_managed", name: "Coding Tools", connected: true };
+    }, app: {}, BrowserWindow: {}, browserHost: {}, runtimeHost: { currentOperation: () => null }, publishBrowserAccounts() {}, publishOperation() {},
+  };
+  vm.runInNewContext(snippet, context);
+  assert.equal(await handler({}), "legacy");
+  context.runtimeHost.currentOperation = () => "setupMcp";
+  await assert.rejects(handler({}, "other"), /current runtime setup/);
+  assert.equal(calls.some(entry => entry?.target), false);
+  context.runtimeHost.currentOperation = () => null;
+  calls.length = 0; records.length = 0;
+  await handler({}, "other");
+  assert.deepEqual(calls.find(entry => entry?.target)?.target, { partition: "persist:other", requireTunnelMatch: true, tunnelId: tunnels[0].tunnelId });
+  assert(calls.includes("route:persist:other") && calls.includes("reconnect:extra"));
+  assert.deepEqual(records, [{ id: "other", bound: true }]);
+  failure = "ChatGPT refused this connector";
+  await assert.rejects(handler({}, "main"), /refused/);
+  assert.deepEqual(records[1], { id: "main", error: failure });
+  failure = null; signedIn = false; calls.length = 0;
+  await assert.rejects(handler({}, "other"), /Sign in to this account/);
+  assert.equal(calls.some(entry => entry?.target), false);
+  signedIn = true; removeDuringSetup = true; calls.length = 0;
+  await assert.rejects(handler({}, "other"), /Unknown account/);
+  assert.equal(calls.includes("connector:extra"), false, "removed accounts cannot acquire a connector binding");
 });

@@ -245,11 +245,12 @@ function extensionHelpersSource() {
  * an extra tunnel in its account's browser partition; the caller records an extra tunnel's connector.
  */
 async function createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost, target }) {
-  const settings = target
+  const settings = target?.tunnelId !== undefined
     ? extraConnectorSettings(runtimeHost, target.tunnelId)
     : currentConnectorSettings(runtimeHost);
   const partition = target?.partition ?? browserHost.partition;
   return browserHost.withManualOperation("MCP connector creation", async () => {
+    target?.assertCurrent?.();
     // Another account's sign-in is checked by the page itself: the Plugins page will not load.
     if (partition === browserHost.partition && !(await browserHost.probeAuthentication()).authenticated) {
       throw new Error("Complete ChatGPT verification in Coding Tools Browser before creating its connector.");
@@ -271,7 +272,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     const timer = setTimeout(() => {
       timedOut = true;
       if (!popup.isDestroyed()) popup.destroy();
-    }, 75_000);
+    }, target ? 120_000 : 75_000);
     timer.unref?.();
     try {
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -292,6 +293,23 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         throw new Error("ChatGPT returned an invalid connector identity.");
       }
       const href = url.pathname + url.search;
+      if (result.created || target?.requireTunnelMatch) {
+        const bindingPath = path.join(app.getPath("userData"), "mcp-account-connector-bindings.json");
+        let saved = {};
+        let legacy = null;
+        try { saved = JSON.parse(fs.readFileSync(bindingPath, "utf8")); } catch {}
+        try { legacy = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "mcp-connector-binding.json"), "utf8")); } catch {}
+        const known = [saved?.bindings?.[partition], legacy].some(binding => binding
+          && binding.name === settings.name && binding.tunnelId === settings.tunnelId && binding.href === href);
+        if (!result.created && !known) {
+          throw new Error("The existing connector could not be matched to this account's saved MCP tunnel. Re-create that connector in the Browser tab, then retry.");
+        }
+        target?.assertCurrent?.();
+        // Remember creation before consent so a failed connection can safely reuse it on retry.
+        if (result.created) writePrivateFileAtomic(bindingPath, JSON.stringify({ version: 1,
+          bindings: { ...saved?.bindings, [partition]: { name: settings.name, tunnelId: settings.tunnelId, href } },
+        }));
+      }
       await popup.loadURL(url.href);
       await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
       await popup.webContents.executeJavaScript(
@@ -301,7 +319,12 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         writePrivateFileAtomic(path.join(app.getPath("userData"), "mcp-connector-binding.json"),
           JSON.stringify({ version: 1, name: settings.name, tunnelId: settings.tunnelId, href }));
       }
-      return { created: result.created, name: settings.name, href };
+      target?.assertCurrent?.();
+      if (target?.requireTunnelMatch) {
+        const current = target.tunnelId !== undefined ? extraConnectorSettings(runtimeHost, target.tunnelId) : currentConnectorSettings(runtimeHost);
+        if (current.name !== settings.name || current.tunnelId !== settings.tunnelId) throw new Error("The MCP configuration changed during setup. Retry this account's connection.");
+      }
+      return { created: result.created, name: settings.name, href, connected: true };
     } catch (error) {
       if (timedOut) throw new Error("ChatGPT connector setup took too long. Retry from Configuration.");
       throw error;
