@@ -455,7 +455,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // A level the model does not take runs at its nearest one instead of failing every request: one
     // kept from another model ("medium" moved to DeepSeek V4.1 Flash, which takes none/low/high/max;
     // "none" to MiMo or GLM) was refused with a 400, and the chat's launch looked stuck.
-    const takes = viaCpa && CLINE_EFFORTS.get(baseModel);
+    const takes = viaCpa && (knownModels[baseModel]?.capability.efforts ?? CLINE_EFFORTS.get(baseModel));
     if (effort && takes && !takes.includes(effort)) {
       const fitted = nearestEffort(effort, takes);
       logger?.info?.("ao.effort_fitted", { model: baseModel.slice(0, 120), effort, fitted: fitted || "auto" });
@@ -879,19 +879,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // "commandcode-go/…(high)" a 503 auth_unavailable): its models get no suffix and offer no
   // reasoning level. A plugin model is known by its namespace, or by the provider CPA names for it.
   const PLUGIN_NAMESPACES = new Set(["cline-pass", ...PLUGIN_PROVIDERS]);
-  // Cline's plugin decodes these suffixes into the provider's request body.
-  // DeepSeek V4.1 Flash and its dated builds ("…-flash-1017"), as the plugin's modelEfforts.
-  // Every other Cline Pass model takes OpenRouter's levels (plugin 0.1.0-codingtools.4). Before, they
-  // took none: GLM 5.3 Flash's effort chip stayed greyed at "Auto" with no level to pick. Not "none"
-  // (GLM always reasons: "Reasoning is mandatory") nor "ultra" (no OpenRouter level), though CPA's
-  // catalog lists them for some of these models.
-  // Command Code's plugin (1.0.0-codingtools.2) reads the suffix too, as its own advertised levels;
-  // before, it dropped the suffix and a picked level never reached Command Code.
+  // Verified plugin suffix support is used only when the provider omits effort metadata.
   const CLINE_EFFORT_MODELS = [[/^cline-pass\/deepseek-v4\.1-flash(?:-\d{4,8})?$/, ["none", "low", "high", "max"]],
     [/^cline-pass\/[^()]+$/, ["minimal", "low", "medium", "high", "xhigh", "max"]],
     [/^commandcode-go\/[^()]+$/, ["none", "low", "medium", "high", "max"]]];
   /**
-   * A Claude model on one of CPA's own providers (Antigravity) that CPA lists with no levels still
+   * A Claude model on one of CPA's own providers (Antigravity) with effort metadata omitted still
    * takes its suffix: tried 2026-10-21, "claude-sonnet-4-6(low|medium|high|max)" and
    * "claude-opus-4-6-thinking(low)" answered with a thinking block, and without one they did not.
    */
@@ -923,15 +916,6 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       || typeof provider === "string" && PLUGIN_PROVIDERS.has(provider.trim().toLowerCase()) || pluginModels.has(base);
   };
   const VERBATIM_EFFORT_REASON = "This model is served by a CPA provider plugin, which passes the model name on unchanged, so it takes no reasoning level.";
-  /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
-  const CPA_STOCK_WINDOW = 272_000;
-  /**
-   * Real context ceilings of provider-plugin models that CPA reports only with its stock window,
-   * by the model's own name (after any provider prefix). Without one, the card offers the client's
-   * 2M ceiling as unverified; DeepSeek v4.1 Flash showed "up to 2M" for its 1M.
-   */
-  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:\.\d+)?-flash\b/i, 1_000_000]];
-  const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(id.slice(id.lastIndexOf("/") + 1)))?.[1];
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -942,23 +926,34 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const efforts = viaCpa || nativeEffort ? reportedEfforts(info?.efforts) : [];
     const capabilities = { efforts };
     if (viaCpa && typeof info?.provider === "string") capabilities.provider = info.provider;
-    if (!efforts.length) capabilities.effortReason = viaCpa
-      ? (typeof info?.effortReason === "string" ? info.effortReason : "CPA did not advertise reasoning levels for this model.")
+    if (typeof info?.effortReason === "string") capabilities.effortReason = info.effortReason;
+    if (!efforts.length && !capabilities.effortReason) capabilities.effortReason = viaCpa
+      ? "CPA did not advertise reasoning levels for this model."
       : "This harness/model has no verified reasoning-effort transport.";
-    const limit = info?.contextLimit;
-    if (Number.isSafeInteger(limit) && limit > 0) capabilities.contextLimit = limit;
+    const limit = Number.isSafeInteger(info?.contextLimit) && info.contextLimit > 0 ? info.contextLimit : undefined;
+    if (limit) capabilities.contextLimit = limit;
+    const base = model.split("(")[0].trim().toLowerCase();
+    const claudeBase = base.replace(/\[1m\]$/, "").trim();
+    const claudeCompaction = agent === "claude-code"
+      && (!base || ["default", "best", "opusplan", "sonnet", "opus", "haiku", "fable"].includes(claudeBase)
+        || claudeBase.startsWith("claude-") || claudeBase.startsWith("anthropic/claude-"));
     const slash = model.indexOf("/");
     const unqualifiedOpenCode = agent === "opencode" && !viaCpa
       && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
-    // agy's gateway variables carry no window, so it takes no context-window setting. Claude Code
-    // takes one for every model, Claude ones included (their picker was off): AO declares a CPA
-    // alias's window and has a model Claude Code recognizes compact at it, capped at its own.
-    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+    if (claudeCompaction && (!limit || limit >= 100000)) {
+      capabilities.contextWindow = { min: 100000, max: Math.min(1000000, limit || 1000000), kind: "compaction" };
+      capabilities.contextReason = "Claude Code compaction budget, bounded by its 1M setting and reported provider capacity. This does not increase the model's capacity.";
+    // agy's gateway variables carry no window, so it takes no context-window setting.
+    } else if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !claudeCompaction && !unqualifiedOpenCode
+      && (!viaCpa || limit) && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
-        : "The provider did not report this model's limit, so 2M (the client's ceiling) is unverified.";
-    } else capabilities.contextReason = unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
+        : "Client context declaration, bounded by its 2M setting; provider capacity was not reported.";
+    } else capabilities.contextReason = claudeCompaction
+      ? "Reported provider capacity is below Claude Code's minimum 100K compaction budget."
+      : unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
+      : viaCpa && !limit ? "The provider did not report this model's capacity. Auto keeps the client default."
       : "This harness/model has no verified context-window setter.";
     return capabilities;
   }
@@ -1166,21 +1161,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const provider = [entry.provider, entry.owned_by, entry.ownedBy, owners?.get(id)].find(value => typeof value === "string" && value.trim());
       const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
       if (verbatim) plugins.add(id);
-      const reportedLevels = verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
-      const efforts = CLINE_EFFORTS.get(id) ?? (!verbatim && !reportedLevels.length && /^claude-/i.test(id) ? CLAUDE_SUFFIX_EFFORTS : reportedLevels);
-      // context_window is the default the client starts with; max_context_window is how far the
-      // model goes (Luna: 272K by default, up to 1M).
-      // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
-      // window, whatever the model really takes: that number is no limit, so it is left unknown
-      // instead of capping the card (and of becoming its default).
-      const reported = entry.max_context_window ?? entry.context_window ?? entry.context_length;
-      const stock = id.includes("/") && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
-      // A real number CPA reports wins; the stock one gives way to a known ceiling, else stays unknown.
-      const limit = stock ? knownContextLimit(id) : reported;
-      capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
-        : "CPA did not advertise reasoning levels for this model." } : {}),
+      const levels = entry.supported_reasoning_levels ?? entry.thinking?.levels;
+      const hasReportedLevels = levels != null;
+      const efforts = verbatim ? [] : hasReportedLevels ? reportedEfforts(levels)
+        : CLINE_EFFORTS.get(id) ?? (/^claude-/i.test(id) ? CLAUDE_SUFFIX_EFFORTS : []);
+      const effortReason = !efforts.length ? (verbatim ? VERBATIM_EFFORT_REASON : "CPA did not advertise reasoning levels for this model.")
+        : hasReportedLevels ? null : CLINE_EFFORTS.has(id)
+          ? "Provider omitted reasoning levels; using verified CPA plugin suffix support."
+          : "Provider omitted reasoning levels; using verified CPA Claude suffix support.";
+      // Provider capacity is authoritative, including namespaced models and the former stock 272K.
+      const limit = [entry.max_context_window, entry.context_window, entry.context_length]
+        .find(value => Number.isSafeInteger(value) && value > 0);
+      capabilities[id] = { efforts, ...(effortReason ? { effortReason } : {}),
         ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
-        ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
+        ...(limit ? { contextLimit: limit } : {}) };
       ids.push(id);
       if (unavailable[id]) { held[id] = unavailable[id]; delete unavailable[id]; }
       if (ids.length === MAX_LISTED_MODELS) break;

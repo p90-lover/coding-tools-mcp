@@ -522,6 +522,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [view, setView] = useState<"chat" | "overview" | "board">("chat");
   // null until the workspace's runs load; "" means a new, unsent chat.
   const [chatTaskId, setChatTaskId] = useState<string | null>(null);
+  const [chatClosed, setChatClosed] = useState(false);
+  // A later close or selection wins over a chat action still reading its history.
+  const chatSelectionVersion = useRef(0);
   // Why a chat's latest run could not start, by task id; cleared once it starts.
   const [chatNotices, setChatNotices] = useState<Record<string, string>>({});
   // Codex's thread list: pinned and unread chats and pinned projects stay on this computer.
@@ -1102,7 +1105,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     // Right after a project switch this runs while the previous project's board and runs are
     // still loaded; picking its "latest chat" re-selected the old project's task under the new
     // project, so a send went to a task the new workspace refuses. Wait for this project's board.
-    if (chatTaskId !== null || !board || boardWorkspace.current !== workspaceId) return;
+    if (chatClosed || chatTaskId !== null || !board || boardWorkspace.current !== workspaceId) return;
     // A split pane opens the chat it was given (a new one for ""), never the project's latest.
     const wanted = paneWanted.current;
     if (wanted) {
@@ -1122,7 +1125,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     const latest = chatList(missions.filter((mission) => mission.workspace_id === workspaceId), board.tasks, taskLifecycle)[0];
     setChatTaskId(latest?.taskId ?? "");
     if (latest) setSelectedRunId(latest.latestRunId);
-  }, [chatTaskId, missions, board, loadedWorkspace]);
+  }, [chatClosed, chatTaskId, missions, board, loadedWorkspace]);
   // Keep the shared project tree and newly created runs current in either view.
   useEffect(() => {
     if (!workspaceId) return;
@@ -1165,6 +1168,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     return () => window.removeEventListener("coding-tools:ao:teams-changed", changed);
   }, [workspaceId, setError]);
   const selectChat = (taskId: string, next: "chat" | "overview" = "chat") => {
+    chatSelectionVersion.current++;
+    setChatClosed(false);
     // A chat chosen here wins over another project's chat still loading to open (selectChatIn).
     switchTarget.current = ""; pendingSelect.current = null;
     if (pendingChat?.taskId !== taskId) setPendingChat(null);
@@ -1635,7 +1640,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     // run() skips its action while another one is in flight; never leave the chat waiting on it.
     if (busy) { reject(new Error("Another action is still running")); return; }
     const owner = selection.current;
-    const current = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.taskId === owner.taskId;
+    const version = chatSelectionVersion.current;
+    const current = () => mounted.current && chatSelectionVersion.current === version
+      && selection.current.workspaceId === workspaceId && selection.current.taskId === owner.taskId;
     void run("chat", async () => {
       try {
         if (!workspaceId) throw new Error("Add a project first");
@@ -1716,7 +1723,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an
   // open chat whenever its agent cannot simply continue (the backend decides, and wakes one that was
   // released while idle). Best effort and silent.
-  const prewarmKey = view === "chat" && chatTaskId !== null && workspaceId
+  const prewarmKey = view === "chat" && !chatClosed && chatTaskId !== null && workspaceId
     ? JSON.stringify([workspaceId, chatTaskId, composerMode, composerMode === "single" ? singleRoute : composerTeamId]) : "";
   useEffect(() => {
     if (!prewarmKey) return;
@@ -1809,7 +1816,12 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     writeList(PINNED_PROJECTS, next);
     return next;
   });
-  const startNewChat = () => { setPendingChat(null); setChatTaskId(""); setDraftTeam(null); setInspectedId(""); setView("chat"); setSheet(""); setMissionTeamId(team?.id ?? ""); };
+  const startNewChat = () => {
+    chatSelectionVersion.current++;
+    switchTarget.current = ""; pendingSelect.current = null;
+    setChatClosed(false); setChatSeed(null); setPendingChat(null); setChatTaskId(""); setDraftTeam(null);
+    setInspectedId(""); setView("chat"); setSheet(""); setMissionTeamId(team?.id ?? "");
+  };
   // Split view (Claude Code's): more chats beside the window's own, each in a pane of its own
   // (SplitPaneLink). "main" is the window's own chat; a sidebar click goes to the focused pane.
   const [splitPanes, setSplitPanes] = useState<SplitPane[]>([]);
@@ -1823,6 +1835,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     : splitPanes.find((item) => item.workspaceId === id && item.taskId === taskId)?.id;
   /** The window's own chat becomes this one (a promoted pane, a chat dropped to the left of it). */
   const showInMain = (id: string, taskId: string) => {
+    chatSelectionVersion.current++;
+    setChatClosed(false);
     if (id === workspaceId) { if (taskId) selectChat(taskId); else startNewChat(); return; }
     if (taskId) selectChatIn(id, taskId);
     else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); }
@@ -1832,6 +1846,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
    * (a new column while one fits, then a free bottom row, else in place of the last chat).
    */
   const openInSplit = (id: string, taskId: string, at?: SplitDropTarget | PanePos | null) => {
+    if (chatClosed) { setFocusedPane("main"); showInMain(id, taskId); return; }
     const open = paneShowing(id, taskId);
     setView("chat"); setSheet("");
     if (open) { setFocusedPane(open); return; }
@@ -1857,14 +1872,19 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setSplitPanes((current) => normalizeSplit([...current, added]));
     setFocusedPane(added.id);
   };
-  /** Close split view: a pane goes; the window's own chat closed hands its place to the first pane with a chat. */
+  /** Close a pane, promoting a remaining chat or draft; the final close leaves no composer. */
   const closeSplitPane = (id: string) => {
-    if (!splitPanes.length) return;
     if (id === "main") {
+      chatSelectionVersion.current++;
       const ordered = [...splitPanes].sort(paneOrder);
-      const first = ordered.find((item) => item.taskId);
+      const first = ordered.find((item) => item.taskId) ?? ordered[0];
       setFocusedPane("main");
-      if (!first) { startNewChat(); return; }
+      if (!first) {
+        switchTarget.current = ""; pendingSelect.current = null; splitRestored.current = true;
+        setChatClosed(true); setPendingChat(null); setChatTaskId(""); setChatSeed(null);
+        setSelectedRunId(""); setDraftTeam(null); setSheet(""); setSplitPanes([]);
+        return;
+      }
       setSplitPanes((current) => normalizeSplit(current.filter((item) => item.id !== first.id)));
       showInMain(first.workspaceId, first.taskId);
       return;
@@ -1876,14 +1896,14 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // The split view is kept between runs (its chats, column widths and row split), as Claude Code keeps it.
   const splitRestored = useRef(false);
   useEffect(() => {
-    if (pane || splitRestored.current || !workspaceReady) return;
+    if (pane || chatClosed || splitRestored.current || !workspaceReady) return;
     splitRestored.current = true;
     let saved: SplitSaved = { panes: [] };
     try { saved = readSplit(localStorage.getItem(SPLIT_STORE)); } catch { /* Nothing kept. */ }
     if (saved.panes.length) setSplitPanes(normalizeSplit(saved.panes.map((item) => ({ ...item, id: crypto.randomUUID() }))));
     if (saved.weights) setSplitWeightsSaved(saved.weights);
     if (saved.rowSplit) setSplitRow(saved.rowSplit);
-  }, [workspaceReady]);
+  }, [workspaceReady, chatClosed]);
   useEffect(() => {
     if (pane || !splitRestored.current) return;
     const kept: SplitSaved = { panes: splitPanes.filter((item) => item.taskId).map(({ workspaceId: id, taskId, col, row }) => ({ workspaceId: id, taskId, col, row })),
@@ -1906,7 +1926,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         const from = focusedSplit ?? { col: 0, row: 0 as const };
         openInSplit(workspaceId, "", belowPlace(splitPanes, from, splitMaxCols) as PanePos);
       } else if (event.ctrlKey && event.altKey && !event.shiftKey && (key.toLowerCase() === "w" || event.code === "KeyW")) {
-        if (!splitPanes.length) return;
+        if (chatClosed) return;
         event.preventDefault();
         closeSplitPane(focusedPane);
       } else if (event.ctrlKey && !event.altKey && !event.shiftKey && (key === "]" || key === "[")) {
@@ -1952,6 +1972,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   };
   /** New chat: in a split window it opens a pane of its own; otherwise it replaces the open chat. */
   const openNewChat = (id = workspaceId) => {
+    setChatClosed(false);
     if (pane) { pane.onNewChat(id); return; }
     if (splitPanes.length) { openInSplit(id, ""); return; }
     if (id === workspaceId) startNewChat();
@@ -1971,16 +1992,24 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   });
   // Rewind the conversation and run the selected message again; workspace files stay unchanged.
   const rewindChat = (taskId: string, upTo: number) => (async () => {
+    const version = ++chatSelectionVersion.current;
+    switchTarget.current = ""; pendingSelect.current = null;
     const description = await loadDescription(taskId);
+    if (chatSelectionVersion.current !== version) return;
     const messages = chatMessagesFromDescription(description);
     if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) throw new Error("That message is no longer in this chat; reload it");
+    setChatClosed(false);
     await sendChat({ taskId, message: messages[upTo].text, rewind: { index: upTo, description } });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Fork: a new chat starting from this chat's messages (all, the first, or up to one of them).
   const forkChat = (taskId: string, upTo?: number | "first") => void (async () => {
+    const version = ++chatSelectionVersion.current;
+    switchTarget.current = ""; pendingSelect.current = null;
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
+    if (chatSelectionVersion.current !== version) return;
     const kept = upTo === undefined ? messages : messages.slice(0, upTo === "first" ? 1 : upTo + 1);
     if (!kept.length) return;
+    setChatClosed(false);
     await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => chatMessageReadable(message.text)).join("\n\n").slice(0, 8192) });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Delete message (confirmed in the chat): the message and its reply leave this chat. The chat
@@ -2017,8 +2046,12 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // Continue in project: runs stay with their own project, so another project gets a new chat whose
   // composer holds this chat's messages; you pick that project's team or model and send.
   const continueInProject = (taskId: string, targetWorkspaceId: string) => void (async () => {
+    const version = ++chatSelectionVersion.current;
+    switchTarget.current = ""; pendingSelect.current = null;
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
+    if (chatSelectionVersion.current !== version) return;
     const text = messages.map((message) => chatMessageReadable(message.text)).join("\n\n").slice(0, 8192);
+    setChatClosed(false);
     setChatSeed({ key: crypto.randomUUID(), workspaceId: targetWorkspaceId, title: `${taskName(taskId)} (continued)`.slice(0, 240), text });
     setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
     if (targetWorkspaceId === workspaceId) { setChatTaskId(""); setView("chat"); } else chooseWorkspace(targetWorkspaceId);
@@ -2109,6 +2142,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const showingHistory = !showInactive && visibleNodes.length > 0 && visibleNodes.every(node => ["cancelled", "archived"].includes(node.state));
   const workers = selectedRun?.nodes.filter(node => node.role === "worker") ?? [];
   const switchToWorkspace = (id: string) => {
+    chatSelectionVersion.current++;
+    setChatClosed(false);
     setWorkspaceId(id);
     setChatTaskId(null);
     if (pane) return;
@@ -2130,6 +2165,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const pendingSelect = useRef<{ workspaceId: string; taskId: string } | null>(null);
   const switchTarget = useRef("");
   const selectChatIn = (id: string, taskId: string) => {
+    chatSelectionVersion.current++;
+    setChatClosed(false);
     // A cached row of the project just switched to (its runs not read yet) waits like another
     // project's: selecting it now set a chat with no run, and the load then picked another chat's run.
     if (id === workspaceId && loadedWorkspace === workspaceId) { selectChat(taskId); return; }
@@ -2416,11 +2453,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   return (
     <section className={pane ? "ao-workflow cx-pane-surface" : "ao-workflow"} aria-label={copy.title} lang={language}>
       {pane ? null : <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
-        chats={threadChats} archived={threadArchived} selectedTaskId={focusedSplit ? focusedSplit.taskId : chatTaskId ?? ""} now={listNow}
+        chats={threadChats} archived={threadArchived} selectedTaskId={focusedSplit ? focusedSplit.taskId : chatClosed ? "" : chatTaskId ?? ""} now={listNow}
         archivedAll={archivedAll ?? undefined} restoreArchived={restoreArchived} setArchiveDays={setArchiveDays}
         pinned={chatPins} togglePin={togglePin} unread={chatUnread} setUnread={markUnread}
         pinnedProjects={projectPins} toggleProjectPin={toggleProjectPin}
-        busyTaskIds={chatBusy} openTaskIds={[chatTaskId ?? "", ...splitPanes.map((item) => item.taskId)].filter(Boolean)} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined}
+        busyTaskIds={chatBusy} openTaskIds={[chatClosed ? "" : chatTaskId ?? "", ...splitPanes.map((item) => item.taskId)].filter(Boolean)} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined}
         actions={{ select: (taskId) => showChat(workspaceId, taskId), newChat: () => openNewChat(), rename: renameChat,
           lifecycle: missionAction, archiveAll: archiveAllChats,
           fork: (taskId, from) => forkChat(taskId, from === "first" ? "first" : undefined), copy: copyChat,
@@ -2578,6 +2615,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         {view === "chat" ? (
           !workspaceId && workspaceReady
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
+            : chatClosed ? <div className="ao-empty-state" role="status"><p>No open chats</p>
+                <button className="button-primary" type="button" onClick={startNewChat}>New chat</button></div>
             : <ChatSplit focused={focusedPane} onFocus={setFocusedPane}
                 weights={splitWeightsSaved} onWeights={setSplitWeightsSaved} rowSplit={splitRow} onRowSplit={setSplitRow}
                 maxColumns={splitMaxCols} onMaxColumns={setSplitMaxCols}
@@ -2586,7 +2625,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                   pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => openInSplit(id, ""), onClose: () => closeSplitPane(item.id),
                     onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
               <AgentOrchestratorChat
-                onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
+                onClosePane={pane ? pane.onClose : () => closeSplitPane("main")}
                 runs={chatRuns}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
                 projectLoadError={projectLoadError} onRetryProject={() => setProjectLoadRevision((value) => value + 1)} onComposing={prewarmOnTyping}

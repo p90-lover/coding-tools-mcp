@@ -1,0 +1,7 @@
+/*
+!/desktop-electron/
+/desktop-electron/dist/
+/desktop-electron/build/
+/desktop-electron/release/
+/desktop-electron/vendor/
+/desktop-electron/assets/

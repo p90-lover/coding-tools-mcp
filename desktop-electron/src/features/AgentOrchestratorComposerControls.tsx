@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { Caret, Icon } from "../icons";
 import {
@@ -62,13 +62,36 @@ export function useComposerPopover() {
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLElement>(null);
-  const close = () => { setOpen(false); trigger.current?.focus(); };
-  useEffect(() => {
+  const close = () => { setOpen(false); trigger.current?.focus({ preventScroll: true }); };
+  useLayoutEffect(() => {
     if (!open) return;
-    panel.current?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled)")?.focus();
+    const popup = panel.current, button = trigger.current;
+    if (!popup || !button) return;
+    // The top layer escapes split-pane clipping without scrolling the pane to reveal the menu.
+    popup.setAttribute("popover", "manual");
+    Object.assign(popup.style, { position: "fixed", inset: "auto", margin: "0", left: "0px", top: "0px" });
+    popup.showPopover();
+    const place = () => {
+      const anchor = button.getBoundingClientRect(), width = popup.offsetWidth, height = popup.offsetHeight;
+      const above = anchor.top - height - 12, below = anchor.bottom + 12;
+      const top = above >= 8 ? above : below + height <= window.innerHeight - 8 ? below
+        : Math.max(8, Math.min(above, window.innerHeight - height - 8));
+      popup.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8))}px`;
+      popup.style.top = `${top}px`;
+    };
+    place();
+    popup.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled)")?.focus({ preventScroll: true });
     const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
     document.addEventListener("pointerdown", outside);
-    return () => document.removeEventListener("pointerdown", outside);
+    window.addEventListener("resize", place);
+    const resize = new ResizeObserver(place);
+    resize.observe(popup); resize.observe(button);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      window.removeEventListener("resize", place);
+      resize.disconnect();
+      if (popup.matches(":popover-open")) popup.hidePopover();
+    };
   }, [open]);
   const onKeyDown = (event: KeyboardEvent) => {
     if (!open) return;
@@ -78,8 +101,8 @@ export function useComposerPopover() {
       const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled), [tabindex='0']") ?? []);
       if (!controls.length) return;
       const first = controls[0], last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus({ preventScroll: true }); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus({ preventScroll: true }); }
     }
   };
   return { open, setOpen, root, trigger, panel, close, onKeyDown };
@@ -234,7 +257,7 @@ export function AgentOrchestratorComposerControls({
     if (effort) next.effort = effort;
     onRouteChange(next);
   };
-  return <div className="ao-composer-controls">
+  return <div className={`ao-composer-controls is-${mode}`}>
     {permissions}
     <div className="ao-mode-switch" role="group" aria-label="Who answers">
       {(["single", "team"] as const).map(option => <button key={option} type="button" aria-pressed={mode === option}
@@ -287,15 +310,15 @@ export function AgentOrchestratorComposerControls({
           </div>
         </>}
       </ChipMenu>
-      {tier ? <ChipMenu heading="Reasoning effort" popupClass="ao-tuning-popup" ariaLabel={`Reasoning effort: ${tier.label}`} disabled={busy}
+      {tier ? <ChipMenu heading="Effort" popupClass="ao-tuning-popup ao-effort-popup" ariaLabel={`Effort: ${tier.label}`} disabled={busy}
         title="Each effort is its own WebGPT model"
         label={<span>{tier.label}</span>}>
         {(close) => <div role="radiogroup" aria-label="Efforts">
           {WEB_TIERS.map(item => <Option key={item.model} picked={item.model === route.model} disabled={busy}
             onPick={() => { pickModel(item.model); close(); }}>{item.label}</Option>)}
         </div>}
-      </ChipMenu> : <ChipMenu heading="Reasoning effort" popupClass="ao-tuning-popup" className={effortUnsupported ? "is-warning" : ""}
-        ariaLabel={`Reasoning effort: ${effortLabel}`}
+      </ChipMenu> : <ChipMenu heading="Effort" popupClass="ao-tuning-popup ao-effort-popup" className={effortUnsupported ? "is-warning" : ""}
+        ariaLabel={`Effort: ${effortLabel}`}
         disabled={busy || (!levels.length && !route.effort)}
         title={!efforts ? capability?.effortReason || "This model's efforts are not known yet" : !efforts.length ? capability?.effortReason || "This model takes no effort setting"
           : route.effort ? "How hard the model thinks" : "The model's own effort until you pick one"}
@@ -305,7 +328,7 @@ export function AgentOrchestratorComposerControls({
               (a level a plugin lacked 400ed, and the chat's launch looked stuck). It is saved as "auto",
               so the model's start effort (startEffort) never replaces it. */}
           {levels.length ? <Option picked={route.effort === "auto"} disabled={busy}
-            onPick={() => { setEffort("auto"); close(); }}>Auto<small>the model's own</small></Option> : null}
+            onPick={() => { setEffort("auto"); close(); }}>Auto</Option> : null}
           {/* Unpicked, the model's own effort shows as the pick; picking it again keeps it the model's own. */}
           {levels.map(effort => <Option key={effort} picked={route.effort ? route.effort === effort : modelEffort === effort} disabled={busy}
             onPick={() => { setEffort(!route.effort && modelEffort === effort ? null : effort); close(); }}>{effortWord(effort)}</Option>)}
@@ -315,7 +338,7 @@ export function AgentOrchestratorComposerControls({
             ? capability?.effortReason || "This model's efforts are not known yet."
             : capability?.effortReason || "This model takes no effort setting."}</p> : null}
           {!levels.length && route.effort ? <Option picked={false} disabled={busy} onPick={() => { setEffort(null); close(); }}>
-            Auto<small>the model's own</small></Option> : null}
+            Auto</Option> : null}
           {effortUnsupported && levels.length ? <p className="ao-popup-muted" role="status">This model doesn't take {effortWord(route.effort)}. Pick another above.</p> : null}
         </div>}
       </ChipMenu>}
@@ -323,20 +346,24 @@ export function AgentOrchestratorComposerControls({
         title={!context ? capability?.contextReason || "This agent's window cannot be set" : "How much of the conversation the agent keeps in view"}
         label={<span>{windowLabel}</span>}>
         {(close) => <div role="radiogroup" aria-label="Context windows">
-          {[...new Set([...presets, ...(fullLimit ? [fullLimit] : [])])].sort((a, b) => a - b).map(tokens => <Option key={tokens}
+          {[...new Set([...presets, ...(fullLimit && inRange(fullLimit) ? [fullLimit] : [])])].sort((a, b) => a - b).map(tokens => <Option key={tokens}
             picked={(route.context_window || startWindow) === tokens} disabled={busy}
             onPick={() => { setWindow(tokens); close(); }}>{contextText(tokens)}{tokens === fullLimit ? <small>full model limit</small> : null}</Option>)}
-          <form className="ao-context-custom" onSubmit={event => {
-            event.preventDefault();
-            const tokens = parseTokens(contextDraft);
-            if (tokens === null || !inRange(tokens)) return;
-            setWindow(tokens); setContextDraft(""); close();
+          <div className="ao-context-custom" onKeyDown={event => {
+            if (event.key !== "Enter") return;
+            event.preventDefault(); event.stopPropagation();
+            event.currentTarget.querySelector<HTMLButtonElement>("button")?.click();
           }}>
             <input type="text" inputMode="numeric" aria-label="Custom context window" placeholder="Other size, e.g. 300k" value={contextDraft}
               aria-invalid={Boolean(contextDraft.trim()) && !inRange(parseTokens(contextDraft) ?? Number.NaN)} onChange={event => setContextDraft(event.target.value)} />
-            <button type="submit" className="ao-popover-apply" disabled={busy || !inRange(parseTokens(contextDraft) ?? Number.NaN)}>Set</button>
-          </form>
-          {context ? <p className="ao-popup-muted">{contextText(context.min)}–{context.max ? contextText(context.max) : "no limit"}. Applies from the next turn.</p> : null}
+            <button type="button" className="ao-popover-apply" disabled={busy || !inRange(parseTokens(contextDraft) ?? Number.NaN)} onClick={() => {
+              const tokens = parseTokens(contextDraft);
+              if (tokens === null || !inRange(tokens)) return;
+              setWindow(tokens); setContextDraft(""); close();
+            }}>Set</button>
+          </div>
+          {context ? <p className="ao-popup-muted">{contextText(context.min)}–{context.max ? contextText(context.max) : "no limit"}.
+            {context.kind === "compaction" ? " Conversation budget before auto-compaction." : ""} Applies from the next turn.</p> : null}
         </div>}
       </ChipMenu>
     </> : <ChipMenu heading="Orchestrator / Team" popupClass="ao-team-popup" ariaLabel="Choose saved team" disabled={busy}
