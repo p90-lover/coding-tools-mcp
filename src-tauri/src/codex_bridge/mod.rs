@@ -611,6 +611,7 @@ impl Memory {
 #[derive(Default)]
 pub struct Hub {
     current: Mutex<Option<Arc<Bridge>>>,
+    admission_epoch: AtomicU64,
     state_file: Option<PathBuf>,
     recovery: Mutex<()>,
 }
@@ -1065,6 +1066,23 @@ fn native_child_command(
 }
 
 impl Hub {
+    fn connection_admission(
+        &self,
+        epoch: u64,
+    ) -> Result<std::sync::MutexGuard<'_, Option<Arc<Bridge>>>> {
+        let current = lock(&self.current)?;
+        if self.admission_epoch.load(Ordering::SeqCst) != epoch {
+            return Err(
+                "Native connection was cancelled before admission; use a fresh local Connect"
+                    .into(),
+            );
+        }
+        if current.is_some() {
+            return Err("Disconnect the existing native session before reconnecting".into());
+        }
+        Ok(current)
+    }
+
     /// Local desktop admission only. Caller must hold the listener's current policy fence.
     /// Returns before the handshake; a later policy change can cancel the provisional child.
     pub fn connect(&self, root: &Path, options: Connection) -> Result<()> {
@@ -1096,6 +1114,7 @@ impl Hub {
         recovery_deadline: Option<u64>,
         preserve_budget: bool,
     ) -> Result<()> {
+        let admission_epoch = self.admission_epoch.load(Ordering::SeqCst);
         if ao_web {
             let tier = options.model.strip_prefix("chatgpt-web/");
             if !tier.is_some_and(|tier| crate::integrations::ao::WEB_TIERS.contains(&tier))
@@ -1116,10 +1135,7 @@ impl Hub {
                 return Err("Saved native grant expired before recovery admission".into());
             }
         }
-        let mut current = lock(&self.current)?;
-        if current.is_some() {
-            return Err("Disconnect the existing native session before reconnecting".into());
-        }
+        let mut current = self.connection_admission(admission_epoch)?;
         let session_file = self
             .state_file
             .clone()
@@ -1503,6 +1519,7 @@ impl Hub {
     /// Nonblocking invalidation relative to model RPCs. Already submitted effects are not undone.
     pub fn cancel(&self, reason: &str) {
         if let Ok(current) = self.current.lock() {
+            self.admission_epoch.fetch_add(1, Ordering::SeqCst);
             if let Some(bridge) = current.as_ref() {
                 bridge.stop(reason);
             }
@@ -1511,6 +1528,7 @@ impl Hub {
     pub fn disconnect(&self) {
         let _recovery = self.recovery.lock().ok();
         if let Ok(mut current) = self.current.lock() {
+            self.admission_epoch.fetch_add(1, Ordering::SeqCst);
             if let Some(bridge) = current.take() {
                 bridge.stop("local_disconnect");
             } else if let Some(path) = &self.state_file {
@@ -2572,6 +2590,42 @@ mod tests {
     }
 
     use super::*;
+
+    fn pending_connection_is_cancelled(stop: impl FnOnce(&Hub)) {
+        let hub = Arc::new(Hub::default());
+        assert!(hub.state_file.is_none());
+        let (captured, waiting) = mpsc::channel();
+        let (resume, paused) = mpsc::channel();
+        let worker = std::thread::spawn({
+            let hub = hub.clone();
+            move || {
+                let epoch = hub.admission_epoch.load(Ordering::SeqCst);
+                captured.send(()).unwrap();
+                paused.recv().unwrap();
+                hub.connection_admission(epoch).map(|_| ())
+            }
+        });
+        waiting.recv().unwrap();
+        stop(&hub);
+        resume.send(()).unwrap();
+        assert_eq!(
+            worker.join().unwrap().unwrap_err(),
+            "Native connection was cancelled before admission; use a fresh local Connect"
+        );
+        let fresh_epoch = hub.admission_epoch.load(Ordering::SeqCst);
+        assert!(hub.connection_admission(fresh_epoch).unwrap().is_none());
+    }
+
+    #[test]
+    fn disconnect_rejects_pending_connection_admission_and_allows_a_fresh_epoch() {
+        pending_connection_is_cancelled(Hub::disconnect);
+    }
+
+    #[test]
+    fn cancel_rejects_pending_connection_admission_and_allows_a_fresh_epoch() {
+        pending_connection_is_cancelled(|hub| hub.cancel("workspace_policy_changed"));
+    }
+
     #[test]
     fn web_card_approve_for_me_runs_unattended_instead_of_waiting_on_codex_review() {
         // Seen live: Codex's reviewer for a WebGPT card needed the busy ChatGPT web bridge.
