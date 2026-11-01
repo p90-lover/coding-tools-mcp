@@ -5,12 +5,16 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { pinnedCpaSha256, validateCpaRuntime } = require("./prepare-package-resources.cjs");
+const { binaryGoVersion, safeGo } = require("./go-toolchain.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(desktopRoot, "..");
 const aiTempRoot = path.join(repositoryRoot, "aiTemp");
 const SHA256 = /^[a-f0-9]{64}$/;
 const SOURCE_SHA = /^[a-f0-9]{40}$/;
+// Bun before 1.4.4 trusted the leaked eMudhra CAs in fetch, whatever the runtime's guard did
+// (runtime-web/src/ca-distrust.ts); the installer must not ship one.
+const MINIMUM_BUN = [1, 4, 4];
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 
 const PRODUCT = Object.freeze({
@@ -223,6 +227,11 @@ function validateRuntimeBundle(runtimeRoot) {
   }
   const bun = fs.readFileSync(path.join(runtimeRoot, "runtime", "bun.exe"));
   if (bun.subarray(0, 2).toString("ascii") !== "MZ") fail("PACKAGE_RUNTIME_BUN_NOT_WINDOWS_EXECUTABLE", runtimeRoot);
+  const bunVersion = /^(\d+)\.(\d+)\.(\d+)$/.exec(manifest.bunVersion)?.slice(1).map(Number);
+  const older = bunVersion && bunVersion.findIndex((part, index) => part !== MINIMUM_BUN[index]);
+  if (!bunVersion || (older >= 0 && bunVersion[older] < MINIMUM_BUN[older])) {
+    fail("PACKAGE_RUNTIME_BUN_TRUSTS_LEAKED_CAS", manifest.bunVersion);
+  }
   return { bundleId: manifest.bundleId, bunVersion: manifest.bunVersion, playwright: manifest.playwright, fileCount: files.length };
 }
 
@@ -578,6 +587,13 @@ function validatePackageManifest(resourcesRoot, appManifest, options = {}) {
     pinnedCpaSha256(desktopRoot, PRODUCT.platform, PRODUCT.arch));
   validateCpaPlugins(resourcesRoot);
   validateMigrationRollback(resourcesRoot);
+  // The AO daemon must come from a Go with the crypto/x509 fix, however it reached the build output
+  // (the daemon installed on 2026-10-31 was go1.27.1 although the AO build asked for 1.27.3).
+  const aoDaemon = path.join(resourcesRoot, "agent-orchestrator", "ao-daemon.exe");
+  if (fs.existsSync(aoDaemon)) {
+    const goVersion = binaryGoVersion(fs.readFileSync(aoDaemon));
+    if (!safeGo(goVersion)) fail("PACKAGE_AO_DAEMON_GO_TOO_OLD", goVersion ? `go${goVersion.join(".")}` : "unknown Go version");
+  }
   const notices = fs.readFileSync(path.join(resourcesRoot, REQUIRED_COMPONENTS["third-party-notices"]), "utf8");
   for (const marker of ["codex-chatgpt-web", "MIT", "Apache-2.0"]) {
     if (!notices.includes(marker)) fail("PACKAGE_NOTICES_INCOMPLETE", marker);
