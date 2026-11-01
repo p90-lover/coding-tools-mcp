@@ -75,6 +75,15 @@ test("the sandboxed window loads a bundled preload before every launch path", ()
   assert.match(builder, /external:\s*\["electron"\]/);
 });
 
+test("extra tunnel Platform settings send only the existing tunnel id through its named channel", async () => {
+  const { launcher, invocations } = loadPreload();
+  await launcher.openMcpTunnelSettings("b41a6986");
+  assert.deepEqual(invocations, [{ channel: "launcher:mcp-tunnel-settings", payload: "b41a6986" }]);
+  const panel = fs.readFileSync(path.resolve(__dirname, "../src/features/McpTunnelsPanel.tsx"), "utf8");
+  assert.match(panel, /api\.openMcpTunnelSettings\(tunnel\.id\)/);
+  assert.match(panel, /Platform settings/);
+});
+
 test("preload exposes only the named Coding Tools domains and no generic privileged API", () => {
   const { api, launcher } = loadPreload();
 

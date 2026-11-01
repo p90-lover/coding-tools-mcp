@@ -1972,7 +1972,10 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* Who answered and its verdict are in the head; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
-                <ChatMarkdown text={turn.final.text ?? ""} />
+                <ChatMarkdown text={turn.final.text ?? ""} onVisualize={turn.status === "done" && !turn.final.working
+                  && chatRuns.find(run => run.id === turn.runId)?.nodes.some(node => node.id === turn.final?.nodeId
+                    && node.route?.harness_id === "codex-native" && node.route.model.startsWith("chatgpt-web/"))
+                  ? () => setWorkbench("preview") : undefined} />
                 <MessageActions text={turn.final.text ?? ""}>
                   {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}><Icon name="reload" width="14" height="14" /></button> : null}
                 </MessageActions>

@@ -2268,7 +2268,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           : { web_bridge_base_url: webBridge.baseUrl, web_model_catalog: webBridge.catalog }),
         ...(lease ? { chat_preview_server: lease.servers[0] } : {}),
         confirm: !granted,
-      }, granted ? undefined : { localConfirmation: true });
+      }, granted && !lease ? undefined : { localConfirmation: true });
       if (response?.ok === true && response.waiting === true) return response;
       if (response?.ok !== true || response.status?.model !== route.model) {
         throw new Error("Couldn't confirm the connection. Check the status before you retry.");
@@ -2317,6 +2317,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true) throw new Error("AO result is unavailable; inspect the run before retrying");
+    const mission = response.run;
+    const node = mission?.nodes?.find(value => value.id === nodeId);
+    if (nativePreviewTools?.renderNativeVisualization && stillCurrent() && !mission?.cancelled
+      && mission?.workspace_id === workspaceId && mission.id === runId && node?.state === "finished"
+      && node.role === (mission.execution_mode === "single" || mission.solo ? "planner" : "reviewer")
+      && mission.nodes.every(value => ["retry", "approver"].includes(value.role) || ["finished", "cancelled", "archived"].includes(value.state))
+      && node.route?.harness_id === "codex-native" && node.route?.model?.startsWith("chatgpt-web/")
+      && node.receipt?.thread_id && !node.receipt.error && typeof node.receipt.answer === "string"
+      && node.receipt.request_key && node.receipt.request_key === found.node?.receipt?.request_key) {
+      const receipt = node.receipt;
+      try {
+        await nativePreviewTools.renderNativeVisualization({ workspaceId, runId, nodeId, answer: receipt.answer, requestKey: receipt.request_key,
+          workingDirectory: node.settings?.working_directory ?? ".",
+          stillCurrent: async () => {
+            if (!stillCurrent()) return false;
+            const latest = await savedNode(workspaceId, runId, nodeId);
+            return !latest.mission?.cancelled && latest.node?.state === "finished"
+              && latest.mission.nodes.every(value => ["retry", "approver"].includes(value.role) || ["finished", "cancelled", "archived"].includes(value.state))
+              && latest.node.receipt?.request_key === receipt.request_key && latest.node.receipt?.thread_id === receipt.thread_id
+              && latest.node.receipt?.answer === receipt.answer && latest.node.receipt?.turn_id === receipt.turn_id
+              && (latest.node.settings?.working_directory ?? ".") === (node.settings?.working_directory ?? ".")
+              && JSON.stringify(latest.node.route) === JSON.stringify(node.route);
+          },
+        });
+      } catch (error) { logger?.warn?.("ao.visualization_unavailable", { message: publicText(error?.message || error, 200) }); }
+    }
     return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals, found) } : response;
   }
 

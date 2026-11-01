@@ -10,7 +10,7 @@ import { chatGptComposerPromptText, chatGptConnectionInterruptedAlertVisible, ob
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
-import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
+import { CHATGPT_ASSISTANT_TURN_SELECTOR, parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import { ChatGptExternalTurnProgress, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import type { CodexProviderConfig } from "../src/types";
 import { compileChatGptWebPrompt, formatChatGptWebMultipartCommit, formatChatGptWebMultipartStage } from "../src/adapters/chatgpt-web/prompt";
@@ -188,6 +188,23 @@ test("an answer bound before ChatGPT rendered its prompt survives the prompt app
   expect(chatGptAcceptedUserTurnCount(0, 2)).toBe(2);
 });
 
+test("native assistant detection excludes user-only exchanges but retains reasoning and rich-only replies", () => {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  const document = createDocument(`<body>
+    <div data-turn-key="user" id="user"><div data-user-message-bubble>Request only</div></div>
+    <div data-turn-key="thinking" id="thinking"><div data-user-message-bubble>Request</div>
+      <div data-conversation-role="assistant"><div data-streaming-response-status>Thinking</div></div></div>
+    <div data-turn-key="placeholder" id="placeholder"><div data-conversation-role="assistant"></div></div>
+    <div data-turn-key="rich" id="rich"><div data-user-message-bubble>Request</div>
+      <div data-conversation-role="assistant"><div class="chart-widget-container"></div></div></div>
+    <div data-turn-key="message" id="message"><div data-message-author-role="assistant"></div></div>
+    <div data-turn-key="native" id="native"><div data-markdown-text-style="assistant-message"></div></div>
+    <div data-testid="conversation-turn-4" data-turn="assistant" id="legacy"></div>
+  </body>`);
+  expect([...document.querySelectorAll(CHATGPT_ASSISTANT_TURN_SELECTOR)].map(element => element.id))
+    .toEqual(["thinking", "placeholder", "rich", "message", "native", "legacy"]);
+});
+
 test("current ChatGPT exchange containers prove submission and bind only their assistant", async () => {
   let phase = 0;
   let notify = () => {};
@@ -203,12 +220,29 @@ test("current ChatGPT exchange containers prove submission and bind only their a
       return [];
     },
   }, MutationObserver: class { constructor(callback: () => void) { notify = callback; } observe() {} } });
-  const page = { evaluate: async (fn: Function, args: unknown) => runInContext(`(${fn.toString()})`, context)(args), locator: () => ({}) };
+  const hidden = { filter() { return this; }, last() { return this; }, isVisible: async () => false };
+  const page = { isClosed: () => false,
+    evaluate: async (fn: Function, args: unknown) => runInContext(`(${fn.toString()})`, context)(args), locator: () => hidden };
   const worker = Object.create(ChatGptBrowserWorker.prototype);
   const baseline = await worker.captureSubmissionBaseline(page);
   phase = 1; notify();
   expect(await worker.currentSubmissionEvidence(page, baseline)).toBe("user_turn");
-  expect([...(await worker.submissionDomState(page, baseline.domCache)).responseIdentities]).toEqual(["exchange-id"]);
+  expect([...(await worker.submissionDomState(page, baseline.domCache)).responseIdentities]).toEqual([]);
+  const realDateNow = Date.now;
+  let now = 1_000;
+  let waits = 0;
+  try {
+    Date.now = () => now;
+    worker.waitForTurnDomOrExternalProgress = async () => {
+      if (++waits > 1) throw new Error("user-only exchange bypassed the missing-assistant grace");
+      now += CHATGPT_RESPONSE_DOM_GRACE_MS + 1;
+    };
+    await expect(worker.waitForNewAssistantTurn(page, baseline, undefined))
+      .rejects.toThrow("did not expose its assistant turn");
+    expect(waits).toBe(1);
+  } finally {
+    Date.now = realDateNow;
+  }
   phase = 2; notify();
   expect([...(await worker.submissionDomState(page, baseline.domCache)).responseIdentities]).toEqual(["exchange-id"]);
   phase = 3; notify();
@@ -916,7 +950,7 @@ test("an accepted turn rebinds the missing assistant observation and acknowledge
 
 test("missing-assistant expiry checks fresh DOM after a delayed wake while preserving the turn deadline", async () => {
   type Baseline = { initialTurnIdentities: string[]; domCache: Record<string, unknown> };
-  type State = { turnIdentities: string[]; userIdentities: string[]; responseIdentities: string[] };
+  type State = { turnIdentities: string[]; userIdentities: string[]; responseIdentities: string[]; visibleStopButtonCount: number };
   const hiddenLocator = {
     filter() { return this; },
     last() { return this; },
@@ -929,7 +963,7 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
   } as unknown as Page;
   const realDateNow = Date.now;
   try {
-    for (const scenario of ["appeared", "missing", "turn-deadline"] as const) {
+    for (const scenario of ["appeared", "reasoning", "missing", "turn-deadline"] as const) {
       let now = 1_000;
       Date.now = () => now;
       const worker = ChatGptBrowserWorker.forProvider({
@@ -950,11 +984,12 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
         return {
           turnIdentities: ["conversation-turn-user", "conversation-turn-assistant"],
           userIdentities: ["conversation-turn-user"],
-          responseIdentities: waits > 0 && scenario !== "missing" ? ["conversation-turn-assistant"] : [],
+          responseIdentities: waits >= (scenario === "reasoning" ? 2 : 1) && scenario !== "missing" ? ["conversation-turn-assistant"] : [],
+          visibleStopButtonCount: ["reasoning", "turn-deadline"].includes(scenario) && waits < 2 ? 1 : 0,
         };
       };
       worker.waitForTurnDomOrExternalProgress = async () => {
-        if (++waits > 1) throw new Error("missing response was allowed to wait past its grace");
+        if (++waits > (scenario === "reasoning" ? 2 : 1)) throw new Error("missing response was allowed to wait past its grace");
         // Renderer or scheduler resumes after the response grace with a newly rendered turn.
         now += CHATGPT_RESPONSE_DOM_GRACE_MS + 1;
       };
@@ -963,15 +998,15 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
         { initialTurnIdentities: [], domCache: {} },
         scenario === "turn-deadline" ? now + CHATGPT_RESPONSE_DOM_GRACE_MS : undefined,
       );
-      if (scenario === "appeared") {
+      if (scenario === "appeared" || scenario === "reasoning") {
         expect(await result).toMatchObject({ identity: "conversation-turn-assistant", locator: assistantLocator });
       } else {
         await expect(result).rejects.toThrow(scenario === "missing"
           ? "ChatGPT accepted the message but did not expose its assistant turn in the DOM"
           : "ChatGPT web turn timed out");
       }
-      expect(observations).toBe(scenario === "turn-deadline" ? 1 : 2);
-      expect(waits).toBe(1);
+      expect(observations).toBe(scenario === "turn-deadline" ? 1 : scenario === "reasoning" ? 3 : 2);
+      expect(waits).toBe(scenario === "reasoning" ? 2 : 1);
     }
   } finally {
     Date.now = realDateNow;

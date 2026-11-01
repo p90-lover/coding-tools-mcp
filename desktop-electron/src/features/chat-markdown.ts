@@ -17,6 +17,7 @@ export type MdBlock =
   | { kind: "paragraph"; inline: MdInline[] }
   | { kind: "list"; ordered: boolean; start: number; items: MdInline[][] }
   | { kind: "quote"; inline: MdInline[] }
+  | { kind: "visualize"; title: string }
   | { kind: "code"; lang: string; text: string }
   | { kind: "table"; headers: MdInline[][]; rows: MdInline[][][]; align: ("left" | "center" | "right" | undefined)[] }
   | { kind: "rule" };
@@ -111,7 +112,7 @@ function tableCells(line: string): string[] {
   return cells;
 }
 
-export function parseMarkdown(source: string): MdBlock[] {
+export function parseMarkdown(source: string, visualizations = false): MdBlock[] {
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
   const blocks: MdBlock[] = [];
   let paragraph: string[] = [];
@@ -143,6 +144,18 @@ export function parseMarkdown(source: string): MdBlock[] {
       continue;
     }
     if (!line.trim()) { endParagraph(); continue; }
+    const reference = visualizations && !/^ {4}|^\t/.test(line) ? /^\s*visualize([^\r\n]+)\s*$/.exec(line) : null;
+    if (reference) {
+      try {
+        const value: unknown = JSON.parse(reference[1]);
+        if (value && typeof value === "object" && !Array.isArray(value) && typeof (value as { path?: unknown }).path === "string") {
+          const title = (value as { title?: unknown }).title;
+          endParagraph();
+          blocks.push({ kind: "visualize", title: typeof title === "string" && title.trim() ? title.slice(0, 250) : "Interactive panel" });
+          continue;
+        }
+      } catch { /* Malformed and partial references remain inert text. */ }
+    }
     const heading = HEADING.exec(line);
     if (heading) { endParagraph(); blocks.push({ kind: "heading", level: heading[1].length, inline: parseInline(heading[2]) }); continue; }
     if (RULE.test(line)) { endParagraph(); blocks.push({ kind: "rule" }); continue; }

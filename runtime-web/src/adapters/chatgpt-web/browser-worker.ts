@@ -188,9 +188,11 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "data-artifact-id",
   "data-code-block-preview-pane",
   "data-is-last-node",
+  "data-markdown-text-style",
   "data-message-author-role",
   "data-state",
   "data-streaming-response-status",
+  "data-talvt-turn-state",
   "data-testid",
   "data-turn",
   "data-turn-id",
@@ -3332,6 +3334,14 @@ export class ChatGptBrowserWorker {
           state.userIdentities.length,
         ),
       };
+      // Generation can start before the assistant subtree mounts; its visible Stop control
+      // keeps this missing-DOM grace alive without overriding an explicit turn deadline.
+      if (state.visibleStopButtonCount > 0) {
+        responseDeadline = Math.min(
+          deadline ?? Number.POSITIVE_INFINITY,
+          Math.max(responseDeadline, Date.now() + graceMs),
+        );
+      }
       // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
       // observation can prove it is still missing; the explicit turn deadline remains above.
       if (Date.now() >= responseDeadline

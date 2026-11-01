@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      build_headless_artifact:
+        description: Build the tested Windows headless component for local verification
+        required: false
+        default: false
+        type: boolean
   pull_request:
     branches: [main]
   push:
@@ -132,9 +138,53 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked
 
+      - name: Headless private preview regressions
+        env:
+          TEMP: ${{ github.workspace }}/aiTemp/headless-tests
+          TMP: ${{ github.workspace }}/aiTemp/headless-tests
+          CODEX_HOME: ${{ github.workspace }}/aiTemp/headless-tests/codex-home
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml --locked --lib -- ao_preview_home_is_bound_to_its_workspace_loopback_server listener_status_is_readable_but_start_requires_local_confirmation a_project_folder_session_works_in_the_workspace_folder_and_nowhere_else
+
       - name: Cargo clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build the tested headless component
+        if: github.event_name == 'workflow_dispatch' && inputs.build_headless_artifact
+        env:
+          TEMP: ${{ github.workspace }}/aiTemp/headless-tests
+          TMP: ${{ github.workspace }}/aiTemp/headless-tests
+          CODEX_HOME: ${{ github.workspace }}/aiTemp/headless-tests/codex-home
+          CARGO_PROFILE_RELEASE_DEBUG: '0'
+        run: |
+          cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml --locked --lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --manifest-path rust-core/coding-tools-headless/Cargo.toml --locked --release --bin coding-tools-headless
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $env:CARGO_TARGET_DIR 'release/coding-tools-headless.exe'
+          $proof = [ordered]@{
+            sourceSha = (git rev-parse HEAD).Trim()
+            headlessSourceBlob = (git rev-parse 'HEAD:rust-core/coding-tools-headless/src/lib.rs').Trim()
+            headlessLockBlob = (git rev-parse 'HEAD:rust-core/coding-tools-headless/Cargo.lock').Trim()
+            coreTree = (git rev-parse 'HEAD:rust-core/coding-tools-core').Trim()
+            tauriTree = (git rev-parse 'HEAD:src-tauri').Trim()
+            rustc = (rustc --version)
+            sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            size = (Get-Item -LiteralPath $binary).Length
+          }
+          $proof | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $env:CARGO_TARGET_DIR 'release/headless-build-proof.json')
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: github.event_name == 'workflow_dispatch' && inputs.build_headless_artifact
+        with:
+          name: headless-windows-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/aiTemp/cargo-target-windows/release/coding-tools-headless.exe
+            ${{ github.workspace }}/aiTemp/cargo-target-windows/release/headless-build-proof.json
+          if-no-files-found: error
+          retention-days: 3
 
   rust-macos:
     name: Rust macOS — test and clippy
