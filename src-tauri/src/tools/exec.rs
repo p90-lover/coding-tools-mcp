@@ -217,7 +217,7 @@ fn list_directory(
 ) -> Result<String, WorkspaceError> {
     let target = match args {
         [] => cwd.to_path_buf(),
-        [path] => ctx.workspace.resolve_existing(path)?.path,
+        [path] => ctx.workspace.resolve_existing_at(cwd, path)?.path,
         _ => {
             return Err(WorkspaceError::invalid_argument(
                 "ls/dir accepts at most one directory path",
@@ -933,6 +933,29 @@ mod tests {
             std::path::Path::new(&resolved),
             entry.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn audit_native_directory_operands_follow_the_requested_workdir() {
+        let workspace = tempdir().unwrap();
+        let harness = tempdir().unwrap();
+        let nested = workspace.path().join("nested");
+        std::fs::create_dir_all(workspace.path().join("same")).unwrap();
+        std::fs::create_dir_all(nested.join("same")).unwrap();
+        std::fs::write(workspace.path().join("same/root-only.txt"), "root").unwrap();
+        std::fs::write(nested.join("same/nested-only.txt"), "nested").unwrap();
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .unwrap();
+        for command in ["ls same", "dir same"] {
+            let result = call_tool(
+                &ctx,
+                "exec_command",
+                &json!({"cmd":command,"workdir":"nested"}),
+            );
+            assert_eq!(result["ok"], true, "{result}");
+            assert_eq!(result["stdout"], "nested-only.txt\n", "{result}");
+        }
     }
 
     #[test]
