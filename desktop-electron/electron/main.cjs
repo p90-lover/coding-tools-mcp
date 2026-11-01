@@ -3052,7 +3052,7 @@ function registerIpc({ logger, stateStore }) {
     const tunnel = extraTunnels?.status().find(entry => entry.accountId === accountId);
     const id = tunnel?.id, tunnelId = tunnel?.tunnelId;
     const missingTunnel = new Error("Assign an existing account-owned MCP tunnel in More tunnels, then retry this account.");
-    let requireReady = false, creating = false;
+    let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
       if (runtimeHost.currentOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
       if (!operationBrowser || operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
@@ -3061,7 +3061,7 @@ function registerIpc({ logger, stateStore }) {
         throw new Error("Browser account switching or shutdown is in progress");
       }
       const operation = operationBrowser.currentOperation();
-      if (operationBrowser.activeTraceId || (operation && (!creating || operation !== "MCP connector creation"))) {
+      if (!connectorConfirmed && (operationBrowser.activeTraceId || (operation && (!creating || operation !== "MCP connector creation")))) {
         throw new Error("MCP connector setup is busy");
       }
       if (!id) throw missingTunnel;
@@ -3113,8 +3113,10 @@ function registerIpc({ logger, stateStore }) {
         target: { partition, requireTunnelMatch: true, tunnelId, connectorBindings: tunnel.connectorBindings },
         });
       } finally { creating = false; }
-      assertCurrent();
       if (result.connected !== true || result.binding?.tunnelId !== tunnelId) throw new Error("ChatGPT did not confirm the exact connector state.");
+      // The helper has released browser admission; new work cannot undo its verified connection.
+      connectorConfirmed = true;
+      assertCurrent();
       await extraTunnels.setConnector(id, result.href, result.binding);
       assertCurrent();
       const recorded = await browserAccounts.recordConnector(accountId, { bound: true });
