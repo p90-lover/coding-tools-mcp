@@ -60,7 +60,7 @@ const { RuntimeHost } = require("./runtime.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
 const {
   ensurePackagedRuntime,
-  installedRuntimeForLaunch,
+  ensurePackagedRuntimeAsync,
   pruneOldRuntimes,
   waitForPackagedRuntimeSource,
 } = require("./runtime-install.cjs");
@@ -3798,10 +3798,10 @@ async function start() {
     }
     return installedRuntimeRoot;
   };
-  // A launch whose version directory is already whole is checked without holding the main thread
-  // (installedRuntimeForLaunch); a first launch of a release or a damaged copy goes through
-  // ensurePackagedRuntime as before.
-  const launchRuntimeRoot = await installedRuntimeForLaunch({
+  // The launch checks, and on a new version's first start copies, the runtime without holding the
+  // main thread (ensurePackagedRuntimeAsync). If that fails, the synchronous call below runs the
+  // same steps again and reports the failure as before.
+  const launchRuntimeRoot = await ensurePackagedRuntimeAsync({
     app,
     coreHome: CORE_HOME,
     resourcesPath: process.resourcesPath,
