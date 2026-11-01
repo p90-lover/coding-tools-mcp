@@ -8,7 +8,7 @@ import type {
 } from "../types";
 import { Icon } from "../icons";
 import "./email.css";
-import { pageHidden } from "./page-visibility";
+import { useSurfaceHidden } from "./page-visibility";
 
 // A surface-local boundary: a render error here shows a message instead of unmounting the app.
 class EmailBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
@@ -265,6 +265,7 @@ function randomName(): string {
 }
 
 function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: string | null) => void }) {
+  const hidden = useSurfaceHidden();
   const [status, setStatus] = useState<EmailStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [origin, setOrigin] = useState("");
@@ -362,9 +363,9 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   useEffect(loadStatus, [loadStatus]);
 
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    const timer = setInterval(() => { if (!hidden()) setNow(Date.now()); }, 30_000);
     return () => clearInterval(timer);
-  }, []);
+  }, [hidden]);
 
   // --- addresses -------------------------------------------------------------------------
 
@@ -470,7 +471,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   useEffect(() => {
     if (!status?.configured) return;
     const timer = setInterval(() => {
-      if (!current(generation) || pageHidden()) return;
+      if (!current(generation) || hidden()) return;
       const token = listToken.current;
       void api.listEmailMessages({ address: viewAddress, limit: PAGE_SIZE, offset: 0 })
         .then(({ messages: newest, count }) => {
@@ -486,7 +487,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
         .catch(() => {});
     }, waitingForMail ? WAITING_POLL_MS : NEW_MAIL_POLL_MS);
     return () => clearInterval(timer);
-  }, [api, status?.configured, viewAddress, key, waitingForMail, generation, current]);
+  }, [api, status?.configured, viewAddress, key, waitingForMail, generation, current, hidden]);
 
   const moreMessages = messages.length < messageCount;
   const messageSentinel = useSentinel(() => {

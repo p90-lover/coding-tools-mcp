@@ -32,7 +32,8 @@ const settle = () => new Promise(setImmediate);
 
 function fixture() {
   const cache = { origin: "worker-a", generation: 1, lists: new Map(), messages: new Map(), loading: new Map() };
-  const activeGeneration = { current: 1 }, calls = [], timers = new Map();
+  const activeGeneration = { current: 1 }, calls = [], timers = new Map(), intervals = new Map();
+  let intervalId = 0;
   const state = { addresses: [{ id: 2, address: "b@example.test" }], addressCount: 1, addressesLoading: false,
     messages: [{ id: 2, subject: "Worker B" }], messageCount: 1, listLoading: false, listError: null,
     openId: null, openMessage: null, openError: null, pane: "list", confirm: null, pending: null, error: null,
@@ -40,9 +41,9 @@ function fixture() {
   const globals = { cache, generation: 1, activeGeneration, api: {}, status: { configured: true }, key: "*", viewAddress: undefined, addressQuery: "", openId: null,
     addressToken: { current: 0 }, listToken: { current: 0 }, openRef: { current: null }, prefetchTimer: { current: null },
     PAGE_SIZE: 20, ADDRESS_PAGE: 50, PREFETCH_DELAY_MS: 150, WAITING_POLL_MS: 5000, NEW_MAIL_POLL_MS: 20000,
-    waitingForMail: false, pageHidden: () => false, mergeNewest: (_old, newest) => newest,
+    waitingForMail: false, pageHidden: () => false, hidden: () => false, mergeNewest: (_old, newest) => newest,
     window: { setTimeout: (fn, ms) => { const id = timers.size + 1; timers.set(id, { fn, ms }); return id; }, clearTimeout: id => timers.delete(id) },
-    setInterval: fn => { globals.tick = fn; return 1; }, clearInterval() {}, markRead() {},
+    setInterval: fn => { globals.tick = fn; intervals.set(++intervalId, fn); return intervalId; }, clearInterval: id => intervals.delete(id), markRead() {},
     loadAddresses: async () => {},
   };
   for (const key of Object.keys(state)) globals[`set${key[0].toUpperCase()}${key.slice(1)}`] = value => {
@@ -58,8 +59,23 @@ function fixture() {
     cache.lists.clear(); cache.messages.clear(); cache.loading.clear();
     state.addressesLoading = true; state.listLoading = true;
   };
-  return { globals, state, cache, calls, timers, switchWorker };
+  return { globals, state, cache, calls, timers, intervals, switchWorker };
 }
+
+test("Email's new-mail poll and relative clock pause while hidden and resume when shown", async () => {
+  const f = fixture(); let hidden = true, reads = 0, clockUpdates = 0;
+  f.globals.hidden = () => hidden; f.globals.setNow = () => { clockUpdates += 1; };
+  f.globals.api.listEmailMessages = async () => { reads += 1; return { messages: [], count: 0 }; };
+  const clockCleanup = callback("effect:setNow(Date.now())", f.globals)(), clock = f.globals.tick;
+  const pollCleanup = callback("effect:waitingForMail ? WAITING_POLL_MS", f.globals)(), poll = f.globals.tick;
+  try {
+    clock(); poll(); await settle(); assert.equal(reads, 0); assert.equal(clockUpdates, 0);
+    hidden = false; clock(); poll(); await settle(); assert.equal(reads, 1); assert.equal(clockUpdates, 1);
+    hidden = true; clock(); poll(); await settle(); assert.equal(reads, 1); assert.equal(clockUpdates, 1);
+    hidden = false; clock(); poll(); await settle(); assert.equal(reads, 2); assert.equal(clockUpdates, 2);
+  } finally { clockCleanup(); pollCleanup(); }
+  assert.equal(f.intervals.size, 0);
+});
 
 test("an old Worker's list, poll, and address replies cannot update the new Worker", async t => {
   for (const kind of ["list", "poll", "addresses"]) await t.test(kind, async () => {

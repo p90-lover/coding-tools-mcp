@@ -4,6 +4,7 @@ import { cpaProviderOf } from "./AgentOrchestratorRoleEditor";
 import { FloatingLayer } from "./ChatMenu";
 import { contextFraction, tokensShort } from "./ao-chat";
 import { agoLabel, clineStateLabel, costLabel, costSourceLabel, isClineModel, readCpaUsage, servingAccounts, type CpaUsage, type CpaUsageAccount } from "./cpa-usage";
+import { useSurfaceHidden } from "./page-visibility";
 
 // The composer's context meter, as Claude Code shows one: a ring filling as the chat's agent
 // session uses its context window, and on click what AO knows about it. That is the agent's own
@@ -219,6 +220,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
   /** The share of the window in use as the ring shows it, for the chat's pet (null when unknown). */
   onFraction?: (fraction: number | null) => void;
 }) {
+  const hidden = useSurfaceHidden();
   const [snapshot, setSnapshot] = useState<ChatContextSnapshot | null>(null);
   const [quota, setQuota] = useState<CpaQuota | null>(null);
   const [cpaUsage, setUsageReport] = useState<CpaUsage | null>(null);
@@ -240,19 +242,22 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
     if (!sessionId) return undefined;
     let live = true;
     const earlier = earlierKey ? earlierKey.split(",") : [];
-    const read = () => void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId, ...earlier] } })
-      .then((outer) => {
-        const sessions = (outer.result as { sessions?: Record<string, ChatContextSnapshot> } | undefined)?.sessions;
-        // A reply without this session is a read that failed (AO busy or restarting, a timeout),
-        // not a session with no context: the last reading stays instead of the meter emptying.
-        const next = currentContext(sessions, sessionId, earlier);
-        if (live && next) setSnapshot(next);
-      })
-      .catch(() => undefined);
+    const read = () => {
+      if (!live || hidden()) return;
+      void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId, ...earlier] } })
+        .then((outer) => {
+          const sessions = (outer.result as { sessions?: Record<string, ChatContextSnapshot> } | undefined)?.sessions;
+          // A reply without this session is a read that failed (AO busy or restarting, a timeout),
+          // not a session with no context: the last reading stays instead of the meter emptying.
+          const next = currentContext(sessions, sessionId, earlier);
+          if (live && next) setSnapshot(next);
+        })
+        .catch(() => undefined);
+    };
     read();
-    const timer = window.setInterval(() => { if (document.visibilityState === "visible") read(); }, POLL_MS);
+    const timer = window.setInterval(read, POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
-  }, [sessionId, earlierKey]);
+  }, [sessionId, earlierKey, hidden]);
 
   // CPA's Codex accounts' limits change slowly and CPA Helper caches them: read once a minute while
   // the window is visible, and again when the panel opens. Their token use and cost come along.
@@ -264,6 +269,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
     if (!onCpaCodex && !onCpaCline && !onCpaOther) return undefined;
     let live = true;
     const read = () => {
+      if (!live || hidden()) return;
       if (onCpaCodex) {
         void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "cpa_quota", arguments: {} })
           .then((outer) => { if (live) setQuota((outer.result as CpaQuota | undefined) ?? null); })
@@ -276,12 +282,12 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
       }
     };
     read();
-    const timer = window.setInterval(() => { if (document.visibilityState === "visible") read(); }, QUOTA_POLL_MS);
+    const timer = window.setInterval(read, QUOTA_POLL_MS);
     const onOpen = () => read();
     button.current?.addEventListener("click", onOpen);
     const target = button.current;
     return () => { live = false; window.clearInterval(timer); target?.removeEventListener("click", onOpen); };
-  }, [onCpaCodex, onCpaCline, onCpaOther]);
+  }, [onCpaCodex, onCpaCline, onCpaOther, hidden]);
 
   // The category split reads the chat's history, so only while the panel is open. The last split
   // stays across openings and failed reads: clearing it on every open showed only "Used" until a
@@ -295,7 +301,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
     // Each read can page through thousands of timeline entries: one at a time, and none while hidden.
     let pending = false;
     const read = () => {
-      if (pending || document.visibilityState !== "visible") return;
+      if (!live || pending || hidden()) return;
       pending = true;
       void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId], detail: true } })
         .then((outer) => {
@@ -308,7 +314,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
     read();
     const timer = window.setInterval(read, DETAIL_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
-  }, [isOpen, sessionId]);
+  }, [isOpen, sessionId, hidden]);
 
   useEffect(() => {
     if (!open) return undefined;
