@@ -32,6 +32,26 @@ function renameAtomicFile(
   }
 }
 
+/** renameAtomicFile off the main thread: the rename runs in the thread pool and retries wait on a timer. */
+async function renameAtomicFileAsync(
+  source,
+  destination,
+  { platform = process.platform, rename = fs.promises.rename } = {},
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      const transientWindowsError = platform === "win32"
+        && ["EBUSY", "EPERM", "EACCES"].includes(error?.code);
+      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
+      if (!transientWindowsError || delay === undefined) throw error;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
 /** Writes `payload` to a new file at `target` ("wx"), flushed to disk before it is closed. */
 function writeFlushedFile(target, payload, mode) {
   const fd = fs.openSync(target, "wx", mode);
@@ -154,6 +174,7 @@ function writePrivateFileAtomicAsync(filePath, content, { mode = 0o600, protectD
 module.exports = {
   WINDOWS_RENAME_RETRY_DELAYS_MS,
   renameAtomicFile,
+  renameAtomicFileAsync,
   writePrivateFileAtomic,
   writePrivateFileAtomicAsync,
 };
