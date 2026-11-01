@@ -61,9 +61,9 @@ function resolveCpaProxyRoute(dataRoot, safeStorage, componentId = "cpa") {
   return { profileId: profile.id, url };
 }
 
-function resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage) {
+function resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage, resolveRoute = resolveCpaProxyRoute) {
   if (!MANAGED_PROXY_COMPONENTS.has(componentId)) return {};
-  const route = resolveCpaProxyRoute(dataRoot, safeStorage, componentId);
+  const route = resolveRoute(dataRoot, safeStorage, componentId);
   if (!route.url) throw new Error(`Select a network proxy before starting ${componentId}`);
   const protocol = new URL(route.url).protocol;
   if (componentId !== "cpa" && protocol !== "http:" && protocol !== "https:") {
@@ -99,6 +99,39 @@ function createManagedExternalServicesController({
     throw new Error("Managed component data root must be absolute");
   }
 
+  // Every services snapshot resolved the proxy route for CPA (twice) and agy, each time reading the
+  // saved proxy settings and their key synchronously on main: up to 12.8 s on the busy hard disk
+  // (0.8.48, 2026-11-01). A snapshot reuses one resolution per component until the providers
+  // folder reports a change, then publishes afresh; starts always resolve the route anew, so a
+  // process never starts on an old one. Without a watch, every snapshot reads as before.
+  const providersDirectory = path.join(path.dirname(dataRoot), "providers");
+  let snapshotting = false;
+  let routeCache = null;
+  let routeWatcher = null;
+  function watchRoutes() {
+    try {
+      routeWatcher = fs.watch(providersDirectory, () => {
+        routeCache = new Map();
+        publishCombined();
+      });
+      routeWatcher.on("error", () => { routeWatcher?.close(); routeWatcher = null; routeCache = null; });
+      routeWatcher.unref?.();
+      routeCache = new Map();
+    } catch { routeWatcher = null; routeCache = null; }
+  }
+  function snapshotRoute(root, safeStorage, componentId = "cpa") {
+    if (!snapshotting) return resolveCpaProxyRoute(root, safeStorage, componentId);
+    if (!routeWatcher) watchRoutes();
+    if (!routeCache) return resolveCpaProxyRoute(root, safeStorage, componentId);
+    if (!routeCache.has(componentId)) {
+      try { routeCache.set(componentId, { route: resolveCpaProxyRoute(root, safeStorage, componentId) }); }
+      catch (error) { routeCache.set(componentId, { error }); }
+    }
+    const cached = routeCache.get(componentId);
+    if (cached.error) throw cached.error;
+    return cached.route;
+  }
+
   const meshPath = path.join(dataRoot, "loopback-mesh.json");
 
   function persistMeshFromServices(services, targetId = null) {
@@ -128,7 +161,7 @@ function createManagedExternalServicesController({
     resolveRuntimeExecutable,
     resolveCrossUseEnvironment: (componentId) => {
       const extra = peerEnvironmentFor(componentId, crossUseSecrets());
-      Object.assign(extra, resolveManagedProxyEnvironment(componentId, dataRoot, options.safeStorage));
+      Object.assign(extra, resolveManagedProxyEnvironment(componentId, dataRoot, options.safeStorage, snapshotRoute));
       return extra;
     },
     publish: publishCombined,
@@ -164,7 +197,7 @@ function createManagedExternalServicesController({
 
   function cpaProxyStatus(service) {
     try {
-      const route = resolveCpaProxyRoute(dataRoot, options.safeStorage);
+      const route = snapshotRoute(dataRoot, options.safeStorage);
       let configured = false;
       try {
         const config = fs.readFileSync(path.join(dataRoot, "state", "cpa", "config.yaml"), "utf8");
@@ -254,6 +287,7 @@ function createManagedExternalServicesController({
     const snapshot = baseController.snapshot();
     if (snapshotBusy) return snapshot;
     snapshotBusy = true;
+    snapshotting = true;
     try {
       return {
         ...snapshot,
@@ -261,6 +295,7 @@ function createManagedExternalServicesController({
       };
     } finally {
       snapshotBusy = false;
+      snapshotting = false;
     }
   }
 
@@ -502,6 +537,7 @@ function createManagedExternalServicesController({
   }
 
   function dispose({ keepPersistent = false } = {}) {
+    routeWatcher?.close(); routeWatcher = null; routeCache = null;
     managedController.dispose({ keepPersistent });
     baseController.dispose();
   }

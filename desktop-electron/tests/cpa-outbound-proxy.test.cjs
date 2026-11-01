@@ -134,6 +134,56 @@ test("CPA config follows the selected authenticated global profile", () => {
   assert.throws(() => resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage), /saved sign-in, so CPA didn't start/);
 });
 
+// Each snapshot read the proxy settings synchronously on main, up to 12.8 s on the busy disk (0.8.48).
+test("a services snapshot reuses the proxy route until the saved settings change", async (t) => {
+  const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-route-cache-"));
+  const providers = path.join(root, "providers");
+  fs.mkdirSync(providers, { recursive: true });
+  const safeStorage = { isEncryptionAvailable: () => false };
+  const store = createProviderNetworkStore({
+    filePath: path.join(providers, "provider-network.json"),
+    keyPath: path.join(providers, "provider-network.key"), safeStorage,
+  });
+  store.saveProxyProfile({ id: "owned", name: "Route", enabled: true,
+    endpoint: { protocol: "http", host: "127.0.0.1", port: 17895 }, scopes: ["all"] });
+  store.setGlobalRouting({ enabled: true, profileId: "owned" });
+  const published = [];
+  const controller = createManagedExternalServicesController({
+    dataRoot: path.join(root, "integrations"), safeStorage,
+    filePath: path.join(root, "external-services.json"),
+    keyPath: path.join(root, "external-services.key"),
+    env: {}, resolveRuntimeExecutable: () => process.execPath,
+    publish: (snapshot) => published.push(snapshot),
+  });
+  const realRead = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = function (file, ...rest) {
+    if (String(file).endsWith("provider-network.json")) reads += 1;
+    return realRead.call(this, file, ...rest);
+  };
+  t.after(() => { fs.readFileSync = realRead; controller.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
+  const cpaOf = (snapshot) => snapshot.services.find((service) => service.id === "cpa");
+
+  assert.equal(cpaOf(controller.snapshot()).outboundProxy.profileId, "owned");
+  const afterFirst = reads;
+  assert.ok(afterFirst > 0);
+  for (let index = 0; index < 5; index += 1) assert.equal(cpaOf(controller.snapshot()).outboundProxy.profileId, "owned");
+  assert.equal(reads, afterFirst, "later snapshots don't read the saved proxy settings again");
+  // A route resolved outside a snapshot (a start) is always read afresh.
+  assert.equal(resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage).profileId, "owned");
+  assert.ok(reads > afterFirst);
+
+  // Changing the route is seen through the folder's watch, which publishes a fresh snapshot.
+  published.length = 0;
+  store.setGlobalRouting({ enabled: false, profileId: null });
+  const deadline = Date.now() + 5_000;
+  while (!published.some((snapshot) => cpaOf(snapshot).outboundProxy.profileId === null) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(published.length > 0, "the change published a snapshot");
+  assert.equal(cpaOf(controller.snapshot()).outboundProxy.profileId, null);
+});
+
 test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets the bare route", async (t) => {
   const { createProviderNetworkController } = require("../electron/provider-network.cjs");
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/global-env-proxy-"));
