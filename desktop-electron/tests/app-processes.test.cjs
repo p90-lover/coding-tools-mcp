@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { listAppProcesses, selectOwn, roleOf, uptime } = require("../electron/app-processes.cjs");
+const { listAppProcesses, selectOwn, roleOf, uptime, posixSnapshot } = require("../electron/app-processes.cjs");
 
 const T0 = Date.parse("2026-10-22T00:00:00Z");
 const row = (pid, ppid, name, extra = {}) => ({ pid, ppid, name, exe: `C:\\Other\\${name}`, createdMs: T0 + pid, cpuMs: 0,
@@ -69,4 +69,39 @@ test("names map to roles, and uptimes read short", () => {
   assert.equal(roleOf("whatever.exe"), "");
   assert.equal(uptime(42_000), "42s");
   assert.equal(uptime(3 * 86_400_000 + 7_200_000), "3d 2h");
+});
+
+test("POSIX snapshots use supported elapsed-time fields and preserve minutes, hours and days", async t => {
+  const now = T0 + 3 * 86_400_000;
+  t.mock.method(Date, "now", () => now);
+  const taken = await posixSnapshot(1000, async args => {
+    // Apple's ps supports etime; GNU's additional etimes field is not part of this contract.
+    const supported = new Set(["pid", "ppid", "pcpu", "rss", "etime", "comm"]);
+    for (const field of args[1].split(",")) if (!supported.has(field.replace(/=$/, ""))) throw new Error("Unsupported ps field: " + field);
+    return "100 1 0.0 1024 00:42 /opt/Coding Tools\n101 1 0.0 2048 01:02:03 /opt/worker\n102 1 0.0 3072 2-03:04:05 /opt/ao-daemon\n";
+  });
+  const listed = await listAppProcesses({ snapshot: async () => taken, platform: "darwin", cores: 4, own: [100, 101, 102], now });
+  const byPid = Object.fromEntries(listed.processes.map(entry => [entry.pid, entry]));
+  assert.equal(listed.total.processes, 3);
+  for (const [pid, seconds, text] of [[100, 42, "42s"], [101, 3723, "1h 2m"], [102, 183845, "2d 3h"]]) {
+    assert.equal(byPid[pid].started_at, new Date(now - seconds * 1000).toISOString());
+    assert.equal(byPid[pid].uptime, text);
+  }
+  assert.equal(byPid[100].name, "Coding Tools");
+  assert.equal(byPid[102].memory_mb, 3);
+});
+
+test("POSIX CPU values, totals and busy notes use the whole machine's capacity", async t => {
+  for (const [cores, pcpu, expected] of [[4, 0, 0], [4, 100, 25], [4, 400, 100], [1, 100, 100], [8, 100, 12.5]]) await t.test(`${pcpu}% on ${cores} cores`, async () => {
+    const snapshot = sample => posixSnapshot(sample, async args => {
+      // A Linux ps fixture can supply either supported elapsed representation, as requested.
+      const elapsed = args[1].includes("etime=") ? "00:01:00" : "60";
+      return `100 1 ${pcpu} 102400 ${elapsed} /opt/coding-tools\n`;
+    });
+    const listed = await listAppProcesses({ snapshot, platform: "linux", cores, own: [100] });
+    assert.equal(listed.processes[0].cpu_percent, expected);
+    assert.equal(listed.total.cpu_percent, expected);
+    assert.equal(listed.notes.length, expected >= 50 ? 1 : 0);
+    if (expected >= 50) assert.ok(listed.notes[0].includes(`used ${expected}% of all cores`));
+  });
 });
