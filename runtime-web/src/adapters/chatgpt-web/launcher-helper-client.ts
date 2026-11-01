@@ -6,6 +6,7 @@ import { notifyLauncherTurn, waitForLauncherBrowserHostDescriptor, type Launcher
 import { ChatGptCompactionHandoffAccepted, ChatGptTurnSupersededError, ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
+import { normalizeChatGptRichOutput, type ChatGptRichOutput } from "./rich-output";
 import {
   parseChatGptLunaCheckpoint,
   type ChatGptLunaCheckpoint,
@@ -32,6 +33,7 @@ type HelperMessage =
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
   | { type: "event"; id: string; event: "luna_checkpoint"; checkpoint: ChatGptLunaCheckpoint; answerHash: string }
+  | { type: "event"; id: string; event: "rich_output"; output: ChatGptRichOutput }
   | { type: "result"; id: string; text: string }
   | {
       type: "error";
@@ -63,6 +65,11 @@ function parseHelperMessage(line: string): HelperMessage {
   }
   if (message.type === "event") {
     const event = message.event;
+    if (event === "rich_output") {
+      const output = normalizeChatGptRichOutput(message.output);
+      if (!output) throw new Error("Launcher browser helper rich output is invalid");
+      return { type: "event", id: message.id, event, output };
+    }
     if (event === "multipart_stage_acknowledged") {
       if (!Number.isSafeInteger(message.stageIndex) || (message.stageIndex as number) <= 0) {
         throw new Error("Launcher browser helper multipart stage index is invalid");
@@ -310,6 +317,7 @@ export class LauncherBrowserHelperClient {
             ...(turn.conversationKey ? { conversationKey: turn.conversationKey } : {}),
             ...(turn.compaction ? { compaction: true } : {}),
             ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
+            ...(turn.onRichOutput && this.helperFeatures.has("rich-output") ? { captureRichOutput: true } : {}),
             ...(turn.externalProgress ? { externalProgress: true } : {}),
           },
         })
@@ -573,6 +581,9 @@ export class LauncherBrowserHelperClient {
           return;
         }
         pending.turn.onLunaCheckpoint({ checkpoint: message.checkpoint, answerHash: message.answerHash });
+      }
+      else if (message.event === "rich_output" && !pending.localFailure && !pending.turn.abortSignal?.aborted) {
+        pending.turn.onRichOutput?.(message.output);
       }
       else if (message.event === "reasoning" && message.text) {
         pending.turn.onReasoningSummary?.(message.text, message.continuation === true);

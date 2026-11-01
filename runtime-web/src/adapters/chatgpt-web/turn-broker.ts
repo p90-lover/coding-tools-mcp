@@ -3,6 +3,8 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
+import type { CanonicalToolResult, CodexToolResultMessage } from "../../types";
+import { parseDataUrl } from "../image";
 import {
   CompactionTransactionStore,
   type CompactionTransactionHandle,
@@ -21,11 +23,33 @@ export interface BrokerToolRequest {
   input?: string;
 }
 
-export interface BrokerToolResult {
-  content: unknown[];
-  structuredContent?: unknown;
-  isError?: boolean;
-  _meta?: unknown;
+export type BrokerToolResult = CanonicalToolResult;
+
+/** Preserve supplied MCP data, while keeping legacy native text/image results compatible. */
+export function codexToolResultToBrokerResult(message: CodexToolResultMessage): BrokerToolResult {
+  if (message.mcpResult) return message.mcpResult;
+  const content = typeof message.content === "string"
+    ? [{ type: "text", text: message.content }]
+    : message.content.map(part => {
+      if (part.type === "text") return { type: "text", text: part.text };
+      const parsed = parseDataUrl(part.imageUrl);
+      return parsed
+        ? { type: "image", data: parsed.base64, mimeType: parsed.mediaType }
+        : { type: "resource_link", uri: part.imageUrl, name: "Codex tool image", mimeType: "image/*" };
+    });
+  const text = typeof message.content === "string"
+    ? message.content
+    : message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
+  let structuredContent: unknown;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object") structuredContent = parsed;
+  } catch {}
+  return {
+    content,
+    ...(structuredContent !== undefined ? { structuredContent } : {}),
+    ...(message.isError ? { isError: true } : {}),
+  };
 }
 
 interface PendingInvocation {

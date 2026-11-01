@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildResponseJSON } from "../src/bridge";
+import { bridgeToResponsesSSE, buildResponseJSON } from "../src/bridge";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
@@ -13,7 +13,9 @@ import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation
 import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision, priorChatGptAbortedTurnIds } from "../src/adapters/chatgpt-web/environment";
 import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
+import { formatChatGptRichOutput, type ChatGptRichOutput } from "../src/adapters/chatgpt-web/rich-output";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
+import { CHATGPT_LUNA_CHECKPOINT_MARKER, hashChatGptLunaAnswer } from "../src/adapters/chatgpt-web/rolling-checkpoint";
 import {
   CODEX_ACTIVE_COMPACTION_REQUEST_MARKER,
 } from "../src/adapters/chatgpt-web/native-compaction-control";
@@ -146,7 +148,7 @@ const browserOnlyCapabilities = { localToolsEnabled: false, solAvailable: true, 
 function brokerTestEndpoint(name: string): string {
   return process.platform === "win32"
     ? defaultBrokerEndpoint(join(tmpdir(), name), "win32")
-    : join(tmpdir(), `${name}.sock`);
+    : join(tmpdir(), `cgw-${createHash("sha256").update(name).digest("hex").slice(0, 12)}.sock`);
 }
 
 async function invokeAfterBrowserBoundary<T>(
@@ -303,6 +305,115 @@ function canonicalJson(value: unknown): string {
 }
 
 describe("ChatGPT outer-native harness v4", () => {
+  test.each(["rich-only", "schema", "failed"])("rich response finalization preserves %s boundaries", async mode => {
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://rich-boundary-${mode}-${Date.now()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run;
+    const rich: ChatGptRichOutput = { sourceUrl: "https://chatgpt.com/c/owned-boundary", items: [{ kind: "chart", label: "Revenue" }] };
+    const answer = mode === "rich-only" ? "" : mode === "schema" ? '{"ok":true}' : "Partial";
+    worker.run = async turn => {
+      await turn.prepare();
+      if (answer) turn.onTextDelta(answer);
+      turn.onRichOutput?.(rich);
+      if (mode === "failed") throw new Error("Controlled browser failure");
+      return answer;
+    };
+    const request = rawWireRequest(environmentXml);
+    if (mode === "schema") request.options.outputFormat = {
+      type: "json_schema", name: "result", strict: true,
+      schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false },
+    };
+    const events: AdapterEvent[] = [];
+    try {
+      const run = createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      if (mode === "failed") expect((await rejection(run)).message).toContain("Controlled browser failure");
+      else await run;
+      const text = events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "final_answer").map(event => event.text).join("");
+      if (mode === "failed") {
+        expect(events.some(event => event.type === "done")).toBeFalse();
+        expect(text).not.toContain("Open Revenue");
+      } else {
+        expect(text).toBe(mode === "rich-only" ? formatChatGptRichOutput(rich) : answer);
+        expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      }
+    } finally {
+      worker.run = originalRun;
+    }
+  });
+
+  test.each([false, true])("rich responses stream and replay once with local tools=%s", async localToolsEnabled => {
+    const socketPath = brokerTestEndpoint(`cgw-rich-${localToolsEnabled}-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://rich-response-${localToolsEnabled}-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled, solAvailable: true },
+    };
+    const rich: ChatGptRichOutput = {
+      sourceUrl: "https://chatgpt.com/c/owned-rich-response",
+      items: [
+        { kind: "chart", label: "Revenue" },
+        { kind: "app", label: "Explorer" },
+        { kind: "artifact", label: "Report" },
+        { kind: "image", label: "Photo", url: "https://example.com/photo.png" },
+        { kind: "file", label: "Data", url: "https://example.com/data.csv" },
+        { kind: "audio", label: "Audio", url: "https://example.com/audio.mp3" },
+        { kind: "video", label: "Video", url: "https://example.com/video.mp4" },
+      ],
+    };
+    const answer = "Results\n\n| Item | Value |\n| --- | --- |\n| Total | 42 |\n\n[Source](https://example.com/source)";
+    const expected = answer + formatChatGptRichOutput(rich, answer);
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run;
+    let browserStarts = 0;
+    let started!: () => void;
+    let finish!: () => void;
+    const browserStarted = new Promise<void>(resolve => { started = resolve; });
+    const finishBrowser = new Promise<void>(resolve => { finish = resolve; });
+    worker.run = async turn => {
+      browserStarts++;
+      await turn.prepare();
+      turn.onReasoningSummary?.("Preparing the chart");
+      turn.onTextDelta("Results");
+      started();
+      await finishBrowser;
+      turn.onTextDelta(answer.slice("Results".length));
+      turn.onRichOutput?.(rich);
+      return answer;
+    };
+    const request = rawWireRequest(environmentXml);
+    const events: AdapterEvent[] = [];
+    try {
+      const run = createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      await browserStarted;
+      await Bun.sleep(0);
+      expect(events.some(event => event.type === "text_delta" && event.text === "Results")).toBeTrue();
+      expect(events.some(event => event.type === "done")).toBeFalse();
+      finish();
+      await run;
+      const text = events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "final_answer").map(event => event.text).join("");
+      expect(text).toBe(expected);
+      expect(events.some(event => event.type === "thinking_delta" && event.thinking === "Preparing the chart")).toBeTrue();
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      const replay: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => replay.push(event));
+      expect(browserStarts).toBe(1);
+      expect(replay.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "final_answer").map(event => event.text).join("")).toBe(expected);
+      expect(JSON.stringify(buildResponseJSON(events, request.modelId))).toContain("Open Revenue in ChatGPT");
+      const wire = await new Response(bridgeToResponsesSSE((async function* () { yield* events; })(), request.modelId)).text();
+      expect(wire).toContain("response.completed");
+      expect(wire).toContain("Open Revenue in ChatGPT");
+      expect(wire).toContain("Preparing the chart");
+    } finally {
+      finish();
+      worker.run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
   test("extracts authoritative environment, tool registry, and turn identity from the Codex wire envelope", () => {
     const request = rawWireRequest(environmentXml);
     expect(extractChatGptTurnEnvironment(request)).toEqual({
@@ -1474,6 +1585,72 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(existsSync(checkpointPath)).toBeFalse();
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    }
+  });
+
+  test("Luna rich response applies its persisted checkpoint on the next exact-parent turn", async () => {
+    const checkpointPath = join(tempRoot, `rich-luna-checkpoint-${Date.now()}.json`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-luna-rich-checkpoint-${Date.now()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: false, proAvailable: false, lunaCheckpointStatePath: checkpointPath },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run;
+    const preparedTexts: string[] = [];
+    const rich: ChatGptRichOutput = { sourceUrl: "https://chatgpt.com/c/owned-luna-rich", items: [{ kind: "chart", label: "Revenue" }] };
+    const answer = "Created the chart.";
+    const expected = answer + formatChatGptRichOutput(rich, answer);
+    worker.run = async turn => {
+      const prepared = await turn.prepare();
+      try {
+        preparedTexts.push(prepared.text);
+        const bareAnswer = preparedTexts.length === 1 ? answer : "Continued the chart work.";
+        turn.onTextDelta(bareAnswer);
+        turn.onLunaCheckpoint?.({
+          checkpoint: { version: 2, summary: "Private checkpoint: the Revenue chart is ready." },
+          answerHash: hashChatGptLunaAnswer(bareAnswer),
+        });
+        if (preparedTexts.length === 1) turn.onRichOutput?.(rich);
+        return bareAnswer;
+      } finally {
+        prepared.release();
+      }
+    };
+    const threadId = "thread_rich_luna_checkpoint";
+    const sourceTurnId = "turn_rich_luna_source";
+    const nextTurnId = "turn_rich_luna_next";
+    const wireMessage = (role: "user" | "assistant", text: string, turnId: string) => ({
+      type: "message", role,
+      content: [{ type: role === "assistant" ? "output_text" : "input_text", text }],
+      internal_chat_message_metadata_passthrough: { turn_id: turnId },
+    });
+    const request = (turnId: string, input: unknown[]) => parseRequest({
+      model: "gpt-5.6-luna", reasoning: { effort: "low" }, input,
+      client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId, turn_id: turnId }) },
+    });
+    const original = wireMessage("user", "Original full Luna history: create a Revenue chart", sourceTurnId);
+    try {
+      const firstEvents: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(request(sourceTurnId, [original]), { headers: new Headers() }, event => firstEvents.push(event));
+      const visible = firstEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "final_answer").map(event => event.text).join("");
+      expect(visible).toBe(expected);
+      expect(visible).not.toContain(CHATGPT_LUNA_CHECKPOINT_MARKER);
+      expect(visible).not.toContain("Private checkpoint");
+      const nextEvents: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(request(nextTurnId, [
+        original,
+        wireMessage("assistant", visible, sourceTurnId),
+        wireMessage("user", "Continue with the Revenue chart", nextTurnId),
+      ]), { headers: new Headers() }, event => nextEvents.push(event));
+      expect(preparedTexts).toHaveLength(2);
+      expect(preparedTexts[1]).toContain("Compressed Luna task history");
+      expect(preparedTexts[1]).toContain("the Revenue chart is ready");
+      expect(preparedTexts[1]).toContain("Continue with the Revenue chart");
+      expect(preparedTexts[1]).not.toContain("Original full Luna history");
+      expect(nextEvents.at(-1)).toMatchObject({ type: "done", endTurn: true });
+    } finally {
+      worker.run = originalRun;
     }
   });
 
@@ -3287,8 +3464,8 @@ describe("ChatGPT outer-native harness v4", () => {
     environment.tools = [
       { name: "exec_command", description: "Run a Codex command", parameters: { type: "object" } },
     ];
-    const abandonedToken = await broker.register(environment, 3_000);
-    const replacementToken = await broker.register(environment);
+    let abandonedToken: string | undefined;
+    let replacementToken: string | undefined;
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: ["src/cli.ts", "mcp", "--broker-socket", socketPath],
@@ -3301,6 +3478,8 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(chatGptMcpInvocationTimeout(environment)).toBe(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS);
       expect(chatGptMcpInvocationTimeout({ ...environment, expiresAt: 1_500 }, 1_000)).toBe(500);
       await client.connect(transport);
+      abandonedToken = await broker.register(environment, 3_000);
+      replacementToken = await broker.register(environment);
       const abort = new AbortController();
       const abandoned = client.callTool({
         name: "codex_exec",
@@ -3334,8 +3513,8 @@ describe("ChatGPT outer-native harness v4", () => {
       });
     } finally {
       await client.close().catch(() => {});
-      broker.revoke(abandonedToken);
-      broker.revoke(replacementToken);
+      if (abandonedToken) broker.revoke(abandonedToken);
+      if (replacementToken) broker.revoke(replacementToken);
       await broker.close();
     }
   }, 10_000);

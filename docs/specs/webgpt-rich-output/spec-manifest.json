@@ -1,0 +1,8 @@
+{
+  "layout": "parent-child",
+  "subspecs": [
+    { "id": "response-capture", "title": "Rich response capture and helper transport", "fr": ["FR-1", "FR-2", "FR-6"] },
+    { "id": "native-tool-envelope", "title": "Native tool metadata and result fidelity", "fr": ["FR-4", "FR-5"] },
+    { "id": "codex-presentation", "title": "Codex presentation and verification", "fr": ["FR-3", "FR-7"], "dependsOn": ["response-capture", "native-tool-envelope"] }
+  ]
+}

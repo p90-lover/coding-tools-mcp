@@ -35,6 +35,7 @@ interface RunMessage {
     conversationKey?: string;
     compaction?: boolean;
     captureLunaCheckpoint?: boolean;
+    captureRichOutput?: boolean;
     externalProgress?: boolean;
   };
 }
@@ -179,6 +180,9 @@ async function run(message: RunMessage): Promise<void> {
   if (message.turn.captureLunaCheckpoint !== undefined && typeof message.turn.captureLunaCheckpoint !== "boolean") {
     throw new Error("Browser helper Luna checkpoint flag is invalid");
   }
+  if (message.turn.captureRichOutput !== undefined && typeof message.turn.captureRichOutput !== "boolean") {
+    throw new Error("Browser helper rich-output flag is invalid");
+  }
   if (message.turn.externalProgress !== undefined && typeof message.turn.externalProgress !== "boolean") {
     throw new Error("Browser helper external progress flag is invalid");
   }
@@ -297,6 +301,13 @@ async function run(message: RunMessage): Promise<void> {
     }),
     onCommentary: (text, continuation) => writeProtocol({ type: "event", id: message.id, event: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
     onTextDelta: text => writeProtocol({ type: "event", id: message.id, event: "text", text }),
+    ...(message.turn.captureRichOutput ? {
+      onRichOutput: output => {
+        if (!writeProtocol({ type: "event", id: message.id, event: "rich_output", output })) {
+          throw new Error("Browser helper could not persist rich response references");
+        }
+      },
+    } : {}),
     ...(message.turn.captureLunaCheckpoint ? {
       captureLunaCheckpoint: true,
       onLunaCheckpoint: captured => writeProtocol({
@@ -534,4 +545,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack"] });
+writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "rich-output"] });

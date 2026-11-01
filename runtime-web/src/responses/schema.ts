@@ -28,10 +28,17 @@ const inputContentBlockSchema = z.union([inputTextSchema, plainTextSchema, input
 const outputContentBlockSchema = z.union([outputTextSchema, plainTextSchema, outputRefusalSchema]);
 // Codex tool outputs can contain both input-shaped and output-shaped content blocks.
 const toolOutputContentBlockSchema = z.union([
-  outputTextSchema, plainTextSchema, outputRefusalSchema,
-  inputTextSchema, inputImageBlockSchema, encryptedContentBlockSchema,
+  outputTextSchema, plainTextSchema.loose(), outputRefusalSchema,
+  inputTextSchema, inputImageBlockSchema, inputFileBlockSchema, encryptedContentBlockSchema,
+  z.object({ type: z.enum(["text", "image", "audio", "resource", "resource_link"]) }).loose(),
 ]);
-const toolOutputSchema = z.union([z.string(), z.array(toolOutputContentBlockSchema)]);
+const canonicalToolResultSchema = z.object({
+  content: z.array(z.object({ type: z.string() }).loose()).optional(),
+  structuredContent: z.unknown().optional(),
+  isError: z.boolean().optional(),
+  _meta: z.unknown().optional(),
+}).loose();
+const toolOutputSchema = z.union([z.string(), z.array(toolOutputContentBlockSchema), canonicalToolResultSchema]);
 
 const userMessageItemSchema = z.object({
   type: z.literal("message").optional(),
@@ -115,6 +122,9 @@ export const toolSchema = z.object({
   description: z.string().optional(),
   parameters: z.record(z.string(), z.unknown()).optional(),
   strict: z.boolean().optional(),
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
+  annotations: z.record(z.string(), z.unknown()).optional(),
+  _meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 const builtinToolSchema = z.object({ type: z.string() }).loose();

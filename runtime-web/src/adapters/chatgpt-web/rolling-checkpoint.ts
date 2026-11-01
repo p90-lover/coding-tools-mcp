@@ -311,16 +311,16 @@ export class ChatGptLunaCheckpointStore {
     return { parsed: compacted, applied: true };
   }
 
-  commit(parsed: CodexParsedRequest, captured: CapturedChatGptLunaCheckpoint, answer: string): void {
+  commit(parsed: CodexParsedRequest, captured: CapturedChatGptLunaCheckpoint, answer: string, displayedAnswer = answer): void {
     const identity = extractChatGptTurnIdentity(parsed);
     if (!identity.threadId || !identity.turnId) {
       throw new Error("ChatGPT Luna rolling checkpoint requires native thread_id and turn_id metadata");
     }
     const checkpoint = parseChatGptLunaCheckpoint(captured.checkpoint);
-    const answerHash = hashChatGptLunaAnswer(answer);
-    if (captured.answerHash !== answerHash) {
+    if (captured.answerHash !== hashChatGptLunaAnswer(answer)) {
       throw new Error("ChatGPT Luna rolling checkpoint answer hash does not match the completed browser answer");
     }
+    const answerHash = hashChatGptLunaAnswer(displayedAnswer);
     this.load();
     const stored: StoredChatGptLunaCheckpoint = {
       threadId: identity.threadId,

@@ -17,9 +17,8 @@ import {
   type LauncherManualTurnOwner,
   type LauncherManualTurnStart,
 } from "../../launcher-browser-host";
-import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
+import { namespacedToolName, type AdapterEvent, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
-import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
@@ -27,7 +26,8 @@ import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebC
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
-import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
+import { TurnBroker, codexToolResultToBrokerResult, type BrokerToolRequest, type TurnBrokerOwner } from "./turn-broker";
+import { formatChatGptRichOutput, normalizeChatGptRichOutput, type ChatGptRichOutput } from "./rich-output";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
@@ -210,38 +210,6 @@ export function chatGptWebTraceId(provider: CodexProviderConfig, parsed: CodexPa
     .update(conversation ? `:${conversation}` : "")
     .digest("hex")
     .slice(0, 12);
-}
-
-function structuredContent(text: string): unknown | undefined {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return parsed !== null && typeof parsed === "object" ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function brokerContent(content: string | CodexContentPart[]): unknown[] {
-  if (typeof content === "string") return [{ type: "text", text: content }];
-  return content.map(part => {
-    if (part.type === "text") return { type: "text", text: part.text };
-    const parsed = parseDataUrl(part.imageUrl);
-    if (parsed) return { type: "image", data: parsed.base64, mimeType: parsed.mediaType };
-    return { type: "resource_link", uri: part.imageUrl, name: "Codex tool image", mimeType: "image/*" };
-  });
-}
-
-function brokerResult(message: CodexToolResultMessage): BrokerToolResult {
-  const content = brokerContent(message.content);
-  const text = typeof message.content === "string"
-    ? message.content
-    : message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
-  const structured = structuredContent(text);
-  return {
-    content,
-    ...(structured !== undefined ? { structuredContent: structured } : {}),
-    ...(message.isError ? { isError: true } : {}),
-  };
 }
 
 function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (event: AdapterEvent) => void): void {
@@ -459,6 +427,11 @@ export function createChatGptWebAdapter(
       );
     }
     let capturedCheckpoint: CapturedChatGptLunaCheckpoint | undefined;
+    let richOutput: ChatGptRichOutput | undefined;
+    const text = new ChatGptTextFeed();
+    const captureRichOutput = (output: ChatGptRichOutput): void => {
+      richOutput = normalizeChatGptRichOutput(output);
+    };
     let checkpointCaptureError: Error | undefined;
     const captureCheckpoint = (captured: CapturedChatGptLunaCheckpoint): void => {
       if (capturedCheckpoint) {
@@ -468,10 +441,16 @@ export function createChatGptWebAdapter(
       capturedCheckpoint = captured;
     };
     const finalizeCheckpoint = (browser: Promise<string>): Promise<string> => browser.then(answer => {
-      if (!captureLunaCheckpoint) return answer;
-      if (checkpointCaptureError) throw checkpointCaptureError;
-      if (capturedCheckpoint) lunaCheckpointStore.commit(parsed, capturedCheckpoint, answer);
-      return answer;
+      const footer = parsed._compactionRequest || parsed.options.outputFormat
+        ? "" : formatChatGptRichOutput(richOutput, answer);
+      const displayedAnswer = answer + footer;
+      if (captureLunaCheckpoint) {
+        if (checkpointCaptureError) throw checkpointCaptureError;
+        if (capturedCheckpoint) lunaCheckpointStore.commit(parsed, capturedCheckpoint, answer, displayedAnswer);
+      }
+      // References join the same append-only stream only after successful browser completion.
+      if (footer) text.push(footer);
+      return displayedAnswer;
     });
     const browserAbort = new AbortController();
     let browserOwnerSettled = false;
@@ -479,7 +458,6 @@ export function createChatGptWebAdapter(
       browserOwnerSettled = true;
     });
     const trace = new ChatGptTraceFeed();
-    const text = new ChatGptTextFeed();
     const observedCapabilityTokens = new Set<string>();
     const observeCapabilityRetirement = (
       turnToken: string,
@@ -703,6 +681,7 @@ export function createChatGptWebAdapter(
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
+        onRichOutput: captureRichOutput,
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
@@ -770,6 +749,7 @@ export function createChatGptWebAdapter(
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
+      onRichOutput: captureRichOutput,
       externalProgress,
       completionFence: {
         begin: async () => broker.beginCompletionFence(await token.promise),
@@ -1239,7 +1219,7 @@ export function createChatGptWebAdapter(
                   throw new Error(`Codex returned ${results.length} of ${outstanding.length} results for a parallel ChatGPT tool batch`);
                 }
                 for (const message of results) {
-                  await broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
+                  await broker.completeTool(turnToken, message.toolCallId, codexToolResultToBrokerResult(message));
                   session.runtime.externalProgress.recordToolResult();
                   session.markResultDelivered(message.toolCallId);
                 }
