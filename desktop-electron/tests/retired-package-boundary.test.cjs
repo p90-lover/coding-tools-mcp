@@ -29,6 +29,7 @@ test("package inputs keep CPA plugins and AO/CPA handlers without retired standa
   assert.deepEqual(COMPONENT_IDS, ["cpa"]);
   assert.deepEqual(BUNDLED_IDS, []);
   assert.ok(build.files.includes("vendor/bundled/cpa-plugins/**"));
+  assert.ok(build.files.includes("vendor/tools/codex-auto-review-policy.json"), "packaged workflow requires the pinned auto-review policy");
   for (const glob of ["vendor/upstream/**", "vendor/managed-components/**", "vendor/bundled/**"]) {
     assert.ok(!build.files.includes(glob), glob);
   }

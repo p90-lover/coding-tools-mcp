@@ -274,6 +274,37 @@ test("Cline switcher frame gets the opaque marker exchange only for its own mana
   assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
 });
 
+test("Codex review plugin exchanges its marker only from its exact owned page to its own API", async () => {
+  const f = fixture();
+  f.install();
+  await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
+  const marker = f.sessionStorage.getItem("coding-tools-cpa-session");
+  const frame = { url: `${ORIGIN}/v0/resource/plugins/codex-review-account-selector/index.html`,
+    top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
+  const requestHeaders = { Authorization: `Bearer ${marker}` };
+  const own = `${ORIGIN}/v0/management/codex-review-account-selector/`;
+  for (const route of ["accounts", "settings"]) {
+    assert.deepEqual(await f.request({ frame, url: own + route, requestHeaders }), {
+      requestHeaders: { Authorization: `Bearer ${SECRET}` },
+    });
+  }
+  for (const url of [`${ORIGIN}/v0/management/config`, `${ORIGIN}/v0/management/cpa-helper/usage`,
+    `${ORIGIN}/v0/management/cline-pass-switcher/api/accounts`,
+    `${ORIGIN}/v0/management/codex-review-account-selector-evil/settings`,
+    "http://localhost:8317/v0/management/codex-review-account-selector/settings"]) {
+    assert.deepEqual(await f.request({ frame, url, requestHeaders }), { requestHeaders });
+  }
+  for (const other of [
+    { ...frame, url: `${ORIGIN}/v0/resource/plugins/codex-review-account-selector/other.html` },
+    { ...frame, url: `${ORIGIN}/v0/resource/plugins/cpa-helper/index.html` },
+    { ...frame, url: `${ORIGIN}/v0/resource/plugins/cline-pass-switcher/index.html` },
+    { ...frame, parent: null },
+  ]) assert.deepEqual(await f.request({ frame: other, url: own + "settings", requestHeaders }), { requestHeaders });
+  assert.deepEqual(await f.request({ frame, url: own + "settings", webContentsId: 72, requestHeaders }), { requestHeaders });
+  assert.equal(f.frame.scripts.join("").includes(SECRET), false);
+  assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
+});
+
 test("non-loopback origins are rejected and destroying the host removes the request hook", () => {
   for (const origin of [
     "http://localhost:8317",

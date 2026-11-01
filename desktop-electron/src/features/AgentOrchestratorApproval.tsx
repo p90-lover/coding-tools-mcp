@@ -107,8 +107,9 @@ function waited(since?: string) {
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 
-export function AgentOrchestratorApproval({ approval, busy, approve }: {
+export function AgentOrchestratorApproval({ approval, busy, approve, route }: {
   approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => void;
+  route?: { harness_id: string; approvals_reviewer?: string };
 }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [content, setContent] = useState("{}");
@@ -153,6 +154,9 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
       setError(""); approve(approval, { action: "accept", content: value });
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
+  const reviewing = approval.source === "ao" && route?.harness_id.startsWith("ao:") && route.approvals_reviewer === "auto_review"
+    && !["question", "questions", "plan"].includes(kind || "") && !approval.plan
+    && (!approval.recommendation || approval.recommendation.action === "allow");
   const supported = !typed || ["command", "file_change", "permissions", "questions", "mcp_form", "mcp_url"].includes(kind || "");
   if (approval.source === "ao" && approval.kind === "question") return <AoQuestion approval={approval} busy={busy} approve={approve} />;
   // Claude Code finished planning: show the plan and every way it offered to go on.
@@ -180,7 +184,9 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
     {typed ? <details><summary>Exact native request</summary><pre>{JSON.stringify(request, null, 2)}</pre></details> : null}
     {typed && !scoped ? <p role="alert">Missing live thread/turn scope. Refresh the request or reconnect this role through its normal consent flow; no response can be sent.</p> : null}
     {!supported ? <p role="alert">This runtime request is unsupported. Update the native bridge or stop the affected role; no automatic grant was sent.</p> : null}
-    <fieldset disabled={busy || (typed && !scoped) || !supported}>
+    {reviewing ? <p className="ao-hint" role="status">{approval.recommendation?.action === "allow"
+      ? "Codex auto-review approved this request. Sending approval…"
+      : "Codex auto-review is checking this request"}</p> : <fieldset disabled={busy || (typed && !scoped) || !supported}>
       {!typed ? <div className="ao-msg-actions"><button type="button" className="button-primary" onClick={() => approve(approval, true)}>Allow once</button><button type="button" className="button-secondary" onClick={() => approve(approval, false)}>Deny</button></div> : null}
       {typed && (kind === "command" || kind === "file_change") ? <div className="ao-msg-actions">{decisions.map((decision, index) =>
         <button key={index} type="button" className="button-secondary" onClick={() => approve(approval, { decision })}>{typeof decision === "string" ? decision : JSON.stringify(decision)}</button>)}</div> : null}
@@ -210,7 +216,7 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
         <button type="button" className="button-secondary" onClick={() => approve(approval, { action: "decline" })}>Decline</button>
         <button type="button" className="button-secondary" onClick={() => approve(approval, { action: "cancel" })}>Cancel</button>
       </> : null}
-    </fieldset>
+    </fieldset>}
     {error ? <p role="alert">{error}</p> : null}
   </div>;
 }

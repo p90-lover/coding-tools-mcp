@@ -8,12 +8,12 @@ const React = require("react");
 const { renderToStaticMarkup } = require("react-dom/server");
 const { randomUUID } = require("node:crypto");
 
-function load(file, imports = {}) {
+function load(file, imports = {}, extraSource = "") {
   const exports = {};
-  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8"), {
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8") + extraSource, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText, { exports, structuredClone, crypto: { randomUUID },
-    require: name => name === "react" || name === "react/jsx-runtime" ? require(name) : imports[name] ?? {} });
+  }).outputText, { exports, structuredClone, crypto: { randomUUID }, window: { setInterval: () => 1, clearInterval() {} },
+    require: name => name === "react" || name === "react/jsx-runtime" ? imports[name] ?? require(name) : imports[name] ?? {} });
   return exports;
 }
 const chat = load("ao-chat.ts");
@@ -30,7 +30,7 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { 
   // controls and approval cards render only when a composer or an approval is passed.
   "./ChatBranchBar": { ChatBranchBar: () => null },
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
-  "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
+  "./AgentOrchestratorApproval": load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown }),
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {} },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
@@ -197,6 +197,44 @@ test("an AO agent's question shows as a card with its options, an Other box, and
   assert.match(html, />Skip<\/button>/);
 });
 
+test("chat supplies the selected role's auto-review route to pending cards", () => {
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [
+    { id: "lead", role: "planner", state: "running", route: { harness_id: "ao:claude-code", approvals_reviewer: "auto_review" } }] }],
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false,
+    approvals: [{ nodeId: "lead", approval_id: "read", source: "ao", kind: "permission" }],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  assert.match(html, /Codex auto-review is checking this request/);
+  assert.equal(html.includes("Allow once"), false);
+});
+
+test("Approve for me waits for Codex review before offering permission buttons", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown });
+  const approval = { nodeId: "one", approval_id: "tool", source: "ao", kind: "permission", tool: "Read",
+    summary: "Read the project file", toolInput: '{"path":"app.py"}' };
+  const route = { harness_id: "ao:claude-code", approvals_reviewer: "auto_review" };
+  const render = (over = {}, selectedRoute = route) => renderToStaticMarkup(React.createElement(
+    approvalUi.AgentOrchestratorApproval, { approval: { ...approval, ...over }, route: selectedRoute, busy: false, approve() {} }));
+  const awaiting = render();
+  assert.match(awaiting, /Codex auto-review is checking this request/);
+  assert.equal(awaiting.includes("Allow once"), false);
+  assert.equal(awaiting.includes(">Deny<"), false);
+  assert.match(awaiting, /app.py/);
+  const allowed = render({ recommendation: { action: "allow", reason: "Safe read" } });
+  assert.match(allowed, /Codex auto-review approved this request/);
+  assert.equal(allowed.includes("Allow once"), false);
+  for (const [action, reason] of [["ask", "Rejected by review"], ["ask", "Reviewer unavailable"], ["deny", "Legacy rejection"]]) {
+    const ask = render({ recommendation: { action, reason } });
+    assert.match(ask, /Allow once/);
+    assert.match(ask, />Deny</);
+    assert.ok(ask.includes(reason));
+  }
+  assert.match(render({}, { harness_id: "codex-native", approvals_reviewer: "auto_review" }), /Allow once/);
+  assert.match(render({}, { harness_id: "ao:claude-code", approvals_reviewer: "user" }), /Allow once/);
+  assert.match(render({ kind: "question", message: "Choose a file", fields: [] }), /Send answer/);
+  assert.match(render({ plan: "Read the source", decisions: [{ id: "accept", kind: "accept", label: "Accept plan" }] }), /Accept plan/);
+});
+
 test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {
   // Seen live: the agent started its dev server (the Terminal opened), then preview_open'd the page,
   // and the panel stayed on the Terminal: the user never saw the browser.
@@ -209,6 +247,53 @@ test("an agent's new page brings the Preview pane forward, even over the Termina
   const polled = new Set(["ao-1"]);
   assert.equal(workbench.startsNewChat(["ao-2"], polled), true, "another chat starts over");
   assert.equal(workbench.startsNewChat(["ao-1", "ao-3"], polled), false, "an agent joining the same chat does not");
+});
+
+for (const failAtEnd of [false, true]) test(`terminal keeps stdout when stderr ${failAtEnd ? "offset discovery" : "read"} fails`, async () => {
+  const states = [], effects = [];
+  const command = { id: "sbx-server", source: "app", cmd: "dev server", status: "running", startedAt: 1 };
+  const hooks = { ...React, useState(initial) {
+    const index = states.length;
+    states.push(index === 0 ? [command] : index === 1 ? command.id : initial);
+    return [states[index], next => { states[index] = typeof next === "function" ? next(states[index]) : next; }];
+  }, useRef: current => ({ current }), useEffect: effect => effects.push(effect), useLayoutEffect() {} };
+  const outputClient = { getCodingToolsClient: () => ({ apps: { call: async ({ operation, arguments: args }) => {
+    assert.equal(operation, "chat_process_output");
+    if (args.stream === "stderr" && (failAtEnd || args.offset !== Number.MAX_SAFE_INTEGER)) throw new Error("SESSION_NOT_FOUND");
+    if (args.offset === Number.MAX_SAFE_INTEGER) return { result: { nextOffset: 0 } };
+    return { result: { content: "Server ready on 8000\\n", nextOffset: 21 } };
+  } } }) };
+  const workbench = load("ChatWorkbench.tsx", { "react": hooks, "../api/client": outputClient, "../icons": { Icon: () => null } },
+    "; export { TerminalPane };");
+  // Run only its output effect, with inert interval scheduling and no native app.
+
+  // The loader supplies inert interval timers.
+  workbench.TerminalPane({ sessionId: "ao-one" });
+  const cleanup = effects[1]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(states[2], "Server ready on 8000\\n");
+  assert.match(states[3], /Could not read command output:.*SESSION_NOT_FOUND/);
+  cleanup();
+});
+
+test("terminal follows the actual live app command unless the user chose another command", () => {
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
+  const diagnostic = { id: "agent:check", source: "agent", status: "running", startedAt: 30 };
+  const server = { id: "sbx-server", source: "app", status: "running", startedAt: 20 };
+  const done = { ...diagnostic, status: "completed" };
+  assert.equal(workbench.terminalSelection([done, server], diagnostic.id, false), server.id);
+  assert.equal(workbench.terminalSelection([diagnostic, server], diagnostic.id, false), server.id,
+    "a native diagnostic does not hide the app's live server");
+  assert.equal(workbench.terminalSelection([diagnostic, server], diagnostic.id, true), diagnostic.id,
+    "an explicit selection is respected");
+  assert.equal(workbench.terminalSelection([server], diagnostic.id, true), server.id,
+    "a vanished selection falls back to the server");
+  const nextServer = { ...server, id: "next-server", startedAt: 40 };
+  assert.equal(workbench.terminalSelection([nextServer, server], server.id, false), server.id,
+    "a new command of the same priority does not interrupt an existing live stream");
+  assert.equal(workbench.terminalSelection([done], diagnostic.id, false), diagnostic.id,
+    "completed output remains readable when there is no live command");
+  assert.equal(workbench.terminalSelection([], diagnostic.id, false), "");
 });
 
 test("the Subagents page's model picker lists the AO agent's own models, never WebGPT (Native Codex only)", async () => {

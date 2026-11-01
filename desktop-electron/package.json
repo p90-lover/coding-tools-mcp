@@ -77,6 +77,7 @@
       "vendor/managed-components/cpa.json",
       "vendor/managed-components/cpa-provider-backend.openapi.json",
       "vendor/tools/antigravity-cli.json",
+      "vendor/tools/codex-auto-review-policy.json",
       "vendor/bundled/cpa-plugins/**",
       "assets/icon.png",
       "assets/linux-appimage-runner.sh",

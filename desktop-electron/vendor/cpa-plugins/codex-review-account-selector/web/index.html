@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Codex Auto Review</title>
+<style>
+:root{color-scheme:light dark;font:15px system-ui,sans-serif;background:#f7f7f5;color:#222}body{max-width:680px;margin:56px auto;padding:0 24px}h1{font-size:28px;font-weight:600}p{line-height:1.6;color:#666}section{padding:24px;border:1px solid #ddd;border-radius:12px;background:#fff}label{display:block;margin-bottom:10px;font-weight:600}select,input[type=password]{box-sizing:border-box;width:100%;padding:12px;border:1px solid #bbb;border-radius:7px;background:transparent;color:inherit;font:inherit}button{padding:10px 18px;border-radius:7px;border:1px solid #bbb;font:inherit;cursor:pointer}button[type=submit]{background:#242424;color:white;border-color:#242424}button:disabled{opacity:.5;cursor:default}.actions{display:flex;gap:10px;margin-top:20px}#status{min-height:24px;margin-top:18px}#detail{font-size:13px;white-space:pre-line}code{font-size:13px}@media(prefers-color-scheme:dark){:root{background:#171717;color:#eee}section{background:#202020;border-color:#444}p{color:#bbb}button{background:#333;color:#eee}button[type=submit]{background:#eee;color:#222}}
+</style>
+</head>
+<body>
+<h1>Codex Auto Review</h1>
+<p>Choose which configured Codex account handles <code>codex-auto-review</code>. If this account becomes unavailable, the review fails and the chat can ask you for approval.</p>
+<section id="sign-in-panel" hidden>
+<form id="page-sign-in" autocomplete="off">
+<label for="management-key">CPA management key</label>
+<input id="management-key" type="password" autocomplete="off" required aria-describedby="sign-in-help">
+<p id="sign-in-help">Sign in using this CPA server’s management key. The key stays in this page’s memory until you close it.</p>
+<button type="submit" id="sign-in-button">Sign in for this page</button>
+</form>
+</section>
+<section>
+<form id="settings">
+<label for="account">Codex account</label>
+<select id="account" disabled required aria-describedby="detail"><option value="">Loading accounts…</option></select>
+<p id="detail"></p>
+<div class="actions"><button type="submit" id="save" disabled>Save account</button><button type="button" id="refresh">Refresh</button></div>
+</form>
+<div id="status" role="status" aria-live="polite"></div>
+</section>
+<p>Other model routes keep their existing account selection. This plugin saves only the account ID.</p>
+<script>
+"use strict";
+const prefix="/v0/management/codex-review-account-selector";
+const picker=document.getElementById("account"), status=document.getElementById("status"), save=document.getElementById("save"), detail=document.getElementById("detail");
+const signInPanel=document.getElementById("sign-in-panel"), signIn=document.getElementById("page-sign-in"), keyInput=document.getElementById("management-key"), signInButton=document.getElementById("sign-in-button"), refreshButton=document.getElementById("refresh");
+let accounts=[], pageKey="", ready=false, loading=false, needsSignIn=false;
+function managementKey(){
+ if(pageKey)return pageKey;
+ let key="";
+ try{
+  key=sessionStorage.getItem("coding-tools-cpa-session")||localStorage.getItem("cpaHelper.managementKey")||localStorage.getItem("managementKey")||"";
+  try{key=JSON.parse(key)}catch{}
+  if(!key){try{key=JSON.parse(localStorage.getItem("cli-proxy-auth")).state.managementKey}catch{}}
+ }catch{}
+ return typeof key==="string"?key:"";
+}
+function describe(){
+ picker.disabled=!ready;
+ const account=accounts.find(a=>a.id===picker.value);
+ detail.textContent=ready&&account?[
+  account.email||account.label||"Configured Codex account",
+  Date.parse(account.lastRefresh)>0?"Last refreshed: "+new Date(account.lastRefresh).toLocaleString():"",
+  account.disabled?"Disabled":account.unavailable?"Unavailable":"Available"
+ ].filter(Boolean).join("\n"):needsSignIn?"Sign in to load configured Codex accounts.":"Select an available Codex account.";
+ save.disabled=!ready||!account||account.disabled||account.unavailable;
+}
+function requireSignIn(message){
+ needsSignIn=true;ready=false;pageKey="";
+ signInPanel.hidden=false;refreshButton.disabled=true;status.textContent=message;describe();
+}
+async function api(path,options={}){
+ if(needsSignIn)throw Error("Sign in for this page to continue.");
+ const headers=new Headers(options.headers);headers.set("Authorization","Bearer "+managementKey());headers.set("Content-Type","application/json");
+ const response=await fetch(prefix+path,{...options,headers,cache:"no-store"});
+ if(response.status===401){requireSignIn("The management key was not accepted. Sign in for this page to continue.");throw Error("Management sign-in is required.");}
+ let result;try{result=await response.json()}catch{throw Error("The plugin returned an unreadable response")}
+ if(!response.ok)throw Error(typeof result.error==="string"?result.error:"The plugin request failed (HTTP "+response.status+")");
+ return result;
+}
+async function refresh(){
+ if(loading)return;
+ if(needsSignIn||!managementKey()){requireSignIn("Sign in for this page to load your configured Codex accounts.");return;}
+ loading=true;ready=false;refreshButton.disabled=true;signInButton.disabled=true;describe();status.textContent="Loading configured accounts…";
+ try{
+  // One rejected sign-in stops bootstrap before another authenticated request is sent.
+  const settings=await api("/settings"), list=await api("/accounts");accounts=list.accounts;
+  picker.replaceChildren(new Option("Select an account",""));
+  for(const a of accounts){
+   const option=new Option((a.label||a.email||"Codex account")+(a.disabled?" — disabled":a.unavailable?" — unavailable":""),a.id);
+   option.disabled=a.disabled||a.unavailable;picker.append(option);
+  }
+  picker.value=settings.selectedAuthId||"";ready=true;needsSignIn=false;signInPanel.hidden=true;
+  status.textContent=settings.selectedAuthId?(accounts.some(a=>a.id===settings.selectedAuthId)?"Saved account loaded.":"The saved account is missing. Select an available account."):"No account selected yet.";
+ }catch(error){status.textContent=error.message;picker.replaceChildren(new Option("Accounts unavailable",""));}
+ finally{loading=false;signInButton.disabled=false;refreshButton.disabled=needsSignIn;describe();}
+}
+signIn.addEventListener("submit",async event=>{
+ event.preventDefault();
+ const entered=keyInput.value.trim();keyInput.value="";
+ if(loading)return;
+ if(!entered){requireSignIn("Enter the CPA management key.");return;}
+ pageKey=entered;needsSignIn=false;await refresh();
+});
+picker.addEventListener("change",describe);
+refreshButton.addEventListener("click",refresh);
+document.getElementById("settings").addEventListener("submit",async event=>{
+ event.preventDefault();if(!ready||loading)return;save.disabled=true;status.textContent="Saving account…";
+ try{await api("/settings",{method:"PUT",body:JSON.stringify({selectedAuthId:picker.value})});status.textContent="Saved. New reviews use this account."}catch(error){status.textContent=error.message}finally{describe()}
+});
+refresh();
+</script>
+</body>
+</html>

@@ -993,7 +993,7 @@ export function AgentOrchestratorChat({
                 <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry failed step</button></div>
               </div>
             ) : null}
-            {approvals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={busy} approve={approve} />)}
+            {approvals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} route={latest?.nodes.find(node => node.id === approval.nodeId)?.route} busy={busy} approve={approve} />)}
           </div>
           {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}

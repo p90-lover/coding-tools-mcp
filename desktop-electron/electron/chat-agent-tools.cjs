@@ -1255,7 +1255,16 @@ function createChatAgentTools({
     // when the chat's approval reviewer has already judged this call (reviewedUpstream), the app
     // does not ask again; otherwise the user confirms it here. Being sandboxed never approves a
     // command by itself. A command the sandbox did not start (the user's own terminal) goes on below.
-    if (group === "terminal" && sandboxed() && sandboxRuns(name, args)) {
+    if (group === "terminal" && sandboxRuns(entry, name, args)) {
+      if (name !== "exec_command" && name !== "check_exec_environment") {
+        const id = commandIdOf(name, args);
+        if (!entry.commands.get(id)?.sandboxed) {
+          return failedCall("That sandboxed command is not available in this chat. It may belong to another chat or have ended when the app restarted. Start a new command in this chat.");
+        }
+        if (!sandbox?.owns(id)) {
+          return failedCall("That sandboxed command has ended or its output expired, possibly because the app restarted. Start a new command in this chat; its old command_id cannot be resumed.");
+        }
+      }
       if (!entry.bypass && !reviewedUpstream(entry)) {
         const answer = await confirmTerminal(entry, name, args, root, { sandboxed: true });
         if (answer !== true && answer !== false) return answer;
@@ -1321,14 +1330,17 @@ function createChatAgentTools({
     ? args.output_ref.split(":")[1] : typeof args.command_id === "string" ? args.command_id : args.session_id);
 
   /**
-   * Whether the sandbox runs this terminal call: exec_command and check_exec_environment always;
-   * write_stdin, read_output and kill_command for a command it started. Anything else (the user's
+   * Whether the sandbox runs this terminal call: exec_command and check_exec_environment when available;
+   * write_stdin, read_output and kill_command for sandbox ids, even after restart. Anything else (the user's
    * own terminal) is headless's.
    */
-  function sandboxRuns(name, args) {
-    if (name === "exec_command" || name === "check_exec_environment") return true;
+  function sandboxRuns(entry, name, args) {
+    if (name === "exec_command" || name === "check_exec_environment") return sandboxed();
     const id = commandIdOf(name, args);
-    try { return typeof id === "string" && sandbox.owns(id); } catch { return false; }
+    if (typeof id !== "string") return false;
+    // Stale sandbox ids must not reach headless's unrelated terminal registry.
+    if (id.startsWith("sbx-") || entry.commands.get(id)?.sandboxed) return true;
+    try { return Boolean(sandbox?.owns(id)); } catch { return false; }
   }
 
   /** A terminal call sandboxRuns, run in the sandbox. Results are shaped like headless's, so the agent sees no difference. */
@@ -1603,9 +1615,9 @@ function createChatAgentTools({
       return { content: value.content, nextOffset: value.next_read_offset, gap: value.output_gap, status: command.status, exitCode: command.exitCode };
     }
     if (command.sandboxed) {
-      // The app restarted since: the sandboxed command ended with it.
+      // The runner no longer owns this command, so an empty response would conceal lost output.
       if (command.status === "running") command.status = "gone";
-      return { content: "", nextOffset: Math.max(0, Number(offset) || 0), gap: false, status: command.status, exitCode: command.exitCode };
+      throw new Error("This sandboxed command has ended because the app restarted or its output expired. Start a new command in this chat.");
     }
     const root = await rootOf(entry);
     const read = await invoke(entry, "read_output", {

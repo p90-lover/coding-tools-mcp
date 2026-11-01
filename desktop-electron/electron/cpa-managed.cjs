@@ -139,6 +139,7 @@ const COMMANDCODE_PLUGINS = [
   { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
   // Grok Build/Web/Console provider built from chenyme/grok2api (vendor/cpa-plugins/grok-login-provider).
   { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.1.dll", sha256: "57fbdce4ad770499e604a7d3654bc7b700532e0572c0980ff040818a83117cb7" },
+  { id: "codex-review-account-selector", file: "codex-review-account-selector-v0.1.0-codingtools.4.dll", sha256: "92f839c18aa8993d2062b5890eac76fcf3b23b86be766f38f7865be4d73f28a5" },
 ];
 
 function installBundledCommandCodePlugin(state) {
@@ -223,6 +224,9 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     `      runtime-executable: ${yamlString(process.execPath)}`,
     `      data-dir: ${yamlString(path.join(state, "cline-pass-switcher-data"))}`,
     ...(outboundProxyUrl ? [`      proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
+    "    codex-review-account-selector:",
+    "      enabled: true",
+    `      data-dir: ${yamlString(path.join(state, "codex-review-account-selector-data"))}`,
     "    grok-login-provider:",
     "      enabled: true",
     // Ask OpenAI's Responses models for a reasoning summary. Claude Code never sends the

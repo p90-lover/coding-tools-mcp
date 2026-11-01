@@ -8,8 +8,9 @@ const { createManagedExternalServicesController, resolveCpaProxyRoute, resolveMa
 const { runtimeConfiguration, installBundledCommandCodePlugin } = require("../electron/cpa-managed.cjs");
 const { redactText } = require("../electron/logging.cjs");
 
-test("CPA config follows the selected authenticated global profile", () => {
+test("CPA config follows the selected authenticated global profile", (t) => {
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-outbound-proxy-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const providers = path.join(root, "providers");
   fs.mkdirSync(providers, { recursive: true });
   const safeStorage = { isEncryptionAvailable: () => false };
@@ -59,7 +60,8 @@ test("CPA config follows the selected authenticated global profile", () => {
     fs.writeFileSync(path.join(platformDir, "commandcode-go-v0.9.0.dll"), "old plugin");
     fs.writeFileSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll"), "old plugin");
     const installed = installBundledCommandCodePlugin(path.join(root, "cpa"));
-    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_277_568, 12_664_320, 14_896_640, 810_496, 24_915_456]);
+    const reviewAsset = require("../vendor/bundled/cpa-plugins/BUNDLE.json").codexReview.platforms["win32/x64"];
+    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_277_568, 12_664_320, 14_896_640, 810_496, 24_915_456, reviewAsset.size]);
     assert.equal(fs.existsSync(path.join(platformDir, "commandcode-go-v0.9.0.dll")), false);
     assert.equal(fs.existsSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll")), false);
     assert.equal(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins")).length, 2);
@@ -94,4 +96,22 @@ test("CPA config follows the selected authenticated global profile", () => {
   delete broken.secrets.proxies.owned;
   fs.writeFileSync(savedFile, `${JSON.stringify(broken)}\n`);
   assert.throws(() => resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage), /authentication is unavailable/);
+});
+
+test("managed CPA config installs the pinned Codex review account selector with private selection storage", (t) => {
+  const scratch = path.join(__dirname, "../../aiTemp/codex-review-plugin-node-tests");
+  fs.mkdirSync(scratch, { recursive: true });
+  const state = fs.mkdtempSync(path.join(scratch, "config-"));
+  t.after(() => fs.rmSync(state, { recursive: true, force: true }));
+  const config = runtimeConfiguration(state, "m".repeat(36), "k".repeat(36));
+  assert.match(config, /codex-review-account-selector:\r?\n      enabled: true/);
+  assert.ok(config.includes(JSON.stringify(path.join(state, "codex-review-account-selector-data"))));
+  const bundleRoot = path.resolve(__dirname, "../vendor/bundled/cpa-plugins");
+  const asset = JSON.parse(fs.readFileSync(path.join(bundleRoot, "BUNDLE.json"))).codexReview.platforms["win32/x64"];
+  const binary = fs.readFileSync(path.join(bundleRoot, asset.path));
+  assert.equal(binary.length, asset.size);
+  assert.equal(require("node:crypto").createHash("sha256").update(binary).digest("hex"), asset.sha256);
+  assert.equal(fs.existsSync(path.join(state, "auth/codex-review-account-selector.json")), false);
+  const adapter = fs.readFileSync(path.join(__dirname, "../electron/cpa-managed.cjs"), "utf8");
+  assert.ok(adapter.includes(asset.sha256), "the managed installer verifies the pinned plugin digest");
 });

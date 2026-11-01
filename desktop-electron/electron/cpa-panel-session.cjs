@@ -10,6 +10,8 @@ const CPA_HELPER_RESOURCE_PREFIX = "/v0/resource/plugins/cpa-helper/";
 const CPA_HELPER_API_PREFIX = "/v0/management/cpa-helper/";
 const CLINE_RESOURCE_PREFIX = "/v0/resource/plugins/cline-pass-switcher/";
 const CLINE_API_PREFIX = "/v0/management/cline-pass-switcher/";
+const CODEX_REVIEW_RESOURCE = "/v0/resource/plugins/codex-review-account-selector/index.html";
+const CODEX_REVIEW_API_PREFIX = "/v0/management/codex-review-account-selector/";
 
 // localStorage entries seeded into the managed CPA origin. Values carry only the
 // opaque session marker; the real key is swapped in by the main-process header hook.
@@ -59,13 +61,15 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
     try {
       const location = new URL(frame.url);
       const target = new URL(url);
+      const pluginApiPrefix = location.pathname.startsWith(CPA_HELPER_RESOURCE_PREFIX) ? CPA_HELPER_API_PREFIX
+        : location.pathname.startsWith(CLINE_RESOURCE_PREFIX) ? CLINE_API_PREFIX
+          : location.pathname === CODEX_REVIEW_RESOURCE ? CODEX_REVIEW_API_PREFIX : null;
       return isManagedPanel(frame.parent)
         && location.origin === origin
-        && (location.pathname.startsWith(CPA_HELPER_RESOURCE_PREFIX) || location.pathname.startsWith(CLINE_RESOURCE_PREFIX))
+        && pluginApiPrefix !== null
         && !location.username && !location.password
         && target.origin === origin
-        && target.pathname.startsWith(location.pathname.startsWith(CPA_HELPER_RESOURCE_PREFIX)
-          ? CPA_HELPER_API_PREFIX : CLINE_API_PREFIX);
+        && target.pathname.startsWith(pluginApiPrefix);
     } catch {
       return false;
     }

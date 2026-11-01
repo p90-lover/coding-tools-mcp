@@ -27,6 +27,19 @@ const isAgentShell = (command: Command | undefined) => command?.source === "agen
 /** Still running: an app command, an agent's command mid-call, or one it left running in the background. */
 const isLive = (command: Command | undefined) => command?.status === "running" || command?.status === "background";
 
+const terminalPriority = (command: Command) => !isLive(command) ? 4 : command.user ? 3
+  : !isAgentShell(command) ? 0 : command.background || command.status === "background" ? 1 : 2;
+
+/** Follow live app output automatically, while keeping a command the user explicitly chose. */
+export function terminalSelection(commands: Command[], selected: string, explicit: boolean): string {
+  const current = commands.find((command) => command.id === selected);
+  if (current && explicit) return current.id;
+  const preferred = [...commands].sort((left, right) => terminalPriority(left) - terminalPriority(right)
+    || right.startedAt - left.startedAt)[0];
+  if (current && (!preferred || terminalPriority(current) <= terminalPriority(preferred))) return current.id;
+  return preferred?.id ?? "";
+}
+
 const TAB_TITLES: Record<WorkbenchTab, string> = { preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", new: "New tab" };
 const PANEL_WIDTH_KEY = "coding-tools:ao:workbench-width";
 let tabSequence = 0;
@@ -334,7 +347,9 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
 function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspaceId?: string }) {
   const [commands, setCommands] = useState<Command[]>([]);
   const [selected, setSelected] = useState("");
+  const explicitSelection = useRef(false);
   const [output, setOutput] = useState("");
+  const [outputError, setOutputError] = useState("");
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
   const [now, setNow] = useState(Date.now());
@@ -352,12 +367,13 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
         // What still runs comes first (a dev server started long ago above the newest one-off
         // commands), newest first within each.
         const found = [...(((result.sessions as { commands: Command[] }[] | undefined)?.[0]?.commands) ?? [])]
-          .sort((left, right) => Number(isLive(right)) - Number(isLive(left)));
+          .sort((left, right) => terminalPriority(left) - terminalPriority(right) || right.startedAt - left.startedAt);
         setCommands(found);
         setNow(Date.now());
-        // First choice: a running app the agent started (not the user's own shell), then anything live.
-        setSelected((current) => (found.some((command) => command.id === current) ? current
-          : (found.find((command) => isLive(command) && !command.user) ?? found.find(isLive) ?? found[0])?.id ?? ""));
+        setSelected((current) => {
+          if (!found.some((command) => command.id === current)) explicitSelection.current = false;
+          return terminalSelection(found, current, explicitSelection.current);
+        });
       }).catch(() => undefined);
     };
     tick();
@@ -373,36 +389,40 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
   useEffect(() => {
     offsets.current = { stdout: 0, stderr: 0 };
     setOutput("");
+    setOutputError("");
     pinned.current = true;
     if (!selected || selectedAgentShell) return undefined;
     let live = true;
     let busy = false;
-    let started = false;
+    const started = { stdout: false, stderr: false };
     const read = async () => {
       if (busy) return;
       busy = true;
-      try {
-        let added = "";
-        if (!started) {
-          // Where each stream ends now (an offset past the end reads nothing and reports the end).
-          let skipped = false;
-          for (const stream of ["stdout", "stderr"] as const) {
+      let added = "";
+      const errors: string[] = [];
+      for (const stream of ["stdout", "stderr"] as const) {
+        try {
+          if (!started[stream]) {
+            // Discover and read each stream independently: an unavailable stderr must not hide stdout.
             const end = await paneCall("chat_process_output", { sessionId, ...(workspaceId ? { workspaceId } : {}), commandId: selected, stream, offset: Number.MAX_SAFE_INTEGER });
             const last = Number(end.nextOffset) || 0;
             offsets.current[stream] = Math.max(0, last - TAIL_BYTES);
-            skipped ||= last > TAIL_BYTES;
+            started[stream] = true;
+            if (last > TAIL_BYTES) added += "[earlier output not shown]\n";
           }
-          started = true;
-          if (skipped) added += "[earlier output not shown]\n";
-        }
-        for (const stream of ["stdout", "stderr"] as const) {
           const result = await paneCall("chat_process_output", { sessionId, ...(workspaceId ? { workspaceId } : {}), commandId: selected, stream, offset: offsets.current[stream] });
           offsets.current[stream] = Number(result.nextOffset) || offsets.current[stream];
           if (result.gap === true) added += "\n[earlier output was dropped]\n";
           if (typeof result.content === "string" && result.content) added += plain(result.content);
+        } catch (cause) {
+          errors.push(`${stream}: ${cause instanceof Error ? cause.message : String(cause)}`);
         }
-        if (live && added) setOutput((current) => (current + added).slice(-MAX_OUTPUT_CHARS));
-      } catch { /* the next tick tries again */ } finally { busy = false; }
+      }
+      if (live) {
+        setOutputError(errors.length ? `Could not read command output: ${errors.join("; ")}` : "");
+        if (added) setOutput((current) => (current + added).slice(-MAX_OUTPUT_CHARS));
+      }
+      busy = false;
     };
     void read();
     const timer = window.setInterval(() => void read(), OUTPUT_POLL_MS);
@@ -430,7 +450,7 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
     setError("");
     setStarting(true);
     void paneCall("chat_terminal_start", { sessionId, ...(workspaceId ? { workspaceId } : {}) })
-      .then((result) => { if (typeof result.commandId === "string") setSelected(result.commandId); })
+      .then((result) => { if (typeof result.commandId === "string") { explicitSelection.current = true; setSelected(result.commandId); } })
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
       .finally(() => setStarting(false));
   };
@@ -449,7 +469,7 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
     <div className="cx-terminal-head">{shellButton}</div>
     <ul className="cx-terminal-list" aria-label="Commands">
       {commands.map((item) => <li key={item.id}>
-        <button type="button" aria-pressed={item.id === selected} title={item.cmd} onClick={() => setSelected(item.id)}>
+        <button type="button" aria-pressed={item.id === selected} title={item.cmd} onClick={() => { explicitSelection.current = true; setSelected(item.id); }}>
           <span className={`cx-terminal-dot is-${isLive(item) ? "running" : item.exitCode === 0 || (isAgentShell(item) && item.exitCode === null && item.status === "completed") ? "ok" : "failed"}`} aria-hidden="true" />
           <code>{item.user ? "Your terminal" : item.cmd}</code>
           {isAgentShell(item) ? agentShellLabel : null}
@@ -466,9 +486,10 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
       {running && !agentShell ? <button type="button" className="cx-terminal-stop" onClick={stop}>Stop</button> : null}
     </div> : null}
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
+    {outputError ? <p className="cx-workbench-error" role="alert">{outputError}</p> : null}
     <pre ref={screen} className="cx-terminal-output" aria-live="off"
       onScroll={(event) => { const box = event.currentTarget; pinned.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24; }}>
-      {shown || (running ? "Waiting for output…" : "No output.")}
+      {shown || (outputError ? "Output unavailable." : running ? "Waiting for output…" : "No output.")}
     </pre>
     {running && !agentShell ? <form className="cx-terminal-input" onSubmit={(event) => { event.preventDefault(); send(); }}>
       <input aria-label={command?.user ? "Type a command" : "Type into the command"} placeholder={command?.user ? "PS> type a command, Enter runs it" : "Type into the command, Enter sends"}
