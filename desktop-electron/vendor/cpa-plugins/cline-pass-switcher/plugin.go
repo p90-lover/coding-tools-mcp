@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -362,6 +363,13 @@ func management(raw []byte) ([]byte, error) {
 	}
 	return okEnvelope(map[string]any{"StatusCode": status, "Headers": headers, "Body": b})
 }
+func modelEfforts(model string) []string {
+	if model == "cline-pass/deepseek-v4.1-flash" {
+		return []string{"none", "low", "high", "max"}
+	}
+	return nil
+}
+
 func models() ([]byte, error) {
 	status, _, b, e := readLocal("GET", "/v1/models", nil)
 	if e != nil {
@@ -380,7 +388,11 @@ func models() ([]byte, error) {
 	}
 	infos := []map[string]any{}
 	for _, m := range result.Data {
-		infos = append(infos, map[string]any{"ID": m.ID, "Object": "model", "OwnedBy": "cline", "Type": "cline", "DisplayName": m.ID, "Name": m.ID})
+		info := map[string]any{"ID": m.ID, "Object": "model", "OwnedBy": "cline", "Type": "cline", "DisplayName": m.ID, "Name": m.ID}
+		if levels := modelEfforts(m.ID); len(levels) > 0 {
+			info["thinking"] = map[string]any{"levels": levels, "zero_allowed": true}
+		}
+		infos = append(infos, info)
 	}
 	return okEnvelope(map[string]any{"Provider": providerIdentifier, "Models": infos})
 }
@@ -415,8 +427,26 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	if e := json.Unmarshal(req.Payload, &body); e != nil {
 		return nil, e
 	}
-	if req.Model != "" {
-		body["model"] = req.Model
+	model := req.Model
+	if model == "" {
+		model, _ = body["model"].(string)
+	}
+	effort, _ := body["reasoning_effort"].(string)
+	if open := strings.LastIndex(model, "("); open > 0 && strings.HasSuffix(model, ")") {
+		effort, model = model[open+1:len(model)-1], model[:open]
+		if len(modelEfforts(model)) == 0 {
+			return upstreamErrorEnvelope("unsupported_effort", "Cline has no advertised reasoning levels for this model", 400, false), nil
+		}
+	}
+	if levels := modelEfforts(model); len(levels) > 0 && effort != "" {
+		if !slices.Contains(levels, effort) {
+			return upstreamErrorEnvelope("unsupported_effort", "Supported reasoning levels are none, low, high, max", 400, false), nil
+		}
+		// The explicit suffix wins over CPA's generic conversion (max used to become xhigh).
+		body["reasoning_effort"] = effort
+	}
+	if model != "" {
+		body["model"] = model
 	}
 	body["stream"] = stream
 	b, e := json.Marshal(body)

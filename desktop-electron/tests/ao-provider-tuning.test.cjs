@@ -131,24 +131,26 @@ test("CPA effort becomes exactly one session-local wire suffix and context is fo
   assert.equal(Object.hasOwn(own, "gateway"), false);
 });
 
-test("a Cline Pass model reaches CPA by its bare name: the plugin passes the name to Cline unchanged", async () => {
-  // Seen live: "cline-pass/deepseek-v4.1-flash(high)" came back "model not found".
-  for (const model of ["cpa/cline-pass/deepseek-v4.1-flash", "cpa/cline-pass/deepseek-v4.1-flash(high)"]) {
-    const input = await dispatched("claude-code", model, { effort: "high" });
-    assert.equal(input.model, "cline-pass/deepseek-v4.1-flash");
-    assert.deepEqual(input.gateway, { provider: "cpa", model: "cline-pass/deepseek-v4.1-flash" });
+test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged", async () => {
+  const id = "cline-pass/deepseek-v4.1-flash";
+  const catalog = [{ slug: id, supported_reasoning_levels: ["low", "medium", "high", "xhigh"] }];
+  for (const agent of ["codex", "claude-code", "opencode"]) {
+    const workflow = createAgentOrchestratorWorkflow({
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+      fetchImpl: async () => ({ ok: true, json: async () => ({ models: catalog }) }),
+      aoHarness: { models: async () => [] },
+    });
+    const result = await workflow.call("models", { harness: "ao:" + agent });
+    assert.deepEqual(result.capabilities["cpa/" + id].efforts, ["none", "low", "high", "max"], agent);
+    for (const effort of ["none", "low", "high", "max"]) {
+      const input = await dispatched(agent, "cpa/" + id + "(high)", { effort }, catalog);
+      assert.equal(input.model, (agent === "opencode" ? "openai/" : "") + id + "(" + effort + ")");
+      assert.deepEqual(input.gateway, { provider: "cpa", model: id + "(" + effort + ")" });
+      assert.equal(input.effort, undefined);
+    }
+    await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "xhigh" }, catalog), /reasoning.*not.*support/i);
+    assert.equal((await dispatched(agent, "cpa/" + id, {}, catalog)).gateway.model, id);
   }
-  // CPA advertises its stock levels for the plugin's models; the card offers none.
-  const workflow = createAgentOrchestratorWorkflow({
-    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
-    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [
-      { slug: "cline-pass/deepseek-v4.1-flash", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] },
-      { slug: "gpt-5.5", supported_reasoning_levels: [{ effort: "high" }] }] }) }),
-    aoHarness: { models: async () => [] },
-  });
-  const { capabilities } = await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws" });
-  assert.deepEqual(capabilities["cpa/cline-pass/deepseek-v4.1-flash"]?.efforts ?? capabilities["cline-pass/deepseek-v4.1-flash"]?.efforts, []);
-  assert.deepEqual(capabilities["cpa/gpt-5.5"]?.efforts ?? capabilities["gpt-5.5"]?.efforts, ["high"]);
 });
 
 test("every provider plugin's model reaches CPA by its bare name, by namespace or by the provider CPA names", async () => {
