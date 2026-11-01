@@ -778,8 +778,10 @@ test("Windows disposal owns an in-flight managed preparation command", { skip: p
   const pending = controller.startComponent("cpa");
   await spawned;
   controller.dispose();
-  assert.deepEqual(terminated, [child]);
+  // The command starts off the main thread, so dispose() can come before the start hands its child
+  // back; the start then ends that child itself.
   await assert.rejects(pending, /disposed/);
+  assert.deepEqual(terminated, [child]);
   assert.deepEqual(controller.project("cpa").processes, []);
 });
 
@@ -827,6 +829,37 @@ test("a persistent CPA runs detached, survives a keep-running dispose, and is ad
   await second.startComponent("cpa");
   assert.equal(spawnedAgain, 0, "a healthy CPA of the same version is adopted, not restarted");
   assert.equal(survivor.exitCode, null);
+});
+
+test("a persistent start that finishes after dispose is kept by a keep-running quit and ended by any other", async () => {
+  for (const keepPersistent of [true, false]) {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let requested;
+    const asked = new Promise((resolve) => { requested = resolve; });
+    const child = mockChild(keepPersistent ? 9100 : 9101);
+    child.unref = () => {};
+    const { controller, dataRoot } = controllerFixture({
+      persistentComponents: ["cpa"],
+      healthProbe: async () => true,
+      // The start is off the main thread: it hands its child back only after dispose() ran.
+      spawnProcess: async () => { requested(); await gate; return child; },
+      terminateProcessTree: (owned, signal) => owned.kill(signal),
+    });
+    const pending = controller.startComponent("cpa");
+    await asked;
+    controller.dispose({ keepPersistent });
+    release();
+    if (keepPersistent) {
+      await pending;
+      assert.equal(child.killed, false, "a keep-running quit leaves CPA for the next launcher");
+      const record = JSON.parse(fs.readFileSync(path.join(dataRoot, "state", "cpa.process.json"), "utf8"));
+      assert.equal(record.pid, 9100, "and records it, so the next launcher adopts it");
+    } else {
+      await assert.rejects(pending, /disposed/);
+      assert.equal(child.killed, true, "any other dispose ends the program it could not see");
+    }
+  }
 });
 
 test("a persistent CPA captures its plugin bundle before spawn and replaces an outdated bundle", async (t) => {

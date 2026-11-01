@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const { execFile, spawn } = require("node:child_process");
+const { execFile } = require("node:child_process");
 const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway.cjs");
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
 const { MAX_RESPONSE_BYTES } = require("./ipc-schema.cjs");
@@ -17,7 +17,7 @@ const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
-const { warmProgram } = require("./off-thread-run.cjs");
+const { spawnOffThread } = require("./off-thread-run.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -2029,15 +2029,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const profiler = await profilerAddress(dataRoot);
         checkStartup();
         if (profiler) logger.info?.("ao.profiler_enabled", { address: profiler });
-        // spawn() holds this thread, every window's, until Windows has loaded the program and the
-        // antivirus has scanned it: 4.8 s once after a reboot (launcher.main_blocked, 2026-10-30).
-        // The daemon's pipes and exit must live here, so its program is run once from a worker
-        // first (--help exits at once) and the start below finds it loaded and scanned.
-        await warmProgram(executable, ["--help"]);
-        checkStartup();
+        // spawn() holds this thread, every window's, until Windows has created the process and the
+        // antivirus has scanned it: 4.8 s after a reboot (2026-10-30) and, even after a warm-up run,
+        // 15.4 s on the busy hard disk (0.8.40, 2026-11-01). The daemon starts in a worker, and its
+        // output and exit reach this thread as before. A stop during the start waits for it to
+        // settle, and the next checkStartup() hands this daemon to cleanup().
           // The AO CLI build answers the daemon command and the internal commands the daemon
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
-          child = spawn(executable, ["daemon"], {
+          child = await spawnOffThread(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
           env: { ...daemonEnvironment, ...(profiler ? { AO_PPROF_ADDR: profiler } : {}), AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
             // AO bounds every request at 60 s, and starting a chat agent (worktree, agent process,
