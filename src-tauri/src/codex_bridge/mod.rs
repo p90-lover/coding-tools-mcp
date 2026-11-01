@@ -547,6 +547,28 @@ struct LedgerEntry {
     result: Option<Value>,
     completed_at: Option<Instant>,
 }
+struct PendingAdmission {
+    key: String,
+    fingerprint: String,
+    charged: u32,
+}
+impl PendingAdmission {
+    fn capture(memory: &Memory, key: String, before: u32, fresh: bool) -> Result<Option<Self>> {
+        if !fresh {
+            return Ok(None);
+        }
+        let entry = memory
+            .ledger
+            .get(&key)
+            .filter(|entry| entry.result.is_none() && entry.completed_at.is_none())
+            .ok_or("Native admission receipt unavailable")?;
+        Ok(Some(Self {
+            key,
+            fingerprint: entry.fingerprint.clone(),
+            charged: memory.requests_used.saturating_sub(before),
+        }))
+    }
+}
 #[derive(Default)]
 struct Memory {
     threads: BTreeMap<String, ThreadState>,
@@ -557,6 +579,22 @@ struct Memory {
 }
 
 impl Memory {
+    fn fail_admission(&mut self, pending: &PendingAdmission, result: Value) -> bool {
+        let Some(entry) = self.ledger.get_mut(&pending.key) else {
+            return false;
+        };
+        if entry.fingerprint != pending.fingerprint
+            || entry.result.is_some()
+            || entry.completed_at.is_some()
+        {
+            return false;
+        }
+        entry.result = Some(result);
+        entry.completed_at = Some(Instant::now());
+        self.requests_used = self.requests_used.saturating_sub(pending.charged);
+        true
+    }
+
     fn ao_thread(&mut self, options: &Connection) -> Result<Option<String>> {
         let terminal = |thread: &ThreadState| {
             thread.restored
@@ -599,6 +637,37 @@ impl Memory {
         }
         Ok(None)
     }
+}
+
+fn persist_admission(
+    memory: &Mutex<Memory>,
+    pending: Option<&PendingAdmission>,
+    mut persist: impl FnMut() -> Result<()>,
+    failure: impl FnOnce(&str) -> Value,
+    stop: impl FnOnce(),
+) -> Result<()> {
+    let error = match persist() {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let Some(pending) = pending else {
+        return Err(error);
+    };
+    let result = failure(&error);
+    let settled = {
+        match memory.lock() {
+            Ok(mut memory) => memory.fail_admission(pending, result),
+            Err(_) => false,
+        }
+    };
+    if settled {
+        // Persist compensation only after its memory guard is released. If this
+        // also fails, disk recovery keeps its conservative unknown outcome.
+        let _ = persist();
+    } else {
+        stop();
+    }
+    Err(error)
 }
 
 /// Owned by an actual authenticated listener, never keyed only by a filesystem path.
@@ -1393,20 +1462,45 @@ impl Hub {
     pub fn admit(&self, request: Control) -> Result<Ticket> {
         let uses_model = validate_control(&request)?;
         let bridge = self.bridge()?;
-        let replay = {
+        let (replay, pending) = {
             let mut memory = lock(&bridge.memory)?;
-            reserve(
+            let before = memory.requests_used;
+            let replay = reserve(
                 &mut memory,
                 &request,
                 uses_model,
                 &bridge.options,
                 bridge.live.load(Ordering::SeqCst),
                 bridge.ready.load(Ordering::SeqCst),
-            )?
+            )?;
+            let pending = PendingAdmission::capture(
+                &memory,
+                request.request_id.clone(),
+                before,
+                replay.is_none(),
+            );
+            (replay, pending)
+        };
+        let pending = match pending {
+            Ok(pending) => pending,
+            Err(error) => {
+                bridge.stop("native_session_persistence_failed");
+                return Err(error);
+            }
         };
         // Persist admission before any RPC, so a process restart cannot turn an unknown
         // submitted request into a fresh model call with the same request ID.
-        bridge.save_session()?;
+        persist_admission(
+            &bridge.memory,
+            pending.as_ref(),
+            || bridge.save_session(),
+            |error| {
+                json!({"ok":false,"request_id":request.request_id,
+                "error":format!("Native request was not submitted because its admission journal could not be saved: {error}"),
+                "outcome":"not_submitted","replayed":false})
+            },
+            || bridge.stop("native_session_persistence_failed"),
+        )?;
         Ok(Ticket {
             bridge,
             request,
@@ -2505,6 +2599,221 @@ mod tests {
     }
 
     use super::*;
+
+    fn journal_admission_fixture() -> (Mutex<Memory>, PendingAdmission) {
+        let mut memory = Memory {
+            requests_used: 4,
+            ..Default::default()
+        };
+        for key in ["fresh-request", "other-pending", "restored-unknown"] {
+            memory.ledger.insert(
+                key.into(),
+                LedgerEntry {
+                    fingerprint: key.into(),
+                    result: (key == "restored-unknown").then_some(Value::Null),
+                    completed_at: None,
+                },
+            );
+        }
+        let pending = PendingAdmission::capture(&memory, "fresh-request".into(), 3, true)
+            .unwrap()
+            .unwrap();
+        (Mutex::new(memory), pending)
+    }
+
+    #[test]
+    fn admission_journal_failure_settles_only_its_fresh_charge_once() {
+        use std::cell::Cell;
+        for settlement_succeeds in [false, true] {
+            let (memory, pending) = journal_admission_fixture();
+            let writes = Cell::new(0);
+            let dispatched = Cell::new(false);
+            let result = persist_admission(
+                &memory,
+                Some(&pending),
+                || {
+                    assert!(memory.try_lock().is_ok(), "persist held the memory guard");
+                    writes.set(writes.get() + 1);
+                    if writes.get() == 1 {
+                        Err("first journal failure".into())
+                    } else if settlement_succeeds {
+                        Ok(())
+                    } else {
+                        Err("settlement also failed".into())
+                    }
+                },
+                |error| {
+                    assert_eq!(error, "first journal failure");
+                    Value::Null
+                },
+                || panic!("owned receipt should settle without stopping"),
+            );
+            if result.is_ok() {
+                dispatched.set(true);
+            }
+            assert_eq!(result.unwrap_err(), "first journal failure");
+            assert!(!dispatched.get());
+            assert_eq!(writes.get(), 2);
+            let mut memory = lock(&memory).unwrap();
+            assert_eq!(memory.requests_used, 3);
+            let entry = &memory.ledger["fresh-request"];
+            assert_eq!(entry.fingerprint, "fresh-request");
+            assert_eq!(entry.result, Some(Value::Null));
+            let completed = entry.completed_at;
+            assert!(completed.is_some());
+            assert!(!memory.fail_admission(&pending, Value::Null));
+            assert_eq!(memory.requests_used, 3);
+            assert_eq!(memory.ledger["fresh-request"].completed_at, completed);
+            assert!(memory.ledger["other-pending"].result.is_none());
+            assert!(memory.ledger["other-pending"].completed_at.is_none());
+            assert_eq!(memory.ledger["restored-unknown"].result, Some(Value::Null));
+            assert!(memory.ledger["restored-unknown"].completed_at.is_none());
+        }
+    }
+
+    #[test]
+    fn admission_journal_success_and_replay_failure_preserve_receipts() {
+        use std::cell::Cell;
+        let (memory, pending) = journal_admission_fixture();
+        persist_admission(
+            &memory,
+            Some(&pending),
+            || Ok(()),
+            |_| panic!("successful admission must remain pending"),
+            || panic!("successful admission must not stop"),
+        )
+        .unwrap();
+        let completed = Instant::now();
+        let replay = {
+            let mut memory = lock(&memory).unwrap();
+            assert_eq!(memory.requests_used, 4);
+            assert!(memory.ledger["fresh-request"].result.is_none());
+            assert!(memory.ledger["fresh-request"].completed_at.is_none());
+            let entry = memory.ledger.get_mut("fresh-request").unwrap();
+            entry.result = Some(Value::Null);
+            entry.completed_at = Some(completed);
+            PendingAdmission::capture(&memory, "fresh-request".into(), 3, false).unwrap()
+        };
+        assert!(replay.is_none());
+        let writes = Cell::new(0);
+        let failed = persist_admission(
+            &memory,
+            replay.as_ref(),
+            || {
+                writes.set(writes.get() + 1);
+                Err("replay journal failure".into())
+            },
+            |_| panic!("a replay does not own a fresh reservation"),
+            || panic!("a replay failure must not alter its receipt"),
+        );
+        assert_eq!(failed.unwrap_err(), "replay journal failure");
+        assert_eq!(writes.get(), 1);
+        let memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 4);
+        assert_eq!(memory.ledger["fresh-request"].result, Some(Value::Null));
+        assert_eq!(memory.ledger["fresh-request"].completed_at, Some(completed));
+    }
+
+    #[test]
+    fn admission_journal_unavailable_state_stops_after_guards_drop() {
+        use std::cell::Cell;
+        let (memory, pending) = journal_admission_fixture();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = memory.lock().unwrap();
+            panic!("poison admission fixture");
+        });
+        let stopped = Cell::new(false);
+        let result = persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| Value::Null,
+            || {
+                assert!(!matches!(
+                    memory.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+                stopped.set(true);
+            },
+        );
+        assert_eq!(result.unwrap_err(), "journal unavailable");
+        assert!(stopped.get());
+
+        let (memory, pending) = journal_admission_fixture();
+        lock(&memory)
+            .unwrap()
+            .ledger
+            .get_mut("fresh-request")
+            .unwrap()
+            .fingerprint = "replacement".into();
+        let stopped = Cell::new(false);
+        assert!(persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| Value::Null,
+            || {
+                assert!(memory.try_lock().is_ok());
+                stopped.set(true);
+            },
+        )
+        .is_err());
+        assert!(stopped.get());
+        let memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 4);
+        assert_eq!(memory.ledger["fresh-request"].fingerprint, "replacement");
+        assert!(memory.ledger["fresh-request"].result.is_none());
+    }
+
+    #[test]
+    fn model_journal_failure_preserves_replay_identity_and_refunds_new_charge() {
+        let options: Connection =
+            serde_json::from_value(json!({"executable":"/not-executed/codex",
+            "expected_sha256":"0".repeat(64),"codex_home":"/not-opened/home",
+            "allow_model_usage":true,"model":"fixture","request_limit":1,"lifetime_seconds":60}))
+            .unwrap();
+        let request = Control {
+            operation: "start".into(),
+            request_id: "journal-model".into(),
+            thread_id: None,
+            text: Some("must not be submitted".into()),
+            model: None,
+            effort: None,
+        };
+        let mut state = Memory::default();
+        let before = state.requests_used;
+        assert!(reserve(&mut state, &request, true, &options, true, true)
+            .unwrap()
+            .is_none());
+        let pending = PendingAdmission::capture(&state, request.request_id.clone(), before, true)
+            .unwrap()
+            .unwrap();
+        let memory = Mutex::new(state);
+        assert!(persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| json!({"ok":false,"outcome":"not_submitted"}),
+            || panic!("fresh receipt should settle"),
+        )
+        .is_err());
+        let mut memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 0);
+        let replay = reserve(&mut memory, &request, true, &options, true, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay["outcome"], "not_submitted");
+        assert_eq!(memory.requests_used, 0);
+        let mut changed = request.clone();
+        changed.text = Some("different arguments".into());
+        assert!(reserve(&mut memory, &changed, true, &options, true, true).is_err());
+        changed.request_id = "fresh-model".into();
+        assert!(reserve(&mut memory, &changed, true, &options, true, true)
+            .unwrap()
+            .is_none());
+        assert_eq!(memory.requests_used, 1);
+    }
+
     #[test]
     fn web_card_approve_for_me_runs_unattended_instead_of_waiting_on_codex_review() {
         // Seen live: Codex's reviewer for a WebGPT card needed the busy ChatGPT web bridge.

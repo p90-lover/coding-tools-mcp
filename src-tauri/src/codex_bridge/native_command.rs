@@ -97,17 +97,42 @@ impl Hub {
         {
             bridge.stop("local_consent_expired");
         }
-        let replay = {
+        let (replay, pending) = {
             let mut memory = lock(&bridge.memory)?;
-            reserve_command(
+            let before = memory.requests_used;
+            let replay = reserve_command(
                 &mut memory,
                 &bridge.options,
                 &request,
                 bridge.live.load(Ordering::SeqCst),
                 bridge.ready.load(Ordering::SeqCst),
-            )?
+            )?;
+            let pending = PendingAdmission::capture(
+                &memory,
+                format!("command/{}", request.request_id),
+                before,
+                replay.is_none(),
+            );
+            (replay, pending)
         };
-        bridge.save_session()?;
+        let pending = match pending {
+            Ok(pending) => pending,
+            Err(error) => {
+                bridge.stop("native_session_persistence_failed");
+                return Err(error);
+            }
+        };
+        persist_admission(
+            &bridge.memory,
+            pending.as_ref(),
+            || bridge.save_session(),
+            |error| {
+                json!({"ok":false,"request_id":request.request_id,
+                "error":format!("Native command was not submitted because its admission journal could not be saved: {error}"),
+                "outcome":"not_submitted","model_requests":0,"replayed":false})
+            },
+            || bridge.stop("native_session_persistence_failed"),
+        )?;
         Ok(CommandTicket {
             bridge,
             request,
@@ -180,6 +205,63 @@ mod tests {
             "codex_home":"/not-opened/home","allow_model_usage":false,"allow_command_execution":true,
             "model":"unused","request_limit":1,"lifetime_seconds":60})).unwrap()
     }
+    #[test]
+    fn command_journal_failure_preserves_prefix_replay_and_model_budget() {
+        let options = options();
+        let request = CommandRequest {
+            request_id: "same-id".into(),
+            argv: vec!["not-executed".into()],
+            timeout_ms: 1000,
+        };
+        let mut state = Memory {
+            requests_used: 7,
+            ..Default::default()
+        };
+        state.ledger.insert(
+            request.request_id.clone(),
+            LedgerEntry {
+                fingerprint: "control-owner".into(),
+                result: None,
+                completed_at: None,
+            },
+        );
+        let before = state.requests_used;
+        assert!(reserve_command(&mut state, &options, &request, true, true)
+            .unwrap()
+            .is_none());
+        let pending = PendingAdmission::capture(
+            &state,
+            format!("command/{}", request.request_id),
+            before,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(pending.charged, 0);
+        let memory = Mutex::new(state);
+        assert!(persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| json!({"ok":false,"outcome":"not_submitted","model_requests":0}),
+            || panic!("fresh command receipt should settle"),
+        )
+        .is_err());
+        let mut memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 7);
+        assert_eq!(memory.ledger["same-id"].fingerprint, "control-owner");
+        assert!(memory.ledger["same-id"].result.is_none());
+        let replay = reserve_command(&mut memory, &options, &request, true, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay["outcome"], "not_submitted");
+        assert_eq!(replay["model_requests"], 0);
+        assert!(memory.ledger["command/same-id"].completed_at.is_some());
+        let mut changed = request;
+        changed.argv.push("different".into());
+        assert!(reserve_command(&mut memory, &options, &changed, true, true).is_err());
+    }
+
     #[test]
     fn native_043_command_consent_bounds_and_replay_are_independent() {
         let mut memory = Memory::default();
