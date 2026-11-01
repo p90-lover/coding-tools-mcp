@@ -255,6 +255,182 @@ test("a retained MCP conversation reuses its proven connector binding", () => {
   expect(chatGptConnectorAttachmentMode(false, false)).toBe("none");
 });
 
+test.each([
+  "prepared", "send wait", "send activation", "accepted send", "menu", "retry", "multipart",
+  "approval", "observation", "round trip", "fresh preactivation", "same id", "subframe",
+  "fresh", "rebind moved", "rebind same",
+  "temporary same", "temporary other", "temporary home", "temporary home same", "temporary round trip", "temporary fresh", "temporary fresh moved",
+])("retained page ownership fences %s", async (checkpoint) => {
+  const ts = require("typescript") as typeof import("typescript");
+  const { EventEmitter } = require("node:events") as typeof import("node:events");
+  const { ChatGptWebAdapterError, ChatGptCompactionHandoffAccepted } = await import("../src/adapters/chatgpt-web/adapter-error");
+  const source = ts.createSourceFile("browser-worker.ts",
+    readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+  const declaration = source.statements.filter(ts.isClassDeclaration).find(node => node.name?.text === "ChatGptBrowserWorker")!;
+  const methods = ["runExclusive", "runBrowserTurn", "sendAttachedPrompt", "selectModelAndEffort", "waitForMultipartAcknowledgement"].map(name => {
+    const method = declaration.members.filter(ts.isMethodDeclaration).find(node => node.name.getText(source) === name);
+    if (!method) throw new Error(`Missing worker method ${name}`);
+    return method.getText(source);
+  });
+  const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(`class ProbeWorker {${methods.join("\n")}}; globalThis.ProbeWorker=ProbeWorker;`);
+  const saved = !checkpoint.startsWith("temporary");
+  const temporaryHome = checkpoint === "temporary home same";
+  const canonicalUrl = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001";
+  const originalUrl = temporaryHome ? "https://chatgpt.com/?temporary-chat=true" : `${canonicalUrl}${saved ? "" : "?temporary-chat=true"}`;
+  const otherUrl = `https://chatgpt.com/c/00000000-0000-0000-0000-000000000002${saved ? "" : "?temporary-chat=true"}`;
+  const fresh = ["fresh", "fresh preactivation", "temporary fresh", "temporary fresh moved"].includes(checkpoint);
+  let url = fresh ? `https://chatgpt.com/${saved ? "" : "?temporary-chat=true"}` : originalUrl;
+  const connections: Array<{ closed: boolean; page: any; browser: any }> = [];
+  const surfaces: string[] = [], output: string[] = [];
+  const actions = { send: 0, retry: 0, approval: 0, menu: 0 };
+  const finished = new Error("OWNERSHIP_PROBE_FINISHED");
+  let triggered = false, rebound = false, capturedTurn: any;
+  const hidden: any = { last() { return this; }, filter() { return this; }, getByText() { return this; },
+    getByTestId() { return this; }, isVisible: async () => false };
+  const navigate = (next: string) => {
+    url = next;
+    for (const connection of connections) if (!connection.closed) connection.page.emit("framenavigated", connection.page.mainFrame());
+  };
+  const nativeAction = (connection: { closed: boolean }) => {
+    if (connection.closed) throw new Error("SDK transport closed");
+  };
+  const connectionFor = (page: Page) => connections.find(connection => connection.page === page)!;
+  const connect = async (_descriptor: string, _timeout: number, surface: string) => {
+    surfaces.push(surface);
+    if (connections.length) {
+      expect(connections.at(-1)?.closed).toBeTrue();
+      if (checkpoint === "rebind moved") url = otherUrl;
+    }
+    const connection: any = { closed: false };
+    const page: any = Object.assign(new EventEmitter(), {
+      url: () => url, isClosed: () => connection.closed,
+      mainFrame: () => frame,
+      locator: (selector: string) => {
+        if (selector.startsWith("main aside")) return alert;
+        if (selector.includes('role="dialog"') || selector.includes("tool-approval-card")) return dialog;
+        return hidden;
+      },
+      keyboard: { press: async () => nativeAction(connection) },
+    });
+    const frame = { url: () => url };
+    const retry: any = { last() { return this; }, isVisible: async () => {
+      if (!triggered) { triggered = true; navigate(otherUrl); }
+      await Promise.resolve(); nativeAction(connection); return true;
+    }, click: async () => { nativeAction(connection); actions.retry += 1; } };
+    const alert: any = { ...hidden, isVisible: async () => ["retry", "multipart"].includes(checkpoint) && !actions.retry, getByRole: () => retry };
+    const allow: any = { last() { return this; }, waitFor: async () => {
+      if (!triggered) { triggered = true; navigate(otherUrl); }
+      await Promise.resolve(); nativeAction(connection);
+    }, press: async () => { nativeAction(connection); actions.approval += 1; throw finished; } };
+    const dialog: any = { ...hidden, isVisible: async () => checkpoint === "approval", getByRole: () => allow };
+    connection.page = page;
+    connection.browser = { close: async () => { connection.closed = true; } };
+    connections.push(connection);
+    return { page, browser: connection.browser };
+  };
+  const mode = { effort: "high", localTools: checkpoint === "approval", uiEffortIndex: 0 };
+  const context = createContext({
+    Error, DOMException, URL, AbortController, AbortSignal, process, setTimeout, clearTimeout, setInterval, clearInterval,
+    console: { info() {}, warn() {}, error() {} }, browserStageTimeouts: {}, chatGptSuspensionClock: {},
+    LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS: 100_000, LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS: 1000,
+    CHATGPT_STOP_BUTTON_SELECTOR: "stop", CHATGPT_SEND_BUTTON_SELECTOR: "send", CHATGPT_SEND_ENABLE_GRACE_MS: 1000,
+    CHATGPT_EFFORT_CONTROL_SELECTOR: "effort", CHATGPT_RESPONSE_DOM_GRACE_MS: 60_000,
+    CHATGPT_USER_TURN_SELECTOR: "user", CHATGPT_ASSISTANT_TURN_SELECTOR: "assistant", MAX_CHATGPT_BROWSER_PAGE_REBINDS,
+    ChatGptBrowserObservationTimeoutError,
+    CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_WEB_LUNA_MODEL_ID: "luna", CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS: 1000,
+    ChatGptBrowserDiagnostics: class { async capture() {} }, ChatGptCompletionTracker: class {},
+    ChatGptVisibleTraceTracker: class {}, ChatGptMarkdownBuffer: class {}, ChatGptTurnDomHealthTracker: class {},
+    ChatGptWebAdapterError, ChatGptCompactionHandoffAccepted,
+    ChatGptFailedSendRetrier: class extends ChatGptFailedSendRetrier { constructor() { super(() => 0, [0]); } },
+    resolveChatGptWebModelMode: () => mode,
+    estimateCompiledChatGptWebInputTokens: () => 1, estimateCompiledChatGptWebMessageTokens: () => 1,
+    compiledChatGptWebMaxMessageChars: () => 1, assertChatGptWebInputWithinLimits() {},
+    chatGptRetainedConversationPage: (value: string, saved: boolean) => saved
+      ? /^https:\/\/chatgpt\.com\/c\/[0-9a-f-]{36}(?:[?#].*)?$/.test(value) : value.includes("temporary-chat=true"),
+    chatGptNewChatUrl: (saved: boolean) => saved ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true",
+    connectLauncherBrowserHost: connect, connectAfterClosingBrowserConnection,
+    waitForOperationalChatGptViewport: async () => {}, isChatGptWorkComposer: async () => false,
+    throwIfChatGptSessionFailureAlert: async () => {}, throwIfChatGptRateLimitDialog: async () => {},
+    throwIfChatGptTerminalErrorAlert: async () => {}, throwIfChatGptWorkMode: async () => {},
+    chatGptConnectionInterruptedAlertVisible: async () => false, resolveChatGptToolConfirmation,
+    settleChatGptUi: async () => {},
+    chatGptExpiredSessionAlert: () => ({ waitFor: ({ signal }: { signal: AbortSignal }) => new Promise((_resolve, reject) =>
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true })) }),
+    chatGptModelControlUnavailableError: (message: string) => new Error(message),
+    activateChatGptEffortMenu: async () => { nativeAction(connections.at(-1)!); actions.menu += 1; throw finished; },
+    redactChatGptUiDiagnostic: (value: unknown) => String(value),
+    notifyLauncherTurn: async (_descriptor: unknown, request: { phase: string }) => request.phase === "start"
+      ? { surfaceId: "owned-surface", reused: !fresh, conversationUrl: fresh || temporaryHome ? undefined : canonicalUrl } : { cancelledByUser: false },
+  });
+  runInContext(javascript, context);
+  const worker: any = Object.assign(new context.ProbeWorker(), {
+    config: { browserHost: "launcher", browserHostDescriptorPath: "fixture", useSavedChats: saved,
+      browserDiagnosticsPath: "unused-fixture", appName: "fixture", autoApproveToolCalls: true },
+    runStage: async (_trace: string, _stage: string, _timeout: number, action: (signal: AbortSignal) => Promise<unknown>) => action(new AbortController().signal),
+    prepareChatSurface: async () => {}, attachFiles: async () => {}, captureSubmissionBaseline: async () => ({}),
+    attachPromptWithIntegrityRetry: async () => {
+      if (checkpoint === "fresh preactivation") { triggered = true; navigate(otherUrl); }
+      if (checkpoint === "subframe") connections.at(-1)!.page.emit("framenavigated", { url: () => otherUrl });
+    },
+    activeComposer: async (page: Page) => ({ locator: () => ({ locator: (selector: string) => {
+      const connection = connectionFor(page);
+      const button: any = { last() { return this; }, filter() { return this; }, count: async () => 1,
+        waitFor: async () => {
+          if (!triggered && ["send wait", "round trip", "menu", "temporary other", "temporary home", "temporary round trip"].includes(checkpoint)) {
+            triggered = true; navigate(checkpoint === "temporary home" ? "https://chatgpt.com/?temporary-chat=true" : otherUrl);
+            if (["round trip", "temporary round trip"].includes(checkpoint)) navigate(originalUrl);
+          }
+          await Promise.resolve(); nativeAction(connection);
+        }, isEnabled: async () => true,
+        press: async () => {
+          nativeAction(connection); actions.send += 1;
+          if (["fresh", "temporary fresh", "temporary fresh moved"].includes(checkpoint)) navigate(originalUrl);
+          if (checkpoint === "accepted send") { triggered = true; navigate(otherUrl); }
+        } };
+      return button;
+    } }) }),
+    waitForSubmissionAcceptedWithRecovery: async (page: Page, baseline: unknown, _signal: unknown,
+      _progress: unknown, _revision: unknown, _tracker: unknown, recover: Function) => {
+      if (checkpoint.startsWith("rebind") && !rebound) {
+        rebound = true;
+        const result = await recover(1, new ChatGptBrowserObservationTimeoutError(5), baseline);
+        page = result.page;
+      }
+      nativeAction(connectionFor(page)); return "user_turn";
+    },
+    waitForNewAssistantTurn: async (page: Page) => {
+      if (checkpoint === "multipart") await worker.waitForMultipartAcknowledgement(page, { locator: hidden }, {}, {}, undefined, capturedTurn.abortSignal);
+      return { locator: hidden };
+    },
+    responseDomSnapshot: async () => {
+      if (["observation", "temporary fresh moved"].includes(checkpoint)) { triggered = true; navigate(otherUrl); capturedTurn.onTextDelta("UNOWNED"); }
+      throw finished;
+    },
+  });
+  if (checkpoint !== "menu") worker.selectModelAndEffort = async () => mode;
+  const actualSend = worker.sendAttachedPrompt;
+  worker.sendAttachedPrompt = async (...args: unknown[]) => { capturedTurn = args[5]; return actualSend.apply(worker, args); };
+  let unrelatedClosed = false;
+  worker.browser = { close: async () => { unrelatedClosed = true; } };
+  const prepare = async () => ({ text: "fixture prompt", images: [], release() {} });
+  const error = await worker.runExclusive({ traceId: "fixture", modelId: "fixture", capabilities: {}, conversationKey: "owner",
+    prepare, prepareResume: prepare, onTextDelta: (text: string) => output.push(text),
+    onPreparedSelected: async () => { if (checkpoint === "prepared") { triggered = true; navigate(otherUrl); }
+      if (checkpoint === "same id") navigate(`${originalUrl}?model=fixture#same-chat`); },
+    onSendActivated: async () => { if (checkpoint === "send activation") { triggered = true; navigate(otherUrl); } },
+  }).catch((failure: unknown) => failure);
+  const control = ["same id", "subframe", "fresh", "rebind same", "temporary same", "temporary home same", "temporary fresh"].includes(checkpoint);
+  if (!control) expect(triggered || checkpoint === "rebind moved").toBeTrue();
+  if (control) expect(error).toBe(finished);
+  else expect(error).toMatchObject({ code: "chatgpt_conversation_changed", retryable: false });
+  expect(actions.send).toBe(control || ["accepted send", "retry", "multipart", "approval", "observation", "rebind moved", "temporary fresh moved"].includes(checkpoint) ? 1 : 0);
+  expect({ retry: actions.retry, approval: actions.approval, menu: actions.menu }).toEqual({ retry: 0, approval: 0, menu: 0 });
+  expect(output).toEqual([]);
+  expect(surfaces.every(surface => surface === "owned-surface")).toBeTrue();
+  expect(connections.every(connection => connection.closed && connection.page.listenerCount("framenavigated") === 0)).toBeTrue();
+  expect(unrelatedClosed).toBeFalse();
+});
+
 test("browser turns run concurrently up to the five-tab limit", async () => {
   expect(MAX_CHATGPT_BROWSER_TABS).toBe(5);
   const releases = new Map<string, () => void>();
