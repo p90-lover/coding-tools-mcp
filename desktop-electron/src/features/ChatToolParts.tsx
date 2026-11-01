@@ -1,13 +1,17 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ImagePreviewDialog, type MarkupResult } from "./ImagePreview";
 import { chatMessageReadable, hiddenSecretParts, numberedDiff, type ChatStepRound, type SteerReceipt, type ChatSentAttachment } from "./ao-chat";
 
 // Parts of a chat turn both transcripts draw: the Claude Code one (AgentOrchestratorChat) and the
 // DeepSeek Harness one (DshTranscript), so a fix to one is a fix to both.
 
-/** Reads an attached image for its thumbnail and shows a file in its folder (the desktop app's). */
-export type AttachmentAccess = { preview?: (path: string) => Promise<string>; reveal?: (path: string) => void };
+/**
+ * Reads an attached image for its thumbnail and shows a file in its folder (the desktop app's);
+ * markup puts an image marked up in the preview into this chat's box.
+ */
+export type AttachmentAccess = { preview?: (path: string) => Promise<string>; reveal?: (path: string) => void; markup?: (result: MarkupResult) => Promise<void> };
 export const Attachments = createContext<AttachmentAccess>({});
 /** Thumbnails already read, by path: a poll re-renders every message, and each image is read once. */
 const PREVIEWS = new Map<string, Promise<string>>();
@@ -29,19 +33,13 @@ export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: 
   </button>;
 }
 
-/** An image shown full size over the chat; a click outside it or Escape closes it. */
+/**
+ * An image shown full size over the chat (Codex's image preview), with Markup when the chat box
+ * can take the result; a click outside it or Escape closes it.
+ */
 export function ImageLightbox({ url, onClose }: { url: string; onClose: () => void }) {
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
-  // On <body>: it opens from inside a transcript, whose contained scroll box would otherwise hold
-  // this full-window overlay to the pane.
-  return createPortal(<div className="cx-lightbox" role="dialog" aria-label="Image preview" onClick={onClose}>
-    <img src={url} alt="" onClick={(event) => event.stopPropagation()} />
-    <button type="button" className="cx-lightbox-close" aria-label="Close image preview" onClick={onClose}>×</button>
-  </div>, document.body);
+  const { markup } = useContext(Attachments);
+  return <ImagePreviewDialog url={url} onClose={onClose} onMarkup={markup} />;
 }
 
 /**

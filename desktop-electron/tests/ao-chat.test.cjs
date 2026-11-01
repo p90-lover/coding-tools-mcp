@@ -485,12 +485,13 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   const component = {};
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   const jsx = (type, props) => ({ type, props: props || {} });
-  const react = { useMemo: calculate => calculate(), useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
+  const react = { useMemo: calculate => calculate(), useCallback: callback => callback, useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
     createContext: value => ({ Provider: ({ children }) => children, value }), useContext: context => context.value,
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
       : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
+      : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: text => text }
       : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
         TurnRestart: react.createContext({ restarting: false }) } : {},
