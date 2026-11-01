@@ -7,7 +7,7 @@ import { chatSubagents, contextFraction, subagentActive, subagentTitle, tokensSh
 import { ChatMarkdown } from "./ChatMarkdown";
 import { petFlight, petOverlaps } from "./chat-pet-stage";
 import { costLabel, costSourceLabel, readCpaUsage, type CpaUsage, type CpaUsageRange } from "./cpa-usage";
-import { onWindowFocus, windowUnfocused } from "./page-visibility";
+import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibility";
 
 // The chat's side panel, as Codex shows one beside a thread: tabs for the page the chat's agent
 // opened in its own browser (a native view drawn over the pane's slot), the changes in its
@@ -93,9 +93,26 @@ export function chatProcessRows(commands: Command[], page: LivePage | null): Cha
   return [...rows, ...running.map(row), ...ended.slice(0, OFFLINE_PROCESS_ROWS).map(row)];
 }
 
+// A slow IPC read must finish before another starts. Hidden keep-alive tabs do no work, and
+// returning to the window refreshes immediately instead of waiting for the fallback interval.
+export function startWorkbenchPoll(tick: () => Promise<unknown>, intervalMs: number, hidden: () => boolean): () => void {
+  let live = true, inFlight = false;
+  const refresh = async () => {
+    if (!live || inFlight || hidden()) return;
+    inFlight = true;
+    try { await tick(); } catch { /* the next tick tries again */ }
+    finally { inFlight = false; }
+  };
+  void refresh();
+  const timer = window.setInterval(() => void refresh(), intervalMs);
+  const offFocus = onWindowFocus(() => void refresh());
+  return () => { live = false; window.clearInterval(timer); offFocus(); };
+}
+
 const PROCESSES_POLL_MS = 4000;
 /** The commands this chat's agents and the user ran (chat_processes), read while `wanted` (the details panel is open). */
 export function useChatProcesses(sessionIds: string[], wanted: boolean, workspaceId?: string): Command[] {
+  const hidden = useSurfaceHidden();
   const [commands, setCommands] = useState<Command[]>([]);
   const key = sessionIds.join(",");
   useEffect(() => {
@@ -110,9 +127,8 @@ export function useChatProcesses(sessionIds: string[], wanted: boolean, workspac
         setCommands((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
       } catch { /* the next tick tries again */ }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), PROCESSES_POLL_MS);
-    return () => { live = false; window.clearInterval(timer); };
+    const stop = startWorkbenchPoll(tick, PROCESSES_POLL_MS, hidden);
+    return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, wanted, workspaceId]);
   return commands;
@@ -152,6 +168,7 @@ export function startsNewChat(sessionIds: string[], polled: Set<string>): boolea
  * once; closing the panel is respected until the agent does something new (see autoOpenTab).
  */
 export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string): LivePage | null {
+  const hidden = useSurfaceHidden();
   // The page an agent's browser shows now, if any: the chat offers it back when the panel is hidden.
   const [livePage, setLivePage] = useState<LivePage | null>(null);
   const seen = useRef(new Set<string>());
@@ -201,11 +218,10 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
         if (tab) onOpenNow.current(tab);
       } catch { /* the next tick tries again */ }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), 4000);
-    return () => { live = false; window.clearInterval(timer); };
+    const stop = startWorkbenchPoll(tick, 4000, hidden);
+    return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, workspaceId]);
   return livePage;
 }
 
@@ -221,6 +237,7 @@ const SUBAGENTS_POLL_MS = 3000;
  * was working, and its work could not be read.
  */
 export function useChatSubagents(sessionIds: string[], onStarted: () => void): ChatSubagent[] {
+  const hidden = useSurfaceHidden();
   const [runs, setRuns] = useState<ChatSubagent[]>([]);
   const seen = useRef<Set<string> | null>(null);
   const onStartedNow = useRef(onStarted);
@@ -244,10 +261,8 @@ export function useChatSubagents(sessionIds: string[], onStarted: () => void): C
         if (!first && fresh.some(subagentActive)) onStartedNow.current();
       } catch { /* the next tick tries again */ }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), SUBAGENTS_POLL_MS);
-    const offFocus = onWindowFocus(() => void tick());
-    return () => { live = false; window.clearInterval(timer); offFocus(); };
+    const stop = startWorkbenchPoll(tick, SUBAGENTS_POLL_MS, hidden);
+    return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   return runs;
@@ -621,6 +636,7 @@ function SubagentWork({ run, onBack, renderWork }: { run: ChatSubagent; onBack: 
 }
 
 function PreviewPane({ sessionId }: { sessionId: string }) {
+  const hidden = useSurfaceHidden();
   const slot = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<PreviewState | null>(null);
   const [address, setAddress] = useState("");
@@ -629,18 +645,16 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     let live = true;
-    const tick = () => void paneCall("chat_preview_state", { sessionIds: [sessionId] })
+    const tick = () => paneCall("chat_preview_state", { sessionIds: [sessionId] })
       .then((result) => {
         if (!live) return;
         const next = (result.previews as Record<string, PreviewState> | undefined)?.[sessionId] ?? null;
         if (next) rememberPage(sessionId, next.url, next.title);
-        setState(next);
-      })
-      .catch(() => undefined);
-    tick();
-    const timer = window.setInterval(tick, PREVIEW_POLL_MS);
-    return () => { live = false; window.clearInterval(timer); };
-  }, [sessionId]);
+        setState((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+      });
+    const stop = startWorkbenchPoll(tick, PREVIEW_POLL_MS, hidden);
+    return () => { live = false; stop(); };
+  }, [sessionId, hidden]);
   useEffect(() => { if (!editing) setAddress(state?.url && state.url !== "about:blank" ? state.url : ""); }, [state?.url, editing]);
 
   // The page is a native view: keep it on the slot while the pane shows, and take it off after.

@@ -128,7 +128,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   dismissSessionReminder: () => ipcRenderer.invoke("launcher:session-reminder-dismiss"),
   smokeTest: () => ipcRenderer.invoke("launcher:browser-smoke"),
   verifyMcp: () => ipcRenderer.invoke("launcher:mcp-verify"),
-  createMcpConnector: () => ipcRenderer.invoke("launcher:mcp-create-connector"),
+  createMcpConnector: (accountId) => ipcRenderer.invoke("launcher:mcp-create-connector", accountId),
   doctor: () => ipcRenderer.invoke("launcher:doctor"),
   cancelTurns: () => ipcRenderer.invoke("launcher:cancel-turns"),
   uninstallIntegration: () => ipcRenderer.invoke("launcher:uninstall-integration"),

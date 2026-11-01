@@ -45,12 +45,14 @@ const TUNNEL_TONE: Record<McpTunnel["state"], string> = { ready: "ok", starting:
 const TUNNEL_LABEL: Record<McpTunnel["state"], string> = { ready: "Ready", starting: "Starting", stopped: "Stopped", failed: "Failed" };
 
 function connectorText(connector: BrowserAccount["connector"]) {
-  if (!connector) return { tone: "idle", label: "Not used yet", detail: "Shown after a Codex turn uses it" };
+  if (!connector) return { tone: "idle", label: "Not checked", detail: "Connect MCP to set up and check this account" };
   if (connector.error && (connector.errorAt ?? 0) >= (connector.okAt ?? 0)) {
     return { tone: "error", label: "Failed", detail: `${connector.error} · ${ago(connector.errorAt)}` };
   }
-  return { tone: "ok", label: "Connected", detail: `Last bound ${ago(connector.okAt)}` };
+  return { tone: "idle", label: "Previously connected", detail: `Last confirmed ${ago(connector.okAt)}` };
 }
+
+type ConnectionResult = { state: "connecting" | "connected" | "failed"; detail: string };
 
 export interface BridgeSetup {
   mcpReady: boolean;
@@ -73,6 +75,8 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
   const [threads, setThreads] = useState<CodexThreadBinding[]>([]);
   const [tunnels, setTunnels] = useState<McpTunnel[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [connections, setConnections] = useState<Record<string, ConnectionResult>>({});
+  const [connectionSummary, setConnectionSummary] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -109,6 +113,26 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
       setBusy(null);
     }
   }, [setError]);
+
+  const connectAccounts = (targets: BrowserAccount[]) => run("connect-mcp", async () => {
+    setConnectionSummary(null);
+    let connected = 0;
+    for (const account of targets) {
+      setConnections(previous => ({ ...previous, [account.id]: { state: "connecting", detail: "Setting up and checking the connector in this account" } }));
+      try {
+        const result = await api.createMcpConnector(account.id);
+        if (result.connected !== true) throw new Error("ChatGPT did not confirm this account's connector connection.");
+        connected += 1;
+        setConnections(previous => ({ ...previous, [account.id]: { state: "connected", detail: "ChatGPT confirmed this account's connection" } }));
+      } catch (cause) {
+        const detail = cause instanceof Error ? cause.message : String(cause);
+        setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail } }));
+      }
+    }
+    setConnectionSummary(`${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected.${connected < targets.length ? " Check the accounts that need attention below." : ""}`);
+    await api.browserAccounts().then(setAccounts).catch(() => {});
+    await api.mcpTunnels().then(setTunnels).catch(() => {});
+  });
 
   const proxies = useMemo(() => (network?.proxyProfiles ?? [])
     .filter(profile => !profile.archivedAt)
@@ -149,12 +173,24 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
         <Stat label="Tabs open" value={pages.length} detail={`of ${TOTAL_TAB_CEILING} · ${running} running`} />
         <Stat label="Codex sessions" value={threads.length} detail={`${threads.filter(t => t.running).length} running · ${CONCURRENT_TURNS} turns at once`} />
         <Stat
-          label="MCP connector"
-          value={setup.mcpReady ? "Ready" : "Not set up"}
+          label="MCP check"
+          value={setup.mcpReady ? "Verified" : "Not verified"}
           tone={setup.mcpReady ? "ok" : "warn"}
           detail={`${1 + tunnels.length} tunnel${tunnels.length ? "s" : ""} · ${setup.bridgeReady ? "Codex bridge set up" : "Codex bridge not set up"}`}
         />
         <Stat label="Proxies" value={`${bound}/${accounts.accounts.length}`} detail={`accounts bound · ${decodoCount} from Decodo`} />
+      </div>
+
+      <div className="cbm-decodo-head">
+        <p className="cbm-muted" role="status">{connectionSummary ?? "Set up the configured Coding Tools MCP connector and check its connection in each account."}</p>
+        <button
+          className="cbm-button"
+          disabled={locked || chatRunning || accounts.accounts.length === 0}
+          onClick={() => void connectAccounts(accounts.accounts)}
+          type="button"
+        >
+          {busy === "connect-mcp" ? "Connecting accounts…" : "Connect all accounts"}
+        </button>
       </div>
 
       <div className="cbm-cards">
@@ -166,6 +202,8 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError }: {
             busy={busy}
             chatRunning={chatRunning}
             canRemove={accounts.accounts.length > 1}
+            connection={connections[account.id]}
+            connect={() => connectAccounts([account])}
             inUse={account.id === activeId}
             key={account.id}
             locked={locked}
@@ -208,7 +246,7 @@ function Stat({ label, value, detail, tone }: { label: string; value: string | n
 
 function AccountCard({
   account, api, authenticated, busy, chatRunning, canRemove, inUse, locked, mainTunnelReady, maxTabs, proxies, holders, run, sessions, tabs,
-  tunnel,
+  tunnel, connection, connect,
 }: {
   account: BrowserAccount;
   api: LauncherApi;
@@ -228,6 +266,8 @@ function AccountCard({
   tabs: BrowserState["tabs"];
   /** This account's own MCP tunnel (#674), if it has one. */
   tunnel: McpTunnel | undefined;
+  connection: ConnectionResult | undefined;
+  connect: () => Promise<void>;
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const confirmTimer = useRef<number | undefined>(undefined);
@@ -238,10 +278,15 @@ function AccountCard({
   const holderOf = (profileId: string) => holders.find(other => other.id !== account.id && other.proxyProfileId === profileId);
   const runningTabs = tabs.filter(tab => tab.status === "running").length;
   const plan = planText(account.plan);
-  const connector = connectorText(account.connector);
   // Every account keeps its own sign-in: the one in use from its live page, the others from their
   // own saved session (null until read).
   const signedIn = inUse ? authenticated : account.signedIn;
+  const connector = signedIn === false
+    ? { tone: "warn", label: "Not connected", detail: "Sign in to this account in the Browser tab first" }
+    : connection && !(connection.state === "connected" && account.connector?.error)
+      ? { tone: connection.state === "connected" ? "ok" : connection.state === "failed" ? "error" : "idle",
+        label: connection.state === "connected" ? "Connected" : connection.state === "failed" ? "Needs attention" : "Connecting…", detail: connection.detail }
+      : connectorText(account.connector);
   const signIn = signedIn === null
     ? { tone: "idle", label: "Checking…" }
     : signedIn ? { tone: inUse ? "ok" : "idle", label: "Signed in" } : { tone: "warn", label: "Not signed in" };
@@ -305,16 +350,16 @@ function AccountCard({
             ) : (
               <>
                 <span className={`cbm-tone is-${mainTunnelReady ? "idle" : "warn"}`}>Main tunnel</span>
-                <span className="cbm-muted"> · {mainTunnelReady ? "no tunnel of its own" : "not set up"}</span>
+                <span className="cbm-muted"> · {mainTunnelReady ? "shared configuration" : "not verified"}</span>
               </>
             )}
           </dd>
         </div>
         <div>
           <dt>Connector</dt>
-          <dd>
+          <dd className="cbm-connector" role="status">
             <span className={`cbm-tone is-${connector.tone}`}>{connector.label}</span>
-            <span className={`cbm-muted${connector.tone === "error" ? " is-error" : ""}`} title={connector.detail}> · {connector.detail}</span>
+            <span className={`cbm-muted${connector.tone === "error" ? " is-error" : ""}`} title={connector.detail}>{connector.detail}</span>
           </dd>
         </div>
         <div>
@@ -395,6 +440,15 @@ function AccountCard({
       </div>
 
       <footer className="cbm-card-actions">
+        <button
+          className="cbm-button"
+          disabled={locked || chatRunning || signedIn !== true}
+          onClick={() => void connect()}
+          title={signedIn === true ? "Set up and verify the configured Coding Tools connector in this account" : "Sign in to this account in the Browser tab first"}
+          type="button"
+        >
+          {connection?.state === "connecting" ? "Connecting…" : connection?.state === "connected" ? "Check connection" : "Connect MCP"}
+        </button>
         {!inUse ? (
           <button className="cbm-button" disabled={locked} onClick={() => void run(`use:${account.id}`, () => api.switchBrowserAccount(account.id))} type="button">
             {busy === `use:${account.id}` ? "Switching…" : "Use in Browser tab"}

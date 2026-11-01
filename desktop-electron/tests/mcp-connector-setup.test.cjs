@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const vm = require("node:vm");
 const path = require("node:path");
-const { currentConnectorSettings, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { createConfiguredConnector, currentConnectorSettings, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
 
 function runtime() {
   const config = {
@@ -148,6 +148,123 @@ test("current configuration creates a Tunnel connector from the observed ChatGPT
     assert.equal(result.created, true);
     assert.equal(result.href, "/plugins/plugins~Plugin_created");
     assert.deepEqual(result.submitted, { name: settings.name, tunnelId: settings.tunnelId, authentication: "NONE", trusted: true });
+  } finally {
+    await browser.close();
+  }
+});
+
+test("account setup uses its own partition and only returns connected after positive observation", async () => {
+  const windows = [];
+  let observed = true;
+  class Window {
+    constructor(options) {
+      this.options = options;
+      this.urls = [];
+      this.closed = false;
+      this.webContents = {
+        setWindowOpenHandler() {}, on() {},
+        executeJavaScript: async script => {
+          if (script.startsWith("globalThis.__codingToolsConnectorHelpers.createTunnelConnector(")) {
+            return { created: false, href: "/plugins/plugins~Plugin_managed" };
+          }
+          if (script.startsWith("globalThis.__codingToolsConnectorHelpers.connectTunnelConnector(")) return { connected: observed };
+        },
+      };
+      windows.push(this);
+    }
+    async loadURL(url) { this.urls.push(url); }
+    isDestroyed() { return this.closed; }
+    destroy() { this.closed = true; }
+  }
+  const options = {
+    app: { getPath() { throw new Error("Account setup must not overwrite the main binding"); } },
+    BrowserWindow: Window,
+    browserHost: { partition: "persist:active", withManualOperation: (_label, action) => action() },
+    runtimeHost: runtime(),
+    target: { partition: "persist:other" },
+    verifyConnection: true,
+  };
+  const result = await createConfiguredConnector(options);
+  assert.equal(result.connected, true);
+  assert.equal(windows[0].options.webPreferences.partition, "persist:other");
+  assert.equal(windows[0].urls.length, 2);
+  assert.equal(windows[0].closed, true);
+  observed = false;
+  await assert.rejects(createConfiguredConnector(options), /did not confirm/);
+  assert.equal(windows[1].closed, true, "failed setup closes only its own popup");
+  const legacy = await createConfiguredConnector({ ...options, target: undefined, verifyConnection: false,
+    browserHost: { ...options.browserHost, probeAuthentication: async () => ({ authenticated: true }) } });
+  assert.equal(legacy.connected, undefined, "Configuration retains its create-only behavior");
+  assert.equal(windows[2].urls.length, 1);
+});
+
+test("the account IPC routes and reconnects only the requested account and records its result", async () => {
+  const fs = require("node:fs");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const snippet = source.slice(source.indexOf('  handle("launcher:mcp-create-connector"'), source.indexOf('  handle("launcher:doctor"'));
+  let handler, failure = null, signedIn = true;
+  const calls = [], records = [], tunnels = [{ id: "extra", accountId: "other", tunnelId: "tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", state: "stopped" }];
+  vm.runInNewContext(snippet, {
+    Error,
+    handle: (_name, action) => { handler = action; },
+    assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+    browserAccounts: {
+      partitionOf(id) { assert(["main", "other"].includes(id)); return `persist:${id}`; },
+      recordConnector(id, result) { records.push({ id, ...result }); return true; },
+    },
+    session: { fromPartition: partition => ({ cookies: { get: async () => { calls.push(partition); return []; } } }) },
+    signedInFromCookies: () => signedIn,
+    routeIdleAccountPartition: async partition => calls.push(`route:${partition}`), logger: {},
+    runtimeSupervisor: { extraTunnels: {
+      status: () => tunnels, reconnect: async id => calls.push(`reconnect:${id}`), setConnector: id => calls.push(`connector:${id}`),
+    } },
+    createConfiguredConnector: async options => {
+      calls.push(JSON.parse(JSON.stringify(options)));
+      if (failure) throw new Error(failure);
+      return { created: false, href: "/plugins/plugins~Plugin_managed", name: "Coding Tools", connected: true };
+    },
+    app: {}, BrowserWindow: {}, browserHost: {}, runtimeHost: {}, publishBrowserAccounts() {}, publishOperation() {},
+    stateStore: { update() { throw new Error("Account setup cannot alter global setup flags"); } },
+  });
+  await handler({}, "other");
+  const setup = calls.find(entry => typeof entry === "object");
+  assert.deepEqual(setup.target, { partition: "persist:other", tunnelId: tunnels[0].tunnelId });
+  assert.equal(setup.verifyConnection, true);
+  assert(calls.includes("route:persist:other") && calls.includes("reconnect:extra"));
+  assert.deepEqual(records, [{ id: "other", bound: true }]);
+  calls.length = 0;
+  failure = "ChatGPT refused this connector";
+  await assert.rejects(handler({}, "main"), /refused/);
+  assert.deepEqual(calls.find(entry => typeof entry === "object").target, { partition: "persist:main" });
+  assert.deepEqual(records[1], { id: "main", error: failure });
+  calls.length = 0;
+  signedIn = false;
+  await assert.rejects(handler({}, "other"), /Sign in to this account/);
+  assert.equal(calls.some(entry => typeof entry === "object"), false, "signed-out accounts never create a connector");
+});
+
+test("connection setup ignores another app's Connected status and connects the exact configured app", async () => {
+  const { chromium } = require(require.resolve("playwright-core", { paths: [path.join(__dirname, "../../runtime-web")] }));
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    headless: true, args: ["--no-proxy-server"],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.route("https://chatgpt.com/plugins?view=personal", route => route.fulfill({ contentType: "text/html", body:
+      `<main><div role="tablist"><button role="tab" aria-selected="true">Personal</button></div><section><h2>Installed</h2>
+      <article style="width:320px;height:140px"><a aria-label="Open Other App" href="/plugins/other"><h2>Other App</h2></a><button>Disconnect</button></article>
+      <article style="width:320px;height:140px"><a aria-label="Open Team Harness A" href="/plugins/managed"><h2>Team Harness A</h2></a><button id="connect">Connect</button></article>
+      </section></main>` }));
+    await page.goto("https://chatgpt.com/plugins?view=personal");
+    await page.evaluate(() => { globalThis.connectClicks = 0; document.querySelector("#connect").onclick = event => {
+      globalThis.connectClicks += 1; event.currentTarget.textContent = "Disconnect";
+    }; });
+    await page.evaluate(extensionHelpersSource());
+    assert.equal(await page.evaluate(() => globalThis.__codingToolsConnectorHelpers.observeAppConnection("Team Harness A").connectionObserved), false);
+    assert.deepEqual(await page.evaluate(() => globalThis.__codingToolsConnectorHelpers.connectTunnelConnector("Team Harness A")), { connected: true });
+    assert.deepEqual(await page.evaluate(() => globalThis.__codingToolsConnectorHelpers.connectTunnelConnector("Team Harness A")), { connected: true });
+    assert.equal(await page.evaluate(() => globalThis.connectClicks), 1, "rechecking cannot disconnect an already connected app");
   } finally {
     await browser.close();
   }

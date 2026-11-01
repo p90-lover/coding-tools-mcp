@@ -7,7 +7,7 @@ const vm = require("node:vm");
 const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirname, "..")] }));
 const plain = value => JSON.parse(JSON.stringify(value));
 // persistentRefs: refs live across renders as React's do, for an effect that reads a later render's value.
-function renderer(file, { persistentRefs = false } = {}) {
+function renderer(file, { persistentRefs = false, storage } = {}) {
   let states = [], cursor = 0, refCursor = 0;
   const effects = [], refs = [];
   const react = { useState: initial => {
@@ -26,7 +26,7 @@ function renderer(file, { persistentRefs = false } = {}) {
     const exports = cache[name] = {};
     const source = fs.readFileSync(path.resolve(__dirname, "../src/features", name), "utf8");
     const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-    vm.runInNewContext(compiled, { exports, window: { confirm: () => false }, document: { activeElement: null },
+    vm.runInNewContext(compiled, { exports, localStorage: storage, window: { confirm: () => false }, document: { activeElement: null },
       require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
         : name === "../icons" ? { Icon: () => null } : name.startsWith("./AgentOrchestrator") ? load(name.slice(2) + ".tsx") : {} });
     return exports;
@@ -651,7 +651,7 @@ test("a catalog that loads after the user picked another model does not put the 
   assert.deepEqual(view.routes, [], "the late catalog leaves the newer pick alone");
 });
 
-test("picking a model fits the carried window to it", () => {
+test("picking an unconfigured model uses its own default window, not the previous model's pick", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const routes = [];
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/big", permission_profile: ":ao-default", context_window: 1_000_000 };
@@ -664,7 +664,141 @@ test("picking a model fits the carried window to it", () => {
   pick("cpa/small");
   assert.equal(routes.at(-1).context_window, 262144, "clamped to the new model's limit");
   pick("cpa/unknown");
-  assert.equal(routes.at(-1).context_window, 1_000_000, "within an unreported range a picked window stays");
+  assert.equal(routes.at(-1).context_window, undefined, "an unconfigured model with an unknown limit uses the agent's default");
+});
+
+function tuningStorage() {
+  const values = new Map();
+  return { values, getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+}
+const tuningCaps = {
+  "cpa/big": { efforts: ["low", "medium", "high", "max"], contextLimit: 1_000_000, contextWindow: { min: 4096, max: 1_000_000 } },
+  "cpa/small": { efforts: ["low", "high"], contextLimit: 262144, contextWindow: { min: 4096, max: 262144 } },
+};
+function tuningPicker(storage, capabilities = tuningCaps, initial = {}) {
+  const view = renderer("AgentOrchestratorComposerControls.tsx", { storage, persistentRefs: true });
+  let route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/small", permission_profile: ":ao-default", ...initial };
+  const changes = [];
+  const props = { mode: "single", onModeChange() {}, onRouteChange: (next, adjusted) => { route = plain(next); changes.push({ route, adjusted }); },
+    harnesses: [{ id: "ao:codex", label: "Codex", runnable: true }], loadModels: async () => ({ models: Object.keys(capabilities), capabilities }),
+    teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const render = (catalog = capabilities) => view.render("AgentOrchestratorComposerControls", { ...props, route }, ["", Object.keys(capabilities), catalog, {}, {}, "", "", 0]);
+  const pickOption = (heading, label) => optionsIn(menuNamed(render(), heading)).find(row => text(row.props.children) === label).props.onPick();
+  return {
+    get route() { return route; }, changes,
+    model(id, catalog) { optionsIn(menuNamed(render(catalog), "Model")).find(row => row.props.title.split("\n").includes(id)).props.onPick(); },
+    effort(label) { pickOption("Reasoning effort", label); },
+    window(label) { pickOption("Context window", label); },
+    harness() { pickOption("Harness", "Codex"); },
+    async load() { render(); view.effects.at(-1)(); await new Promise(resolve => setImmediate(resolve)); },
+  };
+}
+
+test("saved model tuning survives A-B-A and a fresh composer, with defaults for an unconfigured model", () => {
+  const storage = tuningStorage();
+  const picker = tuningPicker(storage);
+  picker.model("cpa/big");
+  assert.equal(picker.route.effort, "medium");
+  assert.equal(picker.route.context_window, 400_000);
+  picker.effort("Max"); picker.window("1Mfull model limit");
+  picker.model("cpa/small");
+  assert.equal(picker.route.effort, "high", "the unconfigured model starts on a supported effort");
+  assert.equal(picker.route.context_window, 262144);
+  picker.effort("Low"); picker.window("64k");
+  picker.model("cpa/big");
+  assert.equal(picker.route.effort, "max");
+  assert.equal(picker.route.context_window, 1_000_000, "the smaller model did not overwrite big's window");
+  const fresh = tuningPicker(storage);
+  fresh.model("cpa/big");
+  assert.equal(fresh.route.effort, "max"); assert.equal(fresh.route.context_window, 1_000_000);
+  fresh.model("cpa/small");
+  assert.equal(fresh.route.effort, "low"); assert.equal(fresh.route.context_window, 64_000);
+});
+
+test("explicit Auto is saved, and changing one tuning field does not invent an override for the other", async () => {
+  const storage = tuningStorage();
+  const picker = tuningPicker(storage);
+  picker.model("cpa/big"); picker.effort("Autothe model's own");
+  assert.deepEqual(JSON.parse([...storage.values.values()][0]), { effort: "auto" });
+  const fresh = tuningPicker(storage);
+  fresh.model("cpa/big"); await fresh.load();
+  assert.equal(fresh.route.effort, "auto", "catalog loading must not replace Auto with medium");
+  assert.equal(fresh.route.context_window, 400_000);
+  assert.deepEqual(JSON.parse([...storage.values.values()][0]), { effort: "auto" }, "automatic defaults are not saved as explicit preferences");
+});
+
+test("changed model capabilities fit saved tuning without destroying the preferred window", async () => {
+  const storage = tuningStorage();
+  const picker = tuningPicker(storage);
+  picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  const smaller = { ...tuningCaps, "cpa/big": { efforts: ["low", "high"], contextLimit: 128_000, contextWindow: { min: 4096, max: 128_000 } } };
+  const fresh = tuningPicker(storage, smaller);
+  fresh.model("cpa/big"); await fresh.load();
+  assert.equal(fresh.route.context_window, 128_000);
+  assert.equal(fresh.route.effort, "high", "a removed effort falls back to one the model takes");
+  fresh.effort("Low");
+  assert.deepEqual(JSON.parse([...storage.values.values()][0]), { effort: "low", context_window: 1_000_000 }, "changing effort never saves the fitted window over the preference");
+  const restored = tuningPicker(storage);
+  restored.model("cpa/big");
+  assert.equal(restored.route.context_window, 1_000_000);
+});
+
+test("initial catalog loading restores saved tuning only for fields the chat has not picked", async () => {
+  const storage = tuningStorage();
+  const picker = tuningPicker(storage);
+  picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  const fresh = tuningPicker(storage, tuningCaps, { model: "cpa/big" });
+  await fresh.load();
+  assert.equal(fresh.route.effort, "max");
+  assert.equal(fresh.route.context_window, 1_000_000);
+  assert.equal(fresh.changes.at(-1).adjusted, true, "restoring a preference is not a new explicit pick");
+  const existing = tuningPicker(storage, tuningCaps, { model: "cpa/big", effort: "low", context_window: 64_000 });
+  await existing.load();
+  assert.equal(existing.route.effort, "low", "an existing chat keeps its own explicit effort");
+  assert.equal(existing.route.context_window, 64_000);
+  const partial = tuningPicker(storage, tuningCaps, { model: "cpa/big", effort: "auto" });
+  await partial.load();
+  assert.equal(partial.route.effort, "auto");
+  assert.equal(partial.route.context_window, 1_000_000, "each absent field falls back independently");
+});
+
+test("a late catalog fits saved tuning without replacing the stored preference", async () => {
+  const storage = tuningStorage();
+  const picker = tuningPicker(storage);
+  picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  const smaller = { ...tuningCaps, "cpa/big": { efforts: ["low", "high"], contextLimit: 600_000, contextWindow: { min: 4096, max: 600_000 } } };
+  const fresh = tuningPicker(storage, smaller);
+  fresh.model("cpa/big", {});
+  await fresh.load();
+  assert.equal(fresh.route.effort, "high", "an effort restored before metadata must be revalidated");
+  assert.equal(fresh.route.context_window, 600_000, "fit the saved window, not the 400k default");
+  assert.deepEqual(JSON.parse([...storage.values.values()][0]), { effort: "max", context_window: 1_000_000 });
+});
+
+test("model preferences are isolated by harness and account, and routing keeps approval policy", () => {
+  const storage = tuningStorage();
+  const picker = tuningPicker(storage);
+  picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  const otherHarness = tuningPicker(storage, tuningCaps, { harness_id: "ao:codex", native_permission_profile: "managed/custom", approvals_reviewer: "auto_review" });
+  otherHarness.model("cpa/big");
+  assert.equal(otherHarness.route.effort, "medium"); assert.equal(otherHarness.route.context_window, 400_000);
+  assert.equal(otherHarness.route.native_permission_profile, "managed/custom");
+  assert.equal(otherHarness.route.approvals_reviewer, "auto_review");
+  const otherAccount = tuningPicker(storage, tuningCaps, { model: "cpa/big", account_id: "another-account" });
+  otherAccount.effort("Low");
+  const original = tuningPicker(storage);
+  original.model("cpa/big"); assert.equal(original.route.effort, "max");
+});
+
+test("malformed or blocked model preference storage falls back safely without preventing picks", () => {
+  for (const value of ["not json", "[]", "null", '{"effort":"invented","context_window":-1}', '{"effort":{},"context_window":"1000000"}']) {
+    const storage = { getItem: () => value, setItem() {} };
+    const picker = tuningPicker(storage); picker.model("cpa/big");
+    assert.equal(picker.route.effort, "medium"); assert.equal(picker.route.context_window, 400_000);
+  }
+  const blocked = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("quota"); } };
+  const picker = tuningPicker(blocked); picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  assert.equal(picker.route.effort, "max"); assert.equal(picker.route.context_window, 1_000_000);
 });
 
 test("the selected run's polls ask only the project the run belongs to", () => {
