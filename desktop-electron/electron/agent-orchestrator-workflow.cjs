@@ -1952,10 +1952,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // TIMELINE_TEXT_BYTES there): every item it built, and a message or thought uncut.
     return (Array.isArray(items) ? items : []).slice(-400).map(item => ({
       id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
-      // Live text keeps what the upstream read kept: a running thought's newest part, and messages
-      // and finished thoughts whole (up to 64 KB).
+      // Steers are the person's whole message too: cutting one to a label split its annotation
+      // block from its typed text, so the chat showed the raw preamble and a second pending bubble.
       text: item.kind === "reasoning" && item.status === "running" ? publicText(item.text, 4096, true)
-        : publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 64 * 1024 : 400),
+        : publicText(item.text, item.kind === "message" || item.kind === "reasoning" || item.kind === "steer" ? 64 * 1024 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
       ...(item.input ? { input: publicText(item.input, toolBytes.input) } : {}),
@@ -1984,7 +1984,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (size() <= TIMELINE_RESPONSE_BYTES) return items;
     const cut = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit).replace(/[\ud800-\udbff]$/, "")}…`;
     for (const limit of [16 * 1024, 4096, 1024]) {
-      items = items.map(item => item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
+      // A steer may contain structured annotations and attachments; keep it whole or let the
+      // oldest-item eviction below remove it whole, never leave an unparseable prompt prefix.
+      items = items.map(item => item.kind !== "steer" && item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
       if (size() <= TIMELINE_RESPONSE_BYTES) return items;
     }
     // Tool calls keep a shorter input and output before they lose them: with up to 16 KB of output
