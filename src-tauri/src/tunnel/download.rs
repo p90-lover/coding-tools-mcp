@@ -37,7 +37,8 @@ pub fn plan_github_download(settings: &AppSettings, github_url: &str) -> Downloa
 ///
 /// - `none`: no proxy (default direct connection)
 /// - `system`: reqwest's built-in system-proxy detection
-/// - anything else: treated as an explicit proxy URL (http/https/socks5)
+/// - `manual`: use the separately configured proxy URL
+/// - anything else: retain the legacy explicit proxy URL (http/https/socks5)
 fn build_client(settings: &AppSettings) -> AppResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(180));
     let mode = settings.download.proxy_mode.trim();
@@ -47,6 +48,17 @@ fn build_client(settings: &AppSettings) -> AppResult<reqwest::Client> {
         }
         "system" => {
             // Leave reqwest's default system-proxy detection enabled.
+        }
+        "manual" => {
+            let proxy_url = settings.download.proxy_url.trim();
+            if proxy_url.is_empty() {
+                return Err(AppError::Message(
+                    "下载代理模式为手动，但未填写代理地址。".into(),
+                ));
+            }
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|err| AppError::Message(format!("代理地址无效: {err}")))?;
+            builder = builder.proxy(proxy);
         }
         url => {
             let proxy = reqwest::Proxy::all(url)
@@ -98,4 +110,34 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, Str
         .map_err(|err| err.to_string())?;
     let bytes = response.bytes().await.map_err(|err| err.to_string())?;
     Ok(bytes.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_download_proxy_uses_configured_url_and_rejects_blank_values() {
+        let mut settings = AppSettings::default();
+        settings.download.proxy_mode = "manual".into();
+        settings.download.proxy_url = "http://127.0.0.1:9".into();
+        assert!(build_client(&settings).is_ok());
+
+        settings.download.proxy_url = "http://[".into();
+        assert!(build_client(&settings).is_err());
+
+        settings.download.proxy_url = " \t ".into();
+        let error = build_client(&settings).err().unwrap();
+        assert_eq!(error.to_string(), "下载代理模式为手动，但未填写代理地址。");
+    }
+
+    #[test]
+    fn download_proxy_keeps_none_system_and_legacy_modes() {
+        let mut settings = AppSettings::default();
+        settings.download.proxy_url = "http://[".into();
+        for mode in ["", "none", "system", "http://127.0.0.1:9"] {
+            settings.download.proxy_mode = mode.into();
+            assert!(build_client(&settings).is_ok(), "mode: {mode}");
+        }
+    }
 }

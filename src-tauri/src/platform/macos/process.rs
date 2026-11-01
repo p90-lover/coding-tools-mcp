@@ -73,20 +73,15 @@ fn normalized_image_path(path: &Path) -> PathBuf {
 
 fn collect_child_pids(root_pid: u32) -> AppResult<Vec<u32>> {
     let pids = super::net::all_pids()?;
-    let mut pending = vec![root_pid];
-    let mut seen = std::collections::HashSet::from([root_pid]);
-    let mut ordered = Vec::new();
+    let mut records = Vec::new();
 
     for pid in pids {
         let Some(parent) = super::net::parent_pid(pid as u32)? else {
             continue;
         };
-        if pending.contains(&parent) && seen.insert(pid as u32) {
-            ordered.push(pid as u32);
-            pending.push(pid as u32);
-        }
+        records.push((pid as u32, parent));
     }
-    Ok(ordered)
+    Ok(crate::platform::descendant_pids(root_pid, &records))
 }
 
 fn signal_pid(pid: u32, signal: i32) -> AppResult<()> {

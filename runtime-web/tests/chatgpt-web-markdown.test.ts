@@ -1,6 +1,42 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { chatGptHtmlToMarkdown } from "../src/adapters/chatgpt-web/markdown";
+import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
+
+test("preserves native visualize JSON through HTML and streamed or final Markdown", () => {
+  const references = [
+    ...["G:/task/counter.html", String.raw`G:\task\counter.html`, "G:/task/counter_panel.html",
+      String.raw`\\server\share\counter_panel.html`].map(path => "visualize" + JSON.stringify({
+        path, title: "Counter", mode: "wide",
+      }) + ""),
+    "visualize" + JSON.stringify({ path: "G:/task/counter_panel.html",
+      title: 'Counter  _set_ [[Notes/review]] "quotes" \n\t\b\f\r \\ / <b>&', mode: "wide" }) + "",
+    "visualize" + String.raw`{"path":"G:\\task\\counter_\u0070anel.html","title":"\u005f \uD83D\uDE00","mode":"wide"}` + "",
+  ];
+  for (const reference of references) {
+    const encoded = reference.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+    const html = `<p>${encoded}</p>`;
+    const markdown = chatGptHtmlToMarkdown(html);
+    expect(markdown).toBe(reference);
+    expect(JSON.parse(markdown.slice("visualize".length, -"".length)))
+      .toEqual(JSON.parse(reference.slice("visualize".length, -"".length)));
+    for (const streamable of [true, false]) {
+      const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+      const delta = buffer.observe([{ key: "visualize", tag: "P", html, text: reference, streamable }], 0);
+      const final = buffer.finish();
+      expect(delta + final.delta).toBe(reference);
+      expect(final.markdown).toBe(reference);
+    }
+  }
+});
+
+test("native visualize preservation keeps ordinary Markdown and code examples intact", () => {
+  const reference = "visualize" + JSON.stringify({ path: String.raw`G:\task\counter_panel.html`, title: "Counter `code`", mode: "wide" }) + "";
+  const encoded = reference.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  expect(chatGptHtmlToMarkdown(`<p>Keep _plain_ <strong>bold</strong> ${encoded} ${encoded}</p>`))
+    .toBe(`Keep \\_plain\\_ **bold** ${reference} ${reference}`);
+  expect(chatGptHtmlToMarkdown(`<p><code>${encoded}</code></p><pre><code>${encoded}</code></pre>`))
+    .toBe(`\`\`${reference}\`\`\n\n\`\`\`\n${reference}\n\`\`\``);
+});
 
 test("native ChatGPT code surfaces keep block fences and exact newlines", () => {
   const { createDocument, createWindow } = require("@mixmark-io/domino");

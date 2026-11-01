@@ -95,7 +95,7 @@ function tabLimitOf(host, partition) {
 
 /** The tabs on one account's partition: its Codex turns' tabs, and the Browser tab's own pages. */
 function tabsOnPartition(host, partition) {
-  const ownPages = partition === host.partition ? (host.userTabs?.size ?? 0) : 0;
+  const ownPages = partition === host.partition ? (host.userTabs?.size ?? 0) : (host.parkedHomes?.get(partition)?.userTabs?.size ?? 0);
   return ownPages + [...host.turnTabs.values()].filter((tab) => (tab.partition ?? host.partition) === partition).length;
 }
 
@@ -128,7 +128,8 @@ function makeTabRoom(host, partition, evict = true) {
   while (tabsOnPartition(host, partition) >= limit) {
     if (!evict || !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(host, partition)) return limit;
   }
-  while (host.turnTabs.size + (host.userTabs?.size ?? 0) >= MAX_TOTAL_BROWSER_TABS) {
+  const userTabs = (host.userTabs?.size ?? 0) + [...(host.parkedHomes?.values() ?? [])].reduce((sum, home) => sum + home.userTabs.size, 0);
+  while (host.turnTabs.size + userTabs >= MAX_TOTAL_BROWSER_TABS) {
     if (!evict || !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(host)) return MAX_TOTAL_BROWSER_TABS;
   }
   return null;
@@ -875,10 +876,12 @@ class BrowserHost {
         viewportCssKey: null,
         state: { status: "idle", message: "No active task", url: "about:blank", title: "ChatGPT", authenticated: false, loading: false },
       });
+      this.parkedHomes.set(leaving.partition, leaving);
       try {
         await this.initializePrimaryView();
       } catch (error) {
         const failed = this.parkHome();
+        this.parkedHomes.delete(leaving.partition);
         this.restoreHome(leaving);
         this.unloadHome(failed);
         this.syncViewVisibility();

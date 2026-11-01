@@ -37,12 +37,13 @@ function tempTree() {
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
-  chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, reviewCall = null } = {}) {
+  chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, reviewCall = null, previewEnabled = () => true,
+  registry = [{ id: "ws1", path: path.join(os.tmpdir(), "task") }, { id: "ws2", path: path.join(os.tmpdir(), "other") }] } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory, appProcesses, captureApp, previews,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory, appProcesses, captureApp, previews, previewEnabled,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
@@ -56,6 +57,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     },
     requestHeadless: async (endpoint, body, options) => {
       calls.push({ endpoint, body, options });
+      if (endpoint === "/api/v1/workspaces") return { ok: true, workspaces: registry };
       if (endpoint.startsWith("/api/v1/tools/catalog?")) return catalog;
       if (endpoint === "/api/v1/tools/call") {
         const given = results[body.tool];
@@ -141,6 +143,156 @@ test("native preview leases expose only their own panel and expire without works
     assert.equal((await call(b, "preview_read")).body.result.isError, false);
     second.release({ ended: true });
     assert.equal((await call(b, "preview_read")).status, 401);
+  } finally { await tools.close(); }
+});
+
+test("native visualize references read only the bound workspace and retain an unchanged panel", async () => {
+  let enabled = true, html = '<div class="card"><button class="btn">0</button></div><script>const saved = window.openai?.widgetState; if (typeof window.openai?.setWidgetState === "function") window.openai.setWidgetState({modelContent:{counter:1},privateContent:null}).catch(() => {});</script>';
+  const rendered = [], closed = [], panels = new Map();
+  const { tools, calls } = fixture({ previewEnabled: () => enabled, previews: {
+    call: async (owner, name, args, options) => { panels.set(owner, args.html); rendered.push({ owner, name, html: args.html, options }); return { isError: false }; },
+    matchesPanel: (owner, html) => panels.get(owner) === html,
+    close: owner => { panels.delete(owner); closed.push(owner); },
+  }, results: { read_file: body => ({ state: "completed", result: { ok: true, content: html, total_bytes: Buffer.byteLength(html), truncated: false, next_offset: null } }) } });
+  const reference = 'visualize' + JSON.stringify({ path: path.join(os.tmpdir(), "task", "counter.html") }) + '';
+  const scope = { workspaceId: "ws1", runId: "run", nodeId: "lead" };
+  try {
+    const lease = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "run", nodeId: "lead" } });
+    lease.bind("native:ws1:task:single");
+    const render = answer => tools.renderNativeVisualization({ ...scope, answer, requestKey: "request", stillCurrent: async () => true });
+    await render(reference);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].endpoint, "/api/v1/workspaces");
+    assert.equal(calls[0].options.method, "GET");
+    assert.equal(calls[1].endpoint, "/api/v1/tools/call");
+    assert.equal(calls[1].body.workspace_id, "ws1");
+    assert.equal(calls[1].body.tool, "read_file");
+    assert.equal(calls[1].body.root, path.join(os.tmpdir(), "task"), "only the current registered workspace chooses the isolated read root");
+    assert.equal(calls[1].body.root_kind, "project_folder");
+    assert.equal(rendered[0].owner, "native:ws1:task:single");
+    assert.equal(rendered[0].options.visualization, true, "the engine supplies the offline theme/utility adapter");
+    assert.equal(rendered[0].html, html, "supported widget state does not turn the native counter into an unavailable notice");
+    await render(reference);
+    assert.equal(calls.length, 2, "a repeated completed observation does not re-read or reset interaction state");
+    const next = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "followup", nodeId: "lead" } });
+    next.bind("native:ws1:task:single");
+    await tools.renderNativeVisualization({ ...scope, runId: "followup", answer: reference, requestKey: "followup", stillCurrent: async () => true });
+    assert.equal(calls.length, 4, "a follow-up can update the same file under the current workspace registry");
+    assert.equal(rendered.length, 1, "unchanged content keeps the existing panel across follow-ups");
+    const server = next.servers[0];
+    await callTool(server.url, server.headers, "preview_render", { html: "<p>Explicit panel</p>" });
+    assert.equal(rendered.length, 2);
+    const afterExplicit = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "after-explicit", nodeId: "lead" } });
+    afterExplicit.bind("native:ws1:task:single");
+    await tools.renderNativeVisualization({ ...scope, runId: "after-explicit", answer: reference, requestKey: "after-explicit", stillCurrent: async () => true });
+    assert.equal(rendered.length, 3, "a newer final reference replaces the explicit panel from the previous turn");
+    assert.equal(panels.get("native:ws1:task:single"), html);
+    panels.delete("native:ws1:task:single");
+    const afterClose = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "after-close", nodeId: "lead" } });
+    afterClose.bind("native:ws1:task:single");
+    await tools.renderNativeVisualization({ ...scope, runId: "after-close", answer: reference, requestKey: "after-close", stillCurrent: async () => true });
+    assert.equal(rendered.length, 4, "a disposed panel is recreated even when the file digest is unchanged");
+    enabled = false;
+    await tools.renderNativeVisualization({ ...scope, runId: "after-close", answer: reference, requestKey: "disabled", stillCurrent: async () => true });
+    assert.equal(calls.length, 8);
+    afterClose.release({ ended: true });
+  } finally { await tools.close(); }
+});
+
+test("native visualize loading cannot outlive Stop, a follow-up, or an explicit preview render", async () => {
+  for (const action of ["stop", "followup", "explicit", "changed"]) {
+    let finishRead, readStarted;
+    const started = new Promise(resolve => { readStarted = resolve; });
+    const rendered = [];
+    const { tools } = fixture({ previews: { call: async (_owner, _name, args) => { rendered.push(args.html); return { isError: false }; }, close() {} },
+      results: { read_file: () => { readStarted(); return new Promise(resolve => { finishRead = resolve; }); } } });
+    let current = true;
+    try {
+      const lease = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "run", nodeId: "lead" } });
+      lease.bind("native:ws1:task:single");
+      const pending = tools.renderNativeVisualization({ workspaceId: "ws1", runId: "run", nodeId: "lead", requestKey: "r",
+        answer: 'visualize' + JSON.stringify({ path: path.join(os.tmpdir(), "task", "panel.html") }) + '', stillCurrent: async () => current });
+      await started;
+      if (action === "stop") lease.release({ ended: true });
+      if (action === "followup") (await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "next", nodeId: "lead" } })).bind("native:ws1:task:single");
+      if (action === "explicit") {
+        const server = lease.servers[0];
+        await callTool(server.url, server.headers, "preview_render", { html: "Explicit panel" });
+      }
+      if (action === "changed") current = false;
+      finishRead({ state: "completed", result: { ok: true, content: "<button>0</button>", total_bytes: 18, truncated: false, next_offset: null } });
+      await pending;
+      assert.deepEqual(rendered, action === "explicit" ? ["Explicit panel"] : [], action);
+    } finally { finishRead?.({ state: "failed" }); await tools.close(); }
+  }
+});
+
+test("native visualize provenance waits recheck Stop, expiry and opt-out before reading or rendering", async () => {
+  for (const pauseAt of [1, 2, 3]) for (const action of ["stop", "expiry", "opt-out", "explicit"]) {
+    let releaseProof, proofStarted, checks = 0, stamp = 10_000, enabled = true;
+    const started = new Promise(resolve => { proofStarted = resolve; });
+    const rendered = [];
+    const { tools, calls } = fixture({ now: () => stamp, previewEnabled: () => enabled,
+      previews: { call: async (_owner, _name, args) => { rendered.push(args.html); return { isError: false }; }, close() {} },
+      results: { read_file: () => ({ state: "completed", result: { ok: true, content: "<button>0</button>", total_bytes: 18, truncated: false, next_offset: null } }) } });
+    try {
+      const lease = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: stamp + 120_000, nativeScope: { runId: "run", nodeId: "lead" } });
+      lease.bind("native:ws1:task:single");
+      const pending = tools.renderNativeVisualization({ workspaceId: "ws1", runId: "run", nodeId: "lead", requestKey: "r",
+        answer: 'visualize' + JSON.stringify({ path: path.join(os.tmpdir(), "task", "panel.html") }) + '',
+        stillCurrent: async () => { if (++checks !== pauseAt) return true; proofStarted(); return new Promise(resolve => { releaseProof = resolve; }); } });
+      await started;
+      if (action === "stop") lease.release({ ended: true });
+      if (action === "expiry") stamp += 120_001;
+      if (action === "opt-out") enabled = false;
+      if (action === "explicit") {
+        const server = lease.servers[0];
+        await callTool(server.url, server.headers, "preview_render", { html: "Explicit panel" });
+      }
+      releaseProof(true);
+      await pending;
+      assert.equal(calls.filter(call => call.endpoint === "/api/v1/workspaces").length, pauseAt === 1 ? 0 : 1,
+        `${action}: no workspace lookup after an ended first proof`);
+      assert.equal(calls.filter(call => call.body?.tool === "read_file").length, pauseAt < 3 ? 0 : 1,
+        `${action}: no file read after an ended workspace proof`);
+      assert.deepEqual(rendered, action === "explicit" ? ["Explicit panel"] : [], `${action}: no stale render after proof ${pauseAt}`);
+    } finally { releaseProof?.(false); await tools.close(); }
+  }
+});
+
+test("native visualize loading rejects inert references, scoped read failures and unsupported fragments", async () => {
+  let result = { ok: true, content: "<button>0</button>", total_bytes: 18, truncated: false, next_offset: null };
+  const rendered = [];
+  const { tools, calls } = fixture({ previews: { call: async (_owner, _name, args) => { rendered.push(args.html); return { isError: false }; }, close() {} },
+    results: { read_file: () => ({ state: "completed", result }) } });
+  const reference = 'visualize' + JSON.stringify({ path: path.join(os.tmpdir(), "task", "counter.html") }) + '';
+  let request = 0;
+  const render = (answer, workspaceId = "ws1") => tools.renderNativeVisualization({ workspaceId, runId: "run", nodeId: "lead", answer,
+    requestKey: `request-${++request}`, stillCurrent: async () => true });
+  try {
+    (await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "run", nodeId: "lead" } })).bind("native:ws1:task:single");
+    for (const text of ['```\n' + reference + '\n```', '```html\n```not-a-close\n' + reference + '\n```', '> ' + reference, reference.slice(0, -1)]) await render(text);
+    await render(reference, "other-workspace");
+    assert.equal(calls.length, 0); assert.deepEqual(rendered, []);
+    await render('visualize{"path":"relative.html"}');
+    assert.equal(calls.length, 0); assert.match(rendered.at(-1), /invalid/);
+    result = { ok: false, error: { code: "OUTSIDE_WORKSPACE" } };
+    await render(reference);
+    assert.match(rendered.at(-1), /workspace permissions/);
+    result = { ok: true, content: "<div>partial", total_bytes: 200000, truncated: true, next_offset: 10 };
+    await render(reference);
+    assert.match(rendered.at(-1), /128 KiB/);
+    for (const [html, message] of [["<script>window.openai.callTool({})</script>", /native host APIs/],
+      ['<script src="https://cdn.jsdelivr.net/example.js"></script>', /offline/], ["<html><body>Document</body></html>", /fragment/]]) {
+      result = { ok: true, content: html, total_bytes: Buffer.byteLength(html), truncated: false, next_offset: null };
+      await render(reference);
+      assert.match(rendered.at(-1), message);
+    }
+    await tools.renderNativeVisualization({ workspaceId: "ws1", runId: "run", nodeId: "lead", answer: reference,
+      workingDirectory: "../elsewhere", requestKey: "outside-working-directory", stillCurrent: async () => true });
+    assert.match(rendered.at(-1), /workspace permissions/);
+    assert.ok(calls.filter(call => call.endpoint === "/api/v1/tools/call").every(call => call.body.workspace_id === "ws1"
+      && call.body.tool === "read_file" && call.body.root === path.join(os.tmpdir(), "task") && call.body.root_kind === "project_folder"));
   } finally { await tools.close(); }
 });
 

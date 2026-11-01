@@ -3,44 +3,9 @@ use std::process::Command;
 
 use crate::error::{AppError, AppResult};
 
-#[repr(C)]
-struct ProcBsdInfo {
-    pbi_flags: u32,
-    pbi_status: u32,
-    pbi_xstatus: u32,
-    pbi_pid: u32,
-    pbi_ppid: u32,
-    pbi_uid: u32,
-    pbi_gid: u32,
-    pbi_ruid: u32,
-    pbi_rgid: u32,
-    pbi_svuid: u32,
-    pbi_svgid: u32,
-    pbi_rfu: u32,
-    pbi_comm: [i8; 17],
-    pbi_name: [i8; 33],
-    pbi_nfiles: u32,
-    pbi_pgid: u32,
-    pbi_pjobc: u32,
-    e_tdev: u32,
-    e_tpgid: u32,
-    pbi_nice: i32,
-    pbi_start_tvsec: u64,
-    pbi_start_tvusec: u64,
-}
-
-const PROC_PIDT_SHORTBSDINFO: i32 = 13;
-
 #[link(name = "proc")]
 extern "C" {
     fn proc_listallpids(buffer: *mut libc::c_void, buffersize: i32) -> i32;
-    fn proc_pidinfo(
-        pid: libc::c_int,
-        flavor: i32,
-        arg: u64,
-        buffer: *mut libc::c_void,
-        buffersize: i32,
-    ) -> i32;
 }
 
 pub fn find_pid_listening_on_port(port: u16) -> AppResult<Option<u32>> {
@@ -62,21 +27,22 @@ pub fn find_pid_listening_on_port(port: u16) -> AppResult<Option<u32>> {
 }
 
 pub fn parent_pid(pid: u32) -> AppResult<Option<u32>> {
-    let mut info = mem::MaybeUninit::<ProcBsdInfo>::uninit();
+    let mut info = mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+    let expected_size = mem::size_of::<libc::proc_bsdshortinfo>() as i32;
     let size = unsafe {
-        proc_pidinfo(
+        libc::proc_pidinfo(
             pid as i32,
-            PROC_PIDT_SHORTBSDINFO,
+            libc::PROC_PIDT_SHORTBSDINFO,
             0,
             info.as_mut_ptr().cast(),
-            mem::size_of::<ProcBsdInfo>() as i32,
+            expected_size,
         )
     };
-    if size <= 0 {
+    if size != expected_size {
         return Ok(None);
     }
     let info = unsafe { info.assume_init() };
-    Ok(Some(info.pbi_ppid))
+    Ok(Some(info.pbsi_ppid))
 }
 
 pub fn all_pids() -> AppResult<Vec<i32>> {
@@ -89,4 +55,15 @@ pub fn all_pids() -> AppResult<Vec<i32>> {
     let pid_count = (count as usize).min(capacity);
     let pids = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<i32>(), pid_count) };
     Ok(pids.iter().copied().filter(|pid| *pid > 0).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parent_pid_reads_current_process_parent() {
+        let expected = unsafe { libc::getppid() } as u32;
+        assert_eq!(parent_pid(std::process::id()).unwrap(), Some(expected));
+    }
 }
