@@ -24,6 +24,7 @@ const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancel
 
 // The page the agent's browser has open, as useWorkbenchAutoOpen reports it (null: none).
 let openPage = null;
+let workbenchStorage = null;
 // A stuck turn's Restart: its Provider stays in the tree (so a test can read the value the chat
 // gives it), and its value is what TurnRunning reads.
 const turnRestart = { Provider: "TurnRestartProvider", value: { restarting: false } };
@@ -54,7 +55,12 @@ function mount(props) {
     frame = `${name}#${seen[name]}`; cursor = 0;
     try { return type(props || {}); } finally { [frame, cursor] = outer; }
   };
-  const timers = { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true };
+  const timers = { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true,
+    localStorage: {
+      getItem: (key) => workbenchStorage?.get(key) ?? null,
+      setItem: (key, value) => workbenchStorage?.set(key, value),
+      removeItem: (key) => workbenchStorage?.delete(key),
+    } };
   // The reply's head renders inline too, so a turn's who, status and files can be read.
   const replyHead = transpile("ChatReplyHead.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
@@ -1130,6 +1136,43 @@ test("a hidden agent browser is offered back from the chat header, and opens the
     assert.ok(after.some((element) => element.type === "Workbench" && element.props.tab === "preview"), "the panel opens on the browser");
     assert.ok(!after.some((element) => element.props?.className === "cx-browser-chip"), "no chip while it shows");
   } finally { openPage = null; }
+});
+
+test("a chat keeps its side panel through questions, remounts and chat switches, but respects Hide", () => {
+  workbenchStorage = new Map();
+  try {
+    const { props } = base({ selectedTaskId: "panel-chat", projectId: "project-one" });
+    const view = mount(props);
+    const panel = (tree) => walk(tree).find((element) => element.type === "Workbench");
+    walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview").props.onClick();
+    assert.equal(panel(view.render()).props.tab, "preview");
+    const asking = view.render({ approvals: [{ nodeId: "worker", approval_id: "ask", kind: "question" }] });
+    assert.equal(panel(asking).props.tab, "preview", "asking does not replace or close the panel");
+    assert.ok(walk(asking).some((element) => element.type === "Approval"), "the question is still answerable beside it");
+    assert.equal(panel(mount(props).render()).props.tab, "preview", "a remount restores the chat's panel");
+    assert.equal(panel(view.render({ selectedTaskId: "another-chat" })), undefined, "another chat has its own state");
+    assert.equal(panel(view.render()).props.tab, "preview", "returning restores this chat");
+    assert.equal(panel(view.render({ projectId: "project-two" })), undefined, "matching task ids in other projects stay isolated");
+    panel(view.render()).props.onClose();
+    assert.equal(panel(mount(props).render()), undefined, "an explicit Hide stays hidden after remount");
+  } finally { workbenchStorage = null; }
+});
+
+test("panel persistence tolerates invalid or blocked storage and preserves batched toggles", () => {
+  const { props } = base({ selectedTaskId: "storage-chat", projectId: "storage-project" });
+  const panel = (tree) => walk(tree).find((element) => element.type === "Workbench");
+  workbenchStorage = new Map([[`coding-tools:ao:workbench:${JSON.stringify([props.projectId, props.selectedTaskId])}`, "invalid-tab"]]);
+  try {
+    assert.equal(panel(mount(props).render()), undefined, "malformed saved tabs are ignored");
+    workbenchStorage = { get() { throw new Error("blocked"); }, set() { throw new Error("blocked"); }, delete() { throw new Error("blocked"); } };
+    const view = mount(props);
+    const toggle = walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview").props.onClick;
+    toggle();
+    assert.equal(panel(view.render()).props.tab, "preview", "blocked storage does not stop opening");
+    const batchedToggle = walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview").props.onClick;
+    batchedToggle(); batchedToggle();
+    assert.equal(panel(view.render()).props.tab, "preview", "updaters in one batch see the preceding selection");
+  } finally { workbenchStorage = null; }
 });
 
 test("the chat header has a Preview button that opens the chat's browser with no page open, and closes it again", () => {

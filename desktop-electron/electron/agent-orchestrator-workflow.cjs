@@ -3061,7 +3061,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     .find((decision) => decision.kind === (allow ? "allow_once" : "reject_once"))?.id
     ?? (allow ? null : (approval.decisions || []).find((decision) => decision.kind === "reject_always")?.id) ?? null;
   const withAdvice = (approvals, card = null) => Array.isArray(approvals)
-    ? approvals.map((item) => {
+    // A status read already in flight can return the request after its answer was sent. Do not
+    // offer that answered request again; advice alone (including a failed send) never removes it.
+    ? approvals.filter((item) => !approverAdvice.get(item?.approval_id)?.resolved).map((item) => {
       // Modern native commands carry escalation scope separately from item/permissions requests.
       const request = item?.request;
       const scoped = item?.kind === "command" && request
@@ -3554,6 +3556,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
           if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
           else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false)) {
+            approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
             logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
             note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
           } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
@@ -3563,8 +3566,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
           }).then(result => result?.ok === true && result.result?.ok === true, () => false);
           if (sent) logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
-          if (sent) note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
+          if (sent) {
+            approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
+            note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+          } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
         } else {
           note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
         }

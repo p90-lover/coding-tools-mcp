@@ -1075,7 +1075,30 @@ export function AgentOrchestratorChat({
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
   // The side panel beside the thread (ChatWorkbench: preview, changes, files, terminal) for the
   // chat's AO agents; it opens by itself when an agent first opens a page or starts a command.
-  const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
+  const workbenchKey = `coding-tools:ao:workbench:${JSON.stringify([projectId ?? "", selectedTaskId])}`;
+  const readWorkbench = (): WorkbenchTab | null => {
+    try {
+      const tab = selectedTaskId ? window.localStorage.getItem(workbenchKey) : null;
+      return tab && ["overview", "preview", "terminal", "changes", "files", "subagents", "new"].includes(tab) ? tab as WorkbenchTab : null;
+    } catch { return null; }
+  };
+  const [workbenchState, setWorkbenchState] = useState(() => ({ key: workbenchKey, tab: readWorkbench() }));
+  const workbench = workbenchState.key === workbenchKey ? workbenchState.tab : readWorkbench();
+  // Restore this chat synchronously: a question, a remount or a project refresh must not close
+  // its pane, and switching chats must not briefly show the previous chat's browser.
+  if (workbenchState.key !== workbenchKey) setWorkbenchState({ key: workbenchKey, tab: workbench });
+  const workbenchNow = useRef({ key: workbenchKey, tab: workbench });
+  workbenchNow.current = { key: workbenchKey, tab: workbench };
+  const setWorkbench = (value: WorkbenchTab | null | ((current: WorkbenchTab | null) => WorkbenchTab | null)) => {
+    const tab = typeof value === "function" ? value(workbenchNow.current.tab) : value;
+    workbenchNow.current = { key: workbenchKey, tab };
+    setWorkbenchState(workbenchNow.current);
+    if (!selectedTaskId) return;
+    try {
+      if (tab) window.localStorage.setItem(workbenchKey, tab);
+      else window.localStorage.removeItem(workbenchKey);
+    } catch { /* keep the panel usable when storage is blocked */ }
+  };
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   const previewSessions = useMemo(() => chatAgentSessions(chatRuns, projectId && selectedTaskId
@@ -1096,7 +1119,6 @@ export function AgentOrchestratorChat({
   const subagentLine = useMemo(() => (subagents.some(subagentActive) ? subagentsSummary(subagents) : null), [subagents]);
   const renderSubagentWork = useMemo(() => (items: ChatLiveItem[], live: boolean, reply?: string) =>
     <LiveTimeline items={items} live={live} finished={!live} reply={reply} />, []);
-  useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
   // The details panel's Outputs and Sources, and each reply head's changed files: the cards' work
   // this window has seen (CHAT_WORK holds live polls and turns read back), plus the newest turns'
   // finished cards, read back once each. Older turns count once their work is opened in the chat.
@@ -2425,7 +2447,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
-      {workbench && selectedTaskId ? <ChatWorkbench sessions={workbench === "preview" ? previewSessions : agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
+      {workbench && selectedTaskId ? <ChatWorkbench key={workbenchKey} sessions={workbench === "preview" ? previewSessions : agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
         subagents={subagents} renderWork={renderSubagentWork} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
