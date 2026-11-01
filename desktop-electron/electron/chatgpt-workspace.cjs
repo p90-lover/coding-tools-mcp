@@ -86,18 +86,24 @@ async function workspaceUi(action, input) {
   throw new Error("Unsupported workspace action.");
 }
 
-async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, assertCurrent, expectedContext, onContext }, action) {
+async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, assertCurrent, expectedContext, onContext, metadataOnly = false }, action) {
+  if (metadataOnly && (action || workspaceId || expectedContext)) throw new Error("Subscription inspection cannot perform MCP actions.");
   assertCurrent?.();
   const popup = new BrowserWindow({ show: false, width: 1100, height: 800,
     webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true,
       backgroundThrottling: false, offscreen: true } });
-  let observer, loading = false, changed = false, version = 0, timedOut = false;
+  let observer, loading = false, changed = false, version = 0, timedOut = false, expectedPath = null;
   const timer = setTimeout(() => { timedOut = true; if (!popup.isDestroyed()) popup.destroy(); }, action ? 90_000 : 35_000);
   timer.unref?.();
-  const navigation = (_event, _url, _inPlace, mainFrame) => {
+  const navigation = (_event, value, inPlace, mainFrame) => {
     if (mainFrame === false) return;
     version++;
-    if (!loading) changed = true;
+    if (loading) return;
+    try {
+      const url = new URL(value);
+      if (inPlace && url.origin === "https://chatgpt.com" && url.pathname === expectedPath) return;
+    } catch {}
+    changed = true;
   };
   const check = () => {
     assertCurrent?.();
@@ -105,6 +111,9 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
   };
   try {
     popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    // CDP Network.enable waits for a renderer; an untouched hidden window has none yet.
+    await popup.loadURL("about:blank");
+    check();
     const guard = (event, value) => {
       try { const url = new URL(value);
         if (url.origin === "https://chatgpt.com" && !url.username && !url.password) return;
@@ -116,7 +125,7 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
     popup.webContents.on("did-start-navigation", navigation);
     observer = await observeMcpSetupContext(popup.webContents, null);
     const load = async url => {
-      check(); loading = true;
+      check(); loading = true; expectedPath = new URL(url).pathname;
       try { await popup.loadURL(url); } finally { loading = false; }
       check();
     };
@@ -125,7 +134,9 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
       while (Date.now() < end) {
         check(); const snapshot = observer.snapshot();
         if (snapshot.error) throw new Error(snapshot.error);
-        if (snapshot.activeAccountId && (!id || snapshot.activeAccountId === id)) return snapshot;
+        // Normal account navigation can identify a subscription without granting MCP authority.
+        const accountId = metadataOnly ? snapshot.navigationAccountId || snapshot.activeAccountId : snapshot.activeAccountId;
+        if (accountId && (!id || accountId === id)) return { ...snapshot, accountId };
         if (navigationAfter !== null && snapshot.navigationVersion > navigationAfter && snapshot.navigationAccountId === id) return snapshot;
         await new Promise(resolve => setTimeout(resolve, 50));
       }
@@ -133,7 +144,7 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
     };
     await load("https://chatgpt.com/plugins?view=personal");
     let selection = await selected();
-    let context = await popup.webContents.executeJavaScript(chatGptMcpContextScript(selection.activeAccountId), true);
+    let context = await popup.webContents.executeJavaScript(chatGptMcpContextScript(selection.accountId), true);
     check();
     if (workspaceId && workspaceId !== context.workspaceId) {
       // This fetch proves membership, not active selection. Only the ensuing normal list request
@@ -149,7 +160,7 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
       } finally { loading = false; }
       await load("https://chatgpt.com/plugins?view=personal");
       selection = await selected(workspaceId);
-      context = await popup.webContents.executeJavaScript(chatGptMcpContextScript(selection.activeAccountId), true);
+      context = await popup.webContents.executeJavaScript(chatGptMcpContextScript(selection.accountId), true);
       check();
       if (context.userId !== membership.userId || context.workspaceRole !== membership.workspaceRole) throw new Error(CONTEXT_CHANGED);
     }
@@ -157,10 +168,13 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
     const fresh = async () => {
       check();
       const before = observer.snapshot(), beforeVersion = version;
-      if (before.error || before.activeAccountId !== context.workspaceId) throw new Error(CONTEXT_CHANGED);
-      const current = await popup.webContents.executeJavaScript(chatGptMcpContextScript(before.activeAccountId), true);
+      const accountId = metadataOnly ? before.navigationAccountId || before.activeAccountId : before.activeAccountId;
+      if (before.error || accountId !== context.workspaceId) throw new Error(CONTEXT_CHANGED);
+      const current = await popup.webContents.executeJavaScript(chatGptMcpContextScript(accountId), true);
       check(); const after = observer.snapshot();
       if (beforeVersion !== version || before.selectionVersion !== after.selectionVersion || after.error
+        || (metadataOnly && (before.navigationVersion !== after.navigationVersion
+          || (after.navigationAccountId || after.activeAccountId) !== accountId))
         || current.userId !== original.userId || current.workspaceId !== original.workspaceId
         || current.workspaceRole !== original.workspaceRole || current.workspaceStructure !== original.workspaceStructure) {
         throw new Error(CONTEXT_CHANGED);

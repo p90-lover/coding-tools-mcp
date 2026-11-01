@@ -323,6 +323,12 @@ test("the production connector action verifies fresh owner and workspace proof b
         throw new Error(`Unexpected fixture phase ${phase}`);
       },
     });
+    let rendererInitialized = false;
+    const attach = network.debuggerClient.attach.bind(network.debuggerClient);
+    network.debuggerClient.attach = (...args) => {
+      assert.equal(rendererInitialized, true, "initialize a renderer before awaiting network monitoring");
+      return attach(...args);
+    };
     function Window(options) {
       windowCount++;
       destroyed = false;
@@ -330,6 +336,7 @@ test("the production connector action verifies fresh owner and workspace proof b
       assert.equal(options.webPreferences.partition, "persist:fixture");
       return { webContents: contents, isDestroyed: () => destroyed, destroy: () => { destroyed = true; },
         loadURL: async next => {
+          if (next === "about:blank") { rendererInitialized = true; url = next; return; }
           contents.emit("did-start-navigation", {}, next, false, true); url = next;
           if (next.startsWith("https://platform.openai.com/")) {
             assert.equal(scenario.shared, undefined, "a shared member connection does not borrow Platform authentication");

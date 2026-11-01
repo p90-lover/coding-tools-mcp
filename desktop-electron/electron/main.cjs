@@ -2534,7 +2534,7 @@ function registerIpc({ logger, stateStore }) {
       throw new Error("Sign in to this account before checking its plan.");
     }
     await routeIdleAccountPartition(partition, logger);
-    const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent });
+    const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent, metadataOnly: true });
     assertCurrent();
     recordBrowserWorkspaceContext(partition, context);
     return browserAccountsStatus();

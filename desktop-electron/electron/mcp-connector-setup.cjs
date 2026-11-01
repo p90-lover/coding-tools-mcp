@@ -701,6 +701,9 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     };
     try {
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      // Initialize the hidden renderer before awaiting CDP Network.enable.
+      await popup.loadURL("about:blank");
+      checkHost();
       const guardNavigation = (event, value) => {
         try {
           const url = new URL(value);

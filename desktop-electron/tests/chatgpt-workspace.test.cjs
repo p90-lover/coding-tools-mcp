@@ -21,7 +21,7 @@ test("an inspection timeout preserves its actionable error after the native wind
     }
     isDestroyed() { return destroyed; }
     destroy() { destroyed = true; }
-    async loadURL() { expire(); throw new Error("Navigation cancelled"); }
+    async loadURL(url) { if (url === "about:blank") return; expire(); throw new Error("Navigation cancelled"); }
   }
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/chatgpt-workspace.cjs"), "utf8"), {
@@ -73,7 +73,10 @@ function fixture(options = {}) {
       throw new Error("Unexpected workspace script");
     } });
     const window = { webContents: contents, isDestroyed: () => state.destroyed,
-      destroy: () => { state.destroyed = true; }, loadURL: async url => { contents.emit("did-start-navigation", {}, url, false, true); } };
+      destroy: () => { state.destroyed = true; }, loadURL: async url => {
+        if (url === "about:blank") { contents.rendererInitialized = true; return; }
+        contents.emit("did-start-navigation", {}, url, false, true);
+      } };
     windows.push(window);
     return window;
   }
@@ -82,8 +85,16 @@ function fixture(options = {}) {
     requireAutomaticConnectorSetup() {},
     readAccountConnectorBindings: () => ({ version: 1, bindings: options.bindings || {}, scopedBindings: options.scopedBindings }),
     observeMcpSetupContext: async (contents, tunnelId) => {
+      assert.equal(contents.rendererInitialized, true, "initialize a renderer before awaiting network monitoring");
       assert.equal(tunnelId, null, "plan/role inspection never requires Platform login");
-      return { snapshot: () => ({ activeAccountId: contents.state.activeId, selectionVersion: contents.state.version }), dispose() {} };
+      return { snapshot: () => {
+        if (options.filterNavigation && !contents.filterChanged) {
+          contents.filterChanged = true;
+          contents.emit("did-start-navigation", {}, "https://chatgpt.com/plugins?directoryTab=personal", true, true);
+        }
+        return { activeAccountId: options.navigationOnly ? null : contents.state.activeId, selectionVersion: contents.state.version,
+          navigationAccountId: contents.state.activeId, navigationVersion: contents.state.version };
+      }, dispose() {} };
     },
     createConfiguredConnector: async input => {
       assert.equal(input.operationHeld, true, "one outer operation owns both accounts");
@@ -142,6 +153,22 @@ test("same-workspace owner is preferred, publishes there, and connects the origi
   assert.equal(f.locks(), 1);
   assert(f.windows.every(window => window.isDestroyed()));
   assert(f.contexts.some(value => value.partition === "persist:member" && value.context.planType === "team"));
+});
+
+test("same-page directory filters keep the verified workspace inspection usable", async () => {
+  const f = fixture({ owner: true, filterNavigation: true });
+  const result = await f.run();
+  assert.equal(result.connected, true);
+});
+
+test("subscription inspection can use normal account navigation without lending it MCP authority", async () => {
+  const f = fixture({ navigationOnly: true });
+  const input = { ...f.input, partition: "persist:member", metadataOnly: true };
+  const context = await f.inspectChatGptAccount(input);
+  assert.equal(context.workspaceId, workspaceId);
+  assert.equal(context.planType, "team");
+  await assert.rejects(f.inspectChatGptAccount(input, () => {}), /Subscription inspection cannot perform MCP actions/);
+  assert.equal(f.calls.some(call => call[0] === "publish" || call[0] === "create"), false);
 });
 
 test("an owner/admin in another selected workspace is selected and verified by exact workspace id", async () => {
