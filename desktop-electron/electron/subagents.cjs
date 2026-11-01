@@ -16,7 +16,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const PERMISSIONS = new Set(["auto", "full"]);
 const LIMITS = Object.freeze({ maxConcurrent: [1, 10], maxPerChat: [1, 10], timeoutMinutes: [1, 240] });
 const DEFAULT_SETTINGS = Object.freeze({
@@ -139,6 +139,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   let config = null;
   const runs = new Map(); // AO session id -> run
   const launching = []; // the parent chat of each start AO has not answered yet
+  const pendingLaunches = new Map();
+  const stopGenerations = new Map();
   let poller = null;
   let polling = false;
   const answered = new Set(); // approval ids already answered
@@ -198,13 +200,24 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     poller.unref?.();
   }
 
+  function release(run) {
+    if (run.released === true) return Promise.resolve({ ok: true });
+    if (!run.releasePromise) run.releasePromise = Promise.resolve().then(() => harness()?.exitAgent?.(run.id))
+      .then(outcome => {
+        if (outcome?.ok !== true) throw new Error(`Subagent ${run.id} shutdown is unconfirmed`);
+        run.released = true;
+        return outcome;
+      }).finally(() => { run.releasePromise = null; });
+    return run.releasePromise;
+  }
+
   function finish(run, state, fields = {}) {
     if (!ACTIVE.has(run.state)) return;
     Object.assign(run, { state, endedAt: now(), ...fields });
     logger?.info?.("subagents.finished", { agent: run.agentId, state, seconds: Math.round((run.endedAt - run.startedAt) / 1000) });
-    if (read().settings.releaseWhenDone) {
+    if (read().settings.releaseWhenDone && !fields.released) {
       // The session, worktree and conversation stay for inspection; only its agent process goes.
-      Promise.resolve().then(() => harness()?.exitAgent?.(run.id)).catch(() => undefined);
+      void release(run).catch(() => undefined);
     }
   }
 
@@ -302,6 +315,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
 
   /** Starts a subagent for the chat session `parent` (an AO session id) in `workspaceId`. */
   async function start(parent, workspaceId, { agent: wanted, task } = {}) {
+    const generation = stopGenerations.get(parent) ?? 0;
     const { settings } = read();
     if (!settings.enabled) throw new Error("Subagents are turned off on the Subagents page");
     const key = text(wanted, 60).toLowerCase();
@@ -319,11 +333,18 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       throw new Error(`This chat already runs ${settings.maxPerChat} subagents (the limit per chat); wait for one with subagent_result`);
     }
     launching.push(parent);
-    try { return await launch(parent, workspaceId, agent, route, brief, settings); }
-    finally { launching.splice(launching.indexOf(parent), 1); }
+    const pending = launch(parent, workspaceId, agent, route, brief, settings, generation);
+    if (!pendingLaunches.has(parent)) pendingLaunches.set(parent, new Set());
+    pendingLaunches.get(parent).add(pending);
+    try { return await pending; }
+    finally {
+      launching.splice(launching.indexOf(parent), 1);
+      pendingLaunches.get(parent).delete(pending);
+      if (!pendingLaunches.get(parent).size) pendingLaunches.delete(parent);
+    }
   }
 
-  async function launch(parent, workspaceId, agent, route, brief, settings) {
+  async function launch(parent, workspaceId, agent, route, brief, settings, generation) {
     const permissions = settings.permission === "full"
       ? { permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }
       : { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
@@ -342,6 +363,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     const run = { id, parent, workspaceId, agentId: agent.id, agentName: agent.name, task: brief, startedAt: now(), endedAt: null,
       state: "starting", report: "", error: "" };
     remember(run);
+    if ((stopGenerations.get(parent) ?? 0) !== generation) {
+      const outcomes = await Promise.allSettled([stop(id, parent), stopParent(id)]);
+      const failed = outcomes.find(outcome => outcome.status === "rejected");
+      if (failed) throw failed.reason;
+    }
     logger?.info?.("subagents.started", { agent: agent.id, harness: route.harness_id });
     return run;
   }
@@ -349,11 +375,25 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   async function stop(id, parent = null) {
     const run = runs.get(id);
     if (!run || (parent !== null && run.parent !== parent)) throw new Error("No such subagent");
-    if (!ACTIVE.has(run.state)) return run;
+    if (run.released === true) return run;
+    const wasActive = ACTIVE.has(run.state);
     run.stopping = true;
-    await harness()?.interrupt?.(run.id)?.catch?.(() => undefined);
-    finish(run, "stopped");
+    await release(run);
+    // Shutdown was acknowledged here; automatic release must not submit it a second time.
+    if (wasActive) finish(run, "stopped", { released: true });
+    else Object.assign(run, { released: true, stopping: false });
     return run;
+  }
+
+  async function stopParent(parent) {
+    stopGenerations.set(parent, (stopGenerations.get(parent) ?? 0) + 1);
+    const children = [...runs.values()].filter(run => run.parent === parent);
+    const outcomes = await Promise.allSettled([
+      ...children.flatMap(run => [stop(run.id, parent), stopParent(run.id)]),
+      ...(pendingLaunches.get(parent) ?? []),
+    ]);
+    const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));
+    if (failures.length) throw new Error(failures.join("; "));
   }
 
   /** One subagent tool call from the chat session `parent` (an AO session id) in `workspaceId`. */
@@ -401,6 +441,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     save,
     runs: () => [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).map((run) => ({ ...view(run), workspace_id: run.workspaceId })),
     stop: (id) => stop(id).then(view),
+    stopParent,
     dispose() { if (poller) clearTimer(poller); poller = null; },
   });
 }

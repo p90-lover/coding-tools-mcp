@@ -1,10 +1,41 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const fs = require("node:fs");
 const {
   browserPartitionForLauncherProfile,
   resolveLauncherProfile,
 } = require("../electron/profile.cjs");
+
+test("an existing default data junction keeps its physical history after an upgrade", () => {
+  const scratch = path.resolve(__dirname, "../../aiTemp/profile-junction-tests");
+  fs.mkdirSync(scratch, { recursive: true });
+  const root = fs.mkdtempSync(path.join(scratch, "case-"));
+  try {
+    const appData = path.join(root, "roaming");
+    const physical = path.join(root, "physical");
+    fs.mkdirSync(appData);
+    fs.mkdirSync(physical);
+    fs.writeFileSync(path.join(physical, "history.json"), '{"saved":true}');
+    const junction = path.join(appData, "Coding Tools");
+    fs.symlinkSync(physical, junction, process.platform === "win32" ? "junction" : "dir");
+    const options = { argv: ["electron", "."], env: {}, homeDir: path.join(root, "home"), appData };
+    const profile = resolveLauncherProfile(options);
+    assert.equal(profile.userData, fs.realpathSync(physical));
+    assert.equal(fs.readFileSync(path.join(profile.userData, "history.json"), "utf8"), '{"saved":true}');
+    assert.equal(fs.lstatSync(junction).isSymbolicLink(), true);
+    assert.equal(resolveLauncherProfile({ ...options, env: { CODING_TOOLS_LAUNCHER_DATA_DIR: junction } }).userData,
+      junction, "an explicit override keeps its path semantics");
+    assert.equal(resolveLauncherProfile({ ...options, argv: ["electron", ".", "--dev-profile"] }).userData,
+      path.join(root, "home", ".coding-tools-dev", "launcher"));
+    const missing = path.join(root, "first-launch");
+    assert.equal(resolveLauncherProfile({ ...options, appData: missing }).userData,
+      path.join(missing, "Coding Tools"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    if (fs.readdirSync(scratch).length === 0) fs.rmdirSync(scratch);
+  }
+});
 
 test("DEV launcher profile isolates every durable home from production", () => {
   const homeDir = path.resolve("/Users/tester");

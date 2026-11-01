@@ -834,7 +834,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * provider conversation; continuable() resumes it on the next message.
      */
     async exitAgent(id) {
-      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {});
+      let outcome;
+      try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); }
+      catch (error) {
+        if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
+        outcome = { ok: true, ...await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`) };
+      }
+      if (outcome?.ok !== true || outcome.session?.id !== id || outcome.session?.status !== "exited") {
+        throw new Error(`Agent ${id} shutdown is unconfirmed`);
+      }
       return { ok: true };
     },
     /**
@@ -960,12 +968,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // controller, so nothing to interrupt; AO would send its queued prompt once the agent is up,
         // and the stopped card would leave it working unseen. Its start is cancelled instead. One
         // that came up meanwhile is interrupted.
-        if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) return;
-        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
+        if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) throw error;
+        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
         if (record?.session?.provisionState === "provisioning") {
-          await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {}).catch(() => undefined);
+          await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
           agentTools?.forgetSession?.(id);
-        } else await interrupt().catch(() => undefined);
+        } else await interrupt();
       });
     },
     // A standalone AO terminal running one program (e.g. the Antigravity CLI) with

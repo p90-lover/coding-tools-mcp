@@ -55,16 +55,50 @@ function observeHarness(context) {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
   const start = source.indexOf("    async observe(id");
-  const end = source.indexOf("    async interrupt(id)", start);
+  const end = source.indexOf("    // A standalone AO terminal", start);
   const method = source.slice(start, end).trim().replace(/,$/, "");
   const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
   return vm.runInNewContext(states + helpers + identity + "({" + method + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), agentTools: null,
     observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
   });
 }
+
+test("interrupt reports real failures and retains the exact provisioning cancellation path", async () => {
+  for (const scenario of ["network", "kill-failed", "retry-failed", "provisioning"]) {
+    const calls = [], forgotten = [];
+    let interrupts = 0;
+    const upstream = observeHarness({
+      internalApi: async (method, endpoint) => {
+        calls.push(method + " " + endpoint);
+        if (endpoint.endsWith("/conversation/interrupt")) {
+          interrupts++;
+          throw Error(scenario === "network" ? "AO unavailable" : interrupts === 1 ? "CHAT_CONTROLLER_NOT_READY" : "Retry interrupt failed");
+        }
+        if (method === "GET") return { session: { id: "owned", provisionState: scenario === "retry-failed" ? "ready" : "provisioning" } };
+        if (endpoint.endsWith("/kill")) {
+          if (scenario === "kill-failed") throw Error("Provision cancellation failed");
+          return { ok: true };
+        }
+        throw Error("Unexpected fixture operation");
+      },
+      agentTools: { forgetSession: id => forgotten.push(id) },
+    });
+    const stopping = upstream.interrupt("owned");
+    if (scenario === "provisioning") {
+      await stopping;
+      assert.deepEqual(forgotten, ["owned"]);
+      assert.equal(calls.at(-1), "POST /api/v1/sessions/owned/kill");
+    } else {
+      await assert.rejects(stopping, /AO unavailable|Provision cancellation failed|Retry interrupt failed/,
+        scenario + " cannot report a successful stop");
+      assert.deepEqual(forgotten, [], "uncertain cancellation retains its tool credential");
+    }
+    assert.ok(calls.every(call => call.includes("/sessions/owned")), "no replacement or unrelated session is touched");
+  }
+});
 
 test("a session's project folder is named for its tools only for the chat's own folder-mode project", async () => {
   const vm = require("node:vm");
@@ -453,6 +487,15 @@ test("a turn that only retries its model request shows no new sign of life, so a
   assert.equal((await upstream.observe("s")).lastActivityAt, Date.parse(at(1.5)), "the last real step, not the retry notices after it");
 });
 
+test("exitAgent requires the selected agent's acknowledged exited state", async () => {
+  for (const outcome of [{ ok: false }, { ok: true }, { ok: true, session: { id: "s", status: "working" } }, { ok: true, session: { id: "other", status: "exited" } }]) {
+    const upstream = observeHarness({ internalApi: async () => outcome });
+    await assert.rejects(upstream.exitAgent("s"), /shutdown is unconfirmed/);
+  }
+  const upstream = observeHarness({ internalApi: async () => ({ ok: true, session: { id: "s", status: "exited" } }) });
+  assert.equal((await upstream.exitAgent("s")).ok, true);
+});
+
 test("an idle agent is found by its last turn, released with exit-agent, and resumed when its chat continues", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
@@ -485,7 +528,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
       if (endpoint === "/api/v1/sessions") return { sessions };
       const id = endpoint.split("/")[4];
       if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
-      if (endpoint.endsWith("/exit-agent")) return { ok: true };
+      if (endpoint.endsWith("/exit-agent")) return { ok: true, session: { id, status: "exited" } };
       if (endpoint.endsWith("/resume-agent")) { if (!resumeOk) throw new Error("resume failed"); status = "idle"; return { ok: true }; }
       return { session: { id, mode: "chat", status } };
     },
@@ -799,7 +842,7 @@ test("a finished turn's work is read back from AO, paging back until it reaches 
 
 test("a send binds its workspace in AO once, not for every catalog read and the launch", async () => {
   const vm = require("node:vm");
-  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8").replace(/\r\n/g, "\n");
   const start = source.indexOf("  async function projectFor");
   const block = source.slice(start, source.indexOf("  /**\n   * The app's own tools for one chat session", start));
   const binds = [];

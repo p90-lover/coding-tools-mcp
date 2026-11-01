@@ -1,3 +1,4 @@
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -34,12 +35,18 @@ function resolveLauncherProfile({
   }
   const development = argv.includes("--dev-profile");
   if (!development) {
+    let userData = configuredPath(env, "CODING_TOOLS_LAUNCHER_DATA_DIR", path.join(appData, "Coding Tools"), homeDir);
+    if (!env.CODING_TOOLS_LAUNCHER_DATA_DIR?.trim()) {
+      // Electron's recursive mkdir can fail through an existing Windows junction; keep the same physical data.
+      try { userData = fs.realpathSync(userData); }
+      catch (error) { if (!["ENOENT", "ENOTDIR"].includes(error.code)) throw error; }
+    }
     return {
       kind: PRODUCTION_PROFILE,
       displayName: "Coding Tools",
       coreHome: configuredPath(env, "CODING_TOOLS_HOME", path.join(homeDir, ".coding-tools"), homeDir),
       codexHome: configuredPath(env, "CODEX_HOME", path.join(homeDir, ".codex"), homeDir),
-      userData: configuredPath(env, "CODING_TOOLS_LAUNCHER_DATA_DIR", path.join(appData, "Coding Tools"), homeDir),
+      userData,
       browserPartition: browserPartitionForLauncherProfile(PRODUCTION_PROFILE),
     };
   }

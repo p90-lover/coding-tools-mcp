@@ -444,7 +444,13 @@ impl ExecSession {
     }
 
     pub(crate) async fn finalize_owner(&self) {
-        if !self.has_exited() || self.finalizing.swap(true, Ordering::AcqRel) {
+        if !self.has_exited() {
+            return;
+        }
+        if self.finalizing.swap(true, Ordering::AcqRel) {
+            while !self.finalized.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
             return;
         }
         let owner = self.task_owner.lock().expect("task owner lock").clone();
@@ -608,6 +614,12 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     }
     let session = store.get(command_id)?;
     tauri::async_runtime::block_on(session.refresh_status());
+    if session.has_exited() {
+        tauri::async_runtime::block_on(async {
+            session.wait_for_readers().await;
+            session.finalize_owner().await;
+        });
+    }
 
     let requested_stream = args.get("stream").and_then(Value::as_str).unwrap_or("");
     let stream = if ref_stream == "stdout" || ref_stream == "stderr" {
@@ -766,16 +778,13 @@ fn write_stdin_inner(
         .unwrap_or(65_536) as usize;
 
     let running = tauri::async_runtime::block_on(session.is_running());
-    if !running {
-        if !chars.is_empty() {
-            return Err(WorkspaceError::Tool {
-                code: "SESSION_CLOSED",
-                message: "Session is closed; stdin write blocked.".into(),
-                category: "runtime",
-                retryable: false,
-            });
-        }
-        return Ok(tool_ok(session.snapshot(max_output_bytes)));
+    if !running && !chars.is_empty() {
+        return Err(WorkspaceError::Tool {
+            code: "SESSION_CLOSED",
+            message: "Session is closed; stdin write blocked.".into(),
+            category: "runtime",
+            retryable: false,
+        });
     }
 
     if !chars.is_empty() {
@@ -797,6 +806,12 @@ fn write_stdin_inner(
         tauri::async_runtime::block_on(session.refresh_status());
     }
     tauri::async_runtime::block_on(session.refresh_status());
+    if session.has_exited() {
+        tauri::async_runtime::block_on(async {
+            session.wait_for_readers().await;
+            session.finalize_owner().await;
+        });
+    }
     Ok(tool_ok(session.snapshot(max_output_bytes)))
 }
 
@@ -861,6 +876,12 @@ pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, Workspa
         }
     }
 
+    if session.has_exited() {
+        tauri::async_runtime::block_on(async {
+            session.wait_for_readers().await;
+            session.finalize_owner().await;
+        });
+    }
     let mut payload = session.snapshot(max_output_bytes);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("killed".into(), json!(killed));
