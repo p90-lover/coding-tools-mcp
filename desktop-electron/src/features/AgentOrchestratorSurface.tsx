@@ -2141,7 +2141,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     const launcher = window.codexWebLauncher;
     if (!launcher?.showChatWindow) throw new Error("Update Coding Tools to open chats in a new window");
     const title = taskName(taskId), turns = await chatTranscript(taskId);
-    const result = await launcher.showChatWindow({ key: taskId, title, page: chatWindowPage(title, turns), body: chatWindowBody(title, turns), mode });
+    const body = chatWindowBody(title, turns);
+    const result = await launcher.showChatWindow({ key: taskId, title, page: chatWindowPage(title, turns, body), body, mode });
     setChatWindowIds((current) => result.open ? (current.includes(taskId) ? current : [...current, taskId]) : current.filter((id) => id !== taskId));
   };
   const openChatWindow = (taskId: string) => void pushChatWindow(taskId, "open")

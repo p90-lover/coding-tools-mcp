@@ -282,6 +282,44 @@ test("slash commands open a menu and run on Enter; attachments are sent with the
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ["send", { taskId: "t", message: "look at this\n\nAttached image: C:\\shots\\shot.png" }]);
 });
 
+test("IME confirmation leaves the message unsent until an ordinary Enter", async t => {
+  for (const nativeEvent of [{ isComposing: true, keyCode: 13 }, { isComposing: false, keyCode: 229 }]) await t.test(JSON.stringify(nativeEvent), async () => {
+    const { props, calls } = base(), page = mount(props);
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onChange({ target: { value: "你好" } });
+    let prevented = 0;
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "Enter", shiftKey: false, nativeEvent, preventDefault() { prevented++; } });
+    await new Promise(setImmediate);
+    assert.deepEqual(calls, []); assert.equal(prevented, 0);
+    assert.equal(walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.value, "你好");
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "Enter", shiftKey: true, nativeEvent: { isComposing: false, keyCode: 13 }, preventDefault() { prevented++; } });
+    assert.deepEqual(calls, []); assert.equal(prevented, 0);
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "Enter", shiftKey: false, nativeEvent: { isComposing: false, keyCode: 13 }, preventDefault() { prevented++; } });
+    await new Promise(setImmediate);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["send", { message: "你好" }]]); assert.equal(prevented, 1);
+  });
+});
+
+test("IME candidate keys leave slash commands alone and normal command navigation still works", async t => {
+  for (const nativeEvent of [{ isComposing: true, keyCode: 13 }, { isComposing: false, keyCode: 229 }]) await t.test(JSON.stringify(nativeEvent), async () => {
+    const { props, calls } = base({ selectedTaskId: "t", runs: [run("r1", "t", [node("p", "planner", "running")])], working: false }), page = mount(props);
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onChange({ target: { value: "/st" } });
+    let prevented = 0;
+    for (const key of ["Enter", "Tab", "ArrowDown", "ArrowUp"]) {
+      walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key, shiftKey: false, nativeEvent, preventDefault() { prevented++; } });
+      await new Promise(setImmediate);
+      const rendered = page.render();
+      assert.equal(walk(rendered).find(element => element.props?.["aria-label"] === "Message").props.value, "/st");
+      assert.deepEqual(walk(rendered).filter(element => element.props?.role === "option").map(element => element.props["aria-selected"]), [true, false, false]);
+      assert.deepEqual(calls, []); assert.equal(prevented, 0);
+    }
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "ArrowDown", nativeEvent: {}, preventDefault() { prevented++; } });
+    assert.deepEqual(walk(page.render()).filter(element => element.props?.role === "option").map(element => element.props["aria-selected"]), [false, true, false]);
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "Tab", nativeEvent: {}, preventDefault() { prevented++; } });
+    await new Promise(setImmediate);
+    assert.deepEqual(calls, [["stop", "r1"]]); assert.equal(prevented, 2);
+  });
+});
+
 test("Codex slash commands run from the composer in a Single chat or a team, with their real actions", async () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const actions = [];
