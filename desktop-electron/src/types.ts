@@ -803,7 +803,9 @@ export interface BrowserAccount extends GptBrowserAccount {
   /** Whether new Codex sessions may start on it when they are spread across accounts. */
   acceptsNewSessions: boolean;
   /** The last inspection of its ChatGPT session: Plus stops at 6 High; Team and Pro add Extra High and Pro. */
-  plan: { solAvailable: boolean; proAvailable: boolean; checkedAt: number | null } | null;
+  plan: { solAvailable: boolean | null; proAvailable: boolean | null; checkedAt: number | null;
+    planType?: string | null; planCheckedAt?: number | null; userId?: string; workspaceId?: string;
+    workspaceRole?: string; workspaceStructure?: "workspace" | "personal"; workspaceName?: string } | null;
   /** What its Codex turns showed about its ChatGPT connector. */
   connector: { okAt: number | null; error: string | null; errorAt: number | null } | null;
   /** Its own partition holds a ChatGPT sign-in (read locally); null until first read. */
@@ -1053,7 +1055,7 @@ export interface LauncherApi {
   assignBrowserAccountProxies(): Promise<BrowserAccountsStatus & { assigned: number }>;
   setBrowserAccountSettings(id: string, input: { maxTabs?: number; acceptsNewSessions?: boolean }): Promise<BrowserAccountsStatus>;
   setBrowserAccountsSettings(input: Partial<BrowserAccountsSettings>): Promise<BrowserAccountsStatus>;
-  inspectBrowserAccount(): Promise<BrowserAccountsStatus>;
+  inspectBrowserAccount(accountId?: string): Promise<BrowserAccountsStatus>;
   codexThreads(): Promise<{ threads: CodexThreadBinding[] }>;
   codexThreadAction(input: CodexThreadAction): Promise<{ threads: CodexThreadBinding[] }>;
   saveDecodo(input: Partial<DecodoSettings> & { password?: string }): Promise<ProviderNetworkSnapshot>;
@@ -1070,7 +1072,8 @@ export interface LauncherApi {
   dismissSessionReminder(): Promise<LauncherState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
-  createMcpConnector(accountId?: string): Promise<{ created: boolean; name: string; href: string; connected?: boolean }>;
+  createMcpConnector(accountId?: string): Promise<{ created: boolean; name: string; href: string; connected?: boolean;
+    setupAccountId?: string; setupWorkspaceRole?: string; binding?: { userId: string; workspaceId: string; tunnelId: string } }>;
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;

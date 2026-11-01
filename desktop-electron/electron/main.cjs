@@ -45,6 +45,7 @@ const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
+const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
@@ -1110,7 +1111,15 @@ async function readChatGptAccountEmail(partition) {
 let bridgePlanKey = null;
 function browserAccountPlanKey(accountId) {
   const plan = browserAccounts.status().accounts.find((entry) => entry.id === accountId)?.plan;
-  return plan ? `${plan.solAvailable}:${plan.proAvailable}` : null;
+  return plan && typeof plan.solAvailable === "boolean" && typeof plan.proAvailable === "boolean"
+    ? `${plan.solAvailable}:${plan.proAvailable}` : null;
+}
+
+function recordBrowserWorkspaceContext(partition, context) {
+  const accountId = browserAccounts.accountIdOfPartition(partition);
+  if (!accountId) throw new Error("The browser account changed during MCP setup.");
+  const renamed = context.userEmail ? browserAccounts.setEmail(accountId, context.userEmail) : false;
+  if (browserAccounts.recordPlan(accountId, context) || renamed) publishBrowserAccounts();
 }
 
 async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore }) {
@@ -2509,9 +2518,25 @@ function registerIpc({ logger, stateStore }) {
     publishBrowserAccounts();
     return browserAccountsStatus();
   });
-  handle("launcher:browser-account-inspect", async (event) => {
+  handle("launcher:browser-account-inspect", async (event, accountId = browserAccounts.activeId()) => {
     assertFocusedMainWindow(event, true);
-    await browserHost.inspectSession(true);
+    const partition = browserAccounts.partitionOf(accountId);
+    const assertCurrent = () => {
+      if ((browserHost?.interactionModeOverride ?? stateStore.read().browserInteractionMode) === "manual") {
+        throw Object.assign(new Error("ChatGPT account inspection is disabled in Zero Risk mode"), { code: "manual_browser_inspection_disabled" });
+      }
+      if (browserAccounts.partitionOf(accountId) !== partition || quitting || shutdownInProgress) {
+        throw new Error("The browser account changed during MCP setup.");
+      }
+    };
+    assertCurrent();
+    if (!signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }))) {
+      throw new Error("Sign in to this account before checking its plan.");
+    }
+    await routeIdleAccountPartition(partition, logger);
+    const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent });
+    assertCurrent();
+    recordBrowserWorkspaceContext(partition, context);
     return browserAccountsStatus();
   });
   // Codex threads bound to ChatGPT accounts. Every change needs the focused main window.
@@ -3030,7 +3055,20 @@ function registerIpc({ logger, stateStore }) {
         if (tunnel?.state !== "ready") throw new Error("This account's MCP tunnel is not ready. Reconnect it and retry.");
       }
       assertCurrent();
-      const result = await createConfiguredConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
+      const result = await createWorkspaceConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
+        onContext: recordBrowserWorkspaceContext,
+        accountCandidates: async () => {
+          const candidates = [];
+          for (const entry of browserAccounts.status().accounts) {
+            const candidatePartition = browserAccounts.partitionOf(entry.id);
+            if (!signedInFromCookies(await session.fromPartition(candidatePartition).cookies.get({ url: "https://chatgpt.com/" }))) continue;
+            candidates.push({ id: entry.id, partition: candidatePartition,
+              prepare: () => routeIdleAccountPartition(candidatePartition, logger),
+              assertCurrent: () => { assertCurrent(); if (browserAccounts.partitionOf(entry.id) !== candidatePartition) throw new Error("The browser account changed during MCP setup."); },
+            });
+          }
+          return candidates;
+        },
         target: { partition, requireTunnelMatch: true,
           ...(tunnel ? { tunnelId: tunnel.tunnelId, connectorBindings: tunnel.connectorBindings } : {}) },
       });
