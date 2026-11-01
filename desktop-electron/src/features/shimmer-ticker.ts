@@ -20,8 +20,8 @@ export function installShimmerTicker(doc: Document = document): () => void {
   };
   const tick = () => {
     // A minimized window still reads visible; the preload marks it away (see page-visibility.ts).
-    if (doc.hidden || doc.documentElement?.hasAttribute("data-window-away")) return;
-    const now = doc.timeline.currentTime;
+    const away = doc.hidden || doc.documentElement?.hasAttribute("data-window-away");
+    const now = away ? null : doc.timeline.currentTime;
     for (const animation of shimmers) {
       // Removing the element or its class cancels the animation; a new one fires animationstart.
       if (animation.playState === "idle" || !(animation.effect as KeyframeEffect | null)?.target?.isConnected) {
