@@ -37,12 +37,12 @@ export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
 /** The picker's header row ("6 Sol · 6 High ›"): it swaps the Power slider for the model list. */
 export const CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR = "[data-model-picker-view-toggle]";
 /**
- * GPT-6's row in ChatGPT's model list, by plan: "GPT-6 Sol" on Plus, "6" on Team and Pro (both seen
- * live 2026-10-29). Every other model is billed on top (Codex quota or money), so turns run on GPT-6
+ * GPT-6's exact model-list names: "GPT-6 Sol" and "6" (seen live 2026-10-29), plus the current
+ * "GPT-6" row (2026-11-01). Every other model is billed on top (Codex quota or money), so turns run on GPT-6
  * only. On Plus "Default" the Power slider walks across models; with GPT-6 chosen it only sets
  * GPT-6's own effort: 3 stops on Plus (up to 6 High), 5 on Team (6 Instant, Medium, High, Extra High, Pro).
  */
-export const CHATGPT_TURN_MODEL_NAMES: readonly string[] = ["GPT-6 Sol", "6"];
+export const CHATGPT_TURN_MODEL_NAMES: readonly string[] = ["GPT-6 Sol", "6", "GPT-6"];
 /** Every stop of GPT-6's own slider is labelled "6 <effort>" ("6 Extra High, 4 of 5."). */
 export const CHATGPT_TURN_STOP_PREFIX = "6";
 const MODEL_PICK_STEP_TIMEOUT_MS = 10_000;
