@@ -594,7 +594,7 @@ function surfaceComposer(seed = {}, globals = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8").split("export function AgentOrchestratorSurface")[1];
   const names = [...source.matchAll(/const \[([A-Za-z_]+),[^\]]+\] = useState/g)].map(match => match[1]);
   const state = { workspaceReady: true, workspaceId: "w", chatTaskId: "", board: { revision: 1, tasks: [] }, ...seed };
-  const refs = [], callbacks = []; let cursor = 0, refCursor = 0, callbackCursor = 0;
+  const refs = [], callbacks = [], effects = []; let cursor = 0, refCursor = 0, callbackCursor = 0;
   const react = {
     useState(initial) {
       const name = names[cursor++]; assert.ok(name, "each Surface state is named");
@@ -607,9 +607,10 @@ function surfaceComposer(seed = {}, globals = {}) {
       if (deps && previous && deps.length === previous.deps.length && deps.every((value, i) => Object.is(value, previous.deps[i]))) return previous.callback;
       callbacks[index] = { callback, deps: deps ? [...deps] : [] }; return callback;
     },
-    useMemo: calculate => calculate(), useEffect() {}, useLayoutEffect() {},
+    useMemo: calculate => calculate(), useEffect: effect => effects.push(effect), useLayoutEffect() {},
   };
-  const jsx = (type, props) => ({ type, props: props || {} });
+  let permissionKey;
+  const jsx = (type, props, key) => { if (type === "Permissions") permissionKey = key; return { type, props: props || {} }; };
   const featureCache = {};
   const feature = file => {
     if (featureCache[file]) return featureCache[file];
@@ -644,9 +645,9 @@ function surfaceComposer(seed = {}, globals = {}) {
   };
   const surface = loadSurface(react,{ localStorage: { getItem: () => "w", setItem() {} }, structuredClone, crypto: globalThis.crypto, ...globals }, imports);
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
-  const render = () => { cursor = 0; refCursor = 0; callbackCursor = 0; return surface.AgentOrchestratorSurface({ language: "en", setError() {} }); };
+  const render = () => { effects.length = 0; cursor = 0; refCursor = 0; callbackCursor = 0; return surface.AgentOrchestratorSurface({ language: "en", setError() {} }); };
   const currentChat = () => walk(render()).find(item => item.type === "Chat");
-  return { state, calls, render, walk, currentChat };
+  return { state, calls, render, walk, currentChat, api, effects, permissionKey: () => permissionKey };
 }
 
 test("split view: Split view adds a pane, New chat opens in the focused pane, the sidebar fills it, and closing the window's chat promotes the next", () => {
@@ -1430,7 +1431,7 @@ test("the real project picker cannot carry a pending message into another blank 
   };
   const parent = { workspaceId: "project-a", taskId: "", seed: null };
   const switchToWorkspace = rendererCallback("AgentOrchestratorSurface.tsx", "switchToWorkspace", {
-    setWorkspaceId: id => { parent.workspaceId = id; }, setChatTaskId: id => { parent.taskId = id; }, pane: undefined, localStorage: { setItem() {} },
+    composerIntent: { current: 0 }, setWorkspaceId: id => { parent.workspaceId = id; }, setChatTaskId: id => { parent.taskId = id; }, pane: undefined, localStorage: { setItem() {} },
   });
   const chooseWorkspace = rendererCallback("AgentOrchestratorSurface.tsx", "chooseWorkspace", {
     switchTarget: { current: "" }, pendingSelect: { current: null }, pane: undefined, switchToWorkspace,
@@ -2478,5 +2479,196 @@ test("only the latest folder read can replace its rows or report its error", asy
     reads[1].resolve({ entries: [{ name: "b.txt", path: "folder/b.txt", type: "file" }] }); await new Promise(setImmediate); ui.render();
     reads[0][outcome](outcome === "resolve" ? { entries: [{ name: "a.txt", path: "folder/a.txt", type: "file" }] } : new Error("old folder failed")); await new Promise(setImmediate);
     assert.ok(ui.findEntry("b.txt")); assert.equal(ui.findEntry("a.txt"), undefined); assert.deepEqual(ui.errors(), []); ui.unmount();
+  });
+});
+
+function permissionWidgetRenderer() {
+  // Reuse the existing permission-menu hook fixture, including its actual apply/notice lifecycle.
+  const file = path.resolve(__dirname, "ao-permissions-renderer.test.cjs");
+  const tree = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const declaration = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "renderer");
+  assert.ok(declaration);
+  const context = { fs, path, vm, ts, __dirname, view: undefined };
+  vm.runInNewContext(declaration.getText(tree) + '\nview = renderer("AgentOrchestratorPermissions.tsx");', context);
+  return context.view;
+}
+
+function permissionSaveFixture({ mode = "single", gateAt = "apply_team", cancel = false, missionOnly = false } = {}) {
+  const route = label => ({ harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local",
+    model: label + "-model", permission_profile: ":ao-default", native_permission_profile: ":workspace",
+    approval_policy: "on-request", approvals_reviewer: "user" });
+  const node = (label, id = "lead") => ({ id, template_role_id: "lead", task_id: "task-" + label, role: "planner",
+    state: "finished", parents: [], x: 0, y: 0, settings: { name: "Assistant" }, route: route(label) });
+  const team = label => ({ id: "team-" + label, workspace_id: "w", revision: 1, name: "Team " + label,
+    worker_limit: 1, nodes: [node(label)] });
+  const a = team("a"), b = team("b");
+  const missions = ["a", "b"].map(label => ({ id: "run-" + label, workspace_id: "w", project_id: "task-" + label,
+    revision: 7, execution_mode: mode, cancelled: false, worker_limit: 1, team: label === "a" ? a : b,
+    nodes: [node(label, "node-" + label)] }));
+  const savedA = missionOnly ? { ...a, revision: 2, nodes: [node("a", "new-role")] } : a;
+  const backend = { runs: missions, teams: [savedA, b], team: savedA };
+  const foreign = structuredClone(missions[1]); foreign.workspace_id = "other"; foreign.team.workspace_id = "other";
+  const defaults = [], gate = delayedReply(), entered = delayedReply(), navigation = delayedReply();
+  const f = surfaceComposer({ workspaceReady: true, workspaceId: "w", loadedWorkspace: "w",
+    workspaces: [{ id: "w", name: "Fixture" }, { id: "other", name: "Other project" }], board: { revision: 1, tasks: [{ id: "task-a", title: "A" }, { id: "task-b", title: "B" }] },
+    view: "chat", chatTaskId: "task-a", selectedRunId: "run-a", missions, savedTeams: backend.teams, team: savedA,
+    composerMode: mode, composerTeamId: "team-a", singleRoute: route("a") }, {
+    localStorage: { getItem: () => "w", setItem: (key, value) => { if (key !== "coding-tools:ao:workspace") defaults.push(JSON.parse(value)); } }, window: {}, setTimeout, clearTimeout,
+  });
+  const call = f.api.apps.call;
+  let gated = false, operation, widget, unmounted = false;
+  f.api.apps.call = async input => {
+    const original = await call(input), change = input.arguments?.change;
+    if (input.arguments?.workspaceId !== "w") {
+      await navigation.promise;
+      return { ok: true, result: input.operation === "board" ? { revision: 1, tasks: [{ id: "task-b", title: "Other B" }] }
+        : plain({ runs: [foreign], teams: [foreign.team], team: foreign.team }) };
+    }
+    let response = original;
+    if (input.operation === "permission_profiles") response = { ok: true, result: { capability: {
+      supported: true, profiles: [{ id: ":workspace", allowed: true }], approval_policies: ["on-request"],
+      approvals_reviewers: ["user", "auto_review"],
+    } } };
+    if (input.operation === "runs") response = { ok: true, result: plain(backend) };
+    if (input.operation === "team_update" && change.operation === "save_team") {
+      const next = { ...plain(change.team), revision: 2 };
+      backend.teams = backend.teams.map(item => item.id === next.id ? next : item); backend.team = next;
+      response = { ok: true, result: { team: next } };
+    }
+    if (input.operation === "team_update" && change.operation === "apply_team") response = { ok: true, result: { cancelled: cancel } };
+    if (!gated && (input.operation === "team_update" && change.operation === gateAt || input.operation === "runs" && gateAt === "runs")) {
+      gated = true; entered.resolve(); await gate.promise;
+    }
+    return response;
+  };
+  const commit = () => {
+    f.render();
+    const effect = f.effects.find(effect => String(effect).includes("hydratedComposer.current"));
+    assert.ok(effect); effect(); return f.render();
+  };
+  const widgetTree = () => {
+    const chat = unmounted ? undefined : f.currentChat();
+    if (!chat) { widget = undefined; return; }
+    const element = chat.props.permissions, key = f.permissionKey();
+    const fresh = !widget || widget.key !== key;
+    if (fresh) widget = { key, view: permissionWidgetRenderer() };
+    const props = { ...element.props, save: (...args) => { operation = element.props.save(...args); return operation; } };
+    let tree = widget.view.render("AgentOrchestratorPermissions", props);
+    const owner = JSON.stringify([props.mission?.id, props.team?.id]);
+    if (fresh || widget.owner !== owner) {
+      widget.owner = owner;
+      const effect = widget.view.effects.find(effect => String(effect).includes("popup.setOpen(false)"));
+      assert.ok(effect); effect(); tree = widget.view.render("AgentOrchestratorPermissions", props);
+    }
+    return tree;
+  };
+  const chip = tree => f.walk(tree).find(item => item.type === "button" && item.props.className === "ao-composer-chip");
+  const notice = () => f.walk(widgetTree()).filter(item => ["status", "alert"].includes(item.props?.role)).map(item => item.props.children).join(" ");
+  return Object.assign(f, {
+    backend, defaults, commit, widgetTree, notice,
+    pending: () => chip(widgetTree()).props.disabled,
+    async start() {
+      commit(); chip(widgetTree()).props.onClick(); widgetTree();
+      const load = widget.view.effects.find(effect => String(effect).includes("loadProfiles"));
+      assert.ok(load); load(); await new Promise(setImmediate);
+      const choices = f.walk(widgetTree()).filter(item => item.type === "button" && item.props.role === "menuitemradio");
+      assert.equal(choices[1].props.disabled, false); choices[1].props.onClick();
+      let timer;
+      try { await Promise.race([entered.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("Save did not reach " + gateAt)), 5000); })]); }
+      finally { clearTimeout(timer); }
+      const close = f.walk(widgetTree()).find(item => item.props?.["aria-label"] === "Close permissions");
+      assert.equal(close.props.disabled, undefined); close.props.onClick();
+    },
+    select(taskId, commitNow = true) {
+      f.walk(f.render()).find(item => item.props?.actions?.select).props.actions.select(taskId);
+      if (commitNow) { commit(); widgetTree(); }
+    },
+    preload() { f.walk(f.render()).find(item => item.props?.actions?.selectIn).props.actions.selectIn("other", "task-c"); },
+    async workspace() {
+      navigation.resolve(); f.walk(f.render()).find(item => item.props?.onWorkspace).props.onWorkspace("other"); f.render();
+      const load = f.effects.find(effect => String(effect).includes("preloaded.current") && String(effect).includes("setBoard(null)"));
+      assert.ok(load); const cleanup = load();
+      try {
+        await new Promise(setImmediate); f.render();
+        const select = f.effects.find(effect => String(effect).includes("paneWanted.current") && String(effect).includes("pendingSelect.current"));
+        assert.ok(select); select(); commit(); widgetTree();
+        assert.equal(f.state.loadedWorkspace, "other"); assert.equal(f.state.chatTaskId, "task-b");
+      } finally { cleanup(); }
+    },
+    inspect(taskId) {
+      f.currentChat().props.onOpenTeam(); commit();
+      f.walk(f.render()).find(item => item.type === "Canvas" && item.props.onSelect).props.onSelect("node-" + taskId);
+      commit();
+      return f.walk(f.render()).find(item => item.props?.draft && item.props.node?.id === "node-" + taskId);
+    },
+    unmount() {
+      f.render(); const effect = f.effects.find(effect => String(effect).includes("mounted.current = true"));
+      assert.ok(effect); effect()(); unmounted = true; widget = undefined;
+    },
+    async finish() {
+      gate.resolve(); await operation.catch(() => {}); await new Promise(setImmediate); commit(); widgetTree();
+      const applied = f.calls.find(call => call.operation === "team_update" && call.arguments.change.operation === "apply_team");
+      assert.equal(applied.arguments.change.run_id, "run-a", "the accepted backend operation keeps its original chat");
+      navigation.resolve(); await new Promise(setImmediate);
+    },
+  });
+}
+
+test("permission-save completion belongs to its chat and latest composer intent", async t => {
+  for (const action of ["apply navigation", "refresh navigation", "new model", "model before commit", "new mode", "round trip", "preload", "cancelled navigation", "unmount", "unchanged"]) await t.test(action, async () => {
+    const f = permissionSaveFixture({ gateAt: action === "refresh navigation" ? "runs" : "apply_team", cancel: action === "cancelled navigation" });
+    await f.start();
+    if (action.includes("navigation")) f.select("task-b");
+    if (action === "round trip") { f.select("task-b", false); f.select("task-a", false); }
+    if (action === "preload") f.preload();
+    if (["new model", "model before commit"].includes(action)) {
+      f.currentChat().props.composer.onRouteChange({ ...f.state.singleRoute, model: "newer-model", effort: "low" });
+      if (action !== "model before commit") { f.commit(); f.widgetTree(); }
+    }
+    if (action === "new mode") { f.currentChat().props.composer.onModeChange("team"); f.commit(); f.widgetTree(); }
+    if (action === "unmount") f.unmount();
+    const pending = action !== "unmount" && f.pending();
+    await f.finish();
+    if (["apply navigation", "refresh navigation", "new model", "cancelled navigation", "round trip", "preload"].includes(action)) assert.equal(pending, false, "A's pending state cannot disable another owner");
+    if (action.includes("navigation")) assert.equal(f.state.singleRoute.model, "b-model");
+    else if (["new model", "model before commit"].includes(action)) assert.equal(f.state.singleRoute.model, "newer-model");
+    if (action === "unchanged") {
+      assert.equal(f.state.singleRoute.approvals_reviewer, "auto_review");
+      assert.equal(f.defaults.at(-1).approvals_reviewer, "auto_review");
+      assert.match(f.notice(), /Applies from the next turn/);
+    } else {
+      assert.equal(f.defaults.length, ["new model", "model before commit"].includes(action) ? 1 : 0, "an old save cannot rewrite remembered defaults");
+      assert.equal(f.notice(), "", "old success/cancellation belongs to the retired permission widget");
+      if (action === "round trip") assert.equal(f.state.singleRoute.approvals_reviewer, "user");
+    }
+  });
+});
+
+test("permission team saves update the shared catalog without replacing a newer role draft", async t => {
+  for (const action of ["save navigation", "lookup navigation", "project navigation", "new role draft", "new team choice", "mission only", "unchanged"]) await t.test(action, async () => {
+    const f = permissionSaveFixture({ mode: "team", gateAt: action === "lookup navigation" ? "runs" : action === "mission only" ? "apply_team" : "save_team", missionOnly: action === "mission only" });
+    await f.start();
+    if (action === "project navigation") await f.workspace();
+    else if (action.includes("navigation") || action === "mission only") f.select("task-b");
+    if (action.includes("navigation")) f.inspect("b");
+    if (action === "new role draft") {
+      const editor = f.inspect("a"), next = plain(f.state.draftTeam);
+      next.nodes[0].route.model = "newer-role-model"; editor.props.change(next);
+    }
+    if (action === "new team choice") { f.currentChat().props.composer.onTeamChange("team-b"); f.commit(); f.widgetTree(); }
+    await f.finish();
+    if (action.includes("navigation")) {
+      const editor = f.walk(f.render()).find(item => item.props?.draft && item.props.mission?.id === "run-b");
+      assert.equal(editor.props.draft.id, "team-b");
+    }
+    if (action === "new role draft") assert.equal(f.state.draftTeam.nodes[0].route.model, "newer-role-model");
+    if (action === "new team choice" || action === "mission only") { assert.equal(f.state.draftTeam, null); assert.equal(f.state.composerTeamId, "team-b"); }
+    if (action === "project navigation") {
+      assert.equal(f.state.team.id, "team-b");
+      assert.deepEqual(plain(f.state.savedTeams.map(team => team.id)), ["team-b"]);
+      assert.equal(f.backend.teams.find(team => team.id === "team-a").revision, 2, "A's backend save still completed in A's workspace");
+    } else if (action !== "mission only") assert.equal(f.state.savedTeams.find(team => team.id === "team-a").revision, 2, "the shared A save remains valid");
+    assert.equal(f.state.savedTeams.find(team => team.id === "team-b").nodes[0].route.model, "b-model");
+    if (action === "unchanged") { assert.equal(f.state.draftTeam.id, "team-a"); assert.match(f.notice(), /Permissions saved/); }
   });
 });
