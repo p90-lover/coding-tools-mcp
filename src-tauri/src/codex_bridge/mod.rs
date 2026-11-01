@@ -18,7 +18,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -34,6 +34,8 @@ const MAX_THREADS: usize = 4;
 const MAX_LEDGER: usize = 64;
 const LEDGER_RETENTION: Duration = Duration::from_secs(90 * 60);
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
+const INITIALIZATION_RETIRED: &str =
+    "Native connection stopped or was replaced; use a fresh local Connect";
 type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -553,6 +555,28 @@ struct LedgerEntry {
     result: Option<Value>,
     completed_at: Option<Instant>,
 }
+struct PendingAdmission {
+    key: String,
+    fingerprint: String,
+    charged: u32,
+}
+impl PendingAdmission {
+    fn capture(memory: &Memory, key: String, before: u32, fresh: bool) -> Result<Option<Self>> {
+        if !fresh {
+            return Ok(None);
+        }
+        let entry = memory
+            .ledger
+            .get(&key)
+            .filter(|entry| entry.result.is_none() && entry.completed_at.is_none())
+            .ok_or("Native admission receipt unavailable")?;
+        Ok(Some(Self {
+            key,
+            fingerprint: entry.fingerprint.clone(),
+            charged: memory.requests_used.saturating_sub(before),
+        }))
+    }
+}
 #[derive(Default)]
 struct Memory {
     threads: BTreeMap<String, ThreadState>,
@@ -563,6 +587,22 @@ struct Memory {
 }
 
 impl Memory {
+    fn fail_admission(&mut self, pending: &PendingAdmission, result: Value) -> bool {
+        let Some(entry) = self.ledger.get_mut(&pending.key) else {
+            return false;
+        };
+        if entry.fingerprint != pending.fingerprint
+            || entry.result.is_some()
+            || entry.completed_at.is_some()
+        {
+            return false;
+        }
+        entry.result = Some(result);
+        entry.completed_at = Some(Instant::now());
+        self.requests_used = self.requests_used.saturating_sub(pending.charged);
+        true
+    }
+
     fn record_stop_reason(&mut self, reason: &str) {
         // A delayed resumable writer must never undo explicit revocation.
         if sessions::resumable_stop(self.stop_reason.as_deref())
@@ -616,6 +656,37 @@ impl Memory {
     }
 }
 
+fn persist_admission(
+    memory: &Mutex<Memory>,
+    pending: Option<&PendingAdmission>,
+    mut persist: impl FnMut() -> Result<()>,
+    failure: impl FnOnce(&str) -> Value,
+    stop: impl FnOnce(),
+) -> Result<()> {
+    let error = match persist() {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let Some(pending) = pending else {
+        return Err(error);
+    };
+    let result = failure(&error);
+    let settled = {
+        match memory.lock() {
+            Ok(mut memory) => memory.fail_admission(pending, result),
+            Err(_) => false,
+        }
+    };
+    if settled {
+        // Persist compensation only after its memory guard is released. If this
+        // also fails, disk recovery keeps its conservative unknown outcome.
+        let _ = persist();
+    } else {
+        stop();
+    }
+    Err(error)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum StopTransition {
     First,
@@ -638,6 +709,11 @@ fn stop_transition(
         ready.store(false, Ordering::SeqCst);
     }
     if let Ok(mut memory) = memory.lock() {
+        // A completion may have passed its live check before this stop.
+        // Serialize the final clear with mark_initialized's memory guard.
+        if first {
+            ready.store(false, Ordering::SeqCst);
+        }
         memory.record_stop_reason(reason);
         if first {
             for thread in memory.threads.values_mut() {
@@ -657,6 +733,31 @@ fn stop_transition(
     }
 }
 
+fn require_current_owner<T>(current: &Option<Arc<T>>, expected: &Arc<T>) -> Result<()> {
+    if current
+        .as_ref()
+        .is_none_or(|current| !Arc::ptr_eq(current, expected))
+    {
+        return Err(INITIALIZATION_RETIRED.into());
+    }
+    Ok(())
+}
+
+fn mark_initialized(
+    live: &AtomicBool,
+    ready: &AtomicBool,
+    memory: &Mutex<Memory>,
+    before_store: impl FnOnce(),
+) -> Result<()> {
+    let _memory = lock(memory)?;
+    if !live.load(Ordering::SeqCst) {
+        return Err(INITIALIZATION_RETIRED.into());
+    }
+    before_store();
+    ready.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 /// Owned by an actual authenticated listener, never keyed only by a filesystem path.
 #[derive(Default)]
 pub struct Hub {
@@ -664,6 +765,10 @@ pub struct Hub {
     admission_epoch: AtomicU64,
     state_file: Option<PathBuf>,
     recovery: Mutex<()>,
+}
+#[must_use = "Initialize the admitted native connection with this ticket"]
+pub struct ConnectionTicket {
+    owner: Weak<Bridge>,
 }
 pub struct Ticket {
     bridge: Arc<Bridge>,
@@ -1135,7 +1240,7 @@ impl Hub {
 
     /// Local desktop admission only. Caller must hold the listener's current policy fence.
     /// Returns before the handshake; a later policy change can cancel the provisional child.
-    pub fn connect(&self, root: &Path, options: Connection) -> Result<()> {
+    pub fn connect(&self, root: &Path, options: Connection) -> Result<ConnectionTicket> {
         self.connect_inner(root, options, None, false, None, false)
     }
     pub fn connect_ao_with_cpa_key(
@@ -1143,7 +1248,7 @@ impl Hub {
         root: &Path,
         options: Connection,
         key: String,
-    ) -> Result<()> {
+    ) -> Result<ConnectionTicket> {
         if key.len() < 32 || key.len() > 512 || key.chars().any(char::is_control) {
             return Err("AO CPA proxy key is unavailable or invalid".into());
         }
@@ -1152,7 +1257,7 @@ impl Hub {
         }
         self.connect_inner(root, options, Some(key), false, None, false)
     }
-    pub fn connect_ao_web(&self, root: &Path, options: Connection) -> Result<()> {
+    pub fn connect_ao_web(&self, root: &Path, options: Connection) -> Result<ConnectionTicket> {
         self.connect_inner(root, options, None, true, None, false)
     }
     fn connect_inner(
@@ -1163,7 +1268,7 @@ impl Hub {
         ao_web: bool,
         recovery_deadline: Option<u64>,
         preserve_budget: bool,
-    ) -> Result<()> {
+    ) -> Result<ConnectionTicket> {
         let admission_epoch = self.admission_epoch.load(Ordering::SeqCst);
         if ao_web {
             let tier = options.model.strip_prefix("chatgpt-web/");
@@ -1307,38 +1412,50 @@ impl Hub {
                 std::thread::sleep(Duration::from_secs(1));
             });
         }
-        Ok(())
+        Ok(ConnectionTicket {
+            owner: Arc::downgrade(&bridge),
+        })
     }
-    pub fn initialize(&self) -> Result<Value> {
-        let bridge = self.bridge()?;
-        let result = bridge.rpc(
-            "initialize",
-            json!({"clientInfo":{"name":"coding_tools_mcp",
-            "title":"Coding Tools MCP","version":env!("CARGO_PKG_VERSION")},
-            "capabilities":{"experimentalApi":true}}),
-        );
-        match result {
-            Ok(value) => {
-                if let Ok(mut memory) = bridge.memory.lock() {
-                    memory.native_identity =
-                        bounded(value["userAgent"].as_str().unwrap_or("initialized"), 300);
+    pub fn initialize(&self, ticket: ConnectionTicket) -> Result<Value> {
+        let bridge = ticket
+            .owner
+            .upgrade()
+            .ok_or_else(|| INITIALIZATION_RETIRED.to_string())?;
+        let result = (|| {
+            {
+                let current = lock(&self.current)?;
+                require_current_owner(&current, &bridge)?;
+                if !bridge.live.load(Ordering::SeqCst) {
+                    return Err(INITIALIZATION_RETIRED.into());
                 }
-                bridge.enqueue(json!({"method":"initialized","params":{}}))?;
-                if let Err(error) = bridge
-                    .restore_sessions()
-                    .and_then(|_| bridge.save_session())
-                {
-                    bridge.stop_if_live("native_session_restore_failed");
-                    return Err(error);
-                }
-                bridge.ready.store(true, Ordering::SeqCst);
-                self.status()
             }
-            Err(error) => {
-                bridge.stop_if_live("initialization_failed");
-                Err(error)
+            let value = bridge.rpc(
+                "initialize",
+                json!({"clientInfo":{"name":"coding_tools_mcp",
+                "title":"Coding Tools MCP","version":env!("CARGO_PKG_VERSION")},
+                "capabilities":{"experimentalApi":true}}),
+            )?;
+            if let Ok(mut memory) = bridge.memory.lock() {
+                memory.native_identity =
+                    bounded(value["userAgent"].as_str().unwrap_or("initialized"), 300);
             }
+            bridge.enqueue(json!({"method":"initialized","params":{}}))?;
+            if let Err(error) = bridge
+                .restore_sessions()
+                .and_then(|_| bridge.save_session())
+            {
+                bridge.stop_if_live("native_session_restore_failed");
+                return Err(error);
+            }
+            let current = lock(&self.current)?;
+            require_current_owner(&current, &bridge)?;
+            mark_initialized(&bridge.live, &bridge.ready, &bridge.memory, || {})?;
+            Self::status_for_current(&current)
+        })();
+        if result.is_err() {
+            bridge.stop_if_live("initialization_failed");
         }
+        result
     }
     fn bridge(&self) -> Result<Arc<Bridge>> {
         lock(&self.current)?
@@ -1347,6 +1464,9 @@ impl Hub {
     }
     pub fn status(&self) -> Result<Value> {
         let current = lock(&self.current)?;
+        Self::status_for_current(&current)
+    }
+    fn status_for_current(current: &Option<Arc<Bridge>>) -> Result<Value> {
         let Some(bridge) = current.as_ref() else {
             return Ok(
                 json!({"connected":false,"initializing":false,"model_usage_enabled":false,"command_execution_enabled":false,"command_runtime_sha256":native_command::COMMAND_RUNTIME_SHA256,"implementation":"native_app_server_opt_in",
@@ -1521,20 +1641,45 @@ impl Hub {
     pub fn admit(&self, request: Control) -> Result<Ticket> {
         let uses_model = validate_control(&request)?;
         let bridge = self.bridge()?;
-        let replay = {
+        let (replay, pending) = {
             let mut memory = lock(&bridge.memory)?;
-            reserve(
+            let before = memory.requests_used;
+            let replay = reserve(
                 &mut memory,
                 &request,
                 uses_model,
                 &bridge.options,
                 bridge.live.load(Ordering::SeqCst),
                 bridge.ready.load(Ordering::SeqCst),
-            )?
+            )?;
+            let pending = PendingAdmission::capture(
+                &memory,
+                request.request_id.clone(),
+                before,
+                replay.is_none(),
+            );
+            (replay, pending)
+        };
+        let pending = match pending {
+            Ok(pending) => pending,
+            Err(error) => {
+                bridge.stop("native_session_persistence_failed");
+                return Err(error);
+            }
         };
         // Persist admission before any RPC, so a process restart cannot turn an unknown
         // submitted request into a fresh model call with the same request ID.
-        bridge.save_session()?;
+        persist_admission(
+            &bridge.memory,
+            pending.as_ref(),
+            || bridge.save_session(),
+            |error| {
+                json!({"ok":false,"request_id":request.request_id,
+                "error":format!("Native request was not submitted because its admission journal could not be saved: {error}"),
+                "outcome":"not_submitted","replayed":false})
+            },
+            || bridge.stop("native_session_persistence_failed"),
+        )?;
         Ok(Ticket {
             bridge,
             request,
@@ -2634,39 +2779,161 @@ mod tests {
 
     use super::*;
 
-    fn pending_connection_is_cancelled(stop: impl FnOnce(&Hub)) {
-        let hub = Arc::new(Hub::default());
-        assert!(hub.state_file.is_none());
-        let (captured, waiting) = mpsc::channel();
-        let (resume, paused) = mpsc::channel();
-        let worker = std::thread::spawn({
-            let hub = hub.clone();
+    #[test]
+    fn initialization_owner_cannot_follow_a_replacement_connection() {
+        let first = Arc::new(());
+        let waiting = Arc::downgrade(&first);
+        assert_eq!(Arc::strong_count(&first), 1);
+        let captured = waiting.upgrade().unwrap();
+        let mut current = Some(first.clone());
+        require_current_owner(&current, &captured).unwrap();
+        current = None;
+        assert!(require_current_owner(&current, &captured).is_err());
+        let replacement = Arc::new(());
+        current = Some(replacement.clone());
+        assert!(require_current_owner(&current, &captured).is_err());
+        require_current_owner(&current, &replacement).unwrap();
+        drop(first);
+        drop(captured);
+        assert!(waiting.upgrade().is_none());
+    }
+
+    #[test]
+    fn stopped_or_poisoned_initialization_cannot_become_ready() {
+        let live = AtomicBool::new(false);
+        let ready = AtomicBool::new(false);
+        let memory = Mutex::new(Memory::default());
+        assert_eq!(
+            mark_initialized(&live, &ready, &memory, || panic!("stopped callback")).unwrap_err(),
+            INITIALIZATION_RETIRED
+        );
+        assert!(!ready.load(Ordering::SeqCst));
+
+        let poisoned = Mutex::new(Memory::default());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison readiness fixture");
+        });
+        let live = AtomicBool::new(true);
+        assert!(mark_initialized(&live, &ready, &poisoned, || {}).is_err());
+        assert_eq!(
+            stop_transition(&live, &ready, &poisoned, "initialization_failed", true),
+            StopTransition::First
+        );
+        assert!(!live.load(Ordering::SeqCst));
+        assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stop_wins_over_an_initialization_ready_store_in_progress() {
+        let live = Arc::new(AtomicBool::new(true));
+        let ready = Arc::new(AtomicBool::new(false));
+        let memory = Arc::new(Mutex::new(Memory::default()));
+        let (before_store, paused) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let initializer = std::thread::spawn({
+            let live = live.clone();
+            let ready = ready.clone();
+            let memory = memory.clone();
             move || {
-                let epoch = hub.admission_epoch.load(Ordering::SeqCst);
-                captured.send(()).unwrap();
-                paused.recv().unwrap();
-                hub.connection_admission(epoch).map(|_| ())
+                mark_initialized(&live, &ready, &memory, || {
+                    before_store.send(()).unwrap();
+                    resumed.recv_timeout(Duration::from_secs(10)).unwrap();
+                })
             }
         });
-        waiting.recv().unwrap();
-        stop(&hub);
-        resume.send(()).unwrap();
-        assert_eq!(
-            worker.join().unwrap().unwrap_err(),
-            "Native connection was cancelled before admission; use a fresh local Connect"
-        );
-        let fresh_epoch = hub.admission_epoch.load(Ordering::SeqCst);
-        assert!(hub.connection_admission(fresh_epoch).unwrap().is_none());
+        paused.recv_timeout(Duration::from_secs(10)).unwrap();
+        let stopper = std::thread::spawn({
+            let live = live.clone();
+            let ready = ready.clone();
+            let memory = memory.clone();
+            move || stop_transition(&live, &ready, &memory, "local_disconnect", false)
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while live.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let stop_started = !live.load(Ordering::SeqCst);
+        // Always release and join both workers before an assertion can fail.
+        let _ = resume.send(());
+        let initialized = initializer.join();
+        let stopped = stopper.join();
+        assert!(stop_started, "Stop did not reach its atomic invalidation");
+        initialized.unwrap().unwrap();
+        assert_eq!(stopped.unwrap(), StopTransition::First);
+        assert!(!live.load(Ordering::SeqCst));
+        assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    fn journal_admission_fixture() -> (Mutex<Memory>, PendingAdmission) {
+        let mut memory = Memory {
+            requests_used: 4,
+            ..Default::default()
+        };
+        for key in ["fresh-request", "other-pending", "restored-unknown"] {
+            memory.ledger.insert(
+                key.into(),
+                LedgerEntry {
+                    fingerprint: key.into(),
+                    result: (key == "restored-unknown").then_some(Value::Null),
+                    completed_at: None,
+                },
+            );
+        }
+        let pending = PendingAdmission::capture(&memory, "fresh-request".into(), 3, true)
+            .unwrap()
+            .unwrap();
+        (Mutex::new(memory), pending)
     }
 
     #[test]
-    fn disconnect_rejects_pending_connection_admission_and_allows_a_fresh_epoch() {
-        pending_connection_is_cancelled(Hub::disconnect);
-    }
-
-    #[test]
-    fn cancel_rejects_pending_connection_admission_and_allows_a_fresh_epoch() {
-        pending_connection_is_cancelled(|hub| hub.cancel("workspace_policy_changed"));
+    fn admission_journal_failure_settles_only_its_fresh_charge_once() {
+        use std::cell::Cell;
+        for settlement_succeeds in [false, true] {
+            let (memory, pending) = journal_admission_fixture();
+            let writes = Cell::new(0);
+            let dispatched = Cell::new(false);
+            let result = persist_admission(
+                &memory,
+                Some(&pending),
+                || {
+                    assert!(memory.try_lock().is_ok(), "persist held the memory guard");
+                    writes.set(writes.get() + 1);
+                    if writes.get() == 1 {
+                        Err("first journal failure".into())
+                    } else if settlement_succeeds {
+                        Ok(())
+                    } else {
+                        Err("settlement also failed".into())
+                    }
+                },
+                |error| {
+                    assert_eq!(error, "first journal failure");
+                    Value::Null
+                },
+                || panic!("owned receipt should settle without stopping"),
+            );
+            if result.is_ok() {
+                dispatched.set(true);
+            }
+            assert_eq!(result.unwrap_err(), "first journal failure");
+            assert!(!dispatched.get());
+            assert_eq!(writes.get(), 2);
+            let mut memory = lock(&memory).unwrap();
+            assert_eq!(memory.requests_used, 3);
+            let entry = &memory.ledger["fresh-request"];
+            assert_eq!(entry.fingerprint, "fresh-request");
+            assert_eq!(entry.result, Some(Value::Null));
+            let completed = entry.completed_at;
+            assert!(completed.is_some());
+            assert!(!memory.fail_admission(&pending, Value::Null));
+            assert_eq!(memory.requests_used, 3);
+            assert_eq!(memory.ledger["fresh-request"].completed_at, completed);
+            assert!(memory.ledger["other-pending"].result.is_none());
+            assert!(memory.ledger["other-pending"].completed_at.is_none());
+            assert_eq!(memory.ledger["restored-unknown"].result, Some(Value::Null));
+            assert!(memory.ledger["restored-unknown"].completed_at.is_none());
+        }
     }
 
     #[test]
@@ -2695,6 +2962,149 @@ mod tests {
                 assert!(sessions::resumable_stop(memory.stop_reason.as_deref()));
             }
         }
+    }
+
+    #[test]
+    fn admission_journal_success_and_replay_failure_preserve_receipts() {
+        use std::cell::Cell;
+        let (memory, pending) = journal_admission_fixture();
+        persist_admission(
+            &memory,
+            Some(&pending),
+            || Ok(()),
+            |_| panic!("successful admission must remain pending"),
+            || panic!("successful admission must not stop"),
+        )
+        .unwrap();
+        let completed = Instant::now();
+        let replay = {
+            let mut memory = lock(&memory).unwrap();
+            assert_eq!(memory.requests_used, 4);
+            assert!(memory.ledger["fresh-request"].result.is_none());
+            assert!(memory.ledger["fresh-request"].completed_at.is_none());
+            let entry = memory.ledger.get_mut("fresh-request").unwrap();
+            entry.result = Some(Value::Null);
+            entry.completed_at = Some(completed);
+            PendingAdmission::capture(&memory, "fresh-request".into(), 3, false).unwrap()
+        };
+        assert!(replay.is_none());
+        let writes = Cell::new(0);
+        let failed = persist_admission(
+            &memory,
+            replay.as_ref(),
+            || {
+                writes.set(writes.get() + 1);
+                Err("replay journal failure".into())
+            },
+            |_| panic!("a replay does not own a fresh reservation"),
+            || panic!("a replay failure must not alter its receipt"),
+        );
+        assert_eq!(failed.unwrap_err(), "replay journal failure");
+        assert_eq!(writes.get(), 1);
+        let memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 4);
+        assert_eq!(memory.ledger["fresh-request"].result, Some(Value::Null));
+        assert_eq!(memory.ledger["fresh-request"].completed_at, Some(completed));
+    }
+
+    #[test]
+    fn admission_journal_unavailable_state_stops_after_guards_drop() {
+        use std::cell::Cell;
+        let (memory, pending) = journal_admission_fixture();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = memory.lock().unwrap();
+            panic!("poison admission fixture");
+        });
+        let stopped = Cell::new(false);
+        let result = persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| Value::Null,
+            || {
+                assert!(!matches!(
+                    memory.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+                stopped.set(true);
+            },
+        );
+        assert_eq!(result.unwrap_err(), "journal unavailable");
+        assert!(stopped.get());
+
+        let (memory, pending) = journal_admission_fixture();
+        lock(&memory)
+            .unwrap()
+            .ledger
+            .get_mut("fresh-request")
+            .unwrap()
+            .fingerprint = "replacement".into();
+        let stopped = Cell::new(false);
+        assert!(persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| Value::Null,
+            || {
+                assert!(memory.try_lock().is_ok());
+                stopped.set(true);
+            },
+        )
+        .is_err());
+        assert!(stopped.get());
+        let memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 4);
+        assert_eq!(memory.ledger["fresh-request"].fingerprint, "replacement");
+        assert!(memory.ledger["fresh-request"].result.is_none());
+    }
+
+    #[test]
+    fn model_journal_failure_preserves_replay_identity_and_refunds_new_charge() {
+        let options: Connection =
+            serde_json::from_value(json!({"executable":"/not-executed/codex",
+            "expected_sha256":"0".repeat(64),"codex_home":"/not-opened/home",
+            "allow_model_usage":true,"model":"fixture","request_limit":1,"lifetime_seconds":60}))
+            .unwrap();
+        let request = Control {
+            operation: "start".into(),
+            request_id: "journal-model".into(),
+            thread_id: None,
+            text: Some("must not be submitted".into()),
+            model: None,
+            effort: None,
+        };
+        let mut state = Memory::default();
+        let before = state.requests_used;
+        assert!(reserve(&mut state, &request, true, &options, true, true)
+            .unwrap()
+            .is_none());
+        let pending = PendingAdmission::capture(&state, request.request_id.clone(), before, true)
+            .unwrap()
+            .unwrap();
+        let memory = Mutex::new(state);
+        assert!(persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| json!({"ok":false,"outcome":"not_submitted"}),
+            || panic!("fresh receipt should settle"),
+        )
+        .is_err());
+        let mut memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 0);
+        let replay = reserve(&mut memory, &request, true, &options, true, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay["outcome"], "not_submitted");
+        assert_eq!(memory.requests_used, 0);
+        let mut changed = request.clone();
+        changed.text = Some("different arguments".into());
+        assert!(reserve(&mut memory, &changed, true, &options, true, true).is_err());
+        changed.request_id = "fresh-model".into();
+        assert!(reserve(&mut memory, &changed, true, &options, true, true)
+            .unwrap()
+            .is_none());
+        assert_eq!(memory.requests_used, 1);
     }
 
     #[test]
@@ -2784,6 +3194,41 @@ mod tests {
             stop_transition(&live, &ready, &poisoned, "local_disconnect", false),
             StopTransition::Persist
         );
+    }
+
+    fn pending_connection_is_cancelled(stop: impl FnOnce(&Hub)) {
+        let hub = Arc::new(Hub::default());
+        assert!(hub.state_file.is_none());
+        let (captured, waiting) = mpsc::channel();
+        let (resume, paused) = mpsc::channel();
+        let worker = std::thread::spawn({
+            let hub = hub.clone();
+            move || {
+                let epoch = hub.admission_epoch.load(Ordering::SeqCst);
+                captured.send(()).unwrap();
+                paused.recv().unwrap();
+                hub.connection_admission(epoch).map(|_| ())
+            }
+        });
+        waiting.recv().unwrap();
+        stop(&hub);
+        resume.send(()).unwrap();
+        assert_eq!(
+            worker.join().unwrap().unwrap_err(),
+            "Native connection was cancelled before admission; use a fresh local Connect"
+        );
+        let fresh_epoch = hub.admission_epoch.load(Ordering::SeqCst);
+        assert!(hub.connection_admission(fresh_epoch).unwrap().is_none());
+    }
+
+    #[test]
+    fn disconnect_rejects_pending_connection_admission_and_allows_a_fresh_epoch() {
+        pending_connection_is_cancelled(Hub::disconnect);
+    }
+
+    #[test]
+    fn cancel_rejects_pending_connection_admission_and_allows_a_fresh_epoch() {
+        pending_connection_is_cancelled(|hub| hub.cancel("workspace_policy_changed"));
     }
 
     #[test]
@@ -3865,26 +4310,27 @@ mod tests {
         let root = root.canonicalize().unwrap();
         let home = home.canonicalize().unwrap();
         let hub = Hub::default();
-        hub.connect(
-            &root,
-            Connection {
-                executable,
-                expected_sha256,
-                codex_home: home,
-                allow_model_usage: false,
-                allow_command_execution: false,
-                permission_profile: default_permission_profile(),
-                approval_policy: None,
-                approvals_reviewer: None,
-                model: "no-model-request".into(),
-                request_limit: 1,
-                lifetime_seconds: 30,
-                effort: None,
-                context_window: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(hub.initialize().unwrap()["connected"], true);
+        let ticket = hub
+            .connect(
+                &root,
+                Connection {
+                    executable,
+                    expected_sha256,
+                    codex_home: home,
+                    allow_model_usage: false,
+                    allow_command_execution: false,
+                    permission_profile: default_permission_profile(),
+                    approval_policy: None,
+                    approvals_reviewer: None,
+                    model: "no-model-request".into(),
+                    request_limit: 1,
+                    lifetime_seconds: 30,
+                    effort: None,
+                    context_window: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(hub.initialize(ticket).unwrap()["connected"], true);
         let metadata = hub.permission_profiles().unwrap();
         assert_eq!(metadata["supported"], true);
         assert!(metadata["profiles"]
