@@ -45,12 +45,14 @@ const TUNNEL_TONE: Record<McpTunnel["state"], string> = { ready: "ok", starting:
 const TUNNEL_LABEL: Record<McpTunnel["state"], string> = { ready: "Ready", starting: "Starting", stopped: "Stopped", failed: "Failed" };
 
 function connectorText(connector: BrowserAccount["connector"]) {
-  if (!connector) return { tone: "idle", label: "Not used yet", detail: "Shown after a Codex turn uses it" };
+  if (!connector) return { tone: "idle", label: "Not checked", detail: "Connect MCP to set up and check this account" };
   if (connector.error && (connector.errorAt ?? 0) >= (connector.okAt ?? 0)) {
     return { tone: "error", label: "Failed", detail: `${connector.error} · ${ago(connector.errorAt)}` };
   }
-  return { tone: "ok", label: "Connected", detail: `Last bound ${ago(connector.okAt)}` };
+  return { tone: "idle", label: "Previously connected", detail: `Last confirmed ${ago(connector.okAt)}` };
 }
+
+type ConnectionResult = { state: "connecting" | "connected" | "failed"; detail: string; checkedAt: number; email: string | null };
 
 export interface BridgeSetup {
   mcpReady: boolean;
@@ -74,6 +76,9 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
   const [network, setNetwork] = useState<ProviderNetworkSnapshot | null>(null);
   const [threads, setThreads] = useState<CodexThreadBinding[]>([]);
   const [tunnels, setTunnels] = useState<McpTunnel[]>([]);
+  const [connections, setConnections] = useState<Record<string, ConnectionResult>>({});
+  const [connectionSummary, setConnectionSummary] = useState<string | null>(null);
+  const connectingMcp = useRef(false);
   // The actions running now, by key. Each control waits only on its own action (and the switch
   // buttons on a switch): one busy key once greyed out the whole page, so a Remove or a proxy check,
   // seconds on the busy hard disk, held every other button until it finished.
@@ -96,6 +101,22 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
       offTunnels();
     };
   }, [api]);
+
+  useEffect(() => {
+    setConnections(previous => {
+      const next = { ...previous };
+      let changed = false;
+      for (const id of Object.keys(previous)) {
+        const account = accounts?.accounts.find(entry => entry.id === id);
+        const signedIn = account?.id === accounts?.activeId ? browser?.authenticated : account?.signedIn;
+        if (!account || signedIn === false || previous[id].email !== account.email) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  }, [accounts, browser?.authenticated]);
 
   // Sessions change when turns start and end: re-read them whenever a tab's status changes.
   const tabSignature = (browser?.tabs ?? []).map(tab => `${tab.id}:${tab.status}`).join(",");
@@ -131,6 +152,34 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
   }, [setError]);
   const isRunning = useCallback((key: string) => inFlight.has(key), [inFlight]);
 
+  const connectAccounts = async (targets: BrowserAccount[]) => {
+    if (connectingMcp.current) return;
+    connectingMcp.current = true;
+    try {
+      await run("connect-mcp", async () => {
+        setConnectionSummary(null);
+        let connected = 0;
+        for (const account of targets) {
+          setConnections(previous => ({ ...previous, [account.id]: { state: "connecting", detail: "Setting up and checking this account's connector", checkedAt: Date.now(), email: account.email } }));
+          try {
+            const result = await api.createMcpConnector(account.id);
+            if (result.connected !== true) throw new Error("ChatGPT did not confirm this account's connector connection.");
+            connected += 1;
+            setConnections(previous => ({ ...previous, [account.id]: { state: "connected", detail: "ChatGPT confirmed this account's connection", checkedAt: Date.now(), email: account.email } }));
+          } catch (cause) {
+            const detail = cause instanceof Error ? cause.message : String(cause);
+            setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail, checkedAt: Date.now(), email: account.email } }));
+          }
+        }
+        setConnectionSummary(`Last connection check: ${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected.${connected < targets.length ? " Check the accounts that need attention below." : ""}`);
+        await api.browserAccounts().then(setAccounts).catch(() => {});
+        await api.mcpTunnels().then(setTunnels).catch(() => {});
+      });
+    } finally {
+      connectingMcp.current = false;
+    }
+  };
+
   const proxies = useMemo(() => (network?.proxyProfiles ?? [])
     .filter(profile => !profile.archivedAt)
     .sort((a, b) => Number(b.id.startsWith(DECODO_PREFIX)) - Number(a.id.startsWith(DECODO_PREFIX)) || a.name.localeCompare(b.name)),
@@ -147,8 +196,8 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
   const decodoCount = proxies.filter(profile => profile.id.startsWith(DECODO_PREFIX)).length;
   // One switch at a time (the service refuses a second): adding switches to the new account too,
   // and so does Sign in on an account not in use (a sign-in holds switches until it ends).
-  const switching = accounts.switching || isRunning("add") || [...inFlight].some(key => key.startsWith("use:") || key.startsWith("signin:"));
-  const removing = isRunning("remove-many");
+  const switching = accounts.switching || isRunning("add") || isRunning("connect-mcp") || [...inFlight].some(key => key.startsWith("use:") || key.startsWith("signin:"));
+  const removing = isRunning("remove-many") || isRunning("connect-mcp");
   const full = accounts.accounts.length >= accounts.maxAccounts;
   const chatRunning = browser?.status === "running" || running > 0;
   // A ticked account that has since gone (removed elsewhere) no longer counts.
@@ -190,12 +239,20 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
         <Stat label="Tabs open" value={pages.length} detail={`of ${TOTAL_TAB_CEILING} · ${running} running`} />
         <Stat label="Codex sessions" value={threads.length} detail={`${threads.filter(t => t.running).length} running · ${CONCURRENT_TURNS} turns at once`} />
         <Stat
-          label="MCP connector"
-          value={setup.mcpReady ? "Ready" : "Not set up"}
+          label="MCP check"
+          value={setup.mcpReady ? "Verified" : "Not verified"}
           tone={setup.mcpReady ? "ok" : "warn"}
           detail={`${1 + tunnels.length} tunnel${tunnels.length ? "s" : ""} · ${setup.bridgeReady ? "Codex bridge set up" : "Codex bridge not set up"}`}
         />
         <Stat label="Proxies" value={`${bound}/${accounts.accounts.length}`} detail={`accounts bound · ${decodoCount} from Decodo`} />
+      </div>
+
+      <div className="cbm-decodo-head">
+        <p className="cbm-muted" role="status">{connectionSummary ?? "Set up the configured Coding Tools MCP connector and check its connection in each account."}</p>
+        <button className="cbm-button" disabled={switching || removing || chatRunning || accounts.accounts.length === 0}
+          onClick={() => void connectAccounts(accounts.accounts)} type="button">
+          {isRunning("connect-mcp") ? "Connecting accounts…" : "Connect all accounts"}
+        </button>
       </div>
 
       {accounts.accounts.length > 1 ? (
@@ -219,6 +276,8 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
         {accounts.accounts.map(account => (
           <AccountCard
             account={account}
+            connection={connections[account.id]}
+            connect={() => connectAccounts([account])}
             api={api}
             authenticated={browser?.authenticated === true}
             isRunning={isRunning}
@@ -317,7 +376,7 @@ function Stat({ label, value, detail, tone }: { label: string; value: string | n
 
 function AccountCard({
   account, api, authenticated, isRunning, chatRunning, canRemove, inUse, removing, switching, mainTunnelReady, maxTabs, proxies, holders, run,
-  sessions, tabs, threads, tunnel, selected = false, onSelect, onOpenBrowser,
+  sessions, tabs, threads, tunnel, selected = false, onSelect, onOpenBrowser, connection, connect,
 }: {
   /** Every bound Codex session: a tab's own one gives its tokens, model and effort. */
   threads: CodexThreadBinding[];
@@ -348,6 +407,8 @@ function AccountCard({
   tabs: BrowserState["tabs"];
   /** This account's own MCP tunnel (#674), if it has one. */
   tunnel: McpTunnel | undefined;
+  connection: ConnectionResult | undefined;
+  connect: () => Promise<void>;
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [tabsOpen, setTabsOpen] = useState(false);
@@ -359,10 +420,16 @@ function AccountCard({
   const holderOf = (profileId: string) => holders.find(other => other.id !== account.id && other.proxyProfileId === profileId);
   const runningTabs = tabs.filter(tab => tab.status === "running").length;
   const plan = planText(account.plan);
-  const connector = connectorText(account.connector);
   // Every account keeps its own sign-in: the one in use from its live page, the others from their
   // own saved session (null until read).
   const signedIn = inUse ? authenticated : account.signedIn;
+  const observedAt = Math.max(account.connector?.okAt ?? 0, account.connector?.errorAt ?? 0);
+  const connector = signedIn === false
+    ? { tone: "warn", label: "Not connected", detail: "Sign in to this account in the Browser tab first" }
+    : connection && connection.email === account.email && (connection.state === "connecting" || connection.checkedAt >= observedAt)
+      ? { tone: connection.state === "connected" ? "ok" : connection.state === "failed" ? "error" : "idle",
+        label: connection.state === "connected" ? "Connected" : connection.state === "failed" ? "Needs attention" : "Connecting…", detail: connection.detail }
+      : connectorText(account.connector);
   const signIn = signedIn === null
     ? { tone: "idle", label: "Checking…" }
     : signedIn ? { tone: inUse ? "ok" : "idle", label: "Signed in" } : { tone: "warn", label: "Not signed in" };
@@ -461,16 +528,16 @@ function AccountCard({
             ) : (
               <>
                 <span className={`cbm-tone is-${mainTunnelReady ? "idle" : "warn"}`}>Main tunnel</span>
-                <span className="cbm-muted"> · {mainTunnelReady ? "no tunnel of its own" : "not set up"}</span>
+                <span className="cbm-muted"> · {mainTunnelReady ? "shared configuration" : "not verified"}</span>
               </>
             )}
           </dd>
         </div>
         <div>
           <dt>Connector</dt>
-          <dd>
+          <dd className="cbm-connector" role="status">
             <span className={`cbm-tone is-${connector.tone}`}>{connector.label}</span>
-            <span className={`cbm-muted${connector.tone === "error" ? " is-error" : ""}`} title={connector.detail}> · {connector.detail}</span>
+            <span className={`cbm-muted${connector.tone === "error" ? " is-error" : ""}`} title={connector.detail}>{connector.detail}</span>
           </dd>
         </div>
         <div>
@@ -563,6 +630,10 @@ function AccountCard({
       </div>
 
       <footer className="cbm-card-actions">
+        <button className="cbm-button" disabled={switching || removing || chatRunning || signedIn !== true}
+          onClick={() => void connect()} title={signedIn === true ? "Set up and verify this account's configured MCP connector" : "Sign in to this account first"} type="button">
+          {connection?.state === "connecting" ? "Connecting…" : connection?.state === "connected" ? "Check connection" : "Connect MCP"}
+        </button>
         {!inUse ? (
           <button className="cbm-button" disabled={switching || removing || isRunning(`remove:${account.id}`)} onClick={() => void use()} type="button">
             {isRunning(`use:${account.id}`) ? "Switching…" : "Use in Browser tab"}

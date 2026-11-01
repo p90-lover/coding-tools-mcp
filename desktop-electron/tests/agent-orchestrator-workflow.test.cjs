@@ -3357,19 +3357,121 @@ test("CPA's model list leaves out a provider plugin's models when nobody is sign
     { name: "cline-pass-switcher.json", provider: "cline" },
     { name: "commandcode-old.json", provider: "commandcode-go", disabled: true },
   ];
-  // A disabled account's models stay listed (with why they may not run); built-in and API-key
-  // providers are never judged by their owner name.
+  // Explicitly disabled providers leave the picker; API-key providers without auth files stay.
   const listed = await make(signedIn).call("models", {});
-  assert.deepEqual(listed.models, ["gpt-5.5", "cline-pass/deepseek-v4-flash", "commandcode-go/deepseek-v4.1-flash", "myclaude/claude-sonnet-5"]);
-  assert.match(listed.held["commandcode-go/deepseek-v4.1-flash"], /CommandCode Go's account is disabled in CPA/);
-  assert.equal(listed.unavailable, undefined);
+  assert.deepEqual(listed.models, ["gpt-5.5", "cline-pass/deepseek-v4-flash", "myclaude/claude-sonnet-5"]);
+  assert.match(listed.unavailable["commandcode-go/deepseek-v4.1-flash"], /CommandCode Go's account is disabled in CPA/);
+  assert.equal(listed.held, undefined);
   assert.equal((await make(null).call("models", {})).models.length, 4, "an unreadable account list hides nothing");
   // A provider nobody ever added stays out of the list, with why, for a refused send.
   const noCline = await make([{ name: "codex-a.json", provider: "codex" }]).call("models", {});
   assert.ok(!noCline.models.includes("cline-pass/deepseek-v4-flash"));
   assert.match(noCline.unavailable["cline-pass/deepseek-v4-flash"], /no Cline Pass account is added in CPA/);
   const agent = await make(signedIn).call("models", { harness: "ao:claude-code", workspaceId: "ws" });
-  assert.match(agent.held["cpa/commandcode-go/deepseek-v4.1-flash"], /disabled in CPA/, "an agent's catalog names it by its CPA route");
+  assert.ok(!agent.models.includes("cpa/commandcode-go/deepseek-v4.1-flash"));
+  assert.match(agent.unavailable["cpa/commandcode-go/deepseek-v4.1-flash"], /disabled in CPA/, "an agent's catalog names it by its CPA route");
+});
+
+test("disabled OAuth files do not hide live API-key models or erase their remembered capabilities", async () => {
+  let clock = 1_000_000;
+  let metadataOffline = false;
+  let ownersOffline = false;
+  let offline = false;
+  let unownedListed = true;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async url => {
+      if (offline) throw new Error("CPA offline");
+      if (String(url).includes("/auth-files")) return metadataOffline
+        ? { ok: false, status: 503 }
+        : { ok: true, json: async () => ({ files: [{ name: "codex-oauth.json", provider: "codex", disabled: true }] }) };
+      const rows = [{ id: "gpt-5.5", owned_by: "codex", context_window: 272000, supported_reasoning_levels: ["low", "high"] },
+        ...(unownedListed ? [{ id: "codex/unowned", context_window: 128000 }] : [])];
+      if (!ownersOffline) return { ok: true, json: async () => ({ data: rows }) };
+      // The enhanced catalog still answers; the separate owner metadata request fails.
+      return String(url).includes("client_version")
+        ? { ok: true, json: async () => ({ models: rows.map(({ id, owned_by, ...entry }) => ({ slug: id, ...entry })) }) }
+        : { ok: false, status: 503 };
+    },
+  });
+  const first = await workflow.call("models", {});
+  assert.deepEqual(first.models, ["gpt-5.5", "codex/unowned"], "a live built-in model can still be served by a configured API key");
+  assert.equal(first.capabilities["gpt-5.5"].provider, "codex");
+  assert.equal(first.capabilities["gpt-5.5"].contextLimit, 272000);
+  const capabilities = first.capabilities;
+  metadataOffline = true;
+  clock += 60_001;
+  assert.deepEqual((await workflow.call("models", {})).capabilities, capabilities, "unreadable account metadata removes nothing");
+  metadataOffline = false;
+  ownersOffline = true;
+  unownedListed = false;
+  clock += 60_001;
+  const withoutOwners = await workflow.call("models", {});
+  assert.deepEqual(withoutOwners.models, first.models, "an unknown owner's namespace alone is no disabled-provider verdict");
+  assert.deepEqual(withoutOwners.capabilities, capabilities, "a failed owner lookup keeps the last known provider");
+  offline = true;
+  clock += 60_001;
+  const remembered = await workflow.call("models", {});
+  assert.equal(remembered.stale, true);
+  assert.deepEqual(remembered.models, first.models);
+  assert.deepEqual(remembered.capabilities, capabilities, "an outage keeps the healthy API-key model's effort and window");
+});
+
+test("disabling a CPA provider removes remembered models without hiding enabled Provider Manager upstreams", async () => {
+  let clock = 1_000_000;
+  let disabled = false;
+  let offline = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async url => {
+      if (offline) throw new Error("CPA offline");
+      if (String(url).includes("/auth-files")) return { ok: true, json: async () => ({ files: [
+        { name: "cpa-provider-manager-opencode-go.json", provider: "provider-manager", disabled },
+        { name: "cpa-provider-manager-other.json", provider: "provider-manager" },
+        { name: "cline.json", provider: "cline", disabled },
+        { name: "codex.json", provider: "codex", disabled },
+      ] }) };
+      return { ok: true, json: async () => ({ data: [
+        { id: "other/model", owned_by: "other" },
+        // Plugins may still advertise disabled models; CPA may omit built-in ones entirely.
+        { id: "cline-pass/model", owned_by: "cline" },
+        { id: "opencode-go/model", owned_by: "opencode-go" },
+        ...(!disabled ? [{ id: "gpt-5.5", owned_by: "codex" }] : []),
+      ] }) };
+    },
+  });
+  assert.equal((await workflow.call("models", {})).models.length, 4);
+  disabled = true;
+  clock += 60_001;
+  const listed = await workflow.call("models", {});
+  assert.deepEqual(listed.models, ["other/model"], "disabled models are not restored from history");
+  assert.equal(listed.capabilities["opencode-go/model"], undefined);
+  assert.equal(listed.held, undefined);
+  offline = true;
+  clock += 60_001;
+  assert.deepEqual((await workflow.call("models", {})).models, ["other/model"], "a later outage never revives disabled models");
+  offline = false;
+  disabled = false;
+  clock += 60_001;
+  assert.equal((await workflow.call("models", {})).models.length, 4, "re-enabling restores the live models");
+});
+
+test("disabling the last CPA provider returns an empty catalog instead of reviving its models", async () => {
+  let clock = 1_000_000;
+  let disabled = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async url => String(url).includes("/auth-files")
+      ? { ok: true, json: async () => ({ files: [{ name: "codex.json", provider: "codex", disabled }] }) }
+      : { ok: true, json: async () => ({ data: disabled ? [] : [{ id: "gpt-5.5", owned_by: "codex" }] }) },
+  });
+  assert.deepEqual((await workflow.call("models", {})).models, ["gpt-5.5"]);
+  disabled = true;
+  clock += 60_001;
+  assert.deepEqual((await workflow.call("models", {})).models, []);
 });
 
 test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {
