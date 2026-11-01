@@ -590,7 +590,12 @@ async function refreshPart(part, logger) {
   };
   const actions = {
     bridge: () => runtimeSupervisor.restartDaemonOnly(),
-    mcp: () => runtimeSupervisor.restartTunnelOnly(),
+    mcp: () => {
+      if (quitting || shutdownInProgress) throw new Error("Launcher shutdown is already in progress");
+      const operation = runtimeHost?.currentOperation();
+      if (operation) throw new Error(`Another launcher operation is active: ${operation}`);
+      return runtimeSupervisor.restartTunnelOnly();
+    },
     "agent-orchestrator": async () => { await agentOrchestratorUpstream?.stop(); return agentOrchestratorUpstream?.start(); },
     cpa: () => externalServicesController.restart("cpa"),
     headless: async () => { await headlessHost?.shutdown("part-refresh"); return headlessHost?.ensureStarted(); },
