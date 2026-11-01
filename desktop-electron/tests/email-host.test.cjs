@@ -172,6 +172,51 @@ test("parseMessage decodes a multipart/alternative body", async () => {
   assert.match(parsed.html, /hello html/);
 });
 
+function mimeHost(raw) {
+  const vm = require("node:vm"), ts = require("typescript"), source = fs.readFileSync(path.join(__dirname, "../electron/email-host.cjs"), "utf8");
+  const tree = ts.createSourceFile("email-host.cjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS), methods = [];
+  const visit = node => { if (ts.isMethodDeclaration(node) && ["listMessages", "getMessage"].includes(node.name.getText(tree))) methods.push(node); ts.forEachChild(node, visit); };
+  visit(tree); assert.equal(methods.length, 2);
+  const loaded = { exports: {} }, mime = require("../electron/email-mime.cjs"), row = { id: 1, raw };
+  // Execute the actual normalized list/detail methods without constructing a credential-bearing host.
+  vm.runInNewContext(source + "\nlet lastRefresh = null;\n" + methods.map(node => `module.exports.${node.name.getText(tree)} = async (input) => ${node.body.getText(tree)};`).join("\n"), {
+    module: loaded, exports: loaded.exports, Buffer, URL, URLSearchParams, parseMessage, sanitizeHtml,
+    call: async url => url.startsWith("/admin/mails?") ? { results: [row], count: 1 } : row,
+    require: name => name === "./email-mime.cjs" ? mime : {},
+  });
+  return loaded.exports;
+}
+
+test("mail list and reader separate explicit text attachments from the body", async t => {
+  const alternative = (boundary, plain, html) => [
+    `Content-Type: multipart/alternative; boundary="${boundary}"`, "", `--${boundary}`,
+    "Content-Type: text/plain; charset=utf-8", "", plain, `--${boundary}`,
+    "Content-Type: text/html; charset=utf-8", "", html, `--${boundary}--`,
+  ].join("\r\n");
+  const body = alternative("body", "REAL BODY TEXT", "<p>REAL BODY HTML</p>");
+  const attachment = (type, disposition = "attachment") => [
+    `Content-Type: text/${type}; charset=utf-8`, `Content-Disposition: ${disposition}; filename="notes.${type === "plain" ? "txt" : "html"}"`,
+    "Content-Transfer-Encoding: base64", "", Buffer.from(type === "plain" ? "ATTACHED TEXT" : "<p>ATTACHED HTML</p><script>blocked()</script>").toString("base64"),
+  ].join("\r\n");
+  const cases = [
+    ...["plain", "html"].flatMap(type => [true, false].map(first => ({ name: type + (first ? " first" : " after body"),
+      parts: first ? [attachment(type), body] : [body, attachment(type)], filename: `notes.${type === "plain" ? "txt" : "html"}` }))),
+    { name: "case-insensitive attachment token", parts: [attachment("plain", "AtTaChMeNt"), body], filename: "notes.txt" },
+    { name: "attached multipart", parts: [alternative("attached", "ATTACHED TEXT", "<p>ATTACHED HTML</p>")
+      .replace("\r\n\r\n", '\r\nContent-Disposition: attachment; filename="bundle.mime"\r\n\r\n'), body], filename: "bundle.mime" },
+    { name: "inline filename containing attachment stays body", parts: ['Content-Type: text/plain\r\nContent-Disposition: inline; filename="attachment.txt"\r\n\r\nREAL BODY TEXT', body], filename: null },
+  ];
+  for (const item of cases) await t.test(item.name, async () => {
+    const raw = ["MIME-Version: 1.0", "From: sender@example.test", "Subject: MIME test", 'Content-Type: multipart/mixed; boundary="mixed"', "",
+      "--mixed", item.parts.join("\r\n--mixed\r\n"), "--mixed--"].join("\r\n");
+    const host = mimeHost(raw), list = await host.listMessages({}), { message } = await host.getMessage({ id: 1 });
+    assert.equal(list.messages[0].preview, "REAL BODY TEXT"); assert.equal(message.text.trim(), "REAL BODY TEXT");
+    assert.match(message.html, /REAL BODY HTML/); assert.equal(message.html.includes("ATTACHED"), false);
+    assert.equal(message.attachments.length, item.filename ? 1 : 0);
+    if (item.filename) { assert.equal(message.attachments[0].filename, item.filename); assert.ok(message.attachments[0].size > 0); }
+  });
+});
+
 test("parseMessage decodes transfer encodings as bytes in the part's charset", async () => {
   const raw = [
     "From: =?UTF-8?Q?Caf=C3=A9_Bot?= <bot@x.com>",

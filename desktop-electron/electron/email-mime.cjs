@@ -94,6 +94,13 @@ function decodeEncodedWords(value) {
 function parseSection(section, out) {
   const { headers, body } = splitHeadersBody(section);
   const { type, attrs } = contentType(headers);
+  const disposition = headers["content-disposition"] || "";
+  if (disposition.split(";", 1)[0].trim().toLowerCase() === "attachment") {
+    const decoded = decodeBody(body, headers, attrs.charset);
+    const nameMatch = /filename="?([^";]+)"?/i.exec(disposition);
+    out.attachments.push({ filename: nameMatch?.[1] ?? null, mimeType: type, size: decoded.length });
+    return;
+  }
   if (type.startsWith("multipart/") && attrs.boundary) {
     const marker = `--${attrs.boundary}`;
     const parts = body.split(marker).slice(1);
@@ -106,10 +113,6 @@ function parseSection(section, out) {
   const decoded = decodeBody(body, headers, attrs.charset);
   if (type === "text/html" && !out.html) out.html = decoded;
   else if (type === "text/plain" && !out.text) out.text = decoded;
-  else if (headers["content-disposition"]?.includes("attachment")) {
-    const nameMatch = /filename="?([^";]+)"?/i.exec(headers["content-disposition"]);
-    out.attachments.push({ filename: nameMatch?.[1] ?? null, mimeType: type, size: decoded.length });
-  }
 }
 
 // Async to match the postal-mime interface the design names, so swapping it later is a drop-in.
