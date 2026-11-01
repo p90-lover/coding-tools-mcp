@@ -6,7 +6,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
+const { spawnOffThread } = require("./off-thread-run.cjs");
 const { EventEmitter } = require("node:events");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { readStateFile, writeStateFile } = require("./durable-state.cjs");
@@ -511,7 +512,7 @@ function createManagedComponentController({
   safeStorage = null,
   logger = null,
   fetchImpl = globalThis.fetch,
-  spawnProcess = spawn,
+  spawnProcess = spawnOffThread,
   terminateProcessTree = terminateOwnedProcessTree,
   spawnSyncProcess = spawnSync,
   resolveRuntimeExecutable = () => process.execPath,
@@ -557,6 +558,8 @@ function createManagedComponentController({
   const processes = new Map();
   const stoppingChildren = new WeakSet();
   let disposed = false;
+  // Whether dispose() left persistent components running (a keep-running quit).
+  let keptPersistent = false;
   const persistentIds = new Set(Array.isArray(persistentComponents) ? persistentComponents : []);
   // Install state remembered per version folder (see sourceState), and whether this build bundles
   // each version's runtime, which cannot change while it runs.
@@ -1250,11 +1253,18 @@ function createManagedComponentController({
     return combined.length > 24_000 ? combined.slice(-24_000) : combined;
   }
 
-  function runCommand(entry, context, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS) {
+  async function runCommand(entry, context, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS) {
     const spec = commandSpec(entry, context);
+    if (disposed) throw new Error("Managed component controller has been disposed");
+    // Started off the main thread (spawnOffThread): starting bun.exe here held every window 18 s
+    // on the busy hard disk while the antivirus scanned it (0.8.40, 2026-11-01).
+    const child = await spawnProcess(spec.executable, spec.args, spec.options);
+    // dispose() ran while the program started, so it could not end it: end it here.
+    if (disposed) {
+      stopLateChild(child);
+      throw new Error("Managed component controller has been disposed");
+    }
     return new Promise((resolve, reject) => {
-      if (disposed) throw new Error("Managed component controller has been disposed");
-      const child = spawnProcess(spec.executable, spec.args, spec.options);
       const active = processes.get(context.id) || new Map();
       processes.set(context.id, active);
       active.set(entry.id, child);
@@ -1999,9 +2009,15 @@ function createManagedComponentController({
         // A persistent component outlives the app, so it cannot write to a pipe; its output is
         // discarded rather than appended to a log file for as long as it runs.
         if (persistent) removeOldPersistedLogs(id);
-        const child = spawnProcess(spec.executable, spec.args, persistent
+        const child = await spawnProcess(spec.executable, spec.args, persistent
           ? { ...spec.options, detached: true, stdio: "ignore" }
           : spec.options);
+        // dispose() ran while it started: as dispose() would have, a keep-running quit leaves a
+        // persistent component for the next launcher (its record is written below) and ends the rest.
+        if (disposed && !(keptPersistent && persistent)) {
+          stopLateChild(child);
+          throw new Error("Managed component controller has been disposed");
+        }
         active.set(processEntry.id, child);
         if (persistent && Number.isInteger(child.pid)) {
           writePrivateFileAtomic(persistedRecordPath(id), `${JSON.stringify({
@@ -2027,6 +2043,17 @@ function createManagedComponentController({
       const message = error instanceof Error ? error.message : String(error);
       setOperation(id, { state: "error", step: null, error: message });
       throw error;
+    }
+  }
+
+  /** Ends a program whose start finished after dispose(), as dispose() ends the ones it saw. */
+  function stopLateChild(child) {
+    try {
+      if (!child || child.exitCode !== null || child.signalCode !== null) return;
+      if (platform === "win32") terminateProcessTree(child, "SIGTERM");
+      else child.kill("SIGTERM");
+    } catch (error) {
+      logger?.warn?.("managed-component.late_stop_failed", { pid: child?.pid ?? null, message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -2136,6 +2163,7 @@ function createManagedComponentController({
 
   function dispose({ keepPersistent = false } = {}) {
     disposed = true;
+    keptPersistent = keepPersistent;
     const failures = [];
     for (const [id, active] of processes) {
       for (const [processId, child] of active) {

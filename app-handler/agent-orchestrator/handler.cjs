@@ -3,6 +3,7 @@
 const { presentTask } = require("./kanban.cjs");
 
 const SPECS = Object.freeze({
+  chat_recover: { readOnly: false, description: "Check exactly the chat's existing session and accepted turn without sending a message or replaying work." },
   archive_task: { readOnly: false, description: "Stop and archive exactly one task; preserve recoverable history." },
   delete_task: { readOnly: false, description: "Confirm recoverable logical deletion of exactly one task." },
   restore_task: { readOnly: false, description: "Restore a hidden task without replaying its schedule." },
