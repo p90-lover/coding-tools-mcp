@@ -15,7 +15,7 @@ import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotati
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
-import { ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
+import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
 import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, type ChatStyle } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
@@ -2019,7 +2019,7 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
     // team's answering card marked Team. How it ran (harness, provider, effort, window) is the tooltip.
     const answerRun = chatRuns.find((run) => run.id === turn.runId);
     const teamAnswer = Boolean(answerRun) && answerRun?.execution_mode !== "single";
-    // The reply's head (ReplyHead): who answered, how it stands, why it failed and what it changed.
+    // The reply's summary (ReplyHead, under the answer): who answered, how it stands and what it changed; a failure (ReplyError) leads.
     const live = !idle && liveTurn(turn);
     const cards = [...turn.steps, ...(turn.final ? [turn.final] : [])];
     const modelOf = (step: ChatStep) => answerRun?.nodes.find((node) => node.id === step.nodeId)?.route?.model;
@@ -2070,11 +2070,9 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
                   <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
                 </div>)}</SteerReader.Provider> : null}
               {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} aria-label="Reply">
-              <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
-                startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
-                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} error={headError} members={members} changes={changes} />
+              {headError ? <ReplyError team={teamAnswer} error={headError} /> : null}
               {plan ? <ReplyPlanView plan={plan} style={replyStyle} live={live} /> : null}
-              {/* The head says the error, so the DeepSeek turn leaves its own copy out. */}
+              {/* The reply's top says the error, so the DeepSeek turn leaves its own copy out. */}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
                   errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null}
@@ -2085,7 +2083,7 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
               {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
               {!dsh && live ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
-                {/* Who answered and its verdict are in the head; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
+                {/* Who answered and its verdict are in the summary below; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
                 <ChatMarkdown text={turn.final.text ?? ""} onVisualize={turn.status === "done" && !turn.final.working
                   && chatRuns.find(run => run.id === turn.runId)?.nodes.some(node => node.id === turn.final?.nodeId
@@ -2098,7 +2096,12 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
-              {/* How long it worked is in the head; the foot keeps the turn's model requests. */}
+              {/* The reply's summary closes it, under the answer: the files it changed, a team's cards,
+                  who answered, how it stands and for how long. */}
+              <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
+                startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
+                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes} />
+              {/* How long it worked is in the summary; the foot keeps the turn's model requests. */}
               {turn.runId && turn.startedAtMs && !liveTurn(turn)
                 ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={false}
                   to={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs} /> : null}
