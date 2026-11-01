@@ -1505,6 +1505,111 @@ test("a pending new-chat send keeps its real API identity and leaves the next pr
   assert.equal(calls[0].message, "sent text");
 });
 
+function queuedComposer(attachments = []) {
+  const state = { taskId: "task-a", draft: "A queued message", attachments, annotations: [], card: null }, calls = [], waiting = [];
+  const maps = { CHAT_DRAFTS: new Map([["task-b", "B private draft"]]), CHAT_ATTACHMENTS: new Map([["task-b", [{ path: "G:/b.txt" }]]]), CHAT_ANNOTATIONS: new Map([["task-b", [{ text: "B annotation" }]]]) };
+  const alive = { current: true }, draftOwner = { current: "task-a" }, composing = { current: { taskId: "task-a", cacheKey: "task-a", draft: state.draft, attachments, annotations: state.annotations, queuedRecovery: [] } };
+  let defer = false, lateSetters = 0;
+  const set = key => next => { if (!alive.current) lateSetters++; const apply = () => { state[key] = typeof next === "function" ? next(state[key]) : next; }; if (defer) waiting.push(apply); else apply(); };
+  const globals = () => ({ ...maps, composing, draftOwner, alive, queueRecoveries: composing.current.queuedRecovery ?? [], selectedTaskId: state.taskId, draftKey: state.taskId, draft: state.draft, attachments: state.attachments, annotations: state.annotations,
+    setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setAttachNote() {}, setCard: set("card") });
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8"), tree = ts.createSourceFile("Chat.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let assignment; const find = node => { if (ts.isExpressionStatement(node) && node.getText(tree).startsWith("composing.current =") && node.getText(tree).includes("draftOwner.current")) assignment ??= node; ts.forEachChild(node, find); }; find(tree);
+  const renderSnapshot = () => vm.runInNewContext(ts.transpileModule(assignment.getText(tree), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, globals());
+  const selectChat = rendererCallback("AgentOrchestratorSurface.tsx", "selectChat", { switchTarget: { current: "" }, pendingSelect: { current: null }, pendingChat: null,
+    setPendingChat() {}, setSheet() {}, setInspectedId() {}, setDraftTeam() {}, setConfigStatus() {}, setView() {}, setChatTaskId: set("taskId"), chatUnread: [],
+    chatList: chat.chatList, missions: [], board: { tasks: [] }, taskLifecycle: [], setSelectedRunId() {} });
+  const showChat = rendererCallback("AgentOrchestratorSurface.tsx", "showChat", { paneShowing: () => undefined, focusedSplit: null, workspaceId: "project", selectChat });
+  const rowSource = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatThreadList.tsx"), "utf8"), rowTree = ts.createSourceFile("List.tsx", rowSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let click; const findClick = node => { if (ts.isJsxAttribute(node) && node.name.getText(rowTree) === "onClick" && node.initializer?.getText(rowTree).includes("actions.select(chat.taskId)")) click ??= node.initializer.expression; ts.forEachChild(node, findClick); }; findClick(rowTree);
+  const moveTo = taskId => {
+    const exports = {}; vm.runInNewContext(ts.transpileModule("exports.click = " + click.getText(rowTree), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
+      { exports, chat: { taskId }, workspaceId: "project", actions: { select: id => showChat("project", id) } }); exports.click({});
+    renderSnapshot(); rendererCallback("AgentOrchestratorChat.tsx", "effect:draftOwner.current === draftKey", globals())();
+  };
+  return { state, maps, composing, alive, calls, moveTo, renderSnapshot,
+    defer: value => { defer = value; }, flush: (count = waiting.length) => { for (const apply of waiting.splice(0, count)) apply(); }, lateSetters: () => lateSetters,
+    type(value) { state.draft = value; renderSnapshot(); }, input(value) { set("draft")(value); },
+    unmount() { rendererCallback("AgentOrchestratorChat.tsx", "effect:const { cacheKey", globals())()(); alive.current = false; },
+    async submit() {
+      const reply = delayedReply(), queuedTask = state.taskId;
+      const queueCall = rendererCallback("AgentOrchestratorSurface.tsx", "queueCall", { workspaceId: "project", moduleCall: (operation, args) => { calls.push({ operation, args }); return reply.promise; } });
+      const queue = rendererCallback("AgentOrchestratorSurface.tsx", "chatQueue", { queueCall, aoChatExecution: () => ({ executionMode: "single" }), composerMode: "single", singleRoute: {}, savedTeams: [], composerTeamId: "", executableArg: () => ({}) });
+      const enqueue = rendererCallback("AgentOrchestratorChat.tsx", "enqueue", { queue, steerOn: false, queueOf: () => [], chatQueueAdd: chat.chatQueueAdd });
+      const text = chat.chatMessageWithAnnotations(chat.chatMessageWithAttachments(state.draft, state.attachments), state.annotations);
+      const submit = rendererCallback("AgentOrchestratorChat.tsx", "submit", { ...globals(), commands: undefined, chatSlashParse: chat.chatSlashParse, chatMessageWithAttachments: chat.chatMessageWithAttachments,
+        chatMessageWithAnnotations: chat.chatMessageWithAnnotations, canSend: true, queueing: true, queueWhileSending: false, CHAT_MESSAGE_LIMIT: 8192, enqueue,
+        say: rendererCallback("AgentOrchestratorChat.tsx", "say", { setCard: set("card") }) });
+      await submit(); renderSnapshot();
+      return { text, queuedTask, fail: async () => { reply.reject(new Error("queue unavailable")); await new Promise(setImmediate); } };
+    },
+  };
+}
+
+test("a queue rejection after real sidebar navigation preserves B and restores the serialized draft to A", async () => {
+  const ui = queuedComposer([{ name: "note.txt", path: "G:/note.txt", image: false }]), sent = await ui.submit(); ui.moveTo("task-b");
+  const files = ui.state.attachments, annotations = ui.state.annotations; await sent.fail();
+  assert.equal(ui.calls[0].operation, "chat_queue"); assert.equal(ui.calls[0].args.taskId, "task-a"); assert.equal(ui.calls[0].args.workspaceId, "project");
+  assert.equal(ui.state.draft, "B private draft"); assert.equal(ui.state.card, null); assert.equal(ui.state.attachments, files); assert.equal(ui.state.annotations, annotations);
+  assert.equal(ui.maps.CHAT_DRAFTS.get("task-a"), sent.text); ui.moveTo("task-a"); assert.equal(ui.state.draft, sent.text);
+});
+
+test("queue recovery prepends to the same chat's newer text and respects an explicit later clear", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.type("newer A draft"); await sent.fail();
+  assert.equal(ui.state.draft, sent.text + "\n\nnewer A draft"); assert.match(ui.state.card.text, /queue unavailable/);
+  ui.renderSnapshot(); ui.type(""); ui.unmount(); assert.equal(ui.maps.CHAT_DRAFTS.has("task-a"), false);
+});
+
+test("a same-batch edit or clear after queue recovery stays authoritative on switch or unmount", async t => {
+  for (const value of ["", "latest A edit"]) for (const leave of ["switch", "unmount"]) await t.test(`${value ? "edit" : "clear"}: ${leave}`, async () => {
+    const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail();
+    ui.input(value); ui.flush(); ui.renderSnapshot(); ui.defer(false);
+    if (leave === "switch") ui.moveTo("task-b"); else ui.unmount();
+    assert.equal(ui.maps.CHAT_DRAFTS.get("task-a") ?? "", value);
+    if (leave === "switch") { ui.moveTo("task-a"); assert.equal(ui.state.draft, value); }
+  });
+});
+
+test("deferred queue recovery cannot overwrite the next chat and remains recoverable on switch-back", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail(); ui.defer(false);
+  ui.moveTo("task-b"); ui.flush(); assert.equal(ui.state.draft, "B private draft"); assert.equal(ui.state.card, null);
+  ui.moveTo("task-a"); assert.equal(ui.state.draft, sent.text);
+});
+
+test("a switch-back before the deferred queue recovery applies does not restore it twice", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail(); ui.defer(false);
+  ui.moveTo("task-b"); ui.moveTo("task-a"); ui.flush(); ui.renderSnapshot();
+  assert.equal(ui.state.draft, sent.text);
+});
+
+test("an applied recovery survives unmount before the next state render", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.type("newer A draft"); ui.defer(true); await sent.fail();
+  ui.flush(1); ui.unmount();
+  assert.equal(ui.maps.CHAT_DRAFTS.get("task-a"), sent.text + "\n\nnewer A draft");
+});
+
+test("typing the same text before deferred recovery still preserves both messages", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail();
+  ui.type(sent.text); ui.defer(false); ui.moveTo("task-b"); ui.flush(); ui.moveTo("task-a");
+  assert.equal(ui.state.draft, sent.text + "\n\n" + sent.text);
+});
+
+test("partly applied queue recoveries preserve every failed payload once across navigation", async () => {
+  const ui = queuedComposer(), first = await ui.submit(); ui.type("A second message"); const second = await ui.submit(); ui.type("newer A draft");
+  ui.defer(true); await first.fail(); await second.fail(); ui.defer(false); ui.flush(2); ui.renderSnapshot();
+  ui.moveTo("task-b"); ui.flush(); ui.moveTo("task-a");
+  assert.equal(ui.state.draft, second.text + "\n\n" + first.text + "\n\nnewer A draft");
+});
+
+test("queue recovery survives unmount before a deferred state commit or before rejection", async t => {
+  for (const timing of ["before commit", "before failure"]) await t.test(timing, async () => {
+    const ui = queuedComposer(), sent = await ui.submit(); ui.type("newer A draft");
+    if (timing === "before commit") { ui.defer(true); await sent.fail(); }
+    ui.unmount(); if (timing === "before failure") await sent.fail(); ui.flush();
+    assert.equal(ui.maps.CHAT_DRAFTS.get("task-a"), sent.text + "\n\nnewer A draft"); assert.equal(ui.lateSetters(), 0);
+  });
+});
+
 test("approval callbacks refuse a request displayed by a previous run and still send the current request", async () => {
   const calls = [], approval = { nodeId: "planner", approval_id: "req" };
   const selection = { current: { workspaceId: "b", taskId: "task-b", runId: "run-b" } };

@@ -4703,7 +4703,7 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   // after a pause; only the third failed check stalls it. Every model it may use is tried, never one
   // billed to the person's Codex quota (gpt-6-luna).
   const timers = [];
-  ({ world, workflow, checks } = await goalChat({ evaluator: () => new Error("down"), timers }));
+  ({ world, workflow, checks } = await goalChat({ evaluator: () => new Error("down"), timers, now: () => 1_000_000 }));
   world.runs.push(teamRun("t6", "anything"));
   const quiet = world.updates.length;
   await workflow.goalAfterRun("ws-1", "t6", "finished");
