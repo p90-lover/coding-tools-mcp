@@ -419,6 +419,16 @@ function retainedConversationLocation(value, useSavedChats) {
   return parsed.pathname === "/" ? "/?temporary-chat=true" : null;
 }
 
+function turnConversationOwnershipLost(tab, useSavedChats, url) {
+  if (tab.conversationOwnershipLost) return true;
+  const expected = tab.retainedLocation
+    ?? (useSavedChats && tab.ownedConversation ? `/c/${tab.ownedConversation}` : null);
+  if (!expected) return false;
+  try { url ??= tab.view.webContents.getURL(); } catch { url = null; }
+  if (retainedConversationLocation(url, useSavedChats) !== expected) tab.conversationOwnershipLost = true;
+  return tab.conversationOwnershipLost === true;
+}
+
 function isNewChatUrl(value, useSavedChats) {
   if (!useSavedChats) return isTemporaryChatUrl(value);
   let parsed;
@@ -1374,6 +1384,7 @@ class BrowserHost {
     contents.on("will-redirect", blockAuthenticationNavigation);
     contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
       if (!mainFrame) return;
+      if (tab.status === "running") turnConversationOwnershipLost(tab, useSavedChatsFor(this), url);
       tab.url = url;
       tab.loading = true;
       if (!inPlace) {
@@ -1393,6 +1404,7 @@ class BrowserHost {
     });
     contents.on("did-finish-load", () => {
       tab.url = contents.getURL();
+      if (tab.status === "running") turnConversationOwnershipLost(tab, useSavedChatsFor(this), tab.url);
       tab.loading = false;
       tab.rendererReady = true;
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
@@ -1401,7 +1413,7 @@ class BrowserHost {
         this.publishState?.(this.snapshot());
         return;
       }
-      if (tab.initializingSurface) {
+      if (tab.initializingSurface || tab.conversationOwnershipLost) {
         this.publishState?.(this.snapshot());
         return;
       }
@@ -1421,7 +1433,10 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
-      if (mainFrame) tab.url = url;
+      if (mainFrame) {
+        if (tab.status === "running") turnConversationOwnershipLost(tab, useSavedChatsFor(this), url);
+        tab.url = url;
+      }
       this.publishState?.(this.snapshot());
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
@@ -2286,6 +2301,7 @@ class BrowserHost {
 
   removeTurnTab(tab, abortRunning) {
     if (!this.turnTabs.has(tab.id)) return;
+    const ownershipLost = turnConversationOwnershipLost(tab, useSavedChatsFor(this));
     this.turnTabs.delete(tab.id);
     if (tab.interactionMode === "manual") {
       if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
@@ -2311,9 +2327,12 @@ class BrowserHost {
       // history behind; the hidden page closes once ChatGPT answered (or after a bounded wait).
       // A chat recorded for its Codex thread is kept: the thread's later turns reopen it, and it is
       // archived or deleted with the thread (codex-chat-lifecycle-sync.cjs).
-      if (tab.ownedConversation && !tab.persistedConversation && tab.interactionMode !== "manual" && useSavedChatsFor(this)) {
+      if (tab.ownedConversation && !ownershipLost && !tab.persistedConversation && tab.interactionMode !== "manual" && useSavedChatsFor(this)) {
         this.deleteOwnedConversation(tab);
       } else {
+        if (tab.ownedConversation && ownershipLost) {
+          this.logger?.warn?.("browser.conversation_delete_skipped", { reason: "conversation ownership changed" });
+        }
         tab.view.webContents.close();
       }
     }
@@ -3102,6 +3121,9 @@ class BrowserHost {
     }
     const existing = sameTrace?.status === "running" ? sameTrace : exactRetained;
     if (existing) {
+      if (existing.status === "running" && turnConversationOwnershipLost(existing, useSavedChatsFor(this))) {
+        throw new BrowserTurnCancelledError(traceId);
+      }
       const reused = existing.status === "ready";
       if (reused && existing.conversationUrl && liveConversationUrl(existing) !== existing.conversationUrl) {
         const error = new Error("The retained ChatGPT tab has navigated away from its original conversation");
@@ -3233,6 +3255,12 @@ class BrowserHost {
         `Browser helper ownership mismatch: expected ${tab.helperPid}, received ${helperPid}`,
       );
     }
+    if (turnConversationOwnershipLost(tab, useSavedChatsFor(this))) {
+      status = "failed";
+      retain = false;
+      connectorBound = false;
+      message = "The ChatGPT task page changed conversations.";
+    }
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
     // A connector turn tells whether the account's ChatGPT connector works: it bound, or it failed.
     if (tab.connectorIdentity && tab.interactionMode === "automatic") {
@@ -3255,12 +3283,8 @@ class BrowserHost {
     const retainedLocation = (status === "completed" || status === "superseded") && retain && !tab.view.webContents.isDestroyed()
       ? retainedConversationLocation(tab.view.webContents.getURL(), useSavedChatsFor(this))
       : null;
-    // The saved chat this turn wrote in, recorded now while the bridge still drives the tab, so its
-    // release deletes this chat (as a Temporary Chat would vanish) and never a page the user opened.
-    if (!tab.view.webContents.isDestroyed() && typeof tab.view.webContents.getURL === "function") {
-      tab.ownedConversation = ownedSavedConversationId(tab.view.webContents.getURL(), useSavedChatsFor(this))
-        ?? tab.ownedConversation ?? null;
-    }
+    // Direct tab cleanup must not adopt a DELETE target from the current URL. Keep any established
+    // cleanup ID immutable; fresh chats remain unless separate lifecycle or user actions remove them.
     if ((status === "completed" || status === "superseded") && retain && !retainedLocation) {
       this.logger.warn("browser.tab_retention_refused", { tabId: tab.id, traceId, reason: "no owned conversation page" });
     }

@@ -4947,7 +4947,7 @@ export class ChatGptBrowserWorker {
       return await this.runBrowserTurn({
         ...turn,
         onSubmitted: () => { submitted = true; turn.onSubmitted?.(); },
-      }, surfaceId, undefined, reused);
+      }, surfaceId, undefined, reused, lease.conversationUrl);
     } catch (error) {
       originalError = error;
       terminal = turn.abortSignal?.reason instanceof DOMException
@@ -4997,6 +4997,7 @@ export class ChatGptBrowserWorker {
     launcherSurfaceId?: string,
     maintenancePage?: Page,
     reuseConversation = false,
+    retainedConversationUrl?: string,
   ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
@@ -5025,6 +5026,80 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    const ownershipAbort = new AbortController();
+    let ownershipError: ChatGptWebAdapterError | undefined;
+    let expectedConversationUrl = reuseConversation
+      ? retainedConversationUrl ?? (!useSavedChats ? `${new URL(chatGptNewChatUrl(false)).origin}/` : undefined)
+      : undefined;
+    let sendActivated = false;
+    let pagePrepared = reuseConversation;
+    let ownedPage: Page | undefined;
+    let ownedConnection: Browser | undefined;
+    let detachOwnership = () => {};
+    const pageBelongsToTurn = (value: string): boolean => {
+      let url: URL;
+      try { url = new URL(value); } catch { return false; }
+      if (expectedConversationUrl) {
+        return chatGptRetainedConversationPage(value, useSavedChats)
+          && `${url.origin}${url.pathname}` === expectedConversationUrl;
+      }
+      if (reuseConversation) return false;
+      if (!pagePrepared && (value === "about:blank" || (url.protocol === "data:" && url.hash === "#codex-web-gpt-browser-host"))) return true;
+      const target = new URL(chatGptNewChatUrl(useSavedChats));
+      if (url.origin !== target.origin) return false;
+      if (url.pathname === "/") {
+        return !pagePrepared || (useSavedChats ? !url.searchParams.has("temporary-chat") : url.searchParams.get("temporary-chat") === "true");
+      }
+      if (!sendActivated || !chatGptRetainedConversationPage(value, useSavedChats)) return false;
+      expectedConversationUrl = `${url.origin}${url.pathname}`;
+      return true;
+    };
+    const loseOwnership = (connection = ownedConnection): void => {
+      if (ownershipError) return;
+      ownershipError = new ChatGptWebAdapterError(
+        "The ChatGPT task page changed conversations. Check the original task chat before continuing.",
+        { status: 409, errorType: "invalid_request_error", code: "chatgpt_conversation_changed", retryable: false },
+      );
+      ownershipAbort.abort(ownershipError);
+      // Every launcher turn borrows its own CDP connection. Disconnecting it retires pending SDK
+      // actions without closing the Electron tab or another turn's connection.
+      void connection?.close().catch(() => {});
+    };
+    const assertOwnership = (): void => {
+      if (!launcherSurfaceId) return;
+      if (!ownershipError && ownedPage && !pageBelongsToTurn(ownedPage.url())) loseOwnership();
+      if (ownershipError) throw ownershipError;
+    };
+    const bindOwnership = (page: Page, connection: Browser): void => {
+      detachOwnership();
+      ownedPage = page;
+      ownedConnection = connection;
+      const navigated = (frame: ReturnType<Page["mainFrame"]>) => {
+        if (frame === page.mainFrame() && !pageBelongsToTurn(frame.url())) loseOwnership(connection);
+      };
+      page.on("framenavigated", navigated);
+      detachOwnership = () => { page.off("framenavigated", navigated); };
+      assertOwnership();
+    };
+    if (launcherSurfaceId) {
+      const original = turn;
+      turn = {
+        ...original,
+        abortSignal: original.abortSignal ? AbortSignal.any([original.abortSignal, ownershipAbort.signal]) : ownershipAbort.signal,
+        onTextDelta: text => { assertOwnership(); original.onTextDelta(text); },
+        onReasoningSummary: original.onReasoningSummary && ((...args) => { assertOwnership(); original.onReasoningSummary?.(...args); }),
+        onCommentary: original.onCommentary && ((...args) => { assertOwnership(); original.onCommentary?.(...args); }),
+        onRichOutput: original.onRichOutput && (output => { assertOwnership(); original.onRichOutput?.(output); }),
+        onLunaCheckpoint: original.onLunaCheckpoint && (checkpoint => { assertOwnership(); original.onLunaCheckpoint?.(checkpoint); }),
+        onSendActivated: async () => {
+          assertOwnership();
+          await original.onSendActivated?.();
+          assertOwnership();
+          sendActivated = true;
+        },
+        onSubmitted: () => { assertOwnership(); original.onSubmitted?.(); },
+      };
+    }
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const multipartTransactionId = prepared.multipart
@@ -5113,6 +5188,7 @@ export class ChatGptBrowserWorker {
           throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
         }
         turnConnection = connection.browser;
+        bindOwnership(connection.page, connection.browser);
         await waitForOperationalChatGptViewport(connection.page, abortSignal);
         return connection.page;
       });
@@ -5123,12 +5199,14 @@ export class ChatGptBrowserWorker {
         cause: Error,
         callerSignal?: AbortSignal,
       ): Promise<void> => {
+        assertOwnership();
         if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause;
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} is rebinding its existing launcher page after a stalled DOM probe:`
           + ` ${redactChatGptUiDiagnostic(cause.message)}`,
         );
         const previousConnection = turnConnection;
+        detachOwnership();
         // The observation timeout races the Playwright operation but cannot cancel the underlying
         // page.evaluate by itself. A failed disconnect is terminal: opening a replacement while
         // the stale probe still owns its transport would recreate the contention this rebind is
@@ -5163,6 +5241,7 @@ export class ChatGptBrowserWorker {
                 // the outer diagnostic capture and finally block to release this exact transport.
                 turnConnection = rebound.browser;
                 diagnosticPage = rebound.page;
+                bindOwnership(rebound.page, rebound.browser);
                 await waitForOperationalChatGptViewport(rebound.page, signal);
                 return rebound;
               },
@@ -5242,6 +5321,8 @@ export class ChatGptBrowserWorker {
             useSavedChats,
           ),
         );
+        pagePrepared = true;
+        assertOwnership();
       } else if (!chatGptRetainedConversationPage(page.url(), useSavedChats)) {
         // A retained tab is a live ChatGPT page with the history sidebar. If anything moved it to
         // another conversation, typing the continuation would post into the user's own chat.
@@ -5883,19 +5964,25 @@ export class ChatGptBrowserWorker {
       }
       throw error;
     } finally {
-      prepared.release();
-      if (turnConnection) {
-        await turnConnection.close().catch(error => {
-          console.error(
-            `[chatgpt-web] failed to release launcher browser connection for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
-      } else if (managedPage && !managedPage.isClosed()) {
-        await managedPage.close().catch(error => {
-          console.error(
-            `[chatgpt-web] failed to close managed browser tab for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
+      detachOwnership();
+      try {
+        prepared.release();
+        if (turnConnection) {
+          await turnConnection.close().catch(error => {
+            console.error(
+              `[chatgpt-web] failed to release launcher browser connection for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        } else if (managedPage && !managedPage.isClosed()) {
+          await managedPage.close().catch(error => {
+            console.error(
+              `[chatgpt-web] failed to close managed browser tab for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        }
+      } finally {
+        // A late completion or cleanup failure cannot turn a lost page into an accepted owner.
+        if (ownershipError) throw ownershipError;
       }
     }
   }
