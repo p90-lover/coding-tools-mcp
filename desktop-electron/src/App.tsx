@@ -471,6 +471,11 @@ function LauncherShell({
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(compactAtMount ? false : snapshot.state.sidebarOpen !== false);
   const [sidebarWidth, setSidebarWidth] = useState(snapshot.state.sidebarWidth || 252);
+  // Hiding the docked sidebar leaves a rail of its icons; hovering the rail shows the whole panel
+  // over the page until the pointer leaves, and the toggle pins it open again.
+  const sidebarPinned = useRef(snapshot.state.sidebarOpen !== false);
+  const [sidebarPeek, setSidebarPeek] = useState(false);
+  const sidebarPeekTimer = useRef(0);
   // Rarely used surfaces, folded under "More" so the everyday ones stay in view.
   const moreSurfaces = [
     { surface: "activity", icon: "activity", label: copy.activity },
@@ -491,8 +496,12 @@ function LauncherShell({
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(false);
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
+  const sidebarRail = !compactSidebar && !sidebarOpen;
+  // Native views (browser, ChatGPT, Register) are drawn above the page, so they step aside while
+  // a sidebar is laid over them.
+  const sidebarCovers = (compactSidebar && sidebarOpen) || (sidebarRail && sidebarPeek);
   const browserSurfaceActive = surface === "browser"
-    && !(compactSidebar && sidebarOpen)
+    && !sidebarCovers
     && !biggerContextRecommendationOpen;
   const needsBrowser = snapshot.state.browserInteractionMode === "automatic"
     && browser?.authenticated !== true;
@@ -565,13 +574,17 @@ function LauncherShell({
 
   useEffect(() => {
     const media = window.matchMedia(COMPACT_SIDEBAR_QUERY);
+    // The first state already honours the saved choice; only a crossing of the compact width
+    // changes it (a narrow window folds the drawer away, a wide one restores the saved choice).
     const apply = () => {
       setCompactSidebar(media.matches);
-      setSidebarOpen(!media.matches);
+      setSidebarOpen(!media.matches && sidebarPinned.current);
     };
-    apply();
     media.addEventListener("change", apply);
-    return () => media.removeEventListener("change", apply);
+    return () => {
+      media.removeEventListener("change", apply);
+      window.clearTimeout(sidebarPeekTimer.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -598,12 +611,30 @@ function LauncherShell({
   }, []);
 
   const persistSidebar = (open: boolean, width = sidebarWidth) => {
+    sidebarPinned.current = open;
     void api!.setSidebarState({ open, width })
       .then(updateState)
       .catch((cause) => setError(messageOf(cause)));
   };
 
+  // A short delay either way: passing the window's edge doesn't throw the panel open, and the
+  // pointer can cross the gap between the rail and its panel.
+  const peekSidebar = (show: boolean) => {
+    window.clearTimeout(sidebarPeekTimer.current);
+    if (!show) {
+      sidebarPeekTimer.current = window.setTimeout(() => setSidebarPeek(false), 220);
+      return;
+    }
+    if (sidebarRail) sidebarPeekTimer.current = window.setTimeout(() => setSidebarPeek(true), 140);
+  };
+
+  const closeSidebarPeek = () => {
+    window.clearTimeout(sidebarPeekTimer.current);
+    setSidebarPeek(false);
+  };
+
   const toggleSidebar = () => {
+    closeSidebarPeek();
     const next = !sidebarOpen;
     if (compactSidebar && next && surface === "browser") {
       void api!.setBrowserSurfaceActive(false)
@@ -647,6 +678,7 @@ function LauncherShell({
     }
     setSurface(next === "api-models" ? "providers" : next);
     if (compactSidebar) setSidebarOpen(false);
+    closeSidebarPeek();
   };
 
   const startAvailableUpdate = useCallback(async () => {
@@ -711,7 +743,7 @@ function LauncherShell({
   return (
     <motion.main
       animate={{ opacity: 1 }}
-      className={`app-shell${compactSidebar ? " is-compact" : ""}${sidebarOpen ? " is-sidebar-open" : ""}`}
+      className={`app-shell${compactSidebar ? " is-compact" : ""}${sidebarOpen ? " is-sidebar-open" : ""}${sidebarRail ? " is-sidebar-rail" : ""}`}
       initial={{ opacity: 0 }}
       style={{ "--sidebar-width": `${sidebarWidth}px` } as Record<string, string>}
     >
@@ -735,9 +767,11 @@ function LauncherShell({
       ) : null}
 
       <motion.aside
-        animate={{ width: sidebarOpen ? "var(--sidebar-width)" : 0 }}
-        className="app-sidebar"
+        animate={{ width: sidebarOpen ? "var(--sidebar-width)" : compactSidebar ? 0 : "var(--sidebar-rail-width)" }}
+        className={`app-sidebar${sidebarRail && sidebarPeek ? " is-peek" : ""}`}
         initial={false}
+        onPointerEnter={() => peekSidebar(true)}
+        onPointerLeave={() => peekSidebar(false)}
         transition={{ type: "spring", duration: 0.5, bounce: 0.08 }}
       >
         <div className="sidebar-clip">
@@ -749,6 +783,9 @@ function LauncherShell({
                 {devProfile ? <em className="dev-profile-badge">{copy.devBadge}</em> : null}
               </div>
               <div className="sidebar-brand-actions">
+                {sidebarRail ? (
+                  <IconButton icon="sidebar" label={copy.keepSidebarOpen} onClick={toggleSidebar} releaseFocus />
+                ) : null}
                 <IconButton
                   icon="github"
                   label="GitHub"
@@ -913,11 +950,11 @@ function LauncherShell({
             {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
             {(surface === "gpt-browser" || visitedSurfaces.has("gpt-browser")) ? <GptBrowserDock
               standaloneHost={standaloneChatHost} chatHost={null} inChat={false}
-              active={surface === "gpt-browser" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
+              active={surface === "gpt-browser" && !sidebarCovers && !biggerContextRecommendationOpen}
               api={api!} setError={setError} /> : null}
             {keepAlive("chatgpt-desktop", () => (
               <ChatGptDesktopSurface
-                active={surface === "chatgpt-desktop" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
+                active={surface === "chatgpt-desktop" && !sidebarCovers && !biggerContextRecommendationOpen}
                 api={api!}
                 setError={setError}
               />
@@ -928,7 +965,7 @@ function LauncherShell({
             {keepAlive("register", () => (
               <RegisterSurface
                 api={api!}
-                active={surface === "register" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen && !sessionReminderDue && !refreshMenuOpen}
+                active={surface === "register" && !sidebarCovers && !biggerContextRecommendationOpen && !sessionReminderDue && !refreshMenuOpen}
                 language={language}
                 setError={setError}
               />
@@ -1211,6 +1248,8 @@ function SidebarItem({
   return (
     <button
       aria-current={active ? "page" : undefined}
+      // The rail shows the icon alone, so the name can't come from the hidden text.
+      aria-label={label}
       className={`sidebar-item${active ? " is-active" : ""}${tone === "update" ? " is-update" : ""}`}
       disabled={disabled}
       onClick={onClick}
