@@ -94,6 +94,7 @@ const {
   scheduleFullIpcAfterPaint,
 } = require("./launcher-ready-path.cjs");
 const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
+const { loadClawdSprites } = require("./claude-sprites.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
 const {
   createStateStore,
@@ -1636,6 +1637,11 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:project-remote", async (event, folder) => {
     assertFocusedMainWindow(event, false);
     return readRemote(folder);
+  });
+  // The chat pet draws Clawd with the installed Claude app's own sprites when it can (read-only).
+  handle("launcher:clawd-sprites", async (event) => {
+    assertFocusedMainWindow(event, false);
+    return loadClawdSprites();
   });
   handle("launcher:project-branch", async (event, folder) => {
     assertFocusedMainWindow(event, false);

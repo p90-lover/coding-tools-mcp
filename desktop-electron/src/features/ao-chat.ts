@@ -894,6 +894,22 @@ export function petMood({ asking, running, lastStatus, lastFailed }: {
   return lastStatus === "done" ? "done" : "idle";
 }
 
+/** What the agent is doing right now, for the pet to act out (Clawd at a laptop, thinking, …). */
+export type PetActivity = "thinking" | "command" | "edit" | "read" | "writing" | null;
+/** The pet's activity from the running turn's live items: the newest one still running, else the newest. */
+export function petActivity(items: readonly { kind: string; status?: string; label?: string; text?: string }[] | undefined): PetActivity {
+  if (!items?.length) return null;
+  const current = [...items].reverse().find((item) => item.status === "running") ?? items[items.length - 1];
+  switch (current.kind) {
+    case "reasoning": return "thinking";
+    case "edit": return "edit";
+    case "command": return "command";
+    case "message": return "writing";
+    case "tool": return /\b(read|search|grep|glob|find|list|fetch|open)\b/i.test(`${current.label ?? ""} ${current.text ?? ""}`) ? "read" : "command";
+    default: return null;
+  }
+}
+
 /**
  * What the line under the chat box counts: the latest turn, and before it every turn that ended
  * without finishing (failed, stopped, held). A message whose attempt failed and was sent again,

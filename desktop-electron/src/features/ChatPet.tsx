@@ -1,47 +1,35 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactElement } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 
-// Bit, the chat's pet: Claude Code's Clawd living on the chat box. It walks all the way around the
-// box (along the top, down the right side, upside down underneath, up the left side), dashing across
-// any button it passes and never stopping on one. While the agent works it gets to work itself:
-// typing at a little laptop, searching with a magnifier, hammering, carrying a file box; idle, it
-// sips coffee, reads, looks around, waves. When the pointer comes close it may leap onto it, for a
-// hug with hearts or a ride wherever the pointer goes, then jump back home to the box. It runs to
-// the send button to wave when a request waits for you, dances when a turn finishes and frets when
-// one fails. Left alone while nothing runs, it pulls a bed out of itself and climbs in to nap.
-// Click to pet it, double-click to feed it, drag it anywhere along the box. Pure view: it reads the
-// chat's state and changes nothing.
+// Bit, the chat's pet: Claude's Clawd, drawn with the sprites of the Claude desktop app installed on
+// this computer (electron/claude-sprites.cjs reads them; nothing of Claude's is copied into this
+// app), at 2 screen px per sprite pixel; without Claude installed it keeps its own drawing.
+//
+// It lives on the chat box's top edge and acts out what the agent does: thinking (Thinking), running
+// commands and writing (at the laptop), editing (at the desktop), reading (an idea lights up);
+// waits pointing when a request needs you, dances when a turn finishes, and is disappointed, dizzy
+// or facepalms when one fails. Idle, it looks around, sways, meditates and strolls (dashing past
+// buttons). Drag it anywhere, with no limit; let go and it falls back onto the box (or to the
+// window's floor, and hops back up). Come close and it may hop onto the pointer for a ride. Left
+// alone while nothing runs it pulls a bed out of itself and naps. Click to pet, double-click to
+// feed, right-click for its menu. Pure view: it reads the chat's state and changes nothing.
 
-import type { PetMood } from "./ao-chat";
+import type { PetActivity, PetMood } from "./ao-chat";
 
-// Where it was left, as a fraction of the way around the box from the top-left corner.
-const POSITION_KEY = "coding-tools:ao:pet-around";
-// How far out from the box's edge it was lifted (px), and the most it can be: dragged away from the
-// edge it stays there, standing on nothing, and walks round the box at that distance.
-const LIFT_KEY = "coding-tools:ao:pet-lift";
-const MAX_LIFT = 160;
+const SCALE = 2;
+const POSITION_KEY = "coding-tools:ao:pet-ground";
 const NAP_MS = 45_000;
-const CHEER_MS = 6_000;
-// Claude Code draws Clawd with block characters, each quadrant half a terminal cell: pixels about
-// twice as tall as wide. Square pixels made it a squat miniature; these match a 14px terminal.
-const PIXEL_W = 4;
-const PIXEL_H = 8;
-const WIDTH = 18 * PIXEL_W;
-const HEIGHT = 7 * PIXEL_H;
-/** Claude Code's working spinner, cycled over Clawd's head while the agent works. */
-const SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
-/** Walking speed in px/s: a stroll while nothing runs, a scurry while the agent works. */
-const STROLL = 46;
-const SCURRY = 115;
-/** Over a button or chip it dashes, so it never sits in the way of a click. */
-const DASH = 2.8;
-/** How near (px) the pointer must come before Bit turns its eyes to it, and before it leaps on. */
-const NOTICE = 180;
-const REACH = 70;
-/** Between two leaps onto the pointer, so it plays now and then rather than pestering. */
-const PLAY_EVERY = 15_000;
-/** How far beside Clawd its bed lands (px). */
-const BED_GAP = 64;
+const GRAVITY = 2600;
+const WALK = 42, RUN = 110, DASH = 2.8;
+/** How near (px) the pointer must stay, and for how long (ms), before Bit hops onto it. */
+const REACH = 56, HOVER_MS = 700;
+/** How high (px) the bed's mattress is: Clawd lies on it. */
+const MATTRESS = 5 * SCALE;
+
+type RawSprite = { w: number; h: number; fps: number; palette: string[]; base: string; deltas: string[]; a0: number[] };
+type Sheet = { w: number; h: number; fps: number; ax: number; ay: number; frames: HTMLCanvasElement[] };
+type Anim = "Walking" | "Running" | "Laptop" | "Desktop" | "Thinking" | "Lightbulb" | "Spark" | "Waving" | "Pointing" | "JumpingHappy"
+  | "Jumping" | "DancingHappy" | "Excited" | "Disappointed" | "Facepalm" | "Dizzy" | "Meditating" | "LookingAround" | "Swaying" | "Turning";
 
 const LINES: Record<PetMood, string> = {
   idle: "Nothing running. Want to start something?",
@@ -50,684 +38,426 @@ const LINES: Record<PetMood, string> = {
   done: "Turn finished. Nice work.",
   error: "Something broke. Retry the step?",
 };
+const WORKING: Record<NonNullable<PetActivity> | "none", Anim> = {
+  thinking: "Thinking", command: "Laptop", writing: "Laptop", edit: "Desktop", read: "Lightbulb", none: "Laptop",
+};
+const IDLE: readonly Anim[] = ["LookingAround", "Swaying", "Meditating", "LookingAround", "Turning"];
 const PETTED = ["Hehe", "More pets, please", "I like you", "*purr*"];
-const MUSINGS = ["Hmm…", "*looks around*", "What are we building?", "♪", "Nice code"];
-const RIDING = ["Wheee!", "Take me somewhere", "Faster!", "Hold on tight"];
-
-// Claude Code's Clawd: its banner glyph " ▐▛███▜▌ / ▝▜█████▛▘ /   ▘▘ ▝▝" read as 2×2 quadrants
-// is an 18×5 sprite. The two quadrants missing from the top row are its eyes.
-const C = { body: "#D97757", eye: "#1F1E1D", tint: "#B85C3F" };
-// Props, in the same pixels.
-const P = { frame: "#3d3d3a", screen: "#1f2a33", glow: "#7fd1ff", key: "#b4b2a7", mug: "#efede6", rim: "#8c8a82", steam: "#c9c7bd",
-  page: "#faf9f5", cover: "#6a9bcc", wood: "#8a5a3c", metal: "#5b5a55", lens: "#bfe3f5", box: "#c8a26b", boxDark: "#9b7a48",
-  sheet: "#f3f1ea", pillow: "#ffffff", quilt: "#6a9bcc", quiltLight: "#8fb6dd" };
-
-/** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. */
-type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read";
-type Arms = "down" | "left" | "right" | "both" | "reach";
-type Pose = { look: -1 | 0 | 1; arms: Arms; walking: boolean; sit: boolean };
-/** Bedtime: the bed flying out and growing, Clawd in it, or the bed going back in. */
-type Bed = { phase: "none" | "out" | "in" | "back"; side: 1 | -1 };
-/** On the pointer: leaping on, riding along, or leaping back home to the box (screen px). */
-type Ride = { x: number; y: number; mode: "boarding" | "riding" | "leaving"; look: -1 | 0 | 1 };
-
-const rect = (x: number, y: number, w: number, h: number, color: string, key: string) =>
-  <rect key={key} x={x} y={y} width={w} height={h} fill={color} />;
-
-/** Clawd on an 18×7 grid: two rows above its head for raised arms, a "!" or a carried box. */
-function Sprite({ mood, asleep, step, pose, blink, job }: { mood: PetMood; asleep: boolean; step: boolean; pose: Pose; blink: boolean; job: Job }) {
-  const r = rect;
-  // Sitting (or tucked in bed), the body drops a row onto its tucked legs.
-  const top = pose.sit ? 3 : 2;
-  const asking = mood === "ask" && !asleep;
-  const working = mood === "working" && !asleep;
-  // Working in place with no tool, its arms take turns, typing; carrying, both hold the box.
-  const typing = working && !pose.walking && pose.arms === "down" && job === "none";
-  let arms: Arms = asleep ? "down" : asking ? "right" : typing ? (step ? "left" : "right") : pose.arms;
-  if (!asleep && job === "carry") arms = "both";
-  if (!asleep && (job === "laptop" || job === "search" || job === "build" || job === "coffee" || job === "read")) arms = "reach";
-  const leftUp = arms === "both" || arms === "left";
-  const rightUp = arms === "both" || arms === "right";
-  const parts = [r(3, top, 12, 2, C.body, "head"), r(3, top + 2, 12, 2, C.body, "body")];
-  parts.push(leftUp ? r(2, top - 1, 1, 3, C.body, "arm-l") : r(1, top + 2, 2, 1, C.body, "arm-l"));
-  if (arms === "reach") {
-    // Reaching out to its tool: the arm taps (laptop, hammer) or holds steady.
-    const tap = (job === "laptop" || job === "build") && step;
-    parts.push(r(15, top + (tap ? 3 : 2), 3, 1, C.body, "arm-r"));
-  } else parts.push(rightUp ? r(15, top - 1, 1, 3, C.body, "arm-r") : r(15, top + 2, 2, 1, C.body, "arm-r"));
-  // Eyes: holes in the head (drawn dark to read on a light page), turned where it looks; closed
-  // when napping, pleased or blinking; wide and worried after an error.
-  const look = asleep ? 0 : job === "laptop" || job === "read" || job === "coffee" ? 1 : pose.look;
-  if (asleep || mood === "done" || blink) parts.push(r(5, top + 1, 1, 1, C.tint, "eye-l"), r(12, top + 1, 1, 1, C.tint, "eye-r"));
-  else if (mood === "error") parts.push(r(5, top, 1, 2, C.eye, "eye-l"), r(12, top, 1, 2, C.eye, "eye-r"));
-  else parts.push(r(5 + look, top + 1, 1, 1, C.eye, "eye-l"), r(12 + look, top + 1, 1, 1, C.eye, "eye-r"));
-  // Four legs, cycling while it walks; none showing while it sits.
-  if (!pose.sit) {
-    const legs = (pose.walking || (working && job === "none")) && step ? [3, 7, 10, 14] : [4, 6, 11, 13];
-    legs.forEach((x, index) => parts.push(r(x, top + 4, 1, 1, C.body, `leg${index}`)));
-  }
-  // A file box carried on its head.
-  if (!asleep && job === "carry") parts.push(r(5, 0, 8, 2, P.box, "box"), r(5, 0, 8, 1, P.boxDark, "box-lid"), r(8, 1, 2, 1, P.boxDark, "box-tape"));
-  if (asking) parts.push(r(16, 0, 1, 2, C.eye, "bang"), r(16, 3, 1, 1, C.eye, "bang-dot"));
-  return <svg viewBox="0 0 18 7" width={WIDTH} height={HEIGHT} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
-}
-
-/** The tool beside it, on a 9×7 grid of the same pixels, standing on the same ground line. */
-function Prop({ job, step, tick }: { job: Job; step: boolean; tick: number }) {
-  if (job === "none" || job === "carry") return null;
-  const r = rect;
-  const parts: ReactElement[] = [];
-  if (job === "laptop") {
-    // A laptop facing Clawd: its screen's lines scroll as it types.
-    parts.push(r(1, 3, 6, 3, P.frame, "lid"), r(2, 3, 4, 2, P.screen, "screen"), r(0, 6, 8, 1, P.key, "keys"));
-    for (let line = 0; line < 2; line += 1) parts.push(r(2, 3 + line, 1 + ((tick + line * 3) % 4), 1, P.glow, `line${line}`));
-  } else if (job === "search") {
-    // A magnifier held up, bobbing as it scans.
-    const y = step ? 2 : 3;
-    parts.push(r(1, y, 3, 1, P.metal, "ring-t"), r(1, y + 2, 3, 1, P.metal, "ring-b"), r(0, y + 1, 1, 1, P.metal, "ring-l"),
-      r(4, y + 1, 1, 1, P.metal, "ring-r"), r(1, y + 1, 3, 1, P.lens, "lens"), r(4, y + 3, 1, 1, P.wood, "grip"));
-  } else if (job === "build") {
-    // A hammer swinging down onto a nail, a spark on each hit.
-    if (step) parts.push(r(0, 3, 1, 1, P.wood, "handle"), r(0, 4, 3, 1, P.metal, "head"), r(4, 6, 1, 1, P.metal, "nail"), r(5, 5, 1, 1, "#f5c451", "spark"));
-    else parts.push(r(0, 1, 1, 3, P.wood, "handle"), r(0, 0, 3, 1, P.metal, "head"), r(4, 6, 1, 1, P.metal, "nail"));
-  } else if (job === "coffee") {
-    // A mug, lifted for a sip now and then, steam curling up.
-    const y = step ? 3 : 4;
-    parts.push(r(1, y, 3, 2, P.mug, "mug"), r(1, y, 3, 1, P.rim, "rim"), r(4, y + 1, 1, 1, P.rim, "handle"));
-    const curl = tick % 3;
-    parts.push(r(1 + curl, y - 1, 1, 1, P.steam, "steam1"), r(3 - curl, y - 2, 1, 1, P.steam, "steam2"));
-  } else if (job === "read") {
-    // An open book, a page turning now and then.
-    parts.push(r(0, 4, 3, 2, P.page, "page-l"), r(4, 4, 3, 2, P.page, "page-r"), r(3, 4, 1, 3, P.cover, "spine"), r(0, 6, 7, 1, P.cover, "cover"));
-    if (tick % 6 === 0) parts.push(r(3, 3, 2, 1, P.page, "turn"));
-  }
-  return <svg className="cx-pet-prop" viewBox="0 0 9 7" width={9 * PIXEL_W} height={HEIGHT} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
-}
-
-/** Clawd's bed, 88×24: headboard, mattress and pillow; its quilt is drawn over Clawd separately. */
-function BedFrame({ side }: { side: 1 | -1 }) {
-  const r = rect;
-  // The headboard and pillow sit at the far end from where Clawd jumps in.
-  const head = side > 0 ? 20 : 0, foot = side > 0 ? 0 : 20, pillow = side > 0 ? 15 : 3;
-  return <svg className="cx-pet-bed" viewBox="0 0 22 6" width={88} height={24} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">
-    {[r(head, 0, 2, 6, P.wood, "headboard"), r(foot, 2, 2, 4, P.wood, "footboard"), r(1, 4, 20, 1, P.wood, "rail"),
-      r(2, 3, 18, 1, P.sheet, "mattress"), r(pillow, 2, 4, 1, P.pillow, "pillow"), r(1, 5, 1, 1, P.wood, "leg-a"), r(20, 5, 1, 1, P.wood, "leg-b")]}
-  </svg>;
-}
-function Quilt() {
-  const r = rect;
-  return <svg className="cx-pet-quilt" viewBox="0 0 14 3" width={56} height={18} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">
-    {[r(0, 0, 14, 3, P.quilt, "quilt"), r(0, 0, 14, 1, P.quiltLight, "fold"), r(3, 1, 1, 2, P.quiltLight, "stripe-a"), r(9, 1, 1, 2, P.quiltLight, "stripe-b")]}
-  </svg>;
-}
-
-type Floater = { id: number; text: string; offset: number };
-const REST: Pose = { look: 0, arms: "down", walking: false, sit: false };
 const pick = <T,>(items: readonly T[]) => items[Math.floor(Math.random() * items.length)]!;
-const WORK: readonly Job[] = ["laptop", "laptop", "search", "build", "carry"];
 
-/** The box's outline as one loop: its size, and the spot and side at a distance around it. */
-type Loop = { width: number; height: number; length: number };
-function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2 | 3 } {
-  const { width: w, height: h, length } = loop;
-  const s = ((at % length) + length) % length;
-  if (s < w) return { x: s, y: 0, side: 0 };
-  if (s < w + h) return { x: w, y: s - w, side: 1 };
-  if (s < 2 * w + h) return { x: w - (s - w - h), y: h, side: 2 };
-  return { x: 0, y: h - (s - 2 * w - h), side: 3 };
+/** A sprite's frames as canvases, decoded as Claude's engine does (base, then each delta in turn). */
+function decode(raw: RawSprite): Sheet {
+  const pixels = Uint8Array.from([...raw.base].map((char) => char === "." ? 255 : parseInt(char, 36)));
+  const frames: Uint8Array[] = [pixels.slice()];
+  for (const delta of raw.deltas) {
+    if (delta) for (const change of delta.split(",")) {
+      const end = change.length - 1;
+      pixels[parseInt(change.slice(0, end), 36)] = change[end] === "." ? 255 : parseInt(change[end]!, 36);
+    }
+    frames.push(pixels.slice());
+  }
+  const canvases = frames.map((frame) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = raw.w; canvas.height = raw.h;
+    const context = canvas.getContext("2d");
+    if (!context) return canvas;
+    const image = context.createImageData(raw.w, raw.h);
+    frame.forEach((index, at) => {
+      if (index === 255) return;
+      const color = raw.palette[index] ?? "#d97757";
+      image.data[at * 4] = parseInt(color.slice(1, 3), 16);
+      image.data[at * 4 + 1] = parseInt(color.slice(3, 5), 16);
+      image.data[at * 4 + 2] = parseInt(color.slice(5, 7), 16);
+      image.data[at * 4 + 3] = 255;
+    });
+    context.putImageData(image, 0, 0);
+    return canvas;
+  });
+  const box = raw.a0[2]! > 0 ? raw.a0 : [0, 0, raw.w, raw.h];
+  return { w: raw.w, h: raw.h, fps: raw.fps || 12, ax: box[0]! + box[2]! / 2, ay: box[1]! + box[3]!, frames: canvases };
 }
-/** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
-const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
 
-export function ChatPet({ mood, context, onHide }: {
+/** Bit's own Clawd (no Claude installed): the banner glyph's 18×5 sprite, legs stepping. */
+function ownSprite(): RawSprite {
+  const w = 18, h = 7;
+  const frame = (legs: number[]) => {
+    const grid = Array.from({ length: w * h }, () => ".");
+    const fill = (x: number, y: number, width: number, height: number, color: string) => {
+      for (let row = y; row < y + height; row += 1) for (let col = x; col < x + width; col += 1) grid[row * w + col] = color;
+    };
+    fill(3, 2, 12, 4, "1"); fill(1, 4, 2, 1, "1"); fill(15, 4, 2, 1, "1");
+    fill(5, 3, 1, 1, "0"); fill(12, 3, 1, 1, "0");
+    legs.forEach((x) => fill(x, 6, 1, 1, "1"));
+    return grid.join("");
+  };
+  const base = frame([4, 6, 11, 13]), step = frame([3, 7, 10, 14]);
+  const delta = [...step].map((char, at) => char !== base[at] ? `${at.toString(36)}${char}` : "").filter(Boolean).join(",");
+  const back = [...base].map((char, at) => char !== step[at] ? `${at.toString(36)}${char}` : "").filter(Boolean).join(",");
+  return { w, h, fps: 6, palette: ["#1f1e1d", "#d97757"], base, deltas: [delta, back], a0: [0, 2, 18, 5] };
+}
+
+// Sheets are decoded once per app run and shared by every chat.
+let sheets: Partial<Record<Anim, Sheet>> | null = null;
+let loading: Promise<Partial<Record<Anim, Sheet>>> | null = null;
+function loadSheets(): Promise<Partial<Record<Anim, Sheet>>> {
+  if (sheets) return Promise.resolve(sheets);
+  loading ??= (async () => {
+    let raw: Record<string, RawSprite> = {};
+    try {
+      const result = await window.codexWebLauncher?.clawdSprites?.();
+      if (result?.source === "claude") raw = result.sprites as Record<string, RawSprite>;
+    } catch { /* Claude's sprites are optional */ }
+    const own = decode(ownSprite());
+    const decoded: Partial<Record<Anim, Sheet>> = {};
+    for (const [name, sprite] of Object.entries(raw)) { try { decoded[name as Anim] = decode(sprite); } catch { /* left out */ } }
+    // Every animation falls back to the nearest one there is, and finally to Bit's own drawing.
+    const fallback = (name: Anim, ...others: Anim[]) => decoded[name] ?? others.map((other) => decoded[other]).find(Boolean) ?? decoded.Walking ?? own;
+    const all: Anim[] = ["Walking", "Running", "Laptop", "Desktop", "Thinking", "Lightbulb", "Spark", "Waving", "Pointing", "JumpingHappy",
+      "Jumping", "DancingHappy", "Excited", "Disappointed", "Facepalm", "Dizzy", "Meditating", "LookingAround", "Swaying", "Turning"];
+    sheets = Object.fromEntries(all.map((name) => [name, fallback(name, "Excited", "LookingAround")])) as Record<Anim, Sheet>;
+    return sheets;
+  })();
+  return loading;
+}
+
+/** Clawd's bed (pulled out of him at bedtime) and its quilt, in the same chunky pixels. */
+function Bed() {
+  const r = (x: number, y: number, w: number, h: number, color: string) => <rect key={`${x}-${y}-${color}`} x={x} y={y} width={w} height={h} fill={color} />;
+  return <svg className="cx-pet-bed" viewBox="0 0 32 9" width={32 * SCALE} height={9 * SCALE} shapeRendering="crispEdges" aria-hidden="true">
+    {[r(29, 0, 3, 9, "#8a5a3c"), r(0, 3, 3, 6, "#8a5a3c"), r(1, 6, 30, 2, "#8a5a3c"), r(3, 4, 26, 2, "#f3f1ea"), r(22, 2, 6, 2, "#ffffff"),
+      r(1, 8, 2, 1, "#8a5a3c"), r(29, 8, 2, 1, "#8a5a3c")]}
+  </svg>;
+}
+
+type Mode = "ground" | "drag" | "fall" | "hop" | "ride" | "bed";
+
+export function ChatPet({ mood, activity = null, context, onHide }: {
   mood: PetMood;
+  /** What the agent is doing now (petActivity), acted out while it works. */
+  activity?: PetActivity;
   /** Share of the context window in use (0–1), when the agent reports it. */
   context: number | null;
   onHide: () => void;
 }) {
-  const box = useRef<HTMLDivElement>(null);
-  // The chat box it lives on: its parent when first mounted (it rides the pointer outside it).
-  const composer = useRef<HTMLElement | null>(null);
-  // Distance walked around the box from its top-left corner, NaN until the box is measured. It is
-  // never wrapped, so every lap keeps turning the same way at the corners.
-  const [at, setAt] = useState(Number.NaN);
-  const [lift, setLift] = useState(() => {
-    try { const saved = Number(localStorage.getItem(LIFT_KEY)); return saved > 0 ? Math.min(MAX_LIFT, saved) : 0; } catch { return 0; }
-  });
-  const liftNow = useRef(lift);
-  liftNow.current = lift;
-  const [loop, setLoop] = useState<Loop | null>(null);
-  const [pose, setPose] = useState<Pose>(REST);
-  const [job, setJob] = useState<Job>("none");
-  const [bed, setBed] = useState<Bed>({ phase: "none", side: 1 });
-  const [ride, setRide] = useState<Ride | null>(null);
-  const [step, setStep] = useState(false);
-  const [tick, setTick] = useState(0);
-  const [blink, setBlink] = useState(false);
-  const [spin, setSpin] = useState(0);
-  const [asleep, setAsleep] = useState(false);
-  const [cheering, setCheering] = useState(false);
+  const anchor = useRef<HTMLSpanElement>(null);
+  const holder = useRef<HTMLDivElement>(null);
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [ready, setReady] = useState<Partial<Record<Anim, Sheet>> | null>(sheets);
   const [bubble, setBubble] = useState<string | null>(null);
-  const [motion, setMotion] = useState("");
-  const [floaters, setFloaters] = useState<Floater[]>([]);
-  const [fed, setFed] = useState(0);
-  const drag = useRef<{ moved: boolean; x: number; y: number } | null>(null);
-  const pointer = useRef({ x: 0, y: 0 });
-  const lastPlay = useRef(0);
-  const clickTimer = useRef<number | undefined>(undefined);
-  const bubbleTimer = useRef<number | undefined>(undefined);
-  const napTimer = useRef<number | undefined>(undefined);
-  const walkFrame = useRef(0);
-  // Every scheduled behaviour (the next stroll, an arrival, an action's frames), cleared together.
-  const plans = useRef<number[]>([]);
-  const seq = useRef(0);
-  // Timers and listeners fire later; they read the state then, not the state they were set up in.
-  const atNow = useRef(at);
-  atNow.current = at;
-  const loopNow = useRef(loop);
-  loopNow.current = loop;
-  const moodNow = useRef(mood);
-  moodNow.current = mood;
-  const asleepNow = useRef(asleep);
-  asleepNow.current = asleep;
-  const bedNow = useRef(bed);
-  bedNow.current = bed;
-  const rideNow = useRef(ride);
-  rideNow.current = ride;
+  const [floaters, setFloaters] = useState<{ id: number; text: string; dx: number }[]>([]);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [bed, setBed] = useState<"none" | "out" | "in">("none");
+  // Where the bed stands, as an offset from the box's left edge.
+  const [bedAt, setBedAt] = useState(0);
   const [still] = useState(() => { try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; } });
+  // Everything the frame loop reads and writes, outside React: it runs every frame.
+  const state = useRef({
+    mode: "ground" as Mode, x: 0, y: 0, vy: 0, groundX: Number.NaN, facing: 1 as 1 | -1,
+    anim: "LookingAround" as Anim, animStart: 0, walkTo: null as number | null, speed: WALK, dashRects: [] as DOMRect[],
+    hop: null as { fromX: number; fromY: number; toX: number; toY: number; start: number; ms: number; then: () => void } | null,
+    grab: { dx: 0, dy: 0, startX: 0, startY: 0, moved: false, down: false }, pointer: { x: -1e4, y: -1e4 }, hoverSince: 0,
+    lastTouch: Date.now(), cooldownUntil: 0, plans: [] as number[], fed: 0, seq: 0,
+  });
+  const moodNow = useRef(mood); moodNow.current = mood;
+  const activityNow = useRef(activity); activityNow.current = activity;
 
-  const later = (ms: number, run: () => void) => { plans.current.push(window.setTimeout(run, ms)); };
-  const stopWalking = () => { if (walkFrame.current) window.cancelAnimationFrame(walkFrame.current); walkFrame.current = 0; };
-  const cancelPlans = () => { plans.current.forEach((timer) => window.clearTimeout(timer)); plans.current = []; stopWalking(); };
+  useEffect(() => { let alive = true; void loadSheets().then((loaded) => { if (alive) setReady(loaded); }); return () => { alive = false; }; }, []);
+
+  const composer = () => anchor.current?.parentElement?.getBoundingClientRect() ?? null;
+  const play = (anim: Anim) => { const s = state.current; if (s.anim !== anim) { s.anim = anim; s.animStart = performance.now(); } };
+  const later = (ms: number, run: () => void) => { state.current.plans.push(window.setTimeout(run, ms)); };
+  const cancelPlans = () => { state.current.plans.forEach((timer) => window.clearTimeout(timer)); state.current.plans = []; state.current.walkTo = null; };
+  // Its own timer, not a plan: a mood change cancels the plans but must not leave a bubble up.
+  const bubbleTimer = useRef<number | undefined>(undefined);
   const say = (text: string, ms = 1800) => {
     setBubble(text);
     window.clearTimeout(bubbleTimer.current);
-    if (ms) bubbleTimer.current = window.setTimeout(() => setBubble(null), ms);
+    bubbleTimer.current = window.setTimeout(() => setBubble((current) => current === text ? null : current), ms);
   };
-  const play = (name: "hop" | "shake" | "spin" | "bounce") => { setMotion(""); window.requestAnimationFrame(() => setMotion(name)); };
-  const float = (text: string, left = 10 + Math.round(Math.random() * 24)) => {
-    const id = ++seq.current;
-    setFloaters((current) => [...current, { id, text, offset: left }]);
+  const float = (text: string) => {
+    const id = ++state.current.seq;
+    setFloaters((current) => [...current, { id, text, dx: Math.round(Math.random() * 28) - 14 }]);
     window.setTimeout(() => setFloaters((current) => current.filter((item) => item.id !== id)), 1100);
   };
-  const busyElsewhere = () => asleepNow.current || drag.current !== null || rideNow.current !== null || bedNow.current.phase !== "none";
-
-  // The box it walks around: measured now and whenever it resizes.
-  useEffect(() => {
-    const parent = box.current?.parentElement;
-    if (!parent) return undefined;
-    composer.current = parent;
-    const measure = () => {
-      const width = parent.offsetWidth, height = parent.offsetHeight;
-      if (width > 0 && height > 0) setLoop({ width, height, length: 2 * (width + height) });
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(parent);
-    return () => observer.disconnect();
-  }, []);
-  // First placement: the saved fraction of the way round, else near the top-right corner.
-  useEffect(() => {
-    if (!loop || !Number.isNaN(atNow.current)) return;
-    let saved = Number.NaN;
-    try { saved = Number(localStorage.getItem(POSITION_KEY) ?? Number.NaN); } catch { /* first visit */ }
-    setAt(saved >= 0 && saved < 1 ? saved * loop.length : Math.max(WIDTH / 2, loop.width - WIDTH * 1.5));
-  }, [loop]);
+  const touch = () => { state.current.lastTouch = Date.now(); };
   const remember = () => {
-    const current = loopNow.current;
-    if (!current || Number.isNaN(atNow.current)) return;
-    try {
-      localStorage.setItem(POSITION_KEY, String((((atNow.current % current.length) + current.length) % current.length) / current.length));
-      localStorage.setItem(LIFT_KEY, String(Math.round(liftNow.current)));
-    } catch { /* the spot still applies now */ }
+    const box = composer();
+    if (box && box.width > 0) try { localStorage.setItem(POSITION_KEY, String((state.current.x - box.left) / box.width)); } catch { /* still applies now */ }
   };
 
-  /** Buttons, chips and fields around the box: Bit dashes across them and never rests on one. */
-  const obstacles = () => {
-    const area = composer.current?.parentElement;
-    if (!area) return [];
-    return [...area.querySelectorAll("button, a, input, select, [role='button']"), ...document.querySelectorAll(".cx-turn-stats > *")]
-      .filter((element) => !composer.current?.contains(element))
-      .map((element) => element.getBoundingClientRect())
-      .filter((found) => found.width > 0 && found.height > 0);
+  /** Where on the box's top edge x can stand (Clawd stays fully on it). */
+  const clampToBox = (x: number, box: DOMRect) => Math.max(box.left + 14 * SCALE, Math.min(box.right - 14 * SCALE, x));
+  const buttonsNearBox = (box: DOMRect) => [...(anchor.current?.parentElement?.parentElement?.querySelectorAll("button, a, input, select, [role='button']") ?? [])]
+    .filter((element) => !anchor.current?.parentElement?.contains(element)).map((element) => element.getBoundingClientRect())
+    .filter((rect) => rect.width > 0 && rect.bottom > box.top - 70 && rect.top < box.top + 4);
+
+  /** Walk along the top edge to x; over a button or chip it dashes and never stops there. */
+  const walkTo = (x: number, fast = false) => {
+    const s = state.current, box = composer();
+    if (!box || still) return;
+    s.walkTo = clampToBox(x, box);
+    s.speed = fast ? RUN : WALK;
+    s.dashRects = buttonsNearBox(box);
   };
-  /** Whether standing at `spot` (a distance around) would cover one of `rects`. */
-  const blocked = (spot: number, rects: DOMRect[]) => {
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!current || !frame) return false;
-    const { x, y, side } = spotAt(current, spot);
-    const half = WIDTH / 2;
-    // Its footprint stands outward from the box: above the top, right of the right side, and so on.
-    const [left, top, right, bottom] = side === 0 ? [x - half, y - HEIGHT, x + half, y]
-      : side === 1 ? [x, y - half, x + HEIGHT, y + half]
-      : side === 2 ? [x - half, y, x + half, y + HEIGHT]
-      : [x - HEIGHT, y - half, x, y + half];
-    return rects.some((found) => found.left < frame.left + right && found.right > frame.left + left
-      && found.top < frame.top + bottom && found.bottom > frame.top + top);
-  };
-  /** The nearest spot to `spot` that covers no button. */
-  const freeNear = (spot: number) => {
-    const current = loopNow.current;
-    const rects = obstacles();
-    if (!current || !blocked(spot, rects)) return spot;
-    for (let offset = 8; offset < current.length / 2; offset += 8) {
-      const free = [spot + offset, spot - offset].find((candidate) => !blocked(candidate, rects));
-      if (free !== undefined) return free;
-    }
-    return spot;
+  /** A hop in an arc from where it is to a spot on the box's top edge (or `lift` px above it). */
+  const hopTo = (x: number, then: () => void = () => undefined, lift = 0) => {
+    const s = state.current, box = composer();
+    if (!box) return;
+    const toX = clampToBox(x, box);
+    s.mode = "hop";
+    s.hop = { fromX: s.x, fromY: s.y, toX, toY: box.top - lift, start: performance.now(), ms: 650,
+      then: () => { s.groundX = toX - box.left; s.mode = "ground"; remember(); then(); } };
+    play("Jumping");
   };
 
-  /** Walks around the box to `target` (a distance around it), dashing over buttons; then `arrive`. */
-  const walkTo = (target: number, speed: number, arrive?: () => void) => {
-    stopWalking();
-    const rects = obstacles();
-    const direction = target >= atNow.current ? 1 : -1;
-    setPose({ ...REST, walking: true, look: direction > 0 ? 1 : -1 });
-    let last = performance.now();
-    const frame = (now: number) => {
-      const elapsed = Math.min(0.05, (now - last) / 1000);
-      last = now;
-      const next = atNow.current + direction * speed * (blocked(atNow.current, rects) ? DASH : 1) * elapsed;
-      const arrived = direction > 0 ? next >= target : next <= target;
-      atNow.current = arrived ? target : next;
-      setAt(atNow.current);
-      if (!arrived) { walkFrame.current = window.requestAnimationFrame(frame); return; }
-      walkFrame.current = 0;
-      setPose(REST);
-      remember();
-      arrive?.();
-    };
-    walkFrame.current = window.requestAnimationFrame(frame);
-  };
-
-  /** A spot to walk to: mostly a short way along, sometimes a long way round, never on a button. */
-  const nextSpot = (working: boolean) => {
-    const current = loopNow.current;
-    if (!current) return atNow.current;
-    const rects = obstacles();
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const far = Math.random() < (working ? 0.4 : 0.25);
-      const span = far ? current.length * (0.5 + Math.random() * 0.7) : 60 + Math.random() * 200;
-      const target = atNow.current + (Math.random() < 0.5 ? -1 : 1) * span;
-      if (!blocked(target, rects)) return target;
-    }
-    return atNow.current;
-  };
-
-  /** One thing to do on arriving somewhere, so a stroll never looks like sliding. */
-  const act = () => {
-    if (busyElsewhere()) return;
-    if (moodNow.current === "working") {
-      // At work: settle at a tool for a while; carrying walks on to drop the box somewhere.
-      const next = pick(WORK);
-      if (next === "carry") { setJob("carry"); walkTo(nextSpot(true), SCURRY * 0.8, () => { setJob("none"); play("bounce"); }); return; }
-      setJob(next);
-      later(5000 + Math.random() * 4000, () => setJob("none"));
+  // The routine: what to do next, from the chat's state and what the agent is doing.
+  const routine = () => {
+    const s = state.current;
+    if (s.mode !== "ground") { later(800, routine); return; }
+    const now = moodNow.current;
+    if (now === "working") {
+      play(WORKING[activityNow.current ?? "none"]);
+      // Now and then it scurries to another spot to work there.
+      if (Math.random() < 0.18) { const box = composer(); if (box) walkTo(box.left + Math.random() * box.width, true); }
+      later(2600 + Math.random() * 2400, routine);
       return;
     }
-    const choice = pick(["look", "hop", "wave", "stretch", "spin", "sit", "muse", "coffee", "read", "rest"] as const);
-    if (choice === "look") {
-      setPose({ ...REST, look: -1 });
-      later(500, () => setPose({ ...REST, look: 1 }));
-      later(1000, () => setPose({ ...REST, look: 0 }));
-    } else if (choice === "hop") play("hop");
-    else if (choice === "wave") {
-      [0, 260, 520, 780].forEach((when, index) => later(when, () => setPose({ ...REST, arms: index % 2 ? "down" : "right", look: 1 })));
-      later(1040, () => setPose(REST));
-    } else if (choice === "stretch") { setPose({ ...REST, arms: "both" }); later(900, () => setPose(REST)); }
-    else if (choice === "spin") play("spin");
-    else if (choice === "sit") { setPose({ ...REST, sit: true }); later(2600, () => setPose(REST)); }
-    else if (choice === "coffee" || choice === "read") { setJob(choice); later(3500 + Math.random() * 2500, () => setJob("none")); }
-    else if (choice === "muse" && moodNow.current === "idle") say(pick(MUSINGS), 1500);
+    if (now === "ask") { play("Pointing"); later(3000, routine); return; }
+    if (now === "error") { play(pick(["Disappointed", "Facepalm", "Dizzy"] as const)); later(3200, routine); return; }
+    if (bedRef.current !== "none") { later(1500, routine); return; }
+    if (Date.now() - s.lastTouch > NAP_MS && (now === "idle" || now === "done")) { goToBed(); return; }
+    if (Math.random() < 0.45) { const box = composer(); if (box) walkTo(box.left + Math.random() * box.width); }
+    else play(pick(IDLE));
+    later(2400 + Math.random() * 2600, routine);
   };
 
-  /** The wander loop: a pause (or a job), a walk somewhere, an action, again. */
-  const wander = () => {
-    if (still) return;
-    const working = moodNow.current === "working";
-    const pause = working ? 5500 + Math.random() * 4000 : 2000 + Math.random() * 3000;
-    later(pause, () => {
-      if (busyElsewhere() || moodNow.current === "ask" || moodNow.current === "error") { wander(); return; }
-      setJob("none");
-      walkTo(nextSpot(working), working ? SCURRY : STROLL, () => { act(); wander(); });
-    });
-  };
-
-  /** Bedtime: it pulls a tiny bed out of its body, the bed grows as it lands beside it, and Clawd
-   *  jumps in, pulls up the quilt and falls asleep. */
+  /** Bedtime: a bed pops out of him and lands beside him, he hops in under the quilt and naps. */
+  const bedRef = useRef(bed); bedRef.current = bed;
   const goToBed = () => {
+    const s = state.current, box = composer();
+    if (!box || s.mode !== "ground") return;
     cancelPlans();
-    setJob("none");
-    const here = atNow.current;
-    const rects = obstacles();
-    const side: 1 | -1 = !blocked(here + BED_GAP, rects) ? 1 : !blocked(here - BED_GAP, rects) ? -1 : 1;
-    setPose({ ...REST, arms: "both", look: side });
     say("Bedtime…", 1300);
-    if (still) { setBed({ phase: "in", side }); setPose({ ...REST, sit: true }); setAsleep(true); setBubble("Zzz"); return; }
-    later(350, () => setBed({ phase: "out", side }));
-    later(1350, () => { setPose({ ...REST, look: side }); setBed({ phase: "in", side }); });
-    later(2000, () => { setPose({ ...REST, sit: true }); setAsleep(true); setBubble("Zzz"); });
-  };
-  /** Out of bed: it hops back and the bed shrinks back into its body. */
-  const unbed = () => {
-    if (bedNow.current.phase === "none" || bedNow.current.phase === "back") return;
-    setBed((current) => ({ ...current, phase: "back" }));
-    window.setTimeout(() => setBed((current) => current.phase === "back" ? { ...current, phase: "none" } : current), still ? 0 : 650);
-  };
-  // Nothing running for a while: it goes to bed. Any touch, or the agent starting, wakes it.
-  const poke = () => {
-    window.clearTimeout(napTimer.current);
-    napTimer.current = window.setTimeout(() => {
-      if ((moodNow.current === "idle" || moodNow.current === "done") && !rideNow.current && !drag.current) goToBed();
-    }, NAP_MS);
+    play("Excited");
+    const side = s.x + 40 * SCALE < box.right ? 1 : -1;
+    s.facing = side as 1 | -1;
+    // The bed has its own spot on the box, beside him; he hops onto its mattress.
+    const spot = clampToBox(s.x + side * 24 * SCALE, box);
+    later(500, () => { setBedAt(spot - box.left); setBed("out"); });
+    later(1400, () => hopTo(spot, () => { s.mode = "bed"; setBed("in"); play("Meditating"); setBubble("Zzz"); }, MATTRESS));
   };
   const wake = () => {
-    if (!asleepNow.current && bedNow.current.phase === "none") return false;
-    setAsleep(false);
-    setPose(REST);
-    unbed();
-    say("Huh? I'm up.", 1500);
-    poke();
-    cancelPlans();
-    wander();
+    if (bedRef.current === "none") return false;
+    if (state.current.mode === "bed") state.current.mode = "ground";
+    setBed("none"); setBubble(null);
+    say("Huh? I'm up.", 1300); play("Excited"); touch();
+    later(1300, routine);
     return true;
   };
 
-  /** Feet on the box at `spot`, in screen px. */
-  const screenAt = (spot: number) => {
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!current || !frame) return { x: pointer.current.x, y: pointer.current.y };
-    const { x, y } = spotAt(current, spot);
-    return { x: frame.left + x, y: frame.top + y };
-  };
-  /** It jumps off the pointer, back onto the box's top edge below it (never onto a button). */
-  const leave = () => {
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!rideNow.current || !current || !frame) { setRide(null); return; }
-    const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, pointer.current.x - frame.left));
-    const spot = freeNear(nearLap(current, x, atNow.current));
-    setPose({ ...REST, arms: "both" });
-    setRide((ridden) => ridden && { ...ridden, ...screenAt(spot), mode: "leaving" });
-    window.setTimeout(() => {
-      atNow.current = spot;
-      setAt(spot);
-      setRide(null);
-      setPose(REST);
-      play("hop");
-      remember();
-      poke();
-      cancelPlans();
-      wander();
-    }, still ? 0 : 480);
-  };
-  /** It leaps onto the pointer: for a short hug with hearts, or for a ride of a few seconds. */
-  const board = (stay: number) => {
-    cancelPlans();
-    setJob("none");
-    setRide({ ...screenAt(atNow.current), mode: "boarding", look: 0 });
-    setPose({ ...REST, arms: "both" });
-    // Two frames later, so the leap starts from where it stood.
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() =>
-      setRide((current) => current && { ...current, ...pointer.current, mode: "boarding" })));
-    later(420, () => {
-      setRide((current) => current && { ...current, ...pointer.current, mode: "riding" });
-      setPose({ ...REST, sit: true });
-      float("♥", 18); float("♥", 40);
-      later(200, () => float("♥", 28));
-      say(stay > 2000 ? pick(RIDING) : "Hi!", 1400);
-    });
-    later(420 + stay, leave);
-  };
-
-  // React to the agent: each mood gets its own little scene, then the wander loop resumes.
+  // React to the chat: each mood gets a little scene, then the routine resumes.
   useEffect(() => {
+    const s = state.current;
     cancelPlans();
-    if (rideNow.current) leave();
-    setAsleep(false);
-    unbed();
-    setPose(REST);
-    setJob("none");
-    poke();
-    if (mood === "done") {
-      setCheering(true);
-      float("✓");
-      if (!still) [0, 380, 760].forEach((when, index) => later(when, () => { play("hop"); setPose({ ...REST, look: index % 2 ? -1 : 1, arms: "both" }); }));
-      later(1200, () => setPose(REST));
-      const timer = window.setTimeout(() => setCheering(false), CHEER_MS);
-      wander();
-      return () => { window.clearTimeout(timer); cancelPlans(); };
-    }
-    setCheering(false);
-    if (mood === "working" && !still) later(400, () => setJob("laptop"));
-    if (mood === "error") { play("shake"); say("Uh oh", 1600); }
+    if (bedRef.current !== "none" && mood !== "idle") wake();
+    touch();
+    if (mood === "done") { play("DancingHappy"); float("✓"); later(2600, () => play("JumpingHappy")); later(4200, routine); return cancelPlans; }
+    if (mood === "error") { play("Disappointed"); say("Uh oh", 1600); }
     if (mood === "ask") {
-      // It runs to the top-right corner, by the send button, and waves for attention.
       say(LINES.ask, 2600);
-      const current = loopNow.current;
-      if (!still && current) walkTo(freeNear(nearLap(current, current.width - WIDTH / 2, atNow.current)), SCURRY * 1.4, () => play("hop"));
+      const box = composer();
+      if (box && s.mode === "ground") walkTo(box.right, true);
     }
-    wander();
+    later(600, routine);
     return cancelPlans;
   }, [mood]);
-  const full = context !== null && context >= 0.8;
-  useEffect(() => { if (full) say("I'm getting full. Compact soon?", 2600); }, [full]);
+  // A new activity shows at once rather than at the routine's next turn.
+  useEffect(() => { if (moodNow.current === "working" && state.current.mode === "ground" && state.current.walkTo === null) play(WORKING[activity ?? "none"]); }, [activity]);
+  useEffect(() => { if (context !== null && context >= 0.8) say("I'm getting full. Compact soon?", 2600); }, [context !== null && context >= 0.8]);
 
-  // Legs cycle while it walks; at work, its arms and tools keep the same beat.
-  const walking = !asleep && (pose.walking || mood === "working" || job !== "none");
+  // The frame loop: physics, walking, the ride, and drawing the current frame.
   useEffect(() => {
-    if (!walking) { setStep(false); return undefined; }
-    const beat = pose.walking ? 140 : job === "build" ? 260 : job === "coffee" || job === "read" ? 900 : 200;
-    const timer = window.setInterval(() => { setStep((current) => !current); setTick((current) => current + 1); }, beat);
-    return () => window.clearInterval(timer);
-  }, [walking, pose.walking, job]);
-  // A spark flies on each hammer blow.
-  useEffect(() => { if (job === "build" && step && !still) float("✦", 48); }, [job, step]);
-  // In bed, z's drift up from the pillow.
-  useEffect(() => {
-    if (!asleep || bed.phase !== "in" || still) return undefined;
-    const timer = window.setInterval(() => float("z", WIDTH / 2 + bed.side * (BED_GAP + 12)), 1500);
-    return () => window.clearInterval(timer);
-  }, [asleep, bed.phase, bed.side]);
-  // While the agent works, Claude Code's spinner turns over its head.
-  const busy = mood === "working" && !asleep && job !== "carry" && !ride;
-  useEffect(() => {
-    if (!busy || still) { setSpin(0); return undefined; }
-    const timer = window.setInterval(() => setSpin((current) => (current + 1) % SPINNER.length), 120);
-    return () => window.clearInterval(timer);
-  }, [busy, still]);
-  // Awake, it blinks now and then.
-  useEffect(() => {
-    if (asleep || still) return undefined;
-    let timer = 0;
-    const next = () => {
-      timer = window.setTimeout(() => {
-        setBlink(true);
-        timer = window.setTimeout(() => { setBlink(false); next(); }, 130);
-      }, 2500 + Math.random() * 3500);
+    if (!ready) return undefined;
+    const s = state.current;
+    const box = composer();
+    if (box) {
+      let saved = Number.NaN;
+      try { saved = Number(localStorage.getItem(POSITION_KEY)); } catch { /* first time */ }
+      s.groundX = Number.isFinite(saved) && saved >= 0 && saved <= 1 ? saved * box.width : box.width - 60 * SCALE;
+      s.x = clampToBox(box.left + s.groundX, box); s.y = box.top;
+    }
+    let frame = 0, last = performance.now();
+    // One bad frame must never stop the pet: the next frame is always asked for first.
+    const step = (now: number) => {
+      frame = window.requestAnimationFrame(step);
+      try { tick(now); } catch { /* skip this frame */ }
     };
-    next();
-    return () => { window.clearTimeout(timer); setBlink(false); };
-  }, [asleep, still]);
+    const tick = (now: number) => {
+      const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now;
+      const rect = composer();
+      if (rect && rect.width > 0) {
+        if (s.mode === "ground") {
+          // Standing on the box: it follows the box as the window or the chat resizes.
+          if (s.walkTo !== null) {
+            const over = s.dashRects.some((r) => s.x > r.left - 10 && s.x < r.right + 10);
+            const speed = s.speed * (over ? DASH : 1);
+            const dir = s.walkTo > s.x ? 1 : -1;
+            s.facing = dir as 1 | -1;
+            play(over || s.speed === RUN ? "Running" : "Walking");
+            s.x += dir * speed * dt;
+            if ((dir > 0 && s.x >= s.walkTo) || (dir < 0 && s.x <= s.walkTo)) { s.x = s.walkTo; s.walkTo = null; s.groundX = s.x - rect.left; remember(); }
+            else s.groundX = s.x - rect.left;
+          }
+          s.x = clampToBox(rect.left + s.groundX, rect); s.y = rect.top;
+        } else if (s.mode === "fall") {
+          s.vy += GRAVITY * dt; s.y += s.vy * dt;
+          // It lands on the box when it falls onto it, else on the window's floor.
+          const overBox = s.x > rect.left && s.x < rect.right && s.y - s.vy * dt <= rect.top + 1;
+          const ground = overBox ? rect.top : window.innerHeight - 4;
+          if (s.y >= ground) {
+            const height = s.vy;
+            s.y = ground; s.vy = 0;
+            if (overBox) {
+              s.mode = "ground"; s.groundX = clampToBox(s.x, rect) - rect.left; remember();
+              play(height > 1400 ? "Dizzy" : "Excited");
+              later(height > 1400 ? 1600 : 700, routine);
+            } else {
+              // On the window's floor: a moment there (a hop with no arc holds it still), then it
+              // hops back up onto the box.
+              s.mode = "hop"; s.hop = null;
+              play(height > 1400 ? "Dizzy" : "LookingAround");
+              later(height > 1400 ? 1500 : 700, () => hopTo(s.x, () => later(400, routine)));
+            }
+          }
+        } else if (s.mode === "hop" && s.hop) {
+          const t = Math.min(1, (now - s.hop.start) / s.hop.ms);
+          s.x = s.hop.fromX + (s.hop.toX - s.hop.fromX) * t;
+          s.y = s.hop.fromY + (s.hop.toY - s.hop.fromY) * t - Math.sin(Math.PI * t) * 46;
+          s.facing = s.hop.toX >= s.hop.fromX ? 1 : -1;
+          if (t >= 1) { const then = s.hop.then; s.hop = null; then(); }
+        } else if (s.mode === "ride") {
+          s.x = s.pointer.x; s.y = s.pointer.y + 2;
+        } else if (s.mode === "bed") {
+          // In bed: on the mattress, wherever the box is now.
+          s.x = clampToBox(rect.left + s.groundX, rect); s.y = rect.top - MATTRESS;
+        }
+      }
+      // Draw: feet at (x, y).
+      const sheet = (ready[s.anim] ?? ready.Walking)!;
+      const el = holder.current, cv = canvas.current;
+      if (el && cv) {
+        const width = sheet.w * SCALE, height = sheet.h * SCALE;
+        if (cv.width !== width || cv.height !== height) { cv.width = width; cv.height = height; }
+        // A frame's timestamp can come a moment before the animation started: never a negative index.
+        const index = still ? 0 : Math.floor((Math.max(0, now - s.animStart) / 1000) * sheet.fps) % sheet.frames.length;
+        const image = sheet.frames[index] ?? sheet.frames[0];
+        const context2d = cv.getContext("2d");
+        if (context2d && image) {
+          context2d.imageSmoothingEnabled = false;
+          context2d.clearRect(0, 0, width, height);
+          context2d.drawImage(image, 0, 0, width, height);
+        }
+        el.style.transform = `translate(${Math.round(s.x)}px, ${Math.round(s.y)}px)`;
+        cv.style.left = `${-sheet.ax * SCALE}px`;
+        cv.style.top = `${-sheet.ay * SCALE}px`;
+        cv.style.transform = s.facing < 0 ? "scaleX(-1)" : "";
+        cv.style.transformOrigin = `${sheet.ax * SCALE}px 0`;
+      }
+    };
+    frame = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(frame);
+  }, [ready, still]);
 
-  // It watches the pointer when it comes near, rides it once aboard, now and then leaps onto it,
-  // and perks up while you type in the box.
+  // The pointer: it hops on after the pointer stays near a moment, then rides it for a while.
   useEffect(() => {
     if (still) return undefined;
-    let frame = 0;
-    let moved = 0;
     const onMove = (event: PointerEvent) => {
-      moved += event.clientX - pointer.current.x;
-      pointer.current = { x: event.clientX, y: event.clientY };
-      if (frame) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        const { x, y } = pointer.current;
-        const dx = moved;
-        moved = 0;
-        if (rideNow.current) {
-          // Aboard, it goes wherever the pointer goes, facing the way it is carried.
-          if (rideNow.current.mode === "riding") setRide((current) => current && { ...current, x, y, look: dx < -1 ? -1 : dx > 1 ? 1 : current.look });
-          return;
+      const s = state.current;
+      s.pointer = { x: event.clientX, y: event.clientY };
+      if (s.grab.down) return;
+      const near = Math.hypot(event.clientX - s.x, event.clientY - (s.y - 16 * SCALE)) < REACH;
+      if (s.mode === "ground" && near && moodNow.current !== "working" && bedRef.current === "none" && Date.now() > s.cooldownUntil) {
+        if (!s.hoverSince) s.hoverSince = Date.now();
+        else if (Date.now() - s.hoverSince > HOVER_MS) {
+          s.hoverSince = 0; s.cooldownUntil = Date.now() + 12_000;
+          cancelPlans(); touch();
+          s.mode = "ride"; play("Excited"); float("♥"); float("♥"); say(pick(["Wheee!", "Take me somewhere", "Hold on tight"]), 1400);
+          later(4000 + Math.random() * 4000, () => { if (s.mode === "ride") { s.mode = "fall"; s.vy = 0; play("Jumping"); } });
         }
-        const body = box.current?.getBoundingClientRect();
-        if (!body || asleepNow.current || drag.current) return;
-        const middle = body.left + body.width / 2;
-        const distance = Math.hypot(x - middle, y - (body.top + body.height / 2));
-        const calm = moodNow.current === "idle" || moodNow.current === "done";
-        if (calm && distance < REACH && bedNow.current.phase === "none" && Date.now() - lastPlay.current > PLAY_EVERY && Math.random() < 0.6) {
-          lastPlay.current = Date.now();
-          board(Math.random() < 0.5 ? 1200 : 4000 + Math.random() * 6000);
-          return;
-        }
-        setPose((current) => {
-          if (current.walking || current.sit) return current;
-          const look: Pose["look"] = distance > NOTICE ? 0 : x < middle - 12 ? -1 : x > middle + 12 ? 1 : 0;
-          return current.look === look ? current : { ...current, look };
-        });
-      });
+      } else s.hoverSince = 0;
     };
-    let lastTyped = 0;
-    const form = composer.current ?? box.current?.parentElement;
-    const onInput = () => {
-      const now = Date.now();
-      if (now - lastTyped < 1500 || asleepNow.current) return;
-      lastTyped = now;
-      play("bounce");
-      poke();
-    };
+    const onInput = () => { touch(); if (state.current.mode === "ground" && moodNow.current !== "working") { play("Excited"); later(900, routine); } };
+    const form = anchor.current?.parentElement;
     window.addEventListener("pointermove", onMove);
     form?.addEventListener("input", onInput);
-    return () => { window.removeEventListener("pointermove", onMove); form?.removeEventListener("input", onInput); if (frame) window.cancelAnimationFrame(frame); };
+    return () => { window.removeEventListener("pointermove", onMove); form?.removeEventListener("input", onInput); };
   }, [still]);
 
-  useEffect(() => () => { window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current); window.clearTimeout(napTimer.current); cancelPlans(); }, []);
+  useEffect(() => () => cancelPlans(), []);
 
-  const shown: PetMood = mood === "done" && !cheering ? "idle" : mood;
-
-  /** The spot on the outline nearest a pointer, as a distance around near the current one. */
-  const nearestSpot = (clientX: number, clientY: number) => {
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!current || !frame) return atNow.current;
-    const x = Math.max(0, Math.min(current.width, clientX - frame.left));
-    const y = Math.max(0, Math.min(current.height, clientY - frame.top));
-    const distances = [y, current.width - x, current.height - y, x];
-    const side = distances.indexOf(Math.min(...distances));
-    const along = side === 0 ? x : side === 1 ? current.width + y : side === 2 ? current.width + current.height + (current.width - x)
-      : 2 * current.width + current.height + (current.height - y);
-    return nearLap(current, along, atNow.current);
-  };
-  /**
-   * How far out from the box a pointer holds it: the pointer's distance outside the edge the spot is
-   * on, less half its height (it is held by the middle of its body), from 0 on the edge to MAX_LIFT.
-   */
-  const liftAt = (clientX: number, clientY: number, spot: number) => {
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!current || !frame) return liftNow.current;
-    const { side } = spotAt(current, spot);
-    const outside = side === 0 ? frame.top - clientY : side === 1 ? clientX - frame.right
-      : side === 2 ? clientY - frame.bottom : frame.left - clientX;
-    return Math.max(0, Math.min(MAX_LIFT, Math.round(outside - HEIGHT / 2)));
-  };
-
-  const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    // Picked up mid-walk or mid-job: it stops where it is and goes where it is carried.
-    cancelPlans();
-    setJob("none");
-    drag.current = { moved: false, x: event.clientX, y: event.clientY };
+  // Drag anywhere: it dangles while carried and falls when let go.
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const s = state.current;
+    s.grab = { dx: event.clientX - s.x, dy: event.clientY - s.y, startX: event.clientX, startY: event.clientY, moved: false, down: true };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
-  const onPointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    const state = drag.current;
-    if (!state) return;
-    if (!state.moved && Math.hypot(event.clientX - state.x, event.clientY - state.y) > 4) {
-      state.moved = true;
-      // Lifted out of bed: the bed goes back in.
-      setAsleep(false);
-      unbed();
-      setPose(REST);
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const s = state.current;
+    if (!s.grab.down) return;
+    if (!s.grab.moved && Math.hypot(event.clientX - s.grab.startX, event.clientY - s.grab.startY) > 4) {
+      s.grab.moved = true; cancelPlans(); touch();
+      if (bedRef.current !== "none") { setBed("none"); setBubble(null); }
+      s.mode = "drag"; play("Jumping"); say("Wheee", 900);
     }
-    if (!state.moved) return;
-    const spot = nearestSpot(event.clientX, event.clientY);
-    atNow.current = spot;
-    setAt(spot);
-    // Drawn away from the edge, it comes away with the pointer, as far as MAX_LIFT.
-    const height = liftAt(event.clientX, event.clientY, spot);
-    liftNow.current = height;
-    setLift(height);
+    if (s.grab.moved) { s.x = event.clientX - s.grab.dx; s.y = event.clientY - s.grab.dy; }
   };
   const onPointerUp = () => {
-    const state = drag.current;
-    drag.current = null;
-    if (!state?.moved) { if (!asleepNow.current) wander(); return; }
-    // Dropped on a button: it hops off to the nearest free spot. Lifted clear of the edge it covers
-    // none of the buttons along it, so it stays where it was let go.
-    const free = liftNow.current > HEIGHT ? atNow.current : freeNear(atNow.current);
-    if (free !== atNow.current) walkTo(free, SCURRY * DASH, remember);
-    else remember();
-    say("Wheee", 900);
-    play("hop");
-    poke();
-    wander();
+    const s = state.current;
+    const wasDrag = s.grab.moved;
+    s.grab.down = false; s.grab.moved = false;
+    if (wasDrag) { s.mode = "fall"; s.vy = 0; return; }
+    // A click: pet it (or wake it).
+    if (wake()) return;
+    touch(); cancelPlans();
+    play("JumpingHappy"); float("♥"); float("♥"); say(pick(PETTED), 1400);
+    later(1500, routine);
+  };
+
+  const run = (what: string) => {
+    setMenu(null);
+    const s = state.current;
+    cancelPlans(); touch();
+    if (what === "nap") { s.lastTouch = 0; goToBed(); return; }
+    if (bedRef.current !== "none") wake();
+    if (what === "dance") { play("DancingHappy"); later(3000, routine); }
+    else if (what === "wave") { play("Waving"); say("Hi!", 1200); later(2200, routine); }
+    else if (what === "think") { play("Lightbulb"); later(3500, routine); }
+    else if (what === "ride") { s.mode = "ride"; play("Excited"); later(6000, () => { if (s.mode === "ride") { s.mode = "fall"; s.vy = 0; } }); }
+    else if (what === "hide") onHide();
   };
 
   const percent = context === null ? null : Math.round(context * 100);
-  const side = loop && !Number.isNaN(at) && !ride ? spotAt(loop, at).side : 0;
-  // On the box: feet on the outline, body outward, so upright on top, sideways on the sides and
-  // upside down under it. On the pointer: feet on the pointer's tip, upright, above everything.
-  const placement: CSSProperties = ride
-    ? { position: "fixed", left: ride.x - WIDTH / 2, top: ride.y - HEIGHT + 4, zIndex: 60, pointerEvents: "none",
-      transition: ride.mode === "riding" ? "none" : "left .42s ease-out, top .42s cubic-bezier(.3,-.7,.6,1)" }
-    : loop && !Number.isNaN(at) ? (() => {
-      const { x, y } = spotAt(loop, at);
-      // Turned to its side, "up" is away from the box, so its lift is a move up after the turn.
-      return { left: x - WIDTH / 2, top: y - HEIGHT, transform: `rotate(${side * 90 + Math.floor(at / loop.length) * 360}deg)${lift ? ` translateY(${-lift}px)` : ""}`,
-        transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
-    })() : { visibility: "hidden" };
-  const bedStyle = { "--bed-dx": `${bed.side * BED_GAP}px` } as CSSProperties;
-  const pet = <div ref={box} className={`cx-pet side-${side}${ride ? ` is-riding ride-${ride.mode}` : ""}${bed.phase !== "none" ? ` bed-${bed.phase}` : ""}`}
-    style={{ ...placement, ...bedStyle }}>
-    {bed.phase !== "none" ? <BedFrame side={bed.side} /> : null}
+  const layer = <div ref={holder} className={`cx-pet${bed !== "none" ? ` bed-${bed}` : ""}`} aria-hidden={false}>
+    <canvas ref={canvas} className="cx-pet-canvas" role="img"
+      aria-label={`Bit the pet: ${bed === "in" ? "napping" : LINES[mood]}${percent !== null ? ` Context ${percent}%.` : ""}`}
+      title={`${bed === "in" ? "Napping. Click to wake" : LINES[mood]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag anywhere · right-click for more`} />
+    <div className="cx-pet-hit" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
+      onDoubleClick={() => { touch(); cancelPlans(); state.current.fed += 1; play("Excited"); float("🍪"); say(state.current.fed > 3 ? "So full. Maybe compact me?" : "Nom. Tokens are tasty", 1600); later(1600, routine); }}
+      onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }); }} />
+    {bed === "in" ? <span className="cx-pet-zzz" aria-hidden="true">z</span> : null}
     {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
-    {busy ? <span className="cx-pet-spinner" aria-hidden="true">{SPINNER[spin]}</span> : null}
-    {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
-    <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job}` : ""}${motion ? ` is-${motion}` : ""}`}
-      style={ride && ride.look < 0 ? { transform: "scaleX(-1)" } : undefined}
-      aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
-      title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag it around the box, or away from it to lift it`}
-      onAnimationEnd={(event) => { if (event.target !== event.currentTarget) setMotion(""); }}
-      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
-      onClick={() => {
-        if (drag.current?.moved) return;
-        window.clearTimeout(clickTimer.current);
-        clickTimer.current = window.setTimeout(() => {
-          if (wake()) return;
-          play("hop"); float("♥"); float("♥");
-          setPose({ ...REST, arms: "both" });
-          later(700, () => setPose(REST));
-          say(pick(PETTED), 1400);
-          poke();
-        }, 220);
-      }}
-      onDoubleClick={() => {
-        window.clearTimeout(clickTimer.current);
-        wake();
-        setFed((count) => count + 1);
-        float("🍪"); window.setTimeout(() => float("nom"), 250);
-        say(fed >= 3 ? "So full. Maybe compact me?" : "Nom. Tokens are tasty", 1600);
-        play("bounce");
-        poke();
-      }}
-      onContextMenu={(event) => { event.preventDefault(); onHide(); }}>
-      <Sprite mood={shown} asleep={asleep} step={step} pose={pose} blink={blink} job={job} />
-      <Prop job={asleep || ride ? "none" : job} step={step} tick={tick} />
-    </button>
-    {bed.phase === "in" && asleep ? <Quilt /> : null}
+    {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.dx }} aria-hidden="true">{item.text}</span>)}
   </div>;
-  // Aboard the pointer it lives on the page itself, so no panel's edge clips it.
-  return ride && typeof document !== "undefined" ? createPortal(pet, document.body) : pet;
+  return <span ref={anchor} className="cx-pet-anchor" aria-hidden="true">
+    {typeof document !== "undefined" && ready ? createPortal(<>
+      {bed !== "none" && composer() ? <div className={`cx-pet-bedspot bed-${bed}`}
+        style={{ left: composer()!.left + bedAt - 16 * SCALE, top: composer()!.top - 9 * SCALE }}><Bed /></div> : null}
+      {layer}
+      {menu ? <div className="cx-pet-menu" role="menu" style={{ left: menu.x, top: menu.y }} onMouseLeave={() => setMenu(null)}>
+        {[["nap", "Nap now"], ["dance", "Dance"], ["wave", "Wave"], ["think", "Have an idea"], ["ride", "Ride the pointer"], ["hide", "Hide pet"]]
+          .map(([id, label]) => <button key={id} type="button" role="menuitem" onClick={() => run(id!)}>{label}</button>)}
+      </div> : null}
+    </>, document.body) : null}
+  </span>;
 }

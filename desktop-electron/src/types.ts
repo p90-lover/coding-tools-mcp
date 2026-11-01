@@ -821,6 +821,8 @@ export interface LauncherApi {
   showChatWindow?(input: { key: string; title: string; page: string; body: string; mode: "open" | "update" }): Promise<{ open: boolean }>;
   /** A project folder's git origin as "owner/repo", or null. */
   projectRemote?(folder: string): Promise<string | null>;
+  /** The installed Claude app's Clawd sprites, for the chat pet (electron/claude-sprites.cjs). */
+  clawdSprites?(): Promise<{ source: "claude" | "none"; sprites: Record<string, { w: number; h: number; fps: number; palette: string[]; base: string; deltas: string[]; a0: number[] }> }>;
   projectBranch?(folder: string): Promise<string | null>;
   /** What a project folder is in git: a repository, a worktree of one, a folder inside one, not git, or gone. */
   projectGit?(folder: string): Promise<ProjectGit | null>;

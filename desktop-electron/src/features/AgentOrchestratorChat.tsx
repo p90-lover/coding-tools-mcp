@@ -17,7 +17,7 @@ import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuSta
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatMessageParts, chatStatsSpan, isDeepSeekModel, petActivity, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, wakeupLabel, type ChatWakeup,
 } from "./ao-chat";
 
@@ -1463,7 +1463,9 @@ export function AgentOrchestratorChat({
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
           {petOn && selectedTaskId ? (() => {
             const last = [...turns].reverse().find((turn) => turn.runId);
-            return <ChatPet context={contextShare} onHide={togglePet}
+            // What the agent is doing this moment (thinking, a command, an edit…), for Clawd to act out.
+            const working = last && [...last.steps, ...(last.final ? [last.final] : [])].find((step) => step.working);
+            return <ChatPet context={contextShare} onHide={togglePet} activity={petActivity(working?.working?.timeline)}
               mood={petMood({ asking: awaitingAnswer, running: runOpen && anyWorking, lastStatus: last?.status,
                 lastFailed: Boolean(last && !runOpen && [...last.steps, ...(last.final ? [last.final] : [])].some((step) => step.state === "failed" || step.state === "held")) })} />;
           })() : null}
