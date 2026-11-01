@@ -2043,6 +2043,113 @@ test("a released saved chat is deleted from its own page, as a Temporary Chat wo
   assert.ok(moved.logs.includes("browser.conversation_delete_skipped"));
 });
 
+function conversationOwnershipFixture(Host = BrowserHost, { fresh = false, persisted = false, temporary = false, home = false } = {}) {
+  const originalUrl = `https://chatgpt.com${home ? "/" : `/c/${SAVED_CONVERSATION_ID}`}${temporary ? "?temporary-chat=true" : ""}`;
+  let url = originalUrl;
+  let closed = false;
+  const scripts = [];
+  const registrations = [];
+  const contents = Object.assign(new EventEmitter(), createContents().webContents, {
+    getURL: () => url, isDestroyed: () => closed, close: () => { closed = true; },
+    setBackgroundThrottling() {}, setWindowOpenHandler() {},
+    executeJavaScript: async (script) => { scripts.push(script.match(/\}\)\("([^"]+)",/)?.[1] ?? "surface-script"); return { ok: true, status: 200 }; },
+  });
+  const tab = {
+    id: "owned-tab", traceId: "owned-trace", helperPid: 17, surfaceId: "owned-surface",
+    conversationKey: "a".repeat(64), nativeThreadId: "11111111-2222-4333-8444-555555555555",
+    status: "running", interactionMode: "automatic", persistedConversation: persisted,
+    ...(fresh ? {} : { retainedLocation: `${home ? "/" : `/c/${SAVED_CONVERSATION_ID}`}${temporary ? "?temporary-chat=true" : ""}`,
+      conversationUrl: home ? undefined : `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, ownedConversation: temporary ? undefined : SAVED_CONVERSATION_ID }),
+    view: { webContents: contents },
+  };
+  const host = Object.assign(Object.create(Host.prototype), {
+    turnTabs: new Map([[tab.id, tab]]), userCancelledTurnOwners: new Map(), closedTurnOwners: new Map(),
+    selectedTabId: "home", manualOperation: null, getUseSavedChats: () => !temporary,
+    window: { contentView: { removeChildView() {} } },
+    logger: { info() {}, warn() {}, error() {} },
+    syncPowerSaveBlocker() {}, syncViewVisibility() {}, publishState() {}, writeDescriptor() {},
+    snapshot: () => ({ tabs: [] }),
+    chatLifecycleSync: { register: (_thread, location) => { registrations.push(location); return true; } },
+  });
+  host.bindTurnContents(tab);
+  return { host, tab, scripts, registrations, originalUrl,
+    navigate(next, mainFrame = true) { url = next; contents.emit("did-navigate-in-page", {}, next, mainFrame); },
+  };
+}
+
+for (const [status, roundTrip, persisted] of [
+  ["aborted", false, false], ["failed", false, false], ["completed", false, false],
+  ["completed", true, false], ["completed", false, true], ["superseded", true, false],
+]) test(`conversation ownership cannot retarget cleanup or retention (${status}, return=${roundTrip}, persisted=${persisted})`, async () => {
+  const fixture = conversationOwnershipFixture(BrowserHost, { persisted });
+  fixture.navigate("https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+  if (roundTrip) fixture.navigate(fixture.originalUrl);
+  await fixture.host.endTurn(fixture.tab.traceId, 17, status, false, undefined, true, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.tab.ownedConversation, SAVED_CONVERSATION_ID, "the known owner is immutable");
+  assert.deepEqual(fixture.scripts, [], "no DELETE after ambiguous navigation");
+  assert.deepEqual(fixture.registrations, [], "the native thread must not acquire the navigated chat");
+  assert.equal(fixture.host.turnTabs.has(fixture.tab.id), false, "a lost lease cannot be retained");
+});
+
+for (const status of ["failed", "aborted"]) test(`conversation ownership does not infer a fresh direct-cleanup target (${status})`, async () => {
+  const fixture = conversationOwnershipFixture(BrowserHost, { fresh: true });
+  fixture.navigate("https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+  await fixture.host.endTurn(fixture.tab.traceId, 17, status, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.tab.ownedConversation, undefined);
+  assert.deepEqual(fixture.scripts, []);
+});
+
+for (const Host of [BrowserHost, StandaloneBrowserHost]) {
+  test(`conversation ownership pins a fresh result without granting direct-cleanup authority (${Host === BrowserHost ? "desktop" : "portable"})`, async () => {
+    const fixture = conversationOwnershipFixture(Host, { fresh: true });
+    await fixture.host.endTurn(fixture.tab.traceId, 17, "completed", false, undefined, true, false);
+    assert.equal(fixture.tab.retainedLocation, `/c/${SAVED_CONVERSATION_ID}`);
+    assert.equal(fixture.tab.ownedConversation, undefined);
+    const lease = await fixture.host.beginTurn("next-trace", false, 18, fixture.tab.conversationKey);
+    assert.equal(lease.reused, true);
+    assert.equal(lease.conversationUrl, fixture.originalUrl);
+    fixture.navigate(`${fixture.originalUrl}?model=fixture#same-chat`);
+    await fixture.host.endTurn("next-trace", 18, "completed", false, undefined, true, false);
+    assert.equal(fixture.host.turnTabs.has(fixture.tab.id), true, "same-ID query changes remain valid");
+    assert.deepEqual(fixture.scripts, []);
+  });
+  test(`conversation ownership latches a mid-lease round trip (${Host === BrowserHost ? "desktop" : "portable"})`, async () => {
+    const fixture = conversationOwnershipFixture(Host);
+    fixture.navigate("https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    fixture.navigate(fixture.originalUrl);
+    await fixture.host.endTurn(fixture.tab.traceId, 17, "completed", false, undefined, true, false);
+    assert.equal(fixture.host.turnTabs.has(fixture.tab.id), false);
+    assert.deepEqual(fixture.scripts, []);
+  });
+  for (const home of [false, true]) test(`conversation ownership exposes a temporary lease identity (${Host === BrowserHost ? "desktop" : "portable"}, home=${home})`, async () => {
+    const fixture = conversationOwnershipFixture(Host, { fresh: true, temporary: true, home });
+    await fixture.host.endTurn(fixture.tab.traceId, 17, "completed", false, undefined, true, false);
+    const lease = await fixture.host.beginTurn("next-trace", false, 18, fixture.tab.conversationKey);
+    assert.equal(lease.reused, true);
+    assert.equal(lease.conversationUrl, home ? undefined : `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`);
+    assert.equal(fixture.tab.retainedLocation, `${home ? "/" : `/c/${SAVED_CONVERSATION_ID}`}?temporary-chat=true`);
+    assert.deepEqual(fixture.scripts, []);
+  });
+}
+
+for (const action of ["remove", "expiry"]) test(`conversation ownership checks missed navigation before ${action}`, async () => {
+  const fixture = conversationOwnershipFixture();
+  fixture.navigate("https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", false);
+  if (action === "expiry") {
+    const now = Date.now();
+    fixture.tab.status = "ready";
+    fixture.tab.lastHeartbeatAt = now - 60 * 60 * 1000;
+    fixture.host.lastTurnSweepAt = now - 1000;
+    fixture.host.reapExpiredTurnTabs(now);
+  } else fixture.host.removeTurnTab(fixture.tab, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.host.turnTabs.has(fixture.tab.id), false);
+  assert.deepEqual(fixture.scripts, []);
+  assert.equal(fixture.tab.ownedConversation, SAVED_CONVERSATION_ID);
+});
+
 test("hard refresh accepts Chromium's completed loading cycle even without did-finish-load", async () => {
   const calls = [];
   const contents = new EventEmitter();
@@ -3263,7 +3370,7 @@ test("a completed connector turn without binding is released instead of retained
   assert.equal(fixture.turnTabs.size, 0);
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(deletedFirst, true, "its saved chat was deleted before the page closed");
+  assert.equal(deletedFirst, false, "a fresh URL alone is not a direct tab-cleanup target");
   assert.equal(closed, true);
 });
 

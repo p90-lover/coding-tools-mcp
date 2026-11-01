@@ -6268,6 +6268,35 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!queueTimers.has(wakeKey(workspaceId, task)) && !draining.has(wakeKey(workspaceId, task))) armQueue(workspaceId, task, 1_000);
     }
   }
+  // A project's goals and queued messages are swept when the window reads its runs. A minimized
+  // window reads nothing (the preload refuses its calls), and goals run all night with the window
+  // minimized: a goal whose round settled unwatched waited for the window to be opened again. The
+  // watch sweeps each project with an active goal that no read swept for GOAL_WATCH_MS.
+  const GOAL_WATCH_MS = 5 * 60_000;
+  const lastSwept = new Map(); // workspace -> when it was last swept
+  let goalWatchTimer = null;
+  function sweepWorkspace(workspaceId, saved) {
+    lastSwept.set(workspaceId, now());
+    sweepGoals(workspaceId, saved);
+    sweepQueues(workspaceId);
+  }
+  async function watchGoals() {
+    for (const workspaceId of goals.activeWorkspaces()) {
+      if (goalsDisposed) return;
+      if (now() - (lastSwept.get(workspaceId) ?? 0) < GOAL_WATCH_MS) continue;
+      try { sweepWorkspace(workspaceId, await runs({ workspaceId })); }
+      catch (error) { logger?.warn?.("ao.goal_watch_failed", { message: publicText(error?.message || error, 200) }); }
+    }
+  }
+  /** Starts the goal watch (the app does, once its backend runs; tests drive watchGoals by hand). */
+  function startGoalWatch() {
+    if (goalWatchTimer || goalsDisposed) return;
+    const next = () => {
+      goalWatchTimer = setTimer(() => { void watchGoals().finally(() => { if (!goalsDisposed) next(); }); }, GOAL_WATCH_MS);
+      goalWatchTimer?.unref?.();
+    };
+    next();
+  }
   // Queues saved before a restart go on shortly after the app is back.
   function restoreQueues() {
     for (const { workspaceId, taskId } of chatQueue.chats()) {
@@ -7111,6 +7140,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     goalsDisposed = true;
     for (const timer of goalTimers.values()) clearTimer(timer);
     goalTimers.clear();
+    if (goalWatchTimer) clearTimer(goalWatchTimer);
+    goalWatchTimer = null;
     autoRetryDisposed = true;
     for (const timer of autoRetryTimers) clearTimer(timer);
     autoRetryTimers.clear();
@@ -7160,10 +7191,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       case "runs": {
         const saved = await runs(args);
-        // A goal whose round settled unwatched (the app was closed meanwhile) is judged now.
-        if (!args.runId) sweepGoals(clean(args.workspaceId, 128), saved);
-        // So does a queued message whose chat's settle was missed.
-        if (!args.runId) sweepQueues(clean(args.workspaceId, 128));
+        // A goal whose round settled unwatched (the app was closed meanwhile) is judged now, and a
+        // queued message whose chat's settle was missed goes on.
+        if (!args.runId) sweepWorkspace(clean(args.workspaceId, 128), saved);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)),
@@ -7301,7 +7331,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

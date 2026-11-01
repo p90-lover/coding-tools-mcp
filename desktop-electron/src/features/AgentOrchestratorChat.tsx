@@ -2403,6 +2403,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
+              if (event.nativeEvent?.isComposing || event.nativeEvent?.keyCode === 229) return;
               if (slash.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
                 event.preventDefault(); setSlashIndex((value) => (value + (event.key === "ArrowDown" ? 1 : slash.length - 1)) % slash.length); return;
               }

@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { assertSafeGo } = require("./go-toolchain.cjs");
 
 const projectRoot = path.resolve(__dirname, "../..");
 const sourceRoot = path.resolve(process.env.CODING_TOOLS_AO_SOURCE_DIR || path.join(projectRoot, "module", "agent-orchestrator"));
@@ -121,10 +122,13 @@ async function main() {
     path.join(projectRoot, ".tools", "go1.27.3", "bin", "go.exe"),
   ].find((candidate) => fs.existsSync(candidate));
   const goExecutable = process.env.CODING_TOOLS_GO || portableGo || "go";
+  const goOutput = (arguments_) => spawnSync(goExecutable, arguments_, { encoding: "utf8", windowsHide: true, env: { ...process.env, GOTOOLCHAIN: "local" } }).stdout;
+  assertSafeGo(goOutput(["env", "GOVERSION"]), `The Go toolchain (${goExecutable})`);
   const daemonPath = path.join(outputRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
   run(goExecutable, ["build", "-trimpath", "-ldflags", "-X=github.com/aoagents/agent-orchestrator/backend/internal/config.CodingToolsLocalOnly=1", "-o", daemonPath, "./cmd/ao"], path.join(sourceRoot, "backend"), {
     GOWORK: "off", GOTOOLCHAIN: "local",
   });
+  assertSafeGo(goOutput(["version", daemonPath]), "The built AO daemon");
   fs.copyFileSync(path.join(sourceRoot, "LICENSE"), path.join(outputRoot, "LICENSE"));
   const acpRuntime = buildAcpRuntime();
   fs.writeFileSync(path.join(outputRoot, "manifest.json"), `${JSON.stringify({
