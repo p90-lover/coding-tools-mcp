@@ -1296,6 +1296,32 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       rememberLaunchWindow(created, contextWindow);
       return created;
     },
+    async recover(id, expectedTurn) {
+      const key = sessionId(id), owner = child, port = daemonPort;
+      const unavailable = message => ({ recovery: "unavailable", status: "unknown", message });
+      const current = () => state === "ready" && child === owner && daemonPort === port;
+      // Even a GET through internalApi starts AO when it is down. Starting it may restore queued
+      // work, so this inspection uses only the already-running daemon and never calls start().
+      if (!current() || !owner || owner.exitCode !== null || owner.signalCode !== null || !expectedTurn) {
+        return unavailable("The original accepted turn cannot be inspected safely. Its session was kept; no input was sent.");
+      }
+      const record = await requestApi("GET", `/api/v1/sessions/${key}`, undefined, { timeoutMs: 15000 });
+      if (!current() || record?.ok !== true || record.data?.session?.id !== key || record.data.session.mode !== "chat"
+        || record.data.session.isTerminated || ["provisioning", "failed"].includes(record.data.session.provisionState)) {
+        return unavailable("The original agent is unavailable or still starting. No input was sent and recovery did not retry its queue.");
+      }
+      const read = await requestApi("GET", `/api/v1/sessions/${key}/conversation?limit=1&includePending=1&trimLargeFields=1`, undefined, { timeoutMs: 15000 });
+      const conversation = read?.data, turn = conversation?.turns?.find(entry => entry.id === expectedTurn);
+      if (!current() || read?.ok !== true || conversation?.sessionId !== key || !turn || !turn.providerTurnId || turn.rolledBack) {
+        return unavailable("The original accepted turn could not be confirmed. No message was sent; its session was kept.");
+      }
+      if (TERMINAL_TURN_STATES.has(turn.state)) return { recovery: "observed", status: turn.state,
+        message: `The original turn is ${turn.state}. Its history was kept; no message was sent or inference restarted.` };
+      if (turn.state !== "running" || conversation.controller === "stopped") {
+        return unavailable("The original turn has no confirmed running controller. Automatic reattachment cannot safely exclude queued work, so no input was sent.");
+      }
+      return { recovery: "observed", status: "working", message: "The existing accepted turn is still working. No message was sent or work replayed." };
+    },
     async observe(id, expectedTurn) {
       const shared = sharedObserveRead(id);
       const read = shared.read;

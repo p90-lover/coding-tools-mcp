@@ -6,6 +6,7 @@ import { AgentOrchestratorComposerControls, type ComposerControlsProps } from ".
 import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
+import type { AoNode } from "./AgentOrchestratorSurface";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
 import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
@@ -205,10 +206,6 @@ export type ChatThreadActions = {
   pinned: boolean;
 };
 
-/** What a stuck turn's Restart sends the same agent as its next turn. */
-export const RESTART_MESSAGE = "Your previous turn stopped responding and was restarted. Continue the same task from where you left off; "
-  + "do not start over or repeat work that is already done. If a command or tool call never returned, do not run it the same way again.";
-
 /**
  * How long since `since`, counting up once a second by itself while `live`: only this label
  * re-renders on a tick, never the transcript around it. Stopped, it holds at `until`.
@@ -252,12 +249,11 @@ function TurnRunning({ turn, refusal }: { turn: ChatTurn; refusal?: CpaRefusal |
   return <p className={`cx-note cx-turn-running${(step.working.stalled && !asking) || refused ? " is-stalled" : ""}`} role="status" aria-live="polite">
     <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
     {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}${hint}`}
-    {/* A stuck turn has a button of its own: the person looking at "may be stuck" had nothing to
-        press, and a tool call that never returned held a chat for hours (Restart: chat_steer's restart). */}
+    {/* Inspect the accepted turn without adding another prompt or interrupting its work. */}
     {!hint && note.includes("may be stuck") ? onRestart
       ? <> · <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
-        title="Stop this turn and have the same agent continue where it left off">{restarting ? "Restarting…" : "Restart"}</button></>
-      : " · send a message to restart it" : ""}
+        title="Check the same agent and accepted turn without sending another message">{restarting ? "Checking…" : "Recover"}</button></>
+      : " · recovery is unavailable for this turn" : ""}
   </p>;
 }
 
@@ -820,7 +816,7 @@ function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, warning, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
 }: {
   /** The app's queue of this project's chats: a message typed while a turn runs waits there. */
@@ -858,6 +854,8 @@ export function AgentOrchestratorChat({
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
   /** `restart`: stop the turn and send the message as its next turn, whatever its quiet time (Restart). */
   steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
+  /** Checks the captured accepted turn without sending a prompt, stopping it, or replaying work. */
+  recover?: (input: { taskId: string; runId: string; nodeId: string; requestKey: string; threadId: string }) => Promise<{ message: string }>;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -1508,11 +1506,42 @@ export function AgentOrchestratorChat({
       return false;
     } finally { setSending(false); }
   };
-  // Restart on a stuck turn's foot: the same agent continues where it left off, told why.
-  const [restarting, setRestarting] = useState(false);
-  const restartTurn = steer && selectedTaskId ? () => {
-    setRestarting(true);
-    void deliver(RESTART_MESSAGE, undefined, false, true).finally(() => setRestarting(false));
+  // This action never enters deliver(): that path adds a user bubble and a queued provider turn.
+  const recoveryNode = (latest?.nodes as AoNode[] | undefined)?.find(node => node.receipt?.thread_id && node.receipt.request_key
+    && (latest.execution_mode === "single" || node.role === "planner"));
+  const recoveryKey = JSON.stringify([projectId, selectedTaskId, latest?.id, recoveryNode?.id,
+    recoveryNode?.receipt?.request_key, recoveryNode?.receipt?.thread_id, recoveryNode?.receipt?.turn_id,
+    recoveryNode?.route]);
+  const recoveryOwner = useRef<{ key: string; pending: boolean; cancel?: () => void }>({ key: recoveryKey, pending: false });
+  if (recoveryOwner.current.key !== recoveryKey) {
+    recoveryOwner.current.cancel?.();
+    recoveryOwner.current = { key: recoveryKey, pending: false };
+  }
+  useEffect(() => () => recoveryOwner.current.cancel?.(), []);
+  const [turnRecovery, setTurnRecovery] = useState<{ owner: typeof recoveryOwner.current; pending: boolean; message: string } | null>(null);
+  const restarting = turnRecovery?.owner === recoveryOwner.current && turnRecovery.pending;
+  const recoveryMessage = turnRecovery?.owner === recoveryOwner.current ? turnRecovery.message : "";
+  const restartTurn = recover && selectedTaskId && latest && recoveryNode ? () => {
+    if (recoveryOwner.current.pending) return;
+    const owner: typeof recoveryOwner.current = { key: recoveryKey, pending: true };
+    recoveryOwner.current = owner;
+    setTurnRecovery({ owner, pending: true, message: "" });
+    const current = () => alive.current && recoveryOwner.current === owner;
+    let timer: number | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      owner.cancel = () => reject(new Error("Recovery is no longer shown for this chat."));
+      timer = window.setTimeout(() => reject(new Error("The recovery check timed out. The original work was kept; no message was sent. Check again when the app responds.")), 35_000);
+    });
+    const operation = Promise.resolve().then(() => {
+      if (!current()) throw new Error("Recovery is no longer shown for this chat.");
+      return recover({ taskId: selectedTaskId, runId: latest.id, nodeId: recoveryNode.id,
+        requestKey: recoveryNode.receipt!.request_key!, threadId: recoveryNode.receipt!.thread_id! });
+    });
+    void Promise.race([operation, deadline]).then(result => {
+      if (current()) setTurnRecovery({ owner, pending: false, message: result.message });
+    }, error => {
+      if (current()) setTurnRecovery({ owner, pending: false, message: error instanceof Error ? error.message : String(error) });
+    }).finally(() => { window.clearTimeout(timer); owner.pending = false; owner.cancel = undefined; });
   } : undefined;
 
   const submit = async () => {
@@ -2208,6 +2237,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             {/* A tool call that timed out: the chat keeps going by itself, so this is a red line in the
                 conversation, not the failed-step card that waited for a click (2026-10-31). */}
             {warning && latest && !recovering ? <p className="cx-step-error cx-timeout-line" role="status">{warning}</p> : null}
+            {recoveryMessage ? <p className="cx-route-note" role="status">{recoveryMessage}</p> : null}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
                 <strong>{notice ? "Couldn't start the run" : "This run hasn't started"}</strong>
