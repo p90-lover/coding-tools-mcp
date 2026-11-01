@@ -101,11 +101,15 @@ async function windowsSnapshot(sampleMs, run = runPowerShell) {
 /** The same on macOS/Linux from ps (its %CPU is already an average, so no second sample). */
 async function posixSnapshot(sampleMs, run) {
   const output = await (run ?? ((args) => new Promise((resolve, reject) => execFile("ps", args, { timeout: 15_000, maxBuffer: 16 * 1024 * 1024 },
-    (error, stdout) => (error ? reject(error) : resolve(stdout))))))(["-axo", "pid=,ppid=,pcpu=,rss=,etimes=,comm="]);
+    (error, stdout) => (error ? reject(error) : resolve(stdout))))))(["-axo", "pid=,ppid=,pcpu=,rss=,etime=,comm="]);
   const now = Date.now();
-  const rows = String(output).split("\n").map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\d+)\s+(.+)$/)).filter(Boolean)
-    .map(([, pid, ppid, pcpu, rss, etimes, comm]) => ({ pid: Number(pid), ppid: Number(ppid), name: path.basename(comm), exe: comm,
-      createdMs: now - Number(etimes) * 1000, cpuPercent: Number(pcpu), ws: Number(rss) * 1024, priv: null, threads: null, handles: null }));
+  const rows = String(output).split("\n").map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+((?:\d+-)?\d+:\d{2}(?::\d{2})?)\s+(.+)$/)).filter(Boolean)
+    .map(([, pid, ppid, pcpu, rss, etime, comm]) => {
+      const [days, clock] = etime.includes("-") ? etime.split("-") : ["0", etime];
+      const seconds = Number(days) * 86_400 + clock.split(":").reduce((total, part) => total * 60 + Number(part), 0);
+      return { pid: Number(pid), ppid: Number(ppid), name: path.basename(comm), exe: comm,
+        createdMs: now - seconds * 1000, cpuPercent: Number(pcpu), ws: Number(rss) * 1024, priv: null, threads: null, handles: null };
+    });
   return { elapsedMs: sampleMs, rows };
 }
 
@@ -151,7 +155,9 @@ async function listAppProcesses({ sampleMs = SAMPLE_MS.default, sort = "cpu", li
   const pids = new Set(rows.map((row) => row.pid));
   const processes = rows.map((row) => {
     const type = electronType.get(row.pid);
-    const cpuPercent = row.cpuPercent ?? (row.cpuMs === null || row.cpuMs === undefined ? null : row.cpuMs / taken.elapsedMs / cores * 100);
+    // ps reports 100% for one busy core; the public counters and notes use all cores.
+    const cpuPercent = row.cpuPercent != null ? row.cpuPercent / cores
+      : (row.cpuMs === null || row.cpuMs === undefined ? null : row.cpuMs / taken.elapsedMs / cores * 100);
     return {
       pid: row.pid, parent_pid: pids.has(row.ppid) ? row.ppid : null, name: row.name,
       role: (type && ELECTRON_TYPES[type]) || roleOf(row.name) || "started by the app",

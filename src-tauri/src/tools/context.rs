@@ -133,15 +133,15 @@ impl ToolContext {
         {
             return Err("Set this Coding Tools workspace to workspace-write before connecting a writable native session".into());
         }
-        {
+        let ticket = {
             let _fence = snapshot
                 .policy_execution_guard()
                 .map_err(|error| error.message())?;
             snapshot
                 .codex_bridge
-                .connect(snapshot.workspace.root(), connection)?;
-        }
-        snapshot.codex_bridge.initialize()
+                .connect(snapshot.workspace.root(), connection)?
+        };
+        snapshot.codex_bridge.initialize(ticket)
     }
 
     pub fn native_codex_status(&self) -> Result<Value, String> {
@@ -163,11 +163,11 @@ impl ToolContext {
                 snapshot.policy.canonical_permission_mode() == "workspace-write",
             )?
         };
-        if restoring {
+        if let Some(ticket) = restoring {
             let bridge = snapshot.codex_bridge.clone();
             // Initialization records failures on the bridge; status polls must stay responsive.
             std::thread::spawn(move || {
-                let _ = bridge.initialize();
+                let _ = bridge.initialize(ticket);
             });
         }
         Ok(())

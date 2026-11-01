@@ -47,18 +47,18 @@ pub async fn codex_local_connect(
                 "Set this Coding Tools workspace to workspace-write before connecting a writable native session".into(),
             ));
         }
-        {
+        let ticket = {
             let _fence = snapshot
                 .policy_execution_guard()
                 .map_err(|e| AppError::Message(e.message()))?;
             snapshot
                 .codex_bridge
                 .connect(snapshot.workspace.root(), connection)
-                .map_err(AppError::Message)?;
-        }
+                .map_err(AppError::Message)?
+        };
         snapshot
             .codex_bridge
-            .initialize()
+            .initialize(ticket)
             .map_err(AppError::Message)
     })
     .await

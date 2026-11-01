@@ -16,7 +16,7 @@ const servicesSource = fs.readFileSync(path.join(launcherRoot, "src", "features"
 const proxySource = fs.readFileSync(path.join(launcherRoot, "src", "features", "NetworkProxySurface.tsx"), "utf8");
 
 test("a new chat's Team picker sits in the chat header, with no setting bar above the chat (Codex)", () => {
-  assert.match(aoSource, /headerExtra=\{chatTaskId === "" && savedTeams\.length \? <label className="cx-head-team"/, "the picker is passed to the chat header");
+  assert.match(aoSource, /headerExtra=\{chatTaskId === "" && composerMode === "team" && savedTeams\.length \? <label className="cx-head-team"/, "the picker is passed to the chat header for a new team chat");
   assert.match(aoSource, /aria-label="New chat team"/);
   assert.doesNotMatch(aoSource, /className="ao-new-chat-team"/, "the full-width Team row is gone");
   const css = fs.readFileSync(path.join(launcherRoot, "src/features/agent-orchestrator.css"), "utf8");
@@ -37,9 +37,26 @@ test("Register keeps its Connections destination and native overlay visibility g
   assert.match(connections, /active=\{surface === "register"\}[\s\S]*?label=\{copy.register\}[\s\S]*?navigateSurface\("register"\)/);
   assert.ok(appSource.includes('{keepAlive("register"'));
   const gate = /<RegisterSurface[\s\S]*?active=\{([^}]+)\}/.exec(appSource)?.[1];
-  assert.equal(gate, 'surface === "register" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen && !sessionReminderDue && !refreshMenuOpen');
+  assert.equal(gate, 'surface === "register" && !sidebarCovers && !biggerContextRecommendationOpen && !sessionReminderDue && !refreshMenuOpen');
   assert.match(typesSource, /type Surface[^;]*"register"/);
   assert.equal((i18nSource.match(/register: /g) || []).length, 4);
+});
+
+test("a hidden docked sidebar folds to an icon rail that shows the whole panel on hover", () => {
+  assert.match(appSource, /animate=\{\{ width: sidebarOpen \? "var\(--sidebar-width\)" : compactSidebar \? 0 : "var\(--sidebar-rail-width\)" \}\}/);
+  assert.match(appSource, /onPointerEnter=\{\(\) => peekSidebar\(true\)\}\s*onPointerLeave=\{\(\) => peekSidebar\(false\)\}/);
+  // Every native view steps aside while the hover panel or the compact drawer covers it.
+  assert.match(appSource, /const sidebarCovers = \(compactSidebar && sidebarOpen\) \|\| \(sidebarRail && sidebarPeek\);/);
+  assert.doesNotMatch(appSource, /!\(compactSidebar && sidebarOpen\)/);
+  assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 4);
+  // The hover panel can be pinned from inside itself, and the toggle also clears the hover state.
+  assert.match(appSource, /\{sidebarRail \? \(\s*<IconButton icon="sidebar" label=\{copy\.keepSidebarOpen\} onClick=\{toggleSidebar\}/);
+  assert.match(appSource, /const toggleSidebar = \(\) => \{\s*closeSidebarPeek\(\);/);
+  assert.equal((i18nSource.match(/keepSidebarOpen: /g) || []).length, 3);
+  // A saved hidden sidebar stays hidden on the next start; only crossing the compact width changes it.
+  assert.match(appSource, /setSidebarOpen\(!media\.matches && sidebarPinned\.current\);\s*\};\s*media\.addEventListener/);
+  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.app-sidebar\.is-peek \.sidebar-clip \{[^}]*width: var\(--sidebar-width\)/);
+  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.app-sidebar:not\(\.is-peek\) \.sidebar-content \{[^}]*width: var\(--sidebar-rail-width\)/);
 });
 
 test("Refresh menu reports every open and close path to the Register native gate", async () => {
@@ -83,8 +100,8 @@ test("Refresh menu reports every open and close path to the Register native gate
   assert.match(appSource, /setSurface\("browser"\);\s*\/\/[^\n]*\n\s*if \(window\.matchMedia\(COMPACT_SIDEBAR_QUERY\)\.matches\) setSidebarOpen\(false\);/);
   assert.match(appSource, /onRefreshMenuOpenChange=\{setRefreshMenuOpen\}/);
   const expression = /<RegisterSurface[\s\S]*?active=\{([^}]+)\}/.exec(appSource)[1];
-  const gate = new Function("surface", "compactSidebar", "sidebarOpen", "biggerContextRecommendationOpen", "sessionReminderDue", "refreshMenuOpen", "return " + expression);
-  const visible = () => gate("register", false, false, false, false, reportedOpen);
+  const gate = new Function("surface", "sidebarCovers", "biggerContextRecommendationOpen", "sessionReminderDue", "refreshMenuOpen", "return " + expression);
+  const visible = () => gate("register", false, false, false, reportedOpen);
   const render = () => { stateIndex = 0; effectIndex = 0; const tree = exports.RefreshMenu(menu.props);
     for (const work of pending.splice(0)) work(); return tree; };
   let tree = render();

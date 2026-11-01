@@ -1911,6 +1911,17 @@ function childPoll(file, selector, options = {}) {
   };
   for (const name of ["Snapshot", "Quota", "UsageReport", "DaySpend", "MonthSpend", "Breakdown", "Stats", "Commands", "LivePage", "Runs", "Context", "Changes", "Tasks", "Usage", "Items", "Error", "State", "Now", "Selected", "ShowHistory", "Output"])
     globals[`set${name}`] = noop;
+  if (file === "ChatWorkbench.tsx") {
+    const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatWorkbench.tsx"), "utf8");
+    const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const scheduler = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "startWorkbenchPoll");
+    assert.ok(scheduler, "the workbench's real polling scheduler");
+    const exports = {};
+    vm.runInNewContext(ts.transpileModule(scheduler.getText(tree), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText, { exports, window, onWindowFocus: visibility.onWindowFocus });
+    globals.startWorkbenchPoll = exports.startWorkbenchPoll;
+  }
   const cleanup = rendererCallback(file, selector, globals)();
   return { calls, timers, focus, clicks, cleanup,
     hide(value) { surfaceHidden = value; visibility.useSurfaceHidden(); },

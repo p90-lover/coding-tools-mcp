@@ -265,6 +265,83 @@ code {
   overflow: hidden;
 }
 
+/* Hidden docked sidebar: a rail of the rows' icons. Hovering it lays the whole panel over the
+   page (.is-peek); the rail keeps its width so the page doesn't move. */
+.app-shell {
+  --sidebar-rail-width: 52px;
+}
+
+.app-shell.is-sidebar-rail .app-sidebar {
+  border-right: 1px solid var(--color-border-light);
+}
+
+.app-shell.is-sidebar-rail .app-sidebar.is-peek .sidebar-clip {
+  z-index: 40;
+  right: auto;
+  width: var(--sidebar-width);
+  border-right: 1px solid var(--color-border);
+  background: rgb(33 33 33 / 97%);
+  box-shadow: 8px 0 24px rgb(0 0 0 / 35%);
+}
+
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-content {
+  width: var(--sidebar-rail-width);
+  min-width: var(--sidebar-rail-width);
+  padding-right: 6px;
+  padding-left: 6px;
+}
+
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) :is(
+  .sidebar-brand-identity strong,
+  .sidebar-brand-identity .dev-profile-badge,
+  .sidebar-brand-actions,
+  .sidebar-item > span,
+  .sidebar-item-meta,
+  .sidebar-more summary > span,
+  .sidebar-more summary > small
+) {
+  display: none;
+}
+
+/* A scrollbar would push the icons off the rail's centre; the wheel still scrolls it. */
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-nav {
+  scrollbar-width: none;
+}
+
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-brand-row {
+  justify-content: center;
+  padding: 6px 0;
+}
+
+/* Group titles give way to a thin divider so the groups still read apart. */
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-group h2 {
+  height: 0;
+  margin: 0 8px 6px;
+  padding: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-group:first-child h2 {
+  border-top: 0;
+}
+
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) :is(.sidebar-item, .sidebar-more summary) {
+  position: relative;
+  justify-content: center;
+  padding: 0;
+}
+
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-item-badge {
+  position: absolute;
+  top: 3px;
+  right: 6px;
+}
+
 .sidebar-content {
   position: relative;
   display: flex;
@@ -649,6 +726,11 @@ code {
 
 .app-shell:not(.is-sidebar-open) .browser-tab-strip {
   padding-left: 112px;
+}
+
+/* The rail already sits under the title bar's buttons. */
+.app-shell.is-sidebar-rail .browser-tab-strip {
+  padding-left: calc(112px - var(--sidebar-rail-width));
 }
 
 .browser-tab {

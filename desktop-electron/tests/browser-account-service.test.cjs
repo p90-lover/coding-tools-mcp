@@ -102,6 +102,18 @@ function setup(t, overrides = {}) {
 
 const ids = status => status.accounts.map(entry => entry.id);
 
+test("an inactive account cannot be removed while its connector popup is creating MCP", async (t) => {
+  const { registry, service, host, forgotten, erased } = setup(t);
+  const other = registry.add();
+  host().currentOperation = () => "MCP connector creation";
+  await assert.rejects(service.remove(other, { logger: logger() }), /Wait for MCP connector creation/);
+  const bulk = await service.removeMany([other], { logger: logger() });
+  assert.equal(bulk.failed.length, 1);
+  assert.equal(registry.has(other), true);
+  assert.deepEqual(forgotten, []);
+  assert.deepEqual(erased, []);
+});
+
 test("switching replaces the host, marks the account active and tells the lists while it runs", async (t) => {
   const { registry, service, published, hosts, host } = setup(t);
   const first = host();

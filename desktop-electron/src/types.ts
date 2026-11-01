@@ -1070,7 +1070,7 @@ export interface LauncherApi {
   dismissSessionReminder(): Promise<LauncherState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
-  createMcpConnector(): Promise<{ created: boolean; name: string; href: string }>;
+  createMcpConnector(accountId?: string): Promise<{ created: boolean; name: string; href: string; connected?: boolean }>;
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;

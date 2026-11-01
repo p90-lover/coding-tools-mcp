@@ -172,6 +172,9 @@ function createBrowserAccountService(deps) {
   // Signs the account out for good. Removing the account in use first switches to another one.
   async function remove(accountId, context) {
     deps.registry.partitionOf(accountId);
+    if (deps.host()?.currentOperation?.() === "MCP connector creation") {
+      throw new Error("Wait for MCP connector creation to finish before removing accounts.");
+    }
     const { accounts } = deps.registry.status();
     if (accounts.length <= 1) throw new Error("The Browser tab needs at least one account");
     if (accountId === deps.registry.activeId()) {
