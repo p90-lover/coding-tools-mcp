@@ -1725,7 +1725,33 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return projectFolder ? { root, projectFolder } : { root };
     },
     /** Whether any live session's agent is mid-turn: restarting the app now would cut it off. */
-    async anySessionWorking() {
+    async anySessionWorking({ start = true } = {}) {
+      if (start === false) {
+        const generation = lifecycleGeneration, owner = child, port = daemonPort;
+        const sameOwner = () => state === "ready" && !stopping && generation === lifecycleGeneration
+          && child === owner && owner?.exitCode === null && owner?.signalCode === null
+          && Number.isInteger(owner?.pid) && owner.pid > 0 && daemonPort === port
+          && Number.isInteger(port) && port > 0 && port <= 65535;
+        if (!sameOwner()) throw new Error("AO session activity is unavailable without starting its runtime");
+        const result = await requestApi("GET", "/api/v1/sessions");
+        if (!sameOwner() || result?.ok !== true) throw new Error("AO session activity could not be confirmed");
+        const list = result.data;
+        const fields = ["sessions", "items"].filter(key => list && Object.hasOwn(list, key));
+        if (!list || typeof list !== "object" || Array.isArray(list) || !fields.length
+          || fields.some(key => !Array.isArray(list[key]))) throw new Error("AO returned an invalid session list");
+        const sessions = fields.flatMap(key => list[key]);
+        const statuses = new Set(["working", "pr_open", "draft", "ci_failed", "review_pending", "changes_requested",
+          "approved", "mergeable", "merged", "needs_input", "exited", "idle", "terminated", "no_signal"]);
+        for (const session of sessions) {
+          if (!session || typeof session !== "object" || Array.isArray(session)
+            || typeof session.isTerminated !== "boolean" || !statuses.has(session.status)) {
+            throw new Error("AO returned an invalid session activity record");
+          }
+          sessionId(session.id);
+          if (!session.isTerminated && session.status === "no_signal") throw new Error("AO session activity is not confirmed");
+        }
+        return sessions.some(session => session.status === "working" && !session.isTerminated);
+      }
       const list = await internalApi("GET", "/api/v1/sessions");
       const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
       return sessions.some(session => session?.status === "working" && !session.isTerminated);
