@@ -44,6 +44,20 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
+test("a project switch keeps its chat pane readable while loading and offers Retry after a failed read", () => {
+  const props = { runs: [], tasks: [], selectedTaskId: "", deciding: true, busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},
+    onRetryProject() {} };
+  const loading = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  assert.match(loading, /Opening project/);
+  assert.match(loading, /Loading project chats/);
+  assert.doesNotMatch(loading, /Retry loading/);
+  const failed = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, projectLoadError: "Request failed" }));
+  assert.match(failed, /Couldn&#x27;t load project/);
+  assert.match(failed, /Couldn&#x27;t load chats: Request failed/);
+  assert.match(failed, /Retry loading/);
+});
+
 test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving while it runs, Completed once it ends", () => {
   const timeline = [
     { id: "r1", kind: "reasoning", status: "completed", text: "**Let me check health.**\nThen the configs." },
