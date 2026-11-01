@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const { createBrowserAccounts: openBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID, MAX_ACCOUNTS } = require("../electron/browser-accounts.cjs");
 const { browserAccountPartition, isBrowserAccountPartition } = require("../electron/profile.cjs");
@@ -28,6 +29,88 @@ function tempRoot(t) {
   });
   return path.join(root, "browser-accounts");
 }
+
+function readRecoveryFixture(content = JSON.stringify({
+  activeId: "abcdefghijkl", accounts: [{ id: "main", label: "Main" }, { id: "abcdefghijkl", label: "Work", maxTabs: 3 }],
+  settings: { newSessions: "balance", keepFinishedTabsMinutes: 30 }, importedEmails: ["seen@example.test"],
+})) {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/browser-accounts.cjs"), "utf8");
+  let bytes = content === null ? null : Buffer.from(content), fault = "EIO";
+  const writes = [];
+  const open = () => {
+    const loaded = { exports: {} };
+    vm.runInNewContext(source, { module: loaded, require: name => name === "node:fs" ? {
+      readFileSync() {
+        if (fault) throw Object.assign(new Error("fixture accounts read unavailable"), { code: fault });
+        return bytes.toString("utf8");
+      },
+    } : name === "./atomic-file.cjs" ? {
+      writePrivateFileAtomicAsync: async (_file, content) => { writes.push(content); bytes = Buffer.from(content); },
+    } : name === "./profile.cjs" ? require("../electron/profile.cjs") : require(name) });
+    return loaded.exports.createBrowserAccounts({ dataRoot: "G:/fixture-browser-accounts", profile: "production", now: () => 1234 });
+  };
+  return { open, writes, bytes: () => bytes, fault: code => { fault = code; } };
+}
+
+test("an unreadable initial account file cannot be replaced by any fallback-state mutation", async t => {
+  const actions = [
+    ["add", store => store.add()],
+    ["importOauthAccounts", store => store.importOauthAccounts([{ email: "new@example.test", plan: "plus" }])],
+    ["setActive", store => store.setActive("main")],
+    ["rename", store => store.rename("main", "Renamed")],
+    ["setProxy", store => store.setProxy("main", "proxy-fixture")],
+    ["setAccountSettings", store => store.setAccountSettings("main", { maxTabs: 2 })],
+    ["setSettings", store => store.setSettings({ newSessions: "balance" })],
+    ["remove", store => store.remove("main")],
+    ["setEmail", store => store.setEmail("main", "main@example.test"), true],
+    ["recordPlan", store => store.recordPlan("main", { solAvailable: true, proAvailable: false }), true],
+    ["recordConnector", store => store.recordConnector("main", { bound: true }), true],
+  ];
+  for (const [name, change, background] of actions) await t.test(name, async () => {
+    const f = readRecoveryFixture(), original = f.bytes(), store = f.open(), before = JSON.stringify(store.status());
+    f.fault(null); // Healthy reads now cannot silently relabel the live fallback browser host.
+    let result, error;
+    try { result = change(store); } catch (cause) { error = cause; }
+    await store.saved();
+    assert.ok(f.bytes().equals(original), "the original accounts file stays intact");
+    assert.equal(f.writes.length, 0);
+    assert.equal(JSON.stringify(store.status()), before, "the failed-load instance stays read-only");
+    if (background) { assert.equal(error, undefined); assert.equal(result, false); }
+    else {
+      assert.ok(error, "explicit changes explain why accounts are unavailable");
+      assert.match(error.message, /EIO/); assert.match(error.message, /restore|restart/i);
+      assert.ok(error.message.length <= 300);
+    }
+  });
+});
+
+test("a fresh valid account load recovers the complete list and its original active identity", async () => {
+  const f = readRecoveryFixture(), blocked = f.open(), original = f.bytes();
+  try { blocked.setSettings({ keepFinishedTabsMinutes: 20 }); } catch {}
+  await blocked.saved();
+  assert.ok(f.bytes().equals(original));
+  f.fault(null);
+  const reopened = f.open();
+  assert.equal(reopened.activeId(), "abcdefghijkl");
+  assert.equal(reopened.activePartition(), `${BASE}-abcdefghijkl`);
+  assert.equal(reopened.status().accounts.length, 2);
+  assert.equal(reopened.settings().newSessions, "balance");
+  assert.deepEqual([...reopened.importOauthAccounts([{ email: "seen@example.test" }])], []);
+  reopened.rename("abcdefghijkl", "Recovered"); await reopened.saved();
+  const persisted = JSON.parse(f.bytes().toString("utf8"));
+  assert.equal(persisted.activeId, "abcdefghijkl"); assert.equal(persisted.accounts.length, 2);
+  assert.equal(persisted.accounts.find(entry => entry.id === "abcdefghijkl").label, "Recovered");
+});
+
+test("a true ENOENT still permits first-start account creation, while torn bytes stay protected", async () => {
+  const missing = readRecoveryFixture(null); missing.fault("ENOENT");
+  const first = missing.open(); first.add(); await first.saved();
+  assert.equal(JSON.parse(missing.bytes().toString("utf8")).accounts.length, 2);
+  const torn = readRecoveryFixture("torn"); torn.fault(null);
+  const blocked = torn.open();
+  assert.throws(() => blocked.rename("main", "Renamed"), /read|unavailable/i);
+  await blocked.saved(); assert.equal(torn.bytes().toString("utf8"), "torn");
+});
 
 test("the first account keeps the original partition, so an existing sign-in carries over", (t) => {
   const accounts = createBrowserAccounts({ dataRoot: tempRoot(t), profile: "production" });
@@ -226,6 +309,21 @@ test("an account whose page cannot load leaves the Browser tab on the account it
   assert.equal(views.find((view) => view.partition === `${BASE}-abcdefghijkl`).closed, true, "the failed page is closed");
 });
 
+test("a cold account switch keeps the leaving account counted and routed while its new page loads", async () => {
+  const { host } = switchingHost();
+  const tab = host.userTabs.get("u1");
+  host.userTabs = new Map(Array.from({ length: 5 }, (_, id) => [id, { ...tab, id }]));
+  let finish;
+  host.initializePrimaryView = () => new Promise(resolve => { finish = resolve; });
+  const switching = host.switchAccount(`${BASE}-abcdefghijkl`);
+  await new Promise(setImmediate);
+  try {
+    assert.equal(host.tabCount(BASE), 5);
+    assert.ok(host.livePartitions().includes(BASE));
+    assert.equal(makeTabRoom(host, BASE, false), 5);
+  } finally { finish(); await switching; }
+});
+
 test("past the warm limit, a parked account a turn runs on stays; a bare signed-out page goes before an older signed-in one", () => {
   const { parkedHomeToUnload } = require("../electron/browser-host.cjs");
   const home = (partition, parkedAt, { tabs = 0, authenticated = false } = {}) =>
@@ -356,6 +454,19 @@ test("each account holds its own tabs up to its limit, and frees only its own re
   );
   assert.equal(makeTabRoom(host, other, false), 2);
   assert.deepEqual(removed, ["b2"], "never another account's tab");
+});
+
+test("parked account tabs still count toward account and global tab limits", () => {
+  const parked = `${BASE}-abcdefghijkl`;
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    partition: BASE, userTabs: new Map(), turnTabs: new Map(),
+    parkedHomes: new Map([[parked, { partition: parked, userTabs: new Map(Array.from({ length: 5 }, (_, id) => [id, {}])) }]]),
+  });
+  assert.equal(host.tabCount(parked), 5, "switching accounts does not free its loaded user tabs");
+  assert.equal(makeTabRoom(host, parked, false), 5);
+  for (let id = 0; id < 10; id += 1) host.turnTabs.set(id, { partition: `other-${Math.floor(id / 5)}`, status: "running" });
+  assert.equal(makeTabRoom(host, BASE, false), 15, "the global ceiling includes every parked home");
+  assert.equal(host.turnTabs.size, 10, "a capacity read never evicts running work");
 });
 
 test("an account counts as signed in while its own partition holds an unexpired ChatGPT session token", () => {

@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const os = require("node:os");
 const path = require("node:path");
 const fs = require("node:fs");
+const vm = require("node:vm");
 const test = require("node:test");
 
 const {
@@ -14,7 +15,7 @@ const {
   positiveId,
   pageSize,
 } = require("../electron/email-host.cjs");
-const { parseMessage, sanitizeHtml, stripDangerous } = require("../electron/email-mime.cjs");
+const { parseMessage, bodyPreview, sanitizeHtml, stripDangerous } = require("../electron/email-mime.cjs");
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "email-host-"));
@@ -22,6 +23,102 @@ function tmp() {
 
 // A safeStorage stub with encryption unavailable, forcing the AES fallback path.
 const noStorage = { isEncryptionAvailable: () => false };
+
+function credentialOptions() {
+  const dir = tmp();
+  return { logger: null, filePath: path.join(dir, "e.json"), keyPath: path.join(dir, "e.key"), safeStorage: noStorage,
+    fetchNative: async url => new Response(JSON.stringify(url.endsWith("/open_api/settings") ? { domains: ["example.test"] } : {}), { status: 200 }),
+    parseMessage, sanitizeHtml };
+}
+
+test("unreadable Email keys and connection files stay intact and recover on a fresh open", async t => {
+  for (const kind of ["key", "connection"]) await t.test(kind, async () => {
+    const options = credentialOptions(), original = { origin: "https://mail.example.test", adminAuth: "fixture-original" };
+    await createEmailHost(options).connect(original);
+    const files = [options.filePath, `${options.filePath}.bak`, options.keyPath, `${options.keyPath}.bak`];
+    const before = files.map(file => fs.readFileSync(file));
+    const failed = new Set(kind === "key" ? files.slice(2) : files.slice(0, 2)), readFile = fs.readFileSync;
+    let unavailable, reads = 0;
+    fs.readFileSync = function (file, ...args) {
+      if (failed.has(String(file))) { reads += 1; throw Object.assign(new Error("fixture read unavailable"), { code: "EIO" }); }
+      return readFile.call(this, file, ...args);
+    };
+    try {
+      unavailable = createEmailHost(options);
+      assert.equal(unavailable.status().configured, false);
+      assert.equal((await unavailable.currentStatus()).configured, false, "status remains usable without a credential");
+      if (kind === "key") await assert.rejects(() => unavailable.connect({ origin: "https://replacement.example.test", adminAuth: "fixture-replacement" }), error => {
+        assert.match(error.message, /key|credential/i); assert.ok(error.message.length <= 300); return true;
+      });
+    } finally { fs.readFileSync = readFile; }
+    assert.ok(reads >= 2, "the primary file and its backup were both unavailable");
+    files.forEach((file, index) => assert.ok(fs.readFileSync(file).equals(before[index]), `${path.basename(file)} stays unchanged`));
+    assert.equal(fs.readdirSync(path.dirname(options.filePath)).some(file => file.includes(".corrupt-")), false);
+    let authenticated = false;
+    const reopened = createEmailHost({ ...options, fetchNative: (url, request) => {
+      authenticated = request.headers["x-admin-auth"] === original.adminAuth;
+      return options.fetchNative(url, request);
+    } });
+    assert.equal(reopened.status().configured, true);
+    assert.equal(reopened.status().origin, original.origin);
+    await reopened.listMessages({});
+    assert.ok(authenticated, "the recovered connection uses the original credential");
+    files.forEach((file, index) => assert.ok(fs.readFileSync(file).equals(before[index]), "reopening does not rotate the saved key or credential"));
+  });
+});
+
+test("decrypting Email with missing or torn key copies never generates a replacement key", async t => {
+  for (const damage of ["missing", "torn"]) await t.test(damage, async () => {
+    const options = credentialOptions();
+    await createEmailHost(options).connect({ origin: "https://mail.example.test", adminAuth: "fixture" });
+    const credential = fs.readFileSync(options.filePath), backup = fs.readFileSync(`${options.filePath}.bak`), key = fs.readFileSync(options.keyPath);
+    for (const file of [options.keyPath, `${options.keyPath}.bak`]) {
+      if (damage === "missing") fs.rmSync(file);
+      else fs.writeFileSync(file, "torn");
+    }
+    assert.equal(createEmailHost(options).status().configured, false);
+    assert.ok(fs.readFileSync(options.filePath).equals(credential));
+    assert.ok(fs.readFileSync(`${options.filePath}.bak`).equals(backup));
+    for (const file of [options.keyPath, `${options.keyPath}.bak`]) {
+      if (damage === "missing") assert.equal(fs.existsSync(file), false, "a read cannot create a key");
+      else assert.ok(fs.readFileSync(file).equals(Buffer.from("torn")), "damaged bytes stay available for recovery");
+      fs.writeFileSync(file, key);
+    }
+    assert.equal(createEmailHost(options).status().configured, true);
+  });
+});
+
+test("a failed first Email key save is retried before any credential uses that key", async () => {
+  const options = credentialOptions(), host = createEmailHost(options), rename = fs.renameSync;
+  let injected = false;
+  fs.renameSync = function (source, destination) {
+    if (String(destination) === options.keyPath) { injected = true; throw Object.assign(new Error("fixture key persistence failed"), { code: "EIO" }); }
+    return rename.call(this, source, destination);
+  };
+  try { await assert.rejects(() => host.connect({ origin: "https://mail.example.test", adminAuth: "fixture" }), /persistence failed/); }
+  finally { fs.renameSync = rename; }
+  assert.ok(injected);
+  assert.equal(host.status().configured, false); assert.equal(fs.existsSync(options.filePath), false); assert.equal(fs.existsSync(options.keyPath), false);
+  await host.connect({ origin: "https://mail.example.test", adminAuth: "fixture" });
+  assert.equal(fs.existsSync(options.keyPath), true);
+  assert.equal(createEmailHost(options).status().configured, true, "the credential uses a durably saved first-start key");
+});
+
+test("a complete Email replacement and explicit disconnect do not require the old plaintext", async () => {
+  const options = credentialOptions();
+  await createEmailHost(options).connect({ origin: "https://old.example.test", adminAuth: "fixture-old" });
+  const key = fs.readFileSync(options.keyPath), stored = JSON.parse(fs.readFileSync(options.filePath, "utf8"));
+  stored.credential.data = Buffer.from("unreadable fixture ciphertext").toString("base64");
+  for (const file of [options.filePath, `${options.filePath}.bak`]) fs.writeFileSync(file, JSON.stringify(stored));
+  const host = createEmailHost(options);
+  assert.equal(host.status().configured, false);
+  await host.connect({ origin: "https://replacement.example.test", adminAuth: "fixture-new" });
+  assert.equal(createEmailHost(options).status().origin, "https://replacement.example.test");
+  assert.ok(fs.readFileSync(options.keyPath).equals(key), "complete replacement can reuse the existing valid key");
+  assert.equal(host.disconnect().configured, false);
+  assert.equal(fs.existsSync(options.filePath), false); assert.equal(fs.existsSync(`${options.filePath}.bak`), false);
+  assert.equal(createEmailHost(options).status().configured, false);
+});
 
 test("normalizeOrigin rejects non-https, paths, and query strings", () => {
   assert.equal(normalizeOrigin("https://mail.example.com"), "https://mail.example.com");
@@ -73,6 +170,51 @@ test("parseMessage decodes a multipart/alternative body", async () => {
   assert.equal(parsed.subject, "Test");
   assert.equal(parsed.text.trim(), "hello plain");
   assert.match(parsed.html, /hello html/);
+});
+
+function mimeHost(raw) {
+  const vm = require("node:vm"), ts = require("typescript"), source = fs.readFileSync(path.join(__dirname, "../electron/email-host.cjs"), "utf8");
+  const tree = ts.createSourceFile("email-host.cjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS), methods = [];
+  const visit = node => { if (ts.isMethodDeclaration(node) && ["listMessages", "getMessage"].includes(node.name.getText(tree))) methods.push(node); ts.forEachChild(node, visit); };
+  visit(tree); assert.equal(methods.length, 2);
+  const loaded = { exports: {} }, mime = require("../electron/email-mime.cjs"), row = { id: 1, raw };
+  // Execute the actual normalized list/detail methods without constructing a credential-bearing host.
+  vm.runInNewContext(source + "\nlet lastRefresh = null;\n" + methods.map(node => `module.exports.${node.name.getText(tree)} = async (input) => ${node.body.getText(tree)};`).join("\n"), {
+    module: loaded, exports: loaded.exports, Buffer, URL, URLSearchParams, parseMessage, sanitizeHtml,
+    call: async url => url.startsWith("/admin/mails?") ? { results: [row], count: 1 } : row,
+    require: name => name === "./email-mime.cjs" ? mime : {},
+  });
+  return loaded.exports;
+}
+
+test("mail list and reader separate explicit text attachments from the body", async t => {
+  const alternative = (boundary, plain, html) => [
+    `Content-Type: multipart/alternative; boundary="${boundary}"`, "", `--${boundary}`,
+    "Content-Type: text/plain; charset=utf-8", "", plain, `--${boundary}`,
+    "Content-Type: text/html; charset=utf-8", "", html, `--${boundary}--`,
+  ].join("\r\n");
+  const body = alternative("body", "REAL BODY TEXT", "<p>REAL BODY HTML</p>");
+  const attachment = (type, disposition = "attachment") => [
+    `Content-Type: text/${type}; charset=utf-8`, `Content-Disposition: ${disposition}; filename="notes.${type === "plain" ? "txt" : "html"}"`,
+    "Content-Transfer-Encoding: base64", "", Buffer.from(type === "plain" ? "ATTACHED TEXT" : "<p>ATTACHED HTML</p><script>blocked()</script>").toString("base64"),
+  ].join("\r\n");
+  const cases = [
+    ...["plain", "html"].flatMap(type => [true, false].map(first => ({ name: type + (first ? " first" : " after body"),
+      parts: first ? [attachment(type), body] : [body, attachment(type)], filename: `notes.${type === "plain" ? "txt" : "html"}` }))),
+    { name: "case-insensitive attachment token", parts: [attachment("plain", "AtTaChMeNt"), body], filename: "notes.txt" },
+    { name: "attached multipart", parts: [alternative("attached", "ATTACHED TEXT", "<p>ATTACHED HTML</p>")
+      .replace("\r\n\r\n", '\r\nContent-Disposition: attachment; filename="bundle.mime"\r\n\r\n'), body], filename: "bundle.mime" },
+    { name: "inline filename containing attachment stays body", parts: ['Content-Type: text/plain\r\nContent-Disposition: inline; filename="attachment.txt"\r\n\r\nREAL BODY TEXT', body], filename: null },
+  ];
+  for (const item of cases) await t.test(item.name, async () => {
+    const raw = ["MIME-Version: 1.0", "From: sender@example.test", "Subject: MIME test", 'Content-Type: multipart/mixed; boundary="mixed"', "",
+      "--mixed", item.parts.join("\r\n--mixed\r\n"), "--mixed--"].join("\r\n");
+    const host = mimeHost(raw), list = await host.listMessages({}), { message } = await host.getMessage({ id: 1 });
+    assert.equal(list.messages[0].preview, "REAL BODY TEXT"); assert.equal(message.text.trim(), "REAL BODY TEXT");
+    assert.match(message.html, /REAL BODY HTML/); assert.equal(message.html.includes("ATTACHED"), false);
+    assert.equal(message.attachments.length, item.filename ? 1 : 0);
+    if (item.filename) { assert.equal(message.attachments[0].filename, item.filename); assert.ok(message.attachments[0].size > 0); }
+  });
 });
 
 test("parseMessage decodes transfer encodings as bytes in the part's charset", async () => {
@@ -214,4 +356,57 @@ test("sanitizeHtml keeps email formatting and drops forms, svg and unknown attri
   assert.ok(html.includes('<a href="https://example.com">link</a>'), html);
   assert.ok(html.includes('<img src="data:image/png;base64,AA" alt="logo">'), html);
   assert.doesNotMatch(html, /<form|<input|<svg|<circle|class=|id=|onclick/);
+});
+
+test("malformed HTML stays bounded in the actual inbox normalizer and sanitizer", async t => {
+  for (const [name, preview, html, expected] of [
+    ["preview block openers", true, "<style>".repeat(32_000), null],
+    ["sanitizer block openers", false, "<style>".repeat(32_000), ""],
+    ["unclosed comments", false, "<!--".repeat(65_536), ""],
+    ["preview less-than signs", true, "<".repeat(65_536), "<".repeat(240)],
+    ["unclosed allowed tags", false, "<a".repeat(16_384), ""],
+    ["unassigned attribute", false, `<p ${"x".repeat(65_536)}>Visible</p>`, "<p>Visible</p>"],
+  ]) await t.test(name, () => {
+    const raw = preview ? `Content-Type: text/html\r\n\r\n${html}` : html;
+    const value = vm.runInNewContext(preview ? "normalizeMessageListRow({ id: 1, raw }).preview" : "sanitizeHtml(raw)",
+      { normalizeMessageListRow, sanitizeHtml, raw }, { timeout: 1_000 });
+    assert.equal(value, expected);
+  });
+});
+
+test("metadata void tags keep the following body, including a head without an explicit close", () => {
+  const metadata = '<meta charset="utf-8"><link rel="stylesheet" href="https://example.test/style"><base href="https://example.test/"><embed src="https://example.test/x">';
+  assert.equal(sanitizeHtml(`${metadata}<p>Body</p>`), "<p>Body</p>");
+  assert.equal(bodyPreview(`Content-Type: text/html\r\n\r\n<head>${metadata}<body><p>Body</p>`), "Body");
+});
+
+test("quoted greater-than signs and multiline attributes retain formatting and stay out of previews", () => {
+  const html = `<table border=1><tr><td title="left > right" style='color:red;\nwhite-space:pre-wrap' colspan="2">First<br />Second</td></tr></table>`;
+  const cleaned = sanitizeHtml(html);
+  assert.ok(cleaned.includes('<table border=1>'));
+  assert.ok(cleaned.includes('title="left > right"'));
+  assert.ok(cleaned.includes("style='color:red;\nwhite-space:pre-wrap'"));
+  assert.ok(cleaned.includes('colspan="2"'));
+  assert.equal(bodyPreview(`Content-Type: text/html\r\n\r\n${html}`), "First Second");
+});
+
+test("raw script and style bodies end at their first closing tag regardless of quotes inside", () => {
+  const html = `<script>const x = "<a title='unfinished";</ScRiPt><p>After script</p><style>.x{content:"<a title='unfinished"}</STYLE><p>After style</p>`;
+  assert.equal(sanitizeHtml(html), "<p>After script</p><p>After style</p>");
+  assert.equal(bodyPreview(`Content-Type: text/html\r\n\r\n${html}`), "After script After style");
+});
+
+test("nested blocked containers retain first-close behavior and unmatched openers keep following content", () => {
+  assert.equal(sanitizeHtml('<object>outer<object>inner</object><p>After first</p></object><p>After all</p>'), '<p>After first</p><p>After all</p>');
+  assert.equal(sanitizeHtml('<script>unclosed<p>Following content</p>'), 'unclosed<p>Following content</p>');
+  assert.equal(sanitizeHtml('<p>Before</p><!-- unclosed <p>Hidden comment</p>'), '<p>Before</p>');
+  assert.equal(sanitizeHtml('<p>Before</p><a title="unclosed'), '<p>Before</p>');
+});
+
+test("the HTML safety floor still removes handlers and unsafe URLs while keeping data images", () => {
+  const html = sanitizeHtml('<p ONCLICK="go()">Hello</p><a href=" javascript:go()">Bad link</a>'
+    + '<img src="data:text/html,bad"><img src="data:image/png;base64,AA" alt="image">');
+  assert.doesNotMatch(html, /onclick|javascript:|data:text\/html/i);
+  assert.ok(html.includes('src="data:image/png;base64,AA"'));
+  assert.ok(html.includes('<p>Hello</p>'));
 });

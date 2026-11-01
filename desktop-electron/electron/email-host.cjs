@@ -28,22 +28,22 @@ function createSecretCodec({ safeStorage, keyPath }) {
   const encryptionAvailable = () => {
     try { return Boolean(safeStorage?.isEncryptionAvailable?.()); } catch { return false; }
   };
-  const loadFallbackKey = () => {
+  const loadFallbackKey = (create = false) => {
     if (fallbackKey) return fallbackKey;
-    // A torn key file is read from its copy; one with no usable copy is set aside, never written
-    // over, so the credential it encrypted can still be recovered by hand (durable-state.cjs).
+    // A failed read must leave the key in place, and decrypting must never create its replacement.
     const read = readStateFile(keyPath, (text) => {
       const bytes = Buffer.from(text.trim(), "base64");
       if (bytes.length !== 32) throw new Error("The fallback key is not 32 bytes");
       return bytes;
-    });
+    }, { preserveUnreadable: true });
     if (read.value) {
       if (read.source === "backup") writeStateFile(keyPath, `${read.value.toString("base64")}\n`);
       return (fallbackKey = read.value);
     }
-    fallbackKey = crypto.randomBytes(32);
-    writeStateFile(keyPath, `${fallbackKey.toString("base64")}\n`);
-    return fallbackKey;
+    if (read.source !== "none" || !create) throw new Error("The saved Email credential key is unavailable");
+    const key = crypto.randomBytes(32);
+    writeStateFile(keyPath, `${key.toString("base64")}\n`);
+    return (fallbackKey = key);
   };
   return {
     encryptionAvailable,
@@ -52,7 +52,7 @@ function createSecretCodec({ safeStorage, keyPath }) {
       if (encryptionAvailable()) {
         return { scheme: "electron-safe-storage-v1", data: safeStorage.encryptString(plain).toString("base64") };
       }
-      const key = loadFallbackKey();
+      const key = loadFallbackKey(true);
       const iv = crypto.randomBytes(12);
       const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
       const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
@@ -184,7 +184,7 @@ function createEmailHost({ logger, filePath, keyPath, safeStorage, fetchNative, 
 
   function load() {
     try {
-      const read = readStateFile(filePath, (text) => JSON.parse(text));
+      const read = readStateFile(filePath, (text) => JSON.parse(text), { preserveUnreadable: true });
       if (read.source === "backup" || read.source === "unreadable") {
         logger?.warn?.("email.state_recovered", { source: read.source, setAside: read.setAside });
       }

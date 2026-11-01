@@ -67,6 +67,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
   const firstAccount = () => normalizeEntry({ id: FIRST_ACCOUNT_ID }, 0);
   // importedEmails: the CPA Codex sign-ins accounts were made from (importOauthAccounts), lowercase.
   let state = { activeId: FIRST_ACCOUNT_ID, accounts: [firstAccount()], settings: { ...DEFAULT_SETTINGS }, importedEmails: [] };
+  let readError = null;
   try {
     const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
     if (Array.isArray(saved?.importedEmails)) {
@@ -91,7 +92,17 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
       }
     }
   } catch (error) {
-    if (error?.code !== "ENOENT") logger?.warn?.("browser_accounts.unreadable", { message: error instanceof Error ? error.message : String(error) });
+    if (error?.code !== "ENOENT") {
+      readError = error;
+      logger?.warn?.("browser_accounts.unreadable", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  // A fallback host may already be on main. Recover through a fresh load, never relabel it live.
+  function assertWritable() {
+    if (!readError) return;
+    const reason = String(readError.code || readError.name || "read error").slice(0, 40);
+    throw new Error(`Browser accounts could not be read (${reason}). Restore accounts.json and restart before changing accounts.`, { cause: readError });
   }
 
   // Saved off the main thread: a synchronous save held Electron's main thread, and every window,
@@ -113,6 +124,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     writing = null;
   }
   function save() {
+    assertWritable();
     dirty = true;
     writing ??= writeAll();
   }
@@ -164,6 +176,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     accountIdOfPartition: (partition) => accountOfPartition(partition)?.id ?? null,
     /** Adds an account (not yet active); returns its id. */
     add() {
+      assertWritable();
       const id = addEntry();
       save();
       return id;
@@ -176,6 +189,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
      * session, so the account waits signed out under that name.
      */
     importOauthAccounts(entries) {
+      assertWritable();
       const seen = new Set(state.importedEmails);
       const added = [];
       let changed = false;
@@ -198,11 +212,13 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
       return added;
     },
     setActive(id) {
+      assertWritable();
       account(id);
       state.activeId = id;
       save();
     },
     rename(id, label) {
+      assertWritable();
       const next = typeof label === "string" ? label.trim().slice(0, MAX_LABEL) : "";
       if (!next) throw new Error("Account name cannot be empty");
       account(id).label = next;
@@ -210,6 +226,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     },
     /** Records the signed-in email shown for an account; returns whether it changed. */
     setEmail(id, email) {
+      if (readError) return false;
       const entry = state.accounts.find((item) => item.id === id);
       const next = typeof email === "string" && email ? email.slice(0, 200) : null;
       if (!entry || entry.email === next) return false;
@@ -222,6 +239,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
      * one account per proxy, so two accounts never share an exit.
      */
     setProxy(id, profileId) {
+      assertWritable();
       const entry = account(id);
       const next = typeof profileId === "string" && profileId ? profileId.slice(0, 160) : null;
       const holder = next && state.accounts.find((other) => other.id !== id && other.proxyProfileId === next);
@@ -235,6 +253,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     },
     /** One account's own settings: how many tabs it may hold, and whether new sessions may start on it. */
     setAccountSettings(id, input = {}) {
+      assertWritable();
       const entry = account(id);
       if (input.maxTabs !== undefined) {
         if (!Number.isInteger(input.maxTabs) || input.maxTabs < 1 || input.maxTabs > MAX_TABS_PER_ACCOUNT) {
@@ -251,6 +270,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     },
     /** Settings for every account: where new Codex sessions start and how long finished tabs stay. */
     setSettings(input = {}) {
+      assertWritable();
       if (input.newSessions !== undefined) {
         if (input.newSessions !== "active" && input.newSessions !== "balance" && !state.accounts.some((entry) => entry.id === input.newSessions)) {
           throw new Error("New sessions start on the account in use, a chosen account, or the least busy one");
@@ -268,6 +288,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     settings: () => ({ ...state.settings }),
     /** Records what an inspection of the account's ChatGPT session found; returns whether it changed. */
     recordPlan(id, inspected) {
+      if (readError) return false;
       const entry = state.accounts.find((item) => item.id === id);
       const plan = normalizePlan({ ...inspected, checkedAt: now() });
       if (!entry || !plan) return false;
@@ -277,6 +298,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     },
     /** Records what a Codex turn showed about the account's connector: bound, or failed with `error`. */
     recordConnector(id, { bound = false, error = null } = {}) {
+      if (readError) return false;
       const entry = state.accounts.find((item) => item.id === id);
       if (!entry || (!bound && !error)) return false;
       const previous = entry.connector ?? { okAt: null, error: null, errorAt: null };
@@ -290,6 +312,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     },
     /** Forgets an account other than the active one; returns its partition for the caller to erase. */
     remove(id) {
+      assertWritable();
       account(id);
       if (id === state.activeId) throw new Error("Switch to another account before removing this one");
       const partition = partitionOf(id);
