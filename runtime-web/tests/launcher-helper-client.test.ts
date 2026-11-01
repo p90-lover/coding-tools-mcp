@@ -1,3 +1,4 @@
+import { selectedSkillFile } from "../src/adapters/chatgpt-web/skill-attachments";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +17,27 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+test.each([false, true])("connector verification preserves chat mode through the real helper process (%s)", async useSavedChats => {
+  const root = mkdtempSync(join(tmpdir(), "codex-verification-chat-mode-"));
+  roots.push(root);
+  const helper = join(root, "helper.ts");
+  writeFileSync(helper, `
+    import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
+    // Keep the launcher request, helper protocol and worker configuration real; replace browser IO.
+    ChatGptBrowserWorker.prototype.verifyConnector = async function() {
+      if (this.config.useSavedChats !== ${useSavedChats}) throw new Error("Verification chat mode lost in helper IPC");
+      return this.config.appName;
+    };
+    await import(${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-helper-main.ts", import.meta.url).href)});
+  `, { mode: 0o700 });
+  const { verifyConnectorWithBrowserHelper } = require("../launcher/electron/browser-helper-verifier.cjs");
+  expect(await verifyConnectorWithBrowserHelper({
+    helper: { executable: process.execPath, script: helper },
+    descriptorPath: join(root, "launcher.json"),
+    appName: "Codex Native2", useSavedChats,
+  })).toEqual({ ok: true, appName: "Codex Native2" });
+});
+
 test("daemon streams browser lifecycle through the real helper process", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-launcher-helper-client-"));
   roots.push(root);
@@ -23,14 +45,20 @@ test("daemon streams browser lifecycle through the real helper process", async (
   writeFileSync(helper, `
     import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
     // Substitute only the browser. Both sides of the production IPC protocol run unchanged.
-    ChatGptBrowserWorker.prototype.run = async turn => {
+    ChatGptBrowserWorker.prototype.run = async function(turn) {
+      if (this.config.useSavedChats !== true) throw new Error("Saved chat preference lost in helper IPC");
+      if (turn.modelFamily !== "5.6") throw new Error("Pinned model family lost in helper IPC");
       await turn.onPreparedSelected(false);
       const prepared = await turn.prepare();
-      if (prepared.multipart.parts.length !== 3) throw new Error("Multipart context was lost");
-      await turn.onMultipartStageAcknowledged?.(1);
-      await turn.onMultipartStageAcknowledged?.(2);
+      if (prepared.skillFiles?.[0]?.text !== "<skill>\\n<name>ipc</name>\\n<path>/skills/ipc/SKILL.md</path>\\ncheck IPC\\n</skill>") throw new Error("Skill file lost in IPC");
+      if (prepared.multipart.parts.length !== 6) throw new Error("Multipart context was lost");
+      for (let index = 1; index < prepared.multipart.parts.length; index++) {
+        await turn.onMultipartStageAcknowledged?.(index);
+      }
       await turn.onSendActivated();
       turn.onSubmitted();
+      turn.onHeartbeat();
+      turn.onGenerationProgress();
       turn.onReasoningSummary("Reading project");
       turn.onReasoningSummary(" files", true);
       turn.onTextDelta("done");
@@ -79,6 +107,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     turnTimeoutMs: 60_000,
     headed: true,
     autoApproveToolCalls: false,
+    useSavedChats: true,
   };
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
@@ -86,6 +115,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
   const acknowledgedStages: number[] = [];
   let sendActivated = false;
   let submitted = false;
+  let heartbeats = 0;
+  let generationProgress = 0;
   let released = false;
   const client = new LauncherBrowserHelperClient(config);
   try {
@@ -93,15 +124,21 @@ test("daemon streams browser lifecycle through the real helper process", async (
       traceId: "abcdef123456",
       modelId: "gpt-5.6-sol",
       reasoning: "high",
-      capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+      modelFamily: "5.6",
+      capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
       prepare: async () => ({
         text: "inspect", images: [],
-        multipart: { parts: ["part one", "part two", "part three"], commit: "inspect" },
+        skillFiles: [selectedSkillFile({ role: "user", origin: "codex_skill", timestamp: 0,
+          content: "<skill>\n<name>ipc</name>\n<path>/skills/ipc/SKILL.md</path>\ncheck IPC\n</skill>",
+        })],
+        multipart: { parts: ["part one", "part two", "part three", "part four", "part five", "part six"], commit: "inspect" },
         release: () => { released = true; },
       }),
       onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
+      onHeartbeat: () => { heartbeats++; },
+      onGenerationProgress: () => { generationProgress++; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onTextDelta: text => deltas.push(text),
       captureLunaCheckpoint: true,
@@ -115,7 +152,9 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
-    expect(acknowledgedStages).toEqual([1, 2]);
+    expect(heartbeats).toBe(1);
+    expect(generationProgress).toBe(1);
+    expect(acknowledgedStages).toEqual([1, 2, 3, 4, 5]);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
       checkpoint: {
@@ -183,7 +222,7 @@ test("accepted compaction retires through the helper as completed without hiding
     appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: descriptorPath,
     browserHelperScriptPath: helper, browserDiagnosticsPath: join(root, "diagnostics"),
     storageStatePath: join(root, "unused-state.json"), chromeExecutablePath: join(root, "unused-chrome"),
-    turnTimeoutMs: 60_000, headed: true, autoApproveToolCalls: false,
+    turnTimeoutMs: 60_000, headed: true, autoApproveToolCalls: false, useSavedChats: false,
   });
   const logs: string[] = [];
   const logger = spyOn(console, "info").mockImplementation((...args) => { logs.push(args.join(" ")); });
@@ -200,7 +239,7 @@ test("accepted compaction retires through the helper as completed without hiding
       const prepare = async () => ({ text: "checkpoint instruction", images: [], release: () => { released = true; } });
       await expect(client.run({
         traceId, modelId: "gpt-5.6-sol", reasoning: "high",
-        capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+        capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
         nativeConnector: true, conversationKey: "a".repeat(64), requireRetainedConversation: true,
         prepare, prepareResume: prepare, abortSignal: controller.signal,
         onSubmitted: () => { controller.abort(reason); }, onTextDelta() {},
@@ -225,7 +264,7 @@ test("accepted compaction retires through the helper as completed without hiding
   }
 });
 
-test("launcher helper protocol preserves multipart context and the compaction flag", async () => {
+test("launcher helper protocol preserves multipart context, broker identity and the compaction flag", async () => {
   const sent: Record<string, unknown>[] = [];
   const client = new LauncherBrowserHelperClient({
     appName: "Codex Native2 DEV",
@@ -236,6 +275,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
     turnTimeoutMs: 60_000,
     headed: true,
     autoApproveToolCalls: false,
+    useSavedChats: false,
   });
   const internal = client as unknown as {
     pending: Map<string, { resolve(value: string): void }>;
@@ -271,12 +311,13 @@ test("launcher helper protocol preserves multipart context and the compaction fl
     traceId: "multipart-123",
     modelId: "gpt-5.6-sol",
     reasoning: "high",
-    capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+    capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
     compaction: true,
     prepare: async () => ({
       text: "commit",
       images: [],
-      multipart: { parts: ["{\"part\":1}", "{\"part\":2}", "{\"part\":3}"], commit: "commit" },
+      turnToken: "turn_0123456789abcdef0123456789abcdef",
+      multipart: { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1 })), commit: "commit" },
       trimmedCompactionMessages: 4,
       release() {},
     }),
@@ -293,7 +334,8 @@ test("launcher helper protocol preserves multipart context and the compaction fl
     type: "prepared_selected_ack",
     prepared: {
         text: "commit",
-        multipart: { parts: ["{\"part\":1}", "{\"part\":2}", "{\"part\":3}"], commit: "commit" },
+        turnToken: "turn_0123456789abcdef0123456789abcdef",
+        multipart: { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1 })), commit: "commit" },
         trimmedCompactionMessages: 4,
     },
   });
@@ -312,6 +354,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
     turnTimeoutMs: 60_000,
     headed: true,
     autoApproveToolCalls: false,
+    useSavedChats: false,
   });
   const internal = client as unknown as {
     ensureChild(): Promise<void>;
@@ -334,7 +377,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
     traceId: "abort-order-123",
     modelId: "gpt-5.6-sol",
     reasoning: "high",
-    capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+    capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
     abortSignal: controller.signal,
     prepare: async () => ({
       text: "inspect",
@@ -358,6 +401,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
     turnTimeoutMs: 60_000,
     headed: true,
     autoApproveToolCalls: false,
+    useSavedChats: false,
   });
   const internal = client as unknown as {
     child?: unknown;
@@ -375,7 +419,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
       turn: {
         traceId: "rate-limit-123",
         modelId: "chatgpt-web/medium",
-        capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+        capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
         prepare: async () => ({ text: "inspect", images: [], release() {} }),
         onTextDelta() {},
       },
@@ -418,4 +462,43 @@ test("a turn cancelled while the app restarts leaves the shared wait at once; th
   expect(await staying).toBe("descriptor");
   expect(await abortable(Promise.resolve(1))).toBe(1);
   await expect(abortable(Promise.resolve(1), AbortSignal.abort())).rejects.toThrow("aborted");
+});
+test("an older helper cannot silently drop selected skill files and releases the prepared turn", async () => {
+  const client = new LauncherBrowserHelperClient({
+    appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: "/durable/launcher.json",
+    storageStatePath: "/durable/unused.json", chromeExecutablePath: "/durable/chrome", headed: true, autoApproveToolCalls: false, useSavedChats: false,
+  });
+  const internal = client as unknown as {
+    child: unknown;
+    ensureChild(): Promise<void>;
+    send(message: Record<string, unknown>): Promise<void>;
+    handleLine(child: unknown, line: string): void;
+  };
+  const child = {};
+  internal.child = child;
+  internal.ensureChild = async () => {};
+  const sent: string[] = [];
+  internal.send = async message => {
+    sent.push(String(message.type));
+    if (message.type === "run") queueMicrotask(() => internal.handleLine(child, JSON.stringify({
+      type: "event", id: message.id, event: "prepared_selected", reused: false,
+    })));
+    if (message.type === "abort") queueMicrotask(() => internal.handleLine(child, JSON.stringify({
+      type: "error", id: message.id, message: "aborted",
+    })));
+  };
+  let released = false;
+  await expect(client.run({
+    traceId: "skill-old-helper", modelId: "gpt-5.6-sol", reasoning: "high",
+    capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
+    prepare: async () => ({ text: "inspect", images: [],
+      skillFiles: [selectedSkillFile({ role: "user", origin: "codex_skill", timestamp: 0,
+        content: "<skill>\n<name>test</name>\n<path>/test</path>\ncheck\n</skill>",
+      })],
+      release() { released = true; },
+    }),
+    onTextDelta() {},
+  })).rejects.toThrow("does not support skill attachments");
+  expect(sent).toEqual(["run", "abort"]);
+  expect(released).toBe(true);
 });

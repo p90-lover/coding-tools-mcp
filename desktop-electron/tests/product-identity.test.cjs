@@ -24,7 +24,7 @@ test('materialized workspaces retain an exact upstream mapping', () => {
   const mapping = JSON.parse(fs.readFileSync(mappingPath, 'utf8'));
   assert.equal(mapping.schema, 1);
   assert.equal(mapping.upstream.repository, 'miuuyy/codex-chatgpt-web');
-  assert.equal(mapping.upstream.commit, 'e85e3693fdb4e3e033348c08df0298c20fcdb612');
+  assert.equal(mapping.upstream.commit, 'cdfceafd51df9ab6f19818c145eac5a99c593a3d');
   assert.ok(mapping.launcherFiles > 20);
   assert.ok(mapping.runtimeFiles > 100);
   assert.equal(mapping.deletedFiles, 0);

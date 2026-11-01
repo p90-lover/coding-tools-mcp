@@ -8,6 +8,8 @@ function subscription(channel, listener) {
 
 contextBridge.exposeInMainWorld("codexWebLauncher", {
   snapshot: () => ipcRenderer.invoke("launcher:snapshot"),
+  getLimits: () => ipcRenderer.invoke("launcher:limits"),
+  setupLimits: () => ipcRenderer.invoke("launcher:limits-setup"),
   setLanguage: (language) => ipcRenderer.invoke("launcher:set-language", language),
   openSocial: (target) => ipcRenderer.invoke("launcher:open-social", target),
   completeOnboarding: (language, browserInteractionMode) => ipcRenderer.invoke(
@@ -38,9 +40,15 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   uninstallIntegration: () => ipcRenderer.invoke("launcher:uninstall-integration"),
   setupCore: () => ipcRenderer.invoke("launcher:setup-core"),
   setupMcp: (input) => ipcRenderer.invoke("launcher:setup-mcp", input),
+  setConnectorNameSuffix: (suffix) => ipcRenderer.invoke("launcher:connector-name", suffix),
   setMcpStep: (step) => ipcRenderer.invoke("launcher:set-mcp-step", step),
   setAutostart: (enabled) => ipcRenderer.invoke("launcher:autostart", enabled),
   setBiggerContext: (enabled) => ipcRenderer.invoke("launcher:bigger-context", enabled),
+  setComposerPredictions: (enabled) => ipcRenderer.invoke("launcher:composer-predictions", enabled),
+  setSkillAttachments: (enabled) => ipcRenderer.invoke("launcher:skill-attachments", enabled),
+  setFreshConversationPerTurn: (enabled) => ipcRenderer.invoke("launcher:fresh-conversation-per-turn", enabled),
+  setUseSavedChats: (enabled) => ipcRenderer.invoke("launcher:use-saved-chats", enabled),
+  setAutoApproveToolCalls: (enabled) => ipcRenderer.invoke("launcher:auto-approve-tool-calls", enabled),
   setZeroRiskPro: (enabled) => ipcRenderer.invoke("launcher:zero-risk-pro", enabled),
   setBrowserInteractionMode: (mode) => ipcRenderer.invoke("launcher:browser-interaction-mode", mode),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
@@ -51,6 +59,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   windowState: () => ipcRenderer.invoke("launcher:window-state"),
   windowControl: (action) => ipcRenderer.send("launcher:window-control", action),
   onWindowStateChanged: (listener) => subscription("launcher:window-state-changed", listener),
+  onConnectorNamesChanged: (listener) => subscription("launcher:connector-names-changed", listener),
   onStateChanged: (listener) => subscription("launcher:state-changed", listener),
   onBrowserState: (listener) => subscription("launcher:browser-state", listener),
   onOperation: (listener) => subscription("launcher:operation", listener),

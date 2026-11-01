@@ -1,3 +1,4 @@
+const languages = require("./languages.json");
 const fs = require("node:fs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const SIDEBAR_MIN_WIDTH = 240;
@@ -13,8 +14,13 @@ const DEFAULT_STATE = Object.freeze({
   autoStart: true,
   keepRunningOnClose: true,
   showBrowserDuringTurns: true,
+  autoApproveToolCalls: false,
   browserInteractionMode: "automatic",
   experimentalBiggerContext: false,
+  composerPredictionsEnabled: true,
+  experimentalSkillAttachments: false,
+  experimentalFreshConversationPerTurn: false,
+  useSavedChats: true,
   zeroRiskProEnabled: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
@@ -35,7 +41,7 @@ function readState(filePath) {
     if (!parsed || parsed.version !== 1) return { ...DEFAULT_STATE };
     const state = { ...DEFAULT_STATE, ...parsed };
     delete state.bridgeEnabled;
-    if (state.language !== null && state.language !== "en" && state.language !== "zh-CN" && state.language !== "ja") {
+    if (state.language !== null && (typeof state.language !== "string" || !Object.hasOwn(languages, state.language))) {
       state.language = DEFAULT_STATE.language;
     }
     for (const key of [
@@ -45,7 +51,12 @@ function readState(filePath) {
       "autoStart",
       "keepRunningOnClose",
       "showBrowserDuringTurns",
+      "autoApproveToolCalls",
       "experimentalBiggerContext",
+      "composerPredictionsEnabled",
+      "experimentalSkillAttachments",
+      "experimentalFreshConversationPerTurn",
+      "useSavedChats",
       "zeroRiskProEnabled",
       "browserSmokePassed",
       "sidebarOpen",

@@ -3,7 +3,7 @@ import type { Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import type { CodexProviderConfig } from "../src/types";
 
-test.each(['data-testid="send-button"', 'aria-label="Send"'])("an already-enabled ChatGPT send control (%s) has no unconditional settle delay", async attribute => {
+test.each(['data-testid="send-button"', 'type="submit" aria-label="Send"'])("an already-enabled ChatGPT send control (%s) has no unconditional settle delay", async attribute => {
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://send-latency-${Date.now()}-${Math.random()}`,

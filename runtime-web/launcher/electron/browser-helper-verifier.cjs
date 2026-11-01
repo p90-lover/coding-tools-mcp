@@ -49,14 +49,15 @@ async function stopChild(child) {
   }
 }
 
-async function runBrowserHelperOperation({ helper, descriptorPath, appName, operation, payload = {}, logger }) {
+async function runBrowserHelperOperation({ helper, descriptorPath, appName, useSavedChats = false, operation, payload = {}, logger }) {
   if (!helper || typeof helper.executable !== "string" || typeof helper.script !== "string") {
     throw new Error("Browser helper verification command is invalid");
   }
-  if (typeof descriptorPath !== "string" || !descriptorPath || typeof appName !== "string" || !appName) {
+  if (typeof descriptorPath !== "string" || !descriptorPath || typeof appName !== "string" || !appName
+    || typeof useSavedChats !== "boolean") {
     throw new Error("Browser helper verification config is invalid");
   }
-  if (!["verify", "inspect", "smoke"].includes(operation)) {
+  if (!["verify", "inspect", "smoke", "limits"].includes(operation)) {
     throw new Error(`Unsupported browser helper operation: ${String(operation)}`);
   }
   const id = `${operation}-${randomBytes(12).toString("hex")}`;
@@ -113,7 +114,7 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
           ...payload,
           type: operation,
           id,
-          config: { appName, browserHostDescriptorPath: descriptorPath },
+          config: { appName, browserHostDescriptorPath: descriptorPath, useSavedChats },
         }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
         return;
       }

@@ -1,3 +1,4 @@
+import { validateSkillFiles } from "./skill-attachments";
 import { createInterface } from "node:readline";
 import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
@@ -6,7 +7,7 @@ import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adap
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
-import type { CompiledChatGptWebPrompt } from "./prompt";
+import { isChatGptWebMultipartPartCount, type CompiledChatGptWebPrompt } from "./prompt";
 import { ChatGptMirroredTurnProgress } from "./turn-progress";
 import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
 
@@ -19,11 +20,13 @@ interface RunMessage {
     browserDiagnosticsPath?: string;
     turnTimeoutMs: number;
     autoApproveToolCalls: boolean;
+    useSavedChats?: boolean;
   };
   turn: {
     traceId: string;
     modelId: string;
     reasoning?: string;
+    modelFamily?: "5.6" | "6";
     capabilities: ChatGptWebCapabilities;
     nativeConnector?: boolean;
     resumeAvailable?: boolean;
@@ -42,6 +45,7 @@ interface VerifyMessage {
   config: {
     appName: string;
     browserHostDescriptorPath: string;
+    useSavedChats?: boolean;
   };
 }
 
@@ -58,7 +62,13 @@ interface SmokeMessage {
   config: VerifyMessage["config"];
 }
 
-type MaintenanceMessage = VerifyMessage | InspectMessage | SmokeMessage;
+interface LimitsMessage {
+  type: "limits";
+  id: string;
+  config: VerifyMessage["config"];
+}
+
+type MaintenanceMessage = VerifyMessage | InspectMessage | SmokeMessage | LimitsMessage;
 type InputMessage = RunMessage
   | MaintenanceMessage
   | { type: "prepared_selected_ack"; id: string; prepared: CompiledChatGptWebPrompt }
@@ -187,6 +197,7 @@ async function run(message: RunMessage): Promise<void> {
       browserDiagnosticsPath: message.config.browserDiagnosticsPath,
       turnTimeoutMs: message.config.turnTimeoutMs,
       autoApproveToolCalls: message.config.autoApproveToolCalls,
+      useSavedChats: message.config.useSavedChats === true,
     },
   };
   const abortController = new AbortController();
@@ -210,6 +221,7 @@ async function run(message: RunMessage): Promise<void> {
     traceId: message.turn.traceId,
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
+    ...(message.turn.modelFamily ? { modelFamily: message.turn.modelFamily } : {}),
     capabilities: message.turn.capabilities,
     ...(message.turn.nativeConnector ? { nativeConnector: true } : {}),
     prepare: prepareSelected,
@@ -251,6 +263,7 @@ async function run(message: RunMessage): Promise<void> {
       },
     } : {}),
     onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
+    onGenerationProgress: () => writeProtocol({ type: "event", id: message.id, event: "generation_progress" }),
     onPreparedSelected: reused => {
       if (!writeProtocol({ type: "event", id: message.id, event: "prepared_selected", reused })) {
         throw new Error("Browser helper could not request prompt selection");
@@ -350,18 +363,19 @@ function maintenanceWorker(message: MaintenanceMessage): ChatGptBrowserWorker {
   }
   const appName = message.config.appName?.trim();
   const browserHostDescriptorPath = message.config.browserHostDescriptorPath?.trim();
-  if (!appName || appName.length > 80 || !browserHostDescriptorPath) {
+  if (!appName || appName.length > 80 || !browserHostDescriptorPath
+    || (message.config.useSavedChats !== undefined && typeof message.config.useSavedChats !== "boolean")) {
     throw new Error("Browser helper maintenance config is invalid");
   }
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
-    chatgptWeb: { appName, browserHost: "launcher", browserHostDescriptorPath },
+    chatgptWeb: { appName, browserHost: "launcher", browserHostDescriptorPath, useSavedChats: message.config.useSavedChats === true },
   };
   return ChatGptBrowserWorker.forProvider(provider);
 }
 
-async function maintain(message: InspectMessage | SmokeMessage): Promise<void> {
+async function maintain(message: InspectMessage | SmokeMessage | LimitsMessage): Promise<void> {
   if (abortControllers.has(message.id)) throw new Error(`Browser helper maintenance operation already exists: ${message.id}`);
   const abortController = new AbortController();
   abortControllers.set(message.id, abortController);
@@ -369,6 +383,7 @@ async function maintain(message: InspectMessage | SmokeMessage): Promise<void> {
     const worker = maintenanceWorker(message);
     const value = message.type === "inspect"
       ? await worker.inspectSession(message.detectCapabilities)
+      : message.type === "limits" ? await worker.inspectLimitsPlan()
       : await worker.smokeTest(abortController.signal);
     writeProtocol({ type: "result", id: message.id, value });
   } catch (error) {
@@ -399,10 +414,16 @@ input.on("line", line => {
       abortControllers.get(message.id)?.abort();
       return;
     }
+    try { validateSkillFiles(prepared.skillFiles); }
+    catch (error) {
+      writeProtocol({ type: "error", id: message.id, message: error instanceof Error ? error.message : String(error) });
+      abortControllers.get(message.id)?.abort();
+      return;
+    }
     if (prepared.multipart !== undefined) {
       const multipart = prepared.multipart;
       if (!multipart || !Array.isArray(multipart.parts)
-        || (multipart.parts.length !== 2 && multipart.parts.length !== 3)
+        || !isChatGptWebMultipartPartCount(multipart.parts.length)
         || multipart.parts.some(part => typeof part !== "string")
         || typeof multipart.commit !== "string") {
         writeProtocol({ type: "error", id: message.id, message: "Browser helper multipart prompt is invalid" });
@@ -485,7 +506,7 @@ input.on("line", line => {
       id: message.id,
       message: error instanceof Error ? error.message : String(error),
     }));
-  } else if (message.type === "inspect" || message.type === "smoke") {
+  } else if (message.type === "inspect" || message.type === "smoke" || message.type === "limits") {
     void maintain(message).catch(error => writeProtocol({
       type: "error",
       id: message.id,
@@ -517,4 +538,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack"] });
+writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "skill-attachments"] });

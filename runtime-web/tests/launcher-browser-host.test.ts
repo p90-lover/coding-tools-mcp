@@ -11,6 +11,7 @@ import {
   LauncherManualTurnTimedOutError,
   LauncherRetainedConversationUnavailableError,
   LauncherBrowserTurnCancelledError,
+  LauncherBrowserTurnOwnerLostError,
   endLauncherManualTurn,
   inspectLauncherBrowserHost,
   inspectLauncherBrowserHostLiveness,
@@ -26,8 +27,99 @@ import {
   launcherRestartAnnouncedUntil,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
+import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 
 const roots: string[] = [];
+
+test("launcher activity follows actual send callbacks and current-turn tool counts", async () => {
+  const messages: Array<{ phase: string; progress?: { stage: string; activeToolCalls: number } }> = [];
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const message = await request.json() as typeof messages[number];
+    messages.push(message);
+    return Response.json(message.phase === "start"
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      : { cancelledByUser: false });
+  } });
+  const waitForStage = async (stage: string) => {
+    const deadline = Date.now() + 1_000;
+    while (!messages.some(message => message.progress?.stage === stage) && Date.now() < deadline) await Bun.sleep(5);
+    expect(messages.some(message => message.progress?.stage === stage)).toBeTrue();
+  };
+  let activeToolCalls = 0;
+  let activated = 0;
+  let submitted = 0;
+  try {
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "launcher", browserHostDescriptorPath: descriptorFile(`http://127.0.0.1:${server.port}`) },
+      runBrowserTurn: async (turn: { onSendActivated(): Promise<void>; onSubmitted(): Promise<void> }) => {
+        await waitForStage("preparing");
+        await turn.onSendActivated();
+        await waitForStage("sending");
+        activeToolCalls = 2;
+        await turn.onSubmitted();
+        await waitForStage("chatgpt");
+        return "done";
+      },
+    });
+    await expect(worker.runExclusive({
+      traceId: "activity-fixture", capabilities: { localToolsEnabled: true },
+      externalProgress: { snapshot: () => ({ activeToolCalls }) },
+      onSendActivated: () => { activated++; }, onSubmitted: () => { submitted++; },
+    })).resolves.toBe("done");
+    expect(messages.filter(message => message.progress).map(message => message.progress)).toEqual([
+      { stage: "preparing", activeToolCalls: 0 }, { stage: "sending", activeToolCalls: 0 },
+      { stage: "chatgpt", activeToolCalls: 2 },
+    ]);
+    expect(messages.at(-1)?.phase).toBe("end");
+    expect([activated, submitted]).toEqual([1, 1]);
+  } finally { server.stop(true); }
+});
+
+test("a blocked sign-in replaces an opaque navigation abort with a non-retryable session error", async () => {
+  let needsSignIn: unknown = true;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const activity = await req.json() as { phase: string };
+    return Response.json(activity.phase === "start"
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      : { cancelledByUser: false, authenticationRequired: needsSignIn });
+  } });
+  try {
+    const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "launcher", browserHostDescriptorPath: descriptor },
+      runBrowserTurn: async () => { throw new Error("page.goto: net::ERR_ABORTED"); },
+    });
+    const turn = { traceId: "auth-redirect", capabilities: { localToolsEnabled: false } };
+    await expect(worker.runExclusive(turn)).rejects.toMatchObject({
+      status: 401, code: "chatgpt_sign_in_required", retryable: false,
+    });
+    needsSignIn = false;
+    await expect(worker.runExclusive(turn)).rejects.toThrow("page.goto: net::ERR_ABORTED");
+    needsSignIn = "true";
+    await expect(notifyLauncherTurn(descriptor, { phase: "end", traceId: "auth-redirect", helperPid: process.pid, status: "failed" }))
+      .rejects.toThrow("invalid authentication state");
+  } finally { server.stop(true); }
+});
+
+test("startup waits beyond five seconds and distinguishes its deadline from caller cancellation", async () => {
+  let calls = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch() {
+    calls++;
+    await Bun.sleep(calls === 1 ? 5_100 : 80);
+    return Response.json({ surfaceId: "a".repeat(32), reused: false, connectorBound: false });
+  } });
+  try {
+    const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);
+    const activity = { phase: "start" as const, traceId: "bounded-start", helperPid: process.pid };
+    await expect(notifyLauncherTurn(descriptor, activity)).resolves.toMatchObject({ reused: false });
+    await expect(notifyLauncherTurn(descriptor, activity, 10)).rejects.toThrow("start timed out after 10ms");
+    const controller = new AbortController();
+    const pending = notifyLauncherTurn(descriptor, activity, undefined, controller.signal);
+    setTimeout(() => controller.abort(), 10);
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toBe(3);
+  } finally { server.stop(true); }
+}, 10_000);
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -203,6 +295,7 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       surfaceId: "launcher_surface_id_0123456789AB",
       reused: true,
       connectorBound: true,
+      trackUsage: false,
     });
     expect(received.authorization).toBe("Bearer launcher-control-token-0123456789abcdefghijklmnop");
     expect(received.body).toEqual({
@@ -334,6 +427,34 @@ test("launcher turn control preserves a missing retained conversation as a typed
   }
 });
 
+test("launcher turn control preserves a lost running helper as a typed signal", async () => {
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* drain request */ }
+    response.writeHead(409, { "content-type": "application/json" });
+    response.end('{"error":"running helper exited","code":"turn_owner_lost"}\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    const error = await notifyLauncherTurn(path, {
+      phase: "start",
+      traceId: "missing123456",
+      helperPid: process.pid,
+      conversationKey: "a".repeat(64),
+      requireRetainedConversation: true,
+    }).catch(caught => caught);
+    expect(error).toBeInstanceOf(LauncherBrowserTurnOwnerLostError);
+    expect(error.message).toContain("running helper exited");
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 test("launcher session verification uses the authenticated control channel instead of Bun CDP", async () => {
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -346,7 +467,7 @@ test("launcher session verification uses the authenticated control channel inste
       authenticated: true,
       temporary: true,
       solAvailable: true,
-      proAvailable: true,
+      extraHighAvailable: true, proAvailable: true,
       url: "https://chatgpt.com/?temporary-chat=true",
     }));
   });
@@ -360,7 +481,7 @@ test("launcher session verification uses the authenticated control channel inste
     const path = descriptorFile(`http://127.0.0.1:${address.port}`);
     expect(await inspectLauncherBrowserHost(path, { detectCapabilities: true })).toEqual({
       solAvailable: true,
-      proAvailable: true,
+      extraHighAvailable: true, proAvailable: true,
       url: "https://chatgpt.com/?temporary-chat=true",
     });
   } finally {

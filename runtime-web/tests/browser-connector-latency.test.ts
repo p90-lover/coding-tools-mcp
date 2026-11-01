@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { CHATGPT_CONNECTOR_MENU_ROW_SELECTOR, ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+
+const CHATGPT_CONNECTOR_MENU_ROW_SELECTOR = '.__menu-item[tabindex="0"], [data-mention-list-scroll-area] button[data-list-navigation-item="true"]';
 
 test("an already-personalized connector menu has no unconditional pre-mention delay", async () => {
   let menuVisible = false;
@@ -71,6 +73,7 @@ test("an already-personalized connector menu has no unconditional pre-mention de
     },
   });
   const page = {
+    url: () => "https://chatgpt.com/",
     getByRole: personalizedRole,
     getByText: (text: string, options: { exact: boolean }) => {
       expect(text).toBe("Coding Tools Native2");

@@ -8,11 +8,11 @@ editing Codex configuration, or opening a new issue.
 1. Install the [latest release](https://github.com/miuuyy/codex-chatgpt-web/releases/latest). Quit
    **Codex Web GPT** before running the installer again; updating preserves its private ChatGPT
    profile and launcher configuration.
-2. In the launcher, confirm that ChatGPT sign-in, the browser smoke test, and **Install models** (or
-   **Repair Codex setup**) are green.
+2. In **Setup**, confirm that ChatGPT sign-in, the browser smoke test, and **Install into Codex**
+   are green. The installation button says **Install models**, or **Reinstall** after setup.
 3. Fully quit Codex, including its background process, and reopen it. Signing out, closing only the
    window, or starting another task does not reload the model catalog. Keep the launcher open.
-4. Select a **ChatGPT Web — …** model from Codex's model picker.
+4. Select a model ending in **(Web)** from Codex's model picker.
 5. Run **Settings → Run doctor**. If the problem remains, reproduce it once and immediately use
    **Activity → Export safe log**.
 
@@ -27,13 +27,35 @@ still running. The launcher should move from **Restart Codex** to a verified cat
 
 If the models still do not appear:
 
-- run **Repair Codex setup** once;
+- confirm that **Codex itself** uses ChatGPT sign-in; signing into the launcher's browser is separate.
+  An API-key or signed-out Codex session can show only its built-in catalog without contacting the bridge;
+- open **Setup → Install into Codex** and click **Reinstall** once;
 - check **Settings → Run doctor**;
 - make sure another Codex wrapper is not replacing the route; and
 - export a safe log after the failed catalog check.
 
 A green step 3 followed by a browser-turn error means installation succeeded. Repeating step 3 will
 not repair an unrelated ChatGPT browser or model-turn failure.
+
+### Windows: Cannot bind the local port (EACCES)
+
+`Cannot bind 127.0.0.1:17841: listen EACCES: permission denied` means Windows refused access to
+the port. Possible causes include a reserved port range, another service holding the address
+exclusively, or security software. The error alone does not identify the cause.
+
+Check reserved ranges and listeners in PowerShell:
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+Get-NetTCPConnection -LocalPort 17841 -ErrorAction SilentlyContinue | Select-Object LocalAddress, State, OwningProcess
+```
+
+If 17841 falls inside a listed range, include that range in your report. Hyper-V, WSL, Docker and
+Windows Sandbox can manage such reservations. If a listener appears, its OwningProcess identifies
+the process to investigate. If neither check explains it, include both outputs and an
+**Activity → Export safe log**. Reinstalling the launcher does not resolve an operating-system
+reservation or another service's exclusive binding. Do not stop networking services or change
+port reservations based only on the EACCES message.
 
 ## `openai_base_url changed after setup` or a model is "not supported"
 
@@ -44,8 +66,9 @@ for the whole installation or only for the process they launch.
 
 Choose one route owner:
 
-- To use Codex Web GPT, disable the other wrapper's provider/proxy mode, run **Repair Codex setup**,
-  fully restart Codex, and start Codex directly rather than through the wrapper command.
+- To use Codex Web GPT, disable the other wrapper's provider/proxy mode, click
+  **Setup → Install into Codex → Reinstall**, fully restart Codex, and start Codex directly rather
+  than through the wrapper command.
 - A tool may remain enabled only as an MCP integration if it does not replace `openai_base_url`.
 - To switch away cleanly, use **Settings → Remove Codex integration** first. This restores the exact
   route that existed before Codex Web GPT was installed.
@@ -53,6 +76,80 @@ Choose one route owner:
 Do not hand-edit the launcher's route journal. It exists so setup and removal can fail closed instead
 of silently destroying another provider's configuration. First-class external-router composition is
 tracked in [#205](https://github.com/miuuyy/codex-chatgpt-web/issues/205), but is not supported today.
+
+## `Codex interrupt lifecycle hook changed after setup`
+
+The launcher found that its entries in Codex's `config.toml` are missing or different from those
+installed during setup. This can happen when another tool edits the file. Setup stops to avoid
+overwriting those changes. A TOML parsing error instead means the file cannot be read; an invalid
+integration journal means the launcher's saved setup record needs investigation.
+
+Close Codex and any tool editing its settings, then make a copy of `config.toml`. It is normally in
+`~/.codex` (Windows: `%USERPROFILE%\.codex`), or the folder selected by `CODEX_HOME`.
+Compare it with a known-good backup made **after successful launcher setup**. Restore only the
+launcher's affected `hooks.Interrupt` and matching `hooks.state` entries, preserving their order and
+all unrelated settings and hooks. For a syntax error, repair the TOML or restore a known-good file,
+keeping a copy of the current version so newer settings are not lost.
+
+Then run **Setup → Install into Codex → Reinstall**. Do not delete all hooks or edit the launcher's
+integration journal to bypass the check. If you have no suitable backup, or the error mentions the
+journal, use **Activity → Export safe log** and open an issue with the exact error. Do not upload your
+whole config file; it may contain credentials.
+
+## A second `CODEX_HOME` fails with `missing network access in trusted Codex environment context`
+
+The bridge normally reads native task permissions from its own `CODEX_HOME`. A CLI using a
+different home stores its task records elsewhere. Its filesystem-only environment message does
+not provide enough information to recover network permissions.
+
+To share one bridge across your local Codex homes, set `CODEX_CHATGPT_WEB_TRUSTED_CODEX_HOMES`
+**in the environment that starts the bridge or launcher**. Its value is a JSON array of up to seven
+additional absolute local directories. For example, in PowerShell:
+
+```powershell
+$env:CODEX_CHATGPT_WEB_TRUSTED_CODEX_HOMES = '["C:\\Codex\\second-home"]'
+& "$env:LOCALAPPDATA\Programs\Codex Web GPT\Codex Web GPT.exe"
+```
+
+Finish active tasks and quit the existing launcher before starting it with the new environment.
+Replace the example paths with your actual home and launcher locations. Each home still needs its
+own Codex integration setup; this setting registers where the shared bridge may read native task
+records. Directories must already exist and must not themselves be symbolic links. The bridge
+canonicalizes directory aliases and rejects a thread found in more than one registered home.
+
+Each turn must match its current native thread, permissions, and turn ID. Shared-home mode does not
+reuse the single-home permission cache. A secondary home's custom SQLite location must be set in
+that home's `config.toml` as `sqlite_home`; the bridge's `CODEX_SQLITE_HOME` applies only to its
+primary home. DEV commands keep their isolated home and discard this production setting.
+
+## Native models stop after closing the launcher
+
+While the integration is installed, native Codex models also use the local bridge. Keep the launcher
+running, or use **Settings → Remove Codex integration** before quitting it. Then fully quit Codex,
+including background processes, and reopen it to load the restored route.
+
+CLI users can temporarily restore the previous route with `codex-chatgpt-web route disconnect`.
+Fully restart Codex after a route change. Starting the launcher reconnects an installed integration.
+
+## Codex's usage-limit banner disables Send for Web models
+
+If Codex shows **You're out of Codex and Work usage** and disables Send even with a Web model
+selected, sign out of **Codex** and sign in with another account you own that can send messages.
+A free account with Codex access and no blocking usage banner can be used.
+
+Keep your intended ChatGPT account signed in inside **Codex Web GPT**; these are separate sessions.
+Changing the Codex login does not reset or increase the launcher's ChatGPT Web account limits.
+
+## Encrypted content cannot be verified after switching models
+
+If switching from ChatGPT Web to a native Codex model fails with `Encrypted content could not be
+decrypted or parsed`, check the route owner. The launcher's native route already converts Web
+checkpoints into readable context and preserves native encrypted history. An external router that
+sends native requests directly to OpenAI bypasses that conversion.
+
+Use one route owner as described above. If the error persists through the launcher, export a safe log
+and include both model names and whether compaction preceded the switch. Do not delete checkpoints
+or strip encrypted history; this can lose task context. External-router composition remains unsupported.
 
 ## ChatGPT sign-in does not complete
 
@@ -65,9 +162,10 @@ window does not automatically transfer that session.
   running.
 - If the account offers **Try another way**, an alternate authentication method can avoid a
   platform-passkey limitation.
-- Passkey-only macOS accounts have a known open issue: [#209](https://github.com/miuuyy/codex-chatgpt-web/issues/209).
-  If no alternate method exists, follow that issue rather than repeatedly deleting the browser
-  profile; there is no safe generic workaround to claim yet.
+- On macOS, choose **Use passkey** to open a separate Chrome window. Sign in to ChatGPT there
+  using your passkey. Once ChatGPT opens, return to the launcher and choose **I’m signed in — continue**.
+  Keep that Chrome window open until you continue; the launcher closes it and verifies the imported
+  session. Your usual Chrome profile is not used. Google Chrome must be installed.
 
 If an ordinary login still fails, export a safe log immediately after one attempt. Include the OS,
 launcher version, account tier, sign-in provider, and whether the Temporary Chat composer ever
@@ -88,6 +186,25 @@ mean that the ChatGPT UI did not expose a structure the bridge can safely prove.
 
 Free and Go accounts normally expose Luna and Think without the paid-account effort selector. A
 missing paid selector on those accounts is not itself a sign-in failure.
+Luna and Think use rolling summaries with **Settings → Bigger Context** off. Experimental Bigger
+Context keeps the temporary conversation and sends large histories in parts. If earlier details
+are lost in long Free-account chats, turn Bigger Context off and restart Codex.
+
+## Personalization or connector controls are not found
+
+If the connector is missing in Temporary Chat but available in a regular ChatGPT chat, enable
+**Launcher → Settings → Save chats in ChatGPT**. Finish active tasks, restart the launcher and
+Codex, then try a new task. This keeps task conversations in your ChatGPT history; ChatGPT
+memory and custom instructions may apply. Saved chats are the default for new setups, but
+updating preserves an existing explicit off setting.
+
+In **6.1.10**, **Verify runtime** still checks Temporary Chat even with saved chats enabled;
+test an actual task on that version. **6.1.11 and later** verify the selected chat mode.
+
+In ChatGPT, open **Settings → General → Language** and choose **English** explicitly, then reload
+ChatGPT inside the launcher and retry once. Some browser controls depend on English labels;
+changing the launcher language does not change the ChatGPT website language.
+The same step applies when a model "could not be selected and verified".
 
 ## Full harness or MCP verification fails
 
@@ -98,15 +215,96 @@ Video walkthroughs:
 
 Browser-only mode needs no connector. Full harness mode requires all of the following:
 
-- a newly created connector named exactly **Codex Native2**;
+- a newly created connector with the exact name shown in the launcher (**Codex Native2** by default);
 - **Developer Mode** enabled in ChatGPT;
 - the exact Tunnel selected with **Authentication: None**;
 - the connector and Tunnel on the same OpenAI account as the ChatGPT workspace;
 - **Allow all actions** under the connector's permissions; and
 - **Connect harness** completed before **Verify runtime**.
 
+If ChatGPT says **MCP endpoint not found**, keep the launcher running and complete
+**Connect harness** before creating the plugin. Use the same Tunnel ID in both places and
+copy the plugin name from the launcher's MCP page. Do not enter both mode names as one name.
+If ChatGPT then reports a request limit, wait for its cooldown before retrying once. If the
+launcher shows the harness connected but creation still fails, export a safe log and include
+the exact error and time of the attempt.
+
 Do not rename or refresh an old **Codex Native** connector. ChatGPT caches the public MCP contract by
 connector identity, so create **Codex Native2** as a new connector.
+
+After updating, if `codex_exec` still does not expose `sandbox_permissions`, `justification`, and
+`prefix_rule`, recreate the current mode's connector so ChatGPT loads the updated tool schema.
+These fields only forward a permission request to Codex; its sandbox and approval policy still
+decide whether the command can run. Ordinary commands do not require these optional fields.
+
+### ChatGPT refuses a tool call or context compaction
+
+Share the exact failed tool result and an **Activity → Export safe log**. An assistant saying
+"safety block" without a failed tool result does not establish the cause. **Allow all actions**
+does not override ChatGPT's own safety checks.
+
+After updating, refresh **Codex Native2** in ChatGPT's plugin settings to load its current tool
+descriptions. This updates the compaction tool contract; it does not remove safety restrictions.
+If compaction ends without a submitted summary, the launcher reports that failure and preserves
+the existing task history.
+
+### A tool reports an invalid or expired turn token
+
+A turn token identifies one active Codex turn. If ChatGPT changes or omits a character when copying
+it into a tool call, the call is rejected. Tokens from finished turns are also rejected.
+
+After updating the launcher, refresh **Codex Native2** in ChatGPT's plugin settings so it loads the
+current token format and copying instructions, then retry the task in Codex. If the error continues,
+attach **Activity → Export safe log** and the failure time. Do not include the token itself.
+
+### Tools disappear on follow-up messages
+
+If local tools work on the first message but disappear on a follow-up, check the same ChatGPT tab
+in **Launcher → Browser**. ChatGPT may not retain the connector for the next message in a reused
+conversation. The model saying it has no tools alone does not establish this.
+
+In 6.0, enable **Settings → New browser chat for each turn** in automatic browser mode for this
+case: the same Codex task continues, but each turn attaches the connector in a
+fresh ChatGPT conversation. It resends more context and can be slower. In stock v5.0.8, close the
+task's **completed** browser tab before sending the next message; closing a running tab cancels it.
+
+Also try recreating **Codex Native2** as a new connector with the same Tunnel and **Allow all
+actions**, then run **Verify runtime**. If tools are already missing in a fresh chat, report that
+separately with a safe log and the browser's actual connector/tool state.
+
+### Windows: `unable to verify the first certificate` or `SELF_SIGNED_CERT_IN_CHAIN`
+
+The Windows launcher and packaged CLI use Windows-trusted certificates by default, including
+certificates installed by your company or antivirus. Explicit `NODE_USE_SYSTEM_CA` settings are
+preserved. Certificate verification remains enabled.
+
+If it still fails, check the affected host with Windows `curl.exe -Iv`
+(for example, `curl.exe -Iv https://api.openai.com/`). If it uses Schannel and receives an HTTP
+response, Windows trusts that connection. For an older launcher, fully quit it and start it from PowerShell:
+
+```powershell
+$env:NODE_USE_SYSTEM_CA = "1"
+$install = (Get-ItemProperty "HKCU:\Software\d1a6026a-6210-588e-9a2b-da3936f94e02").InstallLocation
+Start-Process (Join-Path $install "Codex Web GPT.exe")
+```
+
+For a portable copy, use its executable path instead. Retry **Connect harness** once. This enables
+[Node's system CA support](https://nodejs.org/api/cli.html#node_use_system_ca1); certificate verification
+stays enabled. If it still fails, export a safe log. Do not set `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+
+### ChatGPT will not reuse a deleted plugin's name
+
+In the launcher, open **Settings → Plugin name**, change the part after **Codex**, and confirm.
+For example, replace **Native2** with **Work** to get **Codex Work**. Create a new plugin using
+the exact name shown in **MCP**, then verify it again. Only the current mode's name changes;
+the tunnel credentials and ChatGPT login are kept. Do not rename the retired
+**Codex Native** plugin to reuse its old schema.
+
+### Zero Risk: the prompt was not sent
+
+Confirm **Sent** only after ChatGPT accepts the prompt. If sending is blocked, choose an available
+model yourself. **Copy prompt** gives you a fresh handoff timer before Sent and remains available
+after Sent until the plugin starts. Copying does not send another message or change the model.
 
 ### ChatGPT shows `Error creating connector`
 
@@ -142,6 +340,18 @@ Do not assume that a generic 502 means the Tunnel is broken. Since v4.0.7, a nat
 outlives its turn binding is reported explicitly as `codex_tool_timeout` and retired rather than
 being presented as an ambiguous proxy success.
 
+## Saved task environment cannot be read
+
+If an interrupted shutdown damages `runtime/thread-environments.json`, start a fresh Codex task.
+When Codex supplies a verified workspace and permissions, the launcher preserves the damaged JSON
+beside the original as `thread-environments.json.corrupt-…` and rebuilds the file from that current
+task. It does not recover permissions from damaged data. Existing tasks without a current verified
+environment may still need to be restarted.
+
+If the error remains or reports invalid workspace/permission records, export **Activity → Export
+safe log** and include the exact error. Keep the preserved file private; do not delete your launcher
+settings or upload the saved task environments.
+
 ## Native compaction returns `404 Not Found`
 
 For an ordinary Codex model, `/v1/responses/compact` forwards to the native legacy compact
@@ -171,6 +381,8 @@ max_concurrent_threads_per_session = 1
 ```
 
 If the table already exists, add or change only the key; do not create a second `[agents]` table.
+If it contains `max_threads`, replace that old name with `max_concurrent_threads_per_session`;
+do not keep both. Codex treats them as aliases and may reject the configuration as a duplicate field.
 Bigger Context can make one turn larger and longer, but does not increase safe account concurrency.
 
 ## Images from earlier turns are attached again
@@ -203,8 +415,13 @@ To update, quit **Codex Web GPT** and run the same installer command from the RE
 replaces the application and runtime while preserving the launcher configuration and private
 ChatGPT profile.
 
-To repair a valid installation, use **Repair Codex setup** once and fully restart Codex. Avoid
-deleting configuration until **Run doctor** and a safe log identify which layer failed.
+On Linux, automatic updates require the installed launcher created by `install-launcher.sh`.
+If Update reports that the stable wrapper is missing, quit the app, run the installer command
+from the README, and reopen Codex Web GPT from the applications menu. This preserves settings and browser data.
+
+To repair a valid integration, open **Setup → Install into Codex**, click **Reinstall** once,
+and fully restart Codex. Avoid deleting configuration until **Run doctor** and a safe log identify
+which layer failed.
 
 To remove the integration safely:
 
@@ -226,7 +443,8 @@ safe log**. A useful report contains:
 - Codex Desktop and/or CLI version;
 - OS and architecture;
 - ChatGPT account tier;
-- Browser-only or Full harness mode and the exact selected model;
+- Browser-only, Full harness (automatic), or Zero Risk mode and the exact selected model;
+- For Zero Risk, the ChatGPT model/effort and the last completed step: copying, pasting, sending in ChatGPT, confirming Sent, or the first MCP call;
 - exact reproduction steps and complete final error;
 - whether it reproduces in a fresh Codex task; and
 - a safe log captured immediately after that reproduction.

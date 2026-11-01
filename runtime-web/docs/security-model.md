@@ -41,7 +41,8 @@ The bridge transports decisions; it does not add a second planner, semantic rout
 model. Every available effort uses the same MCP contract. An unavailable account route, missing
 connector, or missing outer tool fails explicitly instead of becoming an effort-specific exception.
 
-The direct turn-token MCP schema is attached only through the `Codex Native2` connector identity.
+The direct turn-token MCP schema is attached only through the exact configured connector name
+(default `Codex Native2`; the part after `Codex ` can be changed).
 The pre-v4 `Codex Native` connector is treated as legacy and is never selected as a fallback. This
 prevents a cached legacy schema from being mistaken for the current capability contract.
 
@@ -75,6 +76,11 @@ preserving the native provider/task identity. Another process under the same OS 
 port. Run on a trusted single-user account and treat local code execution as inside the trust
 boundary.
 
+A web page is not a local process. Browsers can reach a loopback port with a cross-site request,
+or with a same-origin one after DNS rebinding, and they attach `Origin` to every non-GET request.
+The daemon rejects any non-GET request that carries `Origin` before it reaches a route; Codex and
+the launcher never send that header. This closes the browser path only and is not authentication.
+
 The lifecycle endpoints are separate from the Responses surface. `/admin/drain`, `/admin/resume`,
 `/admin/cancel-turn`, `/admin/cancel-turns`, and `/admin/shutdown` require a random bearer token stored in the
 user-only application config. The launcher uses them to reject new work, prove that both the HTTP
@@ -100,15 +106,19 @@ external browser.
 ### Cross-turn data leakage
 
 Browser turns use at most five independent task-bound tabs in one private login partition. Every
-outer Codex task owns an exact launcher surface lease and retains its Temporary Chat only across
+outer Codex task owns an exact launcher surface lease and retains its ChatGPT conversation only across
 sequential messages in the same model/effort/compaction epoch; chats are never reused across tasks.
 Closing a running tab destroys its page and terminates that turn. The five-tab limit bounds parallel
 account traffic. Tool calls remain in the same ChatGPT response. The
 bounded local continuation cache is private, expires, and exists only to implement Codex
 `previous_response_id` replay. Full-mode context compaction accepts a checkpoint only through its
 one-shot MCP control capability in the exact retained source chat. If that chat no longer exists, a
-fresh tool-free Temporary Chat receives the canonical Codex history; the bridge never parses ordinary
+fresh tool-free chat receives the canonical Codex history; the bridge never parses ordinary
 assistant prose as a structured handoff.
+
+Task conversations are saved in ChatGPT history by default. **Save chats in ChatGPT** can be turned
+off to use Temporary Chat; an existing off setting is preserved when updating. Saved chats may use
+ChatGPT memory and custom instructions. Connector verification follows the same selected chat mode.
 
 ## Network exposure
 

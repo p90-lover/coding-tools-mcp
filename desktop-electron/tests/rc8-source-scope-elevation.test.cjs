@@ -6,8 +6,8 @@ const test = require("node:test");
 const SHA = "a".repeat(40);
 const upstream = {
   repository: "miuuyy/codex-chatgpt-web",
-  tag: "v5.0.6",
-  commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
+  tag: "v6.1.12",
+  commit: "cdfceafd51df9ab6f19818c145eac5a99c593a3d",
 };
 
 function packageManifest(nsis) {

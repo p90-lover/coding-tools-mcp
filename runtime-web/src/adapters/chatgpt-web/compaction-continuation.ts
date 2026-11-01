@@ -6,6 +6,8 @@ import type { ChatGptTurnIdentity, ChatGptTurnUserRevision } from "./environment
 interface CompletedCheckpoint {
   summaryHash: string;
   sourceHashes: ReadonlySet<string>;
+  source: ChatGptTurnUserRevision;
+  sourceWasDelegation: boolean;
 }
 
 // Evidence of a checkpoint actually returned by this daemon, not authority inferred from text
@@ -33,9 +35,25 @@ export function rememberCompactionContinuation(
   summary: string,
 ): void {
   const key = scope(parsed, identity);
-  if (!key || !parsed._compactionRequest || !summary) return;
+  if (!key || !parsed._compactionRequest || !summary || !sources[0]) return;
+  const input = (parsed._rawBody as { input?: Array<Record<string, unknown>> } | undefined)?.input;
+  const previous = recoverCompactionInstruction(parsed, identity);
+  // Source extraction has already authenticated this synthetic native instruction. Unlike
+  // human messages, function-call outputs are not retained by the v1 compaction producer.
+  const sourceWasDelegation = sources[0].itemId !== undefined && Array.isArray(input)
+    && input.some(item => item?.id === sources[0]!.itemId && item.type === "function_call_output"
+      && item.name === "send_message_to_thread" && item.namespace === "codex_app" && item.call_id === undefined
+      && item.output === sources[0]!.content)
+    // Later compactions no longer contain the synthetic item. Carry its provenance only
+    // through an exact earlier completed checkpoint, never a newer steering instruction.
+    || previous?.sourceWasDelegation === true && previous.source.itemId === sources[0].itemId
+      && sourceDigest(previous.source) === sourceDigest(sources[0]);
   checkpoints.delete(key);
-  checkpoints.set(key, { summaryHash: digest(summary), sourceHashes: new Set(sources.map(sourceDigest)) });
+  checkpoints.set(key, {
+    summaryHash: digest(summary), sourceHashes: new Set(sources.map(sourceDigest)),
+    source: structuredClone(sources[0]),
+    sourceWasDelegation,
+  });
   while (checkpoints.size > MAX_CHECKPOINTS) checkpoints.delete(checkpoints.keys().next().value!);
 }
 
@@ -44,26 +62,48 @@ export function isAcceptedCompactionContinuation(
   identity: ChatGptTurnIdentity,
   source: ChatGptTurnUserRevision,
 ): boolean {
+  return acceptedCheckpoint(parsed, identity)?.checkpoint.sourceHashes.has(sourceDigest(source)) === true;
+}
+
+/** Native compaction may retain only its summary; recover the task solely from our completed handoff. */
+export function recoverCompactionInstruction(
+  parsed: CodexParsedRequest,
+  identity: ChatGptTurnIdentity,
+): { source: ChatGptTurnUserRevision; summaryIndex: number; sourceWasDelegation: boolean } | undefined {
+  const accepted = acceptedCheckpoint(parsed, identity);
+  return accepted ? {
+    source: structuredClone(accepted.checkpoint.source), summaryIndex: accepted.summaryIndex,
+    sourceWasDelegation: accepted.checkpoint.sourceWasDelegation,
+  } : undefined;
+}
+
+function acceptedCheckpoint(
+  parsed: CodexParsedRequest,
+  identity: ChatGptTurnIdentity,
+): { checkpoint: CompletedCheckpoint; summaryIndex: number } | undefined {
   const key = scope(parsed, identity);
   const checkpoint = key ? checkpoints.get(key) : undefined;
-  if (!key || !checkpoint || !checkpoint.sourceHashes.has(sourceDigest(source))) return false;
+  if (!key || !checkpoint) return undefined;
   const input = (parsed._rawBody as { input?: unknown[] } | undefined)?.input;
-  if (!Array.isArray(input)) return false;
+  if (!Array.isArray(input)) return undefined;
   for (let index = input.length - 1; index >= 0; index -= 1) {
     const item = input[index] as Record<string, unknown> | null;
     if (!item || typeof item !== "object") continue;
+    let summary: string | null;
     if (["compaction", "compaction_summary", "context_compaction"].includes(String(item.type))) {
-      const summary = typeof item.encrypted_content === "string" ? decodeCompactionSummary(item.encrypted_content) : null;
-      return summary !== null && acceptsSummary(key, checkpoint, summary);
+      summary = typeof item.encrypted_content === "string" ? decodeCompactionSummary(item.encrypted_content) : null;
+    } else {
+      if (item.type !== "message" || item.role !== "user") continue;
+      const text = typeof item.content === "string" ? item.content : Array.isArray(item.content)
+        ? item.content.map(part => part?.text ?? "").join("\n") : "";
+      if (!isReadableCompactionSummaryText(text)) continue;
+      summary = text.slice(SUMMARY_PREFIX.length + 1);
     }
-    if (item.role !== "user") continue;
-    const text = typeof item.content === "string" ? item.content : Array.isArray(item.content)
-      ? item.content.map(part => part?.text ?? "").join("\n") : "";
-    if (isReadableCompactionSummaryText(text)) {
-      return acceptsSummary(key, checkpoint, text.slice(SUMMARY_PREFIX.length + 1));
-    }
+    const owner = (item.internal_chat_message_metadata_passthrough as { turn_id?: unknown } | undefined)?.turn_id;
+    if (owner !== undefined && owner !== identity.turnId) return undefined;
+    return summary !== null && acceptsSummary(key, checkpoint, summary) ? { checkpoint, summaryIndex: index } : undefined;
   }
-  return false;
+  return undefined;
 }
 
 function acceptsSummary(key: string, checkpoint: CompletedCheckpoint, summary: string): boolean {

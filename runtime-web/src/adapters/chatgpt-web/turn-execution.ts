@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
-import { chatGptBrowserTabClosedError, chatGptTurnSupersededError } from "./adapter-error";
+import { ChatGptWebAdapterError, chatGptBrowserTabClosedError, chatGptTurnSupersededError } from "./adapter-error";
 import {
   chatGptTurnUserRevisionHistory,
   extractChatGptCompactionSourceRevision,
@@ -56,10 +56,21 @@ interface TraceWaiter {
 export class ChatGptTraceFeed {
   private readonly queued: ChatGptTraceEvent[] = [];
   private readonly waiters = new Set<TraceWaiter>();
+  private readonly progressObservers = new Set<() => void>();
+
+  observeProgress(observer: () => void): () => void {
+    this.progressObservers.add(observer);
+    return () => { this.progressObservers.delete(observer); };
+  }
+
+  recordProgress(): void {
+    for (const observer of this.progressObservers) observer();
+  }
 
   push(event: ChatGptTraceEvent): void {
     const normalized = event.continuation ? event.text : event.text.trim();
     if (!normalized) return;
+    this.recordProgress();
     const normalizedEvent = { ...event, text: normalized };
     this.queued.push(normalizedEvent);
     const waiter = this.waiters.values().next().value as TraceWaiter | undefined;
@@ -312,6 +323,15 @@ export class ChatGptTurnSession {
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
       .then(outcome => {
       this.settledBrowserOutcome = outcome;
+      const error = outcome.type === "error" && outcome.error instanceof ChatGptWebAdapterError
+        ? outcome.error : undefined;
+      console.info(`[chatgpt-web] browser_settled ${JSON.stringify({
+        traceId: this.traceId,
+        outcome: outcome.type,
+        compaction: runtime.usageInput?._compactionRequest === true,
+        ...(!runtime.usageInput?._compactionRequest ? { submission: runtime.submission?.phase ?? "unknown" } : {}),
+        ...(error ? { code: error.code, retryable: error.retryable } : {}),
+      })}`);
       return outcome;
     });
   }
@@ -735,11 +755,17 @@ export class ChatGptTurnSessions {
   }
 
   async cancelTrace(traceId: string, reason = chatGptBrowserTabClosedError()): Promise<number> {
+    const cancellation = this.beginCancelTrace(traceId, reason);
+    await cancellation.settlement;
+    return cancellation.cancelled;
+  }
+
+  /** Revoke execution immediately; keep physical cleanup tracked independently of the UI receipt. */
+  beginCancelTrace(traceId: string, reason: Error): { cancelled: number; settlement: Promise<void> } {
     const sessions = [...this.entries.values()]
       .filter(session => session.traceId === traceId && session.isActive());
     for (const session of sessions) session.cancel(reason);
-    await Promise.all(sessions.map(session => session.physicalSettlement));
-    return sessions.length;
+    return { cancelled: sessions.length, settlement: Promise.all(sessions.map(session => session.physicalSettlement)).then(() => undefined) };
   }
 
   /**

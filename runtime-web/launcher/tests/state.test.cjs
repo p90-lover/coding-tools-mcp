@@ -10,6 +10,30 @@ const {
   validateSidebarState,
 } = require("../electron/state.cjs");
 
+test("prediction setting starts on and remains off after reopening the state store", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-prediction-state-"));
+  const file = path.join(root, "state.json");
+  try {
+    const store = createStateStore(file);
+    assert.equal(store.read().composerPredictionsEnabled, true);
+    store.update({ composerPredictionsEnabled: false });
+    assert.equal(createStateStore(file).read().composerPredictionsEnabled, false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("saved chats default on for new or missing settings and preserve an explicit opt-out", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-saved-chat-state-"));
+  const file = path.join(root, "state.json");
+  try {
+    assert.equal(createStateStore(file).read().useSavedChats, true);
+    fs.writeFileSync(file, JSON.stringify({ version: 1 }));
+    const store = createStateStore(file);
+    assert.equal(store.read().useSavedChats, true);
+    store.update({ useSavedChats: false });
+    assert.equal(createStateStore(file).read().useSavedChats, false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("launcher state persists onboarding, language, and autostart atomically", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-launcher-state-"));
   const file = path.join(root, "state.json");
@@ -24,8 +48,13 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       autoStart: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
+      autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      composerPredictionsEnabled: true,
+      experimentalSkillAttachments: false,
+      experimentalFreshConversationPerTurn: false,
+      useSavedChats: true,
       zeroRiskProEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
@@ -50,8 +79,13 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       autoStart: true,
       keepRunningOnClose: false,
       showBrowserDuringTurns: true,
+      autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      composerPredictionsEnabled: true,
+      experimentalSkillAttachments: false,
+      experimentalFreshConversationPerTurn: false,
+      useSavedChats: true,
       zeroRiskProEnabled: false,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
@@ -77,12 +111,23 @@ test("sidebar state accepts only bounded native shell dimensions", () => {
   assert.throws(() => validateSidebarState({ open: true, width: 900 }), /between 240 and 420/);
 });
 
-test("Japanese is preserved as a supported persisted launcher language", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-ja-state-"));
+test("every supported launcher language survives a state update and reload", () => {
+  const languages = require("../electron/languages.json");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-locale-state-"));
   const file = path.join(root, "state.json");
   try {
-    fs.writeFileSync(file, JSON.stringify({ version: 1, language: "ja" }));
-    assert.equal(createStateStore(file).read().language, "ja");
+    for (const language of Object.keys(languages)) {
+      const store = createStateStore(file);
+      store.update({ language, onboardingComplete: true });
+      assert.equal(createStateStore(file).read().language, language);
+      assert.equal(createStateStore(file).read().onboardingComplete, true);
+    }
+    for (const language of ["__proto__", "constructor", "unknown", [], {}]) {
+      fs.writeFileSync(file, JSON.stringify({ version: 1, language, onboardingComplete: true }));
+      const state = createStateStore(file).read();
+      assert.equal(state.language, null);
+      assert.equal(state.onboardingComplete, true);
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -97,6 +142,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       language: "zh-CN",
       onboardingComplete: "yes",
       autoStart: "yes",
+      experimentalFreshConversationPerTurn: "true",
       bridgeEnabled: false,
       browserSmokePassed: "yes",
       browserSmokeVersion: { invalid: true },
@@ -115,8 +161,13 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       autoStart: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
+      autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      composerPredictionsEnabled: true,
+      experimentalSkillAttachments: false,
+      experimentalFreshConversationPerTurn: false,
+      useSavedChats: true,
       zeroRiskProEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
@@ -139,8 +190,11 @@ test("browser interaction defaults to Automatic and preserves a completed onboar
     store.update({ browserInteractionMode: "manual", onboardingComplete: true });
     assert.equal(createStateStore(file).read().browserInteractionMode, "manual");
     assert.equal(createStateStore(file).read().zeroRiskProEnabled, false);
-    store.update({ coreSetupComplete: true, zeroRiskProEnabled: true });
+    store.update({ coreSetupComplete: true, zeroRiskProEnabled: true, experimentalFreshConversationPerTurn: true });
     assert.equal(createStateStore(file).read().zeroRiskProEnabled, true);
+    assert.equal(createStateStore(file).read().experimentalFreshConversationPerTurn, true);
+    store.update({ browserInteractionMode: "automatic" });
+    assert.equal(createStateStore(file).read().experimentalFreshConversationPerTurn, true);
     fs.writeFileSync(file, JSON.stringify({
       version: 1,
       browserInteractionMode: "manual",

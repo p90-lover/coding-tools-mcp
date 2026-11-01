@@ -6,15 +6,17 @@ import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import {
   cancelAllStructuredCompactions,
   cancelStructuredCompactionNativeTurn,
-  cancelStructuredCompactionTrace,
+  beginCancelStructuredCompactionTrace,
 } from "./adapters/chatgpt-web/compaction-handoff";
-import { chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
+import { ChatGptWebAdapterError, chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
 import {
   CHATGPT_TURN_REVISION_CONFLICT_MESSAGE,
   extractChatGptTurnIdentity,
   extractCodexTurnIdentityFromBody,
   extractChatGptCompactionSourceRevision,
+  isCodexComposerPrediction,
 } from "./adapters/chatgpt-web/environment";
+import { assertComposerPredictionFits, configureComposerPrediction } from "./composer-predictions";
 import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
@@ -415,8 +417,10 @@ function logChatGptWebModelFallback(requested: string, route: ChatGptWebModelRou
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
-  const route = requireChatGptWebModelRoute(parsed.modelId, config);
+  const route = requireChatGptWebModelRoute(parsed.modelId, config, parsed.options.reasoning);
   logChatGptWebModelFallback(parsed.modelId, route);
+  if (route.interactionMode === "automatic" && route.modelFamily) parsed._chatgptModelFamily = route.modelFamily;
+  else delete parsed._chatgptModelFamily;
   parsed.modelId = route.backendModel;
   // Zero Risk preserves a distinct backend identity. Its immutable Codex effort is only a
   // protocol/catalog value; the manual adapter must never reinterpret it as a ChatGPT selection.
@@ -432,8 +436,133 @@ interface ModelCatalogFailure {
 }
 
 function modelCatalogFailure(stage: ModelCatalogFailure["stage"], error: unknown): ModelCatalogFailure {
-  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-  return { stage, ...(typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? { code } : {}) };
+  if (!error || typeof error !== "object") return { stage };
+  // Fetch can wrap the network error. Keep only bounded codes, never free-form
+  // messages, URLs or paths from either layer in the health snapshot.
+  for (const source of [error, "cause" in error ? error.cause : undefined]) {
+    const code = source && typeof source === "object" && "code" in source ? source.code : undefined;
+    if (typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code)) return { stage, code };
+  }
+  const name = "name" in error ? error.name : undefined;
+  // AbortError identifies cancellation, not who initiated it. The upstream request
+  // can also be cancelled by the server, so do not blame the Codex client here.
+  if (name === "AbortError") return { stage, code: "ABORT_ERR" };
+  if (name === "TimeoutError") return { stage, code: "ETIMEDOUT" };
+  return { stage };
+}
+
+type UpstreamModelCatalog =
+  | { ok: true; status: number; statusText: string; headers: Headers; body: ArrayBuffer }
+  | { ok: false; error: unknown; sent: boolean };
+
+/**
+ * Codex abandons a catalog request after five seconds and retries. When the first HTTPS connection
+ * of a network takes longer than that, cancelling the upstream attempt together with each client
+ * made every retry start from nothing, so the catalog never loaded (#696). The upstream GET is
+ * idempotent: one attempt per identical request keeps running for the client that retries, and is
+ * dropped only after nobody has waited for it for a while. Responses are never reused across
+ * different request headers, and a failure is never kept.
+ */
+export class ModelCatalogFetches {
+  private readonly attempts = new Map<string, {
+    result: Promise<UpstreamModelCatalog>;
+    abort: AbortController;
+    waiters: number;
+    sent: boolean;
+    timer?: ReturnType<typeof setTimeout>;
+  }>();
+
+  constructor(
+    private readonly abandonedTimeoutMs = 30_000,
+    private readonly unclaimedResultMs = 10_000,
+  ) {}
+
+  async fetch(
+    request: Request,
+    forward: (request: Request, markSent: () => void) => Promise<Response>,
+  ): Promise<UpstreamModelCatalog> {
+    const key = createHash("sha256")
+      .update(JSON.stringify([new URL(request.url).search, [...request.headers].sort()]))
+      .digest("hex");
+    let attempt = this.attempts.get(key);
+    if (!attempt) {
+      const abort = new AbortController();
+      const created = {
+        abort,
+        waiters: 0,
+        sent: false,
+        result: undefined as unknown as Promise<UpstreamModelCatalog>,
+        timer: undefined as ReturnType<typeof setTimeout> | undefined,
+      };
+      created.result = (async (): Promise<UpstreamModelCatalog> => {
+        try {
+          const response = await forward(new Request(request, { signal: abort.signal }), () => { created.sent = true; });
+          return {
+            ok: true, status: response.status, statusText: response.statusText,
+            headers: response.headers, body: await response.arrayBuffer(),
+          };
+        } catch (error) {
+          return { ok: false, error, sent: created.sent };
+        }
+      })().then(result => {
+        clearTimeout(created.timer);
+        created.timer = undefined;
+        // A client that retries just after its abandoned attempt finished may still take the result.
+        const unclaimed = result.ok && result.status >= 200 && result.status < 300 && created.waiters === 0;
+        if (unclaimed && this.attempts.get(key) === created) {
+          created.timer = setTimeout(() => {
+            if (this.attempts.get(key) === created) this.attempts.delete(key);
+          }, this.unclaimedResultMs);
+          created.timer.unref?.();
+        } else if (this.attempts.get(key) === created) {
+          this.attempts.delete(key);
+        }
+        return result;
+      });
+      attempt = created;
+      this.attempts.set(key, attempt);
+    }
+    const joined = attempt;
+    joined.waiters += 1;
+    clearTimeout(joined.timer);
+    joined.timer = undefined;
+    let leave!: () => void;
+    const left = new Promise<UpstreamModelCatalog>(resolve => {
+      leave = () => resolve({
+        ok: false,
+        error: request.signal.reason ?? new DOMException("Model catalog request aborted", "AbortError"),
+        sent: joined.sent,
+      });
+    });
+    if (request.signal.aborted) leave();
+    else request.signal.addEventListener("abort", leave, { once: true });
+    try {
+      const result = await Promise.race([joined.result, left]);
+      if (result.ok && this.attempts.get(key) === joined) {
+        // Delivered: the next request must ask upstream again.
+        clearTimeout(joined.timer);
+        this.attempts.delete(key);
+      }
+      return result;
+    } finally {
+      request.signal.removeEventListener("abort", leave);
+      joined.waiters -= 1;
+      if (joined.waiters === 0 && this.attempts.get(key) === joined && !joined.timer) {
+        joined.timer = setTimeout(() => joined.abort.abort(
+          new DOMException("Model catalog request was abandoned", "AbortError"),
+        ), this.abandonedTimeoutMs);
+        joined.timer.unref?.();
+      }
+    }
+  }
+
+  close(): void {
+    for (const attempt of this.attempts.values()) {
+      clearTimeout(attempt.timer);
+      attempt.abort.abort(new DOMException("Model catalog request cancelled", "AbortError"));
+    }
+    this.attempts.clear();
+  }
 }
 
 export async function modelsRequest(
@@ -442,18 +571,36 @@ export async function modelsRequest(
   fetchUpstream?: NativeFetch,
   contextOverride?: () => CodexModelContextOverride | undefined,
   onFailure?: (failure: ModelCatalogFailure) => void,
+  clientSignal: AbortSignal = req.signal,
+  shared?: ModelCatalogFetches,
 ): Promise<Response> {
+  const cancelled = () => new Response(null, { status: 499 });
+  if (clientSignal.aborted) return cancelled();
   let upstream: Response;
   let sent = false;
+  const forward = (request: Request, markSent: () => void) => forwardNativeCodexRequest(request, "models", input => {
+    markSent();
+    return (fetchUpstream ?? fetchNativeCodex)(input);
+  });
   try {
-    upstream = await forwardNativeCodexRequest(req, "models", input => {
-      sent = true;
-      return (fetchUpstream ?? fetchNativeCodex)(input);
-    });
+    if (shared) {
+      const result = await shared.fetch(req, forward);
+      if (!result.ok) {
+        sent = result.sent;
+        throw result.error;
+      }
+      upstream = new Response([101, 204, 205, 304].includes(result.status) ? null : result.body.slice(0), {
+        status: result.status, statusText: result.statusText, headers: new Headers(result.headers),
+      });
+    } else {
+      upstream = await forward(req, () => { sent = true; });
+    }
   } catch (error) {
+    if (clientSignal.aborted) return cancelled();
     onFailure?.(modelCatalogFailure(sent ? "transport" : "request", error));
     return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
   }
+  if (clientSignal.aborted) return cancelled();
   if (!upstream.ok) {
     onFailure?.({ stage: "upstream" });
     return upstream;
@@ -462,9 +609,11 @@ export async function modelsRequest(
   try {
     catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
   } catch (error) {
+    if (clientSignal.aborted) return cancelled();
     onFailure?.(modelCatalogFailure("catalog", error));
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
   }
+  if (clientSignal.aborted) return cancelled();
   const body = JSON.stringify(catalog);
   const headers = new Headers(upstream.headers);
   headers.delete("content-encoding");
@@ -555,11 +704,14 @@ export async function responseRequest(
     ? (raw as { previous_response_id?: unknown }).previous_response_id
     : undefined;
   const expanded = expandPreviousResponseInput(raw);
+  const prediction = isCodexComposerPrediction(raw);
+  let executionConfig = config;
   let parsed: CodexParsedRequest;
   let route: ChatGptWebModelRoute;
   try {
     parsed = parseRequest(expanded);
-    route = routeChatGptWebRequest(parsed, config);
+    if (prediction) executionConfig = configureComposerPrediction(parsed, config);
+    route = routeChatGptWebRequest(parsed, executionConfig);
     const identity = extractChatGptTurnIdentity(parsed);
     if (identity.threadId && identity.turnId) {
       options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
@@ -583,7 +735,18 @@ export async function responseRequest(
     );
   }
 
+  if (prediction) {
+    try {
+      assertComposerPredictionFits(parsed, executionConfig);
+    } catch (error) {
+      // An optional suggestion must not compact/retry the task merely to make itself fit.
+      return formatErrorResponse(400, "invalid_request_error", `Next-message prediction skipped: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    console.info(`[chatgpt-web] composer_prediction model=${route.slug} effort=medium`);
+  }
+
   const compaction = parsed._compactionRequest === true;
+  const compactionItem = compaction && parsed._compactionResponseFormat !== "message";
   const rememberCompletedResponse = (response: Record<string, unknown>): void => {
     if (!compaction) {
       if (options.rememberState !== false) rememberResponseState(parsed._rawBody, response, { force: true });
@@ -591,22 +754,30 @@ export async function responseRequest(
     }
     if (response.status !== "completed") return;
     const identity = extractChatGptTurnIdentity(parsed);
-    if (!identity.threadId || !identity.turnId || !Array.isArray(response.output) || response.output.length !== 1) return;
-    const item = response.output[0];
-    if (item?.type !== "compaction" || typeof item.encrypted_content !== "string") return;
-    const summary = decodeCompactionSummary(item.encrypted_content);
+    if (!identity.threadId || !identity.turnId || !Array.isArray(response.output)) return;
+    const items = response.output.filter(item => item?.type === (compactionItem ? "compaction" : "message"));
+    if (items.length !== 1 || (compactionItem && response.output.length !== 1)) return;
+    const item = items[0];
+    const summary = compactionItem
+      ? (typeof item?.encrypted_content === "string" ? decodeCompactionSummary(item.encrypted_content) : null)
+      : (item?.role === "assistant" && Array.isArray(item.content)
+        ? item.content.filter((part: { type?: string; text?: unknown }) => part.type === "output_text" && typeof part.text === "string")
+          .map((part: { text: string }) => part.text).join("")
+        : null);
     if (!summary) return;
     const source = extractChatGptCompactionSourceRevision(parsed);
     const body = parsed._rawBody as { input?: unknown[] };
     // v1 installs the bounded user-message output, whereas v2 retains the original source.
     // Authenticate both exact producer-defined representations, never arbitrary rewrites.
+    // Inspect the literal retained representation: an unchanged summary can match the
+    // previous checkpoint, but must not substitute its recovered delegation here.
     const v1Source = extractChatGptCompactionSourceRevision({
       ...parsed,
       _rawBody: { ...body, input: buildCompactV1Output(extractCompactUserMessages(body.input), summary) },
-    });
+    }, { recoverCheckpoint: false });
     rememberCompactionContinuation(parsed, identity, [source, v1Source], summary);
   };
-  if (compaction && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
+  if (compaction && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL && !config.experimentalBiggerContext) {
     return formatErrorResponse(
       409,
       "invalid_request_error",
@@ -623,7 +794,7 @@ export async function responseRequest(
     parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
   }
 
-  const provider = providerConfig(config);
+  const provider = providerConfig(executionConfig);
   let traceId: string | undefined;
   try {
     traceId = chatGptWebTraceId(provider, parsed);
@@ -696,7 +867,7 @@ export async function responseRequest(
         ...(provider.chatgptWeb?.stallTimeoutSec !== undefined
           ? { stallTimeoutSec: provider.chatgptWeb.stallTimeoutSec }
           : {}),
-        ...(compaction ? { compaction: true } : {}),
+        ...(compactionItem ? { compaction: true } : {}),
         onCompletedResponse: rememberCompletedResponse,
       },
     );
@@ -717,7 +888,7 @@ export async function responseRequest(
     toolNsMap: maps.toolNsMap,
     freeformToolNames: maps.freeformToolNames,
     toolSearchToolNames: maps.toolSearchToolNames,
-    ...(compaction ? { compaction: true } : {}),
+    ...(compactionItem ? { compaction: true } : {}),
   });
   rememberCompletedResponse(json);
   return Response.json(json);
@@ -782,7 +953,7 @@ export async function compactRequest(
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
-  if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
+  if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL && !config.experimentalBiggerContext) {
     return formatErrorResponse(
       409,
       "invalid_request_error",
@@ -842,7 +1013,11 @@ export async function compactRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: {
+    fetchUpstream?: NativeFetch;
+    adapterFactory?: ChatGptWebAdapterFactory;
+    modelCatalogFetches?: ModelCatalogFetches;
+  } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
@@ -865,6 +1040,7 @@ export function startServer(
     request: number; at: string; status: number; failure?: ModelCatalogFailure;
   } | null = null;
   const httpTurns = new HttpTurnCounter();
+  const modelCatalogFetches = dependencies.modelCatalogFetches ?? new ModelCatalogFetches();
   const activity = () => ({
     // Open requests: Codex holds its response connections between turns, so this rarely reaches 0.
     active_http_turns: httpTurns.count(),
@@ -884,6 +1060,16 @@ export function startServer(
     idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url);
+      // Loopback is reachable from any web page, cross-site or same-origin after DNS rebinding,
+      // and this route has no bearer secret. Browsers attach Origin to every such request that
+      // can start or control work; Codex and the launcher are not browsers and never send it.
+      if (req.method !== "GET" && req.headers.has("origin")) {
+        return formatErrorResponse(
+          403,
+          "invalid_request_error",
+          "Browser-originated requests are not accepted by the local Codex route",
+        );
+      }
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
           status: "ok",
@@ -910,32 +1096,48 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/admin/cancel-turn") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         let traceId: string;
+        let leaseFailure: "browser_surface_bootstrap_timeout" | "helper_heartbeat_expired" | undefined;
         try {
-          const body = await req.json() as { traceId?: unknown };
+          const body = await req.json() as { traceId?: unknown; reason?: unknown };
           traceId = typeof body?.traceId === "string" ? body.traceId : "";
           if (!/^[A-Za-z0-9_-]{6,128}$/.test(traceId)) throw new Error("traceId is invalid");
+          if (body.reason !== undefined) {
+            if (body.reason !== "browser_surface_bootstrap_timeout" && body.reason !== "helper_heartbeat_expired") {
+              throw new Error("Browser turn cancellation reason is invalid");
+            }
+            leaseFailure = body.reason;
+          }
         } catch (error) {
           return Response.json(
             { status: "error", error: error instanceof Error ? error.message : String(error) },
             { status: 400 },
           );
         }
-        const reason = chatGptBrowserTabClosedError();
+        const reason = leaseFailure
+          ? new ChatGptWebAdapterError(
+            leaseFailure === "browser_surface_bootstrap_timeout"
+              ? "The ChatGPT browser turn did not finish browser setup before its lease expired. The turn was stopped."
+              : "The ChatGPT browser helper stopped reporting progress and its lease expired. The turn was stopped.",
+            { status: 504, errorType: "server_error", code: leaseFailure, retryable: false },
+          )
+          : chatGptBrowserTabClosedError();
         // Revoke the owner first. This prevents a compaction callback that observes its retained
         // source being cancelled below from starting a fresh fallback during operator shutdown.
-        const compactionCancellation = cancelStructuredCompactionTrace(traceId, reason);
-        const browserCancellation = chatGptTurnSessions.cancelTrace(traceId, reason);
-        const [cancelledBrowserTurns, cancelledCompactionRuns] = await Promise.all([
-          browserCancellation,
-          compactionCancellation,
-        ]);
+        const compactionCancellation = beginCancelStructuredCompactionTrace(traceId, reason);
+        const browserCancellation = chatGptTurnSessions.beginCancelTrace(traceId, reason);
         const cancelledBrokerTurns = turnBroker?.revokeTrace(traceId, reason) ?? 0;
+        const settlement = Promise.all([browserCancellation.settlement, compactionCancellation.settlement]);
+        // Explicit tab close acknowledges revoked authority, then destroys its document. Waiting
+        // for that document's helper first can deadlock the UI behind a stalled browser operation.
+        // Lease cleanup still requires physical settlement before declaring the runtime idle.
+        if (leaseFailure) await settlement;
+        else void settlement.catch(error => console.error(`[chatgpt-web] cancelled turn cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
         return Response.json({
           status: "ok",
           trace_id: traceId,
-          cancelled_browser_turns: cancelledBrowserTurns,
+          cancelled_browser_turns: browserCancellation.cancelled,
           cancelled_broker_turns: cancelledBrokerTurns,
-          cancelled_compaction_runs: cancelledCompactionRuns,
+          cancelled_compaction_runs: compactionCancellation.cancelled,
           ...activity(),
         });
       }
@@ -1078,7 +1280,11 @@ export function startServer(
           const request = ++modelCatalogRequests;
           const started = Date.now();
           const recordResult = (response: Response, failure?: ModelCatalogFailure): Response => {
+            // A disconnected Codex client did not test the catalog. Preserve the
+            // last completed result; only actual failures belong in launcher health.
+            if (req.signal.aborted) return response;
             const result = { request, at: new Date().toISOString(), status: response.status, ...(failure ? { failure } : {}) };
+            // An older, slower request must not replace a newer completed result.
             if (!lastModelCatalogResult || request > lastModelCatalogResult.request) lastModelCatalogResult = result;
             if (!response.ok) {
               try {
@@ -1107,8 +1313,10 @@ export function startServer(
             dependencies.fetchUpstream,
             readCodexModelContextOverride,
             value => { failure = value; },
+            req.signal,
+            modelCatalogFetches,
           );
-          if (response.ok) {
+          if (response.ok && !req.signal.aborted) {
             successfulModelCatalogRequests += 1;
             lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
           }
@@ -1178,6 +1386,7 @@ export function startServer(
     if (shutdownPromise) return;
     draining = true;
     chatGptTurnSessions.clear();
+    modelCatalogFetches.close();
     flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([

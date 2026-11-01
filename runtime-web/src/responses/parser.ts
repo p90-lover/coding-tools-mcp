@@ -13,7 +13,7 @@ import type {
 } from "../types";
 import { namespacedToolName } from "../types";
 import { responsesRequestSchema } from "./schema";
-import { compactionItemToText } from "./compaction";
+import { compactionItemToText, isNativeTextCompaction } from "./compaction";
 import { previousResponseReplayPrefixLength } from "./state";
 import { decodeReasoningEnvelope } from "./reasoning-envelope";
 
@@ -381,7 +381,12 @@ export function parseRequest(body: unknown): CodexParsedRequest {
       }
 
       if (effectiveType === "message") {
-        const msg = item as { role?: string; content?: unknown; phase?: "commentary" | "final_answer" };
+        const msg = item as {
+          role?: string;
+          content?: unknown;
+          phase?: "commentary" | "final_answer";
+          internal_chat_message_metadata_passthrough?: { content_item_kinds?: string[] };
+        };
         switch (msg.role) {
           case "system": {
             pendingReasoning.length = 0;
@@ -394,7 +399,10 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           case "developer": {
             pendingReasoning.length = 0;
             const content = inputContentParts(msg.content as unknown[] | string | undefined);
-            messages.push({ role: msg.role, content, timestamp: now });
+            const kinds = msg.internal_chat_message_metadata_passthrough?.content_item_kinds;
+            const selectedSkill = msg.role === "user" && kinds?.length === 1
+              && kinds[0] === "skills.selected_skill_instructions";
+            messages.push({ role: msg.role, content, timestamp: now, ...(selectedSkill ? { origin: "codex_skill" as const } : {}) });
             break;
           }
           case "assistant": {
@@ -619,6 +627,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
   Object.assign(options, parseTextControls(data.text));
   if (data.prompt_cache_key !== undefined) options.promptCacheKey = data.prompt_cache_key;
 
+  const textCompaction = !compactionRequest && isNativeTextCompaction(body);
   return {
     modelId: data.model,
     ...(data.previous_response_id ? { previousResponseId: data.previous_response_id } : {}),
@@ -627,7 +636,8 @@ export function parseRequest(body: unknown): CodexParsedRequest {
     options,
     _rawBody: body,
     ...(replayedInputPrefixLength > 0 ? { _replayPrefixLen: replayedInputPrefixLength } : {}),
-    ...(compactionRequest ? { _compactionRequest: true } : {}),
+    ...(compactionRequest || textCompaction ? { _compactionRequest: true } : {}),
+    ...(textCompaction ? { _compactionResponseFormat: "message" as const } : {}),
     ...(opaqueMultiAgentV2Payload ? { _opaqueMultiAgentV2Payload: true } : {}),
   };
 }

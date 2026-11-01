@@ -10,8 +10,8 @@ export const PRODUCT_NAME = 'Coding Tools';
 export const APP_ID = 'dev.codingtools.fullharness';
 export const UPSTREAM = Object.freeze({
   repository: 'miuuyy/codex-chatgpt-web',
-  tag: 'v5.0.6',
-  commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+  tag: 'v6.1.12',
+  commit: 'cdfceafd51df9ab6f19818c145eac5a99c593a3d',
 });
 
 function add(errors, code, message) {
@@ -145,7 +145,7 @@ export async function verifySourceScope({ root, tag, sourceSha, allowedRef }) {
   const repoRoot = path.resolve(root);
   const [packageManifest, upstreamManifest] = await Promise.all([
     readJson(path.join(repoRoot, 'desktop-electron', 'package.json')),
-    readJson(path.join(repoRoot, 'vendor', 'codex-chatgpt-web-v5.0.6', 'UPSTREAM_MANIFEST.json')),
+    readJson(path.join(repoRoot, 'vendor', 'codex-chatgpt-web-v6.1.12', 'UPSTREAM_MANIFEST.json')),
   ]);
   const currentSha = execFileSync('git', ['rev-parse', 'HEAD'], {
     cwd: repoRoot,

@@ -4,11 +4,57 @@ import { defaultConfig } from "../src/config";
 import { COMPACT_PROMPT, SUMMARY_PREFIX, decodeCompactionSummary, encodeCompactionSummary } from "../src/responses/compaction";
 import { compactRequest, responseRequest as respond } from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
-import { extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "../src/adapters/chatgpt-web/environment";
+import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "../src/adapters/chatgpt-web/environment";
 import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
+import { parseRequest } from "../src/responses/parser";
 
 const model = "chatgpt-web/high";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
+
+test("native responses/memento compaction returns assistant text, not an encrypted compaction item", async () => {
+  const metadata = {
+    request_kind: "compaction", thread_id: "thread_memento", turn_id: "turn_memento",
+    compaction: { trigger: "auto", reason: "context_limit", implementation: "responses", phase: "pre_turn", strategy: "memento" },
+  };
+  const body = {
+    model, client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) },
+    tools: [{ type: "function", name: "exec_command", parameters: { type: "object" } }],
+    input: [{ type: "message", id: "msg_source_memento", role: "user", content: [{ type: "input_text", text: "Summarize the previous work." }] }],
+  };
+  expect(parseRequest(body)._compactionRequest).toBe(true);
+  for (const stream of [false, true]) {
+    const response = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST", body: JSON.stringify({ ...body, stream }),
+    }), defaultConfig("full"), compactionAdapterFactory());
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    const result = stream
+      ? JSON.parse(text.split("\n").find(line => line.startsWith('data: {"type":"response.completed"'))!.slice(6)).response
+      : JSON.parse(text);
+    expect(result.output).toHaveLength(1);
+    expect(result.output[0]).toMatchObject({ type: "message", role: "assistant", content: [{ type: "output_text", text: summary }] });
+  }
+  const cwd = process.cwd();
+  const continuation = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST", body: JSON.stringify({ model, stream: false,
+      client_metadata: { "x-codex-turn-metadata": JSON.stringify({ ...metadata, request_kind: "turn", sandbox: "none", workspaces: { [cwd]: {} } }) },
+      input: [
+        { type: "message", role: "user", id: "msg_environment", content: [{ type: "input_text",
+          text: `<environment_context><cwd>${cwd}</cwd><sandbox_mode>danger-full-access</sandbox_mode></environment_context>` }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\n${summary}` }] },
+      ],
+    }),
+  }), defaultConfig("full"), () => ({ name: "verified-continuation", async runTurn(parsed, _incoming, emit) {
+    expect(extractChatGptTurnEnvironment(parsed).cwd).toBe(cwd);
+    expect(extractChatGptTurnUserRevision(parsed)).toEqual(body.input[0]!.content);
+    emit({ type: "text_delta", text: "Continued", phase: "final_answer" });
+    emit({ type: "done", stopReason: "stop", endTurn: true });
+  } }));
+  expect(continuation.status).toBe(200);
+  expect((await continuation.json()).status).toBe("completed");
+  expect(parseRequest({ ...body, client_metadata: { "x-codex-turn-metadata": JSON.stringify({ ...metadata, request_kind: "turn" }) } })._compactionRequest).toBeUndefined();
+  expect(() => parseRequest({ ...body, client_metadata: { "x-codex-turn-metadata": JSON.stringify({ ...metadata, compaction: { strategy: "unknown" } }) } })).toThrow("Unsupported native text compaction");
+});
 
 // These fixtures test checkpoint authorization, not persisted previous_response_id storage.
 const responseRequest: typeof respond = (request, config, factory, options) =>
@@ -75,27 +121,31 @@ test("compacts ChatGPT Web v1 through a dedicated read-only browser summarizatio
   ]);
 });
 
-test("compacts a Pro task with Pro effort", async () => {
+test("compacts legacy and named Pro tasks with Pro effort and preserves the selected family", async () => {
   const config = defaultConfig("full");
+  config.extraHighAvailable = true;
   config.proAvailable = true;
-  const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "chatgpt-web/pro",
-      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Inspect" }] }],
-    }),
-  }), config, () => ({
-    name: "pro-compaction-effort-check",
-    async runTurn(parsed, _incoming, emit) {
-      expect(parsed._compactionRequest).toBe(true);
-      expect(parsed.options.reasoning).toBe("max");
-      emit({ type: "text_delta", text: summary, phase: "final_answer" });
-      emit({ type: "done", stopReason: "stop", endTurn: true });
-    },
-  }));
+  for (const [model, family] of [["chatgpt-web/pro", undefined], ["chatgpt-web/gpt-5.6-pro", "5.6"], ["chatgpt-web/gpt-6-pro", "6"]] as const) {
+    const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Inspect" }] }],
+      }),
+    }), config, () => ({
+      name: "pro-compaction-effort-check",
+      async runTurn(parsed, _incoming, emit) {
+        expect(parsed._compactionRequest).toBe(true);
+        expect(parsed.options.reasoning).toBe("max");
+        expect(parsed._chatgptModelFamily).toBe(family);
+        emit({ type: "text_delta", text: summary, phase: "final_answer" });
+        emit({ type: "done", stopReason: "stop", endTurn: true });
+      },
+    }));
 
-  expect(response.status).toBe(200);
+    expect(response.status).toBe(200);
+  }
 });
 
 test("preserves canonical Codex turn metadata from the compact endpoint header", async () => {
@@ -225,25 +275,90 @@ for (const format of ["v1", "v2"] as const) test(`${format} pre-turn compaction 
   expect(starts).toBe(2);
 });
 
-test("v1 goal compaction authorizes the human instruction that native Codex retains", async () => {
+for (const format of ["v1", "v2"] as const) test(`${format} native continuation preserves a dropped delegation past an interrupted human turn`, async () => {
   const config = defaultConfig("full");
-  const metadata = { thread_id: "thread_goal_compaction", turn_id: "turn_goal_continuation" };
+  const metadata = { thread_id: `thread_dropped_delegation_${format}`, turn_id: "turn_after_delegation" };
+  const previous = { type: "message", role: "user", id: "msg_interrupted_human", content: [{ type: "input_text", text: "Earlier human task" }],
+    internal_chat_message_metadata_passthrough: { turn_id: "turn_interrupted_human" } };
+  const aborted = { type: "message", role: "user", id: "msg_human_abort",
+    content: "<turn_aborted>The user interrupted this turn.</turn_aborted>",
+    internal_chat_message_metadata_passthrough: previous.internal_chat_message_metadata_passthrough };
+  const delegation = { type: "function_call_output", id: "fco_delegated_task", name: "send_message_to_thread",
+    namespace: "codex_app", output: "<codex_delegation><source_thread_id>source_thread</source_thread_id><input>Finish the new delegated task.</input></codex_delegation>",
+    internal_chat_message_metadata_passthrough: { turn_id: "turn_delegated_task" } };
+  const original = { model, stream: false, input: [previous, aborted, delegation],
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) } };
+  const compact = format === "v1"
+    ? await compactRequest(new Request("http://127.0.0.1/v1/responses/compact", {
+      method: "POST", body: JSON.stringify(original),
+    }), config, compactionAdapterFactory())
+    : await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST", body: JSON.stringify({ ...original, input: [...original.input, { type: "compaction_trigger" }] }),
+    }), config, compactionAdapterFactory());
+  expect(compact.status).toBe(200);
+  const compacted = await compact.json() as { output: unknown[] };
+  const installed = format === "v1" ? compacted.output : [previous, aborted, ...compacted.output];
+  let starts = 0;
+  const send = (input: unknown[]) => responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST", body: JSON.stringify({ ...original, input }),
+  }), config, () => ({ name: "restored-delegated-task", async runTurn(parsed, _incoming, emit) {
+    starts += 1;
+    expect(extractChatGptTurnUserRevision(parsed)).toBe(delegation.output);
+    emit({ type: "text_delta", text: "Delegated task continued", phase: "final_answer" });
+    emit({ type: "done", stopReason: "stop", endTurn: true });
+  } }));
+  const continued = await send(installed);
+  expect(continued.status).toBe(200);
+  expect((await continued.json()).status).toBe("completed");
+  // A long-running delegated task can compact again after its synthetic source was dropped.
+  const recompact = format === "v1"
+    ? await compactRequest(new Request("http://127.0.0.1/v1/responses/compact", {
+      method: "POST", body: JSON.stringify({ ...original, input: installed }),
+    }), config, compactionAdapterFactory())
+    : await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST", body: JSON.stringify({ ...original, input: [...installed, { type: "compaction_trigger" }] }),
+    }), config, compactionAdapterFactory());
+  expect(recompact.status).toBe(200);
+  const recompacted = await recompact.json() as { output: unknown[] };
+  const reinstalled = format === "v1" ? recompacted.output : [previous, aborted, ...recompacted.output];
+  const continuedAgain = await send(reinstalled);
+  expect(continuedAgain.status).toBe(200);
+  expect((await continuedAgain.json()).status).toBe("completed");
+  // Recovery of a different task never revives an explicitly interrupted delegation.
+  expect((await send([...reinstalled, { ...aborted, id: "msg_delegation_abort",
+    internal_chat_message_metadata_passthrough: delegation.internal_chat_message_metadata_passthrough }])).status).toBe(400);
+  expect(starts).toBe(2);
+});
+
+for (const format of ["v1", "v2"] as const) test(`${format} goal compaction authorizes the human instruction past a standalone AGENTS preamble`, async () => {
+  const config = defaultConfig("full");
+  const metadata = { thread_id: `thread_goal_compaction_${format}`, turn_id: "turn_goal_continuation" };
   const source = { type: "message", role: "user", id: "msg_human",
     content: [{ type: "input_text", text: "Finish the requested work" }],
     internal_chat_message_metadata_passthrough: { turn_id: "turn_human", content_item_kinds: ["user.text"] } };
   const goal = { type: "message", role: "user", id: "msg_goal_context",
     content: [{ type: "input_text", text: '<codex_internal_context source="goal">\nContinue the active goal.\n</codex_internal_context>' }],
     internal_chat_message_metadata_passthrough: { turn_id: metadata.turn_id, content_item_kinds: ["goal.internal_context"] } };
-  const original = { model, stream: false, input: [source, goal],
+  // Instruction refreshes can be standalone user-role context, without an environment tag.
+  // Native compaction drops these and rebuilds the preamble before the last real user.
+  const instructions = { type: "message", role: "user", id: "msg_agents_refresh",
+    content: [{ type: "input_text", text: "# AGENTS.md instructions\n<INSTRUCTIONS>Use the repository rules.</INSTRUCTIONS>" }],
+    internal_chat_message_metadata_passthrough: { turn_id: "turn_previous_goal", content_item_kinds: ["agents_md.instructions"] } };
+  const original = { model, stream: false, input: [source, instructions, goal],
     client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) } };
-  const compact = await compactRequest(new Request("http://127.0.0.1/v1/responses/compact", {
-    method: "POST", body: JSON.stringify(original),
-  }), config, compactionAdapterFactory());
+  const compact = format === "v1"
+    ? await compactRequest(new Request("http://127.0.0.1/v1/responses/compact", {
+      method: "POST", body: JSON.stringify(original),
+    }), config, compactionAdapterFactory())
+    : await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST", body: JSON.stringify({ ...original, input: [...original.input, { type: "compaction_trigger" }] }),
+    }), config, compactionAdapterFactory());
   expect(compact.status).toBe(200);
   const compacted = await compact.json() as { output: Array<{ id?: string }> };
   // Codex 0.152.1 process_annotated_compacted_history drops internal model context.
   // The fixture preserves the wire behavior even if our v1 producer accidentally returns it.
-  const installed = compacted.output.filter(item => item.id !== goal.id);
+  const retained = compacted.output.filter(item => item.id !== goal.id && item.id !== instructions.id);
+  const installed = format === "v1" ? retained : [source, ...retained];
   const response = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
     method: "POST", body: JSON.stringify({ ...original, input: installed }),
   }), config, () => ({ name: "native-goal-continuation", async runTurn(parsed, _incoming, emit) {
@@ -254,6 +369,7 @@ test("v1 goal compaction authorizes the human instruction that native Codex reta
   expect(response.status).toBe(200);
   expect((await response.json() as { status: string }).status).toBe("completed");
   expect(compacted.output).not.toContainEqual(expect.objectContaining({ id: goal.id }));
+  expect(compacted.output).not.toContainEqual(expect.objectContaining({ id: instructions.id }));
 });
 
 test("v1 post-compaction continuation retains the producer's bounded source representation", async () => {
@@ -470,6 +586,26 @@ test("Luna rejects a remote-v2 compaction trigger before opening another browser
   expect(adapterStarted).toBeFalse();
   const body = await response.json() as { error: { message: string } };
   expect(body.error.message).toContain("rolling checkpoint");
+});
+
+test("Luna Bigger Context accepts native v1 and v2 compaction", async () => {
+  const config = { ...defaultConfig("browser-only"), solAvailable: false, experimentalBiggerContext: true };
+  for (const v2 of [false, true]) {
+    const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "Keep the project requirements." }] }];
+    const response = await (v2 ? responseRequest : compactRequest)(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "chatgpt-web/luna", stream: false,
+        input: v2 ? [...input, { type: "compaction_trigger" }] : input }),
+    }), config, compactionAdapterFactory());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    if (v2) {
+      const checkpoint = body.output.find((item: { type: string }) => item.type === "compaction");
+      expect(decodeCompactionSummary(checkpoint.encrypted_content)).toBe(summary);
+    } else {
+      expect(body.output.at(-1).content[0].text).toBe(`${SUMMARY_PREFIX}\n${summary}`);
+    }
+  }
 });
 
 // Since 31aab006 every Sol tier is listed and a tier the account lacks runs at the nearest lower

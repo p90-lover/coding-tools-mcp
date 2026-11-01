@@ -4,3 +4,6 @@
 
 # Pinned third-party releases are verified by SHA-256; checkouts must keep their exact bytes.
 desktop-electron/assets/keysmith/** -text
+
+# The vendored upstream pin is verified by its SHA-256 manifest; keep its exact bytes on every OS.
+vendor/codex-chatgpt-web-*/** -text

@@ -30,8 +30,8 @@ async function writeValidFixture(name) {
     product: { name: 'Coding Tools', app_id: 'dev.codingtools.fullharness' },
     upstream: {
       repository: 'miuuyy/codex-chatgpt-web',
-      version: 'v5.0.6',
-      commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+      version: 'v6.1.12',
+      commit: 'cdfceafd51df9ab6f19818c145eac5a99c593a3d',
     },
     validation_run: {
       id: 987654,

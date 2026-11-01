@@ -2,18 +2,37 @@ import { expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
 import {
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
-  CHATGPT_WEB_MODEL_ROUTES,
+  availableChatGptWebModelRoutes,
   resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
 import { modelsRequest } from "../src/server";
 
-test("proxies official /models auth and query, then appends the fixed ChatGPT Web models", async () => {
+test("catalog diagnostics preserve safe causes without attributing an upstream abort to the client", async () => {
+  for (const [error, code] of [
+    [new DOMException("internal cancellation", "AbortError"), "ABORT_ERR"],
+    [new DOMException("deadline", "TimeoutError"), "ETIMEDOUT"],
+    [new TypeError("private error message", { cause: { code: "ECONNRESET" } }), "ECONNRESET"],
+    [{ code: "ConnectionRefused" }, "ConnectionRefused"],
+    [{ code: "https://private.example/token", cause: { code: "/private/key" } }, undefined],
+  ] as const) {
+    const request = new Request("http://127.0.0.1/v1/models", { headers: { authorization: "Bearer fixture" } });
+    let failure: unknown;
+    const response = await modelsRequest(request, defaultConfig("browser-only"), async () => { throw error; },
+      undefined, result => { failure = result; });
+    expect(request.signal.aborted).toBeFalse();
+    expect(response.status).toBe(502);
+    expect(failure).toEqual({ stage: "transport", ...(code ? { code } : {}) });
+  }
+});
+
+test("proxies official /models auth and query, then appends grouped and legacy Web models", async () => {
   const request = new Request("http://127.0.0.1:17841/v1/models?client_version=1.2.3", {
     headers: { authorization: "Bearer codex-oauth-token", "if-none-match": "native-etag" },
   });
   let upstream: Request | undefined;
   const config = defaultConfig("full");
   config.subagentProtocol = "native";
+  config.extraHighAvailable = true;
   config.proAvailable = true;
   const response = await modelsRequest(request, config, async input => {
     upstream = input;
@@ -53,6 +72,12 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
   };
   expect(body.models.map(model => model.slug)).toEqual([
     "gpt-5.6-sol",
+    "chatgpt-web/gpt-6-sol-instant",
+    "chatgpt-web/gpt-6-sol",
+    "chatgpt-web/gpt-5.6-sol-instant",
+    "chatgpt-web/gpt-5.6-sol",
+    "chatgpt-web/gpt-5.6-pro",
+    "chatgpt-web/gpt-6-pro",
     "chatgpt-web/light",
     "chatgpt-web/medium",
     "chatgpt-web/high",
@@ -64,7 +89,7 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
   expect(body.models[0]!.auto_compact_token_limit).toBe(270_000);
   expect(body.models[0]!.multi_agent_version).toBe("v2");
   for (const [index, model] of body.models.slice(1).entries()) {
-    const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
+    const route = availableChatGptWebModelRoutes(config, true)[index]!;
     const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
     expect(model.context_window).toBe(limits.contextWindow);
     expect(model.max_context_window).toBe(limits.contextWindow);
@@ -97,13 +122,14 @@ test("Luna-only account exposes no paid ChatGPT Web routes", async () => {
   );
   const body = await response.json() as { models: Array<{ slug: string }> };
   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/")).map(model => model.slug))
-    .toEqual(["chatgpt-web/luna", "chatgpt-web/think"]);
+    .toEqual(["chatgpt-web/gpt-5.6-luna", "chatgpt-web/luna", "chatgpt-web/think"]);
 });
 
 test("Zero Risk returns one generic Web row without using scanned capabilities", async () => {
   const config = defaultConfig("full");
   config.browserInteractionMode = "manual";
   config.solAvailable = true;
+  config.extraHighAvailable = true;
   config.proAvailable = true;
   const response = await modelsRequest(
     new Request("http://127.0.0.1:17841/v1/models", {
@@ -170,7 +196,41 @@ test("ChatGPT-only native catalog rows do not turn model discovery into a 502", 
   expect(body.models[0]).toMatchObject({ slug: "gpt-chatgpt-only", supported_in_api: false });
   // All five Sol tiers are listed; the ones the account lacks fall back when used.
   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/")))
-    .toHaveLength(5);
+    .toHaveLength(7);
   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/"))
     .every(model => model.supported_in_api === true)).toBe(true);
+});
+
+
+test("client cancellation is not a catalog failure, including during response body reading", async () => {
+  for (const phase of ["before", "transport", "body"] as const) {
+    const controller = new AbortController();
+    let failures = 0, calls = 0;
+    if (phase === "before") controller.abort();
+    const response = await modelsRequest(new Request("http://127.0.0.1/v1/models", {
+      signal: controller.signal, headers: { authorization: "Bearer fixture" },
+    }), defaultConfig("browser-only"), async () => {
+      calls++;
+      if (phase === "transport") { controller.abort(); throw new DOMException("cancel", "AbortError"); }
+      return new Response(new ReadableStream({ pull(stream) {
+        controller.abort(); stream.error(new DOMException("cancel", "AbortError"));
+      } }));
+    }, undefined, () => { failures++; });
+    expect(response.status).toBe(499);
+    expect(failures).toBe(0);
+    expect(calls).toBe(phase === "before" ? 0 : 1);
+  }
+});
+
+test("a server cancellation remains a failure when the client is still connected", async () => {
+  const server = new AbortController();
+  const client = new AbortController();
+  let failure: unknown;
+  const response = await modelsRequest(new Request("http://127.0.0.1/v1/models", {
+    signal: server.signal, headers: { authorization: "Bearer fixture" },
+  }), defaultConfig("browser-only"), async () => {
+    server.abort(); throw new DOMException("server cancellation", "AbortError");
+  }, undefined, value => { failure = value; }, client.signal);
+  expect(response.status).toBe(502);
+  expect(failure).toEqual({ stage: "transport", code: "ABORT_ERR" });
 });

@@ -8,6 +8,7 @@ import {
   assertAuthenticatedChatGptPage,
   assertTemporaryChatPage,
   CHATGPT_TEMPORARY_CHAT_URL,
+  CHATGPT_COMPOSER_SELECTOR,
   detectChatGptAccountCapabilities,
 } from "./chatgpt-session";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
@@ -16,6 +17,7 @@ export interface BrowserLoginResult {
   storageStatePath: string;
   accountSurfaceUrl: string;
   solAvailable: boolean;
+  extraHighAvailable: boolean;
   proAvailable: boolean;
 }
 
@@ -36,6 +38,7 @@ export interface SystemBrowserLoginCapture {
 interface SystemBrowserLoginOptions {
   continuation: Promise<void>;
   timeoutMs?: number;
+  onBrowserReady?: () => void;
 }
 
 interface LoginVerificationMarker {
@@ -43,6 +46,7 @@ interface LoginVerificationMarker {
   authenticated: true;
   verifiedAt: string;
   solAvailable?: boolean;
+  extraHighAvailable?: boolean;
   proAvailable?: boolean;
 }
 
@@ -165,7 +169,7 @@ async function inspectStoredState(
     try {
       const verifierPage = await verifierContext.newPage();
       await verifierPage.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
-      await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 60_000 });
+      await verifierPage.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true }).first().waitFor({ state: "visible", timeout: 60_000 });
       await assertAuthenticatedChatGptPage(verifierPage);
       await assertTemporaryChatPage(verifierPage);
       return { ...await detectChatGptAccountCapabilities(verifierPage), url: verifierPage.url() };
@@ -181,7 +185,7 @@ export async function inspectBrowserLoginCapabilities(config: AppConfig): Promis
   if (!browserLoginStateExists(config)) throw new Error("ChatGPT login state is missing or unverified");
   const inspected = await inspectStoredState(config, config.storageStatePath);
   writeVerificationMarker(config.storageStatePath, inspected);
-  return { solAvailable: inspected.solAvailable, proAvailable: inspected.proAvailable };
+  return { solAvailable: inspected.solAvailable, extraHighAvailable: inspected.extraHighAvailable, proAvailable: inspected.proAvailable };
 }
 
 export function storedBrowserLoginCapabilities(
@@ -192,6 +196,7 @@ export function storedBrowserLoginCapabilities(
     const marker = JSON.parse(readFileSync(loginVerificationMarkerPath(config.storageStatePath), "utf8")) as Partial<LoginVerificationMarker>;
     return {
       ...(typeof marker.solAvailable === "boolean" ? { solAvailable: marker.solAvailable } : {}),
+      ...(typeof marker.extraHighAvailable === "boolean" ? { extraHighAvailable: marker.extraHighAvailable } : {}),
       ...(typeof marker.proAvailable === "boolean" ? { proAvailable: marker.proAvailable } : {}),
     };
   } catch {
@@ -246,6 +251,9 @@ export async function captureSystemBrowserLogin(
     try {
       await new Promise<void>((resolve, reject) => {
         timeout = setTimeout(() => reject(new Error("Timed out waiting for passkey sign-in")), remainingTime());
+        loginBrowser.once("spawn", () => {
+          try { options.onBrowserReady?.(); } catch (error) { reject(error); }
+        });
         void options.continuation.then(() => {
           continuationRequested = true;
           if (!loginBrowser.kill() && !browserProcessExited(loginBrowser)) {
@@ -407,9 +415,7 @@ export async function loginToChatGpt(
       waitUntil: "domcontentloaded",
       timeout: 60_000,
     });
-    const composer = page.getByRole("textbox", { name: "Chat with ChatGPT" }).or(
-      page.locator('[data-testid="prompt-textarea"], [contenteditable="true"][data-lexical-editor="true"]'),
-    ).first();
+    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true }).first();
     try {
       await composer.waitFor({ state: "visible", timeout: options.timeoutMs ?? 60_000 });
     } catch {
@@ -426,6 +432,7 @@ export async function loginToChatGpt(
       storageStatePath: config.storageStatePath,
       accountSurfaceUrl: page.url(),
       solAvailable: inspected.solAvailable,
+      extraHighAvailable: inspected.extraHighAvailable === true,
       proAvailable: inspected.proAvailable,
     };
   } finally {

@@ -2,9 +2,9 @@
   "schema": 1,
   "upstream": {
     "repository": "miuuyy/codex-chatgpt-web",
-    "tag": "v5.0.6",
-    "commit": "e85e3693fdb4e3e033348c08df0298c20fcdb612",
-    "tunnelClientVersion": "0.0.12"
+    "tag": "v6.1.12",
+    "commit": "cdfceafd51df9ab6f19818c145eac5a99c593a3d",
+    "tunnelClientVersion": "0.0.16"
   },
   "targetVersion": "0.6.0-rc.1",
   "product": "Coding Tools",

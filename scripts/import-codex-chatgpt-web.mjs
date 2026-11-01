@@ -5,10 +5,11 @@ import { writeManifest } from './lib/upstream-manifest.mjs';
 
 const PIN = Object.freeze({
   repository: 'miuuyy/codex-chatgpt-web',
-  tag: 'v5.0.6',
-  commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
-  tunnelClientVersion: '0.0.12',
+  tag: 'v6.1.12',
+  commit: 'cdfceafd51df9ab6f19818c145eac5a99c593a3d',
+  tunnelClientVersion: '0.0.16',
 });
+const VENDOR_NAME = `codex-chatgpt-web-${PIN.tag}`;
 
 function argumentsMap(argv) {
   const result = new Map();
@@ -55,7 +56,7 @@ async function copyVerifiedSource(source, destination) {
 async function main() {
   const args = argumentsMap(process.argv.slice(2));
   const source = path.resolve(args.get('source') ?? 'aiTemp/vendor-import/source');
-  const destination = path.resolve(args.get('destination') ?? 'vendor/codex-chatgpt-web-v5.0.6');
+  const destination = path.resolve(args.get('destination') ?? `vendor/${VENDOR_NAME}`);
   const currentCommit = execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   if (currentCommit !== PIN.commit) throw new Error(`UPSTREAM_COMMIT_MISMATCH:${currentCommit}`);
 
@@ -64,7 +65,7 @@ async function main() {
   const noticeTarget = path.resolve('third_party/THIRD_PARTY_NOTICES.md');
   const retained = [];
   for (const [target, label] of [
-    [destination, 'codex-chatgpt-web-v5.0.6'],
+    [destination, VENDOR_NAME],
     [licenseTarget, 'codex-chatgpt-web-MIT.txt'],
     [noticeTarget, 'THIRD_PARTY_NOTICES.md'],
   ]) {
@@ -81,7 +82,7 @@ async function main() {
   await fs.writeFile(licenseTarget, license, 'utf8');
   await fs.writeFile(
     noticeTarget,
-    `# Third-party notices\n\n## codex-chatgpt-web\n\n- Repository: ${PIN.repository}\n- Tag: ${PIN.tag}\n- Commit: ${PIN.commit}\n- License: MIT\n- License file: \`third_party/LICENSES/codex-chatgpt-web-MIT.txt\`\n- Vendored source: \`vendor/codex-chatgpt-web-v5.0.6/\`\n- Pinned tunnel-client: ${PIN.tunnelClientVersion}\n\nThe upstream and transitive license files remain in the vendored source tree.\n`,
+    `# Third-party notices\n\n## codex-chatgpt-web\n\n- Repository: ${PIN.repository}\n- Tag: ${PIN.tag}\n- Commit: ${PIN.commit}\n- License: MIT\n- License file: \`third_party/LICENSES/codex-chatgpt-web-MIT.txt\`\n- Vendored source: \`vendor/${VENDOR_NAME}/\`\n- Pinned tunnel-client: ${PIN.tunnelClientVersion}\n\nThe upstream and transitive license files remain in the vendored source tree.\n`,
     'utf8',
   );
   console.log(JSON.stringify({ imported: destination, retained, pin: PIN }, null, 2));

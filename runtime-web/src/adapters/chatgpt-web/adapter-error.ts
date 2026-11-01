@@ -22,6 +22,20 @@ export class ChatGptWebAdapterError extends Error {
   }
 }
 
+export function chatGptToolTimeoutError(tool: string, timeoutMs: number): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `Codex tool ${tool} did not return a result within ${timeoutMs / 1_000} seconds. `
+    + "The turn was stopped. Check whether the command is still running or waiting for approval before retrying.",
+    { status: 504, errorType: "server_error", code: "codex_tool_timeout", retryable: false },
+  );
+}
+
+export function chatGptResponseIncompleteError(message: string): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(message, {
+    status: 502, errorType: "server_error", code: "chatgpt_response_incomplete", retryable: false,
+  });
+}
+
 // Only the compaction owner may signal this after the broker accepts its one-shot handoff.
 // It cancels browser observation, while the accepted summary remains the native result.
 export class ChatGptCompactionHandoffAccepted extends DOMException {

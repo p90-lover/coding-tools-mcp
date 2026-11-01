@@ -36,14 +36,16 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
 test("the MCP wizard matches the bundled upstream surface and keeps live tools separate", () => {
   const app = read("src/App.tsx");
   const upstream = fs.readFileSync(
-    path.resolve(root, "..", "vendor", "codex-chatgpt-web-v5.0.6", "launcher", "src", "App.tsx"),
+    path.resolve(root, "..", "vendor", "codex-chatgpt-web-v6.1.12", "launcher", "src", "App.tsx"),
     "utf8",
   );
   const extract = (source, name, next) => {
     const start = source.indexOf(`function ${name}(`);
     const end = source.indexOf(`\nfunction ${next}(`, start + 1);
     assert.ok(start >= 0 && end > start, `${name} must remain a standalone surface`);
-    return source.slice(start, end).replaceAll("\r\n", "\n");
+    // The vendored pin keeps upstream's LF bytes while this checkout may be CRLF; a slice ending
+    // at "\nfunction" can also leave a lone "\r". Compare line content, not line endings.
+    return source.slice(start, end).replace(/\r\n?/g, "\n");
   };
 
   // Coding Tools adds an automatic connector-creation action to the upstream wizard. Every upstream
