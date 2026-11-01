@@ -178,8 +178,10 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
     throw error;
   } finally {
     clearTimeout(timer); observer?.dispose();
-    popup.webContents.removeListener("did-start-navigation", navigation);
-    if (!popup.isDestroyed()) popup.destroy();
+    if (!popup.isDestroyed()) {
+      popup.webContents.removeListener("did-start-navigation", navigation);
+      popup.destroy();
+    }
   }
 }
 

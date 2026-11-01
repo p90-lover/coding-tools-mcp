@@ -10,6 +10,30 @@ const { ADMIN_REQUIRED, PUBLISH_REQUIRED, isWorkspaceAdmin } = require("../elect
 const workspaceId = "602b5d8d-e211-49b1-9762-206108d52954";
 const otherWorkspace = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122";
 
+test("an inspection timeout preserves its actionable error after the native window is destroyed", async () => {
+  let expire, destroyed = false, disposed = 0;
+  const contents = new EventEmitter();
+  contents.setWindowOpenHandler = () => {};
+  class Window {
+    get webContents() {
+      if (destroyed) throw new TypeError("Object has been destroyed");
+      return contents;
+    }
+    isDestroyed() { return destroyed; }
+    destroy() { destroyed = true; }
+    async loadURL() { expire(); throw new Error("Navigation cancelled"); }
+  }
+  const module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/chatgpt-workspace.cjs"), "utf8"), {
+    module, URL, Date, clearTimeout() {},
+    setTimeout(callback) { expire = callback; return { unref() {} }; },
+    require: () => ({ observeMcpSetupContext: async () => ({ dispose() { disposed++; } }) }),
+  });
+  await assert.rejects(module.exports.inspectChatGptAccount({ BrowserWindow: Window, partition: "persist:member" }),
+    /ChatGPT workspace inspection timed out\. Retry this account's action\./);
+  assert.equal(disposed, 1);
+});
+
 function fixture(options = {}) {
   const profiles = {
     "persist:member": { userId: "user-member", activeId: workspaceId, memberships: { [workspaceId]: "standard-user" } },

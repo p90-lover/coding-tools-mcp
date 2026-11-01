@@ -864,8 +864,10 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     } finally {
       clearTimeout(timer);
       observer?.dispose();
-      popup.webContents.removeListener("did-start-navigation", navigation);
-      if (!popup.isDestroyed()) popup.destroy();
+      if (!popup.isDestroyed()) {
+        popup.webContents.removeListener("did-start-navigation", navigation);
+        popup.destroy();
+      }
     }
   };
   return operationHeld ? run() : browserHost.withManualOperation("MCP connector creation", run);
