@@ -1,4 +1,4 @@
-import { Component, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type {
   EmailMailbox,
   EmailMessage,
@@ -300,16 +300,40 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   const prefetchTimer = useRef<number | null>(null);
 
   resetCacheFor(status?.origin ?? null);
+  const generation = cache.generation;
+  const activeGeneration = useRef<number | null>(generation);
+  const current = useCallback((owner: number) => activeGeneration.current === owner && cache.generation === owner, []);
+  // Message and mailbox ids belong to one Worker. Reset before another Worker's controls paint.
+  useLayoutEffect(() => {
+    activeGeneration.current = generation;
+    addressToken.current += 1;
+    listToken.current += 1;
+    openRef.current = null;
+    setView({ kind: "all" });
+    setAddresses([]); setAddressCount(0); setAddressQuery(""); setAddressesLoading(false);
+    setMessages([]); setMessageCount(0); setListLoading(false); setListError(null); setFilter("");
+    setOpenId(null); setOpenMessage(null); setOpenError(null); setPreviewMode("html");
+    setConfirm(null); setPane("list"); setPending(null); setToast(null); setLoadError(null);
+    return () => {
+      activeGeneration.current = null;
+      addressToken.current += 1;
+      listToken.current += 1;
+      openRef.current = null;
+      if (prefetchTimer.current !== null) window.clearTimeout(prefetchTimer.current);
+      prefetchTimer.current = null;
+    };
+  }, [generation]);
   const { readIds, markRead } = useReadIds(status?.origin ?? null);
   const domains = status?.capabilities?.domains ?? [];
 
   const act = useCallback(async (label: string, action: () => Promise<void>) => {
+    if (!current(generation)) return;
     setPending(label);
     setError(null);
     try { await action(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { setPending(null); }
-  }, [setError]);
+    catch (cause) { if (current(generation)) setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { if (current(generation)) setPending(null); }
+  }, [setError, generation, current]);
 
   const flash = useCallback((text: string) => {
     setToast(text);
@@ -321,17 +345,19 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   }, [flash]);
 
   const loadStatus = useCallback(() => {
+    const owner = cache.generation;
+    if (!current(owner)) return;
     // Guard against a bridge that predates the email methods: never let this throw
     // synchronously inside the effect (that would unmount the tree and blank the app).
     try {
       if (typeof api.emailStatus !== "function") throw new Error("This build doesn't support Email. Update Coding Tools.");
       void Promise.resolve(api.emailStatus())
-        .then((next) => { setStatus(next); setLoadError(null); })
-        .catch((cause) => setLoadError(cause instanceof Error ? cause.message : String(cause)));
+        .then((next) => { if (current(owner)) { setStatus(next); setLoadError(null); } })
+        .catch((cause) => { if (current(owner)) setLoadError(cause instanceof Error ? cause.message : String(cause)); });
     } catch (cause) {
-      setLoadError(cause instanceof Error ? cause.message : String(cause));
+      if (current(owner)) setLoadError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [api]);
+  }, [api, current]);
 
   useEffect(loadStatus, [loadStatus]);
 
@@ -343,23 +369,25 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   // --- addresses -------------------------------------------------------------------------
 
   const loadAddresses = useCallback(async (query: string, offset: number) => {
+    if (!current(generation)) return;
     const token = offset === 0 ? ++addressToken.current : addressToken.current;
     setAddressesLoading(true);
     try {
       const { mailboxes, count } = await api.listEmailMailboxes({ limit: ADDRESS_PAGE, offset, query: query || undefined });
-      if (token !== addressToken.current) return;
+      if (!current(generation) || token !== addressToken.current) return;
       if (offset === 0) setAddressCount(count);
-      setAddresses((current) => {
+      setAddresses((rows) => {
+        if (!current(generation) || token !== addressToken.current) return rows;
         if (offset === 0) return mailboxes;
-        const known = new Set(current.map((m) => m.id));
-        return [...current, ...mailboxes.filter((m) => !known.has(m.id))];
+        const known = new Set(rows.map((m) => m.id));
+        return [...rows, ...mailboxes.filter((m) => !known.has(m.id))];
       });
     } catch (cause) {
-      if (token === addressToken.current) setError(cause instanceof Error ? cause.message : String(cause));
+      if (current(generation) && token === addressToken.current) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      if (token === addressToken.current) setAddressesLoading(false);
+      if (current(generation) && token === addressToken.current) setAddressesLoading(false);
     }
-  }, [api, setError]);
+  }, [api, setError, generation, current]);
 
   useEffect(() => {
     if (!status?.configured) return;
@@ -386,6 +414,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
 
   const createAndOpen = (name: string, domain: string) => act("create", async () => {
     const { address } = await api.createEmailAddress({ name, domain });
+    if (!current(generation)) return;
     setAddressQuery("");
     setView({ kind: "address", address, mailbox: null });
     setPane("list");
@@ -399,17 +428,19 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   const key = viewKey(view);
 
   const loadList = useCallback(async (offset: number) => {
+    if (!current(generation)) return;
     const token = offset === 0 ? ++listToken.current : listToken.current;
     setListLoading(true);
     setListError(null);
     try {
       const { messages: page, count } = await api.listEmailMessages({ address: viewAddress, limit: PAGE_SIZE, offset });
-      if (token !== listToken.current) return; // a newer view won; drop this stale page
-      setMessages((current) => {
+      if (!current(generation) || token !== listToken.current) return; // a newer Worker or view won
+      setMessages((rows) => {
+        if (!current(generation) || token !== listToken.current) return rows;
         // Page one folds into the cached rows (or replaces them when nothing overlaps); later pages
         // append, skipping rows that new mail pushed down into them.
-        const known = new Set(current.map((m) => m.id));
-        const next = offset === 0 ? mergeNewest(current, page) : [...current, ...page.filter((m) => !known.has(m.id))];
+        const known = new Set(rows.map((m) => m.id));
+        const next = offset === 0 ? mergeNewest(rows, page) : [...rows, ...page.filter((m) => !known.has(m.id))];
         // The Worker computes the total only for offset 0 and reports 0 on later pages.
         const total = offset === 0 ? count : undefined;
         cache.lists.set(key, { messages: next, count: total ?? cache.lists.get(key)?.count ?? next.length });
@@ -417,11 +448,11 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
       });
       if (offset === 0) setMessageCount(count);
     } catch (cause) {
-      if (token === listToken.current) setListError(cause instanceof Error ? cause.message : String(cause));
+      if (current(generation) && token === listToken.current) setListError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      if (token === listToken.current) setListLoading(false);
+      if (current(generation) && token === listToken.current) setListLoading(false);
     }
-  }, [api, viewAddress, key]);
+  }, [api, viewAddress, key, generation, current]);
 
   // A new view shows its cached rows at once (if any) while page one loads.
   useEffect(() => {
@@ -439,14 +470,15 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   useEffect(() => {
     if (!status?.configured) return;
     const timer = setInterval(() => {
-      if (pageHidden()) return;
+      if (!current(generation) || pageHidden()) return;
       const token = listToken.current;
       void api.listEmailMessages({ address: viewAddress, limit: PAGE_SIZE, offset: 0 })
         .then(({ messages: newest, count }) => {
-          if (token !== listToken.current) return;
+          if (!current(generation) || token !== listToken.current) return;
           setMessageCount(count);
-          setMessages((current) => {
-            const next = mergeNewest(current, newest);
+          setMessages((rows) => {
+            if (!current(generation) || token !== listToken.current) return rows;
+            const next = mergeNewest(rows, newest);
             cache.lists.set(key, { messages: next, count });
             return next;
           });
@@ -454,7 +486,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
         .catch(() => {});
     }, waitingForMail ? WAITING_POLL_MS : NEW_MAIL_POLL_MS);
     return () => clearInterval(timer);
-  }, [api, status?.configured, viewAddress, key, waitingForMail]);
+  }, [api, status?.configured, viewAddress, key, waitingForMail, generation, current]);
 
   const moreMessages = messages.length < messageCount;
   const messageSentinel = useSentinel(() => {
@@ -473,6 +505,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   };
 
   const openById = (id: number) => {
+    if (!current(generation)) return;
     openRef.current = id;
     setOpenId(id);
     setOpenError(null);
@@ -483,42 +516,52 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
     if (cached) return;
     void fetchMessage(api, id)
       .then((message) => {
-        if (openRef.current !== id) return;
+        if (!current(generation) || openRef.current !== id) return;
         if (message) showMessage(message);
         else setOpenError("This mail is no longer on the Worker.");
       })
-      .catch((cause) => { if (openRef.current === id) setOpenError(cause instanceof Error ? cause.message : String(cause)); });
+      .catch((cause) => { if (current(generation) && openRef.current === id) setOpenError(cause instanceof Error ? cause.message : String(cause)); });
   };
 
   // Hovering a row starts loading that mail, so opening it is usually instant.
   const prefetch = (id: number) => {
+    if (!current(generation)) return;
     if (prefetchTimer.current) window.clearTimeout(prefetchTimer.current);
-    prefetchTimer.current = window.setTimeout(() => { void fetchMessage(api, id).catch(() => {}); }, PREFETCH_DELAY_MS);
+    const timer = window.setTimeout(() => {
+      if (!current(generation) || prefetchTimer.current !== timer) return;
+      prefetchTimer.current = null;
+      void fetchMessage(api, id).catch(() => {});
+    }, PREFETCH_DELAY_MS);
+    prefetchTimer.current = timer;
   };
 
   const runConfirm = () => act("confirm", async () => {
-    if (!confirm) return;
+    if (!confirm || !current(generation)) return;
     if (confirm.kind === "delete-message") {
       await api.deleteEmailMessage({ id: confirm.id });
+      if (!current(generation)) return;
       forgetMessage(confirm.id);
       if (openId === confirm.id) { openRef.current = null; setOpenId(null); setOpenMessage(null); setPane("list"); }
       setMessages((current) => current.filter((m) => m.id !== confirm.id));
       setMessageCount((count) => Math.max(0, count - 1));
     } else if (confirm.kind === "clear-inbox") {
       await api.clearEmailInbox({ id: confirm.mailbox.id });
+      if (!current(generation)) return;
       forgetAddress(confirm.mailbox.address);
       setMessages([]);
       setMessageCount(0);
     } else {
       await api.removeEmailMailbox({ id: confirm.mailbox.id });
+      if (!current(generation)) return;
       forgetAddress(confirm.mailbox.address);
       setView({ kind: "all" });
       await loadAddresses(addressQuery.trim(), 0);
     }
-    setConfirm(null);
+    if (current(generation)) setConfirm(null);
   });
 
   const choose = (next: View) => {
+    if (!current(generation)) return;
     setView(next);
     openRef.current = null;
     setOpenId(null);
