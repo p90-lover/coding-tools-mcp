@@ -1339,6 +1339,77 @@ test("late chat creation never overwrites another project, another chat, or an u
   }
 });
 
+function outgoingSend() {
+  const attachments = [], annotations = [], composing = { current: null }, state = { outgoing: null, draft: "" };
+  const set = key => next => { state[key] = typeof next === "function" ? next(state[key]) : next; };
+  const scope = projectId => rendererCallback("AgentOrchestratorChat.tsx", "draftKey", { selectedTaskId: "", projectId, draftScope: "main" });
+  return { state, composing, scope,
+    shown(projectId) { return rendererCallback("AgentOrchestratorChat.tsx", "shownDescription", {
+      useMemo: read => read(), outgoing: state.outgoing, selectedTaskId: "", savedDescription: undefined, draftKey: scope(projectId),
+    }); },
+    start(projectId, message) {
+      const reply = delayedReply(); state.draft = message;
+      composing.current = { taskId: "", cacheKey: scope(projectId), draft: message, attachments, annotations };
+      const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
+        selectedTaskId: "", draft: message, attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
+        setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
+        setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+        setOutgoing: set("outgoing"), setAnnotations() {},
+      });
+      return { ...reply, done: deliver(message) };
+    },
+  };
+}
+
+test("the real project picker cannot carry a pending message into another blank project's scoped composer", async () => {
+  const ui = outgoingSend(), sending = ui.start("project-a", "A's pending message");
+  assert.equal(ui.shown("project-a"), "A's pending message");
+  const callback = (file, property, contains, globals) => {
+    const source = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8"), tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    let expression;
+    const visit = node => { if (ts.isJsxAttribute(node) && node.name.getText(tree) === property && node.initializer?.getText(tree).includes(contains)) expression ??= node.initializer.expression; ts.forEachChild(node, visit); };
+    visit(tree); assert.ok(expression); const exports = {};
+    vm.runInNewContext(ts.transpileModule("exports.callback = " + expression.getText(tree), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports, ...globals });
+    return exports.callback;
+  };
+  const parent = { workspaceId: "project-a", taskId: "", seed: null };
+  const switchToWorkspace = rendererCallback("AgentOrchestratorSurface.tsx", "switchToWorkspace", {
+    setWorkspaceId: id => { parent.workspaceId = id; }, setChatTaskId: id => { parent.taskId = id; }, pane: undefined, localStorage: { setItem() {} },
+  });
+  const chooseWorkspace = rendererCallback("AgentOrchestratorSurface.tsx", "chooseWorkspace", {
+    switchTarget: { current: "" }, pendingSelect: { current: null }, pane: undefined, switchToWorkspace,
+  });
+  const onPickProject = callback("AgentOrchestratorSurface.tsx", "onPickProject", "setChatSeed", {
+    crypto: { randomUUID: () => "seed" }, chooseWorkspace, setChatSeed: seed => { parent.seed = seed; },
+  });
+  callback("AgentOrchestratorChat.tsx", "onClick", "onPickProject?.(item.id", {
+    item: { id: "project-b" }, projectId: "project-a", title: "", draft: ui.state.draft, setProjectPicker() {}, onPickProject,
+  })();
+  assert.equal(parent.workspaceId, "project-b"); assert.equal(parent.seed.workspaceId, "project-b"); assert.equal(parent.taskId, null);
+  assert.notEqual(ui.scope(parent.workspaceId), ui.scope("project-a"));
+  assert.equal(ui.shown(parent.workspaceId), undefined, "the old send belongs only to its original project and pane");
+  sending.resolve(); await sending.done;
+});
+
+test("overlapping deliver callbacks change only their own optimistic message", async t => {
+  // A lower-level ownership invariant: ordinary submit/queue/busy gates still prevent a second send.
+  for (const outcome of ["resolve", "reject"]) await t.test(outcome, async () => {
+    const ui = outgoingSend(), first = ui.start("project-a", "A"), second = ui.start("project-b", "B"), ownB = ui.state.outgoing;
+    first[outcome](outcome === "reject" ? new Error("A failed") : undefined); await first.done;
+    assert.equal(ui.state.outgoing, ownB); assert.equal(ui.state.outgoing.sent, false);
+    second.resolve(); await second.done; assert.equal(ui.state.outgoing.message, "B"); assert.equal(ui.state.outgoing.sent, true);
+  });
+});
+
+test("retiring an earlier optimistic message preserves its replacement", () => {
+  const outgoing = { taskId: "", cacheKey: "old", message: "A", sent: true }, replacement = { taskId: "", cacheKey: "new", message: "B", sent: false };
+  let current = replacement;
+  const retire = rendererCallback("AgentOrchestratorChat.tsx", "effect:if (!outgoing?.sent)", {
+    outgoing, descriptions: {}, setOutgoing: next => { current = typeof next === "function" ? next(current) : next; },
+  });
+  retire(); assert.equal(current, replacement);
+});
+
 test("send completion preserves the next chat's draft and edits typed during the pending send", async () => {
   for (const taskId of ["task-b", "task-a"]) {
     const reply = delayedReply(), attachments = [], annotations = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments, annotations } };
@@ -2024,75 +2095,4 @@ test("a message stamp saved in UTC shows in this computer's own time zone", () =
     assert.equal(chat.localChatStamp("2026-10-23 20:10"), "2026-10-24 04:10");
   }
   assert.equal(chat.localChatStamp("earlier"), "earlier", "a stamp in any other form is shown as saved");
-});
-
-function outgoingSend() {
-  const attachments = [], annotations = [], composing = { current: null }, state = { outgoing: null, draft: "" };
-  const set = key => next => { state[key] = typeof next === "function" ? next(state[key]) : next; };
-  const scope = projectId => rendererCallback("AgentOrchestratorChat.tsx", "draftKey", { selectedTaskId: "", projectId, draftScope: "main" });
-  return { state, composing, scope,
-    shown(projectId) { return rendererCallback("AgentOrchestratorChat.tsx", "shownDescription", {
-      useMemo: read => read(), outgoing: state.outgoing, selectedTaskId: "", savedDescription: undefined, draftKey: scope(projectId),
-    }); },
-    start(projectId, message) {
-      const reply = delayedReply(); state.draft = message;
-      composing.current = { taskId: "", cacheKey: scope(projectId), draft: message, attachments, annotations };
-      const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
-        selectedTaskId: "", draft: message, attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
-        setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-        setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
-        setOutgoing: set("outgoing"), setAnnotations() {},
-      });
-      return { ...reply, done: deliver(message) };
-    },
-  };
-}
-
-test("the real project picker cannot carry a pending message into another blank project's scoped composer", async () => {
-  const ui = outgoingSend(), sending = ui.start("project-a", "A's pending message");
-  assert.equal(ui.shown("project-a"), "A's pending message");
-  const callback = (file, property, contains, globals) => {
-    const source = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8"), tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-    let expression;
-    const visit = node => { if (ts.isJsxAttribute(node) && node.name.getText(tree) === property && node.initializer?.getText(tree).includes(contains)) expression ??= node.initializer.expression; ts.forEachChild(node, visit); };
-    visit(tree); assert.ok(expression); const exports = {};
-    vm.runInNewContext(ts.transpileModule("exports.callback = " + expression.getText(tree), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports, ...globals });
-    return exports.callback;
-  };
-  const parent = { workspaceId: "project-a", taskId: "", seed: null };
-  const switchToWorkspace = rendererCallback("AgentOrchestratorSurface.tsx", "switchToWorkspace", {
-    setWorkspaceId: id => { parent.workspaceId = id; }, setChatTaskId: id => { parent.taskId = id; }, pane: undefined, localStorage: { setItem() {} },
-  });
-  const chooseWorkspace = rendererCallback("AgentOrchestratorSurface.tsx", "chooseWorkspace", {
-    switchTarget: { current: "" }, pendingSelect: { current: null }, pane: undefined, switchToWorkspace,
-  });
-  const onPickProject = callback("AgentOrchestratorSurface.tsx", "onPickProject", "setChatSeed", {
-    crypto: { randomUUID: () => "seed" }, chooseWorkspace, setChatSeed: seed => { parent.seed = seed; },
-  });
-  callback("AgentOrchestratorChat.tsx", "onClick", "onPickProject?.(item.id", {
-    item: { id: "project-b" }, projectId: "project-a", title: "", draft: ui.state.draft, setProjectPicker() {}, onPickProject,
-  })();
-  assert.equal(parent.workspaceId, "project-b"); assert.equal(parent.seed.workspaceId, "project-b"); assert.equal(parent.taskId, null);
-  assert.notEqual(ui.scope(parent.workspaceId), ui.scope("project-a"));
-  assert.equal(ui.shown(parent.workspaceId), undefined, "the old send belongs only to its original project and pane");
-  sending.resolve(); await sending.done;
-});
-
-test("overlapping deliver callbacks change only their own optimistic message", async t => {
-  // A lower-level ownership invariant: ordinary submit/queue/busy gates still prevent a second send.
-  for (const outcome of ["resolve", "reject"]) await t.test(outcome, async () => {
-    const ui = outgoingSend(), first = ui.start("project-a", "A"), second = ui.start("project-b", "B"), ownB = ui.state.outgoing;
-    first[outcome](outcome === "reject" ? new Error("A failed") : undefined); await first.done;
-    assert.equal(ui.state.outgoing, ownB); assert.equal(ui.state.outgoing.sent, false);
-    second.resolve(); await second.done; assert.equal(ui.state.outgoing.message, "B"); assert.equal(ui.state.outgoing.sent, true);
-  });
-});
-
-test("retiring an earlier optimistic message preserves its replacement", () => {
-  const outgoing = { taskId: "", cacheKey: "old", message: "A", sent: true }, replacement = { taskId: "", cacheKey: "new", message: "B", sent: false };
-  let current = replacement;
-  const retire = rendererCallback("AgentOrchestratorChat.tsx", "effect:if (!outgoing?.sent)", {
-    outgoing, descriptions: {}, setOutgoing: next => { current = typeof next === "function" ? next(current) : next; },
-  });
-  retire(); assert.equal(current, replacement);
 });
