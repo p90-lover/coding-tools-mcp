@@ -38,7 +38,7 @@ const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROW
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
-const { createRegisterHost } = require("./register-host.cjs");
+const { createRegisterHost, createRegisterCpaSync } = require("./register-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
 const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
@@ -459,6 +459,7 @@ async function fetchThroughLauncherNetwork(url, options) {
 
 function getRegisterHost(logger) {
   if (registerHost) return registerHost;
+  let accountSync = null;
   registerHost = createRegisterHost({
     projectRoot: path.join(app.getPath("documents"), "ChatGPT", "reg-machine"),
     configPath: path.join(app.getPath("userData"), "runtime-register.json"),
@@ -466,11 +467,23 @@ function getRegisterHost(logger) {
     createView: (partition) => new WebContentsView({
       webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
     }),
-    prepareSession: (browserSession) => browserSession.setProxy({ mode: "direct" }),
+    prepareSession: async (browserSession, origin) => {
+      await browserSession.setProxy({ mode: "direct" });
+      const sync = createRegisterCpaSync({
+        browserSession, origin, getConnection: () => externalServicesController?.cpaConnection(),
+        onError: (message) => logger?.warn?.("launcher.register_cpa_sync_failed", { message }),
+      });
+      accountSync = sync;
+      await sync.sync();
+      return () => { sync.dispose(); if (accountSync === sync) accountSync = null; };
+    },
     attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
     detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
     openExternal: (url) => openWebUrl(url),
-    onChange: (status) => send("launcher:register-changed", status),
+    onChange: (status) => {
+      send("launcher:register-changed", status);
+      if (status.ready) void accountSync?.sync();
+    },
   });
   return registerHost;
 }
