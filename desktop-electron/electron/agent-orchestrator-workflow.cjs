@@ -946,7 +946,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (!response.ok) return null;
       const listing = await response.json();
       if (!Array.isArray(listing?.files)) return null;
-      const files = listing.files.map(normalizedAuthFile).filter(Boolean);
+      const files = listing.files.map(normalizedAuthFile).filter(Boolean).flatMap(entry => {
+        // Provider Manager registers all upstreams under one auth provider, but each marker's
+        // filename names the upstream that owns its models. Judge those switches separately.
+        const upstream = entry.provider === "provider-manager" && /^cpa-provider-manager-(.+)\.json$/i.exec(entry.name)?.[1];
+        return upstream ? [entry, { ...entry, provider: upstream }] : [entry];
+      });
       const enabled = new Set(files.filter(entry => entry.status !== "disabled").map(entry => entry.provider));
       // Why a provider has none: its accounts are all disabled in CPA, or none was added. The model
       // menu and a refused send say so, instead of only "not offered right now".
@@ -1185,10 +1190,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   // Every model CPA has listed, with its capabilities and when CPA last listed it. CPA leaves a
-  // model out of its list while it cools down after upstream errors (Cline's 502s), while its
-  // account is disabled, or while CPA itself restarts or cannot be reached; the model vanished from
-  // the menu and a chat saved on it showed "not available" and refused to send. A model CPA listed
-  // in the last 30 days stays in the list (its effort and window too), and a send goes to CPA,
+  // model out of its list while it cools down after upstream errors (Cline's 502s), or while CPA
+  // itself restarts or cannot be reached; the model vanished from the menu and a chat saved on it
+  // showed "not available" and refused to send. Unless its provider is explicitly disabled, a model
+  // CPA listed in the last 30 days stays in the list (its effort and window too), and a send goes to CPA,
   // which answers for itself. Saved in the user data folder, so it survives a restart.
   const KNOWN_MODEL_MS = 30 * 24 * 60 * 60_000;
   const KNOWN_MODEL_REFRESH_MS = 24 * 60 * 60_000;
@@ -1281,6 +1286,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : await modelOwners(cpa);
     const unserved = id => Boolean(accountProviders && owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
       && !accountProviders.has(owners.get(id)));
+    const disabled = (id, provider) => accountProviders?.disabled?.has(provider || owners?.get(id) || knownModels[id]?.capability.provider)
+      || id.includes("/") && accountProviders?.disabled?.has(id.slice(0, id.indexOf("/")));
     const capabilities = Object.create(null);
     const ids = [];
     const plugins = new Set();
@@ -1293,11 +1300,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     for (const entry of rows || []) {
       const id = entry?.slug ?? entry?.id;
       if (entry?.visibility === "hide" && typeof id === "string" && id && id.length <= 128 && !hidden.includes(id)) hidden.push(id);
+      if (typeof id === "string" && id && id.length <= 128 && disabled(id, entry.provider ?? entry.owned_by ?? entry.ownedBy)) {
+        unavailable[id] = pluginUnavailable(owners?.get(id) || entry.provider || knownModels[id]?.capability.provider || id.split("/")[0], accountProviders);
+        continue;
+      }
       if (typeof id === "string" && id && id.length <= 128 && unserved(id)) {
         unavailable[id] = pluginUnavailable(owners.get(id), accountProviders);
-        // A provider whose account is only disabled keeps its models listed, like any model CPA
-        // set aside for a while; one nobody ever added stays hidden (its plugin lists every model).
-        if (!accountProviders.disabled?.has(owners.get(id)) && !knownModels[id]) continue;
+        if (!knownModels[id]) continue;
       }
       if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
       // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
@@ -1337,12 +1346,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       changed = true;
     }
     for (const [id, entry] of Object.entries(knownModels)) {
-      if (at - entry.seen > KNOWN_MODEL_MS) { delete knownModels[id]; changed = true; }
+      // Explicit switches override outage/cooldown history, including when CPA already removed
+      // the disabled provider from its live model list. Do not revive it on a later failed read.
+      if (disabled(id)) unavailable[id] = pluginUnavailable(owners?.get(id) || entry.capability.provider || id.split("/")[0], accountProviders);
+      if (disabled(id) || at - entry.seen > KNOWN_MODEL_MS) { delete knownModels[id]; changed = true; }
     }
     rememberedModels(ids, capabilities, plugins, held, id => unavailable[id] || HELD_NOTE, at);
     for (const id of Object.keys(held)) delete unavailable[id];
     if (changed) saveKnownModels();
-    if (!ids.length) throw new Error("CPA has no available models");
+    if (!ids.length && !accountProviders?.disabled?.size) throw new Error("CPA has no available models");
     pluginModels = plugins;
     return { ok: true, models: ids, capabilities, ...(Object.keys(unavailable).length ? { unavailable: { ...unavailable } } : {}),
       ...(Object.keys(held).length ? { held: { ...held } } : {}), ...(hidden.length ? { hidden } : {}) };
