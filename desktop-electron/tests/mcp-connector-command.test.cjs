@@ -181,6 +181,84 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
   assert.equal(creates, 1);
 });
 
+test("the account setup action keeps the global profile and uses only the registered account's existing tunnel", async t => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const start = source.indexOf('  handle("launcher:mcp-create-connector",');
+  const end = source.indexOf('\n  handle("launcher:doctor",', start);
+  assert(start >= 0 && end > start);
+  for (const scenario of [
+    { name: "targets a signed-in inactive account", succeeds: true },
+    { name: "reconnects only that account's existing tunnel", stopped: true, succeeds: true },
+    { name: "preserves the no-argument settings command", legacy: true },
+    { name: "rejects an unknown account", invalid: true },
+    { name: "rejects arbitrary account/partition objects", input: { accountId: "account-2", partition: "persist:foreign" } },
+    { name: "never borrows another account's primary or extra tunnel", missingTunnel: true },
+    { name: "rejects a signed-out account", signedOut: true },
+    { name: "rejects another browser operation", busy: true },
+    { name: "aborts if the global profile switches during reconnect", stopped: true, switchDuringReconnect: true },
+    { name: "aborts if the account assignment changes during reconnect", stopped: true, reassign: true },
+    { name: "aborts if the target partition changes during routing", remap: true },
+    { name: "never saves a binding after an account change during setup", switchDuringSetup: true },
+    { name: "requires verified connection before publishing success", disconnected: true },
+    { name: "records only sanitized setup failures", failure: true },
+  ]) await t.test(scenario.name, async () => {
+    const calls = { focus: [], command: [], reconnect: [], route: [], create: [], bindings: [], status: [], published: [] };
+    let action, partition = "persist:account-2";
+    const host = { partition: "persist:global-r7", ready: async () => {}, currentOperation: () => scenario.busy ? "MCP tunnel settings" : null };
+    const tunnel = { id: "b41a6986", accountId: scenario.missingTunnel ? "account-3" : "account-2", tunnelId: "tunnel_account_2", state: scenario.stopped ? "stopped" : "ready" };
+    const binding = { userId: "user-fixture", workspaceId: "workspace-fixture", tunnelId: tunnel.tunnelId };
+    const context = {
+      handle: (_channel, fn) => { action = fn; }, assertFocusedMainWindow: (_event, write) => calls.focus.push(write),
+      mcpConnectorCommand: { request: async (...args) => { calls.command.push(args); return { legacy: true }; } },
+      IS_DEV_PROFILE: false, runtimeStartupInFlight: Promise.resolve(), quitting: false, shutdownInProgress: false,
+      browserHost: host, browserAccountsStatus: () => ({ switching: false }),
+      browserAccounts: { has: id => id === "account-2" && !scenario.invalid, partitionOf: id => {
+        if (scenario.invalid || id !== "account-2") throw new Error("Unknown ChatGPT account");
+        return partition;
+      }, recordConnector: (...args) => { calls.status.push(args); return true; } },
+      publishBrowserAccounts: () => {}, runtimeHost: { currentOperation: () => null },
+      session: { fromPartition: value => { assert.equal(value, "persist:account-2"); return { cookies: { get: async () => [] } }; } },
+      signedInFromCookies: () => !scenario.signedOut,
+      routeIdleAccountPartition: async value => { calls.route.push(value); if (scenario.remap) partition = "persist:remapped"; },
+      runtimeSupervisor: { extraTunnels: { status: () => [tunnel], reconnect: async id => {
+        calls.reconnect.push(id); tunnel.state = "ready";
+        if (scenario.switchDuringReconnect) host.partition = "persist:global-other";
+        if (scenario.reassign) tunnel.accountId = "account-3";
+      }, setConnector: async (...args) => { calls.bindings.push(args); } } },
+      createConfiguredConnector: async options => {
+        calls.create.push(options);
+        assert.equal(options.browserHost, host);
+        assert.equal(options.target.partition, "persist:account-2");
+        assert.equal(options.target.tunnelId, tunnel.tunnelId);
+        if (scenario.switchDuringSetup) host.partition = "persist:global-other";
+        options.assertCurrent();
+        if (scenario.failure) throw new Error("PRIVATE_REMOTE_ALERT_AND_KEY");
+        return { created: false, connected: !scenario.disconnected, name: "Fixture", href: "/plugins/proven", binding };
+      },
+      mcpConnectorCommandFailure, app: {}, BrowserWindow: function () {}, logger: {},
+      publishOperation: value => calls.published.push(value),
+    };
+    vm.runInNewContext(source.slice(start, end), context);
+    const input = scenario.legacy ? undefined : Object.hasOwn(scenario, "input") ? scenario.input : "account-2";
+    if (scenario.legacy) assert.equal((await action({}, input)).legacy, true);
+    else if (scenario.succeeds) {
+      assert.equal((await action({}, input)).connected, true);
+      assert.deepEqual(calls.bindings, [[tunnel.id, "/plugins/proven", binding]]);
+      assert.deepEqual(JSON.parse(JSON.stringify(calls.status)), [["account-2", { bound: true }]]);
+    } else {
+      await assert.rejects(action({}, input), error => !error.message.includes("PRIVATE_REMOTE_ALERT_AND_KEY"));
+      assert.equal(calls.bindings.length, 0);
+      assert(calls.status.every(([id, value]) => id === "account-2" && typeof value.error === "string" && !value.bound));
+    }
+    assert.deepEqual(calls.focus, [true]);
+    assert.equal(calls.command.length, scenario.legacy ? 1 : 0, "a targeted account cannot join a global setup command");
+    assert.equal(calls.create.length, scenario.succeeds || scenario.switchDuringSetup || scenario.disconnected || scenario.failure ? 1 : 0);
+    assert.deepEqual(calls.reconnect, scenario.stopped ? [tunnel.id] : []);
+    assert.equal(host.partition, scenario.switchDuringReconnect || scenario.switchDuringSetup ? "persist:global-other" : "persist:global-r7");
+    assert.doesNotMatch(JSON.stringify({ status: calls.status, published: calls.published }), /PRIVATE_REMOTE_ALERT_AND_KEY/);
+  });
+});
+
 test("extra tunnel Platform settings open only the registered account partition without changing configuration", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const start = source.indexOf('  handle("launcher:mcp-tunnel-settings",');

@@ -280,6 +280,28 @@ test("an account in a running turn cannot be removed", async (t) => {
   assert.deepEqual(erased, []);
 });
 
+test("MCP connector setup keeps every registered account until its popup closes", async (t) => {
+  const { registry, service, host, erased, forgotten, threads } = setup(t);
+  const target = registry.add(), other = registry.add();
+  host().currentOperation = () => "MCP connector creation";
+  const before = ids(registry.status());
+  for (const id of [target, FIRST_ACCOUNT_ID]) {
+    await assert.rejects(service.remove(id, {}), /MCP connector creation/);
+  }
+  const bulk = await service.removeMany([target, other], {});
+  assert.deepEqual(bulk.removed, []);
+  assert.equal(bulk.failed.length, 2);
+  assert(bulk.failed.every(entry => /MCP connector creation/.test(entry.message)));
+  assert.deepEqual(ids(registry.status()), before);
+  assert.equal(registry.activeId(), FIRST_ACCOUNT_ID);
+  assert.deepEqual(erased, []);
+  assert.deepEqual(forgotten, []);
+  assert.deepEqual(threads.removed, []);
+  host().currentOperation = () => null;
+  await service.remove(target, {});
+  assert.equal(registry.has(target), false, "normal removal resumes after setup");
+});
+
 test("sign-in reads that arrive during a read coalesce into one more read", async (t) => {
   let gate = deferred();
   const { service, registry, reads, signedIn, published } = setup(t, { readGate: () => gate.promise });

@@ -84,6 +84,16 @@ test("extra tunnel Platform settings send only the existing tunnel id through it
   assert.match(panel, /Platform settings/);
 });
 
+test("connector setup forwards an optional registered account id on its existing channel", async () => {
+  const { launcher, invocations } = loadPreload();
+  await launcher.createMcpConnector();
+  await launcher.createMcpConnector("account-2");
+  assert.deepEqual(invocations, [
+    { channel: "launcher:mcp-create-connector", payload: undefined },
+    { channel: "launcher:mcp-create-connector", payload: "account-2" },
+  ]);
+});
+
 test("preload exposes only the named Coding Tools domains and no generic privileged API", () => {
   const { api, launcher } = loadPreload();
 

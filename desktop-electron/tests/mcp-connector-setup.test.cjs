@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const vm = require("node:vm");
 const path = require("node:path");
+const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
 const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
 
@@ -232,8 +233,21 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "unexpected document navigation after preparing cannot submit", change: "navigation", error: /navigation|context/i },
     { name: "a busy caller after preparing cannot submit", change: "busy", error: /busy/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, error: /existing connector.*tunnel.*unverified/i },
+    { name: "an installed retry hint cannot authorize an existing same-name connector", existing: true, cached: true, error: /existing connector.*tunnel.*unverified/i },
     { name: "consent is not confirmed after a later workspace switch", change: "consent", error: /context|workspace.*changed/i, submitted: true },
   ]) await t.test(scenario.name, async () => {
+    const fixtureRoot = path.join(__dirname, "../../aiTemp/account-mcp-backend-20261101/fixtures");
+    fs.mkdirSync(fixtureRoot, { recursive: true });
+    const userData = fs.mkdtempSync(path.join(fixtureRoot, "connector-"));
+    t.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+    const retryFile = path.join(userData, "mcp-account-connector-bindings.json");
+    const previousHint = { name: "Other account", tunnelId: `tunnel_${"b".repeat(32)}`, href: "/plugins/other-account" };
+    fs.writeFileSync(retryFile, JSON.stringify({ version: 1, bindings: { "persist:other-account": {
+      ...previousHint, accessToken: "DO_NOT_COPY_OLD_SECRET",
+    } } }));
+    if (scenario.cached) fs.writeFileSync(retryFile, JSON.stringify({ version: 1, bindings: { "persist:fixture": {
+      name: "Team Harness A", tunnelId, href: "/plugins/plugin_fixture",
+    } } }));
     const network = fakeMcpNetwork(), counts = { create: 0, open: 0, confirm: 0 };
     let accountId = scenario.business ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
     const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: true }), withManualOperation: async (_name, work) => work() };
@@ -263,6 +277,12 @@ test("the production connector action verifies fresh owner and workspace proof b
         if (phase === "prepareTunnelConnectorConnection") return { connected: false };
         if (phase === "openTunnelConnectorConsent") {
           counts.open++;
+          const saved = JSON.parse(fs.readFileSync(retryFile, "utf8"));
+          assert.deepEqual(saved.bindings["persist:fixture"], {
+            name: "Team Harness A", tunnelId, href: "/plugins/plugin_fixture", userId: initialUser, workspaceId: accountId,
+          }, "exact creation provenance is saved before consent can fail");
+          assert.deepEqual(saved.bindings["persist:other-account"], previousHint, "another account keeps only its bounded public hint");
+          assert.doesNotMatch(JSON.stringify(saved), /DO_NOT_EXPORT|private-key-file|accessToken|creator_email|DO_NOT_COPY_OLD_SECRET/);
           if (scenario.change === "consent") { accountId = businessId; select(accountId); }
           return { consentReady: true };
         }
@@ -287,13 +307,14 @@ test("the production connector action verifies fresh owner and workspace proof b
           } else if (next.startsWith("https://chatgpt.com/plugins")) select(accountId);
         } };
     }
-    const action = () => createConfiguredConnector({ app: {}, BrowserWindow: Window, browserHost: host, runtimeHost: runtime(),
+    const action = () => createConfiguredConnector({ app: { getPath: name => { assert.equal(name, "userData"); return userData; } }, BrowserWindow: Window, browserHost: host, runtimeHost: runtime(),
       target: { tunnelId, partition: "persist:fixture" }, assertCurrent: () => { if (busy) throw new Error("Caller is busy"); } });
     if (scenario.error) {
       await assert.rejects(action(), scenario.error);
       assert.deepEqual(counts, scenario.submitted ? { create: 1, open: 1, confirm: 0 } : { create: 0, open: 0, confirm: 0 });
     } else {
       const result = await action();
+      assert.equal(result.connected, true, "account setup success means connection was verified");
       assert.deepEqual(result.binding, { userId: initialUser, workspaceId: accountId, tunnelId });
       assert.deepEqual(counts, { create: 1, open: 1, confirm: 1 });
     }

@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { validateConnectorName } = require("./connector-identity.cjs");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 // activeAccountId comes from a fresh ChatGPT request in the owned window, never the default alias
 // or the JWT's possibly stale workspace claim. The token and unrelated account fields stay there.
@@ -686,6 +686,44 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       }
       const href = url.pathname + url.search;
       await navigate(url.href);
+      const createdContext = await freshContext();
+      // Keep exact creation provenance even if consent fails. These local hints never authorize
+      // reuse: an existing card still needs independent exact-tunnel evidence before any mutation.
+      const retryFile = path.join(app.getPath("userData"), "mcp-account-connector-bindings.json");
+      const bindings = Object.create(null);
+      let retryHandle;
+      try {
+        retryHandle = await fs.promises.open(retryFile, "r");
+        if (!(await retryHandle.stat()).isFile()) throw new Error("Invalid connector retry hints");
+        const bytes = Buffer.alloc(64 * 1024 + 1);
+        const { bytesRead } = await retryHandle.read(bytes, 0, bytes.length, 0);
+        if (bytesRead > 64 * 1024) throw new Error("Invalid connector retry hints");
+        const saved = JSON.parse(bytes.subarray(0, bytesRead).toString("utf8"));
+        if (saved?.version === 1 && saved.bindings && typeof saved.bindings === "object" && !Array.isArray(saved.bindings)) {
+          for (const [key, value] of Object.entries(saved.bindings).slice(0, 64)) {
+            try {
+              if (!/^persist:[A-Za-z0-9_-]{1,160}$/.test(key) || !/^tunnel_[a-f0-9]{32}$/.test(value?.tunnelId)) continue;
+              const previousUrl = new URL(value.href, "https://chatgpt.com");
+              if (previousUrl.origin !== "https://chatgpt.com" || previousUrl.username || previousUrl.password
+                || !previousUrl.pathname.startsWith("/plugins/") || previousUrl.pathname.length > 512) continue;
+              bindings[key] = { name: validateConnectorName(value.name), tunnelId: value.tunnelId, href: previousUrl.pathname };
+              if (/^user-[A-Za-z0-9_-]{1,120}$/.test(value.userId)
+                && /^[a-f0-9-]{36}$/i.test(value.workspaceId)) {
+                Object.assign(bindings[key], { userId: value.userId, workspaceId: value.workspaceId });
+              }
+            } catch { /* An invalid old hint cannot supply identity or be copied forward. */ }
+          }
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw new Error("Connector retry evidence could not be saved.");
+      } finally { await retryHandle?.close(); }
+      bindings[partition] = { name: settings.name, tunnelId: settings.tunnelId, href: url.pathname,
+        userId: createdContext.userId, workspaceId: createdContext.workspaceId };
+      checkHost();
+      const retryHints = JSON.stringify({ version: 1, bindings });
+      if (Buffer.byteLength(retryHints) > 64 * 1024) throw new Error("Connector retry evidence could not be saved.");
+      await writePrivateFileAtomicAsync(retryFile, retryHints, { durable: true });
+      await freshContext();
       await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
       const connection = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnectorConnection(${JSON.stringify(settings.name)})`, true);
       if (typeof connection?.connected !== "boolean") throw new Error("ChatGPT did not confirm the exact connector state.");
@@ -705,7 +743,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         writePrivateFileAtomic(path.join(app.getPath("userData"), "mcp-connector-binding.json"),
           JSON.stringify({ version: 1, name: settings.name, tunnelId: settings.tunnelId, href, ...binding }));
       }
-      return { created: true, name: settings.name, href, binding };
+      return { created: true, connected: true, name: settings.name, href, binding };
     } catch (error) {
       if (timedOut) throw new Error("ChatGPT connector setup took too long. Retry from Configuration.");
       throw error;
