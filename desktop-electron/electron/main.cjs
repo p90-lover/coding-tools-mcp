@@ -2988,9 +2988,71 @@ function registerIpc({ logger, stateStore }) {
     }
   } });
   dispatchMcpConnectorCommand();
-  handle("launcher:mcp-create-connector", event => {
+  handle("launcher:mcp-create-connector", async (event, accountId) => {
     assertFocusedMainWindow(event, true);
-    return mcpConnectorCommand.request("create", "settings");
+    if (accountId === undefined) return mcpConnectorCommand.request("create", "settings");
+    if (IS_DEV_PROFILE) throw new Error("Automatic connector creation is available in the production profile only");
+    const partition = browserAccounts.partitionOf(accountId);
+    const operationBrowser = browserHost, operationPartition = operationBrowser.partition;
+    const extraTunnels = runtimeSupervisor?.extraTunnels;
+    const tunnel = extraTunnels?.status().find(candidate => candidate.accountId === accountId);
+    const tunnelId = tunnel?.tunnelId, id = tunnel?.id;
+    let requireReady = false, creating = false;
+    const assertCurrent = () => {
+      if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+        || browserAccounts.partitionOf(accountId) !== partition || extraTunnels !== runtimeSupervisor?.extraTunnels
+        || browserAccountsStatus().switching || quitting || shutdownInProgress || runtimeHost.currentOperation()) {
+        throw new Error("Browser account switching or shutdown is in progress");
+      }
+      const browserOperation = operationBrowser.currentOperation();
+      if (operationBrowser.activeTraceId || (browserOperation && (!creating || browserOperation !== "MCP connector creation"))) {
+        throw new Error("MCP connector setup is busy");
+      }
+      if (!id || !extraTunnels.status().some(current => current.id === id && current.accountId === accountId
+        && current.tunnelId === tunnelId && (!requireReady || current.state === "ready"))) {
+        throw new Error("The account's MCP tunnel changed or is not ready.");
+      }
+    };
+    publishOperation({ name: "mcp-connector-create", status: "running", message: "Connecting the account's ChatGPT connector" });
+    try {
+      assertCurrent();
+      await runtimeStartupInFlight;
+      assertCurrent();
+      await operationBrowser.ready();
+      assertCurrent();
+      const signedIn = signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
+      assertCurrent();
+      if (!signedIn) throw new Error("Sign in to the chosen ChatGPT account before connecting MCP.");
+      await routeIdleAccountPartition(partition, logger);
+      assertCurrent();
+      if (tunnel.state !== "ready") {
+        await extraTunnels.reconnect(id);
+        assertCurrent();
+      }
+      requireReady = true;
+      assertCurrent();
+      let result;
+      creating = true;
+      try {
+        result = await createConfiguredConnector({
+          app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
+          target: { tunnelId, partition },
+        });
+      } finally { creating = false; }
+      assertCurrent();
+      if (result.connected !== true) throw new Error("ChatGPT did not confirm the exact connector state.");
+      await extraTunnels.setConnector(id, result.href, result.binding);
+      assertCurrent();
+      if (browserAccounts.recordConnector(accountId, { bound: true })) publishBrowserAccounts();
+      publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
+      return result;
+    } catch (error) {
+      const failure = mcpConnectorCommandFailure(error);
+      if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
+        && browserAccounts.recordConnector(accountId, { error: failure.code })) publishBrowserAccounts();
+      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      throw Object.assign(new Error(failure.message), { code: failure.code });
+    }
   });
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
