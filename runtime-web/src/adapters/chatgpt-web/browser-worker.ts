@@ -5898,6 +5898,10 @@ export class ChatGptBrowserWorker {
       );
       return finalText;
     } catch (error) {
+      if (turn.abortSignal?.aborted && error instanceof Error
+        && error.name === "AbortError" && !(error instanceof DOMException)) {
+        error = new DOMException(error.message, "AbortError");
+      }
       if (error instanceof DOMException && error.name === "AbortError"
         && turn.abortSignal?.reason instanceof ChatGptCompactionHandoffAccepted) {
         console.info(`[chatgpt-web] browser turn ${turn.traceId} ended after accepted structured compaction handoff`);
