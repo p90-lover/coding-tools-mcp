@@ -9,19 +9,28 @@ import { chatMessageReadable, hiddenSecretParts, numberedDiff, type ChatStepRoun
 /** Reads an attached image for its thumbnail and shows a file in its folder (the desktop app's). */
 export type AttachmentAccess = { preview?: (path: string) => Promise<string>; reveal?: (path: string) => void };
 export const Attachments = createContext<AttachmentAccess>({});
-/** Thumbnails already read, by path: a poll re-renders every message, and each image is read once. */
-const PREVIEWS = new Map<string, Promise<string>>();
+/** Share pending reads within a provider; mounted images own the completed full-size data URLs. */
+const PREVIEWS = new WeakMap<NonNullable<AttachmentAccess["preview"]>, Map<string, Promise<string>>>();
 
 export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string) => void }) {
   const { preview } = useContext(Attachments);
   const [url, setUrl] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
   useEffect(() => {
-    if (!item.path || !preview) return;
+    setUrl(null); setMissing(false);
+    const path = item.path;
+    if (!path || !preview) return;
     let current = true;
-    let read = PREVIEWS.get(item.path);
-    if (!read) { read = preview(item.path); PREVIEWS.set(item.path, read); }
-    read.then((value) => { if (current) setUrl(value); }, () => { PREVIEWS.delete(item.path!); if (current) setMissing(true); });
+    const pending = PREVIEWS.get(preview) ?? new Map<string, Promise<string>>();
+    PREVIEWS.set(preview, pending);
+    let read = pending.get(path);
+    if (!read) {
+      read = Promise.resolve().then(() => preview(path));
+      pending.set(path, read);
+      const clear = () => { if (pending.get(path) === read) pending.delete(path); };
+      void read.then(clear, clear);
+    }
+    read.then((value) => { if (current) setUrl(value); }, () => { if (current) setMissing(true); });
     return () => { current = false; };
   }, [item.path, preview]);
   return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url)}>

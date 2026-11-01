@@ -590,11 +590,11 @@ function loadSurface(react = {}, globals = {}, imports = {}) {
   return surface;
 }
 
-function surfaceComposer(seed = {}) {
+function surfaceComposer(seed = {}, globals = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8").split("export function AgentOrchestratorSurface")[1];
   const names = [...source.matchAll(/const \[([A-Za-z_]+),[^\]]+\] = useState/g)].map(match => match[1]);
   const state = { workspaceReady: true, workspaceId: "w", chatTaskId: "", board: { revision: 1, tasks: [] }, ...seed };
-  const refs = []; let cursor = 0, refCursor = 0;
+  const refs = [], callbacks = []; let cursor = 0, refCursor = 0, callbackCursor = 0;
   const react = {
     useState(initial) {
       const name = names[cursor++]; assert.ok(name, "each Surface state is named");
@@ -602,7 +602,12 @@ function surfaceComposer(seed = {}) {
       return [state[name], value => { state[name] = typeof value === "function" ? value(state[name]) : value; }];
     },
     useRef(initial) { return refs[refCursor++] ??= { current: initial }; },
-    useCallback: callback => callback, useMemo: calculate => calculate(), useEffect() {}, useLayoutEffect() {},
+    useCallback(callback, deps) {
+      const index = callbackCursor++, previous = callbacks[index];
+      if (deps && previous && deps.length === previous.deps.length && deps.every((value, i) => Object.is(value, previous.deps[i]))) return previous.callback;
+      callbacks[index] = { callback, deps: deps ? [...deps] : [] }; return callback;
+    },
+    useMemo: calculate => calculate(), useEffect() {}, useLayoutEffect() {},
   };
   const jsx = (type, props) => ({ type, props: props || {} });
   const featureCache = {};
@@ -637,9 +642,9 @@ function surfaceComposer(seed = {}) {
     "./chat-split": feature("chat-split.ts"),
     "./page-visibility": { useSurfaceHidden: () => () => false, pageHidden: () => false, onAoPush: () => () => {} },
   };
-  const surface = loadSurface(react,{ localStorage: { getItem: () => "w", setItem() {} }, structuredClone, crypto: globalThis.crypto }, imports);
+  const surface = loadSurface(react,{ localStorage: { getItem: () => "w", setItem() {} }, structuredClone, crypto: globalThis.crypto, ...globals }, imports);
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
-  const render = () => { cursor = 0; refCursor = 0; return surface.AgentOrchestratorSurface({ language: "en", setError() {} }); };
+  const render = () => { cursor = 0; refCursor = 0; callbackCursor = 0; return surface.AgentOrchestratorSurface({ language: "en", setError() {} }); };
   const currentChat = () => walk(render()).find(item => item.type === "Chat");
   return { state, calls, render, walk, currentChat };
 }
@@ -1090,7 +1095,8 @@ function rendererCallback(file, name, globals) {
   let body;
   const visit = node => {
     if (ts.isVariableDeclaration(node) && node.name.getText(tree) === name) body ??= node.initializer;
-    if (name.startsWith("effect:") && ts.isCallExpression(node) && node.expression.getText(tree) === "useEffect"
+    const hook = name.startsWith("layout:") ? "useLayoutEffect" : "useEffect";
+    if ((name.startsWith("effect:") || name.startsWith("layout:")) && ts.isCallExpression(node) && node.expression.getText(tree) === hook
       && node.arguments[0]?.getText(tree).includes(name.slice(7))) body ??= node.arguments[0];
     ts.forEachChild(node, visit);
   };
@@ -1102,6 +1108,49 @@ function rendererCallback(file, name, globals) {
   return exports.callback;
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
+
+test("a split pane acknowledges parent selection before reporting its own chat, then reports its first send", () => {
+  for (const requested of [{ workspaceId: "ws", taskId: "" }, { workspaceId: "ws", taskId: "task-b" }, { workspaceId: "other", taskId: "task-b" }]) {
+    let parent = { ...requested };
+    const reports = [];
+    const state = { workspaceId: "ws", chatTaskId: "old-task", loadedWorkspace: "ws" };
+    const paneWanted = { current: { workspaceId: "ws", taskId: "old-task" } };
+    const paneSelectionPending = { current: false };
+    const effects = () => {
+      const globals = { ...state, paneWanted, paneSelectionPending,
+        pane: { ...parent, onChat: (workspaceId, taskId) => { reports.push([workspaceId, taskId]); parent = { workspaceId, taskId }; } },
+        switchToWorkspace: workspaceId => { state.workspaceId = workspaceId; state.chatTaskId = null; },
+        selectChat: taskId => { state.chatTaskId = taskId; }, startNewChat: () => { state.chatTaskId = ""; },
+      };
+      return {
+        apply: rendererCallback("AgentOrchestratorSurface.tsx", "effect:paneWanted.current = { workspaceId: pane.workspaceId", globals),
+        report: rendererCallback("AgentOrchestratorSurface.tsx", "effect:pane.onChat(workspaceId, chatTaskId)", globals),
+      };
+    };
+    // A parent selection and a completed workspace read can share a commit. Both effects still
+    // see the old child selection, even after the first effect schedules its state update.
+    const first = effects();
+    first.apply(); first.report();
+    assert.deepEqual(parent, requested, "the old child cannot overwrite the parent request");
+    assert.deepEqual(reports, []);
+    assert.deepEqual(plain(paneWanted.current), requested);
+
+    state.workspaceId = requested.workspaceId; state.loadedWorkspace = requested.workspaceId;
+    state.chatTaskId = requested.taskId;
+    effects().report();
+    assert.deepEqual(parent, requested, "an applied new draft or existing chat stays selected");
+    assert.deepEqual(reports, []);
+
+    state.chatTaskId = "first-send";
+    effects().report();
+    assert.deepEqual(parent, { workspaceId: requested.workspaceId, taskId: "first-send" });
+    assert.deepEqual(reports, [[requested.workspaceId, "first-send"]], "the child's own new chat still reaches the parent");
+    effects().apply(); // The parent's acknowledgement already matches the child; it must not wait again.
+    state.chatTaskId = "second-send";
+    effects().report();
+    assert.deepEqual(parent, { workspaceId: requested.workspaceId, taskId: "second-send" });
+  }
+});
 
 test("blank chat drafts and files stay with their pane and project across Board roundtrips", () => {
   const maps = { CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(), CHAT_ANNOTATIONS: new Map() };
@@ -1164,6 +1213,7 @@ test("chat attachment previews stay alive while another draft keeps them", () =>
 
 test("an unsent split chat can switch projects and finish choosing its new chat", () => {
   const paneWanted = { current: { workspaceId: "old-project", taskId: "" } };
+  const paneSelectionPending = { current: true };
   const state = { workspaceId: "old-project", taskId: null };
   const pendingSelect = { current: null };
   const choose = rendererCallback("AgentOrchestratorSurface.tsx", "chooseWorkspace", {
@@ -1174,13 +1224,19 @@ test("an unsent split chat can switch projects and finish choosing its new chat"
   choose("new-project");
   const decide = rendererCallback("AgentOrchestratorSurface.tsx", "effect:const wanted = paneWanted.current", {
     chatTaskId: null, workspaceId: state.workspaceId, loadedWorkspace: "new-project",
-    board: { tasks: [] }, boardWorkspace: { current: "new-project" }, paneWanted, pendingSelect,
+    board: { tasks: [] }, boardWorkspace: { current: "new-project" }, paneWanted, paneSelectionPending, pendingSelect,
     missions: [], taskLifecycle: [], chatSeed: { workspaceId: "new-project", text: "Keep my draft" },
     chatList: chat.chatList, setChatTaskId: id => { state.taskId = id; }, setView() {}, setSelectedRunId() {},
   });
   decide();
   assert.equal(state.taskId, "", "the pane resolves its new chat so it can accept input and notify its parent");
   assert.equal(paneWanted.current.workspaceId, "new-project");
+  const reports = [];
+  rendererCallback("AgentOrchestratorSurface.tsx", "effect:pane.onChat(workspaceId, chatTaskId)", {
+    pane: { workspaceId: "old-project", taskId: "", onChat: (...selection) => reports.push(selection) },
+    workspaceId: state.workspaceId, chatTaskId: state.taskId, loadedWorkspace: "new-project", paneWanted, paneSelectionPending,
+  })();
+  assert.deepEqual(reports, [["new-project", ""]], "the resolved project choice is still reported to the parent");
 });
 
 function workspaceRecovery({ hidden = false, selected = "p3" } = {}) {
@@ -1318,6 +1374,78 @@ test("late chat creation never overwrites another project, another chat, or an u
     assert.deepEqual(state.board.tasks, [{ id: "task-b" }], stage);
     assert.deepEqual(state.missions, [{ id: "run-b", workspace_id: "b" }], stage);
   }
+});
+
+function outgoingSend() {
+  const attachments = [], annotations = [], composing = { current: null }, state = { outgoing: null, draft: "" };
+  const set = key => next => { state[key] = typeof next === "function" ? next(state[key]) : next; };
+  const scope = projectId => rendererCallback("AgentOrchestratorChat.tsx", "draftKey", { selectedTaskId: "", projectId, draftScope: "main" });
+  return { state, composing, scope,
+    shown(projectId) { return rendererCallback("AgentOrchestratorChat.tsx", "shownDescription", {
+      useMemo: read => read(), outgoing: state.outgoing, selectedTaskId: "", savedDescription: undefined, draftKey: scope(projectId),
+    }); },
+    start(projectId, message) {
+      const reply = delayedReply(); state.draft = message;
+      composing.current = { taskId: "", cacheKey: scope(projectId), draft: message, snapshot: { text: message }, attachments, annotations };
+      const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
+        selectedTaskId: "", draft: message, attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
+        setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
+        setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+        setOutgoing: set("outgoing"), setAnnotations() {},
+      });
+      return { ...reply, done: deliver(message) };
+    },
+  };
+}
+
+test("the real project picker cannot carry a pending message into another blank project's scoped composer", async () => {
+  const ui = outgoingSend(), sending = ui.start("project-a", "A's pending message");
+  assert.equal(ui.shown("project-a"), "A's pending message");
+  const callback = (file, property, contains, globals) => {
+    const source = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8"), tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    let expression;
+    const visit = node => { if (ts.isJsxAttribute(node) && node.name.getText(tree) === property && node.initializer?.getText(tree).includes(contains)) expression ??= node.initializer.expression; ts.forEachChild(node, visit); };
+    visit(tree); assert.ok(expression); const exports = {};
+    vm.runInNewContext(ts.transpileModule("exports.callback = " + expression.getText(tree), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports, ...globals });
+    return exports.callback;
+  };
+  const parent = { workspaceId: "project-a", taskId: "", seed: null };
+  const switchToWorkspace = rendererCallback("AgentOrchestratorSurface.tsx", "switchToWorkspace", {
+    setWorkspaceId: id => { parent.workspaceId = id; }, setChatTaskId: id => { parent.taskId = id; }, pane: undefined, localStorage: { setItem() {} },
+  });
+  const chooseWorkspace = rendererCallback("AgentOrchestratorSurface.tsx", "chooseWorkspace", {
+    switchTarget: { current: "" }, pendingSelect: { current: null }, pane: undefined, switchToWorkspace,
+  });
+  const onPickProject = callback("AgentOrchestratorSurface.tsx", "onPickProject", "setChatSeed", {
+    crypto: { randomUUID: () => "seed" }, chooseWorkspace, setChatSeed: seed => { parent.seed = seed; },
+  });
+  callback("AgentOrchestratorChat.tsx", "onClick", "onPickProject?.(item.id", {
+    item: { id: "project-b" }, projectId: "project-a", title: "", draft: ui.state.draft, setProjectPicker() {}, onPickProject,
+  })();
+  assert.equal(parent.workspaceId, "project-b"); assert.equal(parent.seed.workspaceId, "project-b"); assert.equal(parent.taskId, null);
+  assert.notEqual(ui.scope(parent.workspaceId), ui.scope("project-a"));
+  assert.equal(ui.shown(parent.workspaceId), undefined, "the old send belongs only to its original project and pane");
+  sending.resolve(); assert.equal(await sending.done, true);
+});
+
+test("overlapping deliver callbacks change only their own optimistic message", async t => {
+  // A lower-level ownership invariant: ordinary submit/queue/busy gates still prevent a second send.
+  for (const outcome of ["resolve", "reject"]) await t.test(outcome, async () => {
+    const ui = outgoingSend(), first = ui.start("project-a", "A"), second = ui.start("project-b", "B"), ownB = ui.state.outgoing;
+    first[outcome](outcome === "reject" ? new Error("A failed") : undefined); const completed = await first.done;
+    if (outcome === "resolve") assert.equal(completed, true);
+    assert.equal(ui.state.outgoing, ownB); assert.equal(ui.state.outgoing.sent, false);
+    second.resolve(); assert.equal(await second.done, true); assert.equal(ui.state.outgoing.message, "B"); assert.equal(ui.state.outgoing.sent, true);
+  });
+});
+
+test("retiring an earlier optimistic message preserves its replacement", () => {
+  const outgoing = { taskId: "", cacheKey: "old", message: "A", sent: true }, replacement = { taskId: "", cacheKey: "new", message: "B", sent: false };
+  let current = replacement;
+  const retire = rendererCallback("AgentOrchestratorChat.tsx", "effect:if (!outgoing?.sent)", {
+    outgoing, descriptions: {}, setOutgoing: next => { current = typeof next === "function" ? next(current) : next; },
+  });
+  retire(); assert.equal(current, replacement);
 });
 
 test("send completion preserves the next chat's draft and edits typed during the pending send", async () => {
@@ -1667,10 +1795,125 @@ test("with Retry automatically on, opening a project retries a single chat's fai
   assert.equal(settledRuns.current.size, 0);
 });
 
+function childPoll(file, selector, options = {}) {
+  const { hidden: initiallyHidden = true, ...overrides } = options;
+  let surfaceHidden = initiallyHidden, away = false, timerId = 0;
+  const latest = { current: surfaceHidden }, timers = new Map(), focus = new Set(), clicks = new Set(), calls = [];
+  const window = { setInterval: fn => { timers.set(++timerId, fn); return timerId; }, clearInterval: id => timers.delete(id),
+    addEventListener: (_event, fn) => focus.add(fn), removeEventListener: (_event, fn) => focus.delete(fn) };
+  const document = { visibilityState: "visible", hasFocus: () => true, documentElement: { hasAttribute: () => away } };
+  const visibility = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/page-visibility.ts"), "utf8"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText, { exports: visibility, window, document, require: () => ({ createContext: value => ({ value }),
+    useContext: () => surfaceHidden, useRef: () => latest, useCallback: fn => fn }) });
+  const hidden = visibility.useSurfaceHidden();
+  const request = async operation => {
+    calls.push(operation);
+    if (operation === "chat_processes") return { sessions: [] };
+    if (operation === "chat_context") return { sessions: { session: { usage: null } } };
+    return { previews: {}, runs: [], timeline: [], entries: [], nextOffset: 0, content: "" };
+  };
+  const noop = () => {};
+  const globals = { hidden, window, document, onWindowFocus: visibility.onWindowFocus, windowUnfocused: visibility.windowUnfocused,
+    getCodingToolsClient: () => ({ apps: { call: async input => ({ result: await request(input.operation) }) } }), paneCall: request,
+    readCpaUsage: async range => { calls.push(`usage:${range}`); return { available: false }; },
+    sessionId: "session", sessionIds: ["session"], workspaceId: "workspace", earlierKey: "", currentContext: (sessions, id) => sessions?.[id],
+    wanted: true, key: "cpa/model", from: 1, running: true, active: true, isOpen: true, run: { subagent_id: "subagent" }, range: "24h",
+    onCpaCodex: true, onCpaCline: false, onCpaOther: false, USAGE_RANGE: "7d", session: {},
+    POLL_MS: 4000, QUOTA_POLL_MS: 60000, DETAIL_POLL_MS: 10000, PROCESSES_POLL_MS: 4000, SUBAGENTS_POLL_MS: 3000,
+    OVERVIEW_POLL_MS: 5000, SUBAGENT_WORK_POLL_MS: 2000, PREVIEW_POLL_MS: 1500, COMMANDS_POLL_MS: 2000, OUTPUT_POLL_MS: 1000,
+    button: { current: { addEventListener: (_event, fn) => clicks.add(fn), removeEventListener: (_event, fn) => clicks.delete(fn) } },
+    seen: { current: null }, polled: { current: new Set() }, openNow: { current: false }, onOpenNow: { current: noop }, onStartedNow: { current: noop },
+    startsNewChat: () => true, chatSubagents: chat.chatSubagents, subagentActive: chat.subagentActive, isLive: () => true,
+    selected: "command", selectedAgentShell: false, offsets: { current: {} }, pinned: { current: false }, shownRequest: { current: "" },
+    plain: value => value, TAIL_BYTES: 1024, MAX_OUTPUT_CHARS: 10000,
+    ...overrides,
+  };
+  for (const name of ["Snapshot", "Quota", "UsageReport", "DaySpend", "MonthSpend", "Breakdown", "Stats", "Commands", "LivePage", "Runs", "Context", "Changes", "Tasks", "Usage", "Items", "Error", "State", "Now", "Selected", "ShowHistory", "Output"])
+    globals[`set${name}`] = noop;
+  const cleanup = rendererCallback(file, selector, globals)();
+  return { calls, timers, focus, clicks, cleanup,
+    hide(value) { surfaceHidden = value; visibility.useSurfaceHidden(); },
+    away(value) { away = value; }, page(value) { document.visibilityState = value; },
+    pulse() { for (const callback of [...timers.values(), ...focus, ...clicks]) callback(); } };
+}
+
+test("chat child refreshes skip hidden surfaces, minimized windows and hidden pages, then resume", async t => {
+  for (const [file, selector, expected] of [
+    ["ChatContextMeter.tsx", "effect:const earlier = earlierKey", ["chat_context"]],
+    ["ChatContextMeter.tsx", "effect:setQuota(null)", ["cpa_quota", "usage:7d"]],
+    ["ChatContextMeter.tsx", "effect:let pending = false", ["chat_context"]],
+    ["ChatTurnStats.tsx", "effect:const [first, ...rest]", ["chat_turn_stats"]],
+    ["ChatWorkbench.tsx", "effect:!wanted", ["chat_processes"]],
+    ["ChatWorkbench.tsx", "effect:setLivePage(null)", ["chat_preview_state", "chat_processes"]],
+    ["ChatWorkbench.tsx", "effect:seen.current = null", ["subagents_runs"]],
+    ["ChatWorkbench.tsx", "effect:countChanges", ["chat_context", "chat_changes", "chat_processes"]],
+    ["ChatWorkbench.tsx", "effect:readCpaUsage(range)", ["usage:24h"]],
+    ["ChatWorkbench.tsx", "effect:subagent_transcript", ["subagent_transcript"]],
+    ["ChatWorkbench.tsx", "effect:rememberPage(sessionId", ["chat_preview_state"]],
+    ["ChatWorkbench.tsx", "effect:shownRequest.current", ["chat_processes"]],
+    ["ChatWorkbench.tsx", "effect:offsets.current = { stdout: 0", ["chat_process_output"]],
+  ]) await t.test(`${file} ${selector}`, async () => {
+    const f = childPoll(file, selector);
+    try {
+      f.pulse(); await new Promise(setImmediate);
+      assert.deepEqual(f.calls, [], "automatic initial reads, timers, focus and panel clicks wait while hidden");
+      f.hide(false); f.pulse(); await new Promise(setImmediate);
+      for (const operation of expected) assert.ok(f.calls.includes(operation), `${operation} resumes without remounting`);
+      f.calls.length = 0;
+      for (const reason of ["surface", "minimized", "page"]) {
+        f.hide(reason === "surface"); f.away(reason === "minimized"); f.page(reason === "page" ? "hidden" : "visible");
+        f.pulse(); await new Promise(setImmediate);
+        assert.deepEqual(f.calls, [], reason);
+      }
+      f.hide(false); f.away(false); f.page("visible"); f.pulse(); await new Promise(setImmediate);
+      for (const operation of expected) assert.ok(f.calls.includes(operation), `${operation} resumes after the window returns`);
+    } finally { f.cleanup?.(); }
+    assert.equal(f.timers.size, 0); assert.equal(f.focus.size, 0); assert.equal(f.clicks.size, 0);
+  });
+});
+
+test("ended turn and subagent reads defer while hidden, issue once when shown and retire their timer", async t => {
+  for (const [file, selector, options] of [
+    ["ChatTurnStats.tsx", "effect:const [first, ...rest]", { running: false }],
+    ["ChatWorkbench.tsx", "effect:subagent_transcript", { active: false }],
+  ]) for (const hidden of [true, false]) await t.test(`${file} hidden=${hidden}`, async () => {
+    const f = childPoll(file, selector, { ...options, hidden });
+    try {
+      await new Promise(setImmediate);
+      assert.equal(f.calls.length, hidden ? 0 : 1);
+      assert.equal(f.timers.size, hidden ? 1 : 0);
+      if (hidden) {
+        const abandoned = childPoll(file, selector, { ...options, hidden: true });
+        abandoned.cleanup(); abandoned.hide(false); abandoned.pulse(); await new Promise(setImmediate);
+        assert.equal(abandoned.timers.size, 0); assert.equal(abandoned.calls.length, 0, "unmount cancels the deferred final read");
+      }
+      f.hide(false); f.pulse(); await new Promise(setImmediate);
+      assert.equal(f.calls.length, 1); assert.equal(f.timers.size, 0);
+      f.pulse(); await new Promise(setImmediate); assert.equal(f.calls.length, 1);
+    } finally { f.cleanup?.(); }
+    assert.equal(f.timers.size, 0);
+  });
+});
+
+test("a hidden preview still hides its native view and disposes its observer on cleanup", () => {
+  const calls = [], remeasure = { current: null }; let disconnected = 0;
+  const cleanup = rendererCallback("ChatWorkbench.tsx", "layout:const measure = () =>", {
+    hidden: () => true, sessionId: "session", hasPage: true, coveredNow: { current: false }, remeasure,
+    slot: { current: { getBoundingClientRect: () => ({ width: 0, height: 0 }) } },
+    paneCall: async operation => { calls.push(operation); }, requestAnimationFrame: fn => { fn(); return 1; }, cancelAnimationFrame() {},
+    ResizeObserver: class { observe() {} disconnect() { disconnected += 1; } }, window: { addEventListener() {}, removeEventListener() {} },
+  })();
+  assert.deepEqual(calls, ["chat_preview_hide"]);
+  cleanup(); assert.deepEqual(calls, ["chat_preview_hide", "chat_preview_hide"]);
+  assert.equal(disconnected, 1); assert.equal(remeasure.current, null);
+});
+
 test("an old terminal read cannot advance a newly selected command's output cursor", async () => {
   const old = delayedReply(), offsets = { current: { stdout: 0, stderr: 0 } };
   const read = rendererCallback("ChatWorkbench.tsx", "effect:offsets.current = { stdout: 0", {
-    selected: "old", sessionId: "session", workspaceId: "a", selectedAgentShell: false, offsets,
+    selected: "old", sessionId: "session", workspaceId: "a", selectedAgentShell: false, offsets, hidden: () => false,
     pinned: { current: false }, setOutput() {}, TAIL_BYTES: 1000, MAX_OUTPUT_CHARS: 10000, OUTPUT_POLL_MS: 1000,
     window: { setInterval: () => 1, clearInterval() {} }, plain: value => value,
     paneCall: async (_operation, args) => args.stream === "stdout" && args.offset === Number.MAX_SAFE_INTEGER
@@ -1707,6 +1950,100 @@ test("late start, restart, retry and pause replies cannot change another selecte
         : { selected: "run-b", status: "idle" }, name);
     }
   }
+});
+
+function sentImagePreviews() {
+  const PREVIEWS = rendererCallback("ChatToolParts.tsx", "PREVIEWS", {});
+  const mount = (preview, path, state = { url: null, missing: false }) => {
+    const cleanup = rendererCallback("ChatToolParts.tsx", "effect:PREVIEWS", {
+      PREVIEWS, preview, item: { path }, setUrl: value => { state.url = value; }, setMissing: value => { state.missing = value; },
+    })();
+    return { state, cleanup: cleanup || (() => {}) };
+  };
+  return { mount, pending: preview => (typeof PREVIEWS.size === "number" ? PREVIEWS : PREVIEWS.get(preview))?.size || 0 };
+}
+
+test("sent image previews release settled reads after 100 images unmount", async () => {
+  const fixture = sentImagePreviews(); let reads = 0;
+  const preview = async file => { reads++; return "data:image/png;base64," + file; };
+  const images = Array.from({ length: 100 }, (_, i) => fixture.mount(preview, "image-" + i));
+  await new Promise(setImmediate);
+  for (const image of images) { assert.ok(image.state.url); image.cleanup(); }
+  assert.equal(reads, 100);
+  assert.equal(fixture.pending(preview), 0, "completed full-size data URLs are owned only by mounted images");
+});
+
+test("sent image previews reread a remounted path after its file changes", async () => {
+  const fixture = sentImagePreviews(); let content = "v1", reads = 0;
+  const preview = async () => { reads++; return content; };
+  const first = fixture.mount(preview, "same.png");
+  await new Promise(setImmediate); assert.equal(first.state.url, "v1"); first.cleanup();
+  content = "v2";
+  const second = fixture.mount(preview, "same.png");
+  await new Promise(setImmediate);
+  assert.equal(second.state.url, "v2"); assert.equal(reads, 2); second.cleanup();
+});
+
+test("sent image previews share pending reads without canceling another mounted consumer", async () => {
+  const fixture = sentImagePreviews(), reply = delayedReply(); let reads = 0;
+  const preview = () => { reads++; return reply.promise; };
+  const first = fixture.mount(preview, "same.png"), second = fixture.mount(preview, "same.png");
+  first.cleanup(); await new Promise(setImmediate);
+  assert.equal(reads, 1); assert.equal(fixture.pending(preview), 1);
+  reply.resolve("shared"); await new Promise(setImmediate);
+  assert.equal(first.state.url, null); assert.equal(second.state.url, "shared");
+  assert.equal(fixture.pending(preview), 0); second.cleanup();
+});
+
+test("sent image previews isolate providers and an old failed read cannot evict another provider", async () => {
+  const fixture = sentImagePreviews(), oldReply = delayedReply(), currentReply = delayedReply(); let currentReads = 0;
+  const oldProvider = () => oldReply.promise;
+  const currentProvider = () => { currentReads++; return currentReply.promise; };
+  const oldImage = fixture.mount(oldProvider, "same.png"); oldImage.cleanup();
+  const currentImage = fixture.mount(currentProvider, "same.png");
+  await new Promise(setImmediate);
+  oldReply.reject(new Error("old provider unavailable")); await new Promise(setImmediate);
+  const sibling = fixture.mount(currentProvider, "same.png"); await new Promise(setImmediate);
+  assert.equal(currentReads, 1); assert.equal(fixture.pending(currentProvider), 1);
+  currentReply.resolve("current"); await new Promise(setImmediate);
+  assert.equal(currentImage.state.url, "current"); assert.equal(sibling.state.url, "current");
+  assert.equal(oldImage.state.missing, false); currentImage.cleanup(); sibling.cleanup();
+});
+
+test("sent image previews clear failed reads so a remount can retry", async () => {
+  const fixture = sentImagePreviews(); let reads = 0;
+  const preview = async () => { if (++reads === 1) throw new Error("missing"); return "recovered"; };
+  const first = fixture.mount(preview, "same.png");
+  await new Promise(setImmediate); assert.equal(first.state.missing, true); first.cleanup();
+  assert.equal(fixture.pending(preview), 0);
+  const second = fixture.mount(preview, "same.png");
+  await new Promise(setImmediate);
+  assert.equal(second.state.url, "recovered"); assert.equal(second.state.missing, false); assert.equal(reads, 2); second.cleanup();
+});
+
+test("sent image previews reset a changed path or provider and fence late replies", async () => {
+  const fixture = sentImagePreviews(), oldReply = delayedReply(), nextReply = delayedReply();
+  const state = { url: "previous", missing: true };
+  const first = fixture.mount(() => oldReply.promise, "old.png", state);
+  assert.equal(state.url, null); assert.equal(state.missing, false); first.cleanup();
+  const next = fixture.mount(() => nextReply.promise, "next.png", state);
+  nextReply.resolve("next"); await new Promise(setImmediate);
+  oldReply.resolve("old"); await new Promise(setImmediate); assert.equal(state.url, "next"); next.cleanup();
+  const unavailable = fixture.mount(undefined, "next.png", state);
+  assert.equal(state.url, null); assert.equal(state.missing, false); unavailable.cleanup();
+});
+
+test("the Surface keeps its attachment preview provider stable across unrelated polls", async () => {
+  const paths = [], launcher = { attachmentPreview: async file => { paths.push(file); return "first"; } };
+  const fixture = surfaceComposer({}, { window: { codexWebLauncher: launcher } });
+  const first = fixture.currentChat().props.attachmentPreview;
+  fixture.state.board = { revision: 2, tasks: [] };
+  const second = fixture.currentChat().props.attachmentPreview;
+  assert.equal(second, first, "polling does not restart every mounted thumbnail read");
+  assert.equal(await second("one.png"), "first");
+  launcher.attachmentPreview = async file => { paths.push(file); return "current"; };
+  assert.equal(await first("two.png"), "current", "the stable provider still uses the current desktop bridge");
+  assert.deepEqual(paths, ["one.png", "two.png"]);
 });
 
 test("a turn's activity drops answered approvals, keeps every tool call, and folds runs of calls and thinking", () => {
@@ -2190,4 +2527,123 @@ test("a message stamp saved in UTC shows in this computer's own time zone", () =
     assert.equal(chat.localChatStamp("2026-10-23 20:10"), "2026-10-24 04:10");
   }
   assert.equal(chat.localChatStamp("earlier"), "earlier", "a stamp in any other form is shown as saved");
+});
+
+function filePane(name) {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatWorkbench.tsx"), "utf8");
+  const file = ts.createSourceFile("ChatWorkbench.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const code = file.statements.filter(node => ts.isFunctionDeclaration(node) && [name, "parseDiff"].includes(node.name?.text))
+    .map(node => node.getText(file)).join("\n") + `\nexports.Pane = ${name};`;
+  const states = [], refs = [], effects = [], memos = [], queued = [], requests = [], afterUnmount = [];
+  let stateIndex, refIndex, effectIndex, memoIndex, dirty, mounted = true;
+  const props = { sessionId: "agent", workspaceId: "project" }, exports = {};
+  const changed = (before, after) => !before || before.length !== after.length || after.some((value, i) => !Object.is(value, before[i]));
+  const effect = (work, deps, phase) => { const index = effectIndex++, previous = effects[index];
+    if (changed(previous?.deps, deps)) queued.push({ phase, work: () => { previous?.cleanup?.(); effects[index] = { deps, cleanup: work() }; } }); };
+  const jsx = (type, props) => ({ type, props: props || {} });
+  vm.runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
+    exports, Error, Icon: "Icon", paneCall: (operation, input) => { const reply = delayedReply(); requests.push({ operation, input, ...reply }); return reply.promise; },
+    useState(initial) { const index = stateIndex++; if (!(index in states)) states[index] = typeof initial === "function" ? initial() : initial;
+      return [states[index], next => { if (!mounted) afterUnmount.push(index); const value = typeof next === "function" ? next(states[index]) : next;
+        if (!Object.is(states[index], value)) { states[index] = value; dirty = true; } }]; },
+    useRef: initial => refs[refIndex++] ??= { current: initial },
+    useEffect: (work, deps) => effect(work, deps, 1), useLayoutEffect: (work, deps) => effect(work, deps, 0),
+    useMemo(work, deps) { const index = memoIndex++; if (changed(memos[index]?.deps, deps)) memos[index] = { deps, value: work() }; return memos[index].value; },
+    require: () => ({ jsx, jsxs: jsx }),
+  });
+  const nodes = tree => !tree || typeof tree !== "object" ? [] : Array.isArray(tree) ? tree.flatMap(nodes) : [tree, ...nodes(tree.props?.children)];
+  const render = (next = {}) => {
+    Object.assign(props, next);
+    for (let pass = 0; pass < 10; pass++) {
+      dirty = false; stateIndex = refIndex = effectIndex = memoIndex = 0; const tree = exports.Pane(props);
+      for (const item of queued.splice(0).sort((a, b) => a.phase - b.phase)) item.work();
+      if (!dirty) return tree;
+    }
+    throw new Error("file pane hooks did not settle");
+  };
+  const findEntry = path => nodes(render()).find(node => node.type === "button" && (node.props.title === path || node.props.children?.includes?.(path)));
+  return { requests, nodes, render, findEntry, afterUnmount,
+    select(path) { const button = findEntry(path); assert.ok(button, path); button.props.onClick(); return render(); },
+    displayed: () => nodes(render()).find(node => node.type === "code")?.props.children,
+    errors: () => nodes(render()).filter(node => node.props.role === "alert").map(node => node.props.children),
+    refresh: () => nodes(render()).find(node => node.props["aria-label"] === "Refresh changes"),
+    unmount() { for (const item of effects) item?.cleanup?.(); mounted = false; },
+    async list() { render(); requests[0].resolve(name === "FilesPane" ? { entries: ["a.txt", "b.txt"].map(path => ({ path, name: path, type: "file" })) }
+      : { entries: ["a.txt", "b.txt"].map(path => ({ path, worktree_status: "?" })), diff: "" }); await new Promise(setImmediate); render(); },
+  };
+}
+
+test("file viewers keep the newest selection after older success or failure", async t => {
+  for (const pane of ["FilesPane", "ChangesPane"]) for (const outcome of ["resolve", "reject"]) await t.test(pane + " " + outcome, async () => {
+    const ui = filePane(pane); await ui.list(); ui.select("a.txt"); ui.select("b.txt");
+    const reads = ui.requests.filter(item => item.operation === "chat_file"); assert.equal(reads.length, 2);
+    reads[1].resolve({ content: "newest B" }); await new Promise(setImmediate); assert.equal(ui.displayed(), "b.txt");
+    reads[0][outcome](outcome === "resolve" ? { content: "late A" } : new Error("old A failed")); await new Promise(setImmediate);
+    assert.equal(ui.displayed(), "b.txt"); assert.deepEqual(ui.errors(), []); ui.unmount();
+  });
+});
+
+test("Files rereads the same path and reports only the current file error", async () => {
+  const ui = filePane("FilesPane"); await ui.list(); ui.select("a.txt");
+  ui.requests.at(-1).resolve({ content: "v1" }); await new Promise(setImmediate); assert.equal(ui.displayed(), "a.txt");
+  ui.select("a.txt"); const same = ui.requests.at(-1); assert.equal(same.operation, "chat_file"); same.resolve({ content: "v2" }); await new Promise(setImmediate);
+  assert.ok(ui.nodes(ui.render()).some(node => node.props.className === "cx-diff-text" && node.props.children === "v2"));
+  ui.select("b.txt"); ui.requests.at(-1).reject(new Error("current B failed")); await new Promise(setImmediate);
+  assert.deepEqual(ui.errors(), ["current B failed"]); ui.unmount();
+});
+
+test("file viewers reset ownership and cached rows on workspace/session change and unmount", async t => {
+  for (const pane of ["FilesPane", "ChangesPane"]) for (const boundary of ["workspaceId", "sessionId", "unmount"]) await t.test(pane + " " + boundary, async () => {
+    const ui = filePane(pane); await ui.list(); const oldButton = ui.findEntry("a.txt"); ui.select("a.txt"); const oldRead = ui.requests.at(-1);
+    if (boundary === "unmount") ui.unmount();
+    else {
+      ui.render({ [boundary]: "other" }); assert.equal(ui.displayed(), undefined); assert.equal(ui.findEntry("a.txt"), undefined);
+      const listing = ui.requests.at(-1); assert.equal(listing.input[boundary], "other");
+      listing.resolve(pane === "FilesPane" ? { entries: [{ name: "b.txt", path: "b.txt", type: "file" }] }
+        : { entries: [{ path: "b.txt", worktree_status: "?" }], diff: "" }); await new Promise(setImmediate);
+      const count = ui.requests.length; oldButton.props.onClick(); ui.render(); assert.equal(ui.requests.length, count, "a retained old-scope callback cannot read in either workspace");
+      ui.select("b.txt"); ui.requests.at(-1).resolve({ content: "current scope B" }); await new Promise(setImmediate); assert.equal(ui.displayed(), "b.txt");
+    }
+    oldRead.resolve({ content: "old scope A" }); await new Promise(setImmediate);
+    if (boundary === "unmount") assert.deepEqual(ui.afterUnmount, []);
+    else { assert.equal(ui.displayed(), "b.txt"); ui.unmount(); }
+  });
+});
+
+test("file/folder/list replies after unmount cannot update either file viewer", async t => {
+  for (const pane of ["FilesPane", "ChangesPane"]) for (const outcome of ["resolve", "reject"]) await t.test(pane + " " + outcome, async () => {
+    const ui = filePane(pane); ui.render(); ui.unmount();
+    ui.requests[0][outcome](outcome === "resolve" ? { entries: [], diff: "" } : new Error("late listing failure")); await new Promise(setImmediate);
+    assert.deepEqual(ui.afterUnmount, []);
+  });
+});
+
+test("Refresh rereads a selected untracked file even when the diff stays empty", async () => {
+  const ui = filePane("ChangesPane"); await ui.list(); ui.select("a.txt"); ui.requests.at(-1).resolve({ content: "v1" }); await new Promise(setImmediate);
+  ui.refresh().props.onClick(); ui.render(); ui.requests.at(-1).resolve({ entries: [{ path: "a.txt", worktree_status: "?" }], diff: "" }); await new Promise(setImmediate); ui.render();
+  const reads = ui.requests.filter(item => item.operation === "chat_file"); assert.equal(reads.length, 2);
+  reads[1].resolve({ content: "v2" }); await new Promise(setImmediate);
+  assert.ok(ui.nodes(ui.render()).some(node => node.props.className === "cx-diff-text" && node.props.children.includes("v2"))); ui.unmount();
+});
+
+test("only the latest Changes refresh can replace data, report errors or finish loading", async t => {
+  for (const outcome of ["resolve", "reject"]) await t.test(outcome, async () => {
+    const ui = filePane("ChangesPane"); await ui.list(); const refresh = ui.refresh(); refresh.props.onClick(); refresh.props.onClick(); ui.render();
+    const reads = ui.requests.filter(item => item.operation === "chat_changes"); assert.equal(reads.length, 3);
+    reads[1][outcome](outcome === "resolve" ? { branch: "old", entries: [], diff: "" } : new Error("old refresh failed")); await new Promise(setImmediate);
+    assert.equal(ui.refresh().props.disabled, true); assert.deepEqual(ui.errors(), []);
+    reads[2].resolve({ branch: "current", entries: [{ path: "b.txt", worktree_status: "?" }], diff: "" }); await new Promise(setImmediate);
+    assert.equal(ui.refresh().props.disabled, false); assert.ok(ui.nodes(ui.render()).some(node => node.props.className === "cx-changes-branch" && node.props.children === "current")); ui.unmount();
+  });
+});
+
+test("only the latest folder read can replace its rows or report its error", async t => {
+  for (const outcome of ["resolve", "reject"]) await t.test(outcome, async () => {
+    const ui = filePane("FilesPane"); ui.render(); ui.requests[0].resolve({ entries: [{ name: "folder", path: "folder", type: "directory" }] }); await new Promise(setImmediate);
+    ui.select("folder"); ui.select("folder"); ui.select("folder");
+    const reads = ui.requests.filter(item => item.input.path === "folder"); assert.equal(reads.length, 2);
+    reads[1].resolve({ entries: [{ name: "b.txt", path: "folder/b.txt", type: "file" }] }); await new Promise(setImmediate); ui.render();
+    reads[0][outcome](outcome === "resolve" ? { entries: [{ name: "a.txt", path: "folder/a.txt", type: "file" }] } : new Error("old folder failed")); await new Promise(setImmediate);
+    assert.ok(ui.findEntry("b.txt")); assert.equal(ui.findEntry("a.txt"), undefined); assert.deepEqual(ui.errors(), []); ui.unmount();
+  });
 });

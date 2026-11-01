@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
 import { cpaStatusWord, dshDuration, isDeepSeekModel, tokensShort, type CpaRefusal } from "./ao-chat";
+import { useSurfaceHidden } from "./page-visibility";
 
 // The line under the chat box, as DeepSeek Harness shows one: the chat's rounds, then the latest
 // turn's model requests through CPA (chat_turn_stats, read from CPA Helper's request log): how many
@@ -98,6 +99,7 @@ export function ChatTurnStats({ model, models = [], from, rounds, running, onRef
   /** Told the running turn's CPA refusals as they are read, so the turn's status line can say why it is quiet. */
   onRefusal?: (refusal: CpaRefusal | null) => void;
 }) {
+  const hidden = useSurfaceHidden();
   const [stats, setStats] = useState<TurnStats | null>(null);
   const refusal = running && stats?.available ? stats.refusal ?? null : null;
   const refusalKey = refusal ? `${refusal.streak}:${refusal.status}:${refusal.lastAt}` : "";
@@ -110,14 +112,18 @@ export function ChatTurnStats({ model, models = [], from, rounds, running, onRef
     if (!key || !from) return undefined;
     let live = true;
     const [first, ...rest] = key.split("|");
-    const read = () => void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_turn_stats", arguments: { model: first, models: rest, from } })
-      .then((outer) => { if (live) setStats((outer.result as TurnStats | undefined) ?? null); })
-      .catch(() => undefined);
+    const read = () => {
+      if (!live || hidden()) return;
+      if (!running) window.clearInterval(timer);
+      void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_turn_stats", arguments: { model: first, models: rest, from } })
+        .then((outer) => { if (live) setStats((outer.result as TurnStats | undefined) ?? null); })
+        .catch(() => undefined);
+    };
+    // A hidden ended turn waits for a visible tick, then retires its timer after the final read.
+    const timer = window.setInterval(read, POLL_MS);
     read();
-    // While the turn runs the numbers move; once it ends one more read settles them.
-    const timer = running ? window.setInterval(() => { if (document.visibilityState === "visible") read(); }, POLL_MS) : undefined;
-    return () => { live = false; if (timer) window.clearInterval(timer); };
-  }, [key, from, running]);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [key, from, running, hidden]);
 
   if (!rounds) return null;
   const has = stats?.available && stats.steps;

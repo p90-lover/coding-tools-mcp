@@ -510,6 +510,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
 }) {
   const copy = words[language];
   const surfaceHidden = useSurfaceHidden();
+  const attachmentPreview = useCallback((file: string) => window.codexWebLauncher?.attachmentPreview?.(file)
+    ?? Promise.reject(new Error("Previews show in the desktop app")), []);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   // The project whose board and runs were last read in full: until it is the open one, the chat
@@ -522,6 +524,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [workspaceId, setWorkspaceId] = useState(() => { if (pane) return pane.workspaceId; try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
   // The chat a split pane is to show once its project has loaded (null: not a pane).
   const paneWanted = useRef(pane ? { workspaceId: pane.workspaceId, taskId: pane.taskId } : null);
+  const paneSelectionPending = useRef(false);
   // One project tree switches between the conversation and the selected graph above its workspace board.
   const [view, setView] = useState<"chat" | "overview" | "board">("chat");
   // Settings covers the chat area as Codex's does (ChatSettingsPage); the chat stays mounted below.
@@ -1133,6 +1136,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     if (wanted) {
       if (wanted.workspaceId !== workspaceId || loadedWorkspace !== workspaceId) return;
       const found = wanted.taskId ? chatList(missions, board.tasks, taskLifecycle).find((entry) => entry.taskId === wanted.taskId) : undefined;
+      // Project loading resolved the request, including a chat removed since it was chosen.
+      paneSelectionPending.current = false;
       setChatTaskId(found?.taskId ?? "");
       if (found) setSelectedRunId(found.latestRunId);
       return;
@@ -2280,6 +2285,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   useEffect(() => {
     if (!pane) return;
     paneWanted.current = { workspaceId: pane.workspaceId, taskId: pane.taskId };
+    paneSelectionPending.current = pane.workspaceId !== workspaceId || pane.taskId !== chatTaskId;
     if (pane.workspaceId !== workspaceId) { switchToWorkspace(pane.workspaceId); return; }
     if (chatTaskId === null || chatTaskId === pane.taskId) return;
     if (pane.taskId) selectChat(pane.taskId); else startNewChat();
@@ -2287,6 +2293,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // ...and tells it which chat it opened itself (a new chat's first send, a project picked in it).
   useEffect(() => {
     if (!pane || chatTaskId === null || loadedWorkspace !== workspaceId) return;
+    // Both effects read the same render: don't echo the old chat while the parent's request applies.
+    if (paneSelectionPending.current) {
+      if (pane.workspaceId !== workspaceId || pane.taskId !== chatTaskId) return;
+      paneSelectionPending.current = false;
+    }
     paneWanted.current = { workspaceId, taskId: chatTaskId };
     if (pane.workspaceId !== workspaceId || pane.taskId !== chatTaskId) pane.onChat(workspaceId, chatTaskId);
   }, [chatTaskId, workspaceId, loadedWorkspace]);
@@ -2742,7 +2753,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                 revealFile={(file) => {
                   void window.codexWebLauncher?.revealFile?.(file).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
                 }}
-                attachmentPreview={(file) => window.codexWebLauncher?.attachmentPreview?.(file) ?? Promise.reject(new Error("Previews show in the desktop app"))}
+                attachmentPreview={attachmentPreview}
                 structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
                   nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
                   selectedId="" busy={Boolean(busy)} describe={describeNode}
