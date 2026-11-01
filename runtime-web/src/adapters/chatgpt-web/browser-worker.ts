@@ -1013,13 +1013,22 @@ export class ChatGptFailedSendRetrier {
   get retries(): number { return this.presses; }
 
   /** True while a failed send is showing (the caller observes again later); false when there is none. */
-  async handle(page: Page, onRetry?: (attempt: number) => Promise<void> | void): Promise<boolean> {
+  async handle(
+    page: Page,
+    onRetry?: (attempt: number) => Promise<void> | void,
+    abortSignal?: AbortSignal,
+  ): Promise<boolean> {
+    if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const alert = page.locator('main aside[role="alert"]').last();
     // The button is looked up only once an alert shows, so an ordinary observation costs one probe.
-    const retry = await alert.isVisible().catch(() => false)
+    const alertVisible = await alert.isVisible().catch(() => false);
+    if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    const retry = alertVisible
       ? alert.getByRole("button", { name: /^\s*(Retry|Try again)\s*$/i }).last()
       : undefined;
-    if (!retry || !await retry.isVisible().catch(() => false)) {
+    const retryVisible = retry ? await retry.isVisible().catch(() => false) : false;
+    if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (!retry || !retryVisible) {
       this.since = undefined;
       return false;
     }
@@ -1028,13 +1037,15 @@ export class ChatGptFailedSendRetrier {
     const wait = this.retryAfterMs[this.presses];
     if (wait === undefined) {
       if (at - this.since < this.giveUpMs) return true;
+      const message = (await alert.innerText().catch(() => "")).replace(/\s*Retry\s*$/i, "").trim().slice(0, 120) || "send failed";
+      if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       throw new ChatGptWebAdapterError(
-        `ChatGPT could not send the message ("${(await alert.innerText().catch(() => "")).replace(/\s*Retry\s*$/i, "").trim().slice(0, 120) || "send failed"}"), and its Retry failed ${this.presses} time(s). Retry the turn.`,
+        `ChatGPT could not send the message ("${message}"), and its Retry failed ${this.presses} time(s). Retry the turn.`,
         { status: 502, errorType: "server_error", code: "chatgpt_send_failed", retryable: true },
       );
     }
     if (at - this.since < wait) return true;
-    await retry.click();
+    await retry.click({ signal: abortSignal });
     this.presses += 1;
     this.since = undefined;
     await onRetry?.(this.presses);
@@ -3945,7 +3956,7 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
-      if (await failedSend.handle(page)) {
+      if (await failedSend.handle(page, undefined, abortSignal)) {
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
         continue;
       }
@@ -5564,7 +5575,7 @@ export class ChatGptBrowserWorker {
         if (!connectionInterruptedVisible) await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
         // ChatGPT's offer to move the chat to Work applies itself unless declined in time.
         await throwIfChatGptWorkMode(page);
-        if (await failedSend.handle(page, attempt => diagnostics.capture(page, `send-retry-${attempt}`))) {
+        if (await failedSend.handle(page, attempt => diagnostics.capture(page, `send-retry-${attempt}`), turn.abortSignal)) {
           internalObservationFaults = 0;
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
