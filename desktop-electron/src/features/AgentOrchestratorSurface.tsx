@@ -509,6 +509,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
 }) {
   const copy = words[language];
   const surfaceHidden = useSurfaceHidden();
+  const attachmentPreview = useCallback((file: string) => window.codexWebLauncher?.attachmentPreview?.(file)
+    ?? Promise.reject(new Error("Previews show in the desktop app")), []);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   // The project whose board and runs were last read in full: until it is the open one, the chat
@@ -2749,7 +2751,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                 revealFile={(file) => {
                   void window.codexWebLauncher?.revealFile?.(file).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
                 }}
-                attachmentPreview={(file) => window.codexWebLauncher?.attachmentPreview?.(file) ?? Promise.reject(new Error("Previews show in the desktop app"))}
+                attachmentPreview={attachmentPreview}
                 structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
                   nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
                   selectedId="" busy={Boolean(busy)} describe={describeNode}
