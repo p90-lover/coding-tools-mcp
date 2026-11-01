@@ -292,6 +292,20 @@ test("an account in a running turn cannot be removed", async (t) => {
   assert.deepEqual(erased, []);
 });
 
+test("removal rechecks MCP setup after an awaited account switch", async t => {
+  let later = false, state;
+  state = setup(t, { failCreate() {
+    if (later) queueMicrotask(() => { state.host().currentOperation = () => "MCP connector creation"; });
+    return false;
+  } });
+  const keep = state.registry.add();
+  later = true;
+  await assert.rejects(state.service.remove(FIRST_ACCOUNT_ID, {}), /MCP connector creation/);
+  assert.equal(state.registry.has(FIRST_ACCOUNT_ID), true);
+  assert.equal(state.registry.activeId(), keep);
+  assert.deepEqual(state.erased, []);
+});
+
 test("sign-in reads that arrive during a read coalesce into one more read", async (t) => {
   let gate = deferred();
   const { service, registry, reads, signedIn, published } = setup(t, { readGate: () => gate.promise });

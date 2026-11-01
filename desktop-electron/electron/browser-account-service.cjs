@@ -181,6 +181,9 @@ function createBrowserAccountService(deps) {
       await switchTo(accounts.find((entry) => entry.id !== accountId).id, context);
     }
     const host = deps.host();
+    if (host?.currentOperation?.() === "MCP connector creation") {
+      throw new Error("Wait for MCP connector creation to finish before removing accounts.");
+    }
     if (host?.livePartitions?.().includes(deps.registry.partitionOf(accountId)) && host.accountSwitchBlocker?.()) {
       throw new Error(`That account cannot be removed while ${host.accountSwitchBlocker()}. Try again when it is done.`);
     }

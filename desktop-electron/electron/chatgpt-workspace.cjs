@@ -1,7 +1,7 @@
 "use strict";
 
 const { chatGptMcpContextScript, observeMcpSetupContext, extensionHelpersSource, createConfiguredConnector,
-  currentConnectorSettings, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding,
+  currentConnectorSettings, extraConnectorSettings,
   requireAutomaticConnectorSetup } = require("./mcp-connector-setup.cjs");
 
 const ADMIN_REQUIRED = "No signed-in owner or admin of this ChatGPT workspace was found. Add or sign in to that workspace's owner/admin account in Browser Management, then retry.";
@@ -219,22 +219,14 @@ async function createWorkspaceConnector(options) {
       operationHeld: true, expectedContext: context, shared, assertCurrent,
       target: { ...target, partition }, onContext });
     if (member.workspaceStructure !== "workspace" || isWorkspaceAdmin(member)) return connect(target.partition, member);
-    const saved = readAccountConnectorBindings(options.app);
-    const scope = { ...settings, workspaceId: member.workspaceId };
-    const previous = accountConnectorBinding(saved, target.partition, scope);
-    const publisher = previous && accountConnectorBinding(saved, previous.publisherPartition, scope);
-    if (previous?.userId === member.userId && previous.workspaceId === member.workspaceId
-      && previous.name === settings.name && previous.tunnelId === settings.tunnelId && publisher
-      && publisher.userId === previous.publisherUserId && publisher.href === previous.href
-      && publisher.workspaceId === member.workspaceId && publisher.name === settings.name && publisher.tunnelId === settings.tunnelId) {
-      try { return await connect(target.partition, member, { ...publisher, publisherPartition: previous.publisherPartition, memberUserId: member.userId }); }
-      catch (error) {
-        if (error?.mcpMutationStarted === false && /did not finish loading this plugin|not available to this member/i.test(error.message)) throw new Error(PUBLISH_REQUIRED);
-        throw error;
-      }
-    }
+    // Saved publisher/member bindings are navigation hints, never permission to connect.
+    // Reinspect a signed-in publisher and its exact saved tunnel fields for every retry.
     const creationRestricted = error => error?.mcpMutationStarted !== true
-      && /connector form|custom MCP server form|Add action|Create action/i.test(error?.message || '');
+      && (/connector form|custom MCP server form|Add action|Create action/i.test(error?.message || '')
+        || ["Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.",
+          "The selected tunnel belongs to a different Platform user. Choose a tunnel created by the signed-in account.",
+          "Platform authentication is different from the selected ChatGPT account. Sign in to the intended Platform account.",
+          "Platform tunnel access requires read and use permissions in the selected organization."].includes(error?.message));
     if (inspected.allowed !== false) {
       try { return await connect(target.partition, member); }
       catch (error) { if (!creationRestricted(error)) throw error; }
@@ -296,7 +288,7 @@ async function createWorkspaceConnector(options) {
     let result;
     try {
       result = await connect(target.partition, member, { href: created.href, ...created.binding,
-        publisherPartition: admin.partition, memberUserId: member.userId });
+        publisherPartition: admin.partition, memberUserId: member.userId, creationResult: created });
     } catch (error) {
       if (error?.mcpMutationStarted !== true && /did not finish loading this plugin|exact workspace connector|not available to this member/i.test(error?.message || "")) {
         throw new Error(PUBLISH_REQUIRED);

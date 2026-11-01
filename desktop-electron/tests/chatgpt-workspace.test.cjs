@@ -41,7 +41,7 @@ function fixture(options = {}) {
     "persist:owner": { userId: "user-owner", activeId: workspaceId, memberships: { [workspaceId]: "account-owner" } },
   };
   const calls = [], windows = [], contexts = [];
-  let removed = false;
+  let removed = false, freshPublisher = null;
   function Window(config) {
     const partition = config.webPreferences.partition, profile = profiles[partition];
     assert.equal(config.show, false);
@@ -109,13 +109,16 @@ function fixture(options = {}) {
       if (partition !== "persist:member" && options.serverDenied) throw new Error("The MCP server denied access.");
       calls.push([input.shared ? "connect-member" : "create", partition]);
       if (input.shared) {
+        assert.equal(input.shared.creationResult, freshPublisher, "member setup receives the original fresh publisher result, not a cached binding");
         assert.equal(input.shared.workspaceId, workspaceId);
         assert.equal(input.shared.memberUserId, "user-member");
         assert.notEqual(input.shared.userId, "user-member");
         if (options.memberUnavailable) throw Object.assign(new Error("ChatGPT did not finish loading this plugin connection."), { mcpMutationStarted: false });
       }
-      return { created: !input.shared, name: "Coding Tools", href: "/plugins/exact-fixture", connected: true,
+      const result = { created: !input.shared, name: "Coding Tools", href: "/plugins/exact-fixture", connected: true,
         binding: { userId: profile.userId, workspaceId, tunnelId: `tunnel_${"a".repeat(32)}` } };
+      if (!input.shared && partition !== "persist:member") freshPublisher = result;
+      return result;
     },
   };
   const module = { exports: {} };
@@ -128,7 +131,7 @@ function fixture(options = {}) {
   let busy = false, locks = 0;
   const input = { BrowserWindow: Window, browserHost: { withManualOperation: async (_name, action) => {
     assert.equal(busy, false); busy = true; locks++; try { return await action(); } finally { busy = false; }
-  } }, target: { partition: "persist:member" }, assertCurrent() {},
+  }, currentOperation: () => busy ? "MCP connector creation" : null }, target: { partition: "persist:member" }, assertCurrent() {},
   onContext: (partition, context) => contexts.push({ partition, context }), accountCandidates: async () => candidates };
   return { ...module.exports, input, profiles, calls, contexts, windows, locks: () => locks,
     remove: () => { removed = true; }, run: () => module.exports.createWorkspaceConnector(input) };
@@ -214,23 +217,23 @@ test("a tunnel-ineligible owner does not hide an eligible workspace admin", asyn
   assert.deepEqual(f.calls.filter(call => call[0] === "create"), [["create", "persist:admin"]]);
 });
 
-test("verified shared provenance reconnects a member without a signed-in publisher", async () => {
+test("cached shared provenance cannot reconnect without fresh publisher verification", async () => {
   const publisher = { userId: "user-admin", workspaceId, name: "Coding Tools", tunnelId: `tunnel_${"a".repeat(32)}`, href: "/plugins/exact-fixture" };
   const f = fixture({ bindings: { "persist:admin": publisher,
     "persist:member": { ...publisher, userId: "user-member", publisherPartition: "persist:admin", publisherUserId: "user-admin" } } });
-  f.input.accountCandidates = async () => { throw new Error("Publisher sign-in must not be required for an already shared connector"); };
-  assert.equal((await f.run()).connected, true);
-  assert.deepEqual(f.calls.filter(call => call[0] === "connect-member"), [["connect-member", "persist:member"]]);
+  f.input.accountCandidates = async () => [];
+  await assert.rejects(f.run(), error => error.message === ADMIN_REQUIRED);
+  assert.deepEqual(f.calls.filter(call => call[0] === "connect-member"), []);
 });
 
-test("cached publisher proofs stay scoped when its latest workspace changes", async () => {
+test("scoped cached hints still require a fresh publisher in the target workspace", async () => {
   const publisher = { userId: "user-admin", workspaceId, name: "Coding Tools", tunnelId: `tunnel_${"a".repeat(32)}`, href: "/plugins/exact-fixture" };
   const f = fixture({ bindings: { "persist:admin": { ...publisher, workspaceId: otherWorkspace },
     "persist:member": { ...publisher, userId: "user-member", publisherPartition: "persist:admin", publisherUserId: "user-admin" } }, scopedBindings: {
     [JSON.stringify(["persist:admin", workspaceId, publisher.tunnelId, publisher.name])]: publisher,
   } });
-  f.input.accountCandidates = async () => { throw new Error("Latest publisher workspace cannot erase exact earlier creation proof"); };
   assert.equal((await f.run()).connected, true);
+  assert(f.calls.some(call => call[0] === "create" && call[1] === "persist:admin"));
 });
 
 test("an unavailable cached shared plugin reports the publishing action instead of a loading error", async () => {
