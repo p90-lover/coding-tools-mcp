@@ -188,9 +188,11 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "data-artifact-id",
   "data-code-block-preview-pane",
   "data-is-last-node",
+  "data-markdown-text-style",
   "data-message-author-role",
   "data-state",
   "data-streaming-response-status",
+  "data-talvt-turn-state",
   "data-testid",
   "data-turn",
   "data-turn-id",
@@ -1011,13 +1013,22 @@ export class ChatGptFailedSendRetrier {
   get retries(): number { return this.presses; }
 
   /** True while a failed send is showing (the caller observes again later); false when there is none. */
-  async handle(page: Page, onRetry?: (attempt: number) => Promise<void> | void): Promise<boolean> {
+  async handle(
+    page: Page,
+    onRetry?: (attempt: number) => Promise<void> | void,
+    abortSignal?: AbortSignal,
+  ): Promise<boolean> {
+    if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const alert = page.locator('main aside[role="alert"]').last();
     // The button is looked up only once an alert shows, so an ordinary observation costs one probe.
-    const retry = await alert.isVisible().catch(() => false)
+    const alertVisible = await alert.isVisible().catch(() => false);
+    if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    const retry = alertVisible
       ? alert.getByRole("button", { name: /^\s*(Retry|Try again)\s*$/i }).last()
       : undefined;
-    if (!retry || !await retry.isVisible().catch(() => false)) {
+    const retryVisible = retry ? await retry.isVisible().catch(() => false) : false;
+    if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (!retry || !retryVisible) {
       this.since = undefined;
       return false;
     }
@@ -1026,13 +1037,15 @@ export class ChatGptFailedSendRetrier {
     const wait = this.retryAfterMs[this.presses];
     if (wait === undefined) {
       if (at - this.since < this.giveUpMs) return true;
+      const message = (await alert.innerText().catch(() => "")).replace(/\s*Retry\s*$/i, "").trim().slice(0, 120) || "send failed";
+      if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       throw new ChatGptWebAdapterError(
-        `ChatGPT could not send the message ("${(await alert.innerText().catch(() => "")).replace(/\s*Retry\s*$/i, "").trim().slice(0, 120) || "send failed"}"), and its Retry failed ${this.presses} time(s). Retry the turn.`,
+        `ChatGPT could not send the message ("${message}"), and its Retry failed ${this.presses} time(s). Retry the turn.`,
         { status: 502, errorType: "server_error", code: "chatgpt_send_failed", retryable: true },
       );
     }
     if (at - this.since < wait) return true;
-    await retry.click();
+    await retry.click({ signal: abortSignal });
     this.presses += 1;
     this.since = undefined;
     await onRetry?.(this.presses);
@@ -1055,11 +1068,15 @@ export async function resolveChatGptToolConfirmation(
   timeoutMs = CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
   onVisible?: () => Promise<void>,
 ): Promise<boolean> {
+  if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
   const dialog = page.locator('[role="dialog"], [data-testid="tool-approval-card"]')
     .filter({ hasText: `Allow ChatGPT to use ${appName}?` })
     .last();
-  if (!await dialog.isVisible().catch(() => false)) return false;
+  const visible = await dialog.isVisible().catch(() => false);
+  if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+  if (!visible) return false;
   await onVisible?.();
+  if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
 
   if (autoApprove) {
     // ChatGPT exposes either "Allow once" or the shorter "Allow" for the
@@ -1068,23 +1085,30 @@ export async function resolveChatGptToolConfirmation(
     const allowCurrentAction = dialog
       .getByRole("button", { name: /^Allow(?: once)?$/ })
       .last();
-    await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000 });
-    await allowCurrentAction.press("Enter");
+    await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000, signal });
+    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    await allowCurrentAction.press("Enter", { signal });
     return true;
   }
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    if (!await dialog.isVisible().catch(() => false)) return true;
+    const stillVisible = await dialog.isVisible().catch(() => false);
+    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (!stillVisible) return true;
     await new Promise(resolveSleep => setTimeout(resolveSleep, Math.min(100, Math.max(1, deadline - Date.now()))));
   }
 
-  if (!await dialog.isVisible().catch(() => false)) return true;
+  if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+  const stillVisible = await dialog.isVisible().catch(() => false);
+  if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+  if (!stillVisible) return true;
   const deny = dialog.getByRole("button", { name: "Deny", exact: true }).last();
-  await deny.waitFor({ state: "visible", timeout: 5_000 });
-  await deny.press("Enter");
-  await dialog.waitFor({ state: "hidden", timeout: 10_000 });
+  await deny.waitFor({ state: "visible", timeout: 5_000, signal });
+  if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+  await deny.press("Enter", { signal });
+  await dialog.waitFor({ state: "hidden", timeout: 10_000, signal });
   return true;
 }
 
@@ -3332,6 +3356,14 @@ export class ChatGptBrowserWorker {
           state.userIdentities.length,
         ),
       };
+      // Generation can start before the assistant subtree mounts; its visible Stop control
+      // keeps this missing-DOM grace alive without overriding an explicit turn deadline.
+      if (state.visibleStopButtonCount > 0) {
+        responseDeadline = Math.min(
+          deadline ?? Number.POSITIVE_INFINITY,
+          Math.max(responseDeadline, Date.now() + graceMs),
+        );
+      }
       // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
       // observation can prove it is still missing; the explicit turn deadline remains above.
       if (Date.now() >= responseDeadline
@@ -3935,7 +3967,7 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
-      if (await failedSend.handle(page)) {
+      if (await failedSend.handle(page, undefined, abortSignal)) {
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
         continue;
       }
@@ -5554,7 +5586,7 @@ export class ChatGptBrowserWorker {
         if (!connectionInterruptedVisible) await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
         // ChatGPT's offer to move the chat to Work applies itself unless declined in time.
         await throwIfChatGptWorkMode(page);
-        if (await failedSend.handle(page, attempt => diagnostics.capture(page, `send-retry-${attempt}`))) {
+        if (await failedSend.handle(page, attempt => diagnostics.capture(page, `send-retry-${attempt}`), turn.abortSignal)) {
           internalObservationFaults = 0;
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
@@ -5866,6 +5898,10 @@ export class ChatGptBrowserWorker {
       );
       return finalText;
     } catch (error) {
+      if (turn.abortSignal?.aborted && error instanceof Error
+        && error.name === "AbortError" && !(error instanceof DOMException)) {
+        error = new DOMException(error.message, "AbortError");
+      }
       if (error instanceof DOMException && error.name === "AbortError"
         && turn.abortSignal?.reason instanceof ChatGptCompactionHandoffAccepted) {
         console.info(`[chatgpt-web] browser turn ${turn.traceId} ended after accepted structured compaction handoff`);

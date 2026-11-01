@@ -172,6 +172,10 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
     /** Resolves once every change so far is on disk (tests, and a caller about to exit). */
     async saved() { while (saving) await saving; },
     get: (workspaceId, taskId) => goals[key(workspaceId, taskId)] ?? null,
+    /** The projects with a goal still being pursued. */
+    activeWorkspaces: () => [...new Set(Object.entries(goals)
+      .filter(([, goal]) => goal?.status === "active")
+      .map(([name]) => name.slice(0, name.indexOf(":"))))],
     /** Every goal of one project, by chat. */
     forWorkspace(workspaceId) {
       const prefix = `${workspaceId}:`;

@@ -2268,7 +2268,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           : { web_bridge_base_url: webBridge.baseUrl, web_model_catalog: webBridge.catalog }),
         ...(lease ? { chat_preview_server: lease.servers[0] } : {}),
         confirm: !granted,
-      }, granted ? undefined : { localConfirmation: true });
+      }, granted && !lease ? undefined : { localConfirmation: true });
       if (response?.ok === true && response.waiting === true) return response;
       if (response?.ok !== true || response.status?.model !== route.model) {
         throw new Error("Couldn't confirm the connection. Check the status before you retry.");
@@ -2317,6 +2317,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true) throw new Error("AO result is unavailable; inspect the run before retrying");
+    const mission = response.run;
+    const node = mission?.nodes?.find(value => value.id === nodeId);
+    if (nativePreviewTools?.renderNativeVisualization && stillCurrent() && !mission?.cancelled
+      && mission?.workspace_id === workspaceId && mission.id === runId && node?.state === "finished"
+      && node.role === (mission.execution_mode === "single" || mission.solo ? "planner" : "reviewer")
+      && mission.nodes.every(value => ["retry", "approver"].includes(value.role) || ["finished", "cancelled", "archived"].includes(value.state))
+      && node.route?.harness_id === "codex-native" && node.route?.model?.startsWith("chatgpt-web/")
+      && node.receipt?.thread_id && !node.receipt.error && typeof node.receipt.answer === "string"
+      && node.receipt.request_key && node.receipt.request_key === found.node?.receipt?.request_key) {
+      const receipt = node.receipt;
+      try {
+        await nativePreviewTools.renderNativeVisualization({ workspaceId, runId, nodeId, answer: receipt.answer, requestKey: receipt.request_key,
+          workingDirectory: node.settings?.working_directory ?? ".",
+          stillCurrent: async () => {
+            if (!stillCurrent()) return false;
+            const latest = await savedNode(workspaceId, runId, nodeId);
+            return !latest.mission?.cancelled && latest.node?.state === "finished"
+              && latest.mission.nodes.every(value => ["retry", "approver"].includes(value.role) || ["finished", "cancelled", "archived"].includes(value.state))
+              && latest.node.receipt?.request_key === receipt.request_key && latest.node.receipt?.thread_id === receipt.thread_id
+              && latest.node.receipt?.answer === receipt.answer && latest.node.receipt?.turn_id === receipt.turn_id
+              && (latest.node.settings?.working_directory ?? ".") === (node.settings?.working_directory ?? ".")
+              && JSON.stringify(latest.node.route) === JSON.stringify(node.route);
+          },
+        });
+      } catch (error) { logger?.warn?.("ao.visualization_unavailable", { message: publicText(error?.message || error, 200) }); }
+    }
     return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals, found) } : response;
   }
 
@@ -4662,9 +4688,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
-  async function createTeamRun(id, task, team, selection = {}, includeRun = false) {
+  async function createTeamRun(id, task, team, selection = {}, includeRun = false, checkCurrent = () => {}) {
     const current = await board({ workspaceId: id });
     const runId = randomUUID();
+    checkCurrent(true);
     const created = await updateRun({ workspaceId: id, change: {
       operation: "create_from_team", run_id: runId, task_id: task,
       expected_board_revision: current.revision,
@@ -4890,10 +4917,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // collided, both were retried, and the chat followed the newer one after it was stopped. The
   // later send now reads the runs after the earlier one has started, so it waits or is refused.
   const chatSends = new Map(); // [workspace, task] -> the send in progress
-  async function chatSend(input = {}) {
-    if (!input || typeof input !== "object" || typeof input.taskId !== "string" || typeof input.workspaceId !== "string") return startChatSend(input);
+  async function chatSend(input = {}, checkCurrent = () => {}) {
+    if (!input || typeof input !== "object" || typeof input.taskId !== "string" || typeof input.workspaceId !== "string") return startChatSend(input, checkCurrent);
     const key = JSON.stringify([input.workspaceId.trim(), input.taskId.trim()]);
-    const mine = (chatSends.get(key) ?? Promise.resolve()).then(() => startChatSend(input));
+    const mine = (chatSends.get(key) ?? Promise.resolve()).then(() => startChatSend(input, checkCurrent));
     const settled = mine.then(() => undefined, () => undefined);
     chatSends.set(key, settled);
     try { return await mine; } finally { if (chatSends.get(key) === settled) chatSends.delete(key); }
@@ -4910,16 +4937,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const id = typeof input?.workspaceId === "string" ? input.workspaceId.trim() : "";
     const task = typeof input?.taskId === "string" ? input.taskId.trim() : "";
     const stalled = id && task && input.goal === undefined && goals.get(id, task)?.status === "stalled" ? goals.get(id, task) : null;
-    if (stalled) goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
+    const stalledNote = stalled?.note;
+    if (stalled) {
+      invalidateGoal(stalled);
+      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
+    }
+    const still = goalGuard(id, task, stalled);
     try {
       const result = await chatSend(input);
-      if (stalled && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalled.note });
-      else if (stalled && result?.runId) goals.update(id, task, { lastRunId: String(result.runId) });
+      if (still() && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalledNote });
+      else if (still() && result?.runId) goals.update(id, task, { lastRunId: String(result.runId) });
       // Sent while the goal waited out a pause (a failed round or check): this turn is its next round.
       if (result?.runId && id && task && goals.get(id, task)?.retry) dropGoalRetry(id, task);
       return result;
     } catch (error) {
-      if (stalled) goals.update(id, task, { status: "stalled", note: stalled.note });
+      if (still()) goals.update(id, task, { status: "stalled", note: stalledNote });
       throw error;
     }
   }
@@ -4937,7 +4969,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
   }
 
-  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind } = {}) {
+  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind } = {}, checkCurrent = () => {}) {
+    checkCurrent();
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -4953,6 +4986,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
+    checkCurrent();
     // The runs before this send, to tell whether its own run was made (withdrawFollowUp).
     const runsBefore = new Set(saved.runs.map(run => run.id));
     if (executionMode !== undefined && !["single", "team"].includes(executionMode)) throw new Error("Choose single or team execution");
@@ -4990,6 +5024,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     }
 
+    checkCurrent();
     let task;
     // Whether the new chat starts as "New task", the only name nameChat replaces. A name the user
     // gave, or a single chat's name taken from its message, kept nameChat's model call for nothing.
@@ -5019,6 +5054,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         throw error;
       }
       let detail = await board({ workspaceId: id, taskId: task });
+      checkCurrent();
       if (!detail.task) throw new Error("This chat's task no longer exists");
       let rewoundDescription = null;
       let discarded = [];
@@ -5074,6 +5110,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full even after compacting. Shorten the message or start a new chat.");
       }
       const saidBefore = String(detail.task.description || "");
+      checkCurrent();
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
       followUp = { before: saidBefore, description };
@@ -5100,7 +5137,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
     let runId, createdRun;
     try {
-      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true));
+      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent));
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
       if (rewind && followUp) {
@@ -5185,26 +5222,46 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     goals.update(id, task, { deferred: { runId: previous.id, since } });
     goalLater(id, task, GOAL_DEFER_MS, previous.id);
   }
+  // A control change retires pending work even when the clock has not advanced.
+  const goalChanges = new WeakMap();
+  const goalRouteIntents = new WeakMap();
+  function invalidateGoal(goal) {
+    if (goal) goalChanges.set(goal, {});
+  }
+  function goalGuard(id, task, goal) {
+    const revision = goalChanges.get(goal);
+    return () => !goalsDisposed && goals.get(id, task) === goal && goal?.status === "active" && goalChanges.get(goal) === revision;
+  }
+  function retryChangedGoal(id, task, runId) {
+    const goal = goals.get(id, task);
+    if (goalsDisposed || goal?.status !== "active" || goal.retry || !runId) return;
+    goalLater(id, task, 0, runId, !judged(goal, runId, "finished"));
+  }
   async function continueGoal(id, task, goal, previous) {
     const key = JSON.stringify([id, task]);
-    if (goalStarts.has(key)) return;
+    const still = goalGuard(id, task, goal);
+    if (!still() || goalStarts.has(key)) return;
     goalStarts.add(key);
     let busy = false;
     try {
       // Read again inside the guard: a round another caller started meanwhile is the next round, and
       // its settle is judged; only a chat that still reads busy with no newer turn waits to retry.
       const saved = await runs({ workspaceId: id });
+      if (!still()) return;
       const latest = saved.runs.filter(run => run.project_id === task).at(-1);
       if (previous && latest && latest.id !== previous.id) return;
       if (chatWorking(id, task, saved.runs)) { busy = true; return; }
-      await startGoalRound(id, task, goals.get(id, task) ?? goal, previous);
+      await startGoalRound(id, task, goal, previous, still);
     } finally {
       goalStarts.delete(key);
-      if (busy) deferGoalRound(id, task, previous, "chat_working");
+      if (!still()) retryChangedGoal(id, task, previous?.id);
+      else if (busy) deferGoalRound(id, task, previous, "chat_working");
     }
   }
-  async function startGoalRound(id, task, goal, previous) {
+  async function startGoalRound(id, task, goal, previous, still) {
+    const before = { round: goal.round, lastMessage: goal.lastMessage, lastRunId: goal.lastRunId };
     const round = goal.round + 1;
+    let accepted = false;
     // A model or team picked while the goal ran (chat_goal "route") takes over from the next round
     // on. A team is named by id only: its current revision is used, so editing the team mid-goal
     // does not stall the goal.
@@ -5214,22 +5271,37 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     goals.update(id, task, { round, note: "", lastMessage: message });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
-      const result = await chatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true });
+      const result = await chatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true }, (accepting = false) => {
+        if (!still()) throw new Error("The goal changed before the next round was accepted");
+        // Submitting run creation accepts this round; a later Pause leaves it running.
+        if (accepting) accepted = true;
+      });
+      if (!still()) {
+        if (goals.get(id, task) === goal && goal.round === round && goal.lastMessage === message && result?.runId) {
+          goals.update(id, task, { lastRunId: String(result.runId), deferred: null });
+        }
+        return;
+      }
       if (result?.ok === false) { goals.update(id, task, { status: "stalled", note: String(result.reason || "The next round could not start") }); return; }
       goals.update(id, task, { lastRunId: String(result.runId || ""), deferred: null, note: result.status === "failed" ? String(result.detail || "The next round could not start") : "" });
       if (result.status === "failed") goals.update(id, task, { status: "stalled" });
     } catch (error) {
+      if (!still()) return;
       const message = String(error?.message || error);
       // Another turn started first (a wakeup, a queued message; see chatSend): that turn is the
       // goal's to judge once it settles (goalAfterRun), so this round is not counted or stalled. A
       // run that only reads busy (no newer turn) is tried again shortly (deferGoalRound).
       if (/still running/.test(message)) {
-        goals.update(id, task, { round: goal.round });
         deferGoalRound(id, task, previous, "still_running");
         return;
       }
       // A full chat says why it could not compact (the note was only "use /compact" before).
       goals.update(id, task, { status: "stalled", note: /chat is full/.test(message) ? `${message.slice(0, 240)} Use /compact, then /goal resume.` : message.slice(0, 300) });
+    } finally {
+      if (!accepted && goals.get(id, task) === goal && goal.round === round
+        && goal.lastMessage === message && goal.lastRunId === before.lastRunId) {
+        goals.update(id, task, { round: before.round, lastMessage: before.lastMessage });
+      }
     }
   }
 
@@ -5329,11 +5401,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (goalsDisposed) return;
       const goal = goals.get(workspaceId, task);
       if (goal?.status !== "active" || goal.retry?.at !== retry.at) return;
+      const still = goalGuard(workspaceId, task, goal);
       goals.update(workspaceId, task, { retry: null });
-      const next = retry.check
-        ? goalAfterRun(workspaceId, retry.runId, "finished")
-        : runs({ workspaceId }).then(saved => continueGoal(workspaceId, task, goals.get(workspaceId, task),
-          saved.runs.find(run => run.id === retry.runId && run.project_id === task)));
+      const next = runs({ workspaceId }).then(saved => {
+        if (!still()) return;
+        const previous = saved.runs.find(run => run.id === retry.runId && run.project_id === task);
+        if (!retry.check) return continueGoal(workspaceId, task, goal, previous);
+        const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+        if (!previous || latest?.id !== previous.id || !runSettled(previous) || chatWorking(workspaceId, task, saved.runs)) return;
+        return goalAfterRun(workspaceId, retry.runId, "finished");
+      });
       void next.catch((error) => { logger?.warn?.("ao.goal_retry_failed", { message: publicText(error?.message || error, 200) }); });
     }, Math.max(0, retry.at - now()));
     timer?.unref?.();
@@ -5470,6 +5547,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const guard = runKey(workspaceId, runId);
     if (goalChecks.has(guard)) return;
     goalChecks.add(guard);
+    let recheck = null;
     try {
       const saved = await runs({ workspaceId });
       const mission = saved.runs.find(run => run.id === runId && run.workspace_id === workspaceId);
@@ -5553,9 +5631,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The person may pause, edit or clear the goal while the check runs: then their choice stands,
       // and the round is judged on resume. A check that failed after a pause marked the goal stalled,
       // and the next message woke it again.
-      const still = () => goals.get(workspaceId, task)?.status === "active";
+      const still = goalGuard(workspaceId, task, goal);
+      recheck = () => { if (!still()) retryChangedGoal(workspaceId, task, runId); };
       try {
-        check = await checkGoal(goal, mission, { judge, ended });
+        check = await checkGoal({ ...goal }, mission, { judge, ended });
       } catch (error) {
         if (!still()) return;
         // Not marked judged: the check runs again later (every evaluator was down, or CPA was
@@ -5585,7 +5664,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return;
       }
       await continueGoal(workspaceId, task, goals.get(workspaceId, task), mission);
-    } finally { goalChecks.delete(guard); }
+    } finally {
+      goalChecks.delete(guard);
+      recheck?.();
+    }
   }
 
   /** How a settled run ended, for its goal: as reportRun would have said when it settled. */
@@ -5648,20 +5730,32 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!goal) throw new Error("No goal set");
     // The model or team picker changed while the goal runs: its next round uses the new pick.
     if (action === "route") {
+      const intent = {}, revision = goalChanges.get(goal);
+      goalRouteIntents.set(goal, intent);
       if (teamId !== undefined) {
         const team = clean(teamId, 80);
         const saved = await runs({ workspaceId: id });
         if (!(saved.teams ?? (saved.team ? [saved.team] : [])).some(item => item?.id === team)) throw new Error("Saved team was not found; refresh before choosing it");
+        if (goalsDisposed || goals.get(id, task) !== goal || goalChanges.get(goal) !== revision || goalRouteIntents.get(goal) !== intent) {
+          return { ok: true, goal: goals.get(id, task) };
+        }
+        invalidateGoal(goal);
         return { ok: true, goal: goals.update(id, task, { team: { id: team }, route: null }) };
       }
-      return { ok: true, goal: goals.update(id, task, { route: checkedSingleRoute(singleRoute), team: null }) };
+      const route = checkedSingleRoute(singleRoute);
+      invalidateGoal(goal);
+      return { ok: true, goal: goals.update(id, task, { route, team: null }) };
     }
-    if (action === "pause") return { ok: true, goal: goals.update(id, task, { status: "paused", note: "" }) };
+    if (action === "pause") {
+      invalidateGoal(goal);
+      return { ok: true, goal: goals.update(id, task, { status: "paused", note: "" }) };
+    }
     // Edit goal: a new objective for the rounds still to come; the running round is left alone. An
     // achieved or stopped goal waits paused with the new objective, so Resume pursues it.
     if (action === "edit") {
-      const edited = { objective: cleanObjective(objective) };
+      const edited = { objective: cleanObjective(objective), evaluatedRunId: "" };
       if (goal.status !== "active") Object.assign(edited, { status: "paused", note: "Edited; resume to pursue it" });
+      invalidateGoal(goal);
       return { ok: true, goal: goals.update(id, task, edited) };
     }
     if (action !== "resume") throw new Error("Choose clear, pause, resume, edit or route");
@@ -5669,12 +5763,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const rounds = goal.rounds > 0 && goal.round >= goal.rounds ? goal.round + goal.rounds : goal.rounds;
     // Resuming carries on now: a pause still waiting is dropped.
     dropGoalRetry(id, task);
+    invalidateGoal(goal);
     goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
+    const still = goalGuard(id, task, goal);
     // The next round starts in the background: setting it up (board writes, a compaction when the
     // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
     // that long. A round that can't start marks the goal stalled (startGoalRound).
     void (async () => {
       const saved = await runs({ workspaceId: id });
+      if (!still()) return;
       // The round still running is judged when it settles (its reportRun).
       if (chatWorking(id, task, saved.runs)) return;
       const latest = saved.runs.filter(run => run.project_id === task).at(-1);
@@ -5685,7 +5782,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         await goalAfterRun(id, latest.id, "finished");
         return;
       }
-      await continueGoal(id, task, goals.get(id, task), latest);
+      await continueGoal(id, task, goal, latest);
     })().catch((error) => { logger?.warn?.("ao.goal_resume_failed", { message: publicText(error?.message || error, 200) }); });
     return { ok: true, goal: goals.get(id, task) };
   }
@@ -5733,7 +5830,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (status !== undefined && !AGENT_GOAL_STATUS.has(status)) {
       throw new Error("update_goal can only mark the existing goal complete, blocked, or paused at the user's explicit request; resume, budget-limited, and usage-limited status changes are controlled by the user or system");
     }
-    const change = objective === undefined ? {} : { objective: cleanObjective(objective) };
+    const change = objective === undefined ? {} : { objective: cleanObjective(objective), evaluatedRunId: "" };
     if (status === "complete" && goal.status === "active") {
       // Keep it active until goalAfterRun independently checks the settled round.
       Object.assign(change, { status: "active", note: "Agent reported completion; awaiting independent goal verification" });
@@ -5752,6 +5849,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     } else if (status === "paused" && goal.status !== "limited") {
       Object.assign(change, { status: "paused", note: "Paused at your request; /goal resume picks it up again" });
     }
+    if (objective !== undefined || (change.status && change.status !== goal.status)) invalidateGoal(goal);
     return codexGoal(goals.update(id, task, change));
   }
 
@@ -6169,6 +6267,35 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (const task of Object.keys(chatQueue.forWorkspace(workspaceId))) {
       if (!queueTimers.has(wakeKey(workspaceId, task)) && !draining.has(wakeKey(workspaceId, task))) armQueue(workspaceId, task, 1_000);
     }
+  }
+  // A project's goals and queued messages are swept when the window reads its runs. A minimized
+  // window reads nothing (the preload refuses its calls), and goals run all night with the window
+  // minimized: a goal whose round settled unwatched waited for the window to be opened again. The
+  // watch sweeps each project with an active goal that no read swept for GOAL_WATCH_MS.
+  const GOAL_WATCH_MS = 5 * 60_000;
+  const lastSwept = new Map(); // workspace -> when it was last swept
+  let goalWatchTimer = null;
+  function sweepWorkspace(workspaceId, saved) {
+    lastSwept.set(workspaceId, now());
+    sweepGoals(workspaceId, saved);
+    sweepQueues(workspaceId);
+  }
+  async function watchGoals() {
+    for (const workspaceId of goals.activeWorkspaces()) {
+      if (goalsDisposed) return;
+      if (now() - (lastSwept.get(workspaceId) ?? 0) < GOAL_WATCH_MS) continue;
+      try { sweepWorkspace(workspaceId, await runs({ workspaceId })); }
+      catch (error) { logger?.warn?.("ao.goal_watch_failed", { message: publicText(error?.message || error, 200) }); }
+    }
+  }
+  /** Starts the goal watch (the app does, once its backend runs; tests drive watchGoals by hand). */
+  function startGoalWatch() {
+    if (goalWatchTimer || goalsDisposed) return;
+    const next = () => {
+      goalWatchTimer = setTimer(() => { void watchGoals().finally(() => { if (!goalsDisposed) next(); }); }, GOAL_WATCH_MS);
+      goalWatchTimer?.unref?.();
+    };
+    next();
   }
   // Queues saved before a restart go on shortly after the app is back.
   function restoreQueues() {
@@ -7013,6 +7140,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     goalsDisposed = true;
     for (const timer of goalTimers.values()) clearTimer(timer);
     goalTimers.clear();
+    if (goalWatchTimer) clearTimer(goalWatchTimer);
+    goalWatchTimer = null;
     autoRetryDisposed = true;
     for (const timer of autoRetryTimers) clearTimer(timer);
     autoRetryTimers.clear();
@@ -7062,10 +7191,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       case "runs": {
         const saved = await runs(args);
-        // A goal whose round settled unwatched (the app was closed meanwhile) is judged now.
-        if (!args.runId) sweepGoals(clean(args.workspaceId, 128), saved);
-        // So does a queued message whose chat's settle was missed.
-        if (!args.runId) sweepQueues(clean(args.workspaceId, 128));
+        // A goal whose round settled unwatched (the app was closed meanwhile) is judged now, and a
+        // queued message whose chat's settle was missed goes on.
+        if (!args.runId) sweepWorkspace(clean(args.workspaceId, 128), saved);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)),
@@ -7203,7 +7331,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

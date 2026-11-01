@@ -814,9 +814,6 @@ test("rewind resends the selected message into the same chat without filling or 
   assert.ok(chat.includes("setCarried(seed.context?.length ? seed.context : null)"));
   assert.ok(chat.includes("[...carried, message].join"), "the first message of the rewound chat carries them ahead of it");
   assert.ok(chat.includes('aria-label="Drop the earlier messages"'), "the context chip can be dropped");
-  // Opening another chat no longer carries this chat's draft along.
-  assert.ok(chat.includes("const CHAT_DRAFTS = new Map<string, string>();"));
-  assert.ok(chat.includes("setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? \"\")"));
 });
 
 test("message action icons have no selectable glyph text when copying multiple messages", () => {

@@ -38,14 +38,14 @@ const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROW
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
-const { createRegisterHost } = require("./register-host.cjs");
+const { createRegisterHost, createRegisterCpaSync } = require("./register-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
 const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
-const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand } = require("./mcp-connector-command.cjs");
+const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
@@ -459,6 +459,7 @@ async function fetchThroughLauncherNetwork(url, options) {
 
 function getRegisterHost(logger) {
   if (registerHost) return registerHost;
+  let accountSync = null;
   registerHost = createRegisterHost({
     projectRoot: path.join(app.getPath("documents"), "ChatGPT", "reg-machine"),
     configPath: path.join(app.getPath("userData"), "runtime-register.json"),
@@ -466,11 +467,23 @@ function getRegisterHost(logger) {
     createView: (partition) => new WebContentsView({
       webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
     }),
-    prepareSession: (browserSession) => browserSession.setProxy({ mode: "direct" }),
+    prepareSession: async (browserSession, origin) => {
+      await browserSession.setProxy({ mode: "direct" });
+      const sync = createRegisterCpaSync({
+        browserSession, origin, getConnection: () => externalServicesController?.cpaConnection(),
+        onError: (message) => logger?.warn?.("launcher.register_cpa_sync_failed", { message }),
+      });
+      accountSync = sync;
+      await sync.sync();
+      return () => { sync.dispose(); if (accountSync === sync) accountSync = null; };
+    },
     attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
     detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
     openExternal: (url) => openWebUrl(url),
-    onChange: (status) => send("launcher:register-changed", status),
+    onChange: (status) => {
+      send("launcher:register-changed", status);
+      if (status.ready) void accountSync?.sync();
+    },
   });
   return registerHost;
 }
@@ -1638,13 +1651,13 @@ function noticeAoApproval(update) {
   }
 }
 
-function assertFocusedMainWindow(event, write = false) {
+function assertFocusedMainWindow(event, write = false, backgroundRead = false) {
   const window = BrowserWindow.fromWebContents(event.sender);
   const valid = window
     && window === mainWindow
     && !window.isDestroyed()
-    && window.isVisible()
-    && !window.isMinimized()
+    && (!backgroundRead || (event.sender.mainFrame && event.senderFrame === event.sender.mainFrame))
+    && ((!write && backgroundRead) || (window.isVisible() && !window.isMinimized()))
     && (!write || (window.isFocused() && event.sender.isFocused()));
   if (!valid) {
     // Said in the user's terms: this refused chat sends and starts too, and the old wording
@@ -2398,11 +2411,15 @@ function registerIpc({ logger, stateStore }) {
     // The chat surface's own background calls run on load, on a timer or when a chat opens, often
     // while focus sits in an embedded view or another app; refused there, they only filled the
     // Activity log ("Click into the Coding Tools window", 22 a night) and left the archived list,
-    // the agent pre-warm and the Retry automatically switch unset. They still need a visible window.
+    // the agent pre-warm and the Retry automatically switch unset. Layout still needs a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm"].includes(input.operation)
         || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined));
-    assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
+    const readOnly = appsHost.isReadOnly(input.moduleId, input.operation);
+    // These two status clocks also run while minimized. Only the trusted main frame may read them.
+    const backgroundRead = readOnly && input.moduleId === "agent-orchestrator"
+      && ["run_status", "subagents_runs"].includes(input.operation);
+    assertFocusedMainWindow(event, !passiveAoLayout && !readOnly, backgroundRead);
     // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
     if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
       input = { ...input, arguments: { ...(input.arguments || {}), zoom: event.sender.getZoomFactor() } };
@@ -2946,12 +2963,26 @@ function registerIpc({ logger, stateStore }) {
         accountTunnel = extraTunnels.status().find(tunnel => tunnel.id === accountTunnel.id && tunnel.accountId === accountId);
         if (accountTunnel?.state !== "ready") throw new Error("The account's MCP tunnel is not ready. Reconnect it before creating the connector.");
       }
+      const assertCurrent = () => {
+        if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+          || browserAccounts.accountIdOfPartition(operationPartition) !== accountId
+          || browserAccountsStatus().switching || quitting || shutdownInProgress || runtimeHost.currentOperation()) {
+          throw new Error("Browser account switching or shutdown is in progress");
+        }
+        if (accountTunnel && !extraTunnels.status().some(tunnel => tunnel.id === accountTunnel.id
+          && tunnel.accountId === accountId && tunnel.tunnelId === accountTunnel.tunnelId && tunnel.state === "ready")) {
+          throw new Error("The account's MCP tunnel changed or is not ready.");
+        }
+      };
+      assertCurrent();
       const result = await createConfiguredConnector({
-        app, BrowserWindow, browserHost: operationBrowser, runtimeHost,
+        app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
         ...(accountTunnel ? { target: { tunnelId: accountTunnel.tunnelId, partition: operationPartition } } : {}),
       });
+      assertCurrent();
       if (accountTunnel) {
-        extraTunnels.setConnector(accountTunnel.id, result.href);
+        await extraTunnels.setConnector(accountTunnel.id, result.href, result.binding);
+        assertCurrent();
       } else {
         const state = stateStore.update({
           autoConnectExistingMcp: true,
@@ -2964,8 +2995,9 @@ function registerIpc({ logger, stateStore }) {
       publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
       return result;
     } catch (error) {
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: error instanceof Error ? error.message : String(error) });
-      throw error;
+      const failure = mcpConnectorCommandFailure(error);
+      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   } });
   dispatchMcpConnectorCommand();
@@ -2998,23 +3030,27 @@ function registerIpc({ logger, stateStore }) {
         if (tunnel?.state !== "ready") throw new Error("This account's MCP tunnel is not ready. Reconnect it and retry.");
       }
       assertCurrent();
-      const result = await createConfiguredConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost,
-        target: { partition, requireTunnelMatch: true, assertCurrent,
-          ...(tunnel ? { tunnelId: tunnel.tunnelId } : {}) },
+      const result = await createConfiguredConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
+        target: { partition, requireTunnelMatch: true,
+          ...(tunnel ? { tunnelId: tunnel.tunnelId, connectorBindings: tunnel.connectorBindings } : {}) },
       });
       assertCurrent();
       if (tunnel) {
         const current = extraTunnels.status().find(entry => entry.id === tunnel.id && entry.accountId === accountId);
         if (current?.state !== "ready" || current.tunnelId !== tunnel.tunnelId) throw new Error("This account's MCP tunnel changed during setup. Retry the connection.");
-        extraTunnels.setConnector(tunnel.id, result.href);
+        await extraTunnels.setConnector(tunnel.id, result.href, result.binding);
+        assertCurrent();
       }
-      if (browserAccounts.recordConnector(accountId, { bound: result.connected === true })) publishBrowserAccounts();
+      const recorded = await browserAccounts.recordConnector(accountId, { bound: result.connected === true });
+      assertCurrent();
+      if (recorded) publishBrowserAccounts();
       publishOperation({ name: "mcp-connector-create", status: "completed", message: "This account's MCP connector is connected" });
       return result;
     } catch (error) {
-      if (browserAccounts.recordConnector(accountId, { error: error instanceof Error ? error.message : String(error) })) publishBrowserAccounts();
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: error instanceof Error ? error.message : String(error) });
-      throw error;
+      const failure = mcpConnectorCommandFailure(error);
+      try { if (await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts(); } catch {}
+      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   });
 
@@ -3195,23 +3231,67 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     return runtimeSupervisor.extraTunnels.reconnect(id);
   });
+  handle("launcher:mcp-tunnel-settings", async (event, id) => {
+    assertFocusedMainWindow(event, true);
+    if (!event.sender.mainFrame || event.senderFrame !== event.sender.mainFrame) throw new Error("Platform settings require the main launcher frame");
+    if (IS_DEV_PROFILE) throw new Error("Extra MCP tunnels are available in the production profile only");
+    if (typeof id !== "string" || !/^[a-f0-9]{8}$/.test(id)) throw new Error("That tunnel is not configured.");
+    const extraTunnels = runtimeSupervisor?.extraTunnels;
+    const tunnel = extraTunnels?.status().find(candidate => candidate.id === id);
+    if (!tunnel) throw new Error("That tunnel is not configured.");
+    if (!tunnel.accountId) throw new Error("Choose the ChatGPT account this tunnel belongs to first.");
+    const accountId = tunnel.accountId, tunnelId = tunnel.tunnelId;
+    const partition = browserAccounts.partitionOf(accountId);
+    const operationBrowser = browserHost, operationPartition = operationBrowser.partition;
+    const assertCurrent = () => {
+      if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+        || extraTunnels !== runtimeSupervisor?.extraTunnels || browserAccounts.partitionOf(accountId) !== partition
+        || browserAccountsStatus().switching || quitting || shutdownInProgress || runtimeHost.currentOperation()) {
+        throw new Error("Browser account switching or shutdown is in progress");
+      }
+      if (!extraTunnels.status().some(current => current.id === id && current.accountId === accountId && current.tunnelId === tunnelId)) {
+        throw new Error("That tunnel's account assignment changed. Retry from More tunnels.");
+      }
+    };
+    assertCurrent();
+    await runtimeStartupInFlight;
+    assertCurrent();
+    await operationBrowser.ready();
+    assertCurrent();
+    const result = await openConfiguredTunnelSettings({ BrowserWindow, browserHost: operationBrowser, runtimeHost, partition });
+    assertCurrent();
+    return result;
+  });
   handle("launcher:mcp-tunnel-connector", async (event, id) => {
     assertFocusedMainWindow(event, true);
     const tunnel = runtimeSupervisor.extraTunnels.status().find(candidate => candidate.id === id);
     if (!tunnel) throw new Error("That tunnel is not configured.");
     if (!tunnel.accountId) throw new Error("Choose the ChatGPT account this tunnel belongs to first.");
+    const operationBrowser = browserHost, operationPartition = operationBrowser.partition;
+    const targetPartition = browserAccounts.partitionOf(tunnel.accountId);
+    const assertCurrent = () => {
+      if (operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+        || browserAccounts.partitionOf(tunnel.accountId) !== targetPartition || browserAccountsStatus().switching
+        || quitting || shutdownInProgress || runtimeHost.currentOperation()) throw new Error("Browser account switching or shutdown is in progress");
+      if (!runtimeSupervisor.extraTunnels.status().some(current => current.id === id && current.accountId === tunnel.accountId
+        && current.tunnelId === tunnel.tunnelId && current.state === "ready")) throw new Error("The account's MCP tunnel changed or is not ready.");
+    };
     publishOperation({ name: "mcp-connector-create", status: "running", message: `Creating the ChatGPT connector for ${tunnel.label}` });
     try {
+      assertCurrent();
       const result = await createConfiguredConnector({
-        app, BrowserWindow, browserHost, runtimeHost,
-        target: { tunnelId: tunnel.tunnelId, partition: browserAccounts.partitionOf(tunnel.accountId) },
+        app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
+        target: { tunnelId: tunnel.tunnelId, partition: targetPartition },
       });
-      runtimeSupervisor.extraTunnels.setConnector(id, result.href);
+      assertCurrent();
+      await runtimeSupervisor.extraTunnels.setConnector(id, result.href, result.binding);
+      assertCurrent();
       publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
       return result;
     } catch (error) {
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: error instanceof Error ? error.message : String(error) });
-      throw error;
+      const failure = mcpConnectorCommandFailure(error);
+      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   });
   handle("launcher:set-mcp-step", (_event, step) => {
@@ -4464,6 +4544,8 @@ async function start() {
     missionWorkflowRuntime = agentOrchestratorWorkflow;
     void listHeadlessWorkspaces().then(items => agentOrchestratorWorkflow.restoreSchedules(items))
       .catch(() => logger.warn("ao.schedule_restore_failed", { detail: "Saved delayed starts need inspection; none were replayed." }));
+    // Goals carry on with the window minimized (its reads, which sweep them, stop then).
+    if (!LAUNCHER_SMOKE_TEST) agentOrchestratorWorkflow.startGoalWatch();
     // Chats a restart interrupted resume now, in every project, without waiting for the window or
     // the ChatGPT bridge (whose connect observes their cards again): resumeInterrupted says which.
     if (!LAUNCHER_SMOKE_TEST) {

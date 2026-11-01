@@ -52,6 +52,34 @@ test("escaped transport markers and code examples keep their original visible te
   assert.doesNotMatch(html, /<img/);
 });
 
+test("inline code retains delimiter, escape and spacing behavior", () => {
+  for (const [source, expected] of [
+    ["Use `one` and `two`", [{ kind: "text", text: "Use " }, { kind: "code", text: "one" }, { kind: "text", text: " and " }, { kind: "code", text: "two" }]],
+    ["``has ` inner``", [{ kind: "code", text: "has ` inner" }]],
+    ["```a``b```", [{ kind: "code", text: "a``b" }]],
+    ["``shorter`", [{ kind: "code", text: "`shorter" }]],
+    ["```x``y`", [{ kind: "code", text: "`x" }, { kind: "text", text: "y`" }]],
+    ["\\``escaped`", [{ kind: "text", text: "`" }, { kind: "code", text: "escaped" }]],
+    ["`  two spaces  `", [{ kind: "code", text: " two spaces " }]],
+    ["`\nline\n`", [{ kind: "code", text: "\nline\n" }]],
+    ["`x``", [{ kind: "text", text: "`x``" }]],
+  ]) assert.deepEqual(JSON.parse(JSON.stringify(parser.parseInline(source))), expected, source);
+});
+
+test("unmatched backtick runs finish within a bounded parser invocation and stay literal", () => {
+  const inputs = [
+    "literal " + "`".repeat(20_000),
+    "literal " + Array.from({ length: 256 }, (_, index) => "`".repeat(index + 1)).join(" x "),
+  ];
+  for (const source of inputs) {
+    const blocks = vm.runInNewContext("parser.parseMarkdown(source)", { parser, source }, { timeout: 1_000 });
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].kind, "paragraph");
+    assert.equal(blocks[0].inline.length, 1);
+    assert.equal(blocks[0].inline[0].text, source);
+  }
+});
+
 test("backslashes in table code remain literal and preserve the following columns", () => {
   const html = render("| Path | Value |\n| --- | --- |\n| `C:\\` | ok |");
   assert.match(html, /<code>C:\\<\/code>/);

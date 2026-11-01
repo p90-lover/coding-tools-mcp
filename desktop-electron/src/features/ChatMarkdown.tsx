@@ -31,10 +31,12 @@ function CodeBlock({ lang, text }: { lang: string; text: string }) {
  * Memoized on its text: the chat re-renders every second while an agent works, and re-parsing
  * every earlier answer each time made long chats lag; an unchanged answer now skips both.
  */
-export const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string }) {
-  const blocks = useMemo(() => parseMarkdown(text), [text]);
+export const ChatMarkdown = memo(function ChatMarkdown({ text, onVisualize }: { text: string; onVisualize?: () => void }) {
+  const visualizations = Boolean(onVisualize);
+  const blocks = useMemo(() => parseMarkdown(text, visualizations), [text, visualizations]);
   return <div className="cx-md">{blocks.map((block, index): ReactNode => {
     switch (block.kind) {
+      case "visualize": return <p key={index}><button type="button" className="cx-chip" onClick={onVisualize}>{block.title}</button><small> · Open in Preview when chat previews are enabled. Offline fragments up to 128 KiB.</small></p>;
       case "heading": {
         const Tag = (`h${Math.min(6, block.level + 2)}`) as "h3" | "h4" | "h5" | "h6";
         return <Tag key={index}><Inline parts={block.inline} /></Tag>;
