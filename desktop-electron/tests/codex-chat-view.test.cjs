@@ -25,7 +25,7 @@ const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancel
 // The page the agent's browser has open, as useWorkbenchAutoOpen reports it (null: none).
 let openPage = null;
 let workbenchStorage = null;
-// A stuck turn's Restart: its Provider stays in the tree (so a test can read the value the chat
+// A stuck turn's recovery: its Provider stays in the tree (so a test can read the value the chat
 // gives it), and its value is what TurnRunning reads.
 const turnRestart = { Provider: "TurnRestartProvider", value: { restarting: false } };
 function mount(props) {
@@ -40,7 +40,13 @@ function mount(props) {
       if (!(at in states)) states[at] = typeof initial === "function" ? initial() : initial;
       return [states[at], (value) => { states[at] = typeof value === "function" ? value(states[at]) : value; }];
     },
-    useMemo: (calculate) => calculate(), useEffect() {}, useRef: (initial) => ({ current: initial }),
+    useMemo: (calculate) => calculate(), useEffect() {},
+    useRef(initial) {
+      const states = frames.get(frame) ?? frames.set(frame, []).get(frame);
+      const at = cursor++;
+      if (!(at in states)) states[at] = { current: initial };
+      return states[at];
+    },
     // Every render here is a fresh one, so a memoized component renders as itself.
     memo: (component) => component,
     // Context reads its default; a Provider renders its children.
@@ -55,7 +61,7 @@ function mount(props) {
     frame = `${name}#${seen[name]}`; cursor = 0;
     try { return type(props || {}); } finally { [frame, cursor] = outer; }
   };
-  const timers = { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true,
+  const timers = { setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, confirm: () => true,
     localStorage: {
       getItem: (key) => workbenchStorage?.get(key) ?? null,
       setItem: (key, value) => workbenchStorage?.set(key, value),
@@ -469,47 +475,60 @@ test("while the agent works, a typed message steers it at once; Esc on an empty 
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "a delivered steer is not also sent as a follow-up");
 });
 
-test("a turn that may be stuck has a Restart button; it stops the turn and has the same agent continue", async () => {
-  // Seen live 2026-10-22: "may be stuck 3h 39m" on a tool call that never returned, with nothing to press.
+test("a turn that may be stuck offers Recover for its accepted turn without sending or queueing input", async () => {
   const now = Date.now();
-  const steered = [];
-  const { props, calls } = base({ selectedTaskId: "t", working: true,
-    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { started_at_ms: now - 4 * 3_600_000 } })], { execution_mode: "single" })],
+  const recovered = [], steered = [], queued = [], queue = appQueue(), add = queue.add;
+  queue.add = (...args) => { queued.push(args); return add(...args); };
+  let finish; const pending = new Promise(resolve => { finish = resolve; });
+  const { props, calls } = base({ projectId: "ws", selectedTaskId: "t", working: true, queue,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: {
+      request_key: "accepted-request", thread_id: "original-session", turn_id: "original-turn", status: "submitted", started_at_ms: now - 4 * 3_600_000 } })], { execution_mode: "single" })],
     activity: { "r1:w": { activity: "running Find detection log files", last_event_at_ms: now - 11 * 60_000, turn_started: true } },
-    steer: async (input) => { steered.push(input); return true; } });
+    steer: async input => { steered.push(input); return true; },
+    recover: input => { recovered.push(JSON.parse(JSON.stringify(input))); return pending; } });
   const view = mount(props);
   const provided = walk(view.render()).find((element) => element.type === "TurnRestartProvider").props.value;
-  assert.equal(typeof provided.onRestart, "function", "a steerable chat offers Restart");
+  assert.equal(typeof provided.onRestart, "function", "the captured accepted receipt offers recovery");
   try {
-    turnRestart.value = { onRestart: provided.onRestart, restarting: false };
+    turnRestart.value = provided;
     const running = walk(view.render()).find((element) => String(element.props?.className).includes("cx-turn-running"));
     assert.match(text(running), /may be stuck/);
     const button = walk(running).find((element) => element.props?.className === "cx-turn-restart");
-    assert.ok(button && !button.props.disabled, "the stuck footer has its own Restart");
-    assert.equal(text(button), "Restart");
-    button.props.onClick();
+    assert.ok(button && !button.props.disabled, "the stuck footer has its own contentless action");
+    assert.equal(text(button), "Recover");
+    button.props.onClick(); button.props.onClick();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(steered.length, 1);
-    assert.equal(steered[0].restart, true, "the turn is restarted whatever its quiet time");
-    assert.match(steered[0].message, /^Your previous turn stopped responding and was restarted\. Continue the same task/);
-    assert.equal(calls.filter(([kind]) => kind === "stop").length, 0, "the run is not stopped: the same agent continues");
-    turnRestart.value = { onRestart: provided.onRestart, restarting: true };
+    assert.deepEqual(recovered, [{ taskId: "t", runId: "r1", nodeId: "w", requestKey: "accepted-request", threadId: "original-session" }]);
+    assert.deepEqual(steered, []); assert.deepEqual(calls, []); assert.deepEqual(queued, []); assert.equal(queue.chats.size, 0);
+    const checking = walk(view.render()).find((element) => element.type === "TurnRestartProvider").props.value;
+    assert.equal(checking.restarting, true, "the real pending request owns the Checking state"); turnRestart.value = checking;
     const pressed = walk(walk(view.render()).find((element) => String(element.props?.className).includes("cx-turn-running")))
       .find((element) => element.props?.className === "cx-turn-restart");
     assert.equal(pressed.props.disabled, true);
-    assert.equal(text(pressed), "Restarting…");
-  } finally { turnRestart.value = { restarting: false }; }
+    assert.equal(text(pressed), "Checking…");
+    finish({ message: "The existing turn was observed; no message was sent." }); await new Promise(setImmediate);
+    const checked = walk(view.render()).find((element) => element.type === "TurnRestartProvider").props.value;
+    assert.equal(checked.restarting, false); turnRestart.value = checked;
+    assert.match(text(view.render()), /existing turn was observed; no message was sent/);
+    assert.deepEqual(steered, []); assert.deepEqual(calls, []); assert.deepEqual(queued, []); assert.equal(queue.chats.size, 0);
+  } finally { finish({ message: "Checked" }); await new Promise(setImmediate); turnRestart.value = { restarting: false }; }
 });
 
-test("a chat that cannot be steered keeps the old hint on a stuck turn instead of a Restart", () => {
-  const now = Date.now();
-  const { props } = base({ selectedTaskId: "t", working: true,
-    runs: [run("r1", "t", [node("w", "planner", "running", { receipt: { started_at_ms: now - 3_600_000 } })], { execution_mode: "single" })],
-    activity: { "r1:w": { activity: "running a command", last_event_at_ms: now - 11 * 60_000, turn_started: true } } });
-  const view = mount(props).render();
-  assert.equal(walk(view).find((element) => element.type === "TurnRestartProvider").props.value.onRestart, undefined);
-  const running = walk(view).find((element) => String(element.props?.className).includes("cx-turn-running"));
-  assert.match(text(running), /may be stuck · send a message to restart it$/);
+test("a stuck turn without recovery capability or accepted identity reports recovery unavailable", async t => {
+  for (const missing of ["capability", "accepted identity"]) await t.test(missing, () => {
+    const now = Date.now(), attempts = [];
+    const { props, calls } = base({ selectedTaskId: "t", working: true,
+      runs: [run("r1", "t", [node("w", "planner", "running", { receipt: { started_at_ms: now - 3_600_000,
+        ...(missing === "capability" ? { request_key: "accepted-request", thread_id: "original-session" } : {}) } })], { execution_mode: "single" })],
+      steer: async () => { attempts.push("steer"); return true; },
+      ...(missing === "accepted identity" ? { recover: async () => { attempts.push("recover"); return { message: "Unexpected" }; } } : {}),
+      activity: { "r1:w": { activity: "running a command", last_event_at_ms: now - 11 * 60_000, turn_started: true } } });
+    const view = mount(props).render();
+    assert.equal(walk(view).find((element) => element.type === "TurnRestartProvider").props.value.onRestart, undefined);
+    const running = walk(view).find((element) => String(element.props?.className).includes("cx-turn-running"));
+    assert.match(text(running), /may be stuck · recovery is unavailable for this turn$/);
+    assert.deepEqual(attempts, []); assert.deepEqual(calls, []); assert.equal(props.queue.chats.size, 0);
+  });
 });
 
 test("while the agent works, /review, /init and a new goal steer it; /rewind goes back to a message", async () => {

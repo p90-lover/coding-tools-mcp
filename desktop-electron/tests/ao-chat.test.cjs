@@ -2658,3 +2658,93 @@ test("only the latest folder read can replace its rows or report its error", asy
     assert.ok(ui.findEntry("b.txt")); assert.equal(ui.findEntry("a.txt"), undefined); assert.deepEqual(ui.errors(), []); ui.unmount();
   });
 });
+
+// Replay the production recovery hook block, including its render-time ownership fence. No IPC,
+// provider, React DOM, or browser is used by this fixture.
+function recoveryControls() {
+  const file = "AgentOrchestratorChat.tsx", text = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8");
+  const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let first, last; const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(tree) === "recoveryNode") first = node.parent.parent.getStart(tree);
+    if (ts.isVariableDeclaration(node) && node.name.getText(tree) === "restartTurn") last = node.parent.parent.end;
+    ts.forEachChild(node, visit);
+  }; visit(tree); assert.ok(first && last > first);
+  const code = ts.transpileModule(text.slice(first, last) + "\nexports.value = { restartTurn, restarting, recoveryMessage };",
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const state = [], refs = [], requests = [], calls = [], timers = new Map(), alive = { current: true };
+  let stateIndex, refIndex, cleanup, timerId = 0, lateWrites = 0;
+  const props = { projectId: "workspace-a", selectedTaskId: "chat-a" };
+  const latest = taskId => ({ id: "run-" + taskId, project_id: taskId, execution_mode: "single", nodes: [
+    { id: "lead", role: "planner", route: { harness_id: "codex-native", model: "same-model" }, receipt: {
+      request_key: "request-" + taskId, thread_id: "thread-" + taskId, turn_id: "accepted-" + taskId } },
+  ] }); props.latest = latest(props.selectedTaskId);
+  const render = () => {
+    stateIndex = 0; refIndex = 0; const exports = {};
+    vm.runInNewContext(code, { exports, ...props, alive, deliver: () => { calls.push("deliver"); return Promise.resolve(); },
+      steer: () => { calls.push("steer"); return Promise.resolve("restart"); },
+      recover: input => { const reply = delayedReply(); requests.push({ ...reply, input: plain(input) }); return reply.promise; },
+      useRef: initial => refs[refIndex++] ??= { current: initial },
+      useState: initial => { const index = stateIndex++; if (!(index in state)) state[index] = initial;
+        return [state[index], value => { if (!alive.current) lateWrites++; state[index] = typeof value === "function" ? value(state[index]) : value; }]; },
+      useEffect: effect => { if (!cleanup) cleanup = effect(); },
+      window: { setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; }, clearTimeout: id => timers.delete(id) },
+    }); return exports.value;
+  };
+  return { render, requests, calls, timers, props, lateWrites: () => lateWrites,
+    select: taskId => { props.selectedTaskId = taskId; props.latest = latest(taskId); return render(); },
+    unmount: () => { alive.current = false; cleanup?.(); },
+  };
+}
+
+test("Recover checks the exact accepted turn without a message and both running footers use it", async t => {
+  for (const [file, name] of [["AgentOrchestratorChat.tsx", "TurnRunning"], ["DshTranscript.tsx", "DshRunning"]]) await t.test(name, async () => {
+    const ui = recoveryControls(), text = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8");
+    const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    let fn; const visit = node => { if (ts.isFunctionDeclaration(node) && node.name?.text === name) fn = node.getText(tree); ts.forEachChild(node, visit); }; visit(tree);
+    const jsx = (type, props) => ({ type, props: props || {} }), exports = {};
+    const context = { exports, useContext: () => ({ onRestart: ui.render().restartTurn, restarting: ui.render().restarting }), TurnRestart: {},
+      useState: initial => [typeof initial === "function" ? initial() : initial, () => {}], useEffect() {}, useNow: () => 100,
+      dshQuietNote: () => " · nothing new for 28m · may be stuck", dshRetryNote: () => "", cpaRefusalNote: () => "", waitsForPerson: () => false,
+      dshDuration: () => "28m", WHALE: "", require: () => ({ jsx, jsxs: jsx, Fragment: "fragment" }) };
+    vm.runInNewContext(ts.transpileModule("exports.render = " + fn, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, context);
+    const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
+    const footer = () => exports.render({ turn: { steps: [{ name: "Agent", working: { stalled: true } }] }, divider: false });
+    const button = () => walk(footer()).find(item => item.type === "button");
+    assert.equal(button().props.children, "Recover"); button().props.onClick(); await new Promise(setImmediate);
+    assert.equal(button().props.children, "Checking…"); assert.equal(button().props.disabled, true);
+    assert.deepEqual(ui.requests[0].input, { taskId: "chat-a", runId: "run-chat-a", nodeId: "lead", requestKey: "request-chat-a", threadId: "thread-chat-a" });
+    assert.deepEqual(ui.calls, []); assert.equal(ui.requests.length, 1); assert.equal("message" in ui.requests[0].input, false);
+    ui.requests[0].resolve({ message: "Original turn observed; no message sent." }); await new Promise(setImmediate);
+    assert.equal(button().props.children, "Recover"); assert.match(ui.render().recoveryMessage, /Original turn observed/); assert.equal(ui.timers.size, 0); ui.unmount();
+  });
+});
+
+test("recovery status is bounded and belongs to its chat, request, and mounted owner", async t => {
+  for (const change of ["navigate", "round trip", "new receipt", "unmount"]) await t.test(change, async () => {
+    const ui = recoveryControls(); ui.render().restartTurn(); await new Promise(setImmediate);
+    if (change === "navigate" || change === "round trip") ui.select("chat-b");
+    if (change === "round trip") ui.select("chat-a");
+    if (change === "new receipt") { ui.props.latest.nodes[0].receipt.request_key = "new-request"; ui.render(); }
+    if (change === "unmount") ui.unmount();
+    ui.requests[0].resolve({ message: "A's old result" }); await new Promise(setImmediate);
+    if (change !== "unmount") { assert.equal(ui.render().restarting, false); assert.equal(ui.render().recoveryMessage, ""); ui.unmount(); }
+    assert.equal(ui.lateWrites(), 0); assert.equal(ui.timers.size, 0); assert.deepEqual(ui.calls, []);
+  });
+  await t.test("timeout permits an explicit new check without old completion overwriting it", async () => {
+    const ui = recoveryControls(); ui.render().restartTurn(); await new Promise(setImmediate);
+    const timer = [...ui.timers.values()][0]; assert.ok(timer.delay >= 30_000 && timer.delay <= 60_000); timer.callback(); await new Promise(setImmediate);
+    assert.equal(ui.render().restarting, false); assert.match(ui.render().recoveryMessage, /timed out/); assert.equal(ui.requests.length, 1, "no automatic repeat");
+    ui.render().restartTurn(); await new Promise(setImmediate); assert.equal(ui.requests.length, 2);
+    ui.requests[0].resolve({ message: "old result" }); await new Promise(setImmediate); assert.equal(ui.render().restarting, true); assert.equal(ui.render().recoveryMessage, "");
+    ui.requests[1].resolve({ message: "new result" }); await new Promise(setImmediate); assert.equal(ui.render().restarting, false); assert.equal(ui.render().recoveryMessage, "new result");
+    assert.equal(ui.timers.size, 0); ui.unmount();
+  });
+});
+
+test("the Surface recovery callback only calls the contentless operation for the captured project", async () => {
+  const calls = [], recover = rendererCallback("AgentOrchestratorSurface.tsx", "recoverChat", { workspaceId: "captured-project",
+    moduleCall: async (operation, args) => { calls.push({ operation, args: plain(args) }); return { ok: true, recovery: "observed", message: "Original work kept" }; } });
+  const input = { taskId: "chat-a", runId: "run-a", nodeId: "lead", requestKey: "accepted", threadId: "original" };
+  assert.deepEqual(plain(await recover(input)), { message: "Original work kept" });
+  assert.deepEqual(calls, [{ operation: "chat_recover", args: { workspaceId: "captured-project", ...input } }]);
+});

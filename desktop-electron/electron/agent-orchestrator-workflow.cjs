@@ -4788,6 +4788,93 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
+  const chatRecoveries = new Map();
+  /** Recovery never enters the sender, run driver, retry path, or the chat's message queue. */
+  async function chatRecover({ workspaceId, taskId, runId, nodeId, requestKey, threadId } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128), run = clean(runId, 80), node = clean(nodeId, 80);
+    const request = clean(requestKey, 256), thread = clean(threadId, 128);
+    const key = JSON.stringify([id, task, run, node, request, thread]);
+    if (chatRecoveries.has(key)) return chatRecoveries.get(key);
+    const unavailable = message => ({ ok: true, recovery: "unavailable", status: "unknown", message });
+    if (schedulerDisposed || chatRecoveries.size >= 64) return unavailable("Recovery is unavailable. The original work was kept; no message was sent.");
+    let retired = false;
+    const operation = (async () => {
+      // Bypass the short renderer-read cache on both sides of the awaited provider lookup.
+      const read = () => { runReads.delete(JSON.stringify([id, ""])); return runs({ workspaceId: id }); };
+      const find = saved => {
+        const mission = saved.runs.filter(entry => entry.project_id === task).at(-1);
+        const card = mission?.nodes?.find(entry => entry.id === node);
+        return { mission, card, active: !retired && !schedulerDisposed && mission?.workspace_id === id && mission.id === run && !mission.cancelled
+          && taskLifecycle(saved, task).visibility === "active" && !backgroundRuns.get(runKey(id, run))?.stopped
+          && !sessionStops.has(thread) && (!sessionOwners.has(thread) || sessionOwners.get(thread) === runKey(id, run))
+          && card?.receipt?.request_key === request && card.receipt.thread_id === thread };
+      };
+      const saved = await read(), before = find(saved);
+      if (before.active && before.card.state === "held" && before.card.receipt.status === "held") return { ok: true, recovery: "observed", status: "held",
+        message: "The original turn is held. Its work and history were kept; no message was sent or inference restarted." };
+      if (!before.active || before.card.state !== "running" || before.card.receipt.status !== "submitted"
+        || (!externalAgent(before.card) && before.card.route?.harness_id !== "codex-native")) {
+        return unavailable("The original accepted turn could not be verified. No message was sent and no replacement was started.");
+      }
+      const continuity = ({ mission, card }) => JSON.stringify([activityAttempt(id, run, card), card.route, card.settings, mission.grant,
+        mission.permission_selections, (card.history ?? []).map(receipt => [receipt.request_key, receipt.thread_id, receipt.turn_id])]);
+      const captured = continuity(before);
+      let result;
+      if (externalAgent(before.card)) {
+        // observe() may retry failed provisioning or interrupt an orphan; continuable() can drain
+        // queued input. Neither is a contentless recovery primitive.
+        const inspect = harnessService().recover;
+        result = typeof inspect === "function" ? await inspect(thread, before.card.receipt.turn_id || expectedTurns.get(thread))
+          : unavailable("The original agent cannot be inspected safely. No input was sent; its session was kept.");
+      } else {
+        // This status endpoint reads the existing hub only. Receipt-aware reattachment must be
+        // performed by an API that atomically checks the captured receipt, never by an unfenced observe.
+        const response = await requestHeadless("/api/v1/ao/harness/status", { workspace_id: id, run_id: run, node_id: node });
+        const status = response?.status;
+        const current = (Array.isArray(status?.threads) ? status.threads : []).find(entry => entry.id === thread);
+        const reviewer = before.card.route.approvals_reviewer ?? "user";
+        const policy = before.card.route.approval_policy ?? (reviewer === "auto_review" ? "on-request" : "never");
+        if (response?.ok !== true || response.owned !== true || status?.connected !== true || !current
+          || status.model !== before.card.route.model || status.permission_profile !== before.card.route.permission_profile
+          || status.approval_policy !== policy || status.approvals_reviewer !== reviewer
+          || (before.card.receipt.turn_id && current.turn_id !== before.card.receipt.turn_id)) {
+          result = unavailable("The original agent connection is unavailable. No message was sent; its history and session were kept.");
+        } else if (["interrupted", "unknown_stopped", "failed", "error", "cancelled", "held"].includes(current.status)) {
+          result = { ok: true, recovery: "observed", status: current.status,
+            message: `The original turn is ${current.status}. Its history was kept, but inference was not restarted and no message was sent.` };
+        } else if (["starting", "inProgress", "in_progress", "running", "compacting", "interrupt_requested", "completed", "finished"].includes(current.status)) {
+          result = { ok: true, recovery: "observed", status: ["completed", "finished"].includes(current.status) ? "settled" : "working",
+            message: ["completed", "finished"].includes(current.status)
+              ? "The original turn has finished. Its history was kept; no message was sent or work replayed."
+              : "The existing accepted turn is still working. No message was sent or work replayed." };
+        } else result = unavailable("The original turn's status could not be confirmed. Its work was kept; no message was sent.");
+      }
+      if (retired || schedulerDisposed) return unavailable("Recovery was closed. The original work was kept; no message was sent.");
+      const after = find(await read());
+      if (!after.active || continuity(after) !== captured) return { ok: true, recovery: "stale", status: "unknown",
+        message: "This chat's turn or settings changed while recovery was checked. No message was sent." };
+      // AO records an interrupted/unknown outcome as Held, not a new turn. Its newer durable
+      // outcome wins even if the earlier connection lookup still said the provider was working.
+      if (["held", "failed", "cancelled", "archived"].includes(after.card.state)) return { ok: true, recovery: "observed", status: after.card.state,
+        message: `The original turn is recorded as ${after.card.state}. Its history was kept; no message was sent or inference restarted.` };
+      if (after.card.state === "finished" && after.card.receipt.status === "completed") return { ok: true, recovery: "observed", status: "settled",
+        message: "The original turn has finished. Its history was kept; no message was sent or work replayed." };
+      if (after.card.state !== "running" || after.card.receipt.status !== "submitted") {
+        return unavailable("The original turn's current state could not be confirmed. Its work was kept; no message was sent.");
+      }
+      return { ok: true, ...result };
+    })();
+    let timer;
+    const deadline = new Promise(resolve => { timer = setTimer(() => {
+      retired = true;
+      resolve(unavailable("The recovery check timed out. The original work was kept; no message was sent."));
+    }, 30_000); timer?.unref?.(); });
+    const pending = Promise.race([operation, deadline]);
+    chatRecoveries.set(key, pending);
+    try { return await pending; }
+    finally { retired = true; clearTimer(timer); if (chatRecoveries.get(key) === pending) chatRecoveries.delete(key); }
+  }
+
   /**
    * Steers the chat's running AO agent: the message reaches its current turn at once (ACP
    * steering), like Codex's steer. It is kept in the chat under the latest message. If the turn
@@ -7189,6 +7276,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function call(operation, args = {}) {
     switch (operation) {
       case "chat_send": return personChatSend(args);
+      case "chat_recover": return chatRecover(args);
       case "chat_steer": return chatSteer(args);
       case "chat_prewarm": return chatPrewarm(args);
       case "turn_timeline": return turnTimeline(args);

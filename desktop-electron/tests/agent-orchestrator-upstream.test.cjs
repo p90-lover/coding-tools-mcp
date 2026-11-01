@@ -2146,3 +2146,30 @@ test("mission accounting reads the conversation only when normalized usage has n
     }
   });
 });
+
+test("contentless agent recovery only reads an existing exact accepted turn without starting or draining", async t => {
+  const vm = require("node:vm"), source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async recover(id, expectedTurn)"); assert.ok(start >= 0);
+  const method = source.slice(start, source.indexOf("    async observe(id, expectedTurn)", start)).trim().replace(/,$/, "");
+  for (const scenario of ["working", "interrupted", "offline", "missing turn", "queued", "failed start", "stopped controller", "wrong session", "daemon changed"]) await t.test(scenario, async () => {
+    const calls = [], child = { exitCode: null, signalCode: null };
+    const context = { state: scenario === "offline" ? "stopped" : "ready", child, daemonPort: 1234,
+      sessionId: value => value, TERMINAL_TURN_STATES: new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]),
+      internalApi: () => { throw new Error("Recovery must never start, resume, stop, or drain the agent"); },
+      requestApi: async (method, endpoint, body, options) => {
+        calls.push({ method, endpoint, body, options }); assert.equal(method, "GET"); assert.equal(body, undefined);
+        if (!endpoint.includes("/conversation?")) return { ok: true, data: { session: { id: scenario === "wrong session" ? "other" : "owned",
+          mode: "chat", provisionState: scenario === "failed start" ? "failed" : "ready" } } };
+        if (scenario === "daemon changed") context.child = { ...child };
+        return { ok: true, data: { sessionId: "owned", controller: scenario === "stopped controller" ? "stopped" : "busy",
+          turns: scenario === "missing turn" ? [] : [{ id: "accepted", providerTurnId: scenario === "queued" ? "" : "provider-turn",
+            state: scenario === "interrupted" ? "interrupted" : scenario === "queued" ? "queued" : "running" }] } };
+      } };
+    const harness = vm.runInNewContext("({" + method + "})", context), result = await harness.recover("owned", "accepted");
+    assert.equal(result.recovery, ["working", "interrupted"].includes(scenario) ? "observed" : "unavailable");
+    if (scenario === "working") assert.equal(result.status, "working");
+    if (scenario === "interrupted") { assert.equal(result.status, "interrupted"); assert.match(result.message, /no message|no input/); }
+    assert.equal(calls.length, scenario === "offline" ? 0 : ["failed start", "wrong session"].includes(scenario) ? 1 : 2);
+    assert.equal(calls.some(call => /resume|messages|interrupt|queue|steer/.test(call.endpoint)), false);
+  });
+});

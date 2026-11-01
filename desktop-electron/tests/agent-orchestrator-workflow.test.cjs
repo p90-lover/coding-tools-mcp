@@ -9885,3 +9885,169 @@ test("a paused goal accepts a validated team and leaves its route intact when va
   }), /Saved team was not found/);
   assert.deepEqual(await goalOf(workflow), before);
 });
+
+test("silent chat recovery only inspects the captured accepted turn and never sends or queues input", async t => {
+  const input = { workspaceId: "recover-ws", taskId: "recover-task", runId: "recover-run", nodeId: "lead",
+    requestKey: "accepted-request", threadId: "original-thread" };
+  const make = (external = false, change, statusReply, extra = {}) => {
+    const calls = [], card = { id: "lead", role: "planner", state: "running",
+      route: { harness_id: external ? "ao:codex" : "codex-native", model: "chosen-model", permission_profile: ":read-only",
+        approval_policy: "on-request", approvals_reviewer: "user" },
+      settings: { working_directory: "original-folder", revision: 4 },
+      receipt: { request_key: input.requestKey, thread_id: input.threadId, turn_id: "accepted-turn", status: "submitted" } };
+    const mission = { id: input.runId, workspace_id: input.workspaceId, project_id: input.taskId, execution_mode: "single", cancelled: false,
+      grant: { permission_profile: ":read-only", executable_sha256: "a".repeat(64) }, nodes: [card] };
+    const saved = { ok: true, runs: [mission] };
+    const workflow = createAgentOrchestratorWorkflow({
+      runReadFreshMs: 60_000,
+      requestHeadless: async (endpoint, body) => {
+        calls.push({ endpoint, body: structuredClone(body) });
+        if (endpoint === "/api/v1/ao/read") return structuredClone(saved);
+        if (endpoint === "/api/v1/ao/harness/status") {
+          await change?.(mission, saved);
+          return statusReply ?? { ok: true, owned: true, status: { connected: true, model: "chosen-model", permission_profile: ":read-only",
+            approval_policy: "on-request", approvals_reviewer: "user", threads: [{ id: input.threadId, turn_id: "accepted-turn", status: "in_progress" }] } };
+        }
+        throw new Error("Recovery must not grant, stop, send, or start another run: " + endpoint);
+      },
+      aoHarness: { recover: async (session, turn) => {
+        calls.push({ external: true, session, turn }); await change?.(mission, saved);
+        return { recovery: "observed", status: "working", message: "The existing turn is still working; no message was sent." };
+      } },
+      confirm: async () => { throw new Error("Recovery must preserve the existing grant"); },
+      ...extra,
+    });
+    return { workflow, mission, card, saved, calls };
+  };
+  for (const external of [false, true]) await t.test(external ? "external accepted turn" : "native accepted turn", async () => {
+    const world = make(external), before = structuredClone(world.saved);
+    try {
+      const result = await world.workflow.call("chat_recover", input);
+      assert.equal(result.ok, true); assert.equal(result.recovery, "observed"); assert.equal(result.status, "working");
+      assert.match(result.message, /existing|original/i); assert.equal(result.restarted, undefined);
+      assert.deepEqual(world.saved, before, "the operation creates no run, receipt, or chat message");
+      assert.deepEqual(world.calls.filter(call => call.endpoint && call.endpoint !== "/api/v1/ao/read").map(call => call.endpoint),
+        external ? [] : ["/api/v1/ao/harness/status"]);
+      if (external) assert.deepEqual(world.calls.find(call => call.external), { external: true, session: input.threadId, turn: "accepted-turn" });
+      assert.deepEqual((await world.workflow.call("chat_queue", { workspaceId: input.workspaceId, taskId: input.taskId, action: "list" })).queue, []);
+    } finally { world.workflow.dispose(); }
+  });
+  for (const [name, mutate] of [
+    ["Stop", mission => { mission.cancelled = true; }],
+    ["new receipt", mission => { mission.nodes[0].receipt.request_key = "new-request"; }],
+    ["new session", mission => { mission.nodes[0].receipt.thread_id = "new-thread"; }],
+    ["new model", mission => { mission.nodes[0].route.model = "other-model"; }],
+    ["new permissions", mission => { mission.nodes[0].route.permission_profile = ":full-access"; }],
+    ["new grant", mission => { mission.grant.executable_sha256 = "b".repeat(64); }],
+    ["new run", (mission, saved) => { saved.runs.push({ ...mission, id: "new-run" }); }],
+  ]) await t.test(name + " wins during an awaited observation", async () => {
+    const world = make(false, mutate);
+    try {
+      const result = await world.workflow.call("chat_recover", input);
+      assert.equal(result.recovery, "stale"); assert.notEqual(result.status, "working");
+      assert.equal(world.calls.some(call => /execute|grant|submitted|interrupt/.test(call.endpoint || "")), false);
+    } finally { world.workflow.dispose(); }
+  });
+  await t.test("missing accepted identity fails closed before any provider lookup", async () => {
+    const world = make(); delete world.card.receipt.request_key;
+    try {
+      const result = await world.workflow.call("chat_recover", input);
+      assert.equal(result.recovery, "unavailable");
+      assert.equal(world.calls.some(call => call.endpoint !== "/api/v1/ao/read"), false);
+    } finally { world.workflow.dispose(); }
+  });
+  for (const status of ["interrupted", "held", "unrecognized", "absent hub"]) await t.test("native " + status + " is reported truthfully", async () => {
+    const world = make(false, undefined, { ok: true, owned: status !== "absent hub", status: { connected: status !== "absent hub",
+      model: "chosen-model", permission_profile: ":read-only", approval_policy: "on-request", approvals_reviewer: "user",
+      threads: [{ id: input.threadId, turn_id: "accepted-turn", status }] } });
+    try {
+      const result = await world.workflow.call("chat_recover", input);
+      assert.equal(result.recovery, ["interrupted", "held"].includes(status) ? "observed" : "unavailable");
+      assert.equal(result.status, ["interrupted", "held"].includes(status) ? status : "unknown");
+      assert.equal(world.calls.some(call => /observe|execute|grant|submitted|interrupt/.test(call.endpoint || "")), false);
+    } finally { world.workflow.dispose(); }
+  });
+  await t.test("a held durable receipt is read without restoring a controller", async () => {
+    const world = make(); world.card.state = "held"; world.card.receipt.status = "held";
+    try {
+      const result = await world.workflow.call("chat_recover", input);
+      assert.equal(result.recovery, "observed"); assert.equal(result.status, "held");
+      assert.deepEqual(world.calls.map(call => call.endpoint), ["/api/v1/ao/read"]);
+    } finally { world.workflow.dispose(); }
+  });
+  for (const [name, mismatch] of [
+    ["model", { model: "other-model" }], ["permission", { permission_profile: ":full-access" }],
+    ["approval policy", { approval_policy: "never" }], ["reviewer", { approvals_reviewer: "auto_review" }],
+  ]) await t.test("a mismatched native " + name + " fails closed", async () => {
+    const world = make(false, undefined, { ok: true, owned: true, status: { connected: true,
+      model: "chosen-model", permission_profile: ":read-only", approval_policy: "on-request", approvals_reviewer: "user", ...mismatch,
+      threads: [{ id: input.threadId, turn_id: "accepted-turn", status: "in_progress" }] } });
+    try { assert.equal((await world.workflow.call("chat_recover", input)).recovery, "unavailable"); }
+    finally { world.workflow.dispose(); }
+  });
+  for (const reviewer of ["user", "auto_review"]) await t.test("omitted native approval policy keeps the " + reviewer + " default", async () => {
+    const world = make(false, undefined, { ok: true, owned: true, status: { connected: true,
+      model: "chosen-model", permission_profile: ":read-only", approval_policy: reviewer === "auto_review" ? "on-request" : "never", approvals_reviewer: reviewer,
+      threads: [{ id: input.threadId, turn_id: "accepted-turn", status: "in_progress" }] } });
+    delete world.card.route.approval_policy;
+    if (reviewer === "user") delete world.card.route.approvals_reviewer; else world.card.route.approvals_reviewer = reviewer;
+    try { assert.equal((await world.workflow.call("chat_recover", input)).status, "working"); }
+    finally { world.workflow.dispose(); }
+  });
+  await t.test("duplicate checks share the original in-flight operation", async () => {
+    let release; const waiting = new Promise(resolve => { release = resolve; }), world = make(false, () => waiting);
+    try {
+      const first = world.workflow.call("chat_recover", input), second = world.workflow.call("chat_recover", input);
+      await new Promise(setImmediate); assert.equal(world.calls.filter(call => call.endpoint === "/api/v1/ao/harness/status").length, 1);
+      release(); assert.deepEqual(await first, await second);
+    } finally { release(); world.workflow.dispose(); }
+  });
+  await t.test("a second check bypasses the still-warm workspace read before any status lookup", async () => {
+    const world = make();
+    try {
+      assert.equal((await world.workflow.call("chat_recover", input)).status, "working");
+      world.card.receipt.request_key = "newer-request";
+      assert.equal((await world.workflow.call("chat_recover", input)).recovery, "unavailable");
+      assert.equal(world.calls.filter(call => call.endpoint === "/api/v1/ao/harness/status").length, 1);
+    } finally { world.workflow.dispose(); }
+  });
+  await t.test("a lost status response releases recovery's wait and late completion starts no follow-on read", async () => {
+    let release, timerId = 0; const waiting = new Promise(resolve => { release = resolve; }), timers = new Map();
+    const world = make(false, () => waiting, undefined, {
+      setTimer: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
+      clearTimer: id => timers.delete(id),
+    });
+    try {
+      const pending = world.workflow.call("chat_recover", input); await new Promise(setImmediate);
+      const timer = [...timers.values()][0]; assert.equal(timer.delay, 30_000); timer.callback();
+      const result = await pending; assert.equal(result.recovery, "unavailable"); assert.match(result.message, /timed out/);
+      assert.equal(timers.size, 0); assert.equal(world.calls.length, 2, "no automatic repeat after the deadline");
+      release(); await new Promise(setImmediate); assert.equal(world.calls.length, 2, "late status cannot continue its retired read chain");
+      assert.equal((await world.workflow.call("chat_recover", input)).status, "working", "an explicit new check is not stuck on the expired promise");
+    } finally { release(); world.workflow.dispose(); }
+  });
+  for (const [name, state, status] of [["held", "held", "held"], ["finished", "finished", "completed"], ["interrupted", "held", "held"]]) {
+    await t.test("newer durable " + name + " wins over the earlier working observation", async () => {
+      const world = make(false, mission => {
+        mission.nodes[0].state = state; mission.nodes[0].receipt.status = status;
+        if (name === "interrupted") mission.nodes[0].receipt.error = "The accepted turn was interrupted";
+      });
+      try {
+        const result = await world.workflow.call("chat_recover", input);
+        assert.equal(result.recovery, "observed"); assert.equal(result.status, name === "finished" ? "settled" : "held");
+        assert.equal(world.calls.some(call => /observe|execute|grant|submitted|interrupt/.test(call.endpoint || "")), false);
+      } finally { world.workflow.dispose(); }
+    });
+  }
+});
+
+test("chat recovery is a privileged app operation routed through the workflow", async () => {
+  const handler = require("../../app-handler/agent-orchestrator/handler.cjs"), calls = [];
+  assert.equal(handler.operations.includes("chat_recover"), true);
+  assert.equal(handler.isReadOnly("chat_recover"), false);
+  const args = { workspaceId: "ws", taskId: "task", runId: "run", nodeId: "lead", requestKey: "request", threadId: "thread" };
+  const result = await handler.invoke("chat_recover", args, { services: { agentOrchestrator: async (operation, input) => {
+    calls.push({ operation, input }); return { ok: true, recovery: "observed" };
+  } } });
+  assert.deepEqual(result, { ok: true, recovery: "observed" }); assert.deepEqual(calls, [{ operation: "chat_recover", input: args }]);
+});
