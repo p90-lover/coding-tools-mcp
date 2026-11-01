@@ -807,7 +807,7 @@ function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, warning, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
 }: {
   /** The app's queue of this project's chats: a message typed while a turn runs waits there. */
@@ -892,11 +892,14 @@ export function AgentOrchestratorChat({
   /** The project picker on the new chat's project chip: every project, the open one, and its actions. */
   projects?: { id: string; name: string; path?: string }[];
   projectId?: string;
+  /** Stable pane identity for its new, unsent chat. */
+  draftScope?: string;
   /** Switches the new chat to that project, carrying what has been typed so far. */
   onPickProject?: (projectId: string, draft: { title: string; text: string }) => void;
   /** "+ New project": choose a folder and add it as a project. */
   onAddProject?: () => void;
 }) {
+  const draftKey = selectedTaskId || JSON.stringify(["new", projectId ?? "", draftScope ?? "main"]);
   const chats = useMemo(() => chatList(runs, tasks, [], true), [runs, tasks]);
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
   const chatRuns = useMemo(() => runs.filter((run) => run.project_id === selectedTaskId), [runs, selectedTaskId]);
@@ -912,7 +915,7 @@ export function AgentOrchestratorChat({
     return () => window.clearTimeout(timer);
   }, [idleQueued, latest?.id]);
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => CHAT_DRAFTS.get(draftKey) ?? "");
   const [title, setTitle] = useState("");
   const [sending, setSending] = useState(false);
   // CPA refusing the running turn's model, as the line under the chat box reads it (ChatTurnStats):
@@ -924,15 +927,11 @@ export function AgentOrchestratorChat({
   // and goes in once the request is answered; it stays shown meanwhile. `sent`: the agent has it.
   // `turnKey`/`messageIndex`: the turn it was sent in, where it stays shown (steerTurnIndex).
   const [pendingSteers, setPendingSteers] = useState<PendingSteer[]>([]);
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>(() => CHAT_ATTACHMENTS.get(draftKey) ?? []);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
   // Ones kept when this chat was last left (another view, another chat) come back with it.
-  const [annotations, setAnnotations] = useState<DraftAnnotation[]>(() => {
-    const kept = CHAT_ANNOTATIONS.get(selectedTaskId) ?? [];
-    CHAT_ANNOTATIONS.delete(selectedTaskId);
-    return kept;
-  });
+  const [annotations, setAnnotations] = useState<DraftAnnotation[]>(() => CHAT_ANNOTATIONS.get(draftKey) ?? []);
   const addAnnotation = (text: string, anchor?: DraftAnnotation["anchor"]) => {
     const id = ++annotationIds;
     setAnnotations((current) => [...current, { id, text, comment: "", ...(anchor ? { anchor } : {}) }]);
@@ -1210,33 +1209,43 @@ export function AgentOrchestratorChat({
     setAtBottom(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
   }, [requestKeys]);
-  // Each chat keeps its own unsent draft, as Codex does (the new-chat composer is "" here): opening
-  // another chat puts this one's draft aside and brings that chat's back.
-  const draftOwner = useRef(selectedTaskId);
-  const composing = useRef({ taskId: selectedTaskId, draft, attachments, annotations });
-  composing.current = { taskId: selectedTaskId, draft, attachments, annotations };
+  // Each chat keeps its own unsent draft. A new composer belongs to its project and pane.
+  const draftOwner = useRef(draftKey);
+  const composing = useRef({ taskId: selectedTaskId, cacheKey: draftKey, draft, attachments, annotations });
+  composing.current = { taskId: selectedTaskId, cacheKey: draftOwner.current, draft, attachments, annotations };
   // Leaving the chat view (the Mission Board, the structure view) unmounts this chat without
-  // changing chats: its unsent annotations are kept for when it comes back.
+  // changing chats: everything unsent is kept for when it comes back.
   useEffect(() => () => {
-    const { taskId, annotations: kept } = composing.current;
-    if (kept.length) CHAT_ANNOTATIONS.set(taskId, kept);
+    const { cacheKey, draft, attachments, annotations } = composing.current;
+    if (draft) CHAT_DRAFTS.set(cacheKey, draft); else CHAT_DRAFTS.delete(cacheKey);
+    if (attachments.length) CHAT_ATTACHMENTS.set(cacheKey, attachments); else CHAT_ATTACHMENTS.delete(cacheKey);
+    if (annotations.length) CHAT_ANNOTATIONS.set(cacheKey, annotations); else CHAT_ANNOTATIONS.delete(cacheKey);
   }, []);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
-    if (draftOwner.current === selectedTaskId) return;
+    if (draftOwner.current === draftKey) {
+      CHAT_DRAFTS.delete(draftKey);
+      CHAT_ATTACHMENTS.delete(draftKey);
+      CHAT_ANNOTATIONS.delete(draftKey);
+      return;
+    }
     if (draft) CHAT_DRAFTS.set(draftOwner.current, draft); else CHAT_DRAFTS.delete(draftOwner.current);
     if (attachments.length) CHAT_ATTACHMENTS.set(draftOwner.current, attachments); else CHAT_ATTACHMENTS.delete(draftOwner.current);
     if (annotations.length) CHAT_ANNOTATIONS.set(draftOwner.current, annotations); else CHAT_ANNOTATIONS.delete(draftOwner.current);
-    setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? "");
-    setAttachments(CHAT_ATTACHMENTS.get(selectedTaskId) ?? []);
-    setAnnotations(CHAT_ANNOTATIONS.get(selectedTaskId) ?? []);
+    const restored = { taskId: selectedTaskId, cacheKey: draftKey, draft: CHAT_DRAFTS.get(draftKey) ?? "",
+      attachments: CHAT_ATTACHMENTS.get(draftKey) ?? [], annotations: CHAT_ANNOTATIONS.get(draftKey) ?? [] };
+    // Unmount can win the queued state render: cleanup already owns the restored composer.
+    composing.current = restored;
+    setDraft(restored.draft);
+    setAttachments(restored.attachments);
+    setAnnotations(restored.annotations);
     setAttachNote("");
-    CHAT_DRAFTS.delete(selectedTaskId);
-    CHAT_ATTACHMENTS.delete(selectedTaskId);
-    CHAT_ANNOTATIONS.delete(selectedTaskId);
-    draftOwner.current = selectedTaskId;
-  }, [selectedTaskId]);
+    CHAT_DRAFTS.delete(draftKey);
+    CHAT_ATTACHMENTS.delete(draftKey);
+    CHAT_ANNOTATIONS.delete(draftKey);
+    draftOwner.current = draftKey;
+  }, [draftKey]);
   // Messages a rewound chat carries as context ahead of its first message; the composer holds only
   // the chosen message. Dropped with the chip's ×, or sent once with that first message.
   const [carried, setCarried] = useState<string[] | null>(null);
@@ -1314,7 +1323,7 @@ export function AgentOrchestratorChat({
   /** `restart`: the stuck turn's Restart: stop it and send `message` as its next turn (chat_steer's restart). */
   const deliver = async (message: string, goal?: string, fromComposer = true, restart = false) => {
     const owner = composing.current;
-    const here = () => alive.current && composing.current.taskId === owner.taskId;
+    const here = () => alive.current && composing.current.taskId === owner.taskId && composing.current.cacheKey === owner.cacheKey;
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
     const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments
       && composing.current.annotations === owner.annotations;
@@ -1393,8 +1402,8 @@ export function AgentOrchestratorChat({
         }
         if (shown) setOutgoing((pending) => pending && { ...pending, sent: true });
       }
-      if (fromComposer && CHAT_DRAFTS.get(owner.taskId) === owner.draft) CHAT_DRAFTS.delete(owner.taskId);
-      if (fromComposer && CHAT_ATTACHMENTS.get(owner.taskId) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.taskId);
+      if (fromComposer && CHAT_DRAFTS.get(owner.cacheKey) === owner.draft) CHAT_DRAFTS.delete(owner.cacheKey);
+      if (fromComposer && CHAT_ATTACHMENTS.get(owner.cacheKey) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.cacheKey);
       if (current() || (shown && here())) {
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         setTitle("");
@@ -1804,7 +1813,8 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
   const shownPreviews = useRef(new Set<string>());
   useEffect(() => {
     const now = new Set(attachments.map((item) => item.preview).filter((url): url is string => Boolean(url)));
-    for (const url of shownPreviews.current) if (!now.has(url)) freePreview(url);
+    const kept = new Set([...CHAT_ATTACHMENTS.values()].flatMap(files => files.map(file => file.preview)));
+    for (const url of shownPreviews.current) if (!now.has(url) && !kept.has(url)) freePreview(url);
     shownPreviews.current = now;
   }, [attachments]);
 
