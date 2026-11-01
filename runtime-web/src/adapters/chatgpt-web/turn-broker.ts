@@ -1189,7 +1189,14 @@ export class TurnBroker implements TurnBrokerOwner {
     if (request.method === "resolve") return { environment: binding.channel.environment };
     this.assertSafeHarnessRunning(binding.channel);
     if (request.method === "invoke_poll") {
-      const receipt = binding.channel.receipts.get(request.callId ?? "");
+      const reference = request.callId ?? "";
+      let receipt = binding.channel.receipts.get(reference);
+      // A lost submission acknowledgment exposes the original request key, not the canonical call id.
+      for (const candidate of binding.channel.receipts.values()) {
+        if (candidate.requestKey !== reference) continue;
+        if (receipt && receipt !== candidate) throw new Error("Invocation receipt reference is ambiguous in this turn");
+        receipt = candidate;
+      }
       if (!receipt) throw new Error("Invocation receipt is unavailable in this turn");
       const waitMs = request.waitMs ?? 0;
       if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 30_000) throw new Error("Invalid receipt polling interval");
