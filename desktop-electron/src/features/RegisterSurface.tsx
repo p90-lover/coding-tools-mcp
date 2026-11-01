@@ -3,10 +3,10 @@ import type { Language, LauncherApi, RegisterStatus } from "../types";
 import "./original-ui.css";
 
 const labels = {
-  en: { choose: "Choose project", start: "Start service", stop: "Stop service", reload: "Reload view", refresh: "Refresh status", connected: "Connected", offline: "Offline", starting: "Starting", project: "Project", empty: "Register in Coding Tools", hint: "Choose the reg-machine project, then start its service to open the registration workspace.", maintenance: "Starting the service also runs its configured background maintenance.", attached: "Using an existing service. Coding Tools will leave it running.", loading: "Loading Register", select: "Select a project to continue." },
-  "zh-CN": { choose: "选择项目", start: "启动服务", stop: "停止服务", reload: "重新加载", refresh: "刷新状态", connected: "已连接", offline: "离线", starting: "启动中", project: "项目", empty: "Coding Tools 注册工作区", hint: "选择 reg-machine 项目并启动服务，即可打开完整注册界面。", maintenance: "启动服务也会运行其已配置的后台维护。", attached: "正在使用已有服务，Coding Tools 不会将其停止。", loading: "正在加载注册界面", select: "请选择项目。" },
-  "zh-TW": { choose: "選擇專案", start: "啟動服務", stop: "停止服務", reload: "重新載入", refresh: "重新整理狀態", connected: "已連線", offline: "離線", starting: "啟動中", project: "專案", empty: "Coding Tools 註冊工作區", hint: "選擇 reg-machine 專案並啟動服務，即可開啟完整註冊介面。", maintenance: "啟動服務也會執行其已設定的背景維護。", attached: "正在使用既有服務，Coding Tools 不會將其停止。", loading: "正在載入註冊介面", select: "請選擇專案。" },
-  ja: { choose: "プロジェクトを選択", start: "サービスを起動", stop: "サービスを停止", reload: "再読み込み", refresh: "状態を更新", connected: "接続済み", offline: "オフライン", starting: "起動中", project: "プロジェクト", empty: "Coding Tools 登録ワークスペース", hint: "reg-machine プロジェクトを選び、サービスを起動すると登録画面が開きます。", maintenance: "起動すると、設定済みのバックグラウンド保守も実行されます。", attached: "既存のサービスに接続しています。Coding Tools はこのサービスを停止しません。", loading: "登録画面を読み込み中", select: "プロジェクトを選択してください。" },
+  en: { start: "Start service", stop: "Stop service", reload: "Reload view", refresh: "Refresh status", connected: "Connected", offline: "Offline", starting: "Starting", empty: "Register in Coding Tools", hint: "Register opens automatically. Use Start service to retry if it could not start.", maintenance: "Register is included with Coding Tools. Your accounts and settings stay in its application data.", attached: "Using an existing service. Coding Tools will leave it running.", loading: "Loading Register" },
+  "zh-CN": { start: "启动服务", stop: "停止服务", reload: "重新加载", refresh: "刷新状态", connected: "已连接", offline: "离线", starting: "启动中", empty: "Coding Tools 注册工作区", hint: "注册工作区会自动打开。若启动失败，可点击启动服务重试。", maintenance: "注册功能已内置，账号和设置保存在 Coding Tools 的应用数据中。", attached: "正在使用已有服务，Coding Tools 不会将其停止。", loading: "正在加载注册界面" },
+  "zh-TW": { start: "啟動服務", stop: "停止服務", reload: "重新載入", refresh: "重新整理狀態", connected: "已連線", offline: "離線", starting: "啟動中", empty: "Coding Tools 註冊工作區", hint: "註冊工作區會自動開啟。若啟動失敗，可點擊啟動服務重試。", maintenance: "註冊功能已內建，帳號和設定儲存在 Coding Tools 的應用程式資料中。", attached: "正在使用既有服務，Coding Tools 不會將其停止。", loading: "正在載入註冊介面" },
+  ja: { start: "サービスを起動", stop: "サービスを停止", reload: "再読み込み", refresh: "状態を更新", connected: "接続済み", offline: "オフライン", starting: "起動中", empty: "Coding Tools 登録ワークスペース", hint: "登録画面は自動的に開きます。起動できない場合はサービスを起動して再試行できます。", maintenance: "登録機能は内蔵されています。アカウントと設定は Coding Tools のアプリデータに保存されます。", attached: "既存のサービスに接続しています。Coding Tools はこのサービスを停止しません。", loading: "登録画面を読み込み中" },
 };
 
 export function RegisterSurface({ api, active, language, setError }: {
@@ -21,6 +21,7 @@ export function RegisterSurface({ api, active, language, setError }: {
   const [error, setLocalError] = useState("");
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
   const mounted = useRef(true);
+  const openingRequested = useRef(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -38,7 +39,11 @@ export function RegisterSurface({ api, active, language, setError }: {
       if (reading || document.hidden) return;
       reading = true;
       try {
-        const next = await api.registerStatus();
+        let next = await api.registerStatus();
+        if (alive && !openingRequested.current) {
+          openingRequested.current = true;
+          if (!next.ready && !next.starting) next = await api.startRegister();
+        }
         if (alive) setStatus(next);
       } catch (cause) {
         if (alive) setLocalError(cause instanceof Error ? cause.message : String(cause));
@@ -104,10 +109,6 @@ export function RegisterSurface({ api, active, language, setError }: {
     }
   }, [setError]);
 
-  const choose = () => run(async () => {
-    const folder = await api.chooseFolder?.();
-    return folder ? api.configureRegister(folder) : null;
-  });
   const state = status?.starting ? "starting" : ready ? "ready" : "offline";
 
   return (
@@ -118,8 +119,7 @@ export function RegisterSurface({ api, active, language, setError }: {
           {state === "starting" ? copy.starting : ready ? copy.connected : copy.offline}
         </span>
         <div className="original-ui-hostbar-actions">
-          <button type="button" disabled={busy || status?.owned || status?.starting} onClick={() => void choose()}>{copy.choose}</button>
-          <button type="button" className="primary" disabled={busy || status?.starting || (!ready && !status?.projectRoot)}
+          <button type="button" className="primary" disabled={busy || status?.starting}
             onClick={() => void run(() => ready ? api.reloadRegister() : api.startRegister())}>
             {status?.starting ? copy.starting : ready ? copy.reload : copy.start}
           </button>
@@ -127,9 +127,6 @@ export function RegisterSurface({ api, active, language, setError }: {
           <button type="button" disabled={busy} onClick={() => void run(() => api.registerStatus())}>{copy.refresh}</button>
         </div>
       </header>
-      <p className="original-ui-note register-project-path">
-        {copy.project}: {status?.projectRoot || copy.select}
-      </p>
       {error || status?.error ? <p className="original-ui-error" role="alert">{error || status?.error}</p> : null}
       <p className="original-ui-note">{ready && !status?.owned ? copy.attached : copy.maintenance}</p>
       <div className="original-ui-frame-shell" ref={setSlot} data-register-slot="true">

@@ -7,18 +7,18 @@ const http = require("node:http");
 const { EventEmitter } = require("node:events");
 const { createRegisterHost } = require("../electron/register-host.cjs");
 
-const fixtureRoot = path.resolve(__dirname, "../../aiTemp/register-runtime-20261020/host-tests");
+const fixtureRoot = path.resolve(__dirname, "../../aiTemp/register-cpa-20261023/host/host-tests");
 const identity = { ok: true, service: "account-manager-v2" };
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 async function fixture(t) {
   fs.mkdirSync(fixtureRoot, { recursive: true });
   const base = fs.mkdtempSync(path.join(fixtureRoot, "case-"));
-  const project = path.join(base, "project");
-  const python = path.join(project, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
-  fs.mkdirSync(path.dirname(python), { recursive: true });
-  fs.mkdirSync(path.join(project, "static"));
-  for (const name of ["main.py", "static/index.html", path.relative(project, python)]) fs.writeFileSync(path.join(project, name), "fixture");
+  const runtime = path.join(base, "runtime"), data = path.join(base, "data");
+  fs.mkdirSync(runtime); fs.mkdirSync(data);
+  const executable = path.join(runtime, process.platform === "win32" ? "register-service.exe" : "register-service");
+  fs.writeFileSync(executable, "fixture", { mode: 0o700 });
+  let instanceId;
   const servers = [], hosts = [], views = [], attaches = [], detaches = [], external = [];
   t.after(async () => {
     for (const host of hosts) await host.shutdown();
@@ -28,7 +28,7 @@ async function fixture(t) {
     assert.ok(base.startsWith(fixtureRoot + path.sep));
     fs.rmSync(base, { recursive: true, force: true });
   });
-  const serve = async (handler = (_request, response) => response.end(JSON.stringify(identity)), port = 0) => {
+  const serve = async (handler = (_request, response) => response.end(JSON.stringify({ ...identity, ...(instanceId ? { instance_id: instanceId } : {}) })), port = 0) => {
     const server = http.createServer(handler); servers.push(server);
     await new Promise(resolve => server.listen(port, "127.0.0.1", resolve));
     return { server, origin: "http://127.0.0.1:" + server.address().port };
@@ -45,10 +45,11 @@ async function fixture(t) {
     views.push(view); return view;
   };
   const host = options => {
-    const instance = createRegisterHost({ projectRoot: project, createView: makeView,
+    const spawnProcess = options?.spawnProcess || (() => { throw Error("Unexpected spawn"); });
+    const instance = createRegisterHost({ runtimeRoot: runtime, dataRoot: data, createView: makeView,
       attachView: view => attaches.push(view), detachView: view => detaches.push(view), openExternal: url => external.push(url),
       healthTimeoutMs: 500, startupTimeoutMs: 1200, pollIntervalMs: 5,
-      spawnProcess: () => { throw Error("Unexpected spawn"); }, ...options });
+      ...options, spawnProcess: (...args) => { instanceId = args[2]?.env.CT_REGISTER_INSTANCE_ID; return spawnProcess(...args); } });
     hosts.push(instance); return instance;
   };
   const child = onKill => {
@@ -61,8 +62,73 @@ async function fixture(t) {
     const deadline = Date.now() + 1000;
     while (!condition()) { assert.ok(Date.now() < deadline, "Fixture condition deadline"); await tick(); }
   };
-  return { base, project, python, serve, freeOrigin, host, child, views, attaches, detaches, external, until };
+  return { base, runtime, data, executable, serve, freeOrigin, host, child, views, attaches, detaches, external, until };
 }
+
+async function managedService(f, handler, options = {}) {
+  const origin = await f.freeOrigin();
+  let service, environment;
+  const health = { valid: true }, calls = [];
+  const host = f.host({ origin, ...options, spawnProcess: (_program, _args, settings) => {
+    environment = settings.env;
+    const child = f.child(() => { service?.server.closeAllConnections(); service?.server.close(); });
+    void f.serve((request, response) => {
+      if (request.url === "/api/health") {
+        response.end(JSON.stringify({ ...identity, instance_id: health.valid ? environment.CT_REGISTER_INSTANCE_ID : "foreign-instance" }));
+      } else {
+        calls.push({ route: request.url, method: request.method, authorization: request.headers.authorization });
+        handler(request, response);
+      }
+    }, Number(new URL(origin).port)).then(value => { service = value; });
+    return child;
+  } });
+  const started = await host.start(); assert.equal(started.ready, true, started.error);
+  return { host, calls, health, environment };
+}
+
+test("managed runtime starts without a project checkout or virtual environment and keeps its bearer native", async t => {
+  const f = await fixture(t), origin = await f.freeOrigin();
+  let spawned, service, privateToken;
+  const host = f.host({ projectRoot: "", runtimeRoot: f.runtime, dataRoot: f.data, origin,
+    prepareSession: (_session, _origin, token) => { privateToken = token; },
+    spawnProcess: (program, args, options) => {
+      spawned = { program, args, options };
+      const child = f.child(() => { service?.server.closeAllConnections(); service?.server.close(); });
+      void f.serve((_request, response) => response.end(JSON.stringify({ ...identity,
+        instance_id: options.env.CT_REGISTER_INSTANCE_ID })), Number(new URL(origin).port)).then(value => { service = value; });
+      return child;
+    },
+  });
+  host.setSurfaceActive(true);
+  const value = await host.start();
+  assert.equal(value.ready, true, value.error); assert.equal(value.managed, true);
+  assert.equal(spawned.program, f.executable);
+  assert.deepEqual(spawned.args, ["--host", "127.0.0.1", "--port", new URL(origin).port]);
+  assert.equal(spawned.options.cwd, f.data);
+  assert.match(spawned.options.env.APP_PASSWORD, /^[A-Za-z0-9_-]{40,}$/);
+  assert.equal(spawned.options.env.CT_REGISTER_DATA_DIR, f.data);
+  assert.equal(spawned.options.env.ACCOUNT_MANAGER_DATA_DIR, f.data);
+  assert.equal(spawned.options.env.ACCOUNT_MANAGER_DATABASE_URL, "sqlite:///" + path.join(f.data, "account_manager.db").replaceAll("\\", "/"));
+  await f.until(() => privateToken);
+  assert.equal(privateToken, spawned.options.env.APP_PASSWORD);
+  assert.equal(JSON.stringify(value).includes(privateToken), false);
+  assert.equal("projectRoot" in value, false);
+});
+
+test("managed child discards inherited external Python and browser runtime overrides", async t => {
+  const f = await fixture(t);
+  const names = ["PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "PLAYWRIGHT_NODEJS_PATH"];
+  const previous = new Map(names.map(name => [name, process.env[name]]));
+  try {
+    for (const name of names) process.env[name] = "FIXTURE_EXTERNAL_RUNTIME_DO_NOT_USE";
+    const managed = await managedService(f, (_request, response) => response.end("{}"));
+    assert.ok(Object.keys(managed.environment).every(name => !names.includes(name.toUpperCase())));
+    assert.equal(managed.environment.CT_REGISTER_DATA_DIR, f.data);
+    assert.equal(managed.environment.ACCOUNT_MANAGER_DATA_DIR, f.data);
+  } finally {
+    for (const [name, value] of previous) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  }
+});
 
 test("status only probes exact identity; attached services are never acquired or killed", async t => {
   const f = await fixture(t), service = await f.serve();
@@ -93,29 +159,28 @@ test("wrong service identity, malformed JSON and hanging responses never spawn",
   assert.ok(Date.now() - startedAt < 500, "Health has a total deadline, even with continuing data");
 });
 
-test("project configuration canonicalizes and persists only the project path", async t => {
-  const f = await fixture(t), alias = path.join(f.base, "alias");
-  fs.symlinkSync(f.project, alias, process.platform === "win32" ? "junction" : "dir");
+test("managed Register ignores legacy checkout settings and has no project configuration entry point", async t => {
+  const f = await fixture(t);
   const configPath = path.join(f.base, "settings/runtime-register.json");
-  const host = f.host({ origin: await f.freeOrigin(), configPath });
-  const value = await host.configure(alias);
-  assert.equal(value.projectRoot, fs.realpathSync.native(f.project));
-  assert.deepEqual(JSON.parse(fs.readFileSync(configPath)), { projectRoot: value.projectRoot });
-  const restored = f.host({ origin: await f.freeOrigin(), projectRoot: "ignored", configPath });
-  assert.equal((await restored.status()).projectRoot, value.projectRoot);
-  await assert.rejects(host.configure(path.join(f.base, "missing")), /does not exist/);
+  fs.mkdirSync(path.dirname(configPath)); fs.writeFileSync(configPath, '{"projectRoot":"unavailable-checkout"}');
+  const host = f.host({ origin: await f.freeOrigin(), configPath, projectRoot: "unavailable-checkout" });
+  const value = await host.status();
+  assert.equal(value.managed, true); assert.equal(value.runtimeRoot, f.runtime); assert.equal(value.dataRoot, f.data);
+  assert.equal("projectRoot" in value, false); assert.equal(host.configure, undefined);
+  assert.equal(fs.readFileSync(configPath, "utf8"), '{"projectRoot":"unavailable-checkout"}');
 });
 
-test("start validates source, static build and Python without importing source", async t => {
+test("start validates only the bundled executable and writable app storage", async t => {
   const f = await fixture(t), host = f.host({ origin: await f.freeOrigin() });
-  for (const [file, message] of [["main.py", /main.py/], ["static/index.html", /static UI/], [path.relative(f.project, f.python), /Python/]]) {
-    const target = path.join(f.project, file); fs.unlinkSync(target);
-    const result = await host.start(); assert.equal(result.owned, false); assert.match(result.error, message);
-    fs.writeFileSync(target, "fixture");
-  }
+  fs.unlinkSync(f.executable);
+  const result = await host.start(); assert.equal(result.owned, false); assert.match(result.error, /bundled.*missing/i);
+  fs.writeFileSync(f.executable, "fixture", { mode: 0o700 });
+  const unavailable = path.join(f.base, "file"); fs.writeFileSync(unavailable, "fixture");
+  const brokenStorage = f.host({ origin: await f.freeOrigin(), dataRoot: unavailable });
+  assert.match((await brokenStorage.start()).error, /writable storage/);
 });
 
-test("concurrent starts share one child, fixed argv and unmodified auth/proxy environment", async t => {
+test("concurrent starts share one child, fixed argv and private managed auth/storage environment", async t => {
   const f = await fixture(t), origin = await f.freeOrigin();
   let spawned, calls = 0, service, child;
   const host = f.host({ origin, spawnProcess: (program, args, options) => {
@@ -124,16 +189,16 @@ test("concurrent starts share one child, fixed argv and unmodified auth/proxy en
     void f.serve(undefined, Number(new URL(origin).port)).then(value => { service = value; }); return child;
   } });
   const first = host.start(); assert.equal(host.start(), first);
-  await assert.rejects(host.configure(f.project), /Stop Register/);
   const value = await first;
   assert.equal(value.ready, true); assert.equal(value.owned, true); assert.equal(value.starting, false); assert.equal(calls, 1);
-  assert.equal(spawned.program, f.python);
-  assert.deepEqual(spawned.args, ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", new URL(origin).port]);
-  assert.ok(Object.keys(spawned.options.env).length === Object.keys(process.env).length
-    && Object.entries(process.env).every(([key, value]) => spawned.options.env[key] === value), "Child environment is unchanged");
-  assert.equal(spawned.options.cwd, f.project);
+  assert.equal(spawned.program, f.executable);
+  assert.deepEqual(spawned.args, ["--host", "127.0.0.1", "--port", new URL(origin).port]);
+  const managed = new Set(["APP_PASSWORD", "CT_REGISTER_INSTANCE_ID", "CT_REGISTER_DATA_DIR", "ACCOUNT_MANAGER_DATA_DIR", "ACCOUNT_MANAGER_DATABASE_URL"]);
+  const external = new Set(["PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "PLAYWRIGHT_NODEJS_PATH"]);
+  assert.ok(Object.entries(process.env).every(([key, value]) => managed.has(key) || external.has(key.toUpperCase()) || spawned.options.env[key] === value), "Unrelated child environment remains unchanged");
+  assert.match(spawned.options.env.APP_PASSWORD, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(spawned.options.cwd, f.data);
   assert.equal(spawned.options.windowsHide, true); assert.deepEqual(spawned.options.stdio, ["ignore", "ignore", "ignore"]);
-  await assert.rejects(host.configure(f.project), /Stop Register/);
   assert.equal((await host.stop()).owned, false); assert.equal(child.kills, 1);
 });
 
@@ -144,7 +209,7 @@ test("startup timeout and spawn errors expose actionable messages without raw se
   assert.equal(value.starting, false); assert.equal(value.owned, false);
   const failed = f.host({ origin, spawnProcess: () => { throw Error("Bearer PRIVATE_FIXTURE_SECRET"); } });
   const error = (await failed.start()).error;
-  assert.match(error, /Python.*start/i); assert.doesNotMatch(error, /PRIVATE_FIXTURE_SECRET/);
+  assert.match(error, /bundled.*start/i); assert.doesNotMatch(error, /PRIVATE_FIXTURE_SECRET/);
 });
 
 test("stop during startup kills only its child and cannot create a late view", async t => {
@@ -232,7 +297,7 @@ test("cancelled quit restores attached view intent without starting a backend", 
   await f.until(() => f.views.length === 2 && f.attaches.includes(f.views[1]));
   assert.deepEqual(f.views[1].placements.at(-1), { x: 40, y: 80, width: 500, height: 300 });
   assert.equal(f.views[1].partition, f.views[0].partition); assert.equal(spawns, 0);
-  await host.configure(f.project);
+  assert.equal((await host.start()).ready, true);
   quitting = true; await host.shutdown(); host.setSurfaceActive(false);
   quitting = false; await host.recoverAfterCancelledQuit(); await tick();
   assert.equal(f.views.length, 2, "Hidden/overlay intent remains hidden after recovery");
@@ -248,8 +313,8 @@ test("uncertain quit keeps ownership until Stop succeeds, then permits explicit 
   assert.equal((await host.start()).owned, true); quitting = true;
   await assert.rejects(host.shutdown(), /refused termination/); quitting = false;
   assert.equal((await host.recoverAfterCancelledQuit()).owned, true);
-  await assert.rejects(host.configure(f.project), /closed|Stop Register/); await host.start(); assert.equal(spawns, 1);
-  assert.equal((await host.stop()).owned, false); await host.configure(f.project);
+  await host.start(); assert.equal(spawns, 1);
+  assert.equal((await host.stop()).owned, false);
   assert.equal(spawns, 1, "Recovery never restarts the backend");
   assert.equal((await host.start()).owned, true); assert.equal(spawns, 2);
 });
@@ -281,4 +346,73 @@ test("loopback origin is constructor-only and rejects credentials or nonlocal ho
   for (const origin of ["https://127.0.0.1:8000", "http://localhost:8000", "http://example.invalid", "http://u:p@127.0.0.1:8000", "http://127.0.0.1:8000/path"]) {
     assert.throws(() => createRegisterHost({ origin }), /loopback/);
   }
+});
+
+test("native API uses only the managed bearer and fixed routes with explicit account IDs", async t => {
+  const f = await fixture(t), selected = [];
+  const managed = await managedService(f, (request, response) => {
+    let body = ""; request.on("data", chunk => { body += chunk; });
+    request.on("end", () => {
+      if (body) selected.push(JSON.parse(body));
+      response.end(JSON.stringify(request.url.endsWith("accounts") ? { accounts: [{ id: 7, email: "fixture@example.invalid" }] }
+        : request.url.endsWith("export") ? { files: [{ account_id: 7, json: { refresh_token: "FIXTURE_PRIVATE" } }] } : { results: [{ id: 7, ok: true }] }));
+    });
+  });
+  assert.equal((await managed.host.request("GET", "/api/coding-tools/accounts")).accounts[0].id, 7);
+  assert.equal((await managed.host.request("POST", "/api/coding-tools/export", { ids: [7] })).files[0].json.refresh_token, "FIXTURE_PRIVATE");
+  assert.equal((await managed.host.request("POST", "/api/coding-tools/refresh", { ids: [7] })).results[0].ok, true);
+  assert.deepEqual(selected, [{ ids: [7] }, { ids: [7] }]);
+  assert.ok(managed.calls.every(call => call.authorization === "Bearer " + managed.environment.APP_PASSWORD));
+  for (const [method, route, body] of [["POST", "/api/coding-tools/accounts", {}], ["GET", "/api/accounts"],
+    ["GET", "https://example.invalid/api/coding-tools/accounts"], ["GET", "/api/coding-tools/accounts", {}],
+    ["POST", "/api/coding-tools/export", { ids: [] }], ["POST", "/api/coding-tools/refresh", { ids: [7, 7] }]]) {
+    await assert.rejects(managed.host.request(method, route, body));
+  }
+  assert.equal(managed.calls.length, 3);
+});
+
+test("pre-existing services and a mismatched managed health identity never receive the private service bearer", async t => {
+  const f = await fixture(t); let externalRequests = 0;
+  const service = await f.serve((request, response) => {
+    if (request.url !== "/api/health") externalRequests++;
+    assert.equal(request.headers.authorization, undefined); response.end(JSON.stringify(identity));
+  });
+  const attached = f.host({ origin: service.origin }); assert.equal((await attached.start()).owned, false);
+  await assert.rejects(attached.request("GET", "/api/coding-tools/accounts"), { code: "register_unavailable" });
+  assert.equal(externalRequests, 0);
+  const managed = await managedService(f, (_request, response) => response.end("{}"));
+  managed.health.valid = false;
+  await assert.rejects(managed.host.request("GET", "/api/coding-tools/accounts"), { code: "register_unavailable" });
+  assert.equal(managed.calls.length, 0);
+});
+
+test("native API rejects redirects, malformed and oversized responses without returning upstream secrets", async t => {
+  const f = await fixture(t); let mode = "redirect";
+  const managed = await managedService(f, (_request, response) => {
+    if (mode === "redirect") response.writeHead(302, { location: "https://example.invalid/" }).end("PRIVATE_FIXTURE_ERROR");
+    else if (mode === "malformed") response.end("PRIVATE_FIXTURE_ERROR");
+    else response.end(JSON.stringify({ padding: "x".repeat(8 * 1024 * 1024) }));
+  });
+  for (mode of ["redirect", "malformed", "oversized"]) {
+    await assert.rejects(managed.host.request("GET", "/api/coding-tools/accounts"), failure => {
+      assert.equal(failure.code, "register_request_failed"); assert.doesNotMatch(failure.message, /PRIVATE_FIXTURE/); return true;
+    });
+  }
+  assert.equal(managed.calls.length, 3);
+});
+
+test("native API requests have total deadlines and are cancelled by abort or owned shutdown", async t => {
+  const f = await fixture(t);
+  const managed = await managedService(f, (_request, response) => response.write("{"), { requestTimeoutMs: 80 });
+  let started = Date.now();
+  await assert.rejects(managed.host.request("POST", "/api/coding-tools/refresh", { ids: [7] }), { code: "register_request_failed" });
+  assert.ok(Date.now() - started < 1000);
+  const controller = new AbortController();
+  const cancelled = managed.host.request("POST", "/api/coding-tools/refresh", { ids: [7] }, { signal: controller.signal }); cancelled.catch(() => {});
+  await f.until(() => managed.calls.length === 2); controller.abort();
+  await assert.rejects(cancelled, { code: "register_unavailable" });
+  const pending = managed.host.request("POST", "/api/coding-tools/refresh", { ids: [7] }); pending.catch(() => {});
+  await f.until(() => managed.calls.length === 3); started = Date.now();
+  await managed.host.shutdown(); await assert.rejects(pending, { code: "register_unavailable" });
+  assert.ok(Date.now() - started < 1000);
 });

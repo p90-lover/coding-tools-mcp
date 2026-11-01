@@ -91,7 +91,6 @@ test("Register launcher calls keep their named channels and unsubscribe changes"
   const { launcher, invocations, subscriptions } = loadPreload();
   const operations = [
     ["registerStatus", "launcher:register-status", undefined],
-    ["configureRegister", "launcher:register-configure", "C:\\fixture\\reg-machine"],
     ["startRegister", "launcher:register-start", undefined],
     ["stopRegister", "launcher:register-stop", undefined],
     ["reloadRegister", "launcher:register-reload", undefined],

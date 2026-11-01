@@ -15,12 +15,13 @@
     "build": "bun run build:preload && bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
     "build:five-stack-runtime": "node scripts/prepare-five-stack-runtime.cjs",
+    "build:register-runtime": "node ../scripts/prepare-register-runtime.cjs",
     "build:package-resources": "node scripts/prepare-package-resources.cjs",
     "build:agent-orchestrator": "node scripts/build-agent-orchestrator.cjs",
-    "package": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs",
-    "package:mac": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --mac",
-    "package:win": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --win",
-    "package:linux": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --linux",
+    "package": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:register-runtime && bun run build:package-resources && bun run scripts/package.cjs",
+    "package:mac": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:register-runtime && bun run build:package-resources && bun run scripts/package.cjs --mac",
+    "package:win": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:register-runtime && bun run build:package-resources && bun run scripts/package.cjs --win",
+    "package:linux": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:register-runtime && bun run build:package-resources && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
     "package:backend": "node scripts/package-backend.cjs",
     "patch:portable": "node scripts/patch-portable.cjs",
@@ -96,6 +97,10 @@
       }
     ],
     "extraResources": [
+      {
+        "from": "../aiTemp/register-runtime",
+        "to": "register-runtime"
+      },
       {
         "from": "assets/keysmith",
         "to": "codex-keysmith"

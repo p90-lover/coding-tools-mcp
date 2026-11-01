@@ -121,19 +121,20 @@ test("Register IPC trusts only the launcher frame and permits hidden detach", as
   const sender = { mainFrame, isFocused: () => focused, getZoomFactor: () => 2 };
   const mainWindow = { webContents: sender, isDestroyed: () => false,
     isVisible: () => visible, isMinimized: () => !visible, isFocused: () => focused };
-  const host = Object.fromEntries(["status", "configure", "start", "stop", "reload", "setSurfaceActive", "setBounds"]
+  const host = Object.fromEntries(["status", "start", "stop", "reload", "setSurfaceActive", "setBounds"]
     .map((name) => [name, (...args) => { seen.push([name, ...args]); return { ready: true }; }]));
   vm.runInNewContext(functions.filter((node) => ["validateBounds", "assertFocusedMainWindow"].includes(node.name?.text))
     .map((node) => node.getText(file)).join("\n") + "\nconst registerFor = " + guard.initializer.getText(file) + ";\n" + calls.join(";\n"), {
     mainWindow, BrowserWindow: { fromWebContents: (value) => value === sender ? mainWindow : null },
     logger: {}, getRegisterHost: () => host, handle: (channel, handler) => handlers.set(channel, handler),
   });
-  assert.equal(handlers.size, 7);
+  assert.equal(handlers.size, 6);
+  assert.equal(handlers.has("launcher:register-configure"), false);
   const event = { sender, senderFrame: mainFrame };
   for (const handler of handlers.values()) assert.throws(() => handler({ sender, senderFrame: {} }), /main.*frame/i);
   assert.equal(seen.length, 0);
   focused = false;
-  for (const suffix of ["configure", "start", "stop"]) assert.throws(() => handlers.get("launcher:register-" + suffix)(event, "C:\\fixture"), /focused/);
+  for (const suffix of ["start", "stop"]) assert.throws(() => handlers.get("launcher:register-" + suffix)(event), /focused/);
   await handlers.get("launcher:register-status")(event);
   assert.equal(seen.length, 1);
   visible = false;

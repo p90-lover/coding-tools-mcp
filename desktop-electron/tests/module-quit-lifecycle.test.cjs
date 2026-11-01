@@ -22,7 +22,7 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
   const disposed = [];
   const nativeStops = [];
   const quits = [];
-  const order = [], recovered = [];
+  const order = [], recovered = [], apiRecovered = [];
   const controller = name => ({ dispose() {
     disposed.push(name);
     if (failCleanup && name === "external") throw new Error("Owned process cleanup failed");
@@ -37,6 +37,8 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
     browserHost: { currentOperation: () => null, persistSession: async () => { if (browserSaveFails) throw new Error("Browser save failed"); }, destroy() {} },
     runtimeSupervisor: { shutdown: async () => { order.push("stop-runtime"); nativeStops.push("runtime"); } },
     headlessHost: { shutdown: async () => {} }, browserControl: { close: async () => {} },
+    registerApi: { close: async () => { order.push("stop-register-api"); },
+      recoverAfterCancelledQuit: async () => { apiRecovered.push(context.quitting); } },
     registerHost: { shutdown: async () => { order.push("stop-register"); if (registerShutdownFails) throw new Error("Register stop failed"); },
       recoverAfterCancelledQuit: async () => { recovered.push(context.quitting); } },
     stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} }, autoInstaller: { stop() {} },
@@ -58,7 +60,7 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
   const quit = vm.runInContext(`(${quitSource})`, context);
   let result;
   context.requestQuit = () => (result = quit());
-  return { disposed, nativeStops, quits, order, recovered, quit, async beforeQuit() {
+  return { disposed, nativeStops, quits, order, recovered, apiRecovered, quit, async beforeQuit() {
     let prevented = 0;
     for (const listener of listeners) vm.runInContext(`(${listener})`, context)({ preventDefault: () => { prevented += 1; } });
     assert.equal(prevented, 1);
@@ -82,7 +84,7 @@ test("accepted app quit disposes each integration controller once", async () => 
   assert.equal(result.ok, true);
   assert.deepEqual(f.disposed, ["bootstrap", "visuals", "external", "upstream"]);
   assert.equal(f.quits.length, 1);
-  assert.deepEqual(f.order, ["restore-route", "stop-runtime", "stop-register", "stop-chatgpt-desktop"]);
+  assert.deepEqual(f.order, ["restore-route", "stop-runtime", "stop-register-api", "stop-register", "stop-chatgpt-desktop"]);
 });
 
 test("route restoration failure cancels quit unless the user chooses Quit anyway", async () => {
@@ -93,7 +95,7 @@ test("route restoration failure cancels quit unless the user chooses Quit anyway
 
   const accepted = fixture({ restoreFails: true, quitAnyway: true });
   assert.equal((await accepted.quit()).ok, true);
-  assert.deepEqual(accepted.order, ["restore-route", "stop-runtime", "stop-register", "stop-chatgpt-desktop"]);
+  assert.deepEqual(accepted.order, ["restore-route", "stop-runtime", "stop-register-api", "stop-register", "stop-chatgpt-desktop"]);
   assert.equal(accepted.quits.length, 1);
 });
 
@@ -102,6 +104,7 @@ test("cancelled quits recover Register only after the main quitting flag clears"
     const f = fixture(options), result = await f.quit();
     assert.equal(result.ok, false); assert.deepEqual(f.quits, []);
     assert.deepEqual(f.recovered, [false]); assert.ok(f.order.includes("stop-register"));
+    assert.deepEqual(f.apiRecovered, [false]);
   }
   const successful = fixture(); await successful.quit(); assert.deepEqual(successful.recovered, []);
 });

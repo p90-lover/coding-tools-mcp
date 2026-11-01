@@ -3,18 +3,30 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const http = require("node:http");
+const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 const { browserViewVisible } = require("./browser-state.cjs");
 
 const PARTITION = "persist:coding-tools-register";
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const API_ROUTES = new Map([["/api/coding-tools/accounts", "GET"], ["/api/coding-tools/export", "POST"], ["/api/coding-tools/refresh", "POST"]]);
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const EXTERNAL_RUNTIME_ENV = new Set(["PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "PLAYWRIGHT_NODEJS_PATH"]);
+
+function validateRegisterIds(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1
+    || !Array.isArray(body.ids) || body.ids.length < 1 || body.ids.length > 100
+    || body.ids.some(id => !Number.isSafeInteger(id) || id < 1) || new Set(body.ids).size !== body.ids.length) {
+    throw new Error("Register requires 1 to 100 explicit unique positive account IDs");
+  }
+  return body.ids;
+}
 
 function createRegisterHost({
-  projectRoot = "", configPath, createView, attachView, detachView, openExternal, onChange,
+  runtimeRoot = "", dataRoot = "", createView, attachView, detachView, openExternal, onChange,
   prepareSession, spawnProcess = spawn, origin = "http://127.0.0.1:8000", isQuitting = () => false,
-  healthTimeoutMs = 1200, startupTimeoutMs = 30000, pollIntervalMs = 120,
+  healthTimeoutMs = 1200, startupTimeoutMs = 30000, pollIntervalMs = 120, requestTimeoutMs = 120000,
 } = {}) {
   const endpoint = new URL(origin);
   if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1"
@@ -22,25 +34,14 @@ function createRegisterHost({
     throw new Error("Register requires a loopback HTTP origin");
   }
   origin = endpoint.origin;
-  if (![healthTimeoutMs, startupTimeoutMs, pollIntervalMs].every(value => Number.isFinite(value) && value > 0)) {
+  if (![healthTimeoutMs, startupTimeoutMs, pollIntervalMs, requestTimeoutMs].every(value => Number.isFinite(value) && value > 0)) {
     throw new Error("Register deadlines must be positive finite numbers");
   }
   healthTimeoutMs = Math.max(1, Math.min(1200, healthTimeoutMs));
   startupTimeoutMs = Math.max(1, Math.min(30000, startupTimeoutMs));
   pollIntervalMs = Math.max(5, Math.min(500, pollIntervalMs));
+  requestTimeoutMs = Math.max(1, Math.min(120000, requestTimeoutMs));
   let error = null;
-  if (configPath && fs.existsSync(configPath)) {
-    try {
-      const stat = fs.lstatSync(configPath);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 65536) throw new Error("Invalid config");
-      const saved = JSON.parse(fs.readFileSync(configPath, "utf8"));
-      if (typeof saved.projectRoot === "string") projectRoot = saved.projectRoot;
-    } catch { error = "Register project settings could not be read. Choose its folder again."; }
-  }
-  if (projectRoot) {
-    projectRoot = path.resolve(projectRoot);
-    try { projectRoot = fs.realpathSync.native(projectRoot); } catch { /* Start reports missing folders. */ }
-  }
   let ready = false, starting = false, active = false, bounds = null, disposed = false;
   let owned = null, view = null, attached = false, viewPending = null, viewToken = null;
   let generation = 0, startPending = null, stopPending = null, statusPending = null;
@@ -48,13 +49,14 @@ function createRegisterHost({
   const requests = new Set();
 
   const snapshot = () => ({
-    projectRoot, origin, ready, owned: Boolean(owned && !owned.ended), starting, error,
+    managed: true, runtimeRoot, dataRoot, origin, ready, owned: Boolean(owned && !owned.ended), starting, error,
     ...(owned && !owned.ended && Number.isInteger(owned.child.pid) ? { pid: owned.child.pid } : {}),
   });
   const emit = () => { try { onChange?.(snapshot()); } catch { /* A closing renderer has no listener. */ } };
   const current = token => !disposed && !isQuitting() && token === generation;
 
   function health(timeout = healthTimeoutMs) {
+    const record = owned;
     return new Promise(resolve => {
       let settled = false, request;
       const finish = kind => {
@@ -77,7 +79,7 @@ function createRegisterHost({
           let value;
           try { value = JSON.parse(body); } catch { /* Any other HTTP service is a conflict. */ }
           finish(response.statusCode === 200 && value?.ok === true
-            && value.service === "account-manager-v2" ? "ready" : "conflict");
+            && value.service === "account-manager-v2" && (!record || value.instance_id === record.instanceId) ? "ready" : "conflict");
         });
       });
       requests.add(request);
@@ -152,7 +154,7 @@ function createRegisterHost({
             error = "Register page could not load. Check the service and reload."; emit();
           }
         });
-        const unregister = await prepareSession?.(contents.session, origin);
+        const unregister = await prepareSession?.(contents.session, origin, owned?.password || "");
         if (!current(token) || view !== created || !ready) {
           if (typeof unregister === "function") { try { unregister(); } catch {} }
           if (view === created) closeView();
@@ -193,35 +195,20 @@ function createRegisterHost({
     return pending;
   }
 
-  async function configure(nextRoot) {
-    if (disposed || isQuitting()) throw new Error("Register host is closed");
-    if (owned || starting || stopPending) throw new Error("Stop Register before changing its project folder.");
-    if (typeof nextRoot !== "string" || !path.isAbsolute(nextRoot)) throw new Error("Choose an absolute Register project folder.");
-    let canonical;
-    try { canonical = fs.realpathSync.native(nextRoot); if (!fs.statSync(canonical).isDirectory()) throw new Error(); }
-    catch { throw new Error("The Register project folder does not exist."); }
-    if (configPath) {
-      try { writePrivateFileAtomic(configPath, JSON.stringify({ projectRoot: canonical }) + "\n"); }
-      catch { throw new Error("Register settings could not be saved. Check the app profile permissions."); }
-    }
-    projectRoot = canonical;
-    error = null; emit();
-    return snapshot();
-  }
-
-  function validateProject() {
-    if (!projectRoot) throw new Error("Choose the reg-machine project folder first.");
-    for (const [relative, message] of [
-      ["main.py", "Register main.py is missing. Choose the reg-machine project folder."],
-      ["static/index.html", "Register static UI is missing. Build its frontend first."],
-    ]) {
-      try { if (!fs.statSync(path.join(projectRoot, relative)).isFile()) throw new Error(); }
-      catch { throw new Error(message); }
-    }
-    const python = path.join(projectRoot, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
-    try { if (!fs.statSync(python).isFile()) throw new Error(); }
-    catch { throw new Error("Register .venv Python is missing. Create its environment and install requirements."); }
-    return python;
+  function validateRuntime() {
+    if (!runtimeRoot || !path.isAbsolute(runtimeRoot)) throw new Error("The bundled Register runtime is unavailable. Repair or update Coding Tools.");
+    const executable = path.join(runtimeRoot, process.platform === "win32" ? "register-service.exe" : "register-service");
+    try {
+      const stat = fs.lstatSync(executable);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error();
+      if (process.platform !== "win32") fs.accessSync(executable, fs.constants.X_OK);
+    } catch { throw new Error("The bundled Register runtime is missing. Repair or update Coding Tools."); }
+    if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Register writable storage is unavailable. Restart Coding Tools.");
+    try {
+      fs.mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
+      if (!fs.statSync(dataRoot).isDirectory()) throw new Error();
+    } catch { throw new Error("Register writable storage could not be opened. Check the app profile permissions."); }
+    return executable;
   }
 
   async function terminate(record) {
@@ -262,34 +249,40 @@ function createRegisterHost({
         }
         if (found !== "absent") throw new Error("The Register port is already in use. Choose the existing service or free the port.");
         if (owned) throw new Error("Register is still running but is not ready. Stop it before retrying.");
-        const python = validateProject();
+        const executable = validateRuntime();
         if (!current(token)) return snapshot();
+        const password = crypto.randomBytes(32).toString("base64url"), instanceId = crypto.randomUUID();
+        const childEnvironment = { ...process.env, APP_PASSWORD: password, CT_REGISTER_INSTANCE_ID: instanceId,
+          CT_REGISTER_DATA_DIR: dataRoot, ACCOUNT_MANAGER_DATA_DIR: dataRoot,
+          ACCOUNT_MANAGER_DATABASE_URL: "sqlite:///" + path.join(dataRoot, "account_manager.db").replaceAll("\\", "/"),
+        };
+        for (const name of Object.keys(childEnvironment)) if (EXTERNAL_RUNTIME_ENV.has(name.toUpperCase())) delete childEnvironment[name];
         let child;
         try {
-          child = spawnProcess(python, ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", endpoint.port || "80"], {
-            cwd: projectRoot, env: { ...process.env }, windowsHide: true, detached: DETACH_OWNED_CHILD, stdio: ["ignore", "ignore", "ignore"],
+          child = spawnProcess(executable, ["--host", "127.0.0.1", "--port", endpoint.port || "80"], {
+            cwd: dataRoot, env: childEnvironment, windowsHide: true, detached: DETACH_OWNED_CHILD, stdio: ["ignore", "ignore", "ignore"],
           });
-        } catch { throw new Error("Register Python could not start. Check its environment and dependencies."); }
-        record = { child, ended: false, stopping: false, failure: null, termination: null };
+        } catch { throw new Error("The bundled Register service could not start. Repair or update Coding Tools."); }
+        record = { child, password, instanceId, ended: false, stopping: false, failure: null, termination: null };
         owned = record;
         const ended = () => {
           record.ended = true;
           if (owned === record) {
-            owned = null; ready = false; closeView();
-            if (!record.stopping && !starting && !disposed) error = "Register exited. Check its environment and start it again.";
+            owned = null; ready = false; closeView(); cancelProbes();
+            if (!record.stopping && !starting && !disposed) error = "Register exited. Retry or repair Coding Tools.";
             emit(); void recoverIfSafe();
           }
         };
         child.once("exit", ended);
-        child.once("error", () => { record.failure = "Register Python could not start. Check its environment and dependencies."; ended(); });
+        child.once("error", () => { record.failure = "The bundled Register service could not start. Repair or update Coding Tools."; ended(); });
         const deadline = Date.now() + startupTimeoutMs;
         while (current(token)) {
-          if (record.ended) throw new Error(record.failure || "Register exited during startup. Verify uvicorn and project dependencies.");
+          if (record.ended) throw new Error(record.failure || "Register exited during startup. Repair or update Coding Tools.");
           const remaining = deadline - Date.now();
-          if (remaining <= 0) throw new Error("Register did not become ready within 30 seconds. Check its environment and dependencies.");
+          if (remaining <= 0) throw new Error("Register did not become ready within 30 seconds. Retry or repair Coding Tools.");
           const result = await health(Math.min(healthTimeoutMs, remaining));
           if (!current(token)) break;
-          if (record.ended) throw new Error(record.failure || "Register exited during startup. Verify uvicorn and project dependencies.");
+          if (record.ended) throw new Error(record.failure || "Register exited during startup. Repair or update Coding Tools.");
           if (result === "ready") {
             ready = true;
             if (active) void ensureView(token);
@@ -328,6 +321,53 @@ function createRegisterHost({
       .then(async () => { await recoverIfSafe(); return snapshot(); });
     stopPending = pending;
     return pending;
+  }
+
+  async function request(method, route, body, { signal } = {}) {
+    if (API_ROUTES.get(route) !== method) throw new Error("Register API operation is not allowed");
+    if (method === "POST") validateRegisterIds(body);
+    else if (body !== undefined) throw new Error("Register account reads do not accept a body");
+    const unavailable = () => Object.assign(new Error("The managed Register service is unavailable. Open Register and retry."), { code: "register_unavailable" });
+    const record = owned, token = generation;
+    if (!record || record.ended || !current(token) || starting || signal?.aborted) throw unavailable();
+    if (await health() !== "ready" || owned !== record || record.ended || !current(token) || signal?.aborted) throw unavailable();
+    const payload = method === "POST" ? Buffer.from(JSON.stringify(body)) : null;
+    return new Promise((resolve, reject) => {
+      let settled = false, outgoing;
+      const fail = () => Object.assign(new Error("Register service request failed. Retry from the plugin."), { code: "register_request_failed" });
+      const finish = (failure, value) => {
+        if (settled) return;
+        settled = true; clearTimeout(timer); requests.delete(outgoing);
+        signal?.removeEventListener("abort", abort);
+        if (failure) reject(failure); else resolve(value);
+      };
+      const abort = () => { finish(unavailable()); outgoing?.destroy(); };
+      const timer = setTimeout(() => { finish(fail()); outgoing?.destroy(); }, requestTimeoutMs);
+      outgoing = http.request(new URL(route, origin), { method, agent: false, headers: {
+        Authorization: "Bearer " + record.password, Connection: "close",
+        ...(payload ? { "Content-Type": "application/json", "Content-Length": payload.length } : {}),
+      } }, incoming => {
+        let bytes = 0; const chunks = [];
+        incoming.on("data", chunk => {
+          bytes += chunk.length;
+          if (bytes > MAX_RESPONSE_BYTES) { finish(fail()); incoming.destroy(); return; }
+          chunks.push(chunk);
+        });
+        incoming.on("error", () => finish(fail()));
+        incoming.on("end", () => {
+          if (incoming.statusCode !== 200 || owned !== record || record.ended || !current(token)) { finish(fail()); return; }
+          let value;
+          try { value = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { finish(fail()); return; }
+          if (!value || typeof value !== "object" || Array.isArray(value)) { finish(fail()); return; }
+          finish(null, value);
+        });
+      });
+      requests.add(outgoing);
+      outgoing.on("error", () => finish(unavailable()));
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) { abort(); return; }
+      outgoing.end(payload);
+    });
   }
 
   async function reload() {
@@ -402,7 +442,7 @@ function createRegisterHost({
     return pending;
   }
 
-  return { status, configure, start, stop, reload, setSurfaceActive, setBounds, shutdown, recoverAfterCancelledQuit };
+  return { status, start, stop, request, reload, setSurfaceActive, setBounds, shutdown, recoverAfterCancelledQuit };
 }
 
-module.exports = { createRegisterHost };
+module.exports = { createRegisterHost, validateRegisterIds };
