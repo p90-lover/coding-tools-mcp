@@ -3797,9 +3797,16 @@ async function start() {
   // copies the worker held stay; a version still not healthy after Settings' health window goes back
   // to the previous one. It used to be kept here at whenReady, before any of that was known.
   // Work that an update, or an update's rollback, must not end: a browser, bridge or AO turn.
-  const appBusy = async () => Boolean(browserHost?.currentOperation() || runtimeHost?.currentOperation()
-    || runtimeStartupInFlight || codexBridgeConnectInFlight
-    || await agentOrchestratorUpstream?.harness.anySessionWorking());
+  const localAppBusy = () => Boolean(quitting || shutdownInProgress || exitCommitted
+    || browserHost?.currentOperation() || runtimeHost?.currentOperation()
+    || runtimeStartupInFlight || codexBridgeConnectInFlight);
+  const appBusy = async ({ start = true } = {}) => {
+    if (localAppBusy()) return true;
+    const working = await (start
+      ? agentOrchestratorUpstream?.harness.anySessionWorking()
+      : agentOrchestratorUpstream.harness.anySessionWorking({ start: false }));
+    return Boolean(working || localAppBusy());
+  };
   if (app.isPackaged && pendingAppliedUpdate(path.dirname(process.execPath), app.getVersion())) {
     const installRoot = path.dirname(process.execPath);
     const commit = () => commitAppliedUpdate(installRoot, app.getVersion())
@@ -3824,10 +3831,18 @@ async function start() {
       isBusy: () => appBusy(),
       commit,
       rollBack: async (reason) => {
+        if (localAppBusy()) return false;
         // The recovery worker waits for this process to exit, puts the previous version back and starts it.
         if (!handOffUpdateRecovery(installRoot, { currentVersion: app.getVersion(), startFailed: reason, logger })) return;
         const quit = await requestQuit().catch((error) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
-        if (quit?.ok === false) app.exit(1);
+        if (quit?.ok === false) {
+          // Handoff already armed a worker: never spawn another or restart AO to inspect a refusal.
+          if (await appBusy({ start: false }).catch(() => true)) {
+            logger.warn("launcher.update_rollback_deferred", { message: String(quit.message || "Work is still active or could not be checked").slice(0, 500) });
+            return;
+          }
+          app.exit(1);
+        }
       },
       logger,
     }).start();

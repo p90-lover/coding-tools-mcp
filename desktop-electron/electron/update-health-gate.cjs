@@ -38,30 +38,48 @@ function createUpdateHealthGate({
     if (settled || ticking) return null;
     ticking = true;
     try {
-      const failing = results().filter(([, result]) => result !== "pass").map(([name, result]) => `${name} ${result}`);
-      const elapsedMs = now() - startedAt;
+      let failing = results().filter(([, result]) => result !== "pass").map(([name, result]) => `${name} ${result}`);
+      let elapsedMs = now() - startedAt;
+      if (failing.length && elapsedMs < timeoutMs()) return null;
+      let rollbackEnabled = failing.length && autoRollback();
+      let busy = false;
+      if (rollbackEnabled) {
+        // The native read can outlive a stop, a loaded window or a change in Settings.
+        busy = await Promise.resolve().then(isBusy).catch(() => true);
+        if (settled) return null;
+        failing = results().filter(([, result]) => result !== "pass").map(([name, result]) => `${name} ${result}`);
+        elapsedMs = now() - startedAt;
+        rollbackEnabled = autoRollback();
+        if (failing.length && elapsedMs < timeoutMs()) return null;
+      }
       if (!failing.length) {
         settle();
         logger?.info("launcher.update_health_passed", { ms: elapsedMs });
         await commit();
         return "committed";
       }
-      if (elapsedMs < timeoutMs()) return null;
-      if (!autoRollback()) {
+      if (!rollbackEnabled) {
         settle();
         logger?.warn("launcher.update_health_kept", { failing });
         await commit();
         return "committed";
       }
       // A busy check that cannot answer counts as busy: never end work it could not see.
-      if (await Promise.resolve().then(isBusy).catch(() => true)) {
+      if (busy) {
         if (!waitingLogged) logger?.warn("launcher.update_rollback_waiting", { failing });
         waitingLogged = true;
         return null;
       }
+      try {
+        logger?.warn("launcher.update_rollback", { failing });
+        // false means no handoff occurred; keep watching until that admission can succeed.
+        if (await rollBack(`The new version did not become healthy: ${failing.join(", ")}`) === false) return null;
+      } catch (error) {
+        // It may already have handed off a worker; an error must not repeat that attempt.
+        settle();
+        throw error;
+      }
       settle();
-      logger?.warn("launcher.update_rollback", { failing });
-      await rollBack(`The new version did not become healthy: ${failing.join(", ")}`);
       return "rolled-back";
     } finally {
       ticking = false;

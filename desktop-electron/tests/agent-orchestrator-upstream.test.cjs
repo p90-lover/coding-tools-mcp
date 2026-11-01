@@ -1988,6 +1988,76 @@ test("only the structured resume-in-progress conflict enters the readiness wait"
   }
 });
 
+/** The real session-list safety method; every network/lifecycle endpoint is substituted. */
+function sessionActivityHarness() {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async anySessionWorking(");
+  const method = source.slice(start, source.indexOf("    /**", start)).trim().replace(/,$/, "");
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  // The window each session"));
+  const calls = [];
+  let data = { sessions: [] }, read = async () => ({ ok: true, data });
+  const context = { state: "ready", stopping: null, lifecycleGeneration: 1,
+    child: { pid: 42, exitCode: null, signalCode: null }, daemonPort: 12345,
+    internalApi: async () => { calls.push("start-capable"); return data; },
+    requestApi: async (method, endpoint) => { calls.push([method, endpoint]); return read(); },
+  };
+  const upstream = require("node:vm").runInNewContext(identity + "({" + method + "})", context);
+  return { upstream, context, calls, data: value => { data = value; }, read: value => { read = value; } };
+}
+
+test("AO activity safety reads do not start a stopped or stopping owner", async () => {
+  for (const change of [context => { context.state = "stopped"; }, context => { context.state = "stopping"; },
+    context => { context.stopping = new Promise(() => {}); }, context => { context.child = null; },
+    context => { context.daemonPort = 0; }, context => { context.child.exitCode = 0; }]) {
+    const fixture = sessionActivityHarness();
+    change(fixture.context);
+    await assert.rejects(fixture.upstream.anySessionWorking({ start: false }));
+    assert.deepEqual(fixture.calls, []);
+  }
+  const legacy = sessionActivityHarness();
+  legacy.context.state = "stopped";
+  assert.equal(await legacy.upstream.anySessionWorking(), false);
+  assert.deepEqual(legacy.calls, ["start-capable"], "default callers retain their existing startup path");
+});
+
+test("AO activity safety reads accept authoritative session lists and reject unknown shape", async () => {
+  const idle = { id: "owned", status: "idle", isTerminated: false };
+  for (const [data, expected] of [
+    [{ sessions: [] }, false], [{ items: [idle] }, false],
+    [{ sessions: [idle], items: [{ ...idle, status: "working" }] }, true],
+    [{ sessions: [{ ...idle, status: "working", isTerminated: true }] }, false],
+  ]) {
+    const fixture = sessionActivityHarness(); fixture.data(data);
+    assert.equal(await fixture.upstream.anySessionWorking({ start: false }), expected);
+    assert.deepEqual(fixture.calls, [["GET", "/api/v1/sessions"]]);
+  }
+  for (const data of [null, [], {}, { sessions: null }, { sessions: [], items: {} }, { sessions: [null] },
+    { sessions: [{}] }, { sessions: [{ ...idle, isTerminated: "false" }] },
+    { sessions: [{ ...idle, status: "unknown-status" }] }, { sessions: [{ ...idle, status: "no_signal" }] }]) {
+    const fixture = sessionActivityHarness(); fixture.data(data);
+    await assert.rejects(fixture.upstream.anySessionWorking({ start: false }));
+    assert.equal(fixture.calls.includes("start-capable"), false);
+  }
+  const failed = sessionActivityHarness(); failed.read(async () => ({ ok: false, status: 503, data: {} }));
+  await assert.rejects(failed.upstream.anySessionWorking({ start: false }));
+});
+
+test("AO activity safety reads discard replies from a retired owner", async () => {
+  for (const change of [context => { context.state = "stopped"; }, context => { context.stopping = Promise.resolve(); },
+    context => { context.lifecycleGeneration++; }, context => { context.child = { ...context.child }; },
+    context => { context.daemonPort++; }, context => { context.child.signalCode = "SIGTERM"; }]) {
+    const fixture = sessionActivityHarness();
+    let finish;
+    fixture.read(() => new Promise(resolve => { finish = resolve; }));
+    const reading = fixture.upstream.anySessionWorking({ start: false });
+    assert.equal(typeof finish, "function");
+    change(fixture.context);
+    finish({ ok: true, data: { sessions: [] } });
+    await assert.rejects(reading);
+    assert.deepEqual(fixture.calls, [["GET", "/api/v1/sessions"]]);
+  }
+});
+
 test("internal AO errors retain bounded structured status and code without changing their message", async () => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
   const start = source.indexOf("  async function internalApi(");
