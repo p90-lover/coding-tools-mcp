@@ -1108,100 +1108,6 @@ function rendererCallback(file, name, globals) {
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
 
-function sentImagePreviews() {
-  const PREVIEWS = rendererCallback("ChatToolParts.tsx", "PREVIEWS", {});
-  const mount = (preview, path, state = { url: null, missing: false }) => {
-    const cleanup = rendererCallback("ChatToolParts.tsx", "effect:PREVIEWS", {
-      PREVIEWS, preview, item: { path }, setUrl: value => { state.url = value; }, setMissing: value => { state.missing = value; },
-    })();
-    return { state, cleanup: cleanup || (() => {}) };
-  };
-  return { mount, pending: preview => (typeof PREVIEWS.size === "number" ? PREVIEWS : PREVIEWS.get(preview))?.size || 0 };
-}
-
-test("sent image previews release settled reads after 100 images unmount", async () => {
-  const fixture = sentImagePreviews(); let reads = 0;
-  const preview = async file => { reads++; return "data:image/png;base64," + file; };
-  const images = Array.from({ length: 100 }, (_, i) => fixture.mount(preview, "image-" + i));
-  await new Promise(setImmediate);
-  for (const image of images) { assert.ok(image.state.url); image.cleanup(); }
-  assert.equal(reads, 100);
-  assert.equal(fixture.pending(preview), 0, "completed full-size data URLs are owned only by mounted images");
-});
-
-test("sent image previews reread a remounted path after its file changes", async () => {
-  const fixture = sentImagePreviews(); let content = "v1", reads = 0;
-  const preview = async () => { reads++; return content; };
-  const first = fixture.mount(preview, "same.png");
-  await new Promise(setImmediate); assert.equal(first.state.url, "v1"); first.cleanup();
-  content = "v2";
-  const second = fixture.mount(preview, "same.png");
-  await new Promise(setImmediate);
-  assert.equal(second.state.url, "v2"); assert.equal(reads, 2); second.cleanup();
-});
-
-test("sent image previews share pending reads without canceling another mounted consumer", async () => {
-  const fixture = sentImagePreviews(), reply = delayedReply(); let reads = 0;
-  const preview = () => { reads++; return reply.promise; };
-  const first = fixture.mount(preview, "same.png"), second = fixture.mount(preview, "same.png");
-  first.cleanup(); await new Promise(setImmediate);
-  assert.equal(reads, 1); assert.equal(fixture.pending(preview), 1);
-  reply.resolve("shared"); await new Promise(setImmediate);
-  assert.equal(first.state.url, null); assert.equal(second.state.url, "shared");
-  assert.equal(fixture.pending(preview), 0); second.cleanup();
-});
-
-test("sent image previews isolate providers and an old failed read cannot evict another provider", async () => {
-  const fixture = sentImagePreviews(), oldReply = delayedReply(), currentReply = delayedReply(); let currentReads = 0;
-  const oldProvider = () => oldReply.promise;
-  const currentProvider = () => { currentReads++; return currentReply.promise; };
-  const oldImage = fixture.mount(oldProvider, "same.png"); oldImage.cleanup();
-  const currentImage = fixture.mount(currentProvider, "same.png");
-  await new Promise(setImmediate);
-  oldReply.reject(new Error("old provider unavailable")); await new Promise(setImmediate);
-  const sibling = fixture.mount(currentProvider, "same.png"); await new Promise(setImmediate);
-  assert.equal(currentReads, 1); assert.equal(fixture.pending(currentProvider), 1);
-  currentReply.resolve("current"); await new Promise(setImmediate);
-  assert.equal(currentImage.state.url, "current"); assert.equal(sibling.state.url, "current");
-  assert.equal(oldImage.state.missing, false); currentImage.cleanup(); sibling.cleanup();
-});
-
-test("sent image previews clear failed reads so a remount can retry", async () => {
-  const fixture = sentImagePreviews(); let reads = 0;
-  const preview = async () => { if (++reads === 1) throw new Error("missing"); return "recovered"; };
-  const first = fixture.mount(preview, "same.png");
-  await new Promise(setImmediate); assert.equal(first.state.missing, true); first.cleanup();
-  assert.equal(fixture.pending(preview), 0);
-  const second = fixture.mount(preview, "same.png");
-  await new Promise(setImmediate);
-  assert.equal(second.state.url, "recovered"); assert.equal(second.state.missing, false); assert.equal(reads, 2); second.cleanup();
-});
-
-test("sent image previews reset a changed path or provider and fence late replies", async () => {
-  const fixture = sentImagePreviews(), oldReply = delayedReply(), nextReply = delayedReply();
-  const state = { url: "previous", missing: true };
-  const first = fixture.mount(() => oldReply.promise, "old.png", state);
-  assert.equal(state.url, null); assert.equal(state.missing, false); first.cleanup();
-  const next = fixture.mount(() => nextReply.promise, "next.png", state);
-  nextReply.resolve("next"); await new Promise(setImmediate);
-  oldReply.resolve("old"); await new Promise(setImmediate); assert.equal(state.url, "next"); next.cleanup();
-  const unavailable = fixture.mount(undefined, "next.png", state);
-  assert.equal(state.url, null); assert.equal(state.missing, false); unavailable.cleanup();
-});
-
-test("the Surface keeps its attachment preview provider stable across unrelated polls", async () => {
-  const paths = [], launcher = { attachmentPreview: async file => { paths.push(file); return "first"; } };
-  const fixture = surfaceComposer({}, { window: { codexWebLauncher: launcher } });
-  const first = fixture.currentChat().props.attachmentPreview;
-  fixture.state.board = { revision: 2, tasks: [] };
-  const second = fixture.currentChat().props.attachmentPreview;
-  assert.equal(second, first, "polling does not restart every mounted thumbnail read");
-  assert.equal(await second("one.png"), "first");
-  launcher.attachmentPreview = async file => { paths.push(file); return "current"; };
-  assert.equal(await first("two.png"), "current", "the stable provider still uses the current desktop bridge");
-  assert.deepEqual(paths, ["one.png", "two.png"]);
-});
-
 test("an unsent split chat can switch projects and finish choosing its new chat", () => {
   const paneWanted = { current: { workspaceId: "old-project", taskId: "" } };
   const state = { workspaceId: "old-project", taskId: null };
@@ -1542,6 +1448,100 @@ test("late start, restart, retry and pause replies cannot change another selecte
         : { selected: "run-b", status: "idle" }, name);
     }
   }
+});
+
+function sentImagePreviews() {
+  const PREVIEWS = rendererCallback("ChatToolParts.tsx", "PREVIEWS", {});
+  const mount = (preview, path, state = { url: null, missing: false }) => {
+    const cleanup = rendererCallback("ChatToolParts.tsx", "effect:PREVIEWS", {
+      PREVIEWS, preview, item: { path }, setUrl: value => { state.url = value; }, setMissing: value => { state.missing = value; },
+    })();
+    return { state, cleanup: cleanup || (() => {}) };
+  };
+  return { mount, pending: preview => (typeof PREVIEWS.size === "number" ? PREVIEWS : PREVIEWS.get(preview))?.size || 0 };
+}
+
+test("sent image previews release settled reads after 100 images unmount", async () => {
+  const fixture = sentImagePreviews(); let reads = 0;
+  const preview = async file => { reads++; return "data:image/png;base64," + file; };
+  const images = Array.from({ length: 100 }, (_, i) => fixture.mount(preview, "image-" + i));
+  await new Promise(setImmediate);
+  for (const image of images) { assert.ok(image.state.url); image.cleanup(); }
+  assert.equal(reads, 100);
+  assert.equal(fixture.pending(preview), 0, "completed full-size data URLs are owned only by mounted images");
+});
+
+test("sent image previews reread a remounted path after its file changes", async () => {
+  const fixture = sentImagePreviews(); let content = "v1", reads = 0;
+  const preview = async () => { reads++; return content; };
+  const first = fixture.mount(preview, "same.png");
+  await new Promise(setImmediate); assert.equal(first.state.url, "v1"); first.cleanup();
+  content = "v2";
+  const second = fixture.mount(preview, "same.png");
+  await new Promise(setImmediate);
+  assert.equal(second.state.url, "v2"); assert.equal(reads, 2); second.cleanup();
+});
+
+test("sent image previews share pending reads without canceling another mounted consumer", async () => {
+  const fixture = sentImagePreviews(), reply = delayedReply(); let reads = 0;
+  const preview = () => { reads++; return reply.promise; };
+  const first = fixture.mount(preview, "same.png"), second = fixture.mount(preview, "same.png");
+  first.cleanup(); await new Promise(setImmediate);
+  assert.equal(reads, 1); assert.equal(fixture.pending(preview), 1);
+  reply.resolve("shared"); await new Promise(setImmediate);
+  assert.equal(first.state.url, null); assert.equal(second.state.url, "shared");
+  assert.equal(fixture.pending(preview), 0); second.cleanup();
+});
+
+test("sent image previews isolate providers and an old failed read cannot evict another provider", async () => {
+  const fixture = sentImagePreviews(), oldReply = delayedReply(), currentReply = delayedReply(); let currentReads = 0;
+  const oldProvider = () => oldReply.promise;
+  const currentProvider = () => { currentReads++; return currentReply.promise; };
+  const oldImage = fixture.mount(oldProvider, "same.png"); oldImage.cleanup();
+  const currentImage = fixture.mount(currentProvider, "same.png");
+  await new Promise(setImmediate);
+  oldReply.reject(new Error("old provider unavailable")); await new Promise(setImmediate);
+  const sibling = fixture.mount(currentProvider, "same.png"); await new Promise(setImmediate);
+  assert.equal(currentReads, 1); assert.equal(fixture.pending(currentProvider), 1);
+  currentReply.resolve("current"); await new Promise(setImmediate);
+  assert.equal(currentImage.state.url, "current"); assert.equal(sibling.state.url, "current");
+  assert.equal(oldImage.state.missing, false); currentImage.cleanup(); sibling.cleanup();
+});
+
+test("sent image previews clear failed reads so a remount can retry", async () => {
+  const fixture = sentImagePreviews(); let reads = 0;
+  const preview = async () => { if (++reads === 1) throw new Error("missing"); return "recovered"; };
+  const first = fixture.mount(preview, "same.png");
+  await new Promise(setImmediate); assert.equal(first.state.missing, true); first.cleanup();
+  assert.equal(fixture.pending(preview), 0);
+  const second = fixture.mount(preview, "same.png");
+  await new Promise(setImmediate);
+  assert.equal(second.state.url, "recovered"); assert.equal(second.state.missing, false); assert.equal(reads, 2); second.cleanup();
+});
+
+test("sent image previews reset a changed path or provider and fence late replies", async () => {
+  const fixture = sentImagePreviews(), oldReply = delayedReply(), nextReply = delayedReply();
+  const state = { url: "previous", missing: true };
+  const first = fixture.mount(() => oldReply.promise, "old.png", state);
+  assert.equal(state.url, null); assert.equal(state.missing, false); first.cleanup();
+  const next = fixture.mount(() => nextReply.promise, "next.png", state);
+  nextReply.resolve("next"); await new Promise(setImmediate);
+  oldReply.resolve("old"); await new Promise(setImmediate); assert.equal(state.url, "next"); next.cleanup();
+  const unavailable = fixture.mount(undefined, "next.png", state);
+  assert.equal(state.url, null); assert.equal(state.missing, false); unavailable.cleanup();
+});
+
+test("the Surface keeps its attachment preview provider stable across unrelated polls", async () => {
+  const paths = [], launcher = { attachmentPreview: async file => { paths.push(file); return "first"; } };
+  const fixture = surfaceComposer({}, { window: { codexWebLauncher: launcher } });
+  const first = fixture.currentChat().props.attachmentPreview;
+  fixture.state.board = { revision: 2, tasks: [] };
+  const second = fixture.currentChat().props.attachmentPreview;
+  assert.equal(second, first, "polling does not restart every mounted thumbnail read");
+  assert.equal(await second("one.png"), "first");
+  launcher.attachmentPreview = async file => { paths.push(file); return "current"; };
+  assert.equal(await first("two.png"), "current", "the stable provider still uses the current desktop bridge");
+  assert.deepEqual(paths, ["one.png", "two.png"]);
 });
 
 test("a turn's activity drops answered approvals, keeps every tool call, and folds runs of calls and thinking", () => {
