@@ -284,26 +284,27 @@ fn native_bridge_actual_turns_against_loopback_fixture() {
     let config=format!("model = \"mock-model\"\napproval_policy = \"on-request\"\nmodel_provider = \"mock_provider\"\n[model_providers.mock_provider]\nname = \"Isolated protocol fixture, no AI\"\nbase_url = \"{}\"\nwire_api = \"responses\"\nrequest_max_retries = 0\nstream_max_retries = 0\nrequires_openai_auth = false\n",fixture.address);
     std::fs::write(home.join("config.toml"), config).unwrap();
     let hub = Hub::default();
-    hub.connect(
-        &root.canonicalize().unwrap(),
-        Connection {
-            executable,
-            expected_sha256: sha,
-            codex_home: home.canonicalize().unwrap(),
-            allow_model_usage: true,
-            allow_command_execution: false,
-            permission_profile: default_permission_profile(),
-            approval_policy: None,
-            approvals_reviewer: None,
-            model: "mock-model".into(),
-            request_limit: 6,
-            lifetime_seconds: 120,
-            effort: None,
-            context_window: None,
-        },
-    )
-    .unwrap();
-    hub.initialize().unwrap();
+    let ticket = hub
+        .connect(
+            &root.canonicalize().unwrap(),
+            Connection {
+                executable,
+                expected_sha256: sha,
+                codex_home: home.canonicalize().unwrap(),
+                allow_model_usage: true,
+                allow_command_execution: false,
+                permission_profile: default_permission_profile(),
+                approval_policy: None,
+                approvals_reviewer: None,
+                model: "mock-model".into(),
+                request_limit: 6,
+                lifetime_seconds: 120,
+                effort: None,
+                context_window: None,
+            },
+        )
+        .unwrap();
+    hub.initialize(ticket).unwrap();
     let result = go(
         &hub,
         "start",

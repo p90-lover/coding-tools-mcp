@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const vm = require("node:vm");
 const path = require("node:path");
+const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
 const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
 
@@ -233,7 +234,25 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "a busy caller after preparing cannot submit", change: "busy", error: /busy/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, error: /existing connector.*tunnel.*unverified/i },
     { name: "consent is not confirmed after a later workspace switch", change: "consent", error: /context|workspace.*changed/i, submitted: true },
+    { name: "a targeted primary account retains the same owner and workspace checks", primary: true },
+    { name: "an exact account binding rechecks ownership and consent without creating again", existing: true, bound: true },
+    { name: "another workspace's saved binding cannot authorize reuse", existing: true, bound: true, wrongWorkspace: true, error: /unverified/i },
+    { name: "another tunnel's saved binding cannot authorize reuse", existing: true, bound: true, wrongTunnel: true, error: /unverified/i },
+    { name: "corrupt account provenance is preserved before any mutation", corrupt: true, error: /bindings could not be read/i },
+    { name: "a failed consent keeps creation provenance for a safe retry", consentError: true, error: /fixture consent failed/, submitted: true },
   ]) await t.test(scenario.name, async () => {
+    const work = path.resolve(__dirname, "../../aiTemp/account-mcp-bindings");
+    fs.mkdirSync(work, { recursive: true });
+    const userData = fs.mkdtempSync(path.join(work, "production-"));
+    t.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+    const bindingPath = path.join(userData, "mcp-account-connector-bindings.json");
+    const other = { name: "another account's provenance" };
+    const saved = { version: 1, bindings: { "persist:keep": other } };
+    if (scenario.bound) saved.bindings["persist:fixture"] = { name: currentConnectorSettings(runtime()).name,
+      tunnelId: scenario.wrongTunnel ? `tunnel_${"b".repeat(32)}` : tunnelId,
+      userId: initialUser, workspaceId: scenario.wrongWorkspace ? businessId : personalId, href: "/plugins/plugin_fixture" };
+    const original = scenario.corrupt ? "invalid JSON retained" : JSON.stringify(saved);
+    fs.writeFileSync(bindingPath, original);
     const network = fakeMcpNetwork(), counts = { create: 0, open: 0, confirm: 0 };
     let accountId = scenario.business ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
     const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: true }), withManualOperation: async (_name, work) => work() };
@@ -251,7 +270,10 @@ test("the production connector action verifies fresh owner and workspace proof b
         if (script.includes("globalThis.__codingToolsConnectorHelpers =")) return;
         const phase = script.match(/__codingToolsConnectorHelpers\.(\w+)\(/)?.[1];
         if (phase === "prepareTunnelConnector") {
-          if (scenario.existing) throw new Error("Existing connector exact tunnel identity is unverified.");
+          if (scenario.existing) {
+            if (!script.includes('"existingHref":"/plugins/plugin_fixture"')) throw new Error("Existing connector exact tunnel identity is unverified.");
+            return { prepared: true, existing: true, href: "/plugins/plugin_fixture" };
+          }
           if (scenario.change === "workspace") { accountId = businessId; select(accountId); }
           if (scenario.change === "user") userId = "user-other";
           if (scenario.change === "partition") host.partition = "persist:other";
@@ -266,13 +288,17 @@ test("the production connector action verifies fresh owner and workspace proof b
           if (scenario.change === "consent") { accountId = businessId; select(accountId); }
           return { consentReady: true };
         }
-        if (phase === "confirmTunnelConnectorConsent") { counts.confirm++; return { connected: true }; }
+        if (phase === "confirmTunnelConnectorConsent") {
+          if (scenario.consentError) throw new Error("fixture consent failed");
+          counts.confirm++; return { connected: true };
+        }
         if (phase === "ensureTunnelConnectorConnected") { counts.open++; counts.confirm++; return; }
         throw new Error(`Unexpected fixture phase ${phase}`);
       },
     });
     function Window(options) {
       windowCount++;
+      destroyed = false;
       assert.equal(options.show, false); assert.equal(options.webPreferences.offscreen, true);
       assert.equal(options.webPreferences.partition, "persist:fixture");
       return { webContents: contents, isDestroyed: () => destroyed, destroy: () => { destroyed = true; },
@@ -287,17 +313,27 @@ test("the production connector action verifies fresh owner and workspace proof b
           } else if (next.startsWith("https://chatgpt.com/plugins")) select(accountId);
         } };
     }
-    const action = () => createConfiguredConnector({ app: {}, BrowserWindow: Window, browserHost: host, runtimeHost: runtime(),
-      target: { tunnelId, partition: "persist:fixture" }, assertCurrent: () => { if (busy) throw new Error("Caller is busy"); } });
+    const action = () => createConfiguredConnector({ app: { getPath: () => userData }, BrowserWindow: Window, browserHost: host, runtimeHost: runtime(),
+      target: { ...(scenario.primary ? {} : { tunnelId }), partition: "persist:fixture", requireTunnelMatch: true },
+      assertCurrent: () => { if (busy) throw new Error("Caller is busy"); } });
     if (scenario.error) {
       await assert.rejects(action(), scenario.error);
       assert.deepEqual(counts, scenario.submitted ? { create: 1, open: 1, confirm: 0 } : { create: 0, open: 0, confirm: 0 });
+      if (scenario.corrupt) assert.equal(fs.readFileSync(bindingPath, "utf8"), original);
+      if (scenario.consentError) {
+        assert.equal(JSON.parse(fs.readFileSync(bindingPath, "utf8")).bindings["persist:fixture"].userId, initialUser);
+        scenario.consentError = false; scenario.existing = true;
+        assert.equal((await action()).connected, true);
+        assert.equal(counts.create, 1, "a retry never creates a second connector");
+      }
     } else {
       const result = await action();
       assert.deepEqual(result.binding, { userId: initialUser, workspaceId: accountId, tunnelId });
-      assert.deepEqual(counts, { create: 1, open: 1, confirm: 1 });
+      assert.deepEqual(counts, { create: scenario.existing ? 0 : 1, open: 1, confirm: 1 });
+      assert.equal(result.connected, true);
+      assert.deepEqual(JSON.parse(fs.readFileSync(bindingPath, "utf8")).bindings["persist:keep"], other);
     }
-    assert.equal(windowCount, 1); assert.equal(destroyed, true);
+    assert.equal(windowCount, scenario.name.startsWith("a failed consent") ? 2 : 1); assert.equal(destroyed, true);
     assert.equal(network.debuggerClient.isAttached(), false);
     assert.equal(network.debuggerClient.listenerCount("message"), 0);
   });
@@ -396,13 +432,18 @@ test("guarded renderer phases reject changed controls and unverified existing ca
   }
   const document = { title: "Plugins", body: { innerText: "Plugins" }, querySelectorAll: () => [{ textContent: "Personal", getAttribute: () => "true" }] };
   const prepare = phase("createTunnelConnector", "async function submitPreparedTunnelConnector", {
-    location: { origin: "https://chatgpt.com" }, document, isPersonalPluginsPage: () => true,
+    location: { origin: "https://chatgpt.com" }, URL, document, isPersonalPluginsPage: () => true,
     visible: () => true, textMatches: matches, PERSONAL_VIEW_LABELS: ["Personal"],
     waitFor: async read => read(), personalPluginsLoaded: () => true, clearPluginSearch: async () => {},
     findManagedAppCard: () => ({ getAttribute: () => "/plugins/existing" }),
     allClickable: () => { throw new Error("Existing connector must not open Create"); },
   });
   await assert.rejects(prepare(settings, "prepare"), /existing connector.*tunnel.*unverified/i);
+  assert.deepEqual({ ...await prepare({ ...settings, existingHref: "/plugins/existing?directoryTab=personal" }, "prepare") },
+    { prepared: true, existing: true, href: "/plugins/existing" });
+  for (const existingHref of ["/plugins/other", "https://elsewhere.invalid/plugins/existing"]) {
+    await assert.rejects(prepare({ ...settings, existingHref }, "prepare"), /unverified/i);
+  }
   const stale = { tunnelConnectorConnected: () => false, tunnelConnectorConnectControl: () => null,
     tunnelConnectorConsent: () => null, pointerActivateMenu: () => { throw new Error("Stale control was clicked"); } };
   await assert.rejects(phase("openTunnelConnectorConsent", "async function confirmTunnelConnectorConsent", stale)(settings.name), /Connect control changed/);
@@ -562,4 +603,56 @@ for (const previouslySeen of [false, true]) test(`observed Tunnel form ${previou
   } finally {
     await browser.close();
   }
+});
+
+test("account IPC preserves legacy arbitration and records only the requested, still-existing account", async () => {
+  const fs = require("node:fs");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const snippet = source.slice(source.indexOf('  handle("launcher:mcp-create-connector"'), source.indexOf('  handle("launcher:doctor"'));
+  let handler, failure = null, signedIn = true, removeDuringSetup = false, removeDuringSave = false;
+  const accounts = new Set(["main", "other"]), calls = [], records = [];
+  const tunnels = [{ id: "extra", accountId: "other", tunnelId: "tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", state: "stopped" }];
+  const context = {
+    Error, handle: (_name, action) => { handler = action; }, assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+    quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
+    mcpConnectorCommand: { request: (...args) => { calls.push(args); return "legacy"; } },
+    browserAccounts: { partitionOf(id) { if (!accounts.has(id)) throw new Error("Unknown account"); return `persist:${id}`; },
+      async recordConnector(id, result) { await Promise.resolve(); if (!accounts.has(id)) return false; records.push({ id, ...result }); return true; } },
+    session: { fromPartition: partition => ({ cookies: { get: async () => { calls.push(partition); return []; } } }) },
+    signedInFromCookies: () => signedIn, routeIdleAccountPartition: async partition => calls.push(`route:${partition}`), logger: {},
+    runtimeSupervisor: { extraTunnels: { status: () => tunnels,
+      reconnect: async id => { calls.push(`reconnect:${id}`); tunnels[0].state = "ready"; },
+      setConnector: async (id, href, binding) => { await Promise.resolve(); assert.equal(binding.tunnelId, tunnels[0].tunnelId); if (removeDuringSave) accounts.delete("other"); calls.push(`connector:${id}`); } } },
+    createConfiguredConnector: async options => {
+      calls.push(JSON.parse(JSON.stringify(options))); options.assertCurrent();
+      if (failure) throw new Error(failure);
+      if (removeDuringSetup) accounts.delete("other");
+      return { created: false, href: "/plugins/plugins~Plugin_managed", name: "Coding Tools", connected: true,
+        binding: { userId: "user-fixture", workspaceId: "6d4774fd-0e67-4b5b-a3b7-4c0e61357122", tunnelId: tunnels[0].tunnelId } };
+    }, app: {}, BrowserWindow: {}, browserHost: {}, runtimeHost: { currentOperation: () => null }, publishBrowserAccounts() { assert(records.length > 0, "account persistence resolves before its update is published"); }, publishOperation() {},
+    mcpConnectorCommandFailure: error => ({ code: "fixture_failure", message: error.message }),
+  };
+  vm.runInNewContext(snippet, context);
+  assert.equal(await handler({}), "legacy");
+  context.runtimeHost.currentOperation = () => "setupMcp";
+  await assert.rejects(handler({}, "other"), /current runtime setup/);
+  assert.equal(calls.some(entry => entry?.target), false);
+  context.runtimeHost.currentOperation = () => null;
+  calls.length = 0; records.length = 0;
+  await handler({}, "other");
+  assert.deepEqual(calls.find(entry => entry?.target)?.target, { partition: "persist:other", requireTunnelMatch: true, tunnelId: tunnels[0].tunnelId });
+  assert(calls.includes("route:persist:other") && calls.includes("reconnect:extra"));
+  assert.deepEqual(records, [{ id: "other", bound: true }]);
+  failure = "ChatGPT refused this connector";
+  await assert.rejects(handler({}, "main"), /refused/);
+  assert.deepEqual(records[1], { id: "main", error: failure });
+  failure = null; signedIn = false; calls.length = 0;
+  await assert.rejects(handler({}, "other"), /Sign in to this account/);
+  assert.equal(calls.some(entry => entry?.target), false);
+  signedIn = true; removeDuringSetup = true; calls.length = 0;
+  await assert.rejects(handler({}, "other"), /Unknown account/);
+  assert.equal(calls.includes("connector:extra"), false, "removed accounts cannot acquire a connector binding");
+  accounts.add("other"); removeDuringSetup = false; removeDuringSave = true;
+  await assert.rejects(handler({}, "other"), /Unknown account/);
+  assert.equal(records.filter(record => record.bound).length, 1, "a stale persistence completion cannot mark a removed account connected");
 });
