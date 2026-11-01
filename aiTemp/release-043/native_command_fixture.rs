@@ -76,26 +76,27 @@ fn native_043_actual_commands_no_model_and_write_denial() {
     let config=format!("model = \"no-model\"\nmodel_provider = \"disabled_fixture\"\napproval_policy = \"on-request\"\n[model_providers.disabled_fixture]\nname = \"No inference allowed\"\nbase_url = \"{}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nrequest_max_retries = 0\nstream_max_retries = 0\n[windows]\nsandbox = \"unelevated\"\n",trap.url);
     std::fs::write(home.join("config.toml"), config).unwrap();
     let hub = Hub::default();
-    hub.connect(
-        &root.canonicalize().unwrap(),
-        Connection {
-            executable: PathBuf::from(std::env::var("NATIVE_CODEX_PROBE_BIN").unwrap()),
-            expected_sha256: std::env::var("NATIVE_CODEX_PROBE_SHA256").unwrap(),
-            codex_home: home.canonicalize().unwrap(),
-            allow_model_usage: false,
-            allow_command_execution: true,
-            permission_profile: default_permission_profile(),
-            approval_policy: None,
-            approvals_reviewer: None,
-            model: "no-model".into(),
-            request_limit: 1,
-            lifetime_seconds: 120,
-            effort: None,
-            context_window: None,
-        },
-    )
-    .unwrap();
-    hub.initialize().unwrap();
+    let ticket = hub
+        .connect(
+            &root.canonicalize().unwrap(),
+            Connection {
+                executable: PathBuf::from(std::env::var("NATIVE_CODEX_PROBE_BIN").unwrap()),
+                expected_sha256: std::env::var("NATIVE_CODEX_PROBE_SHA256").unwrap(),
+                codex_home: home.canonicalize().unwrap(),
+                allow_model_usage: false,
+                allow_command_execution: true,
+                permission_profile: default_permission_profile(),
+                approval_policy: None,
+                approvals_reviewer: None,
+                model: "no-model".into(),
+                request_limit: 1,
+                lifetime_seconds: 120,
+                effort: None,
+                context_window: None,
+            },
+        )
+        .unwrap();
+    hub.initialize(ticket).unwrap();
     assert!(hub
         .admit(Control {
             operation: "start".into(),
