@@ -322,16 +322,16 @@ const TEAM_STOPS: Record<string, string[]> = {
  * model. Clicks act as ChatGPT does: the header opens the list; a row (only in the list) chooses
  * that model and returns to the slider. On Team "6" is the default, so it never reads as explicit.
  */
-function modelListPicker(options: { plan?: "plus" | "team"; models?: string[]; locked?: string; clickIgnored?: boolean; jumpy?: boolean } = {}) {
+function modelListPicker(options: { plan?: "plus" | "team"; models?: string[]; defaultModel?: string; stops?: string[]; locked?: string; clickIgnored?: boolean; jumpy?: boolean } = {}) {
   const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
   const team = options.plan === "team";
   const stopsByModel = team ? TEAM_STOPS : PLUS_STOPS;
-  const defaultModel = team ? "6" : "Default";
+  const defaultModel = options.defaultModel ?? (team ? "6" : "Default");
   const models = team
     ? options.models ?? ["6", "GPT-5.6 Sol"]
     : ["Default", ...(options.models ?? ["GPT-6.1 Sol", "GPT-6 Sol", "GPT-6 Astra", "GPT-5.6 Sol"])];
   const state = { view: "simple", chosen: defaultModel, value: team ? 3 : 1, keys: [] as string[], clicks: [] as string[] };
-  const stops = () => stopsByModel[state.chosen] ?? ["Other Light", "Other High"];
+  const stops = () => options.stops ?? stopsByModel[state.chosen] ?? ["Other Light", "Other High"];
   const row = (name: string) => `<div role="menuitemradio" aria-checked="${name === state.chosen}"`
     + `${name === options.locked ? ' aria-describedby="locked-note"' : ""}><div data-menu-row-content="true">`
     + (name === "Default" ? "<div><span>Default</span><span><span>Recommended set of models</span></span></div>" : `<span>${name}</span>`)
@@ -412,9 +412,9 @@ test("on Team the GPT-6 row is \"6\", and it counts as chosen though ChatGPT kee
 });
 
 test("each failed step stops the pick instead of choosing another model", async () => {
-  const missing = modelListPicker({ models: ["GPT-6.1 Sol", "GPT-6 Astra"] });
+  const missing = modelListPicker({ models: ["GPT-6.1 Sol", "GPT-6 Astra", "GPT-5.6 Sol"] });
   await expect(selectChatGptModelFromList(missing.menu as never, undefined, 50))
-    .rejects.toThrow('no row named "GPT-6 Sol" or "6"');
+    .rejects.toThrow('no row named "GPT-6 Sol" or "6" or "GPT-6"');
   expect(missing.state.clicks).toEqual(["header"]);
 
   const locked = modelListPicker({ locked: "GPT-6 Sol" });
@@ -464,6 +464,32 @@ test("the account probe reads GPT-6's own slider: Plus has no Extra High or Pro,
 const selectModelAndEffort = (ChatGptBrowserWorker.prototype as unknown as {
   selectModelAndEffort(...args: unknown[]): Promise<unknown>;
 }).selectModelAndEffort;
+
+test('the current "GPT-6" row is selected exactly and a High turn verifies "6 High"', async () => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: ["6 Instant", "6 Medium", "6 High", "6 Extra High", "6 Pro"] });
+  const pressed: string[] = [];
+  await selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture, pressed),
+    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, proAvailable: true });
+  expect(picker.state.clicks).toEqual(["header", "GPT-6"]);
+  expect(picker.state.chosen).toBe("GPT-6");
+  expect(picker.label()).toBe("6 High");
+  expect(fixture.keys).toEqual([]);
+  expect(pressed).toEqual(["Escape"]);
+});
+
+test('the current "GPT-6" row cannot substitute another effort for a missing "6 High"', async () => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: ["6 Instant", "6 Medium", "6 Extra High", "6 Pro"] });
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, proAvailable: true }))
+    .rejects.toMatchObject({ code: "chatgpt_model_pick_failed", retryable: false });
+  expect(picker.state.chosen).toBe("GPT-6");
+  expect(picker.state.clicks).toEqual(["header", "GPT-6"]);
+  expect(picker.label()).not.toBe("6 High");
+});
 
 test.each([
   ["team", "max", "6", "6 Pro"],
