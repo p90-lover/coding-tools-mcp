@@ -15,7 +15,7 @@ export function GptBrowserSurface({ api, active, setError, placement = "standalo
   const [status, setStatus] = useState<GptBrowserStatus | null>(null);
   // null while the address bar simply mirrors the page; a string while the user is typing.
   const [draft, setDraft] = useState<string | null>(null);
-  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
   const confirmTimer = useRef<number | undefined>(undefined);
 
@@ -29,6 +29,7 @@ export function GptBrowserSurface({ api, active, setError, placement = "standalo
   }, [api, setError]);
 
   const hasAccount = Boolean(status?.activeId);
+  const confirmingRemove = hasAccount && confirmRemove === status?.activeId;
 
   // The page is a native view pinned over .gpb-slot; it only exists in the window while shown.
   useLayoutEffect(() => {
@@ -56,6 +57,10 @@ export function GptBrowserSurface({ api, active, setError, placement = "standalo
 
   useEffect(() => () => { void api.setGptBrowserSurfaceActive(false).catch(() => undefined); }, [api]);
   useEffect(() => () => window.clearTimeout(confirmTimer.current), []);
+  useEffect(() => {
+    setConfirmRemove(null);
+    window.clearTimeout(confirmTimer.current);
+  }, [status?.activeId]);
 
   const run = useCallback(async (action: () => Promise<GptBrowserStatus>) => {
     setError(null);
@@ -75,15 +80,16 @@ export function GptBrowserSurface({ api, active, setError, placement = "standalo
   };
 
   const remove = () => {
-    if (!status?.activeId) return;
-    if (!confirmRemove) {
-      setConfirmRemove(true);
-      confirmTimer.current = window.setTimeout(() => setConfirmRemove(false), CONFIRM_WINDOW_MS);
+    const id = status?.activeId;
+    if (!id) return;
+    if (confirmRemove !== id) {
+      setConfirmRemove(id);
+      window.clearTimeout(confirmTimer.current);
+      confirmTimer.current = window.setTimeout(() => setConfirmRemove(null), CONFIRM_WINDOW_MS);
       return;
     }
     window.clearTimeout(confirmTimer.current);
-    setConfirmRemove(false);
-    const id = status.activeId;
+    setConfirmRemove(null);
     void run(() => api.removeGptBrowserAccount(id));
   };
 
@@ -149,11 +155,11 @@ export function GptBrowserSurface({ api, active, setError, placement = "standalo
         {hasAccount ? (
           <button
             type="button"
-            className={confirmRemove ? "button-danger" : "button-secondary"}
+            className={confirmingRemove ? "button-danger" : "button-secondary"}
             onClick={remove}
             title="Sign out and erase browser data"
           >
-            {confirmRemove ? "Click again to remove" : "Remove account"}
+            {confirmingRemove ? "Click again to remove" : "Remove account"}
           </button>
         ) : null}
       </header>

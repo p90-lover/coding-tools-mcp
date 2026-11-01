@@ -4355,6 +4355,37 @@ test("Claude Code chat agents run without Claude Code's own scheduler, so they w
   assert.match(extra, /CLAUDE_CODE_DISABLE_CRON: "1"/);
 });
 
+test("with the window minimized (no reads), the goal watch carries a stuck goal on; a recent read leaves it to that read", async () => {
+  // A minimized window's calls are refused in the preload, so nothing swept the goals all night.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "goal-watch-"));
+  let clock = 10_000_000;
+  try {
+    const goalsFile = path.join(dir, "goals.json");
+    fs.writeFileSync(goalsFile, JSON.stringify({ "ws-1:task-1": { objective: "build green", status: "active", round: 1, rounds: 0, startedAt: 1, updatedAt: 1,
+      lastRunId: "r1", evaluatedRunId: "r1", evaluatedAs: "checked", checkedAt: 1, note: "", feedback: "Two tests still fail." } }));
+    const { world, workflow, checks } = await goalChat({ goalsFile, now: () => clock,
+      world: chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] }) });
+    world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Half done." } }] });
+    const before = world.updates.length;
+    await workflow.watchGoals();
+    await goalSettle(() => world.updates.length > before);
+    assert.equal(world.updates.length, before + 1, "the watch started the next round without any read");
+    assert.equal(checks.length, 0, "the verdict it had is not asked again");
+
+    // Swept moments ago (by the watch, or a window read): the next watch leaves it alone.
+    const after = world.updates.length;
+    const reads = world.requests?.length;
+    await workflow.watchGoals();
+    await goalSettle();
+    assert.equal(world.updates.length, after);
+    if (reads !== undefined) assert.equal(world.requests.length, reads, "no read at all within the watch interval");
+    workflow.dispose();
+    await workflow.goalsSaved();
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a goal judged not met whose next round never started goes on at the next read of the chat", async () => {
   // The app closed between the check and the next round's start: after the restart the goal was
   // active, its last round judged, nothing running, and nothing ever started another round. A goal

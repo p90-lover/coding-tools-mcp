@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config";
-import { createTunnelConfig, mcpCommand } from "../src/tunnel";
+import { TUNNEL_VERSION, createTunnelConfig, mcpCommand, pinnedTunnelArchiveSha256 } from "../src/tunnel";
 import { tunnelServiceDefinition } from "../src/tunnel-service";
 import { existingFullSetupCredentials, tunnelWorkerRuntimeChanged } from "../src/setup";
 
@@ -151,4 +151,15 @@ describe("tunnel launchd ownership", () => {
     expect(parsePinnedTunnelCommand(mcpCommand(config, "win32"))).toContain("safe");
   });
 
+});
+
+test("each tunnel-client archive is checked against a checksum pinned here, not one from the same download", () => {
+  // The release's SHA256SUMS.txt arrives over the same connection as the archive, so it proves
+  // nothing to someone who can intercept that TLS; the binary runs as soon as it is installed.
+  for (const os of ["darwin", "linux", "windows"]) {
+    for (const arch of ["amd64", "arm64"]) {
+      expect(pinnedTunnelArchiveSha256(`tunnel-client-v${TUNNEL_VERSION}-${os}-${arch}.zip`)).toMatch(/^[a-f0-9]{64}$/);
+    }
+  }
+  expect(() => pinnedTunnelArchiveSha256(`tunnel-client-v${TUNNEL_VERSION}-plan9-amd64.zip`)).toThrow(/no pinned checksum/);
 });

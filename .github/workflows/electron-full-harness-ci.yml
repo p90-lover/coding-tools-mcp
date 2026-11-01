@@ -90,7 +90,7 @@ jobs:
             version: process.env.RELEASE_VERSION,
             appId: 'dev.codingtools.fullharness',
             productName: 'Coding Tools',
-            electron: '45.0.0',
+            electron: '45.2.1',
             upstreamTag: 'v5.0.6',
             upstreamCommit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
             tunnelClient: '0.0.12',

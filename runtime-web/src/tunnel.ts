@@ -10,6 +10,18 @@ export const TUNNEL_VERSION = "0.0.12";
 const MIGRATABLE_TUNNEL_VERSIONS = new Set(["0.0.10"]);
 const RELEASE_BASE = `https://github.com/openai/tunnel-client/releases/download/v${TUNNEL_VERSION}`;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+// SHA-256 of each release archive, pinned here. The release's own SHA256SUMS.txt came over the same
+// connection as the archive, so anyone able to intercept that TLS (Bun 1.4.3's fetch still trusted
+// the compromised eMudhra CAs, 2026-11) could serve a matching pair, and the binary runs at once.
+// Taken from SHA256SUMS.txt and GitHub's own asset digests for v0.0.12, which agree.
+const TUNNEL_ARCHIVE_SHA256: Readonly<Record<string, string>> = {
+  "tunnel-client-v0.0.12-darwin-amd64.zip": "33de53aec680faafedc795f8f8268d6861577bddb871cb2d49529c91f88c2009",
+  "tunnel-client-v0.0.12-darwin-arm64.zip": "42fb3138dc9c081d5777cb7e8bd1e041cc48b67c4978dbab3c5167ca1aabca02",
+  "tunnel-client-v0.0.12-linux-amd64.zip": "2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81",
+  "tunnel-client-v0.0.12-linux-arm64.zip": "6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6",
+  "tunnel-client-v0.0.12-windows-amd64.zip": "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356",
+  "tunnel-client-v0.0.12-windows-arm64.zip": "65ab54221554481bb1c23b6015b99abe0b7f79b08593f4fb17a9e2e25532281d",
+};
 export const TUNNEL_READY_TIMEOUT_MS = 120_000;
 const TUNNEL_STATUS_POLL_INTERVAL_MS = 1_000;
 
@@ -60,10 +72,10 @@ async function fetchBytes(url: string, timeoutMs = 120_000): Promise<Uint8Array>
   }
 }
 
-function parseExpectedChecksum(text: string, asset: string): string {
-  const line = text.split(/\r?\n/).find(candidate => candidate.trim().endsWith(asset));
-  const checksum = line?.trim().split(/\s+/)[0]?.toLowerCase();
-  if (!checksum || !/^[a-f0-9]{64}$/.test(checksum)) throw new Error(`SHA256SUMS.txt has no valid entry for ${asset}`);
+/** The pinned SHA-256 of a tunnel-client release archive; an archive with no pin is never installed. */
+export function pinnedTunnelArchiveSha256(asset: string): string {
+  const checksum = TUNNEL_ARCHIVE_SHA256[asset];
+  if (!checksum) throw new Error(`tunnel-client ${asset} has no pinned checksum`);
   return checksum;
 }
 
@@ -106,11 +118,8 @@ export async function installTunnelClient(): Promise<string> {
   }
 
   const asset = platformAsset();
-  const [archive, sums] = await Promise.all([
-    fetchBytes(`${RELEASE_BASE}/${asset}`),
-    fetchBytes(`${RELEASE_BASE}/SHA256SUMS.txt`),
-  ]);
-  const expected = parseExpectedChecksum(new TextDecoder().decode(sums), asset);
+  const expected = pinnedTunnelArchiveSha256(asset);
+  const archive = await fetchBytes(`${RELEASE_BASE}/${asset}`);
   const archiveHash = sha256(archive);
   if (archiveHash !== expected) throw new Error(`Checksum mismatch for ${asset}`);
   const files = unzipSync(archive);

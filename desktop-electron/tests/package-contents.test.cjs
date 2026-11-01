@@ -254,6 +254,27 @@ packageTest("rejects a packaged component changed after the package manifest was
   );
 });
 
+packageTest("rejects a runtime whose Bun still trusts the leaked eMudhra CAs in fetch", () => {
+  const { appRoot } = createPackageFixture("old-bun", ({ resourcesRoot }) => {
+    const manifestPath = path.join(resourcesRoot, "runtime", "manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, bunVersion: "1.4.3" }));
+  });
+  assert.throws(() => inspectExtractedApplication(appRoot, packageOptions()), /PACKAGE_RUNTIME_BUN_TRUSTS_LEAKED_CAS: 1\.4\.3/);
+});
+
+packageTest("rejects an AO daemon built with a Go that trusts the leaked eMudhra CAs", () => {
+  const header = Buffer.alloc(32);
+  Buffer.from("\xff Go buildinf:", "latin1").copy(header);
+  header[14] = 8;
+  header[15] = 0x2;
+  const { appRoot } = createPackageFixture("old-go", ({ resourcesRoot }) => {
+    writeFile(path.join(resourcesRoot, "agent-orchestrator", "ao-daemon.exe"),
+      Buffer.concat([Buffer.from("MZfixture-ao"), header, Buffer.from([8]), Buffer.from("go1.27.1")]));
+  });
+  assert.throws(() => inspectExtractedApplication(appRoot, packageOptions()), /PACKAGE_AO_DAEMON_GO_TOO_OLD: go1\.27\.1/);
+});
+
 packageTest("rejects credential-like files and never reports their contents", () => {
   const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
   const { appRoot } = createPackageFixture("secret", ({ resourcesRoot }) => {

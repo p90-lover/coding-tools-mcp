@@ -26,11 +26,31 @@ const {
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
+const SAVED_CONVERSATION_PATH = /^\/c\/[0-9a-f-]{36}$/;
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
 const MAX_CANCELLED_TURN_TRACES = 256;
+
+function retainedConversationLocation(value) {
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.origin !== CHATGPT_ORIGIN) return null;
+  if (url.searchParams.get("temporary-chat") === "true") {
+    return url.pathname === "/" || SAVED_CONVERSATION_PATH.test(url.pathname)
+      ? `${url.pathname}?temporary-chat=true` : null;
+  }
+  return !url.searchParams.has("temporary-chat") && SAVED_CONVERSATION_PATH.test(url.pathname) ? url.pathname : null;
+}
+
+function turnConversationOwnershipLost(tab, url) {
+  if (tab.conversationOwnershipLost) return true;
+  if (!tab.retainedLocation) return false;
+  try { url ??= tab.view.webContents.getURL(); } catch { url = null; }
+  if (retainedConversationLocation(url) !== tab.retainedLocation) tab.conversationOwnershipLost = true;
+  return tab.conversationOwnershipLost === true;
+}
 const MANUAL_SUBMIT_TIMEOUT_MS = 30_000;
 const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
 const MAX_MANUAL_TERMINAL_SIGNALS = 256;
@@ -777,6 +797,7 @@ class BrowserHost {
     contents.on("will-redirect", blockAuthenticationNavigation);
     contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
       if (!mainFrame) return;
+      if (tab.status === "running") turnConversationOwnershipLost(tab, url);
       tab.url = url;
       tab.loading = true;
       if (!inPlace) {
@@ -796,6 +817,7 @@ class BrowserHost {
     });
     contents.on("did-finish-load", () => {
       tab.url = contents.getURL();
+      if (tab.status === "running") turnConversationOwnershipLost(tab, tab.url);
       tab.loading = false;
       tab.rendererReady = true;
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
@@ -804,7 +826,7 @@ class BrowserHost {
         this.publishState?.(this.snapshot());
         return;
       }
-      if (tab.initializingSurface) {
+      if (tab.initializingSurface || tab.conversationOwnershipLost) {
         this.publishState?.(this.snapshot());
         return;
       }
@@ -824,7 +846,10 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
-      if (mainFrame) tab.url = url;
+      if (mainFrame) {
+        if (tab.status === "running") turnConversationOwnershipLost(tab, url);
+        tab.url = url;
+      }
       this.publishState?.(this.snapshot());
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
@@ -2252,12 +2277,19 @@ class BrowserHost {
     if (retainedMatches.length > 1) {
       throw new Error(`ChatGPT retained conversation ${conversationKey} owns multiple browser tabs`);
     }
-    const exactRetained = retainedMatches[0];
+    let exactRetained = retainedMatches[0];
+    if (exactRetained && !exactRetained.view.webContents.isDestroyed()
+      && (turnConversationOwnershipLost(exactRetained)
+        || retainedConversationLocation(exactRetained.view.webContents.getURL()) !== exactRetained.retainedLocation)) {
+      this.removeTurnTab(exactRetained, false);
+      exactRetained = undefined;
+    }
     if (sameTrace?.status === "ready" && sameTrace !== exactRetained) {
       throw new Error(`ChatGPT browser turn ${traceId} is retained under different conversation metadata`);
     }
     const existing = sameTrace?.status === "running" ? sameTrace : exactRetained;
     if (existing) {
+      if (existing.status === "running" && turnConversationOwnershipLost(existing)) throw new BrowserTurnCancelledError(traceId);
       const reused = existing.status === "ready";
       if (existing.status === "running" && existing.helperPid !== helperPid) {
         if (processRunning(existing.helperPid)) {
@@ -2295,6 +2327,8 @@ class BrowserHost {
         tabId: existing.id,
         reused,
         connectorBound: existing.connectorBound === true,
+        ...(existing.retainedLocation && SAVED_CONVERSATION_PATH.test(existing.retainedLocation.split("?")[0])
+          ? { conversationUrl: `${CHATGPT_ORIGIN}${existing.retainedLocation.split("?")[0]}` } : {}),
       };
     }
     if (requireRetainedConversation) {
@@ -2336,6 +2370,12 @@ class BrowserHost {
         `Browser helper ownership mismatch: expected ${tab.helperPid}, received ${helperPid}`,
       );
     }
+    if (turnConversationOwnershipLost(tab)) {
+      status = "failed";
+      retain = false;
+      connectorBound = false;
+      message = "The ChatGPT task page changed conversations.";
+    }
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
     tab.status = status === "completed" ? "ready" : status === "aborted" ? "aborted" : "error";
     this.syncPowerSaveBlocker();
@@ -2347,15 +2387,18 @@ class BrowserHost {
     }
     if (status === "completed"
       && retain
+      && retainedConversationLocation(tab.view.webContents.getURL())
       && tab.conversationKey
       && (!tab.connectorIdentity || connectorBound)) {
       tab.connectorBound = connectorBound === true;
+      tab.retainedLocation = retainedConversationLocation(tab.view.webContents.getURL());
       tab.lastHeartbeatAt = Date.now();
       if (hideAfterTurn && !this.activeTraceId) this.hide();
       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
-      return { cancelledByUser };
+      return { cancelledByUser, ...(SAVED_CONVERSATION_PATH.test(tab.retainedLocation.split("?")[0])
+        ? { conversationUrl: `${CHATGPT_ORIGIN}${tab.retainedLocation.split("?")[0]}` } : {}) };
     }
     // A browser tab represents an active Codex turn, not durable task history. The result already
     // lives in Codex, so release the terminal browser document without touching concurrent turns.
