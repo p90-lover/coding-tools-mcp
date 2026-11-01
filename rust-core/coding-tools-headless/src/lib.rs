@@ -4006,13 +4006,27 @@ mod session_root_tests {
                 RootKind::ProjectFolder,
             )
             .unwrap();
-        let output = tools::dispatch::call_tool_mcp(
-            &current,
-            "read_output",
-            &json!({
-                "output_ref":format!("command:{id}:stdout"),"offset":0,"limit":1024
-            }),
-        );
+        let until = std::time::Instant::now() + Duration::from_secs(4);
+        let output = loop {
+            let output = tools::dispatch::call_tool_mcp(
+                &current,
+                "read_output",
+                &json!({
+                    "output_ref":format!("command:{id}:stdout"),"offset":0,"limit":1024
+                }),
+            );
+            if output["ok"] != true
+                || output["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("admitted-cache-command")
+                || output["status"] == "exited"
+                || std::time::Instant::now() >= until
+            {
+                break output;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
         let same_sessions = Arc::ptr_eq(&admitted.sessions, &current.sessions);
         tools::session::kill_command(&admitted.sessions, &json!({"command_id":id,"wait_ms":2000}))
             .unwrap();
