@@ -119,6 +119,54 @@ test("AO's hook and PATH use the rtk at hand once looked up, refreshing a stale 
   assert.equal(lookups, 2, "a fresh answer is not looked up again");
 });
 
+test("AO's timed-out first RTK lookup stays asynchronous for its hook and PATH", async (t) => {
+  const childProcess = require("node:child_process");
+  const offThread = require("../electron/off-thread-run.cjs");
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  let syncLookups = 0, asyncLookups = 0, installs = 0;
+  t.mock.method(childProcess, "spawnSync", () => {
+    syncLookups += 1;
+    return { status: 0, stdout: "rtk 1.0.1\n" };
+  });
+  t.mock.method(childProcess, "spawn", () => { installs += 1; throw new Error("No installation in this test"); });
+  t.mock.method(offThread, "runOffThread", ({ file, args, timeoutMs }) => {
+    assert.equal(file, RTK);
+    assert.deepEqual(args, ["--version"]);
+    assert.equal(timeoutMs, 5_000);
+    asyncLookups += 1;
+    return pending;
+  });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  // Load with the stand-in spawnSync as the default, preserving run === spawnSync.
+  const modulePath = require.resolve("../electron/rtk.cjs");
+  const cached = require.cache[modulePath];
+  let fresh;
+  delete require.cache[modulePath];
+  try { fresh = require(modulePath); } finally { require.cache[modulePath] = cached; }
+  const rtk = fresh.createRtk({ platform: "win32", now: () => 0,
+    env: { CODING_TOOLS_RTK: RTK }, exists: (file) => file === RTK, listDir: () => [] });
+  const checking = rtk.autoInstall();
+  try {
+    const waiting = rtk.ready(15_000);
+    t.mock.timers.tick(15_000);
+    await waiting;
+    assert.equal(asyncLookups, 1, "the worker lookup is still pending after readiness expires");
+    assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "" });
+    assert.equal(rtk.binDir(), "");
+    assert.equal(syncLookups, 0, "the environment does not restart that lookup on the caller");
+    assert.equal(asyncLookups, 1, "the readers leave the existing lookup running");
+  } finally {
+    release({ code: 0, stdout: "rtk 1.0.1\n" });
+    await checking;
+  }
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: '"' + RTK + '" hook claude' });
+  assert.equal(rtk.binDir(), path.dirname(RTK));
+  assert.equal(syncLookups, 0);
+  assert.equal(installs, 0);
+});
+
 test("a rewritten command is judged as the command it wraps", () => {
   const { rtk } = world();
   rtk.locate();

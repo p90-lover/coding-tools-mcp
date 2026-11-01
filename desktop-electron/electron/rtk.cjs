@@ -144,7 +144,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
    */
   const active = () => {
     if (!enabled()) return null;
-    if (checkedAt === -Infinity) return locate();
+    if (checkedAt === -Infinity) return refreshing ? null : locate();
     if (now() - checkedAt >= FIND_TTL_MS) void locateAsync().catch(() => {});
     return found;
   };
