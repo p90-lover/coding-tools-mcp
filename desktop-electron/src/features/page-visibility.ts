@@ -4,9 +4,12 @@ import { createContext, useCallback, useContext, useRef } from "react";
  * True while the window is hidden in the tray or minimized. The main process serves app calls
  * only to a visible main window, so background polls skip those ticks instead of failing (and
  * reporting an error the user never caused). Screens refresh on the next tick once shown again.
+ * A minimized window's page still reads "visible", so the preload marks <html> data-window-away
+ * from main's own window state as well.
  */
 export function pageHidden(): boolean {
-  return typeof document !== "undefined" && document.visibilityState === "hidden";
+  if (typeof document === "undefined") return false;
+  return document.visibilityState === "hidden" || document.documentElement?.hasAttribute("data-window-away") === true;
 }
 
 /** Whether the tab a screen is drawn in is hidden: tabs stay mounted after a visit (App's keepAlive). */
