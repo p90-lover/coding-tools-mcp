@@ -101,8 +101,7 @@ function planFromFileName(fileName, email) {
 }
 
 // CPA identifies a Codex account by its `type`, not its file name: accounts added through some
-// flows are saved as "<email>.json" with no "codex-" prefix. The type check decides. The Browser
-// tab's accounts are made from the same list (main.cjs syncBrowserAccountsFromCpa).
+// flows are saved as "<email>.json" with no "codex-" prefix. The type check decides.
 function cpaAccountOf(file, name, raw) {
   if (!raw || String(raw.type || "").toLowerCase() !== "codex" || typeof raw.refresh_token !== "string") return null;
   const email = typeof raw.email === "string" ? raw.email : jwtEmail(raw.id_token);

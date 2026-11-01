@@ -32,7 +32,7 @@ const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-li
 const { codexThreadStats } = require("./codex-thread-stats.cjs");
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
-const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
+const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent, readGptBrowserState } = require("./gpt-browser.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
@@ -1209,42 +1209,6 @@ async function assignBrowserAccountProxies({ logger }) {
     assigned += 1;
   }
   return { ...browserAccountsStatus(), assigned };
-}
-
-// Every Codex OAuth sign-in in CPA gets a Browser-tab account named after it
-// (browser-accounts.cjs importOauthAccounts), at startup and every 5 minutes. Read off the main
-// thread, and a file whose size and time are unchanged is not read again: synchronous reads of
-// every CPA auth file stalled the app for seconds on a busy hard disk (chatgpt-desktop.cjs).
-const CPA_BROWSER_ACCOUNT_SYNC_MS = 5 * 60_000;
-const cpaBrowserAccountFiles = new Map(); // file -> { size, mtimeMs, account }
-async function syncBrowserAccountsFromCpa(logger) {
-  const directory = await readCpaAuthDirectory();
-  let names;
-  try { names = await fs.promises.readdir(directory); } catch { return []; }
-  const files = names.filter((name) => /\.json$/i.test(name)).map((name) => [name, path.join(directory, name)]);
-  const accounts = [];
-  for (const [name, file] of files) {
-    let stat;
-    try { stat = await fs.promises.stat(file); } catch { continue; }
-    let known = cpaBrowserAccountFiles.get(file);
-    if (!known || known.size !== stat.size || known.mtimeMs !== stat.mtimeMs) {
-      let raw = null;
-      try { raw = JSON.parse(await fs.promises.readFile(file, "utf8")); } catch { /* being written */ }
-      known = { size: stat.size, mtimeMs: stat.mtimeMs, account: cpaAccountOf(file, name, raw) };
-      cpaBrowserAccountFiles.set(file, known);
-    }
-    if (known.account?.email) accounts.push(known.account);
-  }
-  const present = new Set(files.map(([, file]) => file));
-  for (const file of cpaBrowserAccountFiles.keys()) if (!present.has(file)) cpaBrowserAccountFiles.delete(file);
-  accounts.sort((a, b) => a.email.localeCompare(b.email));
-  const added = browserAccounts.importOauthAccounts(accounts);
-  if (added.length) {
-    logger.info("browser_accounts.imported_from_cpa", { count: added.length });
-    publishBrowserAccounts();
-    void refreshBrowserAccountSignIns(logger);
-  }
-  return added;
 }
 
 function addBrowserAccount(context) {
@@ -4670,11 +4634,8 @@ async function start() {
   await routeBrowserAccountPartition(browserAccounts.activePartition(), logger);
   browserHost = createBrowserHostForAccount(browserAccounts.activeId());
   void refreshBrowserAccountSignIns(logger);
-  const syncCpaAccounts = () => void syncBrowserAccountsFromCpa(logger).catch((error) => logger.warn("browser_accounts.cpa_sync_failed", {
-    message: error instanceof Error ? error.message : String(error),
-  }));
-  syncCpaAccounts();
-  setInterval(syncCpaAccounts, CPA_BROWSER_ACCOUNT_SYNC_MS).unref();
+  // CPA's Codex sign-ins are no longer turned into Browser-tab accounts (every 5 minutes until
+  // 2026-11-01): the user adds the accounts they want themselves.
   setProviderBrowserHost(() => browserHost);
   registerIpc({ logger, stateStore });
   const trayAvailable = createTray(logger, stateStore.read().language);
