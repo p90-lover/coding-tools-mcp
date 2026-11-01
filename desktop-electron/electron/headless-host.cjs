@@ -113,6 +113,7 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
     const chunks = [];
     let size = 0;
     request.on("response", (response) => {
+      response.on("error", (error) => reject(new Error(safeErrorMessage(error))));
       response.on("data", (chunk) => {
         size += chunk.length;
         if (size > MAX_RESPONSE_BYTES) {
