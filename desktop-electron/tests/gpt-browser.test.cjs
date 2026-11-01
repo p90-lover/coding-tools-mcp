@@ -4,6 +4,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const vm = require("node:vm");
+const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirname, "..")] }));
 const { createGptBrowserHost, browsableUrl, cleanUserAgent, partitionFor, readGptBrowserState } = require("../electron/gpt-browser.cjs");
 
 function fakeWorld() {
@@ -125,6 +127,66 @@ test("removing an account erases its session and falls back to another", async (
   assert.equal(world.sessions.get(partitionFor(b)).cleared, 1);
   assert.equal(after.activeId, a);
   assert.deepEqual(after.accounts.map((entry) => entry.id), [a]);
+});
+
+function removalSurface() {
+  const slots = [], timers = new Map(), removed = []; let cursor = 0, nextTimer = 0, listener, activeId = "a", pending = [], dirty = false;
+  const status = () => ({ activeId, accounts: [{ id: "a", label: "Account A" }, { id: "b", label: "Account B" }], page: null });
+  const effect = (fn, deps) => { const at = cursor++, old = slots[at]; if (!old || deps?.some((value, i) => value !== old.deps?.[i])) {
+    const slot = slots[at] = { deps, cleanup: old?.cleanup }; pending.push(() => { slot.cleanup?.(); slot.cleanup = fn(); });
+  } };
+  const react = {
+    useState(initial) { const at = cursor++; if (!(at in slots)) slots[at] = typeof initial === "function" ? initial() : initial;
+      return [slots[at], value => { const next = typeof value === "function" ? value(slots[at]) : value; dirty ||= next !== slots[at]; slots[at] = next; }]; },
+    useRef(initial) { const at = cursor++; return slots[at] ?? (slots[at] = { current: initial }); },
+    useEffect: effect, useLayoutEffect() { cursor++; }, useCallback: fn => fn,
+  };
+  const api = { gptBrowserStatus: async () => status(), onGptBrowserChanged: fn => { listener = fn; return () => { listener = null; }; },
+    setGptBrowserSurfaceActive: async () => status(), switchGptBrowserAccount: async id => { activeId = id; return status(); },
+    removeGptBrowserAccount: async id => { removed.push(id); return status(); } };
+  const window = { setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; }, clearTimeout: id => timers.delete(id) };
+  const jsx = (type, props) => ({ type, props }), exports = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/GptBrowserSurface.tsx"), "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, { exports, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, window });
+  const props = { api, active: false, setError() {} };
+  const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
+  const render = (runEffects = true) => { let view; do { cursor = 0; pending = []; dirty = false; view = exports.GptBrowserSurface(props); if (runEffects) for (const run of pending) run(); } while (runEffects && dirty); return view; };
+  const button = (runEffects = true) => walk(render(runEffects)).find(item => item.props?.title === "Sign out and erase browser data");
+  return { timers, removed, render, button, click: () => button().props.onClick(),
+    select: id => walk(render()).find(item => item.type === "select").props.onChange({ target: { value: id } }),
+    push(id) { activeId = id; listener(status()); }, expire(id) { const timer = timers.get(id); timers.delete(id); timer.fn(); },
+    unmount() { for (const slot of slots) slot?.cleanup?.(); } };
+}
+
+test("removal confirmation belongs to the account selected by the picker or status event", async t => {
+  for (const via of ["picker", "status event"]) await t.test(via, async () => {
+    const ui = removalSurface(); ui.render(); await new Promise(setImmediate); ui.click();
+    if (via === "picker") ui.select("b"); else ui.push("b"); await new Promise(setImmediate);
+    assert.equal(ui.button().props.children, "Remove account"); assert.equal(ui.button().props.className, "button-secondary");
+    ui.click(); assert.deepEqual(ui.removed, []); assert.equal(ui.button().props.children, "Click again to remove");
+    assert.equal(ui.timers.size, 1); ui.click(); await new Promise(setImmediate); assert.deepEqual(ui.removed, ["b"]); ui.unmount();
+  });
+});
+
+test("switching away and back requires fresh removal confirmation", async () => {
+  const ui = removalSurface(); ui.render(); await new Promise(setImmediate); ui.click(); ui.push("b"); ui.render(); ui.push("a");
+  assert.equal(ui.button().props.children, "Remove account"); ui.click(); assert.deepEqual(ui.removed, []); ui.unmount();
+});
+
+test("account-owned confirmation protects the action before the account-change effect runs", async () => {
+  const ui = removalSurface(); ui.render(); await new Promise(setImmediate); ui.click(); ui.push("b");
+  const button = ui.button(false); assert.equal(button.props.children, "Remove account"); button.props.onClick();
+  assert.deepEqual(ui.removed, []); assert.equal(ui.timers.size, 1); ui.unmount();
+});
+
+test("same-account removal retains its four-second expiry and clears timers on removal or unmount", async () => {
+  const ui = removalSurface(); ui.render(); await new Promise(setImmediate); ui.click();
+  const [id, timer] = [...ui.timers][0]; assert.equal(timer.delay, 4000); ui.expire(id);
+  assert.equal(ui.button().props.children, "Remove account"); ui.click(); assert.deepEqual(ui.removed, []);
+  ui.push("a"); assert.equal(ui.button().props.children, "Click again to remove"); ui.click(); await new Promise(setImmediate);
+  assert.deepEqual(ui.removed, ["a"]); assert.equal(ui.timers.size, 0); ui.click(); assert.equal(ui.timers.size, 1);
+  ui.unmount(); assert.equal(ui.timers.size, 0);
 });
 
 test("web pages stay in the account's session; only mailto leaves the app", async () => {
