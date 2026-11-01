@@ -4297,6 +4297,52 @@ test("mirrored turn progress carries daemon MCP activity into the browser helper
   expect(chatGptExternalProgressIsLive(mirror.snapshot(), 62_000, 60_000)).toBeFalse();
 });
 
+test("mirrored turn progress survives clock rollback through active tools and final completion", async () => {
+  for (const clock of [
+    { batch: 100_000, firstResult: 101_000, finalResult: 102_000, finalProgressAt: 102_000 },
+    { batch: 100_000, firstResult: 99_000, finalResult: 98_000, finalProgressAt: 100_000 },
+  ]) {
+    const daemon = new ChatGptExternalTurnProgress();
+    const mirror = new ChatGptMirroredTurnProgress(revision => daemon.acknowledgeToolBatch(revision));
+    const revision = daemon.recordToolBatch(2, clock.batch);
+    expect(mirror.apply(daemon.snapshot())).toBeTrue();
+    const completion = new ChatGptCompletionTracker(1);
+    completion.observeToolBatch(revision, "Before the tools");
+    let observed = false;
+    const boundary = daemon.waitForToolBatchObservation(revision).then(() => { observed = true; });
+    await Promise.resolve();
+    expect(observed).toBeFalse();
+    await mirror.acknowledgeToolBatch(revision);
+    await boundary;
+    expect(observed).toBeTrue();
+
+    const finalDom = {
+      responsePresent: true,
+      running: false,
+      currentText: "Final answer after the tools",
+      completionActionVisible: true,
+    };
+    daemon.recordToolResult(clock.firstResult);
+    expect(mirror.apply(daemon.snapshot())).toBeTrue();
+    expect(mirror.snapshot().activeToolCalls).toBe(1);
+    expect(mirror.snapshot().lastProgressAt).toBeGreaterThanOrEqual(clock.batch);
+    expect(chatGptExternalProgressIsLive(mirror.snapshot(), 2_000_000, 60_000)).toBeTrue();
+    expect(completion.update({
+      ...finalDom,
+      externalToolCallsInFlight: chatGptExternalToolCallsAreInFlight(mirror.snapshot()),
+    }, 2_000_000)).toBeFalse();
+
+    daemon.recordToolResult(clock.finalResult);
+    expect(mirror.apply(daemon.snapshot())).toBeTrue();
+    expect(mirror.snapshot()).toEqual(daemon.snapshot());
+    expect(mirror.snapshot()).toMatchObject({ revision: 3, activeToolCalls: 0, lastProgressAt: clock.finalProgressAt });
+    expect(chatGptExternalToolCallsAreInFlight(mirror.snapshot())).toBeFalse();
+    expect(chatGptExternalProgressIsLive(mirror.snapshot(), 2_000_000, 60_000)).toBeFalse();
+    expect(completion.update({ ...finalDom, externalToolCallsInFlight: false }, 2_000_000)).toBeFalse();
+    expect(completion.update({ ...finalDom, externalToolCallsInFlight: false }, 2_000_001)).toBeTrue();
+  }
+});
+
 test("mirrored turn progress ignores replayed frames and rejects malformed ones", async () => {
   const mirror = new ChatGptMirroredTurnProgress();
   const first = {
