@@ -78,7 +78,7 @@ import {
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
-import { LauncherBrowserHelperClient } from "./launcher-helper-client";
+import { LauncherBrowserHelperClient, parseChatGptReplyRecoveryCheckpoint, type ChatGptReplyRecoveryCheckpoint } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
   ChatGptCompactionHandoffAccepted,
@@ -1412,6 +1412,9 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void;
+  /** Exact accepted reply to observe after helper failure; never a prompt to resubmit. */
+  replyRecovery?: ChatGptReplyRecoveryCheckpoint;
+  onReplyRecoveryCheckpoint?: (checkpoint: ChatGptReplyRecoveryCheckpoint) => void | Promise<void>;
   /** One inert Bigger Context stage completed its exact acknowledgement boundary. */
   onMultipartStageAcknowledged?: (stageIndex: number) => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
@@ -1689,16 +1692,22 @@ export class ChatGptCompletionTracker {
     return revision > this.lastToolBatchRevision;
   }
 
-  observeToolBatch(revision: number, currentText: string): boolean {
+  observeToolBatch(revision: number, currentText: string, sourceGenerationStarted = false): boolean {
     if (!this.needsToolBatchObservation(revision)) return false;
     // The caller acknowledges the batch only after this projection is captured. The outer Codex
     // harness therefore cannot execute the tool until this exact pre-tool answer boundary exists.
     this.postToolAnswerBaselineText = currentText;
-    this.postToolSourceGenerationStarted = false;
+    this.postToolSourceGenerationStarted = sourceGenerationStarted;
     this.lastToolBatchRevision = revision;
     this.missingPostToolAnswerSince = undefined;
     this.candidate = undefined;
     return true;
+  }
+
+  toolBoundary(): ChatGptReplyRecoveryCheckpoint["toolBoundary"] {
+    return this.postToolAnswerBaselineText === undefined ? undefined
+      : { revision: this.lastToolBatchRevision, text: this.postToolAnswerBaselineText,
+        ...(this.postToolSourceGenerationStarted ? { sourceGenerationStarted: true } : {}) };
   }
 
   update(
@@ -4821,7 +4830,7 @@ export class ChatGptBrowserWorker {
     const surfaceId = lease.surfaceId;
     const reused = lease.reused === true;
     let terminal: "completed" | "failed" | "aborted" | "superseded" = "completed";
-    let submitted = false;
+    let submitted = turn.replyRecovery !== undefined;
     let terminalMessage: string | undefined;
     let originalError: unknown;
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -5146,6 +5155,43 @@ export class ChatGptBrowserWorker {
           + ` maxStageMessageTokens=${maxStageMessageTokens} maxStageChars=${maxStageChars}`,
         );
       }
+      let mode = requestedMode;
+      let submissionBaseline: ChatGptSubmissionBaseline;
+      let responseTurn: ChatGptAssistantTurnBinding;
+      const completionTracker = new ChatGptCompletionTracker();
+      let replyRecoveryCheckpoint = turn.replyRecovery;
+      if (turn.replyRecovery) {
+        const checkpoint = parseChatGptReplyRecoveryCheckpoint(turn.replyRecovery);
+        if (page.url() !== checkpoint.conversationUrl) {
+          throw new Error("ChatGPT reply recovery no longer owns its original conversation");
+        }
+        const state = await this.submissionDomState(page, {}, turn.abortSignal);
+        const accepted = new Set(checkpoint.acceptedTurnIdentities);
+        const replies = state.responseIdentities.filter(identity => !checkpoint.initialTurnIdentities.includes(identity));
+        if (state.userTurnCount !== checkpoint.acceptedUserTurnCount
+          || state.userIdentities.some(identity => !accepted.has(identity))
+          || replies.length !== 1 || replies[0] !== checkpoint.responseIdentity) {
+          throw new Error("ChatGPT reply recovery cannot prove the exact current task response");
+        }
+        if (checkpoint.toolBoundary) {
+          if (!turn.externalProgress) throw new Error("ChatGPT reply recovery lost its Codex tool progress");
+          completionTracker.observeToolBatch(checkpoint.toolBoundary.revision, checkpoint.toolBoundary.text,
+            checkpoint.toolBoundary.sourceGenerationStarted);
+        }
+        submissionBaseline = {
+          userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+          responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+          initialTurnIdentities: checkpoint.initialTurnIdentities,
+          initialUserTurnCount: checkpoint.initialUserTurnCount,
+          domCache: {},
+        };
+        responseTurn = {
+          identity: checkpoint.responseIdentity,
+          locator: page.locator(`[data-turn-id=${JSON.stringify(checkpoint.responseIdentity)}], [data-turn-key=${JSON.stringify(checkpoint.responseIdentity)}]`),
+          acceptedTurnIdentities: checkpoint.acceptedTurnIdentities,
+          acceptedUserTurnCount: checkpoint.acceptedUserTurnCount,
+        };
+      } else {
       if (!reuseConversation) {
         await this.runStage(
           turn.traceId,
@@ -5181,7 +5227,7 @@ export class ChatGptBrowserWorker {
       }
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.
-      let mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
+        mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
         this.selectModelAndEffort(
           page,
           turn.modelId,
@@ -5295,7 +5341,7 @@ export class ChatGptBrowserWorker {
         finalPrompt = multipartFinalPrompt;
       }
 
-      let submissionBaseline = await this.captureSubmissionBaseline(page);
+        submissionBaseline = await this.captureSubmissionBaseline(page);
       let catalogRefreshAvailable = mode.localTools && !reuseConversation && !prepared.multipart;
       const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
       for (;;) {
@@ -5359,7 +5405,6 @@ export class ChatGptBrowserWorker {
         this.attachFiles(page, prepared)
       ));
       await diagnostics.capture(page, "file-attachment-complete");
-      const completionTracker = new ChatGptCompletionTracker();
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
         "send",
@@ -5384,7 +5429,7 @@ export class ChatGptBrowserWorker {
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
-      let responseTurn = await this.waitForNewAssistantTurn(
+        responseTurn = await this.waitForNewAssistantTurn(
         page,
         submissionBaseline,
         deadline,
@@ -5400,7 +5445,24 @@ export class ChatGptBrowserWorker {
           }
           : undefined,
       );
-      await diagnostics.capture(page, "send-accepted");
+        if (turn.onReplyRecoveryCheckpoint) {
+          const conversationUrl = page.url();
+          if (/^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]{8,}$/.test(conversationUrl)) {
+            const toolBoundary = completionTracker.toolBoundary();
+            replyRecoveryCheckpoint = {
+              conversationUrl,
+              responseIdentity: responseTurn.identity,
+              initialTurnIdentities: [...submissionBaseline.initialTurnIdentities],
+              acceptedTurnIdentities: [...responseTurn.acceptedTurnIdentities],
+              initialUserTurnCount: submissionBaseline.initialUserTurnCount!,
+              acceptedUserTurnCount: responseTurn.acceptedUserTurnCount,
+              ...(toolBoundary ? { toolBoundary } : {}),
+            };
+            await turn.onReplyRecoveryCheckpoint(replyRecoveryCheckpoint);
+          }
+        }
+      }
+      await diagnostics.capture(page, turn.replyRecovery ? "reply-recovered" : "send-accepted");
 
       let lastHeartbeat = 0;
       let finalText = "";
@@ -5469,7 +5531,7 @@ export class ChatGptBrowserWorker {
         if (!connectionInterruptedVisible) await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
         // ChatGPT's offer to move the chat to Work applies itself unless declined in time.
         await throwIfChatGptWorkMode(page);
-        if (await failedSend.handle(page, attempt => diagnostics.capture(page, `send-retry-${attempt}`))) {
+        if (!turn.replyRecovery && await failedSend.handle(page, attempt => diagnostics.capture(page, `send-retry-${attempt}`))) {
           internalObservationFaults = 0;
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
@@ -5540,6 +5602,14 @@ export class ChatGptBrowserWorker {
         // Liveness may postpone a verdict, never waive it: once activity goes stale the DOM alone
         // decides, so a tool call that never returns cannot hold a turn with no explicit deadline open forever.
         const externalProgressSnapshot = turn.externalProgress?.snapshot();
+        if (turn.replyRecovery?.toolBoundary && externalProgressSnapshot
+          && externalProgressSnapshot.lastToolBatchRevision < turn.replyRecovery.toolBoundary.revision) {
+          if (Date.now() - sentAt >= CHATGPT_RESPONSE_DOM_GRACE_MS) {
+            throw new Error("ChatGPT reply recovery did not receive its current Codex tool progress");
+          }
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          continue;
+        }
         if (turn.externalProgress
           && externalProgressSnapshot
           && completionTracker.needsToolBatchObservation(externalProgressSnapshot.lastToolBatchRevision)) {
@@ -5549,6 +5619,13 @@ export class ChatGptBrowserWorker {
           );
           if (snapshot.mutableProjection && snapshot.visibleText.trim()) {
             toolBoundaryNarration = snapshot.visibleText.trim();
+          }
+          if (replyRecoveryCheckpoint) {
+            replyRecoveryCheckpoint = {
+              ...replyRecoveryCheckpoint,
+              toolBoundary: completionTracker.toolBoundary(),
+            };
+            await turn.onReplyRecoveryCheckpoint?.(replyRecoveryCheckpoint);
           }
           await turn.externalProgress.acknowledgeToolBatch(externalProgressSnapshot.lastToolBatchRevision);
         }
@@ -5642,6 +5719,12 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
             externalToolCallsInFlight,
           });
+          const toolBoundary = completionTracker.toolBoundary();
+          if (replyRecoveryCheckpoint?.toolBoundary && toolBoundary
+            && replyRecoveryCheckpoint.toolBoundary.sourceGenerationStarted !== toolBoundary.sourceGenerationStarted) {
+            replyRecoveryCheckpoint = { ...replyRecoveryCheckpoint, toolBoundary };
+            await turn.onReplyRecoveryCheckpoint?.(replyRecoveryCheckpoint);
+          }
           if (!completionReady) completionFenceRevision = undefined;
           if (completionReady) {
             if (turn.completionFence) {

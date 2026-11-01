@@ -6,6 +6,7 @@ import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adap
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
+import { parseChatGptReplyRecoveryCheckpoint, type ChatGptReplyRecoveryCheckpoint } from "./launcher-helper-client";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import { ChatGptMirroredTurnProgress } from "./turn-progress";
 import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
@@ -37,6 +38,8 @@ interface RunMessage {
     captureLunaCheckpoint?: boolean;
     captureRichOutput?: boolean;
     externalProgress?: boolean;
+    replyRecovery?: ChatGptReplyRecoveryCheckpoint;
+    replyRecoveryEnabled?: boolean;
   };
 }
 
@@ -231,6 +234,7 @@ async function run(message: RunMessage): Promise<void> {
     ...(message.turn.retainConversation ? { retainConversation: true } : {}),
     ...(message.turn.requireRetainedConversation ? { requireRetainedConversation: true } : {}),
     ...(message.turn.conversationKey ? { conversationKey: message.turn.conversationKey } : {}),
+    ...(message.turn.replyRecovery !== undefined ? { replyRecovery: parseChatGptReplyRecoveryCheckpoint(message.turn.replyRecovery) } : {}),
     abortSignal: abortController.signal,
     ...(message.turn.compaction ? { compaction: true } : {}),
     ...(progress ? {
@@ -287,6 +291,13 @@ async function run(message: RunMessage): Promise<void> {
         throw new Error("Browser helper could not persist ChatGPT submission evidence");
       }
     },
+    ...(message.turn.replyRecoveryEnabled === true ? {
+      onReplyRecoveryCheckpoint: (checkpoint: ChatGptReplyRecoveryCheckpoint) => {
+        if (!writeProtocol({ type: "event", id: message.id, event: "reply_recovery", checkpoint })) {
+          throw new Error("Browser helper could not publish task reply recovery evidence");
+        }
+      },
+    } : {}),
     onMultipartStageAcknowledged: stageIndex => {
       if (!writeProtocol({ type: "event", id: message.id, event: "multipart_stage_acknowledged", stageIndex })) {
         throw new Error("Browser helper could not persist multipart acknowledgement evidence");
@@ -545,4 +556,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "rich-output"] });
+writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "rich-output", "reply-recovery"] });

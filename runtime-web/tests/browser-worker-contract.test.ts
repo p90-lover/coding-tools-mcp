@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -4363,3 +4363,84 @@ test("a stage that spans a system sleep is not charged for the slept time", asyn
   await stage;
   expect(outcome).toEqual(["ChatGPT browser stage timed out: probe"]);
 }, 10_000);
+
+test.each(["current", "old-reply", "other-conversation", "later-user", "later-reply", "later-count", "accepted-retry-alert"])("task reply recovery never resends or imports unrelated history: %s", async scenario => {
+  const diagnostics = mkdtempSync(join(tmpdir(), "task-reply-observation-"));
+  const conversationUrl = "https://chatgpt.com/c/current-task-1234";
+  const checkpoint = {
+    conversationUrl, responseIdentity: "current-answer", initialTurnIdentities: ["old-user", "old-answer"],
+    acceptedTurnIdentities: ["old-user", "old-answer", "current-user", "current-answer"],
+    initialUserTurnCount: 1, acceptedUserTurnCount: 2,
+  };
+  const observing = scenario === "accepted-retry-alert";
+  const locator = {
+    last: () => locator, first: () => locator, locator: () => locator, getByRole: () => locator,
+    getByTestId: () => locator, getByText: () => locator, filter: () => locator,
+    isVisible: async () => false, count: async () => 0, allTextContents: async () => [], innerText: async () => "",
+  };
+  const page = {
+    // End the fixture at the first response-loop guard after recovery validation.
+    isClosed: () => !observing, url: () => scenario === "other-conversation" ? "https://chatgpt.com/c/foreign-task-1234" : conversationUrl,
+    locator: () => locator, getByRole: () => locator,
+    evaluate: async () => ({}),
+  };
+  let observed = false;
+  let snapshotObserved = false;
+  let released = false;
+  const forbidden = async () => { throw new Error("Recovery attempted to resubmit a task"); };
+  const retry = observing ? spyOn(ChatGptFailedSendRetrier.prototype, "handle").mockImplementation(async () => {
+    throw new DOMException("Recovery tried to press Retry", "AbortError");
+  }) : undefined;
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    config: { appName: "Codex Native2", browserDiagnosticsPath: diagnostics },
+    runStage: async (_trace: string, _stage: string, _timeout: number, action: (signal: AbortSignal) => Promise<unknown>) => action(new AbortController().signal),
+    prepareTemporaryChatSurface: forbidden, selectModelAndEffort: forbidden, attachPromptWithIntegrityRetry: forbidden,
+    attachFiles: forbidden, sendAttachedPrompt: forbidden,
+    responseDomSnapshot: async () => { snapshotObserved = true; throw new DOMException("End fixture after response observation", "AbortError"); },
+    submissionDomState: async () => {
+      observed = true;
+      return {
+        userTurnCount: scenario === "later-count" || scenario === "later-user" ? 3 : 2,
+        userIdentities: ["old-user", "current-user", ...(scenario === "later-user" ? ["unrelated-user"] : [])],
+        responseIdentities: ["old-answer", ...(scenario === "old-reply" ? [] : ["current-answer"]), ...(scenario === "later-reply" ? ["unrelated-answer"] : [])],
+      };
+    },
+  });
+  try {
+    const result = worker.runBrowserTurn({
+      traceId: "reply-recovery-boundary", modelId: "gpt-5.6-sol", reasoning: "high",
+      capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+      replyRecovery: checkpoint,
+      prepare: async () => ({ text: "current task", images: [], release: () => { released = true; } }),
+      onTextDelta: () => { throw new Error("Fixture must stop before text emission"); },
+    }, undefined, page);
+    if (observing) await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    else if (scenario === "current") await expect(result).rejects.toMatchObject({ code: "client_cancelled" });
+    else await expect(result).rejects.toThrow(scenario === "other-conversation" ? "original conversation" : "exact current task response");
+    expect(observed).toBe(scenario !== "other-conversation");
+    expect(released).toBe(true);
+    if (retry) {
+      expect(retry).not.toHaveBeenCalled();
+      expect(snapshotObserved).toBeTrue();
+    }
+  } finally {
+    retry?.mockRestore();
+    rmSync(diagnostics, { recursive: true, force: true });
+  }
+});
+
+test("reply recovery retains a verified post-tool rich-only generation transition", () => {
+  const tracker = new ChatGptCompletionTracker(0, 1000);
+  tracker.observeToolBatch(3, "");
+  const state = {
+    responsePresent: true, running: true, currentText: "", currentRichContent: "chart",
+    completionActionVisible: false, externalToolCallsInFlight: false,
+  };
+  expect(tracker.update(state, 0)).toBeFalse();
+  const boundary = tracker.toolBoundary();
+  expect(boundary).toMatchObject({ revision: 3, text: "", sourceGenerationStarted: true });
+  const recovered = new ChatGptCompletionTracker(0, 1000);
+  recovered.observeToolBatch(boundary!.revision, boundary!.text, (boundary as { sourceGenerationStarted?: boolean }).sourceGenerationStarted);
+  expect(recovered.update({ ...state, running: false, completionActionVisible: true }, 1)).toBeFalse();
+  expect(recovered.update({ ...state, running: false, completionActionVisible: true }, 2)).toBeTrue();
+});
