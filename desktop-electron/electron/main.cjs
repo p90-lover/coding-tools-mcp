@@ -114,7 +114,7 @@ const {
   scheduleFullIpcAfterPaint,
 } = require("./launcher-ready-path.cjs");
 const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
-const { createMainStallMonitor } = require("./main-stall-monitor.cjs");
+const { createMainStallMonitor, createMainStallProbe } = require("./main-stall-monitor.cjs");
 const { createDiskHealthMonitor } = require("./disk-health.cjs");
 const { createMemoryWatch } = require("./memory-watch.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
@@ -5172,7 +5172,10 @@ async function start() {
   startBridgeWatchdog(logger, stateStore);
   // A blocked main loop freezes every window; this is the only thing that can tell afterwards.
   blockingCalls.attach((entry) => logger.warn("launcher.main_blocked", entry));
-  createMainStallMonitor({ logger, blockingCalls }).start();
+  // A stall no wrapped call explains gets the code that was waiting named by a paused stack.
+  const stallProbe = createMainStallProbe({ logger });
+  stallProbe.start();
+  createMainStallMonitor({ logger, blockingCalls, probe: stallProbe }).start();
   const notifyPerson = ({ title, body }) => { if (Notification.isSupported()) new Notification({ title, body }).show(); };
   // A failing or full disk tears files and freezes the app with nothing else saying why (G:/H:, 2026-10-30).
   const diskHealth = createDiskHealthMonitor({ paths: [app.getPath("userData"), path.dirname(process.execPath)], logger, notify: notifyPerson });
