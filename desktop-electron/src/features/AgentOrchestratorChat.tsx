@@ -1025,19 +1025,19 @@ export function AgentOrchestratorChat({
   // The message being sent, shown at once as Claude Code shows it: the send (saving the chat,
   // starting its run, reloading the board) took seconds, and the message sat in the composer
   // meanwhile as if nothing happened. It shows as the chat's next message until the saved chat has it.
-  const [outgoing, setOutgoing] = useState<{ taskId: string; message: string; stamp: string; sent: boolean; at: number } | null>(null);
+  const [outgoing, setOutgoing] = useState<{ taskId: string; cacheKey: string; message: string; stamp: string; sent: boolean; at: number } | null>(null);
   const savedDescription = descriptions[selectedTaskId] ?? pendingMessage;
   const shownDescription = useMemo(() => {
-    if (!outgoing || outgoing.taskId !== (selectedTaskId ?? "")) return savedDescription;
+    if (!outgoing || outgoing.cacheKey !== draftKey || outgoing.taskId !== (selectedTaskId ?? "")) return savedDescription;
     if (!savedDescription) return outgoing.message;
     if (savedDescription.endsWith(outgoing.message)) return savedDescription;
     return `${savedDescription}\n\nFollow-up (${outgoing.stamp} UTC):\n${outgoing.message}`;
-  }, [savedDescription, outgoing, selectedTaskId]);
+  }, [savedDescription, outgoing, selectedTaskId, draftKey]);
   // Once sent, it gives way to the saved chat when that has it (or after a while, if it never reads back).
   useEffect(() => {
     if (!outgoing?.sent) return undefined;
     const saved = descriptions[outgoing.taskId];
-    if (!outgoing.taskId || (saved && saved.endsWith(outgoing.message))) { setOutgoing(null); return undefined; }
+    if (!outgoing.taskId || (saved && saved.endsWith(outgoing.message))) { setOutgoing((current) => current === outgoing ? null : current); return undefined; }
     const timer = window.setTimeout(() => setOutgoing((current) => (current === outgoing ? null : current)), Math.max(0, 20_000 - (Date.now() - outgoing.at)));
     return () => window.clearTimeout(timer);
   }, [outgoing, descriptions]);
@@ -1384,9 +1384,10 @@ export function AgentOrchestratorChat({
       const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
       // Shown at once: the message leaves the composer and appears in the chat while it is sent.
       const shown = !steered && !goal && fromComposer && here();
-      if (shown) {
-        const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
-        setOutgoing({ taskId: selectedTaskId ?? "", message: selectedTaskId ? message : first, stamp, sent: false, at: Date.now() });
+      const outgoingMessage = shown ? { taskId: selectedTaskId ?? "", cacheKey: owner.cacheKey, message: selectedTaskId ? message : first,
+        stamp: new Date().toISOString().replace("T", " ").slice(0, 16), sent: false, at: Date.now() } : null;
+      if (outgoingMessage) {
+        setOutgoing(outgoingMessage);
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         setAtBottom(true);
       }
@@ -1398,14 +1399,14 @@ export function AgentOrchestratorChat({
           // Not sent: it goes back where it was typed, unless something new was typed meanwhile, or
           // it is only refused for now (it then waits in the queue; see the catch below).
           if (shown) {
-            setOutgoing(null);
+            setOutgoing((pending) => pending === outgoingMessage ? null : pending);
             if (here() && !composing.current.draft && !/still running|focused app window/i.test(String((error as Error)?.message ?? error))) {
               setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
             }
           }
           throw error;
         }
-        if (shown) setOutgoing((pending) => pending && { ...pending, sent: true });
+        if (outgoingMessage) setOutgoing((pending) => pending === outgoingMessage ? { ...pending, sent: true } : pending);
       }
       if (fromComposer && CHAT_DRAFTS.get(owner.cacheKey) === owner.draft) CHAT_DRAFTS.delete(owner.cacheKey);
       if (fromComposer && CHAT_ATTACHMENTS.get(owner.cacheKey) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.cacheKey);
@@ -2004,7 +2005,10 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* Who answered and its verdict are in the head; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
-                <ChatMarkdown text={turn.final.text ?? ""} />
+                <ChatMarkdown text={turn.final.text ?? ""} onVisualize={turn.status === "done" && !turn.final.working
+                  && chatRuns.find(run => run.id === turn.runId)?.nodes.some(node => node.id === turn.final?.nodeId
+                    && node.route?.harness_id === "codex-native" && node.route.model.startsWith("chatgpt-web/"))
+                  ? () => setWorkbench("preview") : undefined} />
                 <MessageActions text={turn.final.text ?? ""}>
                   {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}><Icon name="reload" width="14" height="14" /></button> : null}
                 </MessageActions>
@@ -2368,6 +2372,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
+              if (event.nativeEvent?.isComposing || event.nativeEvent?.keyCode === 229) return;
               if (slash.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
                 event.preventDefault(); setSlashIndex((value) => (value + (event.key === "ArrowDown" ? 1 : slash.length - 1)) % slash.length); return;
               }

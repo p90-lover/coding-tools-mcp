@@ -16,8 +16,21 @@ try {
 // page still reads "visible" here, so its pollers kept calling the apps host about 20 times a second;
 // main's window check refused each one and logged it as an error (about 1,200 a minute, 2026-11-01).
 // While the window is away the call is refused here, with main's own words, before any IPC.
+// The page is told as well, through the DOM both worlds share: data-window-away on <html> makes its
+// pageHidden() true, so its pollers and the shimmer ticker rest instead of running into this refusal
+// (a minimized window's renderer still used a fifth of a core, 2026-11-01), and a visibilitychange
+// lets screens that refresh on being shown do so at once.
 let windowShown = true;
-ipcRenderer.on("launcher:window-shown", (_event, shown) => { windowShown = shown !== false; });
+function markWindowShown(shown) {
+  const root = typeof document === "undefined" ? null : document.documentElement;
+  if (!root || root.hasAttribute("data-window-away") === !shown) return;
+  root.toggleAttribute("data-window-away", !shown);
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+ipcRenderer.on("launcher:window-shown", (_event, shown) => {
+  windowShown = shown !== false;
+  markWindowShown(windowShown);
+});
 function callApps(input) {
   if (!windowShown) return Promise.reject(new Error("Open the Coding Tools window (not minimized) to do this"));
   return invokeContract(ipcRenderer, "apps.call", input);
@@ -153,6 +166,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   addMcpTunnel: (input) => ipcRenderer.invoke("launcher:mcp-tunnel-add", input),
   removeMcpTunnel: (id) => ipcRenderer.invoke("launcher:mcp-tunnel-remove", id),
   reconnectMcpTunnel: (id) => ipcRenderer.invoke("launcher:mcp-tunnel-reconnect", id),
+  openMcpTunnelSettings: (id) => ipcRenderer.invoke("launcher:mcp-tunnel-settings", id),
   createMcpTunnelConnector: (id) => ipcRenderer.invoke("launcher:mcp-tunnel-connector", id),
   onMcpTunnelsChanged: (listener) => subscription("launcher:mcp-tunnels-changed", listener),
   setAutostart: (enabled) => ipcRenderer.invoke("launcher:autostart", enabled),

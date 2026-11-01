@@ -27,6 +27,65 @@ fn test_context() -> (tempfile::TempDir, tempfile::TempDir, ToolContext) {
 }
 
 #[test]
+fn audit_sparse_history_numbers_return_a_bounded_gap_sample() {
+    let (workspace, _harness, ctx) = test_context();
+    let dir = workspace.path().join("docs/history-session");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("1.md"), "# One\n").unwrap();
+    fs::write(dir.join("5000.md"), "# Far away\n").unwrap();
+    let report = invoke_ok(&ctx, "history_session_validate", json!({}));
+    assert!(report["missing_numbers"].as_array().unwrap().len() <= 128);
+    assert_eq!(report["missing_number_count"], 4998);
+    assert_eq!(report["missing_numbers_truncated"], true);
+    fs::write(dir.join(format!("{}.md", u64::MAX)), "# Largest number\n").unwrap();
+    let report = invoke_ok(&ctx, "history_session_validate", json!({}));
+    assert_eq!(report["missing_number_count"], u64::MAX - 3);
+    assert_eq!(report["missing_numbers"].as_array().unwrap().len(), 128);
+    assert_eq!(report["sequence_valid"], false);
+}
+
+#[test]
+fn audit_history_read_does_not_open_unrelated_archives() {
+    let (workspace, _harness, ctx) = test_context();
+    let dir = workspace.path().join("docs/history-session");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("1.md"), "# Selected archive\nExact contents\n").unwrap();
+    fs::write(dir.join("2.md"), [0xff, 0xfe, 0xff]).unwrap();
+    let page = invoke_ok(&ctx, "history_session_read", json!({"number":1}));
+    assert_eq!(page["content"], "# Selected archive\nExact contents\n");
+    let by_path = invoke_ok(
+        &ctx,
+        "history_session_read",
+        json!({"path":"docs/history-session/1.md"}),
+    );
+    assert_eq!(by_path["content_hash"], page["content_hash"]);
+    for path in [
+        "docs/history-session/01.md",
+        "docs/history-session/../history-session/1.md",
+    ] {
+        assert_err(&invoke(&ctx, "history_session_read", json!({"path":path})));
+    }
+    assert_err(&invoke(&ctx, "history_session_validate", json!({})));
+}
+
+#[test]
+fn audit_history_read_rejects_a_numbered_symlink() {
+    let (workspace, _harness, ctx) = test_context();
+    let dir = workspace.path().join("docs/history-session");
+    fs::create_dir_all(&dir).unwrap();
+    let target = workspace.path().join("private.txt");
+    fs::write(&target, "not an archive").unwrap();
+    let link = dir.join("1.md");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_file(&target, &link).is_err() {
+        return;
+    }
+    assert_err(&invoke(&ctx, "history_session_read", json!({"number":1})));
+}
+
+#[test]
 fn bootstrap_prefers_host_session_and_preserves_initial_input() {
     let (workspace, _harness, ctx) = test_context();
     let first_request = "修复 bootstrap，首轮输入必须完整保存";

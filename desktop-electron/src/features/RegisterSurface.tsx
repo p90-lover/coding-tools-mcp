@@ -3,10 +3,10 @@ import type { Language, LauncherApi, RegisterStatus } from "../types";
 import "./original-ui.css";
 
 const labels = {
-  en: { choose: "Choose project", start: "Start service", stop: "Stop service", reload: "Reload view", refresh: "Refresh status", connected: "Connected", offline: "Offline", starting: "Starting", project: "Project", empty: "Register in Coding Tools", hint: "Choose the reg-machine project, then start its service.", maintenance: "Starting the service also runs its background maintenance.", attached: "Using a running service. Coding Tools won't stop it.", loading: "Loading Register…", select: "Choose a project." },
-  "zh-CN": { choose: "选择项目", start: "启动服务", stop: "停止服务", reload: "重新加载", refresh: "刷新状态", connected: "已连接", offline: "离线", starting: "启动中", project: "项目", empty: "Coding Tools 注册工作区", hint: "选择 reg-machine 项目并启动服务，即可打开完整注册界面。", maintenance: "启动服务也会运行其已配置的后台维护。", attached: "正在使用已有服务，Coding Tools 不会将其停止。", loading: "正在加载注册界面", select: "请选择项目。" },
-  "zh-TW": { choose: "選擇專案", start: "啟動服務", stop: "停止服務", reload: "重新載入", refresh: "重新整理狀態", connected: "已連線", offline: "離線", starting: "啟動中", project: "專案", empty: "Coding Tools 註冊工作區", hint: "選擇 reg-machine 專案並啟動服務，即可開啟完整註冊介面。", maintenance: "啟動服務也會執行其已設定的背景維護。", attached: "正在使用既有服務，Coding Tools 不會將其停止。", loading: "正在載入註冊介面", select: "請選擇專案。" },
-  ja: { choose: "プロジェクトを選択", start: "サービスを起動", stop: "サービスを停止", reload: "再読み込み", refresh: "状態を更新", connected: "接続済み", offline: "オフライン", starting: "起動中", project: "プロジェクト", empty: "Coding Tools 登録ワークスペース", hint: "reg-machine プロジェクトを選び、サービスを起動すると登録画面が開きます。", maintenance: "起動すると、設定済みのバックグラウンド保守も実行されます。", attached: "既存のサービスに接続しています。Coding Tools はこのサービスを停止しません。", loading: "登録画面を読み込み中", select: "プロジェクトを選択してください。" },
+  en: { choose: "Choose project", start: "Start service", stop: "Stop service", reload: "Reload view", refresh: "Refresh status", connected: "Connected", offline: "Offline", starting: "Starting", project: "Project", empty: "Register in Coding Tools", hint: "Choose the reg-machine project. Its service starts automatically when you open Register.", maintenance: "Starting the service also runs its background maintenance.", attached: "Using a running service. Coding Tools won't stop it.", loading: "Loading Register…", select: "Choose a project." },
+  "zh-CN": { choose: "选择项目", start: "启动服务", stop: "停止服务", reload: "重新加载", refresh: "刷新状态", connected: "已连接", offline: "离线", starting: "启动中", project: "项目", empty: "Coding Tools 注册工作区", hint: "选择 reg-machine 项目后，打开注册工作区时会自动启动服务。", maintenance: "启动服务也会运行其已配置的后台维护。", attached: "正在使用已有服务，Coding Tools 不会将其停止。", loading: "正在加载注册界面", select: "请选择项目。" },
+  "zh-TW": { choose: "選擇專案", start: "啟動服務", stop: "停止服務", reload: "重新載入", refresh: "重新整理狀態", connected: "已連線", offline: "離線", starting: "啟動中", project: "專案", empty: "Coding Tools 註冊工作區", hint: "選擇 reg-machine 專案後，開啟註冊工作區時會自動啟動服務。", maintenance: "啟動服務也會執行其已設定的背景維護。", attached: "正在使用既有服務，Coding Tools 不會將其停止。", loading: "正在載入註冊介面", select: "請選擇專案。" },
+  ja: { choose: "プロジェクトを選択", start: "サービスを起動", stop: "サービスを停止", reload: "再読み込み", refresh: "状態を更新", connected: "接続済み", offline: "オフライン", starting: "起動中", project: "プロジェクト", empty: "Coding Tools 登録ワークスペース", hint: "reg-machine プロジェクトを選ぶと、登録画面を開いたときにサービスが自動起動します。", maintenance: "起動すると、設定済みのバックグラウンド保守も実行されます。", attached: "既存のサービスに接続しています。Coding Tools はこのサービスを停止しません。", loading: "登録画面を読み込み中", select: "プロジェクトを選択してください。" },
 };
 
 export function RegisterSurface({ api, active, language, setError }: {
@@ -21,6 +21,7 @@ export function RegisterSurface({ api, active, language, setError }: {
   const [error, setLocalError] = useState("");
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
   const mounted = useRef(true);
+  const autoStartedProjects = useRef(new Set<string>());
 
   useEffect(() => {
     mounted.current = true;
@@ -38,7 +39,16 @@ export function RegisterSurface({ api, active, language, setError }: {
       if (reading || document.hidden) return;
       reading = true;
       try {
-        const next = await api.registerStatus();
+        let next = await api.registerStatus();
+        if (!alive || document.hidden) return;
+        if (next.projectRoot && !autoStartedProjects.current.has(next.projectRoot)) {
+          // A manual Stop must stay stopped across polling and tab switches.
+          if (next.ready || next.starting || next.error) autoStartedProjects.current.add(next.projectRoot);
+          else if (document.hasFocus()) {
+            autoStartedProjects.current.add(next.projectRoot);
+            next = await api.startRegister();
+          }
+        }
         if (alive) setStatus(next);
       } catch (cause) {
         if (alive) setLocalError(cause instanceof Error ? cause.message : String(cause));
@@ -50,10 +60,12 @@ export function RegisterSurface({ api, active, language, setError }: {
     const timer = window.setInterval(() => void refresh(), 3_000);
     const unsubscribe = api.onRegisterChanged((next) => { if (alive) setStatus(next); });
     window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
     return () => {
       alive = false;
       window.clearInterval(timer);
       window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
       unsubscribe();
     };
   }, [active, api]);
@@ -106,7 +118,10 @@ export function RegisterSurface({ api, active, language, setError }: {
 
   const choose = () => run(async () => {
     const folder = await api.chooseFolder?.();
-    return folder ? api.configureRegister(folder) : null;
+    if (!folder) return null;
+    const configured = await api.configureRegister(folder);
+    autoStartedProjects.current.add(configured.projectRoot);
+    return api.startRegister();
   });
   const state = status?.starting ? "starting" : ready ? "ready" : "offline";
 

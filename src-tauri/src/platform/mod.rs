@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::error::AppResult;
@@ -113,5 +114,71 @@ fn create_platform() -> Box<dyn Platform> {
             }
         }
         Box::new(Unsupported)
+    }
+}
+
+// Return ancestors before descendants so callers can terminate in reverse order.
+fn descendant_pids(root_pid: u32, records: &[(u32, u32)]) -> Vec<u32> {
+    let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+    for &(pid, parent) in records {
+        children_by_parent.entry(parent).or_default().push(pid);
+    }
+    let mut pending = VecDeque::from([root_pid]);
+    let mut seen = HashSet::from([root_pid]);
+    let mut ordered = Vec::new();
+    while let Some(parent) = pending.pop_front() {
+        if let Some(children) = children_by_parent.get(&parent) {
+            for &pid in children {
+                if seen.insert(pid) {
+                    ordered.push(pid);
+                    pending.push_back(pid);
+                }
+            }
+        }
+    }
+    ordered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descendant_walk_handles_reversed_and_mixed_snapshots() {
+        for records in [
+            vec![(20, 10), (30, 20), (40, 10), (50, 40)],
+            vec![(50, 40), (40, 10), (30, 20), (20, 10)],
+            vec![(30, 20), (50, 40), (20, 10), (40, 10)],
+        ] {
+            let found = descendant_pids(10, &records);
+            assert_eq!(
+                found.iter().copied().collect::<HashSet<_>>(),
+                HashSet::from([20, 30, 40, 50])
+            );
+            for &(child, parent) in &records {
+                if parent != 10 {
+                    let parent_at = found.iter().position(|pid| *pid == parent).unwrap();
+                    let child_at = found.iter().position(|pid| *pid == child).unwrap();
+                    assert!(parent_at < child_at, "ancestors must precede descendants");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn descendant_walk_deduplicates_and_breaks_cycles() {
+        let records = [
+            (30, 20),
+            (20, 10),
+            (20, 10),
+            (10, 30),
+            (20, 30),
+            (70, 80),
+            (80, 70),
+            (99, 1),
+        ];
+        assert_eq!(descendant_pids(10, &records), vec![20, 30]);
+        assert!(descendant_pids(10, &[]).is_empty());
+        assert!(descendant_pids(10, &[(99, 1), (70, 80), (80, 70)]).is_empty());
     }
 }

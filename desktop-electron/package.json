@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-full-harness-desktop",
-  "version": "0.8.41",
+  "version": "0.8.44",
   "private": true,
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
@@ -39,7 +39,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "45.0.0",
+    "electron": "45.2.1",
     "electron-builder": "^26.15.3",
     "typescript": "^5.9.3",
     "vite": "^6.4.5"
