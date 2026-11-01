@@ -13,11 +13,11 @@ use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 /// Default per-file cap for `search_text`. Files are scanned line by line, so this only keeps
 /// multi-GB assets out of a search; large logs and generated sources are searched.
 const DEFAULT_SEARCH_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
-/// How long one `search_text` call may scan before it stops and returns what it found so far
-/// (`timed_out: true`), well inside the callers' own deadlines: a search over a huge folder answers
-/// with partial results instead of failing.
+/// Cooperative scan budget: walking and bounded reads return partial results on expiry
+/// (`timed_out: true`). A blocked filesystem operation or one regex evaluation cannot be preempted.
 const DEFAULT_SEARCH_TIME_BUDGET_MS: u64 = 15_000;
 const MAX_SEARCH_TIME_BUDGET_MS: u64 = 60_000;
+const SEARCH_READ_CHUNK_BYTES: u64 = 64 * 1024;
 const BINARY_PEEK_BYTES: usize = 8192;
 /// Largest `content` one read_file call returns. Tool results pass through the headless service,
 /// which keeps at most 256 KiB of serialized result, so a page stays under that even after JSON
@@ -488,6 +488,49 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
     })))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchStop {
+    Complete,
+    ResultLimit,
+    Deadline,
+}
+
+fn walk_search_files(
+    root: &Path,
+    skip_entry: impl Fn(&walkdir::DirEntry) -> bool,
+    mut consider_file: impl FnMut(&Path) -> SearchStop,
+    expired: &dyn Fn() -> bool,
+) -> SearchStop {
+    let mut entries = WalkDir::new(root).follow_links(false).into_iter();
+    loop {
+        if expired() {
+            return SearchStop::Deadline;
+        }
+        let next = entries.next();
+        if expired() {
+            return SearchStop::Deadline;
+        }
+        let entry = match next {
+            Some(Ok(entry)) => entry,
+            Some(Err(_)) => continue,
+            None => return SearchStop::Complete,
+        };
+        if skip_entry(&entry) {
+            if entry.file_type().is_dir() {
+                entries.skip_current_dir();
+            }
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let stop = consider_file(entry.path());
+        if stop != SearchStop::Complete {
+            return stop;
+        }
+    }
+}
+
 pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let query = args
         .get("query")
@@ -530,6 +573,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             .clamp(1, MAX_SEARCH_TIME_BUDGET_MS),
     );
     let started = std::time::Instant::now();
+    let expired = || started.elapsed() >= budget;
     let matcher = build_matcher(query, use_regex, case_sensitive)?;
     // What git ignores (generated output, virtualenvs, caches) is skipped like the heavy folders
     // is_ignored_path already skips, unless the caller asks for ignored files too.
@@ -543,47 +587,43 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     let mut warnings = Vec::new();
     let mut skipped_large = 0usize;
     let mut skipped_binary = 0usize;
-    let mut truncated = false;
-    let mut timed_out = false;
     let mut files_searched = 0usize;
 
     let mut consider_file = |p: &Path| {
         if matches.len() >= max_results {
-            truncated = true;
-            return false;
+            return SearchStop::ResultLimit;
         }
-        if started.elapsed() >= budget {
-            timed_out = true;
-            return false;
+        if expired() {
+            return SearchStop::Deadline;
         }
         if !ws.is_safe_read_path(p) {
-            return true;
+            return SearchStop::Complete;
         }
         if ws.is_ignored_path(p, false, include_ignored) {
-            return true;
+            return SearchStop::Complete;
         }
         files_searched += 1;
         let rel = ws.display_path(p);
         if !passes_glob_filters(&rel, &include_globs, &exclude_globs) {
-            return true;
+            return SearchStop::Complete;
         }
         let meta = match p.metadata() {
             Ok(m) if m.is_file() => m,
-            _ => return true,
+            _ => return SearchStop::Complete,
         };
         if meta.len() > max_file_bytes {
             skipped_large += 1;
-            return true;
+            return SearchStop::Complete;
         }
         match file_text_eligibility(p) {
             FileEligibility::Binary => {
                 skipped_binary += 1;
-                return true;
+                return SearchStop::Complete;
             }
-            FileEligibility::Unreadable => return true,
+            FileEligibility::Unreadable => return SearchStop::Complete,
             FileEligibility::Text => {}
         }
-        let stop = search_file_streaming(
+        search_file_streaming(
             p,
             &rel,
             &matcher,
@@ -591,37 +631,31 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             max_preview,
             max_results,
             &mut matches,
-        );
-        if stop {
-            truncated = true;
-            return false;
-        }
-        true
+            &expired,
+        )
     };
 
-    if resolved.path.is_file() {
-        let _ = consider_file(&resolved.path);
+    let mut stop = if resolved.path.is_file() {
+        consider_file(&resolved.path)
     } else {
         // Ignored and hidden directories are pruned whole, matching the per-file rule below.
-        for entry in WalkDir::new(&resolved.path)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|entry| {
-                entry.path() == resolved.path
-                    || (!(entry.file_type().is_dir()
+        walk_search_files(
+            &resolved.path,
+            |entry| {
+                entry.path() != resolved.path
+                    && ((entry.file_type().is_dir()
                         && ws.is_ignored_path(entry.path(), false, include_ignored))
-                        && !gitignore.ignores(entry.path(), entry.file_type().is_dir()))
-            })
-            .filter_map(Result::ok)
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            if !consider_file(entry.path()) {
-                break;
-            }
-        }
+                        || gitignore.ignores(entry.path(), entry.file_type().is_dir()))
+            },
+            &mut consider_file,
+            &expired,
+        )
+    };
+    if stop == SearchStop::Complete && expired() {
+        stop = SearchStop::Deadline;
     }
+    let mut truncated = stop == SearchStop::ResultLimit;
+    let timed_out = stop == SearchStop::Deadline;
 
     if truncated {
         warnings.push("result limit reached; scan stopped early".to_string());
@@ -629,7 +663,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     if timed_out {
         truncated = true;
         warnings.push(format!(
-            "search stopped after {} ms with partial results ({files_searched} file(s) searched); \
+            "search time budget of {} ms reached with partial results ({files_searched} file(s) searched); \
              narrow it with path or include_globs",
             budget.as_millis()
         ));
@@ -781,7 +815,8 @@ fn file_text_eligibility(path: &Path) -> FileEligibility {
     FileEligibility::Text
 }
 
-/// Stream a file line-by-line. Returns true when `max_results` is reached.
+/// Stream a file line-by-line, retaining the reason a scan stops early.
+#[allow(clippy::too_many_arguments)]
 fn search_file_streaming(
     path: &Path,
     rel: &str,
@@ -790,25 +825,76 @@ fn search_file_streaming(
     max_preview: usize,
     max_results: usize,
     matches: &mut Vec<Value>,
-) -> bool {
-    let file = match File::open(path) {
+    expired: &dyn Fn() -> bool,
+) -> SearchStop {
+    if expired() {
+        return SearchStop::Deadline;
+    }
+    let opened = File::open(path);
+    if expired() {
+        return SearchStop::Deadline;
+    }
+    let file = match opened {
         Ok(f) => f,
-        Err(_) => return false,
+        Err(_) => return SearchStop::Complete,
     };
-    let mut reader = BufReader::new(file);
+    search_reader_streaming(
+        BufReader::new(file),
+        rel,
+        matcher,
+        context_lines,
+        max_preview,
+        max_results,
+        matches,
+        expired,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_reader_streaming(
+    mut reader: impl BufRead,
+    rel: &str,
+    matcher: &Matcher,
+    context_lines: usize,
+    max_preview: usize,
+    max_results: usize,
+    matches: &mut Vec<Value>,
+    expired: &dyn Fn() -> bool,
+) -> SearchStop {
     let mut recent: VecDeque<String> = VecDeque::with_capacity(context_lines.max(1));
     let mut pending: Vec<PendingMatch> = Vec::new();
     let mut line_no = 0usize;
     let mut raw = Vec::new();
 
-    loop {
+    'lines: loop {
         raw.clear();
-        match reader.read_until(b'\n', &mut raw) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => {
+        loop {
+            if expired() {
                 flush_pending(&mut pending, matches, max_results);
-                return matches.len() >= max_results;
+                return SearchStop::Deadline;
+            }
+            // Keep a logical line intact for UTF-8, anchors and context, but check the
+            // deadline between bounded reads. A blocked OS read cannot be preempted here.
+            let read = (&mut reader)
+                .take(SEARCH_READ_CHUNK_BYTES)
+                .read_until(b'\n', &mut raw);
+            if expired() {
+                flush_pending(&mut pending, matches, max_results);
+                return SearchStop::Deadline;
+            }
+            match read {
+                Ok(0) if raw.is_empty() => break 'lines,
+                Ok(0) => break,
+                Ok(_) if raw.last() == Some(&b'\n') => break,
+                Ok(_) => continue,
+                Err(_) => {
+                    flush_pending(&mut pending, matches, max_results);
+                    return if matches.len() >= max_results {
+                        SearchStop::ResultLimit
+                    } else {
+                        SearchStop::Complete
+                    };
+                }
             }
         }
         // Invalid UTF-8 no longer ends the file: such lines are searched with U+FFFD in place.
@@ -831,7 +917,7 @@ fn search_file_streaming(
                 let done = pending.remove(0);
                 matches.push(done.into_value());
                 if matches.len() >= max_results {
-                    return true;
+                    return SearchStop::ResultLimit;
                 }
             }
         }
@@ -846,7 +932,7 @@ fn search_file_streaming(
                     "preview": preview
                 }));
                 if matches.len() >= max_results {
-                    return true;
+                    return SearchStop::ResultLimit;
                 }
             } else {
                 pending.push(PendingMatch {
@@ -871,10 +957,10 @@ fn search_file_streaming(
     for pend in pending {
         matches.push(pend.into_value());
         if matches.len() >= max_results {
-            return true;
+            return SearchStop::ResultLimit;
         }
     }
-    false
+    SearchStop::Complete
 }
 
 struct PendingMatch {
@@ -1093,4 +1179,271 @@ fn format_mtime(st: Option<SystemTime>) -> Option<String> {
         let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         format!("{}.{:03}Z", d.as_secs(), d.subsec_millis())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::io::{self, Cursor};
+
+    struct ControlledReader<'a> {
+        inner: Cursor<Vec<u8>>,
+        consumed: &'a Cell<usize>,
+        largest_read: &'a Cell<usize>,
+        fail_after: Option<usize>,
+    }
+
+    impl Read for ControlledReader<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let count = bytes.len().min(available.len());
+            bytes[..count].copy_from_slice(&available[..count]);
+            self.consume(count);
+            Ok(count)
+        }
+    }
+
+    impl BufRead for ControlledReader<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            let position = self.inner.position() as usize;
+            if self.fail_after.is_some_and(|limit| position >= limit) {
+                return Err(io::Error::other("controlled read failure"));
+            }
+            let available = self.inner.fill_buf()?;
+            let length = self.fail_after.map_or(available.len(), |limit| {
+                available.len().min(limit - position)
+            });
+            Ok(&available[..length])
+        }
+
+        fn consume(&mut self, count: usize) {
+            self.inner.consume(count);
+            self.consumed.set(self.consumed.get() + count);
+            self.largest_read.set(self.largest_read.get().max(count));
+        }
+    }
+
+    #[test]
+    fn search_deadline_discards_unfinished_line_and_keeps_pending_context() {
+        let first = b"first needle\n";
+        let mut text = first.to_vec();
+        text.extend_from_slice(b"needle ");
+        text.extend(std::iter::repeat_n(b'x', SEARCH_READ_CHUNK_BYTES as usize));
+        text.extend_from_slice(b" end\n");
+        let consumed = Cell::new(0);
+        let largest_read = Cell::new(0);
+        let reader = ControlledReader {
+            inner: Cursor::new(text),
+            consumed: &consumed,
+            largest_read: &largest_read,
+            fail_after: None,
+        };
+        let mut matches = Vec::new();
+        let stop = search_reader_streaming(
+            reader,
+            "log.txt",
+            &Matcher::Exact("needle".into()),
+            2,
+            64,
+            10,
+            &mut matches,
+            &|| consumed.get() >= first.len() + SEARCH_READ_CHUNK_BYTES as usize,
+        );
+        assert_eq!(stop, SearchStop::Deadline);
+        assert_eq!(
+            consumed.get(),
+            first.len() + SEARCH_READ_CHUNK_BYTES as usize
+        );
+        assert!(largest_read.get() <= SEARCH_READ_CHUNK_BYTES as usize);
+        assert_eq!(
+            matches,
+            vec![json!({"path":"log.txt","line":1,"column":1,
+            "preview":"first needle","before":[],"after":[]})]
+        );
+
+        let mut matches = Vec::new();
+        let mut reader = Cursor::new(b"needle\n".to_vec());
+        assert_eq!(
+            search_reader_streaming(
+                &mut reader,
+                "log.txt",
+                &Matcher::Exact("needle".into()),
+                0,
+                64,
+                10,
+                &mut matches,
+                &|| true
+            ),
+            SearchStop::Deadline
+        );
+        assert_eq!(reader.position(), 0);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn search_chunks_preserve_lines_context_utf8_errors_and_limit_reason() {
+        let mut text = b"before\r\n".to_vec();
+        text.extend(std::iter::repeat_n(
+            b'x',
+            SEARCH_READ_CHUNK_BYTES as usize - 1,
+        ));
+        text.extend_from_slice("é\r\nafter\r\nbad".as_bytes());
+        text.push(0xff);
+        let matcher = build_matcher("^(x+é|bad�)$", true, true).unwrap();
+        let mut matches = Vec::new();
+        assert_eq!(
+            search_reader_streaming(
+                Cursor::new(&text),
+                "text",
+                &matcher,
+                1,
+                12,
+                10,
+                &mut matches,
+                &|| false
+            ),
+            SearchStop::Complete
+        );
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0]["line"], 2);
+        assert_eq!(matches[0]["preview"], "xxxxxxxxxxxx...");
+        assert_eq!(matches[0]["before"], json!(["before"]));
+        assert_eq!(matches[0]["after"], json!(["after"]));
+        assert_eq!(matches[1]["line"], 4);
+        assert_eq!(matches[1]["preview"], "bad�");
+        assert_eq!(matches[1]["before"], json!(["after"]));
+        assert_eq!(matches[1]["after"], json!([]));
+
+        let mut limited = Vec::new();
+        assert_eq!(
+            search_reader_streaming(
+                Cursor::new(&text),
+                "text",
+                &matcher,
+                1,
+                12,
+                1,
+                &mut limited,
+                &|| false
+            ),
+            SearchStop::ResultLimit
+        );
+        assert_eq!(limited, matches[..1]);
+
+        let consumed = Cell::new(0);
+        let largest_read = Cell::new(0);
+        let first = b"first needle\n";
+        let reader = ControlledReader {
+            inner: Cursor::new(b"first needle\nunfinished needle\n".to_vec()),
+            consumed: &consumed,
+            largest_read: &largest_read,
+            fail_after: Some(first.len() + 4),
+        };
+        let mut partial = Vec::new();
+        assert_eq!(
+            search_reader_streaming(
+                reader,
+                "text",
+                &Matcher::Exact("needle".into()),
+                2,
+                64,
+                10,
+                &mut partial,
+                &|| false
+            ),
+            SearchStop::Complete
+        );
+        assert_eq!(
+            partial,
+            vec![json!({"path":"text","line":1,"column":1,
+            "preview":"first needle","before":[],"after":[]})]
+        );
+    }
+
+    #[test]
+    fn search_walk_checks_deadline_through_directory_only_and_pruned_entries() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aiTemp/search-deadline-tests");
+        fs::create_dir_all(&base).unwrap();
+        let tree = tempfile::Builder::new()
+            .prefix("walk-")
+            .tempdir_in(&base)
+            .unwrap();
+        for name in ["one", "two"] {
+            fs::create_dir_all(tree.path().join(name).join("child")).unwrap();
+            fs::write(tree.path().join(name).join("unseen.txt"), "needle").unwrap();
+        }
+        let visited = Cell::new(0);
+        let checks = Cell::new(0);
+        let stop = walk_search_files(
+            tree.path(),
+            |entry| entry.path() != tree.path(),
+            |_| {
+                visited.set(visited.get() + 1);
+                SearchStop::Complete
+            },
+            &|| {
+                checks.set(checks.get() + 1);
+                checks.get() >= 6
+            },
+        );
+        assert_eq!(stop, SearchStop::Deadline);
+        assert_eq!(visited.get(), 0);
+        assert_eq!(
+            walk_search_files(
+                tree.path(),
+                |entry| entry.path() != tree.path(),
+                |_| {
+                    visited.set(visited.get() + 1);
+                    SearchStop::Complete
+                },
+                &|| false
+            ),
+            SearchStop::Complete
+        );
+        assert_eq!(visited.get(), 0);
+
+        for name in ["eligible-a.txt", "eligible-b.txt"] {
+            fs::write(tree.path().join(name), "needle").unwrap();
+        }
+        let ignored = std::cell::RefCell::new(None);
+        let mut files = Vec::new();
+        assert_eq!(
+            walk_search_files(
+                tree.path(),
+                |entry| {
+                    if entry.depth() == 1 && entry.file_type().is_file() {
+                        let mut ignored = ignored.borrow_mut();
+                        if ignored.is_none() {
+                            *ignored = Some(entry.path().to_path_buf());
+                            return true;
+                        }
+                    }
+                    false
+                },
+                |path| {
+                    files.push(path.to_path_buf());
+                    SearchStop::Complete
+                },
+                &|| false,
+            ),
+            SearchStop::Complete
+        );
+        let ignored = ignored.into_inner().expect("one root file was ignored");
+        assert_eq!(files.len(), 3);
+        assert!(!files.contains(&ignored));
+        for expected in [
+            tree.path().join("one").join("unseen.txt"),
+            tree.path().join("two").join("unseen.txt"),
+            tree.path().join("eligible-a.txt"),
+            tree.path().join("eligible-b.txt"),
+        ] {
+            if expected != ignored {
+                assert!(
+                    files.contains(&expected),
+                    "eligible sibling missing: {expected:?}"
+                );
+            }
+        }
+    }
 }
