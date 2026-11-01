@@ -77,17 +77,19 @@ function createGptBrowserHost({
   try {
     if (savedText === null) throw Object.assign(new Error("No saved accounts"), { code: "ENOENT" });
     const saved = JSON.parse(savedText ?? fs.readFileSync(statePath, "utf8"));
-    const accounts = Array.isArray(saved?.accounts)
-      ? saved.accounts.filter((entry) => ACCOUNT_ID.test(entry?.id)).slice(0, MAX_ACCOUNTS).map((entry) => ({
-        id: entry.id,
-        label: typeof entry.label === "string" ? entry.label.slice(0, MAX_LABEL) : "ChatGPT account",
-        email: typeof entry.email === "string" ? entry.email.slice(0, 254) : null,
-        createdAt: typeof entry.createdAt === "string" ? entry.createdAt : new Date().toISOString(),
-      }))
-      : [];
+    if (!Array.isArray(saved?.accounts)) throw new Error("Saved GPT Browser state must contain an accounts array");
+    const accounts = saved.accounts.filter((entry) => ACCOUNT_ID.test(entry?.id)).slice(0, MAX_ACCOUNTS).map((entry) => ({
+      id: entry.id,
+      label: typeof entry.label === "string" ? entry.label.slice(0, MAX_LABEL) : "ChatGPT account",
+      email: typeof entry.email === "string" ? entry.email.slice(0, 254) : null,
+      createdAt: typeof entry.createdAt === "string" ? entry.createdAt : new Date().toISOString(),
+    }));
     state = { accounts, activeId: accounts.some((entry) => entry.id === saved?.activeId) ? saved.activeId : accounts[0]?.id ?? null };
   } catch (error) {
-    if (error?.code !== "ENOENT") logger?.warn?.("gpt_browser.state_unreadable", { message: error.message });
+    if (error?.code !== "ENOENT") {
+      logger?.warn?.("gpt_browser.state_unreadable", { message: error.message });
+      throw error;
+    }
   }
 
   const pages = new Map(); // id -> { view, url, title, loading, usedAt }
@@ -330,14 +332,17 @@ function createGptBrowserHost({
 
 /**
  * accounts.json read off the main thread, for createGptBrowserHost's savedText: its text, or null
- * when it is missing or cannot be read (logged, as the host's own read logs it). The synchronous read
+ * when it is missing. Other read errors are logged and reject the load. The synchronous read
  * held every window 21.6 s on the busy hard disk when the GPT Browser first opened (2026-10-31).
  */
 async function readGptBrowserState(dataRoot, logger) {
   try {
     return await fs.promises.readFile(path.join(dataRoot, "accounts.json"), "utf8");
   } catch (error) {
-    if (error?.code !== "ENOENT") logger?.warn?.("gpt_browser.state_unreadable", { message: error.message });
+    if (error?.code !== "ENOENT") {
+      logger?.warn?.("gpt_browser.state_unreadable", { message: error.message });
+      throw error;
+    }
     return null;
   }
 }
