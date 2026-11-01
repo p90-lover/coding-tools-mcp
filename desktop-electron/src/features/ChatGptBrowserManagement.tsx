@@ -466,12 +466,13 @@ function AccountCard({
   const signedIn = inUse ? authenticated : account.signedIn;
   const plan = planText(account.plan, signedIn);
   const observedAt = Math.max(account.connector?.okAt ?? 0, account.connector?.errorAt ?? 0);
+  const connectionCheck = signedIn !== false && connection && connectionMatchesAccount(connection, account)
+    && (connection.state === "connecting" || connection.checkedAt >= observedAt) ? connection : undefined;
   const connector = signedIn === false
     ? { tone: "warn", label: "Not connected", detail: "Sign in to this account in the Browser tab first" }
-    : connection && connectionMatchesAccount(connection, account)
-      && (connection.state === "connecting" || connection.checkedAt >= observedAt)
-      ? { tone: connection.state === "connected" ? "ok" : connection.state === "failed" ? "error" : "idle",
-        label: connection.state === "connected" ? "Connected" : connection.state === "failed" ? "Needs attention" : "Connecting…", detail: connection.detail }
+    : connectionCheck
+      ? { tone: connectionCheck.state === "connected" ? "ok" : connectionCheck.state === "failed" ? "error" : "idle",
+        label: connectionCheck.state === "connected" ? "Connected" : connectionCheck.state === "failed" ? "Needs attention" : "Connecting…", detail: connectionCheck.detail }
       : connectorText(account.connector);
   const signIn = signedIn === null
     ? { tone: "idle", label: "Checking…" }
@@ -673,9 +674,9 @@ function AccountCard({
       </div>
 
       <footer className="cbm-card-actions">
-        <button className="cbm-button" disabled={switching || removing || chatRunning || signedIn !== true}
+        <button className="cbm-button" disabled={switching || removing || chatRunning || signedIn !== true || isRunning(`remove:${account.id}`)}
           onClick={() => void connect()} title={signedIn === true ? "Set up this account's MCP connector. If required, a signed-in owner/admin publishes it to the verified workspace." : "Sign in to this account first"} type="button">
-          {connection?.state === "connecting" ? "Connecting…" : connection?.state === "connected" ? "Check connection" : "Connect MCP"}
+          {connectionCheck?.state === "connecting" ? "Connecting…" : connectionCheck?.state === "connected" ? "Check connection" : "Connect MCP"}
         </button>
         {!inUse ? (
           <button className="cbm-button" disabled={switching || removing || isRunning(`remove:${account.id}`)} onClick={() => void use()} type="button">

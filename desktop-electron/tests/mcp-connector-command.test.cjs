@@ -181,6 +181,56 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
   assert.equal(creates, 1);
 });
 
+test("account setup keeps its captured account and tunnel across awaited workspace setup", async t => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const start = source.indexOf('  handle("launcher:mcp-create-connector",');
+  const end = source.indexOf('\n  handle("launcher:doctor",', start);
+  for (const scenario of [
+    { name: "no assigned tunnel cannot borrow the global primary", missing: true },
+    { name: "a global switch during readiness aborts", readySwitch: true },
+    { name: "a global switch during cookie inspection aborts", cookieSwitch: true },
+    { name: "a target partition remap during routing aborts", remap: true },
+    { name: "a reconnect cannot silently replace the tunnel", retarget: true },
+    { name: "another browser operation keeps setup out", busy: true },
+    { name: "an active browser turn keeps setup out", active: true },
+    { name: "a switch during setup cannot acquire a binding", setupSwitch: true },
+    { name: "an unconfirmed connection cannot acquire a binding", unconfirmed: true },
+    { name: "a switch during binding persistence cannot mark success", saveSwitch: true },
+  ]) await t.test(scenario.name, async () => {
+    let handler, partition = "persist:account-2";
+    const calls = { create: 0, save: 0, bound: 0 };
+    const host = { partition: "persist:global", currentOperation: () => scenario.busy ? "MCP tunnel settings" : null,
+      activeTraceId: scenario.active ? "fixture-turn" : null,
+      ready: async () => { if (scenario.readySwitch) host.partition = "persist:other"; } };
+    const tunnel = { id: "extra-2", accountId: "account-2", tunnelId: "tunnel_original", state: scenario.retarget ? "stopped" : "ready" };
+    const context = {
+      Error, handle: (_channel, callback) => { handler = callback; }, assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+      quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
+      browserAccounts: { has: id => id === "account-2", partitionOf: () => partition,
+        recordConnector: (_id, value) => { if (value.bound) calls.bound++; return true; } },
+      browserHost: host, runtimeHost: { currentOperation: () => null },
+      session: { fromPartition: () => ({ cookies: { get: async () => { if (scenario.cookieSwitch) host.partition = "persist:other"; return []; } } }) },
+      signedInFromCookies: () => true,
+      routeIdleAccountPartition: async () => { if (scenario.remap) partition = "persist:remapped"; },
+      runtimeSupervisor: { extraTunnels: { status: () => scenario.missing ? [] : [tunnel],
+        reconnect: async () => { tunnel.state = "ready"; tunnel.tunnelId = "tunnel_replaced"; },
+        setConnector: async () => { calls.save++; if (scenario.saveSwitch) host.partition = "persist:other"; } } },
+      createWorkspaceConnector: async options => {
+        calls.create++; options.assertCurrent();
+        if (scenario.setupSwitch) host.partition = "persist:other";
+        return { created: false, connected: !scenario.unconfirmed, href: "/plugins/exact", binding: { tunnelId: "tunnel_original" } };
+      },
+      app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
+      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation() {},
+    };
+    vm.runInNewContext(source.slice(start, end), context);
+    await assert.rejects(handler({}, "account-2"));
+    assert.equal(calls.create, scenario.setupSwitch || scenario.unconfirmed || scenario.saveSwitch ? 1 : 0);
+    assert.equal(calls.save, scenario.saveSwitch ? 1 : 0);
+    assert.equal(calls.bound, 0);
+  });
+});
+
 test("extra tunnel Platform settings open only the registered account partition without changing configuration", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const start = source.indexOf('  handle("launcher:mcp-tunnel-settings",');
