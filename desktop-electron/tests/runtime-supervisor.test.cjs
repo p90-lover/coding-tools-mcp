@@ -6,6 +6,8 @@ const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const vm = require("node:vm");
+const ts = require("typescript");
 const { spawn } = require("node:child_process");
 const { packagedRuntimePaths } = require("../electron/runtime-command.cjs");
 const { linuxDesktopEntry, requireAutostartState } = require("../electron/autostart.cjs");
@@ -15,6 +17,171 @@ const {
   managedTunnelConnectArgs,
   validateConfig,
 } = require("../electron/runtime-supervisor.cjs");
+
+function tunnelPreparationFixture() {
+  const coreHome = path.resolve(__dirname, "../aiTemp/virtual-tunnel-preparation");
+  const primary = path.join(coreHome, "tunnel", "primary-runtime"), legacy = path.join(coreHome, "legacy");
+  const alias = "test-primary", record = { alias, tunnel_id: "test-tunnel" };
+  const files = new Map([[path.join(primary, "aliases.yaml"), JSON.stringify({ [alias]: record })]]);
+  const realpaths = new Map(), faults = new Map(), sync = [], reads = [], commands = [];
+  let before = async () => {}, reply = { code: 0, stdout: "ready", stderr: "" };
+  const canonical = value => { const result = realpaths.get(value) ?? value; if (result instanceof Error) throw result; return result; };
+  const read = file => {
+    reads.push(file);
+    if (!files.has(file)) throw Object.assign(new Error("Missing fixture file"), { code: "ENOENT" });
+    const value = files.get(file); if (value instanceof Error) throw value; return value;
+  };
+  const fakeFs = {
+    realpathSync: { native: value => { sync.push("realpathSync.native"); return canonical(value); } },
+    readFileSync: file => { sync.push("readFileSync"); return read(file); },
+    mkdirSync: () => { sync.push("mkdirSync"); },
+    promises: {
+      realpath: async value => { await before("realpath", value); return canonical(value); },
+      readFile: async file => { await before("readFile", file); return read(file); },
+      mkdir: async dir => { await before("mkdir", dir); if (faults.has(dir)) throw faults.get(dir); },
+    },
+  };
+  const source = fs.readFileSync(path.join(__dirname, "../electron/runtime-supervisor.cjs"), "utf8");
+  const tree = ts.createSourceFile("runtime-supervisor.cjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const helpers = tree.statements.filter(node => ts.isFunctionDeclaration(node)
+    && ["readJson", "samePath", "controlResult"].includes(node.name?.text)).map(node => node.getText(tree));
+  assert.equal(helpers.length, 3);
+  const environment = { TUNNEL_CLIENT_STATE_DIR: legacy, INHERITED: "yes" };
+  const method = vm.runInNewContext(helpers.join("\n") + `\n({${RuntimeSupervisor.prototype.runTunnelCommand}}).runTunnelCommand`, {
+    fs: fakeFs, path, os: { homedir: () => path.join(coreHome, "home") }, process: { platform: "win32", env: environment },
+    MAX_CONTROL_OUTPUT_BYTES: 1024 * 1024, runOffThread: async input => { commands.push(input); return reply; },
+  });
+  const owner = { coreHome, browserDescriptorPath: path.join(coreHome, "launcher.json") };
+  const config = { mode: "full", tunnel: { alias, binaryPath: path.join(coreHome, "fake-client.exe"), profileDir: coreHome } };
+  return { coreHome, primary, legacy, alias, record, files, realpaths, faults, sync, reads, commands, owner, config, method, environment,
+    before: callback => { before = callback; }, reply: value => { reply = value; },
+    run: env => method.call(owner, config, ["runtimes", "cleanup", "--json"], 5000, "Fixture inventory", env) };
+}
+
+test("tunnel command preparation uses async disk reads without weakening migration or environment checks", async t => {
+  await t.test("fresh reads, BOM, and an event-loop turn before dispatch", async () => {
+    const f = tunnelPreparationFixture(), file = path.join(f.primary, "aliases.yaml");
+    f.files.set(file, "\uFEFF" + f.files.get(file));
+    let release; const gate = new Promise(resolve => { release = resolve; });
+    f.before(async operation => { if (operation === "readFile") await gate; });
+    const pending = f.run(); await new Promise(setImmediate);
+    assert.equal(f.commands.length, 0, "metadata may be slow while the main event loop remains available");
+    release(); assert.equal((await pending).output, "ready"); assert.deepEqual(f.sync, []);
+    const env = f.commands[0].env;
+    assert.equal(env.TUNNEL_CLIENT_STATE_DIR, f.primary); assert.equal(env.TEMP, path.join(f.primary, "temp"));
+    assert.equal(env.TMP, env.TEMP); assert.equal(env.INHERITED, "yes"); assert.equal(env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR, f.owner.browserDescriptorPath);
+    f.files.set(file, "{}"); f.files.set(path.join(f.legacy, "aliases.yaml"), JSON.stringify({ [f.alias]: f.record }));
+    await assert.rejects(f.run(), /primary tunnel.*migration/i); assert.equal(f.commands.length, 1, "a previous good read never authorizes later changed state");
+  });
+  for (const [name, value] of [["legacy alias", JSON.stringify({ "test-primary": { alias: "test-primary", tunnel_id: "test" } })],
+    ["malformed JSON", "not JSON"], ["unreadable state", Object.assign(new Error("Read refused"), { code: "EIO" })]]) await t.test(name, async () => {
+    const f = tunnelPreparationFixture(); f.files.set(path.join(f.primary, "aliases.yaml"), "{}"); f.files.set(path.join(f.legacy, "aliases.yaml"), value);
+    await assert.rejects(f.run(), /primary tunnel.*(migration|verified)/i); assert.equal(f.commands.length, 0); assert.deepEqual(f.sync, []);
+  });
+  await t.test("canonical aliases, Windows case, and missing-path fallback retain the old comparison", async () => {
+    for (const missing of [false, true]) {
+      const f = tunnelPreparationFixture(); f.files.set(path.join(f.primary, "aliases.yaml"), "{}");
+      if (missing) { f.environment.TUNNEL_CLIENT_STATE_DIR = f.primary; f.realpaths.set(f.primary, new Error("Missing")); }
+      else f.realpaths.set(f.legacy, f.primary.toUpperCase());
+      assert.equal((await f.run()).output, "ready"); assert.equal(f.reads.includes(path.join(f.legacy, "aliases.yaml")), false);
+      assert.deepEqual(f.sync, []);
+    }
+  });
+  await t.test("mkdir errors prevent dispatch and explicit environments preserve descriptor ownership", async () => {
+    const f = tunnelPreparationFixture(); f.faults.set(path.join(f.primary, "temp"), new Error("Temp unavailable"));
+    await assert.rejects(f.run(), /Temp unavailable/); assert.equal(f.commands.length, 0);
+    const supplied = { TUNNEL_CLIENT_STATE_DIR: "extra-state", TEMP: "extra-temp", TMP: "extra-temp", CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: "stale" };
+    assert.equal((await f.run(supplied)).output, "ready"); assert.equal(f.commands[0].env.TUNNEL_CLIENT_STATE_DIR, "extra-state");
+    assert.equal(f.commands[0].env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR, f.owner.browserDescriptorPath);
+    f.reply({ timedOut: true }); await assert.rejects(f.run(supplied), /Fixture inventory timed out after 5000ms/);
+  });
+});
+
+function manualTunnelRestartFixture() {
+  const f = tunnelPreparationFixture(), events = []; let release, enter;
+  const gate = new Promise(resolve => { release = resolve; }), entered = new Promise(resolve => { enter = resolve; });
+  const supervisor = { ...f.owner, stopping: false, startPromise: null, stopPromise: null, recoveryTasks: new Set(),
+    persistentBridge: true, expectedExits: new Set(), restartTimers: { daemon: null, tunnel: null }, tunnelMonitorGeneration: 0,
+    tunnel: null, daemon: null, launcherProfile: "development", extraTunnels: { detach() { events.push("extra-detached"); } },
+    logger: { info() {}, warn() {}, error() {} }, readConfig: () => f.config, readState: () => null,
+    clearState() { events.push("stopped-written"); }, writeState(status) { events.push(status + "-written"); return { daemonPid: this.daemon?.pid, tunnelPid: this.tunnel?.pid }; },
+    assertTunnelClientReady() {}, waitForKnownTunnelStatus: async () => ({ ready: false, absent: true, statusKnown: true, state: "stopped", pid: null, processRunning: false }),
+    waitForTunnelStopped: async () => {}, waitForTunnelMcpTransport: async () => {}, stopExtraTunnels: async () => {}, waitForIdleForSetup: async () => {},
+    startTunnelMonitor() { events.push("monitor-started"); },
+    stopTunnelMonitor() { events.push("monitor-stopped"); return RuntimeSupervisor.prototype.stopTunnelMonitor.call(this); },
+    recordTunnelOwner: async () => { events.push("owner-written"); }, tunnelMcpInvocation: () => ({ executable: "fixture", args: [] }),
+    waitForTunnel: async () => { supervisor.tunnel = { pid: 1234, managed: true }; },
+    runTunnelCommand: async function (...args) {
+      if (args[1].includes("connect")) { events.push("connect-pending"); enter(); await gate; events.push("connect-dispatched"); }
+      return f.method.apply(this, args);
+    },
+  };
+  for (const name of ["restartTunnelOnly", "startTunnel", "runTunnelConnectCommand", "runTunnelStopCommand", "stopTunnelGracefully", "stopForSetup", "performStopForSetup", "adoptConfiguredTunnelForStop", "detach"])
+    supervisor[name] = RuntimeSupervisor.prototype[name];
+  return { supervisor, events, entered, release, f };
+}
+
+test("manual tunnel restart stays tracked through Stop, setup, and keep-bridge teardown", async t => {
+  for (const action of ["stop", "setup", "detach"]) await t.test(action, async () => {
+    const f = manualTunnelRestartFixture(), s = f.supervisor, restart = s.restartTunnelOnly();
+    t.after(async () => { f.release(); await restart.catch(() => {}); });
+    await f.entered; assert.equal(s.recoveryTasks.size, 1); await assert.rejects(s.restartTunnelOnly(), /lifecycle operation/);
+    let done = false, transition;
+    if (action === "setup") {
+      const { RuntimeHost } = require("../electron/runtime.cjs");
+      const host = { currentOperation: () => null, runtimeConfigSnapshot: () => ({ owner: "launcher" }), captureSetupCheckpoint: () => ({}),
+        launcherProfile: "development", supervisor: s, run: async () => { f.events.push("config-written"); return {}; } };
+      s.startIfConfigured = async () => ({ status: "ready" });
+      transition = RuntimeHost.prototype.runSetup.call(host, "fixture-setup", [], {});
+    } else transition = action === "detach" ? s.detach("fixture") : s.stopForSetup();
+    if (action === "detach") {
+      assert.equal(s.stopping, true, "teardown closes admission before its first await");
+      s.daemon = { pid: 51, release() { f.events.push("latest-daemon-released"); }, unref() { f.events.push("latest-daemon-unref"); } };
+    }
+    transition = transition.then(result => { done = true; return result; });
+    await new Promise(setImmediate); assert.equal(done, false); assert.equal(s.stopping, true);
+    assert.equal(f.events.some(event => ["stopped-written", "detached-written", "config-written", "owner-written"].includes(event)), false);
+    await assert.rejects(s.restartTunnelOnly(), /lifecycle operation/); f.release(); await restart; const result = await transition;
+    assert.equal(s.recoveryTasks.size, 0);
+    const terminal = action === "setup" ? "config-written" : action === "detach" ? "detached-written" : "stopped-written";
+    assert.ok(f.events.indexOf(terminal) > f.events.indexOf("connect-dispatched"));
+    if (action === "detach") {
+      assert.equal(result.daemonPid, 51); assert.ok(f.events.indexOf("latest-daemon-unref") > f.events.indexOf("connect-dispatched"));
+      assert.equal(s.stopping, true); await assert.rejects(s.restartTunnelOnly(), /lifecycle operation/);
+    }
+    else assert.equal(s.tunnel, null, "Stop/setup leaves no late connection behind");
+  });
+});
+
+test("manual tunnel restart rejects conflicting admission and preserves a failed operation for its caller", async () => {
+  for (const key of ["stopping", "startPromise", "stopPromise", "recoveryTasks"]) {
+    const f = manualTunnelRestartFixture(), s = f.supervisor;
+    s[key] = key === "stopping" ? true : key === "recoveryTasks" ? new Set([Promise.resolve()]) : Promise.resolve();
+    await assert.rejects(s.restartTunnelOnly(), /lifecycle operation/); assert.equal(f.f.commands.length, 0);
+  }
+  const f = manualTunnelRestartFixture(), failure = new Error("Restart failed");
+  f.supervisor.startTunnel = async () => { throw failure; };
+  await assert.rejects(f.supervisor.restartTunnelOnly(), error => error === failure);
+  assert.equal(f.supervisor.recoveryTasks.size, 0, "failed manual work retires without a detached rejecting finally promise");
+  f.supervisor.startTunnel = async () => { f.supervisor.tunnel = { pid: 2 }; };
+  assert.equal((await f.supervisor.restartTunnelOnly()).pid, 2, "an explicit later retry remains possible");
+});
+
+test("MCP refresh admission rejects setup and quit without changing other refresh actions", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8"), tree = ts.createSourceFile("main.cjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const refresh = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "refreshPart"); assert.ok(refresh);
+  for (const state of [{ quitting: true }, { shutdownInProgress: true }, { operation: "setup-core" }, {}]) {
+    const calls = [], run = vm.runInNewContext(`(${refresh.getText(tree)})`, {
+      REFRESH_PARTS: ["mcp", "cpa"], quitting: false, shutdownInProgress: false, ...state,
+      runtimeHost: { currentOperation: () => state.operation }, runtimeSupervisor: { restartTunnelOnly: async () => { calls.push("mcp"); return { status: "restarted" }; } },
+      externalServicesController: { restart: async () => { calls.push("cpa"); } },
+    });
+    const result = await run("mcp", { info() {}, warn() {} }), blocked = Object.keys(state).length > 0;
+    assert.equal(result.ok, !blocked); assert.equal(calls.includes("mcp"), !blocked);
+    if (blocked) assert.match(result.results[0].message, /shutdown|launcher operation/);
+    assert.equal((await run("cpa", { info() {}, warn() {} })).ok, true); assert.equal(calls.at(-1), "cpa");
+  }
+});
 
 async function freePort() {
   return await new Promise((resolve, reject) => {
