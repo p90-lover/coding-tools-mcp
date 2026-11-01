@@ -69,12 +69,6 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 
 <!-- gitnexus:end -->
 
-## GitHub delivery
-
-- Whenever a task changes tracked project files, commit the task's changes, push them to GitHub, and open or update a pull request before reporting the task as complete, unless the user explicitly asks otherwise.
-- Keep the PR scoped to the task: do not include unrelated edits or commits from the shared checkout. Do not merge the PR unless asked.
-- If verification, authentication, permissions, or another blocker prevents PR delivery, report the blocker and what remains instead of claiming completion.
-
 ## Storage: never the C: drive
 
 - Do not use the C: drive for storage: no builds, caches, scratch, test fixtures, downloads, backups, logs, installer temp or rollback copies. The project, its worktrees and the app's data live on G:; the installed app lives on H:.
