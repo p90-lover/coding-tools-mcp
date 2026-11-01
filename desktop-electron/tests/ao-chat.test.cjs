@@ -1236,42 +1236,29 @@ test("blank chat drafts and files stay with their pane and project across Board 
   const keys = scopes.map(([projectId, draftScope]) => rendererCallback("AgentOrchestratorChat.tsx", "draftKey", { selectedTaskId: "", projectId, draftScope }));
   assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "draftKey", { selectedTaskId: "saved-task", projectId: "project-b", draftScope: "right" }), "saved-task");
   const files = scopes.map((_, index) => [{ path: `G:/fixture-${index}.png`, preview: `blob:fixture-${index}` }]);
-  const mount = key => ({ selectedTaskId: "", draftKey: key, ...maps, useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] });
   for (const [index, key] of keys.entries()) {
-    assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[draft, setDraft]", mount(key))[0], "", "another new composer starts empty");
-    const composing = { current: { taskId: "", cacheKey: key, draft: `Draft ${index}`, attachments: files[index], annotations: [] } };
-    rendererCallback("AgentOrchestratorChat.tsx", "effect:composing.current", { composing, ...maps })()();
+    const ui = queuedComposer([], maps, { taskId: "", blankKey: key }); ui.mount();
+    assert.equal(ui.state.draft, "", "another new composer starts empty");
+    ui.state.attachments = files[index]; ui.type(`Draft ${index}`); ui.unmount();
   }
   for (const [index, key] of keys.entries()) {
-    assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[draft, setDraft]", mount(key))[0], `Draft ${index}`);
-    assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[attachments, setAttachments]", mount(key))[0], files[index]);
+    const ui = queuedComposer([], maps, { taskId: "", blankKey: key }); ui.mount();
+    assert.equal(ui.state.draft, `Draft ${index}`); assert.equal(ui.state.attachments, files[index]); ui.unmount();
   }
-  const draftOwner = { current: keys[0] }, restored = {};
-  rendererCallback("AgentOrchestratorChat.tsx", "effect:if (draftOwner.current", {
-    draftOwner, draftKey: keys[2], selectedTaskId: "", composing: { current: {} }, draft: "Updated first draft", attachments: files[0], annotations: [], ...maps,
-    setDraft: value => { restored.draft = value; }, setAttachments: value => { restored.attachments = value; }, setAnnotations() {}, setAttachNote() {},
-  })();
-  assert.equal(draftOwner.current, keys[2]);
-  assert.equal(restored.draft, "Draft 2");
-  assert.equal(restored.attachments, files[2]);
-  assert.equal(maps.CHAT_DRAFTS.get(keys[0]), "Updated first draft");
-  assert.equal(maps.CHAT_DRAFTS.has(""), false);
+  const ui = queuedComposer([], maps, { taskId: "", blankKey: keys[0] }); ui.mount(); ui.type("Updated first draft"); ui.moveTo("", keys[2]);
+  assert.equal(ui.state.draft, "Draft 2"); assert.equal(ui.state.attachments, files[2]);
+  assert.equal(maps.CHAT_DRAFTS.get(keys[0]).snapshot.text, "Updated first draft"); assert.equal(maps.CHAT_DRAFTS.has(""), false); ui.unmount();
 });
 
 test("unsent chat text, attachments and annotations survive unmount and remount", () => {
   const selectedTaskId = "draft-navigation", attachments = [{ path: "G:/fixture.png", preview: "blob:fixture" }], annotations = [{ id: 1, text: "Selected words" }];
   const maps = { CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(), CHAT_ANNOTATIONS: new Map() };
-  const composing = { current: { taskId: selectedTaskId, cacheKey: selectedTaskId, draft: "Unfinished message", attachments, annotations } };
-  const cleanup = rendererCallback("AgentOrchestratorChat.tsx", "effect:composing.current", { composing, ...maps })();
-  cleanup();
-  assert.equal(maps.CHAT_DRAFTS.get(selectedTaskId), "Unfinished message");
+  const ui = queuedComposer([], maps, { taskId: selectedTaskId }); ui.mount(); ui.state.attachments = attachments; ui.state.annotations = annotations; ui.type("Unfinished message"); ui.unmount();
+  assert.equal(maps.CHAT_DRAFTS.get(selectedTaskId).snapshot.text, "Unfinished message");
   assert.equal(maps.CHAT_ATTACHMENTS.get(selectedTaskId), attachments);
-  const globals = { draftKey: selectedTaskId, ...maps, useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
-  assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[draft, setDraft]", globals)[0], "Unfinished message");
-  assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[attachments, setAttachments]", globals)[0], attachments);
-  assert.equal(rendererCallback("AgentOrchestratorChat.tsx", "[annotations, setAnnotations]", globals)[0], annotations);
-  composing.current = { taskId: selectedTaskId, cacheKey: selectedTaskId, draft: "", attachments: [], annotations: [] };
-  cleanup();
+  const fresh = queuedComposer([], maps, { taskId: selectedTaskId }); fresh.mount();
+  assert.equal(fresh.state.draft, "Unfinished message"); assert.equal(fresh.state.attachments, attachments); assert.equal(fresh.state.annotations, annotations);
+  fresh.state.attachments = []; fresh.state.annotations = []; fresh.type(""); fresh.unmount();
   assert.equal(maps.CHAT_DRAFTS.has(selectedTaskId), false, "an empty composer cannot resurrect old text");
   assert.equal(maps.CHAT_ATTACHMENTS.has(selectedTaskId), false);
   assert.equal(maps.CHAT_ANNOTATIONS.has(selectedTaskId), false);
@@ -1282,21 +1269,15 @@ test("a chat switch preserves its restored draft if unmount wins the queued stat
     const previousKey = taskId ? "task-a" : JSON.stringify(["new", "project-a", "main"]);
     const draftKey = taskId || JSON.stringify(["new", "project-b", "main"]);
     const oldFiles = [{ path: "G:/old.png" }], files = [{ path: "G:/restored.png" }], annotations = [{ id: 1, text: "Restored quote" }];
-    const maps = { CHAT_DRAFTS: new Map([[draftKey, "Restored draft"]]), CHAT_ATTACHMENTS: new Map([[draftKey, files]]), CHAT_ANNOTATIONS: new Map([[draftKey, annotations]]) };
-    const composing = { current: { taskId, cacheKey: previousKey, draft: "Previous draft", attachments: oldFiles, annotations: [] } };
-    const queued = {};
-    rendererCallback("AgentOrchestratorChat.tsx", "effect:if (draftOwner.current", {
-      draftOwner: { current: previousKey }, draftKey, selectedTaskId: taskId, composing, draft: "Previous draft", attachments: oldFiles, annotations: [], ...maps,
-      setDraft: value => { queued.draft = value; }, setAttachments: value => { queued.attachments = value; }, setAnnotations: value => { queued.annotations = value; }, setAttachNote() {},
-    })();
-    assert.equal(queued.draft, "Restored draft", "the next state is scheduled but has not rendered");
-    rendererCallback("AgentOrchestratorChat.tsx", "effect:composing.current", { composing, ...maps })()();
-    assert.equal(maps.CHAT_DRAFTS.get(previousKey), "Previous draft");
-    assert.equal(maps.CHAT_DRAFTS.get(draftKey), "Restored draft", "unmount keeps the newly restored draft");
+    const maps = { CHAT_DRAFTS: new Map([[draftKey, { snapshot: { text: "Restored draft" }, pending: [] }]]), CHAT_ATTACHMENTS: new Map([[draftKey, files]]), CHAT_ANNOTATIONS: new Map([[draftKey, annotations]]) };
+    const ui = queuedComposer([], maps, { taskId: taskId ? previousKey : "", blankKey: previousKey }); ui.mount(); ui.state.attachments = oldFiles; ui.type("Previous draft");
+    // The real handoff schedules restored state, but cleanup runs before any of it commits.
+    ui.deferDraft(true); ui.moveTo(taskId, draftKey); assert.equal(ui.state.draft, "Previous draft"); ui.unmount();
+    assert.equal(maps.CHAT_DRAFTS.get(previousKey).snapshot.text, "Previous draft");
+    assert.equal(maps.CHAT_DRAFTS.get(draftKey).snapshot.text, "Restored draft", "unmount keeps the newly restored draft");
     assert.equal(maps.CHAT_ATTACHMENTS.get(draftKey), files);
     assert.equal(maps.CHAT_ANNOTATIONS.get(draftKey), annotations);
-    assert.equal(composing.current.taskId, taskId);
-    assert.equal(composing.current.cacheKey, draftKey);
+    assert.equal(ui.composing.current.taskId, taskId); assert.equal(ui.composing.current.cacheKey, draftKey);
   }
 });
 
@@ -1483,7 +1464,7 @@ function outgoingSend() {
     }); },
     start(projectId, message) {
       const reply = delayedReply(); state.draft = message;
-      composing.current = { taskId: "", cacheKey: scope(projectId), draft: message, attachments, annotations };
+      composing.current = { taskId: "", cacheKey: scope(projectId), draft: message, snapshot: { text: message }, attachments, annotations };
       const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
         selectedTaskId: "", draft: message, attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
         setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
@@ -1522,16 +1503,17 @@ test("the real project picker cannot carry a pending message into another blank 
   assert.equal(parent.workspaceId, "project-b"); assert.equal(parent.seed.workspaceId, "project-b"); assert.equal(parent.taskId, null);
   assert.notEqual(ui.scope(parent.workspaceId), ui.scope("project-a"));
   assert.equal(ui.shown(parent.workspaceId), undefined, "the old send belongs only to its original project and pane");
-  sending.resolve(); await sending.done;
+  sending.resolve(); assert.equal(await sending.done, true);
 });
 
 test("overlapping deliver callbacks change only their own optimistic message", async t => {
   // A lower-level ownership invariant: ordinary submit/queue/busy gates still prevent a second send.
   for (const outcome of ["resolve", "reject"]) await t.test(outcome, async () => {
     const ui = outgoingSend(), first = ui.start("project-a", "A"), second = ui.start("project-b", "B"), ownB = ui.state.outgoing;
-    first[outcome](outcome === "reject" ? new Error("A failed") : undefined); await first.done;
+    first[outcome](outcome === "reject" ? new Error("A failed") : undefined); const completed = await first.done;
+    if (outcome === "resolve") assert.equal(completed, true);
     assert.equal(ui.state.outgoing, ownB); assert.equal(ui.state.outgoing.sent, false);
-    second.resolve(); await second.done; assert.equal(ui.state.outgoing.message, "B"); assert.equal(ui.state.outgoing.sent, true);
+    second.resolve(); assert.equal(await second.done, true); assert.equal(ui.state.outgoing.message, "B"); assert.equal(ui.state.outgoing.sent, true);
   });
 });
 
@@ -1546,7 +1528,7 @@ test("retiring an earlier optimistic message preserves its replacement", () => {
 
 test("send completion preserves the next chat's draft and edits typed during the pending send", async () => {
   for (const taskId of ["task-b", "task-a"]) {
-    const reply = delayedReply(), attachments = [], annotations = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments, annotations } };
+    const reply = delayedReply(), attachments = [], annotations = [], composing = { current: { taskId: "task-a", draft: "sent text", snapshot: { text: "sent text" }, attachments, annotations } };
     const state = { draft: "sent text" }, set = key => value => { state[key] = value; };
     const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
       selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
@@ -1565,7 +1547,7 @@ test("send completion preserves the next chat's draft and edits typed during the
 
 test("a pending new-chat send keeps its real API identity and leaves the next project's composer alone", async () => {
   const reply = delayedReply(), attachments = [], annotations = [], calls = [];
-  const composing = { current: { taskId: "", cacheKey: "project-a/main", draft: "sent text", attachments, annotations } };
+  const composing = { current: { taskId: "", cacheKey: "project-a/main", draft: "sent text", snapshot: { text: "sent text" }, attachments, annotations } };
   const state = { draft: "sent text", title: "First project" };
   const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
     selectedTaskId: "", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
@@ -1581,6 +1563,192 @@ test("a pending new-chat send keeps its real API identity and leaves the next pr
   assert.equal(state.title, "Next project");
   assert.equal(calls[0].taskId, undefined, "a new chat is sent without a synthetic cache identity");
   assert.equal(calls[0].message, "sent text");
+});
+
+function queuedComposer(attachments = [], sharedMaps, options = {}) {
+  const maps = sharedMaps ?? { CHAT_DRAFTS: new Map([["task-b", { snapshot: { text: "B private draft" }, pending: [] }]]), CHAT_ATTACHMENTS: new Map([["task-b", [{ path: "G:/b.txt" }]]]), CHAT_ANNOTATIONS: new Map([["task-b", [{ text: "B annotation" }]]]) };
+  let blankKey = options.blankKey, taskId = options.taskId ?? "task-a";
+  const key = () => state.taskId || blankKey;
+  const initial = name => rendererCallback("AgentOrchestratorChat.tsx", name, { ...maps, draftKey: taskId || blankKey, useState: value => [typeof value === "function" ? value() : value, () => {}] })[0];
+  const state = { taskId, draft: sharedMaps ? initial("[draft, setDraft]") : "A queued message", attachments: sharedMaps ? initial("[attachments, setAttachments]") : attachments, annotations: sharedMaps ? initial("[annotations, setAnnotations]") : [], card: null }, calls = [], waiting = [];
+  const alive = { current: true }, draftOwner = { current: key() }, draftRegistration = { current: null }, composing = { current: { taskId, cacheKey: key(), draft: state.draft, snapshot: maps.CHAT_DRAFTS.get(key())?.snapshot ?? { text: state.draft }, attachments: state.attachments, annotations: state.annotations, queuedRecovery: [] } };
+  let defer = false, deferDraft = false, replayUpdaters = false, lateSetters = 0, releaseDraft;
+  const set = key => next => { if (!alive.current) lateSetters++; const apply = () => { if (replayUpdaters && typeof next === "function") next(state[key]); state[key] = typeof next === "function" ? next(state[key]) : next; }; if (defer || (deferDraft && key !== "taskId")) waiting.push(apply); else apply(); };
+  const helpers = { draftEntry: rendererCallback("AgentOrchestratorChat.tsx", "draftEntry", maps), trimDraftEntry: rendererCallback("AgentOrchestratorChat.tsx", "trimDraftEntry", maps) };
+  const globals = () => ({ ...maps, ...helpers, releaseDraft, composing, draftOwner, draftRegistration, alive, queueRecoveries: composing.current.queuedRecovery ?? [], selectedTaskId: state.taskId, draftKey: key(), draft: state.draft, attachments: state.attachments, annotations: state.annotations,
+    setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setAttachNote() {}, setCard: set("card") });
+  releaseDraft = rendererCallback("AgentOrchestratorChat.tsx", "releaseDraft", globals());
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8"), tree = ts.createSourceFile("Chat.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let assignment; const find = node => { if (ts.isExpressionStatement(node) && node.getText(tree).startsWith("composing.current =") && node.getText(tree).includes("draftOwner.current")) assignment ??= node; ts.forEachChild(node, find); }; find(tree);
+  const renderSnapshot = () => {
+    vm.runInNewContext(ts.transpileModule(assignment.getText(tree), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, globals());
+    rendererCallback("AgentOrchestratorChat.tsx", "effect:registration.entry.snapshot", globals())();
+  };
+  const selectChat = rendererCallback("AgentOrchestratorSurface.tsx", "selectChat", { switchTarget: { current: "" }, pendingSelect: { current: null }, pendingChat: null,
+    composerIntent: { current: 0 },
+    setPendingChat() {}, setSheet() {}, setInspectedId() {}, setDraftTeam() {}, setConfigStatus() {}, setView() {}, setChatTaskId: set("taskId"), chatUnread: [],
+    chatList: chat.chatList, missions: [], board: { tasks: [] }, taskLifecycle: [], setSelectedRunId() {} });
+  const showChat = rendererCallback("AgentOrchestratorSurface.tsx", "showChat", { paneShowing: () => undefined, focusedSplit: null, workspaceId: "project", selectChat });
+  const rowSource = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatThreadList.tsx"), "utf8"), rowTree = ts.createSourceFile("List.tsx", rowSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let click; const findClick = node => { if (ts.isJsxAttribute(node) && node.name.getText(rowTree) === "onClick" && node.initializer?.getText(rowTree).includes("actions.select(chat.taskId)")) click ??= node.initializer.expression; ts.forEachChild(node, findClick); }; findClick(rowTree);
+  const moveTo = (taskId, nextBlankKey) => {
+    if (nextBlankKey) blankKey = nextBlankKey;
+    const exports = {}; vm.runInNewContext(ts.transpileModule("exports.click = " + click.getText(rowTree), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
+      { exports, chat: { taskId }, workspaceId: "project", actions: { select: id => showChat("project", id) } }); exports.click({});
+    renderSnapshot(); rendererCallback("AgentOrchestratorChat.tsx", "effect:draftOwner.current !== draftKey", globals())();
+  };
+  const ui = { state, maps, composing, alive, calls, moveTo, renderSnapshot,
+    mount() { renderSnapshot(); rendererCallback("AgentOrchestratorChat.tsx", "effect:draftOwner.current !== draftKey", globals())(); renderSnapshot(); },
+    defer: value => { defer = value; }, flush: (count = waiting.length) => { for (const apply of waiting.splice(0, count)) apply(); }, lateSetters: () => lateSetters,
+    deferDraft: value => { deferDraft = value; },
+    replayUpdaters: value => { replayUpdaters = value; },
+    type(value) { state.draft = value; renderSnapshot(); }, input(value) { set("draft")(value); },
+    unmount() { rendererCallback("AgentOrchestratorChat.tsx", "effect:releaseDraft", globals())()(); alive.current = false; },
+    send() {
+      const reply = delayedReply();
+      const result = rendererCallback("AgentOrchestratorChat.tsx", "deliver", { ...globals(), selectedTaskId: state.taskId,
+        setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
+        setTitle() {}, setAtBottom() {}, setCarried() {}, setOutgoing() {} })(state.draft);
+      return { finish: () => { reply.resolve(); return result; } };
+    },
+    async submit() {
+      const reply = delayedReply(), queuedTask = state.taskId;
+      const queueCall = rendererCallback("AgentOrchestratorSurface.tsx", "queueCall", { workspaceId: "project", moduleCall: (operation, args) => { calls.push({ operation, args }); return reply.promise; } });
+      const queue = rendererCallback("AgentOrchestratorSurface.tsx", "chatQueue", { queueCall, aoChatExecution: () => ({ executionMode: "single" }), composerMode: "single", singleRoute: {}, savedTeams: [], composerTeamId: "", executableArg: () => ({}) });
+      const enqueue = rendererCallback("AgentOrchestratorChat.tsx", "enqueue", { queue, steerOn: false, queueOf: () => [], chatQueueAdd: chat.chatQueueAdd });
+      const text = chat.chatMessageWithAnnotations(chat.chatMessageWithAttachments(state.draft, state.attachments), state.annotations);
+      const submit = rendererCallback("AgentOrchestratorChat.tsx", "submit", { ...globals(), commands: undefined, chatSlashParse: chat.chatSlashParse, chatMessageWithAttachments: chat.chatMessageWithAttachments,
+        chatMessageWithAnnotations: chat.chatMessageWithAnnotations, canSend: true, queueing: true, queueWhileSending: false, CHAT_MESSAGE_LIMIT: 8192, enqueue,
+        say: rendererCallback("AgentOrchestratorChat.tsx", "say", { setCard: set("card") }) });
+      await submit(); renderSnapshot();
+      return { text, queuedTask, fail: async () => { reply.reject(new Error("queue unavailable")); await new Promise(setImmediate); } };
+    },
+  };
+  if (!sharedMaps) ui.mount();
+  return ui;
+}
+
+test("a queue rejection after real sidebar navigation preserves B and restores the serialized draft to A", async () => {
+  const ui = queuedComposer([{ name: "note.txt", path: "G:/note.txt", image: false }]), sent = await ui.submit(); ui.moveTo("task-b");
+  const files = ui.state.attachments, annotations = ui.state.annotations; await sent.fail();
+  assert.equal(ui.calls[0].operation, "chat_queue"); assert.equal(ui.calls[0].args.taskId, "task-a"); assert.equal(ui.calls[0].args.workspaceId, "project");
+  assert.equal(ui.state.draft, "B private draft"); assert.equal(ui.state.card, null); assert.equal(ui.state.attachments, files); assert.equal(ui.state.annotations, annotations);
+  ui.moveTo("task-a"); assert.equal(ui.state.draft, sent.text);
+});
+
+test("queue recovery prepends to the same chat's newer text and respects an explicit later clear", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.type("newer A draft"); await sent.fail();
+  assert.equal(ui.state.draft, sent.text + "\n\nnewer A draft"); assert.match(ui.state.card.text, /queue unavailable/);
+  ui.renderSnapshot(); ui.type(""); ui.unmount(); assert.equal(ui.maps.CHAT_DRAFTS.has("task-a"), false);
+});
+
+test("a same-batch edit or clear after queue recovery stays authoritative on switch or unmount", async t => {
+  for (const value of ["", "latest A edit"]) for (const leave of ["switch", "unmount"]) await t.test(`${value ? "edit" : "clear"}: ${leave}`, async () => {
+    const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail();
+    ui.input(value); ui.flush(); ui.renderSnapshot(); ui.defer(false);
+    if (leave === "switch") ui.moveTo("task-b"); else ui.unmount();
+    assert.equal(ui.maps.CHAT_DRAFTS.get("task-a")?.snapshot.text ?? "", value);
+    if (leave === "switch") { ui.moveTo("task-a"); assert.equal(ui.state.draft, value); }
+  });
+});
+
+test("deferred queue recovery cannot overwrite the next chat and remains recoverable on switch-back", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail(); ui.defer(false);
+  ui.moveTo("task-b"); ui.flush(); assert.equal(ui.state.draft, "B private draft"); assert.equal(ui.state.card, null);
+  ui.moveTo("task-a"); assert.equal(ui.state.draft, sent.text);
+});
+
+test("a switch-back before the deferred queue recovery applies does not restore it twice", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail(); ui.defer(false);
+  ui.moveTo("task-b"); ui.moveTo("task-a"); ui.flush(); ui.renderSnapshot();
+  assert.equal(ui.state.draft, sent.text);
+});
+
+test("an applied recovery survives unmount before the next state render", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.type("newer A draft"); ui.defer(true); await sent.fail();
+  ui.flush(1); ui.unmount();
+  assert.equal(ui.maps.CHAT_DRAFTS.get("task-a").snapshot.text, sent.text + "\n\nnewer A draft");
+});
+
+test("typing the same text before deferred recovery still preserves both messages", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail();
+  ui.type(sent.text); ui.defer(false); ui.moveTo("task-b"); ui.flush(); ui.moveTo("task-a");
+  assert.equal(ui.state.draft, sent.text + "\n\n" + sent.text);
+});
+
+test("partly applied queue recoveries preserve every failed payload once across navigation", async () => {
+  const ui = queuedComposer(), first = await ui.submit(); ui.type("A second message"); const second = await ui.submit(); ui.type("newer A draft");
+  ui.defer(true); await first.fail(); await second.fail(); ui.defer(false); ui.flush(2); ui.renderSnapshot();
+  ui.moveTo("task-b"); ui.flush(); ui.moveTo("task-a");
+  assert.equal(ui.state.draft, second.text + "\n\n" + first.text + "\n\nnewer A draft");
+});
+
+test("queue recovery survives unmount before a deferred state commit or before rejection", async t => {
+  for (const timing of ["before commit", "before failure"]) await t.test(timing, async () => {
+    const ui = queuedComposer(), sent = await ui.submit(); ui.type("newer A draft");
+    if (timing === "before commit") { ui.defer(true); await sent.fail(); }
+    ui.unmount(); if (timing === "before failure") await sent.fail(); ui.flush();
+    const fresh = queuedComposer([], ui.maps); fresh.mount();
+    assert.equal(fresh.state.draft, sent.text + "\n\nnewer A draft"); assert.equal(ui.lateSetters(), 0); fresh.unmount();
+  });
+});
+
+test("a late queue failure reaches a new same-chat instance before or after its draft adoption", async t => {
+  for (const timing of ["before adoption", "after adoption"]) for (const typed of ["", "new instance draft", "A queued message"]) await t.test(`${timing}: ${typed || "blank"}`, async () => {
+    const old = queuedComposer(), sent = await old.submit(); old.unmount();
+    const fresh = queuedComposer([], old.maps); if (timing === "after adoption") fresh.mount(); fresh.type(typed);
+    await sent.fail(); if (timing === "before adoption") fresh.mount();
+    assert.equal(fresh.state.draft, sent.text + (typed ? "\n\n" + typed : ""));
+    fresh.unmount(); const again = queuedComposer([], old.maps); again.mount();
+    assert.equal(again.state.draft, sent.text + (typed ? "\n\n" + typed : "")); assert.equal(old.lateSetters(), 0); again.unmount();
+  });
+});
+
+test("multiple late recoveries survive a new owner's deferred updater and later cleanup", async () => {
+  const old = queuedComposer(), first = await old.submit(); old.type("second payload"); const second = await old.submit(); old.unmount();
+  const fresh = queuedComposer([], old.maps); fresh.mount(); fresh.type(first.text); fresh.defer(true);
+  await first.fail(); await second.fail(); fresh.unmount(); fresh.flush();
+  const again = queuedComposer([], old.maps); again.mount();
+  assert.equal(again.state.draft, second.text + "\n\n" + first.text + "\n\n" + first.text); again.unmount();
+});
+
+test("a deferred new-owner recovery cannot change B or be detached by stale cleanup", async () => {
+  const old = queuedComposer(), sent = await old.submit(); old.unmount();
+  const fresh = queuedComposer([], old.maps); fresh.mount(); fresh.type("new A text");
+  const entry = fresh.maps.CHAT_DRAFTS.get("task-a"); old.unmount(); assert.equal(fresh.maps.CHAT_DRAFTS.get("task-a"), entry);
+  fresh.defer(true); await sent.fail(); fresh.defer(false); fresh.moveTo("task-b"); fresh.flush();
+  assert.equal(fresh.state.draft, "B private draft"); assert.equal(fresh.state.card, null); fresh.moveTo("task-a");
+  assert.equal(fresh.state.draft, sent.text + "\n\nnew A text"); fresh.type(""); fresh.unmount(); assert.equal(fresh.maps.CHAT_DRAFTS.has("task-a"), false);
+});
+
+test("successful sends retire only their exact cached snapshot, including identical later text", async t => {
+  for (const edit of ["unchanged", "edited", "identical"]) await t.test(edit, async () => {
+    const ui = queuedComposer(); ui.type("sent text"); const sending = ui.send();
+    if (edit !== "unchanged") { ui.renderSnapshot(); ui.type(edit === "edited" ? "new text" : "sent text"); }
+    ui.unmount(); assert.equal(await sending.finish(), true);
+    if (edit === "unchanged") assert.equal(ui.maps.CHAT_DRAFTS.has("task-a"), false);
+    else { const fresh = queuedComposer([], ui.maps); fresh.mount(); assert.equal(fresh.state.draft, edit === "edited" ? "new text" : "sent text"); fresh.unmount(); }
+  });
+});
+
+test("successful-send cache cleanup retains a separate failed queue receipt", async () => {
+  const ui = queuedComposer(), queued = await ui.submit(); ui.type("later sent text"); const sending = ui.send(); ui.unmount();
+  await queued.fail(); assert.equal(await sending.finish(), true);
+  const fresh = queuedComposer([], ui.maps); fresh.mount(); assert.equal(fresh.state.draft, queued.text); fresh.unmount();
+});
+
+test("a recovery updater tolerates React's ignored first invocation", async () => {
+  const ui = queuedComposer(), sent = await ui.submit(); ui.replayUpdaters(true); await sent.fail();
+  assert.equal(ui.state.draft, sent.text); ui.unmount();
+});
+
+test("adopted queue receipts retire even when a same-batch clear leaves the draft unchanged", async () => {
+  const ui = queuedComposer();
+  for (let i = 0; i < 3; i++) {
+    ui.type("payload " + i); const sent = await ui.submit(); ui.defer(true); await sent.fail(); ui.input(""); ui.flush(); ui.defer(false); ui.renderSnapshot();
+    assert.equal(ui.state.draft, ""); assert.equal(ui.maps.CHAT_DRAFTS.get("task-a").pending.length, 0);
+  }
+  ui.unmount(); assert.equal(ui.maps.CHAT_DRAFTS.has("task-a"), false);
 });
 
 test("approval callbacks refuse a request displayed by a previous run and still send the current request", async () => {
