@@ -306,6 +306,7 @@ export class TurnBroker implements TurnBrokerOwner {
   private readonly retiredTokens = new Map<string, string>();
   private acceptingExternalOwners = true;
   private server?: Server;
+  private socketIdentity?: { dev: number; ino: number };
   private readonly sockets = new Set<Socket>();
   private startPromise?: Promise<void>;
 
@@ -318,7 +319,10 @@ export class TurnBroker implements TurnBrokerOwner {
    * instead of the broker's own answer. The endpoint belongs to the runtime's lifetime.
    */
   async listen(): Promise<void> {
-    await this.start();
+    const started = this.start();
+    const generation = this.startPromise;
+    await started;
+    if (this.startPromise !== generation) throw new Error("ChatGPT web turn broker closed while starting");
   }
 
   async register(
@@ -328,7 +332,10 @@ export class TurnBroker implements TurnBrokerOwner {
     externalOwner = false,
     handlePrefix = "turn",
   ): Promise<string> {
-    await this.start();
+    const started = this.start();
+    const generation = this.startPromise;
+    await started;
+    if (this.startPromise !== generation) throw new Error("ChatGPT web turn broker closed while starting");
     this.prune();
     if (externalOwner && !this.acceptingExternalOwners) {
       throw new Error("turn broker is draining and does not accept new external owners");
@@ -390,7 +397,10 @@ export class TurnBroker implements TurnBrokerOwner {
     traceId: string,
     ttlMs = 120_000,
   ): Promise<CompactionTransactionHandle> {
-    await this.start();
+    const started = this.start();
+    const generation = this.startPromise;
+    await started;
+    if (this.startPromise !== generation) throw new Error("ChatGPT web turn broker closed while starting");
     return this.compactionTransactions.begin(traceId, ttlMs);
   }
 
@@ -771,9 +781,11 @@ export class TurnBroker implements TurnBrokerOwner {
     this.compactionTransactions.close();
     for (const token of [...this.channels.keys()]) this.revoke(token);
     const server = this.server;
+    const socketIdentity = this.socketIdentity;
     this.server = undefined;
+    this.socketIdentity = undefined;
     this.startPromise = undefined;
-    brokers.delete(this.socketPath);
+    if (brokers.get(this.socketPath) === this) brokers.delete(this.socketPath);
     if (server?.listening) {
       const closed = new Promise<void>((resolveClose, rejectClose) => server.close(error => {
         if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolveClose();
@@ -786,9 +798,13 @@ export class TurnBroker implements TurnBrokerOwner {
       this.sockets.clear();
       await closed;
     }
-    if (!isWindowsPipeEndpoint(this.socketPath)
-      && existsSync(this.socketPath)
-      && lstatSync(this.socketPath).isSocket()) unlinkSync(this.socketPath);
+    if (socketIdentity && !brokers.has(this.socketPath)
+      && !isWindowsPipeEndpoint(this.socketPath) && existsSync(this.socketPath)) {
+      const current = lstatSync(this.socketPath);
+      if (current.isSocket() && current.dev === socketIdentity.dev && current.ino === socketIdentity.ino) {
+        unlinkSync(this.socketPath);
+      }
+    }
   }
 
   private start(): Promise<void> {
@@ -822,6 +838,10 @@ export class TurnBroker implements TurnBrokerOwner {
         mkdirSync(dirname(this.socketPath), { recursive: true, mode: 0o700 });
       }
       const listen = (attempt = 0) => {
+        if (brokers.get(this.socketPath) !== this) {
+          rejectStart(new Error(`ChatGPT web turn broker closed while binding ${this.socketPath}`));
+          return;
+        }
         const server = createServer(socket => this.handleSocket(socket));
         this.server = server;
         const failStart = (error: Error) => {
@@ -840,13 +860,36 @@ export class TurnBroker implements TurnBrokerOwner {
         };
         server.once("error", failStart);
         server.listen(this.socketPath, () => {
+          if (brokers.get(this.socketPath) !== this || this.server !== server) {
+            const failure = new Error(`ChatGPT web turn broker closed while binding ${this.socketPath}`);
+            if (server.listening) {
+              server.close(closeError => rejectStart(closeError ?? failure));
+              for (const socket of this.sockets) socket.destroy();
+              this.sockets.clear();
+            } else rejectStart(failure);
+            return;
+          }
           server.off("error", failStart);
           server.on("error", error => {
             console.error(
               `[chatgpt-web] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
             );
           });
-          if (!windowsPipe) chmodSync(this.socketPath, 0o600);
+          try {
+            if (!windowsPipe) {
+              chmodSync(this.socketPath, 0o600);
+              const identity = lstatSync(this.socketPath);
+              if (!identity.isSocket()) throw new Error("ChatGPT web broker endpoint is no longer a socket");
+              this.socketIdentity = { dev: identity.dev, ino: identity.ino };
+            }
+          } catch (error) {
+            server.close(closeError => failStart(closeError
+              ? new AggregateError([error, closeError], "ChatGPT web broker startup and cleanup failed")
+              : errorOf(error)));
+            for (const socket of this.sockets) socket.destroy();
+            this.sockets.clear();
+            return;
+          }
           resolveStart();
         });
       };
@@ -879,6 +922,10 @@ export class TurnBroker implements TurnBrokerOwner {
         if (probeSettled) return;
         probeSettled = true;
         probe.destroy();
+        if (brokers.get(this.socketPath) !== this) {
+          rejectStart(new Error(`ChatGPT web turn broker closed while binding ${this.socketPath}`));
+          return;
+        }
         action();
       };
       probe.setTimeout(2_000, () => finishProbe(() => {
@@ -899,7 +946,14 @@ export class TurnBroker implements TurnBrokerOwner {
             return;
           }
           try {
-            if (existsSync(this.socketPath)) unlinkSync(this.socketPath);
+            if (existsSync(this.socketPath)) {
+              const current = lstatSync(this.socketPath);
+              if (!current.isSocket() || current.dev !== socketStat.dev || current.ino !== socketStat.ino) {
+                rejectStart(new Error(`ChatGPT web broker socket was replaced while checking ${this.socketPath}`));
+                return;
+              }
+              unlinkSync(this.socketPath);
+            }
             listen();
           } catch (cleanupError) {
             rejectStart(errorOf(cleanupError));
