@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { createMainStallMonitor } = require("../electron/main-stall-monitor.cjs");
+const { createMainStallMonitor, createMainStallProbe } = require("../electron/main-stall-monitor.cjs");
 
 function fixture() {
   const clock = { ms: 1_000, cpuUs: 0 };
@@ -47,4 +47,76 @@ test("the monitor's timer never keeps the app from quitting", () => {
   monitor.start();
   monitor.stop();
   assert.equal(unrefCalled, true);
+});
+
+test("each monitor tick beats the stall probe, so a probe sees main is alive", () => {
+  let beats = 0;
+  const monitor = createMainStallMonitor({
+    logger: { warn() {} },
+    now: () => 0,
+    cpuUsage: () => ({ user: 0, system: 0 }),
+    setRepeat: () => ({ unref() {} }),
+    clearRepeat() {},
+    probe: { beat: () => { beats += 1; } },
+  });
+  monitor.start();
+  monitor.tick();
+  monitor.tick();
+  assert.equal(beats, 2);
+});
+
+// Runs a real probe in a child process whose main thread either stays healthy or is held by a
+// native call (spawnSync of a sleeping child), and returns what the probe logged.
+function probeChild(holdMs) {
+  const { spawnSync } = require("node:child_process");
+  const modulePath = require.resolve("../electron/main-stall-monitor.cjs");
+  const script = `
+    const { createMainStallProbe } = require(${JSON.stringify(modulePath)});
+    const { spawnSync } = require("node:child_process");
+    const logged = [];
+    const logger = { warn: (event, detail) => logged.push([event, detail]), info: (event, detail) => logged.push([event, detail]) };
+    const probe = createMainStallProbe({ logger, probeAfterMs: 300, pollMs: 50 });
+    probe.start();
+    const beat = setInterval(() => probe.beat(), 50);
+    // Like a real caller, it uses the result: main's next function call is where the pause lands.
+    const describe = (result) => ({ status: result.status });
+    function heldByTestCall() {
+      const result = spawnSync(process.execPath, ["-e", "setTimeout(() => {}, ${holdMs})"]);
+      return describe(result);
+    }
+    setTimeout(() => { if (${holdMs} > 0) heldByTestCall(); }, 200);
+    setTimeout(() => { clearInterval(beat); probe.stop(); process.stdout.write(JSON.stringify(logged)); }, ${holdMs} + 2000);
+  `;
+  const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test("a stall no wrapped call explains is logged with the function that was waiting", () => {
+  // Seen live 2026-11-01 20:11: main held 61 s with 187 ms of CPU and no blockedBy.
+  const logged = probeChild(1_500);
+  const callers = logged.filter(([event]) => event === "launcher.main_stall_caller");
+  assert.equal(callers.length, 1, JSON.stringify(logged));
+  const [, detail] = callers[0];
+  assert.ok(detail.heldMs >= 1_000, `held ${detail.heldMs} ms`);
+  // The file comes from the scripts the debugger reported ("[eval]" for a -e script); Node's own
+  // frames (the timer that called it) are left out.
+  assert.ok(detail.frames.some(frame => frame.startsWith("heldByTestCall [eval]:")), JSON.stringify(detail));
+  assert.ok(detail.frames.every(frame => !frame.includes("timers")), JSON.stringify(detail));
+});
+
+test("a healthy main is never paused by the probe", () => {
+  assert.deepEqual(probeChild(0), []);
+});
+
+test("a probe whose worker cannot start says so once and does not throw", () => {
+  const logged = [];
+  const probe = createMainStallProbe({
+    logger: { info: (event, detail) => logged.push([event, detail]), warn: (event, detail) => logged.push([event, detail]) },
+    createWorker: () => { throw new Error("workers unavailable"); },
+  });
+  probe.start();
+  probe.beat();
+  probe.stop();
+  assert.deepEqual(logged, [["launcher.main_stall_probe_unavailable", { message: "workers unavailable" }]]);
 });
