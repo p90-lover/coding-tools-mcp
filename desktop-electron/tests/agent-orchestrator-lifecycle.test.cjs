@@ -208,8 +208,9 @@ function createHarness(hooks = {}) {
     "./ipc-schema.cjs": require("../electron/ipc-schema.cjs"),
     // Ending chat hosts at quit has its own tests (ao-chat-hosts.test.cjs); no fixture kills a process.
     "./process-tree.cjs": { terminateOwnedProcessTreeAsync: async () => { throw new Error("No process is killed in a fixture"); } },
-    // Loading the daemon's program off the main thread first has its own tests (off-thread-run.test.cjs).
-    "./off-thread-run.cjs": { warmProgram: async () => {} },
+    // Starting the daemon off the main thread has its own tests (off-thread-spawn.test.cjs); here
+    // the start goes to the fixture's spawn, awaited as the real one is.
+    "./off-thread-run.cjs": { spawnOffThread: async (...args) => dependencies["node:child_process"].spawn(...args) },
   };
   const loadedModule = { exports: {} };
   vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), {
