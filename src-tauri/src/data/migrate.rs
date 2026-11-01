@@ -220,15 +220,22 @@ fn count_data_write(path: &Path) {
         .or_insert(0) += 1;
 }
 
+fn profile_io(stage: &str, error: std::io::Error) -> AppError {
+    AppError::Io(std::io::Error::new(
+        error.kind(),
+        format!("Profile persistence ({stage}): {error}"),
+    ))
+}
+
 fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> {
     // Counted before anything moves, so a reader that saw the old count reads the file again.
     count_data_write(path);
     let Some(parent) = path.parent() else {
         return Err(AppError::Message("profile data path has no parent".into()));
     };
-    fs::create_dir_all(parent)?;
+    fs::create_dir_all(parent).map_err(|error| profile_io("data directory", error))?;
     let temp_dir = app_root.join("aiTemp").join("data-write");
-    fs::create_dir_all(&temp_dir)?;
+    fs::create_dir_all(&temp_dir).map_err(|error| profile_io("temporary directory", error))?;
     let temp_path = temp_dir.join(unique_name("profiles", "tmp"));
     let text = serde_json::to_string_pretty(data)?;
     {
@@ -239,11 +246,16 @@ fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> 
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&temp_path)?;
+        let mut file = options
+            .open(&temp_path)
+            .map_err(|error| profile_io("create temporary file", error))?;
         restrict_file_permissions(&temp_path)?;
-        file.write_all(text.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
+        file.write_all(text.as_bytes())
+            .map_err(|error| profile_io("write temporary file", error))?;
+        file.write_all(b"\n")
+            .map_err(|error| profile_io("write temporary file", error))?;
+        file.sync_all()
+            .map_err(|error| profile_io("sync temporary file", error))?;
     }
 
     let previous_backup = if path.exists() {
@@ -264,7 +276,7 @@ fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> 
                 let _ = fs::copy(backup, path);
             }
         }
-        return Err(AppError::Io(error));
+        return Err(profile_io("install data file", error));
     }
     restrict_file_permissions(path)?;
     copy_valid_backup(path, app_root)?;
@@ -305,7 +317,7 @@ fn copy_valid_backup(path: &Path, app_root: &Path) -> AppResult<PathBuf> {
     let dir = app_root.join("Trash").join("data-backups");
     fs::create_dir_all(&dir)?;
     let target = dir.join(unique_name("profiles-valid", "json"));
-    fs::copy(path, &target)?;
+    fs::copy(path, &target).map_err(|error| profile_io("copy valid backup", error))?;
     restrict_file_permissions(&target)?;
     Ok(target)
 }
@@ -330,7 +342,7 @@ fn move_to_trash(
     let dir = app_root.join("Trash").join(category);
     fs::create_dir_all(&dir)?;
     let target = dir.join(unique_name(prefix, extension));
-    fs::rename(path, &target)?;
+    fs::rename(path, &target).map_err(|error| profile_io("archive previous data", error))?;
     Ok(target)
 }
 
@@ -412,6 +424,30 @@ fn merge_settings(data: &mut AppData, settings: AppSettings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_profile_write_identifies_stage_without_disclosing_path() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/profile-write-errors")
+            .join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::write(root.join("aiTemp"), "blocks the temporary directory").unwrap();
+        let failure = write_data_at(&root.join("data/profiles.json"), &root, &AppData::default())
+            .unwrap_err();
+        let message = failure.to_string();
+        assert!(matches!(failure, AppError::Io(_)));
+        assert!(message.contains("Profile persistence (temporary directory)"));
+        assert!(!message.contains(&root.to_string_lossy().to_string()));
+        let AppError::Io(error) = profile_io(
+            "create temporary file",
+            std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+        ) else {
+            panic!("IO kind must remain IO");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("create temporary file"));
+    }
 
     #[test]
     fn atomic_write_keeps_valid_backups_without_deleting_previous_data() {
