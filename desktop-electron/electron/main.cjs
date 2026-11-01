@@ -2142,11 +2142,22 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:complete-onboarding", (_event, language, rawInteractionMode) => {
     const current = stateStore.read();
-    if (current.autoStart) setAutostart(app, true);
+    let autoStart = current.autoStart;
+    if (autoStart) {
+      try { setAutostart(app, true); }
+      catch (error) {
+        try { autoStart = getAutostart(app).enabled === true; }
+        catch { autoStart = false; }
+        logger.warn("launcher.autostart_unavailable", {
+          message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+        });
+      }
+    }
     const next = stateStore.update({
       language: validateLanguage(language),
       browserInteractionMode: validateBrowserInteractionMode(rawInteractionMode),
       onboardingComplete: true,
+      autoStart,
     });
     updateTrayMenu(next.language);
     logger.info("launcher.onboarding_completed", {
