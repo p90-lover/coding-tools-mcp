@@ -348,3 +348,124 @@ test("saved accounts are read off the main thread and handed to the host", async
     fs.readFileSync = readSync;
   }
 });
+
+function gptBrowserRecoveryFixture(content = JSON.stringify({
+  activeId: "abcdefghijkl", accounts: [{ id: "abcdefghijkl", label: "Existing" }],
+})) {
+  const vm = require("node:vm");
+  const captureRoot = path.resolve(__dirname, "../../aiTemp/gpt-browser-capture-only");
+  const file = path.join(captureRoot, "gpt-browser", "accounts.json");
+  const bytes = new Map([[file, content], [`${file}.bak`, content]]);
+  const writes = [], warnings = [], reads = [];
+  let fault = null;
+  const read = (target, mode) => {
+    assert.equal(target, file);
+    reads.push(mode);
+    if (fault) throw Object.assign(new Error("fixture accounts read failed"), { code: fault });
+    return bytes.get(file);
+  };
+  const durable = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/durable-state.cjs"), "utf8"), {
+    module: durable, require: name => name === "node:fs" ? {} : name === "./atomic-file.cjs" ? {
+      writePrivateFileAtomicAsync: async (target, text) => {
+        assert.ok(target === file || target === `${file}.bak`);
+        writes.push(target); bytes.set(target, text);
+      },
+    } : require(name),
+  });
+  const world = fakeWorld(), loaded = { exports: {} };
+  const context = vm.createContext({
+    module: loaded, URL,
+    require: name => name === "node:fs" ? {
+      readFileSync: target => read(target, "sync"),
+      promises: { readFile: async target => read(target, "async") },
+    } : name === "./durable-state.cjs" ? durable.exports : require(name),
+    gptBrowser: null, CORE_HOME: captureRoot, session: { fromPartition: world.sessionFor },
+    WebContentsView: function (options) { return world.createView(options.webPreferences.partition); },
+    mainWindow: null, routeGptBrowserSession: async () => {}, send() {},
+    shell: { openExternal: async () => {} }, openWebUrl: async () => {},
+  });
+  const source = fs.readFileSync(path.join(__dirname, "../electron/gpt-browser.cjs"), "utf8");
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const getHost = main.match(/function getGptBrowser\([^]*?\n}/)?.[0];
+  assert.ok(getHost, "exercise the current main-process load and failed-promise reset");
+  vm.runInContext(`${source}\n${getHost}`, context);
+  const logger = { warn: event => warnings.push(event) };
+  return {
+    writes, warnings, reads, world,
+    bytes: () => bytes.get(file), backup: () => bytes.get(`${file}.bak`),
+    fault: code => { fault = code; },
+    get: () => context.getGptBrowser(logger),
+    open: () => loaded.exports.createGptBrowserHost({ logger, dataRoot: path.dirname(file), ...world }),
+  };
+}
+
+test("an unreadable GPT Browser startup preserves both copies and retries a healthy async read", async t => {
+  for (const code of ["EIO", "EACCES"]) await t.test(code, async () => {
+    const f = gptBrowserRecoveryFixture(), original = f.bytes();
+    f.fault(code);
+    let browser, failure;
+    try {
+      browser = await f.get(); f.fault(null);
+      await browser.addAccount(); await browser.saved();
+    } catch (error) { failure = error; } finally { browser?.dispose(); }
+    assert.equal(f.writes.length, 0, "Add must not overwrite a fallback registry or its backup");
+    assert.equal(f.bytes(), original); assert.equal(f.backup(), original);
+    assert.equal(failure?.code, code);
+    assert.ok(f.warnings.includes("gpt_browser.state_unreadable"));
+    f.fault(null);
+    const recovered = await f.get();
+    try {
+      assert.deepEqual(Array.from(recovered.status().accounts, entry => entry.id), ["abcdefghijkl"]);
+      assert.equal(recovered.status().activeId, "abcdefghijkl");
+      await recovered.switchTo("abcdefghijkl");
+      assert.ok(f.world.sessions.has(partitionFor("abcdefghijkl")));
+      recovered.rename("abcdefghijkl", "Recovered"); await recovered.saved();
+      assert.equal(JSON.parse(f.bytes()).accounts[0].label, "Recovered");
+      assert.equal(f.reads.includes("sync"), false, "main startup stays off the synchronous read path");
+    } finally { recovered.dispose(); }
+  });
+});
+
+test("unusable GPT Browser JSON, root shape and direct reads cannot become writable empty hosts", async t => {
+  for (const content of ["{", "null", "{}", '{"accounts":"invalid"}']) await t.test(content, async () => {
+    const f = gptBrowserRecoveryFixture(content);
+    let browser, failure;
+    try { browser = await f.get(); await browser.addAccount(); await browser.saved(); }
+    catch (error) { failure = error; } finally { browser?.dispose(); }
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.bytes(), content); assert.equal(f.backup(), content);
+    assert.ok(failure, "invalid saved data must reject the load");
+    assert.ok(f.warnings.includes("gpt_browser.state_unreadable"));
+  });
+  await t.test("direct EIO", async () => {
+    const f = gptBrowserRecoveryFixture(), original = f.bytes(); f.fault("EIO");
+    let browser, failure;
+    try { browser = f.open(); f.fault(null); await browser.addAccount(); await browser.saved(); }
+    catch (error) { failure = error; } finally { browser?.dispose(); }
+    assert.equal(f.writes.length, 0); assert.equal(f.bytes(), original); assert.equal(f.backup(), original);
+    assert.equal(failure?.code, "EIO");
+  });
+});
+
+test("missing, valid empty and optional GPT Browser metadata retain their startup behavior", async () => {
+  for (const content of [null, '{"accounts":[]}']) {
+    const f = gptBrowserRecoveryFixture(content); if (content === null) f.fault("ENOENT");
+    const browser = await f.get();
+    try {
+      assert.equal(browser.status().accounts.length, 0);
+      await browser.addAccount(); await browser.saved();
+      assert.equal(JSON.parse(f.bytes()).accounts.length, 1);
+      assert.equal(f.backup(), f.bytes()); assert.equal(f.writes.length, 2);
+      assert.deepEqual(f.warnings, []);
+    } finally { browser.dispose(); }
+  }
+  const f = gptBrowserRecoveryFixture('{"activeId":"abcdefghijkl","accounts":[{"id":"abcdefghijkl"}]}');
+  const browser = await f.get();
+  try {
+    assert.deepEqual(Array.from(browser.status().accounts, entry => ({ ...entry })),
+      [{ id: "abcdefghijkl", label: "ChatGPT account", email: null }]);
+    browser.rename("abcdefghijkl", "Kept"); await browser.saved();
+    assert.equal(typeof JSON.parse(f.bytes()).accounts[0].createdAt, "string");
+  } finally { browser.dispose(); }
+});
