@@ -141,12 +141,20 @@ test("a reply's head says who answered, how it stands, why it failed, a team's c
   assert.equal(JSON.stringify(changes.map((file) => [file.path, file.additions, file.deletions]).sort()),
     JSON.stringify([["src/aistudio.js", 5, 3], ["tests/aistudio.test.cjs", 2, 0]]));
   const single = renderToStaticMarkup(React.createElement(head.ReplyHead, { team: false, name: "GPT-6.1 Sol", tone: "failed",
-    startedAtMs: 1_000, endedAtMs: 155_000, error: { step: "GPT-6.1 Sol", message: "API Error: 400 unknown provider" }, members: [], changes }));
+    startedAtMs: 1_000, endedAtMs: 155_000, members: [], changes }));
+  assert.match(single, /^<footer class="cx-reply-head">/, "the summary closes the reply, under the answer");
   assert.match(single, /cx-reply-who-name">GPT-6\.1 Sol</);
   assert.match(single, /cx-reply-status is-failed">Failed</);
   assert.match(single, /cx-reply-time[^>]*>2m 34s</, "how long it ran");
-  assert.match(single, /role="alert".*API Error: 400 unknown provider/, "the error leads the reply");
+  assert.match(single, /aria-label="Changed files".*cx-reply-top/, "the changed files come before who answered");
+  assert.doesNotMatch(single, /role="alert"/, "the error is not in the summary");
+  const error = renderToStaticMarkup(React.createElement(head.ReplyError, { team: false, error: { step: "GPT-6.1 Sol", message: "API Error: 400 unknown provider" } }));
+  assert.match(error, /role="alert".*Failed.*API Error: 400 unknown provider/, "the error leads the reply on its own");
   assert.match(single, /2 files <span class="cx-reply-diff"><span class="is-add">\+7<\/span> <span class="is-del">−3<\/span>/, "the turn's total change");
+  // The chat draws a reply as: the failure, the work and answer, then the summary.
+  const chatSource = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const [failure, answer, summary] = ["<ReplyError ", "className={`cx-answer", "<ReplyHead "].map((mark) => chatSource.indexOf(mark));
+  assert.ok(failure > 0 && failure < answer && answer < summary, "the summary sits under the answer");
   assert.doesNotMatch(single, /cx-reply-roster|cx-reply-mode/, "a single chat has no team");
   const step = (key, name, extra) => ({ key, nodeId: key, role: "worker", name, detail: "", state: "finished", ...extra });
   const members = [step("p", "Planner"), step("w", "Worker", { working: { detail: "", stalled: false, activity: "Running npm test" }, state: "running" }),
