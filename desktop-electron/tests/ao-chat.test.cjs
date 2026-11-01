@@ -621,7 +621,7 @@ function surfaceComposer(seed = {}, globals = {}) {
         : name === "./AgentOrchestratorRoleEditor" ? feature("AgentOrchestratorRoleEditor.tsx") : {} });
     return exports;
   };
-  const calls = [];
+  const calls = [], errors = [];
   const result = { runs: seed.missions || [], teams: seed.savedTeams || [], team: seed.team || null };
   const api = { apps: { call: async input => {
     calls.push(plain(input));
@@ -629,7 +629,7 @@ function surfaceComposer(seed = {}, globals = {}) {
     if (input.operation === "runs") return { ok: true, result };
     if (input.operation === "board") return { ok: true, result: { revision: 1, tasks: [] } };
     if (input.operation === "permission_profiles") return { ok: true, result: { capability: { supported: true, profiles: [] } } };
-    if (input.operation === "team_update") return { ok: true, result: { ok: true } };
+    if (input.operation === "team_update" || input.operation === "update_run") return { ok: true, result: { ok: true } };
     throw new Error("Unexpected operation " + input.operation);
   } } };
   const imports = {
@@ -645,9 +645,9 @@ function surfaceComposer(seed = {}, globals = {}) {
   };
   const surface = loadSurface(react,{ localStorage: { getItem: () => "w", setItem() {} }, structuredClone, crypto: globalThis.crypto, ...globals }, imports);
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
-  const render = () => { effects.length = 0; cursor = 0; refCursor = 0; callbackCursor = 0; return surface.AgentOrchestratorSurface({ language: "en", setError() {} }); };
+  const render = () => { effects.length = 0; cursor = 0; refCursor = 0; callbackCursor = 0; return surface.AgentOrchestratorSurface({ language: "en", setError: error => { if (error) errors.push(error); } }); };
   const currentChat = () => walk(render()).find(item => item.type === "Chat");
-  return { state, calls, render, walk, currentChat, api, effects, permissionKey: () => permissionKey };
+  return { state, calls, errors, render, walk, currentChat, api, effects, permissionKey: () => permissionKey };
 }
 
 test("split view: Split view adds a pane, New chat opens in the focused pane, the sidebar fills it, and closing the window's chat promotes the next", () => {
@@ -742,6 +742,83 @@ test("Surface Team selection passes actual identity/revision and rejects missing
   const stale = surfaceComposer({ savedTeams: [team], composerMode: "team", composerTeamId: "deleted" });
   await assert.rejects(stale.currentChat().props.send({ message: "Do not substitute defaults" }), /saved team/i);
   assert.equal(stale.calls.some(call => call.operation === "chat_send"), false);
+});
+
+test("mission and chat dropdowns submit the team they display", async t => {
+  const teams = ["a", "b"].map((id, index) => ({ id, workspace_id: "w", revision: index ? 9 : 3, name: "Team " + id,
+    worker_limit: index ? 2 : 1, nodes: [{ id: id + "-lead", role: "planner", parents: [], settings: {},
+      route: { harness_id: "ao:claude-code", model: "cpa/model-" + id } }] }));
+  const seed = { team: teams[0], savedTeams: teams, composerTeamId: "a", missionTeamId: "a",
+    board: { revision: 1, tasks: [{ id: "existing-task", title: "Existing task" }] } };
+  const select = (f, label, root = f.render()) => f.walk(root).find(item => item.type === "select" && item.props["aria-label"] === label);
+  const openMission = f => {
+    f.currentChat().props.onOpenMissionBoard();
+    const open = f.walk(f.render()).find(item => item.type === "button" && item.props.children === "New mission");
+    assert.ok(open, "the real New mission button is available"); open.props.onClick();
+    select(f, "Mission task").props.onChange({ target: { value: "existing-task" } });
+  };
+  const submitMission = async f => {
+    const form = f.walk(f.render()).find(item => item.type === "form" && item.props["aria-label"] === "New mission");
+    let prevented = false; form.props.onSubmit({ preventDefault() { prevented = true; } });
+    assert.equal(prevented, true); await new Promise(setImmediate);
+    return f.calls.find(call => call.operation === "update_run")?.arguments.change;
+  };
+  for (const mode of ["team", "single"]) await t.test("mission selection is independent of chat " + mode + " mode", async () => {
+    const f = surfaceComposer({ ...seed, composerMode: mode }); openMission(f);
+    select(f, "Mission team").props.onChange({ target: { value: "b" } });
+    assert.equal(select(f, "Mission team").props.value, "b");
+    assert.equal(f.state.composerTeamId, "a", "a mission choice leaves the chat choice alone");
+    const change = await submitMission(f);
+    assert.equal(change.execution_mode, "team"); assert.equal(change.team_id, "b"); assert.equal(change.team_revision, 9);
+    assert.equal(change.worker_limit, 2); assert.equal("single_route" in change, false); assert.deepEqual(f.errors, []);
+  });
+  await t.test("mission defaults to its displayed team and keeps an explicit worker limit", async () => {
+    const f = surfaceComposer({ ...seed, composerMode: "single", composerTeamId: "b" }); openMission(f);
+    assert.equal(select(f, "Mission team").props.value, "a");
+    f.walk(f.render()).find(item => item.type === "input" && item.props.type === "number" && item.props.max === 24)
+      .props.onChange({ target: { value: "4" } });
+    const change = await submitMission(f);
+    assert.equal(change.execution_mode, "team"); assert.equal(change.team_id, "a"); assert.equal(change.team_revision, 3);
+    assert.equal(change.worker_limit, 4); assert.equal(f.state.composerTeamId, "b"); assert.deepEqual(f.errors, []);
+  });
+  await t.test("mission without saved teams follows its visible Single route", async () => {
+    const f = surfaceComposer({ ...seed, team: null, savedTeams: [], composerMode: "team" }); openMission(f);
+    assert.equal(select(f, "Mission team"), undefined);
+    const route = { ...f.state.workerRouteDraft, model: "cpa/picked-fallback" };
+    f.walk(f.render()).find(item => item.props.route === f.state.workerRouteDraft && item.props.onChange).props.onChange(route);
+    const change = await submitMission(f);
+    assert.equal(change.execution_mode, "single"); assert.deepEqual(change.single_route, route); assert.equal(change.worker_limit, 1);
+    assert.equal("team_id" in change, false); assert.deepEqual(f.errors, []);
+  });
+  for (const remaining of [[teams[0]], []]) await t.test("a vanished mission team fails closed with " + remaining.length + " teams left", async () => {
+    const f = surfaceComposer({ ...seed, composerMode: "single" }); openMission(f);
+    select(f, "Mission team").props.onChange({ target: { value: "b" } }); f.state.savedTeams = remaining;
+    assert.equal(await submitMission(f), undefined); assert.match(f.errors.at(-1), /saved team/i);
+    assert.equal(f.state.sheet, "mission", "the failed selection remains reviewable");
+  });
+  await t.test("new chat header and composer share Team selection and intent", async () => {
+    const f = surfaceComposer({ ...seed, composerMode: "team" });
+    const header = () => select(f, "New chat team", f.currentChat().props.headerExtra);
+    header().props.onChange({ target: { value: "b" } });
+    let current = f.currentChat(); assert.equal(current.props.composer.teamId, "b"); assert.equal(header().props.value, "b");
+    assert.equal(f.state.missionTeamId, "a", "a chat choice leaves the mission choice alone");
+    await current.props.send({ message: "Use displayed B" });
+    const sent = f.calls.find(call => call.operation === "chat_send").arguments;
+    assert.equal(sent.teamId, "b"); assert.equal(sent.teamRevision, 9); assert.equal(sent.executionMode, "team");
+    f.state.chatTaskId = ""; current = f.currentChat(); current.props.composer.onTeamChange("a");
+    assert.equal(header().props.value, "a", "the canonical picker also updates the header");
+    const before = JSON.parse(f.permissionKey()).at(-1); header().props.onChange({ target: { value: "a" } });
+    f.currentChat(); assert.equal(JSON.parse(f.permissionKey()).at(-1), before + 1, "even a repeated pick retains the permission intent fence");
+  });
+  await t.test("Single mode offers no ignored header team choice", async () => {
+    const f = surfaceComposer({ ...seed, composerMode: "single" });
+    assert.equal(f.currentChat().props.headerExtra, undefined);
+    await f.currentChat().props.send({ message: "Keep Single" });
+    const sent = f.calls.find(call => call.operation === "chat_send").arguments;
+    assert.equal(sent.executionMode, "single"); assert.equal("teamId" in sent, false);
+    f.state.chatTaskId = ""; f.currentChat().props.composer.onModeChange("team");
+    assert.equal(select(f, "New chat team", f.currentChat().props.headerExtra).props.value, "a");
+  });
 });
 
 test("draft Single permission selection mutates only the future route and never creates or saves a team", async () => {

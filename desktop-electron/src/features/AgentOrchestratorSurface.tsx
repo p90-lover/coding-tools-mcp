@@ -599,6 +599,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // composer fitting an opened chat's route to its model (`adjusted`) is that chat's, and keeping it
   // made a rewind or a new chat start on the old chat's model, effort and window.
   const composerIntent = useRef(0);
+  const pickComposerTeam = (id: string) => { composerIntent.current++; setComposerTeamId(id); };
   const pickSingleRoute = (route: AoRoute, adjusted = false) => { composerIntent.current++; setSingleRoute(route); if (!adjusted) rememberChatRoute(route); };
   const hydratedComposer = useRef("");
   // The New mission sheet's team choice (#254); the composer keeps its own (composerTeamId).
@@ -1609,7 +1610,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
 
   const createRun = () => void run("new-run", async () => {
     if (!board || !workspaceId || (!runTaskId && !missionPrompt.trim())) return;
-    const execution = aoChatExecution(composerMode, workerRouteDraft, savedTeams, composerTeamId);
+    const selectedTeamId = missionTeamId || team?.id || "";
+    const execution = aoChatExecution(savedTeams.length || selectedTeamId ? "team" : "single", workerRouteDraft, savedTeams, selectedTeamId);
     let missionBoard = board;
     let taskId = runTaskId;
     if (!taskId) {
@@ -1626,7 +1628,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     const id = crypto.randomUUID();
     const result = await moduleCall("update_run", { workspaceId, change: { operation: "create_from_team", run_id: id, task_id: taskId,
       expected_board_revision: missionBoard.revision,
-      ...(composerMode === "single" ? { execution_mode: "single", single_route: execution.singleRoute, worker_limit: 1 }
+      ...(execution.executionMode === "single" ? { execution_mode: "single", single_route: execution.singleRoute, worker_limit: 1 }
         : { execution_mode: "team", team_id: execution.teamId, team_revision: execution.teamRevision, worker_limit: missionLimit }) } });
     if (result.cancelled) return;
     setSheet("");
@@ -2785,9 +2787,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
                 busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} queue={chatQueue} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
-                headerExtra={chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
+                headerExtra={chatTaskId === "" && composerMode === "team" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
                   <span>Team</span>
-                  <select aria-label="New chat team" disabled={Boolean(busy)} value={missionTeamId || team?.id || ""} onChange={event => setMissionTeamId(event.target.value)}>
+                  <select aria-label="New chat team" disabled={Boolean(busy)} value={composerTeamId} onChange={event => pickComposerTeam(event.target.value)}>
                     {savedTeams.map(item => <option key={item.id} value={item.id}>{item.name}{item.id === team?.id ? " · Default" : ""}</option>)}
                   </select>
                 </label> : undefined}
@@ -2799,7 +2801,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? shownApprovals : []}
                 composer={{ mode: composerMode, onModeChange: mode => { composerIntent.current++; setComposerMode(mode); }, route: singleRoute, onRouteChange: pickSingleRoute,
-                  harnesses, loadModels, teams: savedTeams, teamId: composerTeamId, onTeamChange: id => { composerIntent.current++; setComposerTeamId(id); } }}
+                  harnesses, loadModels, teams: savedTeams, teamId: composerTeamId, onTeamChange: pickComposerTeam }}
                 onOpenTeam={openTeam}
                 onOpenMissionBoard={() => { setSheet(""); setView("board"); }}
                 permissions={<AgentOrchestratorPermissions key={JSON.stringify([workspaceId, chatTaskId, permissionMission?.id, composerMode, permissionTeam?.id, composerIntent.current])} team={permissionTeam} mission={permissionMission} busy={Boolean(busy)}
