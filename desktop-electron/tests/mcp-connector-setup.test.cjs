@@ -47,9 +47,10 @@ test("MCP context uses the selected accessible workspace and keeps ownership rol
   assert.deepEqual(chatGptMcpContext(context), {
     userId, workspaceId: businessId, workspaceRole: "account-owner", workspaceStructure: "workspace",
     workspaceType: "workspace", workspaceUserId: "workspace-member", workspaceOwnerId: "workspace-owner",
-    chatGptOrganizationId: "chatgpt-organization", planType: "team",
+    chatGptOrganizationId: "chatgpt-organization", planType: "team", workspaceName: "Untrusted label",
   });
-  assert.doesNotMatch(JSON.stringify(chatGptMcpContext(context)), /DO_NOT_RETURN|Untrusted label/);
+  assert.doesNotMatch(JSON.stringify(chatGptMcpContext(context)), /DO_NOT_RETURN/);
+  assert.equal(chatGptMcpContext(context).workspaceRole, "account-owner", "a display name is only a navigation hint");
   context.activeAccountId = personalId;
   assert.equal(chatGptMcpContext(context).planType, "free", "Personal/free remains valid; server capability decides availability");
   assert.equal(chatGptMcpContext(context).workspaceStructure, "personal");
@@ -135,6 +136,9 @@ test("MCP observation uses normal list requests and bounded public Platform meta
   t.after(() => observer.dispose());
   observed("GET", "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27", { "chatgpt-account-id": businessId }, {});
   assert.equal(observer.snapshot().activeAccountId, null, "preflight cannot select its own workspace");
+  observed("GET", "https://chatgpt.com/backend-api/models", { "chatgpt-account-id": businessId }, {});
+  assert.equal(observer.snapshot().navigationAccountId, businessId, "ordinary navigation can signal when a workspace switch finishes");
+  assert.equal(observer.snapshot().activeAccountId, null, "navigation hints cannot establish connector workspace authority");
   observed("POST", "https://chatgpt.com/backend-api/aip/connectors/mcp/list_accessible", { "ChatGPT-Account-ID": personalId, Authorization: "PRIVATE_HEADER" }, {});
   observed("POST", "https://api.openai.com/v1/dashboard/onboarding/login", {}, {
     user: { id: userId, email: "PRIVATE_EMAIL", orgs: { data: [{ id: organizationId, role: "owner", name: "UNTRUSTED_NAME" }] }, session: "PRIVATE_SESSION" },
@@ -232,6 +236,7 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "partition switch after preparing cannot submit", change: "partition", error: /account|partition|context/i },
     { name: "unexpected document navigation after preparing cannot submit", change: "navigation", error: /navigation|context/i },
     { name: "a busy caller after preparing cannot submit", change: "busy", error: /busy/i },
+    { name: "switching to manual mode after preparing cannot submit", change: "manual", error: /Zero Risk/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, error: /existing connector.*tunnel.*unverified/i },
     { name: "consent is not confirmed after a later workspace switch", change: "consent", error: /context|workspace.*changed/i, submitted: true },
     { name: "a targeted primary account retains the same owner and workspace checks", primary: true },
@@ -240,6 +245,13 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "another tunnel's saved binding cannot authorize reuse", existing: true, bound: true, wrongTunnel: true, error: /unverified/i },
     { name: "corrupt account provenance is preserved before any mutation", corrupt: true, error: /bindings could not be read/i },
     { name: "a failed consent keeps creation provenance for a safe retry", consentError: true, error: /fixture consent failed/, submitted: true },
+    { name: "a member connects the exact administrator-created workspace connector", business: true, shared: true },
+    { name: "a member cannot borrow another workspace's creation provenance", business: true, shared: true, badPublisher: "workspace", error: /unverified/i },
+    { name: "a member cannot borrow another tunnel's creation provenance", business: true, shared: true, badPublisher: "tunnel", error: /unverified/i },
+    { name: "a member role change before consent invalidates the inspected context", business: true, shared: true, change: "role", error: /context.*changed/i, submitted: true },
+    { name: "a publisher's newer workspace does not replace its exact creation proof", business: true, shared: true, publisherMoved: true },
+    { name: "an unavailable shared plugin does not seed a member binding", business: true, shared: true, sharedUnavailable: true, error: /plugin connection/ },
+    { name: "an admin creator explicitly selects its intended workspace in a fresh popup", business: true, selectAdmin: true },
   ]) await t.test(scenario.name, async () => {
     const work = path.resolve(__dirname, "../../aiTemp/account-mcp-bindings");
     fs.mkdirSync(work, { recursive: true });
@@ -248,13 +260,21 @@ test("the production connector action verifies fresh owner and workspace proof b
     const bindingPath = path.join(userData, "mcp-account-connector-bindings.json");
     const other = { name: "another account's provenance" };
     const saved = { version: 1, bindings: { "persist:keep": other } };
+    if (scenario.shared) saved.bindings["persist:admin"] = { name: currentConnectorSettings(runtime()).name,
+      tunnelId: scenario.badPublisher === "tunnel" ? `tunnel_${"b".repeat(32)}` : tunnelId,
+      userId: "user-admin", workspaceId: scenario.badPublisher === "workspace" ? personalId : businessId, href: "/plugins/plugin_fixture" };
+    if (scenario.publisherMoved) {
+      saved.scopedBindings = { [JSON.stringify(["persist:admin", businessId, tunnelId, currentConnectorSettings(runtime()).name])]: { ...saved.bindings["persist:admin"] } };
+      saved.bindings["persist:admin"] = { ...saved.bindings["persist:admin"], workspaceId: personalId, href: "/plugins/different-workspace" };
+    }
     if (scenario.bound) saved.bindings["persist:fixture"] = { name: currentConnectorSettings(runtime()).name,
       tunnelId: scenario.wrongTunnel ? `tunnel_${"b".repeat(32)}` : tunnelId,
       userId: initialUser, workspaceId: scenario.wrongWorkspace ? businessId : personalId, href: "/plugins/plugin_fixture" };
     const original = scenario.corrupt ? "invalid JSON retained" : JSON.stringify(saved);
     fs.writeFileSync(bindingPath, original);
     const network = fakeMcpNetwork(), counts = { create: 0, open: 0, confirm: 0 };
-    let accountId = scenario.business ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
+    let accountId = scenario.business && !scenario.selectAdmin ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
+    let workspaceRole = scenario.shared ? "standard-user" : "account-owner";
     const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: true }), withManualOperation: async (_name, work) => work() };
     const select = id => network.observed("POST", "https://chatgpt.com/backend-api/aip/connectors/mcp/list_accessible", { "chatgpt-account-id": id }, {});
     const contents = new EventEmitter();
@@ -262,13 +282,15 @@ test("the production connector action verifies fresh owner and workspace proof b
       isDestroyed: () => destroyed,
       executeJavaScript: async script => {
         if (script.includes('fetch("/api/auth/session"')) {
-          const entry = id => ({ can_access_with_session: true, account: { account_id: id, account_user_role: "account-owner",
-            structure: id === personalId ? "personal" : "workspace", plan_type: id === personalId ? "free" : "team", is_deactivated: false } });
-          return chatGptMcpContext({ user: { id: userId }, auth: { chatgpt_user_id: userId }, activeAccountId: accountId,
+          const entry = id => ({ can_access_with_session: true, account: { account_id: id, account_user_role: workspaceRole,
+            structure: id === personalId ? "personal" : "workspace", plan_type: id === personalId ? "free" : "team", name: "Fixture workspace", is_deactivated: false } });
+          const requested = script.match(/activeAccountId: "([a-f0-9-]+)"/)?.[1] || accountId;
+          return chatGptMcpContext({ user: { id: userId }, auth: { chatgpt_user_id: userId }, activeAccountId: requested,
             accounts: scenario.mismatch ? {} : { [personalId]: entry(personalId), [businessId]: entry(businessId) } });
         }
         if (script.includes("globalThis.__codingToolsConnectorHelpers =")) return;
         const phase = script.match(/__codingToolsConnectorHelpers\.(\w+)\(/)?.[1];
+        if (phase === "selectWorkspace") { accountId = businessId; select(accountId); return { selected: true }; }
         if (phase === "prepareTunnelConnector") {
           if (scenario.existing) {
             if (!script.includes('"existingHref":"/plugins/plugin_fixture"')) throw new Error("Existing connector exact tunnel identity is unverified.");
@@ -279,12 +301,17 @@ test("the production connector action verifies fresh owner and workspace proof b
           if (scenario.change === "partition") host.partition = "persist:other";
           if (scenario.change === "navigation") { url = "https://chatgpt.com/"; contents.emit("did-start-navigation", {}, url, false, true); }
           if (scenario.change === "busy") busy = true;
+          if (scenario.change === "manual") host.interactionModeOverride = "manual";
           return { prepared: true };
         }
         if (phase === "submitPreparedTunnelConnector" || phase === "createTunnelConnector") { counts.create++; return { created: true, href: "/plugins/plugin_fixture" }; }
-        if (phase === "prepareTunnelConnectorConnection") return { connected: false };
+        if (phase === "prepareTunnelConnectorConnection") {
+          if (scenario.sharedUnavailable) throw new Error("ChatGPT did not finish loading this plugin connection.");
+          return { connected: false };
+        }
         if (phase === "openTunnelConnectorConsent") {
           counts.open++;
+          if (scenario.change === "role") workspaceRole = "account-admin";
           if (scenario.change === "consent") { accountId = businessId; select(accountId); }
           return { consentReady: true };
         }
@@ -296,6 +323,12 @@ test("the production connector action verifies fresh owner and workspace proof b
         throw new Error(`Unexpected fixture phase ${phase}`);
       },
     });
+    let rendererInitialized = false;
+    const attach = network.debuggerClient.attach.bind(network.debuggerClient);
+    network.debuggerClient.attach = (...args) => {
+      assert.equal(rendererInitialized, true, "initialize a renderer before awaiting network monitoring");
+      return attach(...args);
+    };
     function Window(options) {
       windowCount++;
       destroyed = false;
@@ -303,8 +336,10 @@ test("the production connector action verifies fresh owner and workspace proof b
       assert.equal(options.webPreferences.partition, "persist:fixture");
       return { webContents: contents, isDestroyed: () => destroyed, destroy: () => { destroyed = true; },
         loadURL: async next => {
+          if (next === "about:blank") { rendererInitialized = true; url = next; return; }
           contents.emit("did-start-navigation", {}, next, false, true); url = next;
           if (next.startsWith("https://platform.openai.com/")) {
+            assert.equal(scenario.shared, undefined, "a shared member connection does not borrow Platform authentication");
             assert(network.debuggerClient.isAttached(), "observation must precede Platform navigation");
             network.observed("POST", "https://api.openai.com/v1/dashboard/onboarding/login", {}, { user: { id: initialUser, orgs: { data: [{ id: org, role: "owner" }] } } });
             network.observed("GET", "https://api.openai.com/v1/dashboard/organization/permissions", { "openai-organization": org }, { data: ["api.organization.tunnel.read", "api.organization.tunnel.use"] });
@@ -315,11 +350,19 @@ test("the production connector action verifies fresh owner and workspace proof b
     }
     const action = () => createConfiguredConnector({ app: { getPath: () => userData }, BrowserWindow: Window, browserHost: host, runtimeHost: runtime(),
       target: { ...(scenario.primary ? {} : { tunnelId }), partition: "persist:fixture", requireTunnelMatch: true },
+      ...(scenario.shared ? { expectedContext: { userId: initialUser, workspaceId: businessId,
+        workspaceRole: "standard-user", workspaceStructure: "workspace" },
+      shared: { href: "/plugins/plugin_fixture", userId: "user-admin", workspaceId: businessId, tunnelId,
+        publisherPartition: "persist:admin", memberUserId: initialUser } } : {}),
+      ...(scenario.selectAdmin ? { selectWorkspace: true, expectedContext: { userId: initialUser, workspaceId: businessId,
+        workspaceRole: "account-owner", workspaceStructure: "workspace" } } : {}),
       assertCurrent: () => { if (busy) throw new Error("Caller is busy"); } });
     if (scenario.error) {
       await assert.rejects(action(), scenario.error);
-      assert.deepEqual(counts, scenario.submitted ? { create: 1, open: 1, confirm: 0 } : { create: 0, open: 0, confirm: 0 });
+      assert.deepEqual(counts, scenario.submitted ? { create: scenario.shared ? 0 : 1, open: 1, confirm: 0 } : { create: 0, open: 0, confirm: 0 });
       if (scenario.corrupt) assert.equal(fs.readFileSync(bindingPath, "utf8"), original);
+      if (scenario.sharedUnavailable) assert.equal(JSON.parse(fs.readFileSync(bindingPath, "utf8")).bindings["persist:fixture"], undefined,
+        "an inaccessible app cannot become the member's shared reconnection proof");
       if (scenario.consentError) {
         assert.equal(JSON.parse(fs.readFileSync(bindingPath, "utf8")).bindings["persist:fixture"].userId, initialUser);
         scenario.consentError = false; scenario.existing = true;
@@ -329,7 +372,7 @@ test("the production connector action verifies fresh owner and workspace proof b
     } else {
       const result = await action();
       assert.deepEqual(result.binding, { userId: initialUser, workspaceId: accountId, tunnelId });
-      assert.deepEqual(counts, { create: scenario.existing ? 0 : 1, open: 1, confirm: 1 });
+      assert.deepEqual(counts, { create: scenario.existing || scenario.shared ? 0 : 1, open: 1, confirm: 1 });
       assert.equal(result.connected, true);
       assert.deepEqual(JSON.parse(fs.readFileSync(bindingPath, "utf8")).bindings["persist:keep"], other);
     }
@@ -623,7 +666,8 @@ test("account IPC preserves legacy arbitration and records only the requested, s
     runtimeSupervisor: { extraTunnels: { status: () => tunnels,
       reconnect: async id => { calls.push(`reconnect:${id}`); tunnels[0].state = "ready"; },
       setConnector: async (id, href, binding) => { await Promise.resolve(); assert.equal(binding.tunnelId, tunnels[0].tunnelId); if (removeDuringSave) accounts.delete("other"); calls.push(`connector:${id}`); } } },
-    createConfiguredConnector: async options => {
+    recordBrowserWorkspaceContext() {},
+    createWorkspaceConnector: async options => {
       calls.push(JSON.parse(JSON.stringify(options))); options.assertCurrent();
       if (failure) throw new Error(failure);
       if (removeDuringSetup) accounts.delete("other");

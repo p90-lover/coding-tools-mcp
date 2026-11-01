@@ -5,6 +5,10 @@ const { randomUUID } = require("node:crypto");
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const PREFLIGHT_FAILURES = new Map([
+  ["manual_browser_inspection_disabled", "MCP connector setup is disabled in Zero Risk mode."],
+  ["workspace_admin_required", "No signed-in owner or admin of this ChatGPT workspace was found. Add or sign in to that workspace's owner/admin account in Browser Management, then retry."],
+  ["workspace_publish_required", "The workspace admin created the MCP connector, but ChatGPT did not make it available to this member. Publish the connector in that workspace's app settings, then retry."],
+  ["workspace_publish_required", "ChatGPT did not confirm workspace publication."],
   ["tunnel_owner_unknown", "Platform tunnel ownership is unknown. Open the intended Platform organization and retry."],
   ["tunnel_owner_mismatch", "The selected tunnel belongs to a different Platform user. Choose a tunnel created by the signed-in account."],
   ["platform_account_mismatch", "Platform authentication is different from the selected ChatGPT account. Sign in to the intended Platform account."],

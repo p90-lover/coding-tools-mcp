@@ -940,11 +940,13 @@ function LauncherShell({
             ))}
             {keepAlive("chatgpt-browser-management", () => (
               <ChatGptBrowserManagement
+                active={surface === "chatgpt-browser-management"}
                 api={api!}
                 browser={browser}
                 onOpenBrowser={() => navigateSurface("browser")}
                 setError={setError}
-                setup={{ mcpReady: snapshot.state.mcpSetupComplete === true, bridgeReady: snapshot.state.coreSetupComplete === true }}
+                setup={{ mcpReady: snapshot.state.mcpSetupComplete === true, bridgeReady: snapshot.state.coreSetupComplete === true,
+                  inspectionDisabled: snapshot.state.browserInteractionMode === "manual" }}
               />
             ))}
             {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}

@@ -32,11 +32,23 @@ function signedInFromCookies(cookies, nowSeconds = Date.now() / 1000) {
 const clampTabs = (value) => (Number.isInteger(value) && value >= 1 && value <= MAX_TABS_PER_ACCOUNT ? value : MAX_TABS_PER_ACCOUNT);
 const timestamp = (value) => (Number.isFinite(value) && value > 0 ? value : null);
 
-// What the account's last ChatGPT inspection found: Plus has 6 High at most, Team and Pro add
-// Extra High and Pro (solAvailable/proAvailable, as the bridge's capability check reports them).
+// Subscription metadata and model capabilities have separate sources and observation times.
 function normalizePlan(value) {
-  if (!value || typeof value.solAvailable !== "boolean" || typeof value.proAvailable !== "boolean") return null;
-  return { solAvailable: value.solAvailable, proAvailable: value.proAvailable, checkedAt: timestamp(value.checkedAt) };
+  if (!value) return null;
+  const capabilities = typeof value.solAvailable === "boolean" && typeof value.proAvailable === "boolean";
+  const metadata = typeof value.userId === "string" && /^user-[A-Za-z0-9_-]{1,120}$/.test(value.userId)
+    && typeof value.workspaceId === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value.workspaceId)
+    && ["workspace", "personal"].includes(value.workspaceStructure)
+    && typeof value.workspaceRole === "string" && /^[a-z][a-z-]{0,63}$/.test(value.workspaceRole)
+    && (value.planType === null || (typeof value.planType === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(value.planType)));
+  if (!capabilities && !metadata) return null;
+  return { solAvailable: capabilities ? value.solAvailable : null, proAvailable: capabilities ? value.proAvailable : null,
+    checkedAt: capabilities ? timestamp(value.checkedAt) : null,
+    ...(metadata ? { userId: value.userId, workspaceId: value.workspaceId, workspaceRole: value.workspaceRole,
+      workspaceStructure: value.workspaceStructure, planType: value.planType, planCheckedAt: timestamp(value.planCheckedAt),
+      ...(typeof value.workspaceName === "string" && value.workspaceName.length <= 200 ? { workspaceName: value.workspaceName } : {}),
+    } : {}),
+  };
 }
 
 // What the account's Codex turns showed about its ChatGPT connector: the last turn that bound it,
@@ -231,6 +243,8 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
       const next = typeof email === "string" && email ? email.slice(0, 200) : null;
       if (!entry || entry.email === next) return false;
       entry.email = next;
+      entry.plan = null;
+      entry.connector = null;
       save();
       return true;
     },
@@ -290,9 +304,19 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     recordPlan(id, inspected) {
       if (readError) return false;
       const entry = state.accounts.find((item) => item.id === id);
-      const plan = normalizePlan({ ...inspected, checkedAt: now() });
-      if (!entry || !plan) return false;
-      entry.plan = plan;
+      const at = now();
+      const observed = normalizePlan({ ...inspected, checkedAt: at, planCheckedAt: at });
+      if (!entry || !observed) return false;
+      const previous = (observed.userId && entry.plan?.userId && observed.userId !== entry.plan.userId)
+        || (observed.workspaceId && entry.plan?.workspaceId && observed.workspaceId !== entry.plan.workspaceId) ? null : entry.plan;
+      if (entry.plan && !previous) entry.connector = null;
+      entry.plan = normalizePlan({ ...previous, ...observed,
+        ...(!observed.userId && previous?.userId ? { userId: previous.userId, workspaceId: previous.workspaceId,
+          workspaceRole: previous.workspaceRole, workspaceStructure: previous.workspaceStructure,
+          planType: previous.planType, planCheckedAt: previous.planCheckedAt, workspaceName: previous.workspaceName } : {}),
+        ...(observed.solAvailable === null ? { solAvailable: previous?.solAvailable, proAvailable: previous?.proAvailable,
+          checkedAt: previous?.checkedAt } : {}),
+      });
       save();
       return true;
     },

@@ -425,6 +425,34 @@ test("an account records its plan and what its turns showed about its connector"
   assert.deepEqual(accounts.status().accounts[0].connector, { okAt: 1_061_000, error: null, errorAt: null });
 });
 
+test("subscription metadata stays separate from capabilities and is invalidated by identity or workspace changes", t => {
+  const accounts = createBrowserAccounts({ dataRoot: tempRoot(t), profile: "production", now: () => 1_000_000 });
+  const metadata = { userId: "user-fixture", workspaceId: "602b5d8d-e211-49b1-9762-206108d52954",
+    workspaceRole: "standard-user", workspaceStructure: "workspace", planType: "team", workspaceName: "Workspace" };
+  accounts.setEmail("main", "member@example.com");
+  assert.equal(accounts.recordPlan("main", metadata), true);
+  let plan = accounts.status().accounts[0].plan;
+  assert.equal(plan.planType, "team");
+  assert.equal(plan.solAvailable, null, "a subscription does not invent model access");
+  assert.equal(plan.planCheckedAt, 1_000_000);
+  accounts.recordPlan("main", { solAvailable: true, proAvailable: true });
+  plan = accounts.status().accounts[0].plan;
+  assert.equal(plan.planType, "team", "model access cannot rewrite the subscription");
+  assert.equal(plan.proAvailable, true);
+  accounts.recordConnector("main", { bound: true });
+  accounts.recordPlan("main", { ...metadata, planType: "plus", workspaceId: "6d4774fd-0e67-4b5b-a3b7-4c0e61357122", workspaceStructure: "personal" });
+  plan = accounts.status().accounts[0].plan;
+  assert.equal(plan.planType, "plus");
+  assert.equal(plan.proAvailable, null, "another workspace's capabilities cannot follow this subscription");
+  assert.equal(accounts.status().accounts[0].connector, null, "another workspace's connection evidence cannot follow it either");
+  accounts.recordPlan("main", { ...metadata, userId: "user-changed" });
+  assert.equal(accounts.status().accounts[0].plan.userId, "user-changed");
+  accounts.recordConnector("main", { bound: true });
+  accounts.setEmail("main", "different@example.com");
+  assert.equal(accounts.status().accounts[0].plan, null);
+  assert.equal(accounts.status().accounts[0].connector, null);
+});
+
 test("each account holds its own tabs up to its limit, and frees only its own retained tab", async () => {
   const SECOND = "abcdefghijkl";
   const other = `${BASE}-${SECOND}`;
