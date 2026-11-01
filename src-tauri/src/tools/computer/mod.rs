@@ -256,6 +256,18 @@ pub fn has_local_session() -> bool {
 pub fn list_local_targets() -> Result<Vec<Target>> {
     native::targets()
 }
+/// The program a window belongs to, its executable's file name ("notepad.exe"), which the app's
+/// per-app approvals are kept by; empty when the process cannot be inspected.
+pub fn local_target_app(pid: u32) -> String {
+    native::executable_path(pid)
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
 #[cfg(test)]
 pub fn local_arm(root: PathBuf, target: Target, duration_seconds: u64) -> Result<Value> {
     local_arm_with_mode(root, target, duration_seconds, false)

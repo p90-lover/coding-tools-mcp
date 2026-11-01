@@ -42,7 +42,7 @@ test("Electron and Bun agree on the exact launcher idle surface", () => {
   ));
 });
 
-test("descriptor publishes native surface identities without inspecting renderers or Zero Risk tabs", () => {
+test("descriptor publishes native surface identities without inspecting renderers or Zero Risk tabs", async () => {
   const dir = fs.mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "browser-targets-"));
   const queried = [];
   const contents = id => ({
@@ -59,32 +59,48 @@ test("descriptor publishes native surface identities without inspecting renderer
     partition: "persist:codex-web-gpt-chatgpt", control: {}, helper: {},
     descriptorPath: require("node:path").join(dir, "descriptor.json"),
   };
+  const write = () => BrowserHost.prototype.writeDescriptor.call(fixture);
   try {
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    // Written off the main thread: no synchronous disk call while the write is asked for or runs.
+    const synchronous = [];
+    const watched = ["openSync", "writeFileSync", "writeSync", "renameSync", "fsyncSync", "mkdirSync", "rmSync"];
+    const originals = Object.fromEntries(watched.map(name => [name, fs[name]]));
+    for (const name of watched) fs[name] = (...args) => { synchronous.push(name); return originals[name](...args); };
+    try { await write(); } finally { Object.assign(fs, originals); }
+    assert.deepEqual(synchronous, []);
     const descriptor = JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8"));
     assert.equal(descriptor.version, 3);
     assert.deepEqual(descriptor.surfaceTargets, { [fixture.surfaceId]: "home-target", [automatic.surfaceId]: "auto-target" });
     assert.deepEqual(queried, ["home-target", "auto-target"]);
     fixture.getBrowserInteractionMode = () => "manual";
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    await write();
     assert.deepEqual(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).surfaceTargets, {});
     assert.deepEqual(queried, ["home-target", "auto-target"]);
-    // Nothing the bridge reads changed (a tab was selected): no disk write on the main process.
+    // Nothing the bridge reads changed (a tab was selected): no disk write at all.
     const written = fs.readFileSync(fixture.descriptorPath, "utf8");
     fs.rmSync(fixture.descriptorPath);
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    await write();
     assert.equal(fs.existsSync(fixture.descriptorPath), false);
-    // A change is written at once, and a host that removed its descriptor writes it again.
+    // A change is written, and a host that removed its descriptor writes it again.
     fixture.getBrowserInteractionMode = () => "automatic";
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    await write();
     assert.equal(Object.keys(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).surfaceTargets).length, 2);
     fixture.window = { off() {} };
     fixture.shellZoomShortcutBindings = new Map();
     fs.writeFileSync(fixture.descriptorPath, written.replace(/"pid": \d+/, `"pid": ${process.pid}`));
     try { BrowserHost.prototype.destroy.call(fixture); } catch {}
     fixture.getBrowserInteractionMode = () => "manual";
-    BrowserHost.prototype.writeDescriptor.call(fixture);
+    await write();
     assert.equal(fs.existsSync(fixture.descriptorPath), true);
+    // A write that destroy() overtakes does not bring the closed browser's descriptor back.
+    fixture.getBrowserInteractionMode = () => "automatic";
+    const overtaken = write();
+    try { BrowserHost.prototype.destroy.call(fixture); } catch {}
+    await overtaken;
+    assert.equal(fs.existsSync(fixture.descriptorPath), false);
+    // The caller that reads it straight back gets it written before the call returns.
+    BrowserHost.prototype.writeDescriptor.call(fixture, { now: true });
+    assert.equal(JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).version, 3);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -2027,6 +2043,113 @@ test("a released saved chat is deleted from its own page, as a Temporary Chat wo
   assert.ok(moved.logs.includes("browser.conversation_delete_skipped"));
 });
 
+function conversationOwnershipFixture(Host = BrowserHost, { fresh = false, persisted = false, temporary = false, home = false } = {}) {
+  const originalUrl = `https://chatgpt.com${home ? "/" : `/c/${SAVED_CONVERSATION_ID}`}${temporary ? "?temporary-chat=true" : ""}`;
+  let url = originalUrl;
+  let closed = false;
+  const scripts = [];
+  const registrations = [];
+  const contents = Object.assign(new EventEmitter(), createContents().webContents, {
+    getURL: () => url, isDestroyed: () => closed, close: () => { closed = true; },
+    setBackgroundThrottling() {}, setWindowOpenHandler() {},
+    executeJavaScript: async (script) => { scripts.push(script.match(/\}\)\("([^"]+)",/)?.[1] ?? "surface-script"); return { ok: true, status: 200 }; },
+  });
+  const tab = {
+    id: "owned-tab", traceId: "owned-trace", helperPid: 17, surfaceId: "owned-surface",
+    conversationKey: "a".repeat(64), nativeThreadId: "11111111-2222-4333-8444-555555555555",
+    status: "running", interactionMode: "automatic", persistedConversation: persisted,
+    ...(fresh ? {} : { retainedLocation: `${home ? "/" : `/c/${SAVED_CONVERSATION_ID}`}${temporary ? "?temporary-chat=true" : ""}`,
+      conversationUrl: home ? undefined : `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, ownedConversation: temporary ? undefined : SAVED_CONVERSATION_ID }),
+    view: { webContents: contents },
+  };
+  const host = Object.assign(Object.create(Host.prototype), {
+    turnTabs: new Map([[tab.id, tab]]), userCancelledTurnOwners: new Map(), closedTurnOwners: new Map(),
+    selectedTabId: "home", manualOperation: null, getUseSavedChats: () => !temporary,
+    window: { contentView: { removeChildView() {} } },
+    logger: { info() {}, warn() {}, error() {} },
+    syncPowerSaveBlocker() {}, syncViewVisibility() {}, publishState() {}, writeDescriptor() {},
+    snapshot: () => ({ tabs: [] }),
+    chatLifecycleSync: { register: (_thread, location) => { registrations.push(location); return true; } },
+  });
+  host.bindTurnContents(tab);
+  return { host, tab, scripts, registrations, originalUrl,
+    navigate(next, mainFrame = true) { url = next; contents.emit("did-navigate-in-page", {}, next, mainFrame); },
+  };
+}
+
+for (const [status, roundTrip, persisted] of [
+  ["aborted", false, false], ["failed", false, false], ["completed", false, false],
+  ["completed", true, false], ["completed", false, true], ["superseded", true, false],
+]) test(`conversation ownership cannot retarget cleanup or retention (${status}, return=${roundTrip}, persisted=${persisted})`, async () => {
+  const fixture = conversationOwnershipFixture(BrowserHost, { persisted });
+  fixture.navigate("https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+  if (roundTrip) fixture.navigate(fixture.originalUrl);
+  await fixture.host.endTurn(fixture.tab.traceId, 17, status, false, undefined, true, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.tab.ownedConversation, SAVED_CONVERSATION_ID, "the known owner is immutable");
+  assert.deepEqual(fixture.scripts, [], "no DELETE after ambiguous navigation");
+  assert.deepEqual(fixture.registrations, [], "the native thread must not acquire the navigated chat");
+  assert.equal(fixture.host.turnTabs.has(fixture.tab.id), false, "a lost lease cannot be retained");
+});
+
+for (const status of ["failed", "aborted"]) test(`conversation ownership does not infer a fresh direct-cleanup target (${status})`, async () => {
+  const fixture = conversationOwnershipFixture(BrowserHost, { fresh: true });
+  fixture.navigate("https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+  await fixture.host.endTurn(fixture.tab.traceId, 17, status, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.tab.ownedConversation, undefined);
+  assert.deepEqual(fixture.scripts, []);
+});
+
+for (const Host of [BrowserHost, StandaloneBrowserHost]) {
+  test(`conversation ownership pins a fresh result without granting direct-cleanup authority (${Host === BrowserHost ? "desktop" : "portable"})`, async () => {
+    const fixture = conversationOwnershipFixture(Host, { fresh: true });
+    await fixture.host.endTurn(fixture.tab.traceId, 17, "completed", false, undefined, true, false);
+    assert.equal(fixture.tab.retainedLocation, `/c/${SAVED_CONVERSATION_ID}`);
+    assert.equal(fixture.tab.ownedConversation, undefined);
+    const lease = await fixture.host.beginTurn("next-trace", false, 18, fixture.tab.conversationKey);
+    assert.equal(lease.reused, true);
+    assert.equal(lease.conversationUrl, fixture.originalUrl);
+    fixture.navigate(`${fixture.originalUrl}?model=fixture#same-chat`);
+    await fixture.host.endTurn("next-trace", 18, "completed", false, undefined, true, false);
+    assert.equal(fixture.host.turnTabs.has(fixture.tab.id), true, "same-ID query changes remain valid");
+    assert.deepEqual(fixture.scripts, []);
+  });
+  test(`conversation ownership latches a mid-lease round trip (${Host === BrowserHost ? "desktop" : "portable"})`, async () => {
+    const fixture = conversationOwnershipFixture(Host);
+    fixture.navigate("https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    fixture.navigate(fixture.originalUrl);
+    await fixture.host.endTurn(fixture.tab.traceId, 17, "completed", false, undefined, true, false);
+    assert.equal(fixture.host.turnTabs.has(fixture.tab.id), false);
+    assert.deepEqual(fixture.scripts, []);
+  });
+  for (const home of [false, true]) test(`conversation ownership exposes a temporary lease identity (${Host === BrowserHost ? "desktop" : "portable"}, home=${home})`, async () => {
+    const fixture = conversationOwnershipFixture(Host, { fresh: true, temporary: true, home });
+    await fixture.host.endTurn(fixture.tab.traceId, 17, "completed", false, undefined, true, false);
+    const lease = await fixture.host.beginTurn("next-trace", false, 18, fixture.tab.conversationKey);
+    assert.equal(lease.reused, true);
+    assert.equal(lease.conversationUrl, home ? undefined : `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`);
+    assert.equal(fixture.tab.retainedLocation, `${home ? "/" : `/c/${SAVED_CONVERSATION_ID}`}?temporary-chat=true`);
+    assert.deepEqual(fixture.scripts, []);
+  });
+}
+
+for (const action of ["remove", "expiry"]) test(`conversation ownership checks missed navigation before ${action}`, async () => {
+  const fixture = conversationOwnershipFixture();
+  fixture.navigate("https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", false);
+  if (action === "expiry") {
+    const now = Date.now();
+    fixture.tab.status = "ready";
+    fixture.tab.lastHeartbeatAt = now - 60 * 60 * 1000;
+    fixture.host.lastTurnSweepAt = now - 1000;
+    fixture.host.reapExpiredTurnTabs(now);
+  } else fixture.host.removeTurnTab(fixture.tab, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.host.turnTabs.has(fixture.tab.id), false);
+  assert.deepEqual(fixture.scripts, []);
+  assert.equal(fixture.tab.ownedConversation, SAVED_CONVERSATION_ID);
+});
+
 test("hard refresh accepts Chromium's completed loading cycle even without did-finish-load", async () => {
   const calls = [];
   const contents = new EventEmitter();
@@ -2595,7 +2718,7 @@ for (const [useSavedChats, endedAt, expected] of [
   [true, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, `/c/${SAVED_CONVERSATION_ID}`],
   [false, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`, `/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`],
   [false, "https://chatgpt.com/?temporary-chat=true", "/?temporary-chat=true"],
-  // No owned conversation page: the tab is released instead of retained.
+  // No owned conversation page: the tab lingers for the idle time, matched by no later turn.
   [true, "https://chatgpt.com/", null],
   [true, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`, null],
   [false, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, null],
@@ -2617,8 +2740,13 @@ for (const [useSavedChats, endedAt, expected] of [
     logger: { info() {}, warn() {} },
   });
   await BrowserHost.prototype.endTurn.call(fixture, "trace_end", 7, "completed", false, undefined, true, true);
-  assert.equal(tab.retainedLocation, expected ?? undefined);
-  assert.deepEqual(removed, expected ? [] : ["ending"]);
+  assert.equal(tab.retainedLocation, expected ?? null);
+  assert.deepEqual(removed, []);
+  if (!expected) {
+    assert.equal(tab.lingering, true);
+    assert.equal(tab.traceId, null, "no later turn of this trace finds it");
+    assert.equal(tab.conversationKey, null, "no later turn of this conversation reuses it");
+  }
 });
 
 test("steering retains only the owned task tab and the next turn reuses it", async () => {
@@ -3145,11 +3273,33 @@ test("a completed keyed turn is retained for thirty minutes and preserves its ac
   assert.deepEqual(throttling, [true]);
 
   const retainedAt = tab.lastHeartbeatAt;
-  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, retainedAt + (10 * 60 * 1000) - 1);
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, retainedAt + (5 * 60 * 1000) - 1);
   assert.equal(fixture.turnTabs.has(tab.id), true);
 });
 
-test("a retained browser tab expires at ten minutes", () => {
+test("a finished tab on screen is in use: its idle time starts once it is left", () => {
+  const tab = { id: "tab-shown", traceId: null, status: "ready", lastHeartbeatAt: 100 };
+  const removed = [];
+  const fixture = {
+    turnTabs: new Map([[tab.id, tab]]),
+    visible: true,
+    selectedTabId: tab.id,
+    logger: { info() {} },
+    removeTurnTab(candidate) { removed.push(candidate.id); this.turnTabs.delete(candidate.id); },
+  };
+  // Swept as the timer does, moments after the last sweep (a long gap reads as the machine asleep).
+  const sweep = (now) => { fixture.lastTurnSweepAt = now - 1000; BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, now); };
+  const later = 100 + (60 * 60 * 1000);
+  sweep(later);
+  assert.deepEqual(removed, []);
+  fixture.selectedTabId = "home";
+  sweep(later + (5 * 60 * 1000) - 1);
+  assert.deepEqual(removed, [], "five idle minutes from when it was left");
+  sweep(later + (5 * 60 * 1000));
+  assert.deepEqual(removed, [tab.id]);
+});
+
+test("a retained browser tab expires at five minutes", () => {
   const removed = [];
   const tab = {
     id: "tab-expired",
@@ -3166,7 +3316,7 @@ test("a retained browser tab expires at ten minutes", () => {
     },
   };
 
-  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 100 + (10 * 60 * 1000));
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 100 + (5 * 60 * 1000));
 
   assert.deepEqual(removed, [[tab.id, false]]);
   assert.equal(fixture.turnTabs.size, 0);
@@ -3220,7 +3370,7 @@ test("a completed connector turn without binding is released instead of retained
   assert.equal(fixture.turnTabs.size, 0);
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(deletedFirst, true, "its saved chat was deleted before the page closed");
+  assert.equal(deletedFirst, false, "a fresh URL alone is not a direct tab-cleanup target");
   assert.equal(closed, true);
 });
 
@@ -3849,4 +3999,18 @@ test("manual turns have no live-session TTL but are revoked when their owner pro
     helperPid: dead.helperPid,
     status: "failed",
   });
+});
+
+test("a Codex turn on another account is flagged, so the shown account's strip leaves it out", () => {
+  const view = { webContents: { isDestroyed: () => false, getURL: () => "https://chatgpt.com/" } };
+  const own = { id: "own", traceId: "t1", partition: "persist:coding-tools-chatgpt", label: "ChatGPT 1", status: "running", view };
+  const other = { id: "other", traceId: "t2", partition: "persist:coding-tools-chatgpt-abcdefabcdef", accountId: "abcdefabcdef", label: "ChatGPT 2", status: "running", view };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    partition: "persist:coding-tools-chatgpt",
+    selectedTabId: "own",
+    turnTabs: new Map([[own.id, own], [other.id, other]]),
+    userTabs: new Map(),
+  });
+  assert.equal(BrowserHost.prototype.tabSnapshot.call(fixture, own).otherAccount, undefined);
+  assert.equal(BrowserHost.prototype.tabSnapshot.call(fixture, other).otherAccount, true);
 });

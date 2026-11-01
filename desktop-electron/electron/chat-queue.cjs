@@ -9,7 +9,7 @@
 // A steer that reached a turn which then died unread (its agent never answered, or never started)
 // comes back here too, at the front, so it is sent as the next turn instead of disappearing.
 
-const { readStateFile, writeStateFile } = require("./durable-state.cjs");
+const { createStateFileWriter, readStateFile } = require("./durable-state.cjs");
 
 const MESSAGE_LIMIT = 8192;
 const QUEUE_LIMIT = 50;
@@ -90,10 +90,9 @@ function createChatQueueStore({ file = null, now = Date.now, logger = null } = {
   let counter = 0;
   const makeId = () => `queued-${now().toString(36)}-${(counter += 1).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
-  const persist = () => {
-    if (!file) return;
-    writeStateFile(file, `${JSON.stringify({ version: STATE_VERSION, chats })}\n`, { protectDirectory: false });
-  };
+  const writer = file ? createStateFileWriter(file, { protectDirectory: false,
+    onError: (error) => logger?.warn?.("chat_queue.save_failed", { message: String(error?.message || error).slice(0, 200) }) }) : null;
+  const persist = () => writer?.save(`${JSON.stringify({ version: STATE_VERSION, chats })}\n`);
   const chat = (workspaceId, taskId) => chats[key(workspaceId, taskId)];
   const items = (workspaceId, taskId) => (Array.isArray(chat(workspaceId, taskId)?.items) ? chat(workspaceId, taskId).items : []);
   const delivered = (workspaceId, taskId) => (Array.isArray(chat(workspaceId, taskId)?.delivered) ? chat(workspaceId, taskId).delivered : []);
@@ -104,6 +103,8 @@ function createChatQueueStore({ file = null, now = Date.now, logger = null } = {
     persist();
   };
   return {
+    /** Resolves once every change so far is on disk (tests, and a caller about to exit). */
+    saved: async () => writer?.saved(),
     list: (workspaceId, taskId) => items(workspaceId, taskId).map(item => ({ ...item })),
     /** Every chat's queue in one project, by task (what the chat view shows). */
     forWorkspace(workspaceId) {
@@ -149,6 +150,15 @@ function createChatQueueStore({ file = null, now = Date.now, logger = null } = {
       const prefix = `${workspaceId}:`;
       return Object.entries(chats).filter(([name]) => name.startsWith(prefix))
         .flatMap(([, entry]) => (entry.delivered ?? []).filter(steer => steer.runId === runId).map(steer => ({ ...steer, taskId: entry.taskId })));
+    },
+    /** A chat that moved to another project (move_chat) keeps its queue there. */
+    move(from, to, taskId) {
+      const saved = chat(from, taskId);
+      if (!saved) return false;
+      delete chats[key(from, taskId)];
+      chats[key(to, taskId)] = { ...saved, workspaceId: to };
+      persist();
+      return true;
     },
     forgetDelivered(workspaceId, taskId, ids) {
       const current = delivered(workspaceId, taskId);

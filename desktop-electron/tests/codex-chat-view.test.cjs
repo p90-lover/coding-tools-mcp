@@ -54,8 +54,15 @@ function mount(props) {
     frame = `${name}#${seen[name]}`; cursor = 0;
     try { return type(props || {}); } finally { [frame, cursor] = outer; }
   };
+  const timers = { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true };
+  // The reply's head renders inline too, so a turn's who, status and files can be read.
+  const replyHead = transpile("ChatReplyHead.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
+    : name === "./ao-chat" ? chat : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
+  // The reply's steps (chat-reply-plan) and their views, real too.
+  const replyPlan = transpile("chat-reply-plan.ts", (name) => name === "./ao-chat" ? chat : {});
+  const replyPlanView = transpile("ChatReplyPlan.tsx", (name) => name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {});
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
+    : name === "./ao-chat" ? chat : name === "./ChatReplyHead" ? replyHead : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
@@ -66,7 +73,7 @@ function mount(props) {
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
               SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox", SecretText: "SecretText",
               SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
-  { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
+  { window: timers, document: { querySelector: () => null }, navigator: {} });
   props.queue?.attach?.(module.syncChatQueues);
   return {
     render: (next = {}) => { frame = "root"; cursor = 0; seen = {}; return module.AgentOrchestratorChat({ ...props, ...next }); },
@@ -273,6 +280,44 @@ test("slash commands open a menu and run on Enter; attachments are sent with the
   view = sending.render();
   await walk(view).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ["send", { taskId: "t", message: "look at this\n\nAttached image: C:\\shots\\shot.png" }]);
+});
+
+test("IME confirmation leaves the message unsent until an ordinary Enter", async t => {
+  for (const nativeEvent of [{ isComposing: true, keyCode: 13 }, { isComposing: false, keyCode: 229 }]) await t.test(JSON.stringify(nativeEvent), async () => {
+    const { props, calls } = base(), page = mount(props);
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onChange({ target: { value: "你好" } });
+    let prevented = 0;
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "Enter", shiftKey: false, nativeEvent, preventDefault() { prevented++; } });
+    await new Promise(setImmediate);
+    assert.deepEqual(calls, []); assert.equal(prevented, 0);
+    assert.equal(walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.value, "你好");
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "Enter", shiftKey: true, nativeEvent: { isComposing: false, keyCode: 13 }, preventDefault() { prevented++; } });
+    assert.deepEqual(calls, []); assert.equal(prevented, 0);
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "Enter", shiftKey: false, nativeEvent: { isComposing: false, keyCode: 13 }, preventDefault() { prevented++; } });
+    await new Promise(setImmediate);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["send", { message: "你好" }]]); assert.equal(prevented, 1);
+  });
+});
+
+test("IME candidate keys leave slash commands alone and normal command navigation still works", async t => {
+  for (const nativeEvent of [{ isComposing: true, keyCode: 13 }, { isComposing: false, keyCode: 229 }]) await t.test(JSON.stringify(nativeEvent), async () => {
+    const { props, calls } = base({ selectedTaskId: "t", runs: [run("r1", "t", [node("p", "planner", "running")])], working: false }), page = mount(props);
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onChange({ target: { value: "/st" } });
+    let prevented = 0;
+    for (const key of ["Enter", "Tab", "ArrowDown", "ArrowUp"]) {
+      walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key, shiftKey: false, nativeEvent, preventDefault() { prevented++; } });
+      await new Promise(setImmediate);
+      const rendered = page.render();
+      assert.equal(walk(rendered).find(element => element.props?.["aria-label"] === "Message").props.value, "/st");
+      assert.deepEqual(walk(rendered).filter(element => element.props?.role === "option").map(element => element.props["aria-selected"]), [true, false, false]);
+      assert.deepEqual(calls, []); assert.equal(prevented, 0);
+    }
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "ArrowDown", nativeEvent: {}, preventDefault() { prevented++; } });
+    assert.deepEqual(walk(page.render()).filter(element => element.props?.role === "option").map(element => element.props["aria-selected"]), [false, true, false]);
+    walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "Tab", nativeEvent: {}, preventDefault() { prevented++; } });
+    await new Promise(setImmediate);
+    assert.deepEqual(calls, [["stop", "r1"]]); assert.equal(prevented, 2);
+  });
 });
 
 test("Codex slash commands run from the composer in a Single chat or a team, with their real actions", async () => {
@@ -736,8 +781,9 @@ test("a failed step's card names the step and its error, and its turn leaves the
   assert.ok(card.includes("notice || step?.error ||"), "the reason is the run's notice, else the step's own error");
   assert.ok(card.includes("<span className=\"cx-fail-step\">{step.name}</span>"), "the card names the step");
   assert.ok(source.includes("<FailedStepCard step={failedStep} notice={notice}"));
-  assert.ok(source.includes("errorShownBelow={turn === failedTurn}") && source.includes("prev.errorShownBelow === next.errorShownBelow"),
-    "the failed turn is told, and its memo sees the change");
+  assert.ok(source.includes("errorShownBelow={Boolean(failing)}") && source.includes("prev.errorShownBelow === next.errorShownBelow"),
+    "a failed DeepSeek turn leaves its error to the reply head, and its memo sees the change");
+  assert.ok(source.includes("const headError = failing && turn !== failedTurn"), "the head says the error unless the failed-step card does");
   assert.ok(dsh.includes("{errorShownBelow ? null : steps.filter((step) => step.error)"), "the DeepSeek turn drops its own copy of the error");
   assert.ok(source.includes("<input type=\"checkbox\" role=\"switch\""), "automatic retry is a switch");
 });
@@ -806,9 +852,6 @@ test("rewind resends the selected message into the same chat without filling or 
   assert.ok(chat.includes("setCarried(seed.context?.length ? seed.context : null)"));
   assert.ok(chat.includes("[...carried, message].join"), "the first message of the rewound chat carries them ahead of it");
   assert.ok(chat.includes('aria-label="Drop the earlier messages"'), "the context chip can be dropped");
-  // Opening another chat no longer carries this chat's draft along.
-  assert.ok(chat.includes("const CHAT_DRAFTS = new Map<string, string>();"));
-  assert.ok(chat.includes("setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? \"\")"));
 });
 
 test("message action icons have no selectable glyph text when copying multiple messages", () => {

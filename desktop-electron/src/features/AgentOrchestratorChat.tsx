@@ -4,7 +4,6 @@ import { Caret, Icon } from "../icons";
 import { ModelJudgesToggle } from "./ModelJudgesToggle";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
-import { ModelLogo } from "./HarnessLogo";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
@@ -15,6 +14,9 @@ import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotati
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
+import { ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
+import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
+import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, type ChatStyle } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
@@ -27,7 +29,7 @@ import {
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
-  chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
+  autoCompactArg, chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -590,7 +592,7 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
 
 const WorkGroup = memo(WorkGroupView, sameWork);
 /** A DeepSeek turn's work (DshTranscript), skipped on re-render by the same check as WorkGroup. */
-const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live
+const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live && prev.headed === next.headed
   && prev.useWork === next.useWork && prev.beforeStatus === next.beforeStatus && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
 
 function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
@@ -805,7 +807,7 @@ function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, warning, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
 }: {
   /** The app's queue of this project's chats: a message typed while a turn runs waits there. */
@@ -890,11 +892,14 @@ export function AgentOrchestratorChat({
   /** The project picker on the new chat's project chip: every project, the open one, and its actions. */
   projects?: { id: string; name: string; path?: string }[];
   projectId?: string;
+  /** Stable pane identity for its new, unsent chat. */
+  draftScope?: string;
   /** Switches the new chat to that project, carrying what has been typed so far. */
   onPickProject?: (projectId: string, draft: { title: string; text: string }) => void;
   /** "+ New project": choose a folder and add it as a project. */
   onAddProject?: () => void;
 }) {
+  const draftKey = selectedTaskId || JSON.stringify(["new", projectId ?? "", draftScope ?? "main"]);
   const chats = useMemo(() => chatList(runs, tasks, [], true), [runs, tasks]);
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
   const chatRuns = useMemo(() => runs.filter((run) => run.project_id === selectedTaskId), [runs, selectedTaskId]);
@@ -910,7 +915,7 @@ export function AgentOrchestratorChat({
     return () => window.clearTimeout(timer);
   }, [idleQueued, latest?.id]);
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => CHAT_DRAFTS.get(draftKey) ?? "");
   const [title, setTitle] = useState("");
   const [sending, setSending] = useState(false);
   // CPA refusing the running turn's model, as the line under the chat box reads it (ChatTurnStats):
@@ -922,15 +927,11 @@ export function AgentOrchestratorChat({
   // and goes in once the request is answered; it stays shown meanwhile. `sent`: the agent has it.
   // `turnKey`/`messageIndex`: the turn it was sent in, where it stays shown (steerTurnIndex).
   const [pendingSteers, setPendingSteers] = useState<PendingSteer[]>([]);
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>(() => CHAT_ATTACHMENTS.get(draftKey) ?? []);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
   // Ones kept when this chat was last left (another view, another chat) come back with it.
-  const [annotations, setAnnotations] = useState<DraftAnnotation[]>(() => {
-    const kept = CHAT_ANNOTATIONS.get(selectedTaskId) ?? [];
-    CHAT_ANNOTATIONS.delete(selectedTaskId);
-    return kept;
-  });
+  const [annotations, setAnnotations] = useState<DraftAnnotation[]>(() => CHAT_ANNOTATIONS.get(draftKey) ?? []);
   const addAnnotation = (text: string, anchor?: DraftAnnotation["anchor"]) => {
     const id = ++annotationIds;
     setAnnotations((current) => [...current, { id, text, comment: "", ...(anchor ? { anchor } : {}) }]);
@@ -1024,19 +1025,19 @@ export function AgentOrchestratorChat({
   // The message being sent, shown at once as Claude Code shows it: the send (saving the chat,
   // starting its run, reloading the board) took seconds, and the message sat in the composer
   // meanwhile as if nothing happened. It shows as the chat's next message until the saved chat has it.
-  const [outgoing, setOutgoing] = useState<{ taskId: string; message: string; stamp: string; sent: boolean; at: number } | null>(null);
+  const [outgoing, setOutgoing] = useState<{ taskId: string; cacheKey: string; message: string; stamp: string; sent: boolean; at: number } | null>(null);
   const savedDescription = descriptions[selectedTaskId] ?? pendingMessage;
   const shownDescription = useMemo(() => {
-    if (!outgoing || outgoing.taskId !== (selectedTaskId ?? "")) return savedDescription;
+    if (!outgoing || outgoing.cacheKey !== draftKey || outgoing.taskId !== (selectedTaskId ?? "")) return savedDescription;
     if (!savedDescription) return outgoing.message;
     if (savedDescription.endsWith(outgoing.message)) return savedDescription;
     return `${savedDescription}\n\nFollow-up (${outgoing.stamp} UTC):\n${outgoing.message}`;
-  }, [savedDescription, outgoing, selectedTaskId]);
+  }, [savedDescription, outgoing, selectedTaskId, draftKey]);
   // Once sent, it gives way to the saved chat when that has it (or after a while, if it never reads back).
   useEffect(() => {
     if (!outgoing?.sent) return undefined;
     const saved = descriptions[outgoing.taskId];
-    if (!outgoing.taskId || (saved && saved.endsWith(outgoing.message))) { setOutgoing(null); return undefined; }
+    if (!outgoing.taskId || (saved && saved.endsWith(outgoing.message))) { setOutgoing((current) => current === outgoing ? null : current); return undefined; }
     const timer = window.setTimeout(() => setOutgoing((current) => (current === outgoing ? null : current)), Math.max(0, 20_000 - (Date.now() - outgoing.at)));
     return () => window.clearTimeout(timer);
   }, [outgoing, descriptions]);
@@ -1077,11 +1078,14 @@ export function AgentOrchestratorChat({
   const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
+  const previewSessions = useMemo(() => chatAgentSessions(chatRuns, projectId && selectedTaskId
+    ? { workspaceId: projectId, taskId: selectedTaskId } : undefined), [chatRuns, projectId, selectedTaskId]);
+  const previewSessionIds = useMemo(() => previewSessions.map(session => session.id), [previewSessions]);
   // An agent of this chat asking to control a window: asked here, beside its other requests.
   const allComputerRequests = useComputerRequests();
   const computerRequests = useMemo(() => selectedTaskId ? chatComputerRequests(allComputerRequests, agentSessionIds, projectId) : [],
     [selectedTaskId, allComputerRequests, agentSessionIds, projectId]);
-  const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  const livePage = useWorkbenchAutoOpen(selectedTaskId ? previewSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
   // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
   const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
   const processRows = useMemo(() => detailsOpen ? chatProcessRows(processCommands, livePage) : [], [detailsOpen, processCommands, livePage]);
@@ -1093,12 +1097,12 @@ export function AgentOrchestratorChat({
   const renderSubagentWork = useMemo(() => (items: ChatLiveItem[], live: boolean, reply?: string) =>
     <LiveTimeline items={items} live={live} finished={!live} reply={reply} />, []);
   useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
-  // The details panel's Outputs and Sources: the cards' work this window has seen (CHAT_WORK holds
-  // live polls and turns read back), plus the newest turns' finished cards, read back once each
-  // while the panel is open. Older turns count once their work is opened in the chat.
+  // The details panel's Outputs and Sources, and each reply head's changed files: the cards' work
+  // this window has seen (CHAT_WORK holds live polls and turns read back), plus the newest turns'
+  // finished cards, read back once each. Older turns count once their work is opened in the chat.
   const [detailsWorkTick, setDetailsWorkTick] = useState(0);
   useEffect(() => {
-    if (!detailsOpen || !loadWork) return;
+    if (!loadWork) return;
     for (const turn of turns.slice(-DETAILS_READ_TURNS)) {
       for (const step of [...turn.steps, ...(turn.final ? [turn.final] : [])]) {
         const key = stepWorkKey(step);
@@ -1111,7 +1115,7 @@ export function AgentOrchestratorChat({
         }).catch(() => undefined);
       }
     }
-  }, [detailsOpen, loadWork, turns]);
+  }, [loadWork, turns]);
   const detailLinks = useMemo(() => detailsOpen ? chatDetailLinks(turns.flatMap((turn) => [...turn.steps, ...(turn.final ? [turn.final] : [])])
     .flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])) : null,
   // CHAT_WORK changes with the polls that change turns, or with a read back (the tick).
@@ -1147,6 +1151,12 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem(COMPACT_ACTIVITY_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
     return !current;
   });
+  // How a reply draws its steps (chat-reply-plan's styles), picked from the header menu.
+  const [replyStyle, setReplyStyle] = useState<ChatStyle>(() => { try { return chatStyle(localStorage.getItem(CHAT_STYLE_KEY)); } catch { return "transcript"; } });
+  const pickReplyStyle = (next: ChatStyle) => {
+    try { localStorage.setItem(CHAT_STYLE_KEY, next); } catch { /* applies now regardless */ }
+    setReplyStyle(next);
+  };
   // Bit, the chat's pet (ChatPet), shown unless turned off from the header menu or its own right-click.
   const [petOn, setPetOn] = useState(() => { try { return localStorage.getItem(PET_KEY) !== "off"; } catch { return true; } });
   // In split view the panes share one pet: hiding it in one pane hides it in all of them.
@@ -1199,33 +1209,43 @@ export function AgentOrchestratorChat({
     setAtBottom(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
   }, [requestKeys]);
-  // Each chat keeps its own unsent draft, as Codex does (the new-chat composer is "" here): opening
-  // another chat puts this one's draft aside and brings that chat's back.
-  const draftOwner = useRef(selectedTaskId);
-  const composing = useRef({ taskId: selectedTaskId, draft, attachments, annotations });
-  composing.current = { taskId: selectedTaskId, draft, attachments, annotations };
+  // Each chat keeps its own unsent draft. A new composer belongs to its project and pane.
+  const draftOwner = useRef(draftKey);
+  const composing = useRef({ taskId: selectedTaskId, cacheKey: draftKey, draft, attachments, annotations });
+  composing.current = { taskId: selectedTaskId, cacheKey: draftOwner.current, draft, attachments, annotations };
   // Leaving the chat view (the Mission Board, the structure view) unmounts this chat without
-  // changing chats: its unsent annotations are kept for when it comes back.
+  // changing chats: everything unsent is kept for when it comes back.
   useEffect(() => () => {
-    const { taskId, annotations: kept } = composing.current;
-    if (kept.length) CHAT_ANNOTATIONS.set(taskId, kept);
+    const { cacheKey, draft, attachments, annotations } = composing.current;
+    if (draft) CHAT_DRAFTS.set(cacheKey, draft); else CHAT_DRAFTS.delete(cacheKey);
+    if (attachments.length) CHAT_ATTACHMENTS.set(cacheKey, attachments); else CHAT_ATTACHMENTS.delete(cacheKey);
+    if (annotations.length) CHAT_ANNOTATIONS.set(cacheKey, annotations); else CHAT_ANNOTATIONS.delete(cacheKey);
   }, []);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
-    if (draftOwner.current === selectedTaskId) return;
+    if (draftOwner.current === draftKey) {
+      CHAT_DRAFTS.delete(draftKey);
+      CHAT_ATTACHMENTS.delete(draftKey);
+      CHAT_ANNOTATIONS.delete(draftKey);
+      return;
+    }
     if (draft) CHAT_DRAFTS.set(draftOwner.current, draft); else CHAT_DRAFTS.delete(draftOwner.current);
     if (attachments.length) CHAT_ATTACHMENTS.set(draftOwner.current, attachments); else CHAT_ATTACHMENTS.delete(draftOwner.current);
     if (annotations.length) CHAT_ANNOTATIONS.set(draftOwner.current, annotations); else CHAT_ANNOTATIONS.delete(draftOwner.current);
-    setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? "");
-    setAttachments(CHAT_ATTACHMENTS.get(selectedTaskId) ?? []);
-    setAnnotations(CHAT_ANNOTATIONS.get(selectedTaskId) ?? []);
+    const restored = { taskId: selectedTaskId, cacheKey: draftKey, draft: CHAT_DRAFTS.get(draftKey) ?? "",
+      attachments: CHAT_ATTACHMENTS.get(draftKey) ?? [], annotations: CHAT_ANNOTATIONS.get(draftKey) ?? [] };
+    // Unmount can win the queued state render: cleanup already owns the restored composer.
+    composing.current = restored;
+    setDraft(restored.draft);
+    setAttachments(restored.attachments);
+    setAnnotations(restored.annotations);
     setAttachNote("");
-    CHAT_DRAFTS.delete(selectedTaskId);
-    CHAT_ATTACHMENTS.delete(selectedTaskId);
-    CHAT_ANNOTATIONS.delete(selectedTaskId);
-    draftOwner.current = selectedTaskId;
-  }, [selectedTaskId]);
+    CHAT_DRAFTS.delete(draftKey);
+    CHAT_ATTACHMENTS.delete(draftKey);
+    CHAT_ANNOTATIONS.delete(draftKey);
+    draftOwner.current = draftKey;
+  }, [draftKey]);
   // Messages a rewound chat carries as context ahead of its first message; the composer holds only
   // the chosen message. Dropped with the chip's ×, or sent once with that first message.
   const [carried, setCarried] = useState<string[] | null>(null);
@@ -1303,7 +1323,7 @@ export function AgentOrchestratorChat({
   /** `restart`: the stuck turn's Restart: stop it and send `message` as its next turn (chat_steer's restart). */
   const deliver = async (message: string, goal?: string, fromComposer = true, restart = false) => {
     const owner = composing.current;
-    const here = () => alive.current && composing.current.taskId === owner.taskId;
+    const here = () => alive.current && composing.current.taskId === owner.taskId && composing.current.cacheKey === owner.cacheKey;
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
     const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments
       && composing.current.annotations === owner.annotations;
@@ -1359,9 +1379,10 @@ export function AgentOrchestratorChat({
       const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
       // Shown at once: the message leaves the composer and appears in the chat while it is sent.
       const shown = !steered && !goal && fromComposer && here();
-      if (shown) {
-        const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
-        setOutgoing({ taskId: selectedTaskId ?? "", message: selectedTaskId ? message : first, stamp, sent: false, at: Date.now() });
+      const outgoingMessage = shown ? { taskId: selectedTaskId ?? "", cacheKey: owner.cacheKey, message: selectedTaskId ? message : first,
+        stamp: new Date().toISOString().replace("T", " ").slice(0, 16), sent: false, at: Date.now() } : null;
+      if (outgoingMessage) {
+        setOutgoing(outgoingMessage);
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         setAtBottom(true);
       }
@@ -1373,17 +1394,17 @@ export function AgentOrchestratorChat({
           // Not sent: it goes back where it was typed, unless something new was typed meanwhile, or
           // it is only refused for now (it then waits in the queue; see the catch below).
           if (shown) {
-            setOutgoing(null);
+            setOutgoing((pending) => pending === outgoingMessage ? null : pending);
             if (here() && !composing.current.draft && !/still running|focused app window/i.test(String((error as Error)?.message ?? error))) {
               setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
             }
           }
           throw error;
         }
-        if (shown) setOutgoing((pending) => pending && { ...pending, sent: true });
+        if (outgoingMessage) setOutgoing((pending) => pending === outgoingMessage ? { ...pending, sent: true } : pending);
       }
-      if (fromComposer && CHAT_DRAFTS.get(owner.taskId) === owner.draft) CHAT_DRAFTS.delete(owner.taskId);
-      if (fromComposer && CHAT_ATTACHMENTS.get(owner.taskId) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.taskId);
+      if (fromComposer && CHAT_DRAFTS.get(owner.cacheKey) === owner.draft) CHAT_DRAFTS.delete(owner.cacheKey);
+      if (fromComposer && CHAT_ATTACHMENTS.get(owner.cacheKey) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.cacheKey);
       if (current() || (shown && here())) {
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         setTitle("");
@@ -1666,9 +1687,22 @@ export function AgentOrchestratorChat({
         case "compact":
           if (!commands || !selectedTaskId) break;
           if (!accepts) { say("Compact", "Can't compact while the chat is running."); break; }
-          say("Compact", "Compacting this chat's context…");
-          say("Compact", await commands.compact());
+          say("Compact", arg ? `Compacting this chat's context, focused on: ${arg}` : "Compacting this chat's context…");
+          say("Compact", await commands.compact(arg));
           break;
+        case "autocompact": {
+          if (!commands?.autoCompact) break;
+          const change = autoCompactArg(arg);
+          if (change && "error" in change) { say("Auto-compact", change.error); setDraft(`/autocompact ${arg}`); break; }
+          const setting = await commands.autoCompact(change ?? {});
+          const now = setting.autoCompact
+            ? `Auto-compact is on: before a message that would fill ${setting.percent}% of the chat's ${setting.limit.toLocaleString("en-US")}-byte limit, the earlier conversation becomes a summary.`
+            : "Auto-compact is off: a full chat stops until you /compact it.";
+          say("Auto-compact", change ? now : `${now}
+Change it with /autocompact on, off, or a share like /autocompact 80.`);
+          break;
+        }
+        case "context": if (commands?.context) setCard(await commands.context()); break;
         case "review":
           if (await dispatch("Review", reviewPrompt(arg), undefined, arg ? `/review ${arg}` : "/review") === "sent" && !accepts) say("Review", "Sent to the working agent.");
           break;
@@ -1718,13 +1752,17 @@ export function AgentOrchestratorChat({
           setCard(await commands.mcp());
           break;
         case "resume": if (commands) setCard(commands.recent()); break;
-        case "new": thread?.newChat(); break;
+        case "new": case "clear": thread?.newChat(); break;
         case "stop": if (latest && runOpen) stop?.(latest.id); break;
         case "retry": if (latest) restart?.(latest.id); break;
         case "model":
           // This chat's own picker: in split view every pane has one.
           ((chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose model"]')
             ?? (chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose saved team"]'))?.click();
+          break;
+        case "effort":
+          // This chat's own effort chip, as /model opens its model chip.
+          (chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label^="Reasoning effort"]')?.click();
           break;
         case "structure": setShowStructure((value) => !value); break;
         case "board": onOpenMissionBoard?.(); break;
@@ -1776,7 +1814,8 @@ export function AgentOrchestratorChat({
   const shownPreviews = useRef(new Set<string>());
   useEffect(() => {
     const now = new Set(attachments.map((item) => item.preview).filter((url): url is string => Boolean(url)));
-    for (const url of shownPreviews.current) if (!now.has(url)) freePreview(url);
+    const kept = new Set([...CHAT_ATTACHMENTS.values()].flatMap(files => files.map(file => file.preview)));
+    for (const url of shownPreviews.current) if (!now.has(url) && !kept.has(url)) freePreview(url);
     shownPreviews.current = now;
   }, [attachments]);
 
@@ -1790,6 +1829,8 @@ export function AgentOrchestratorChat({
     ] as ChatMenuItem[] : []),
     ...(steer ? [{ label: "Steer while working", checked: steerOn, run: toggleSteer } as ChatMenuItem] : []),
     { label: "Compact activity", checked: compactActivity, run: toggleCompact } as ChatMenuItem,
+    { label: "Reply style", detail: CHAT_STYLES.find((style) => style.id === replyStyle)?.label,
+      items: CHAT_STYLES.map((style) => ({ label: style.label, detail: style.hint, checked: style.id === replyStyle, run: () => pickReplyStyle(style.id) })) } as ChatMenuItem,
     { label: "Show pet", checked: petOn, run: togglePet } as ChatMenuItem,
     { label: workMode === "single" ? "Show work details" : "Show workers' activity", checked: showWork, run: toggleWork } as ChatMenuItem,
     { kind: "separator" },
@@ -1837,7 +1878,29 @@ export function AgentOrchestratorChat({
   // Each turn's steers on their way as one element, kept while they are unchanged so a DeepSeek turn's
   // memoized work (DshWork) does not draw again for them.
   const steerViews = useMemo(() => new Map([...steersByTurn].map(([at, list]) => [at, <PendingSteers steers={list} />])), [steersByTurn]);
+  // A goal's rounds past the newest two fold under one row (FoldedRounds): a 52-round goal was 52
+  // replies to scroll past. `foldOf` maps a folded turn to its run of rounds, `foldAt` the run's first turn to its row.
+  const [openRounds, setOpenRounds] = useState<ReadonlySet<string>>(() => new Set());
+  const roundFolds = useMemo(() => {
+    const foldOf = new Map<number, string>();
+    const foldAt = new Map<number, { key: string; first: number; last: number }>();
+    for (const [key, indexes] of foldedRounds(turns)) {
+      for (const index of indexes) foldOf.set(index, key);
+      foldAt.set(indexes[0], { key, first: goalRound(turns, indexes[0])!.round, last: goalRound(turns, indexes[indexes.length - 1])!.round });
+    }
+    return { foldOf, foldAt };
+  }, [turns]);
+  const toggleRounds = (key: string) => setOpenRounds((open) => {
+    const next = new Set(open);
+    if (!next.delete(key)) next.add(key);
+    return next;
+  });
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
+    const foldKey = roundFolds.foldOf.get(turnIndex);
+    const foldRow = roundFolds.foldAt.get(turnIndex);
+    const foldToggle = foldRow ? <FoldedRounds key={`fold:${foldRow.key}`} first={foldRow.first} last={foldRow.last}
+      open={openRounds.has(foldRow.key)} onToggle={() => toggleRounds(foldRow.key)} /> : null;
+    if (foldKey && !openRounds.has(foldKey)) return foldToggle;
     // A turn on a DeepSeek model shows as DeepSeek Harness shows one (DshTranscript); others as Claude Code.
     const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
     let readWork = dshReaders.get(turn.runId);
@@ -1851,16 +1914,38 @@ export function AgentOrchestratorChat({
     // Who answered, said once and plainly: a single chat's model (its maker's mark and name), or a
     // team's answering card marked Team. How it ran (harness, provider, effort, window) is the tooltip.
     const answerRun = chatRuns.find((run) => run.id === turn.runId);
-    const answerModel = turn.final ? answerRun?.nodes.find((node) => node.id === turn.final?.nodeId)?.route?.model : undefined;
     const teamAnswer = Boolean(answerRun) && answerRun?.execution_mode !== "single";
+    // The reply's head (ReplyHead): who answered, how it stands, why it failed and what it changed.
+    const live = !idle && liveTurn(turn);
+    const cards = [...turn.steps, ...(turn.final ? [turn.final] : [])];
+    const modelOf = (step: ChatStep) => answerRun?.nodes.find((node) => node.id === step.nodeId)?.route?.model;
+    const lead = turn.final ?? cards[0];
+    const leadModel = lead ? modelOf(lead) : undefined;
+    const members: ReplyMember[] = teamAnswer ? cards.map((step) => {
+      const model = modelOf(step);
+      const tone = cardTone(step);
+      return { key: step.key, name: step.name, model, modelName: model ? modelShortLabel(model).name || model : undefined, tone,
+        state: step.verdict || (tone === "working" ? step.working?.activity || "Working" : tone === "failed" ? "Failed" : tone === "done" ? "Done"
+          : tone === "stopped" ? "Stopped" : tone === "stalled" ? "May be stuck" : "Waiting") };
+    }) : [];
+    const failing = cards.find((step) => step.error);
+    // The chat's failed-step card says this turn's error already (FailedStepCard).
+    const headError = failing && turn !== failedTurn ? { step: failing.name, message: failing.error! } : undefined;
+    const items = cards.flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? []);
+    const changes = turnChanges(items);
+    // The reply as steps, drawn in the chat style (ChatReplyPlan); the transcript's rows are its steps.
+    const plan = replyStyle === "transcript" ? null : replyPlan(items, live, failing?.error);
+    // Focus keeps the work behind Show work whatever the chat's setting: its progress line says where the turn is.
+    const turnWork = replyStyle === "focus" ? false : showWork;
+    const hasReply = Boolean(cards.length || live);
+    // A goal's later round opens on a divider: its number and why the last round fell short.
+    const round = feedback ? goalRound(turns, turnIndex) : null;
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
-    return <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
-              {feedback ? <div className="cx-hook-feedback" role="note">
-                <span className="cx-hook-feedback-mark" aria-hidden="true">⎿</span>
-                <span className="cx-hook-feedback-text">Stop hook feedback:{"\n"}[{feedback.objective}]: {feedback.reason}</span>
-                {turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
-              </div> : turn.user ? <div className="cx-user">
+    const view = <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
+              {feedback ? <RoundDivider round={round?.round ?? 2} reason={feedback.reason}
+                stamp={turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null} />
+              : turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
                 <MessageActions text={chatMessageReadable(turn.user.text)}>
                   {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
@@ -1880,41 +1965,45 @@ export function AgentOrchestratorChat({
                     <MessageActions text={chatMessageReadable(steer.text)} /></div>
                   <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
                 </div>)}</SteerReader.Provider> : null}
+              {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} aria-label="Reply">
+              <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
+                startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
+                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} error={headError} members={members} changes={changes} />
+              {plan ? <ReplyPlanView plan={plan} style={replyStyle} live={live} /> : null}
+              {/* The head says the error, so the DeepSeek turn leaves its own copy out. */}
               {dsh && readWork
-                ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
-                  errorShownBelow={turn === failedTurn} refusal={!idle && liveTurn(turn) ? cpaRefusal : null}
-                  beforeStatus={!idle && liveTurn(turn) ? steerViews.get(turnIndex) : undefined} />
-                : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
+                ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
+                  errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null}
+                  beforeStatus={live ? steerViews.get(turnIndex) : undefined} headed />
+                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork} />}
               {/* A steer on its way sits above the turn's running line ("Deep diving", "Working"), never
                   under it: a running DeepSeek turn draws it inside its work, right above that line. */}
-              {steerViews.has(turnIndex) && !(dsh && readWork && !idle && liveTurn(turn)) ? steerViews.get(turnIndex) : null}
-              {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
+              {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
+              {!dsh && live ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
-                {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
-                {dsh ? (turn.final.verdict ? <div className="cx-answer-meta"><span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span></div> : null)
-                  : <div className="cx-answer-meta" title={turn.final.detail || undefined}>
-                    {answerModel ? <ModelLogo model={answerModel} label={turn.final.name} size={14} /> : null}
-                    <span className="cx-answer-name">{turn.final.name}</span>
-                    {teamAnswer ? <span className="cx-answer-mode">Team</span> : null}
-                    {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
-                  </div>}
-                {/* A finished reviewer becomes the answer; its earlier cycles stay above it (DeepSeek's row shows them). */}
+                {/* Who answered and its verdict are in the head; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
-                <ChatMarkdown text={turn.final.text ?? ""} />
+                <ChatMarkdown text={turn.final.text ?? ""} onVisualize={turn.status === "done" && !turn.final.working
+                  && chatRuns.find(run => run.id === turn.runId)?.nodes.some(node => node.id === turn.final?.nodeId
+                    && node.route?.harness_id === "codex-native" && node.route.model.startsWith("chatgpt-web/"))
+                  ? () => setWorkbench("preview") : undefined} />
                 <MessageActions text={turn.final.text ?? ""}>
                   {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}><Icon name="reload" width="14" height="14" /></button> : null}
                 </MessageActions>
               </div> : null}
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
-              {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p>
-                : turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
+              {/* How long it worked is in the head; the foot keeps the turn's model requests. */}
               {turn.runId && turn.startedAtMs && !liveTurn(turn)
-                ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={!dsh}
+                ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={false}
                   to={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs} /> : null}
+              </section> : null}
+              {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews]);
+    return foldToggle ? [foldToggle, view] : view;
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
+    replyStyle, roundFolds, openRounds]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>
@@ -2261,6 +2350,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
+              if (event.nativeEvent?.isComposing || event.nativeEvent?.keyCode === 229) return;
               if (slash.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
                 event.preventDefault(); setSlashIndex((value) => (value + (event.key === "ArrowDown" ? 1 : slash.length - 1)) % slash.length); return;
               }
@@ -2335,7 +2425,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
-      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
+      {workbench && selectedTaskId ? <ChatWorkbench sessions={workbench === "preview" ? previewSessions : agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
         subagents={subagents} renderWork={renderSubagentWork} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>

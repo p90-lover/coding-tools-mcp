@@ -1,8 +1,7 @@
 export default {
   browserAccount: "ChatGPT 帳戶",
   browserAccountAdd: "新增帳戶",
-  browserAccountRemove: "移除帳戶",
-  browserAccountRemoveConfirm: "再按一次以移除",
+  browserAccountFull: "Browser 分頁最多容納 12 個帳戶。請在 ChatGPT browser management 移除一個後再新增。",
   browserAccountSwitching: "正在切換帳戶…",
   browserAccountHint: "Codex 的 WebGPT 對話使用此帳戶",
   product: "Coding Tools",

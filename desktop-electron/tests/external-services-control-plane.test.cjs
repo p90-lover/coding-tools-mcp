@@ -317,12 +317,39 @@ test("a failed keep-alive lease write does not fail healthy CPA inspection", asy
     return openSync.call(this, target, ...args);
   };
   try {
-    assert.equal((await controller.inspect("cpa")).status, "ready");
+    // A change that could not be saved is tried again by the lease, which fails the same way.
+    assert.throws(() => controller.configure("cpa", { autoStart: true }), { code: "ENOSPC" });
     assert.equal(failedWrites, 1);
+    assert.equal((await controller.inspect("cpa")).status, "ready");
+    assert.equal(failedWrites, 2);
     assert.equal(warnings.length, 1);
     assert.equal(warnings[0].detail.code, "ENOSPC");
-    assert.throws(() => controller.configure("cpa", { autoStart: true }), { code: "ENOSPC" });
     assert.equal(fs.readFileSync(filePath, "utf8"), saved);
+  } finally {
+    fs.openSync = openSync;
+    controller.dispose();
+  }
+});
+
+test("a healthy keep-alive check never rewrites settings that did not change", async (t) => {
+  // 2026-10-31: the lease rewrote the same bytes, flushed, on the first healthy check after every
+  // start and every 5 minutes after, holding every window up to 1.8 s on the hard disk.
+  const { controller, directory } = controllerFixture();
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  controller.configure("cpa", { keepAlive: true });
+  const filePath = path.join(directory, "external-services.json");
+  const openSync = fs.openSync;
+  let writes = 0;
+  fs.openSync = function (target, ...args) {
+    if (String(target).startsWith(filePath)) writes += 1;
+    return openSync.call(this, target, ...args);
+  };
+  try {
+    assert.equal((await controller.inspect("cpa")).status, "ready");
+    assert.equal(writes, 0, "nothing changed, so nothing is written");
+    controller.configure("cpa", { autoStart: true });
+    assert.equal(writes, 2, "a real change is still saved, the file and its copy");
+    assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8")).services.cpa.autoStart, true);
   } finally {
     fs.openSync = openSync;
     controller.dispose();

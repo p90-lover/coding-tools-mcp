@@ -658,12 +658,18 @@ export interface BrowserTabState {
   threadId?: string;
   /** The ChatGPT account the tab's Codex session runs on (absent: the shown account). */
   accountId?: string;
+  /** Runs on an account the Browser tab is not showing: kept out of its tab strip. */
+  otherAccount?: boolean;
   conversationUrl?: string;
   title: string;
   status: "idle" | "loading" | "signed-out" | "ready" | "testing" | "running" | "error" | "aborted";
   loading: boolean;
   active: boolean;
   closable: boolean;
+  /** When the tab opened, its turn finished, and a finished one closes if left idle (ms). */
+  startedAt?: number;
+  finishedAt?: number;
+  closesAt?: number;
   interactionMode?: BrowserInteractionMode;
   manualState?: "awaiting-user" | "sent" | "running" | "completed" | "timed-out" | "cancelled" | "failed";
   manualDeadlineAt?: string;
@@ -843,6 +849,10 @@ export interface CodexThreadBinding {
   boundAt: number;
   lastUsedAt: number;
   title: string | null;
+  /** From Codex's own thread index: tokens the whole session used, its model and effort (null: unknown). */
+  tokensUsed: number | null;
+  model: string | null;
+  effort: string | null;
   running: boolean;
   chats: Array<{ url: string; archived: boolean }>;
 }
@@ -971,7 +981,7 @@ export interface LauncherApi {
   setGptBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   onGptBrowserChanged(listener: (status: GptBrowserStatus) => void): () => void;
   /** AO pushed a change: session ids whose conversation or state moved, "<workspace>:<run>" run keys. */
-  onAoChanged?(listener: (change: { sessions: string[]; runs: string[] }) => void): () => void;
+  onAoChanged?(listener: (change: { sessions: string[]; runs: string[]; moved?: { from: string; to: string; taskId: string }[] }) => void): () => void;
   chatGptDesktopStatus(): Promise<ChatGptDesktopStatus>;
   openChatGptDesktop(slotId: string): Promise<ChatGptDesktopStatus>;
   newChatGptDesktopSignIn(): Promise<ChatGptDesktopStatus>;
@@ -1036,6 +1046,8 @@ export interface LauncherApi {
   switchBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
   renameBrowserAccount(id: string, label: string): Promise<BrowserAccountsStatus>;
   removeBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
+  /** Bulk delete: removes each listed account; one that could not go is in `failed` with its reason. */
+  removeBrowserAccounts(ids: string[]): Promise<BrowserAccountsStatus & { removed: string[]; failed: { id: string; message: string }[] }>;
   onBrowserAccountsChanged(listener: (status: BrowserAccountsStatus) => void): () => void;
   setBrowserAccountProxy(id: string, profileId: string | null): Promise<BrowserAccountsStatus>;
   assignBrowserAccountProxies(): Promise<BrowserAccountsStatus & { assigned: number }>;
@@ -1077,6 +1089,7 @@ export interface LauncherApi {
   addMcpTunnel(input: { label: string; tunnelId: string; runtimeKey: string; accountId: string | null }): Promise<McpTunnel>;
   removeMcpTunnel(id: string): Promise<{ removed: boolean }>;
   reconnectMcpTunnel(id: string): Promise<McpTunnel>;
+  openMcpTunnelSettings(id: string): Promise<{ opened: boolean; name: string }>;
   createMcpTunnelConnector(id: string): Promise<{ created: boolean; name: string; href: string }>;
   onMcpTunnelsChanged(listener: (tunnels: McpTunnel[]) => void): () => void;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;

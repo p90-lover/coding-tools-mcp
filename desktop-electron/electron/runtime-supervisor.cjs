@@ -4,7 +4,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { execFile, spawn } = require("node:child_process");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
 const {
   DETACH_OWNED_CHILD,
@@ -459,7 +459,15 @@ class RuntimeSupervisor {
     // same tunnel program it ships now (tunnelOwnerMatches). Off (the default here) adopts any ready
     // tunnel, as before; main.cjs passes the setting.
     reuseTunnelOnlyWhenMatching = () => false,
+    // The app watches config.json's folder and trusts its cached copy until the watch reports a
+    // change (readConfigJson); off, every read checks the file, as tests that write it and read it
+    // back at once expect.
+    watchConfigFile = false,
   }) {
+    this.watchConfigFile = watchConfigFile;
+    this.configWatcher = null;
+    this.configTrusted = false;
+    this.configChanges = 0;
     this.reuseTunnelOnlyWhenMatching = reuseTunnelOnlyWhenMatching;
     this.tunnelOwnerPath = path.join(coreHome, "runtime", "tunnel-owner.json");
     this.app = app;
@@ -508,15 +516,21 @@ class RuntimeSupervisor {
     // Tunnels for further ChatGPT accounts; each runs beside the main tunnel and stops with it.
     const extraStateDir = path.join(coreHome, "tunnel", "extra-runtime");
     const extraTempDir = path.join(extraStateDir, "temp");
+    let extraStateMigrated = false;
     this.extraTunnels = new ExtraTunnels({
       coreHome,
       logger,
-      runTunnel: (tunnel, args, timeoutMs, label) => {
+      runTunnel: async (tunnel, args, timeoutMs, label) => {
         // A new state root cannot see legacy runtimes; starting them again would create duplicates.
-        if (savedExtraTunnels && !fs.existsSync(path.join(extraStateDir, "aliases.yaml"))) {
-          throw new Error("Existing extra tunnels require migration to the dedicated runtime state directory before they can be started.");
+        // Checked with fs.promises: the monitor runs this every 10 s, and the synchronous check and
+        // mkdir held every window up to 21 s on the busy hard disk (2026-10-31). A migrated root stays so.
+        if (savedExtraTunnels && !extraStateMigrated) {
+          extraStateMigrated = await fs.promises.access(path.join(extraStateDir, "aliases.yaml")).then(() => true, () => false);
+          if (!extraStateMigrated) {
+            throw new Error("Existing extra tunnels require migration to the dedicated runtime state directory before they can be started.");
+          }
         }
-        fs.mkdirSync(extraTempDir, { recursive: true, mode: 0o700 });
+        await fs.promises.mkdir(extraTempDir, { recursive: true, mode: 0o700 });
         return this.runTunnelCommand({ tunnel }, args, timeoutMs, label, {
           ...this.getRuntimeEnvironment(),
           TUNNEL_CLIENT_STATE_DIR: extraStateDir,
@@ -551,6 +565,9 @@ class RuntimeSupervisor {
    * time changes, whoever wrote it.
    */
   readConfigJson() {
+    if (this.configTrusted && this.configCache) return structuredClone(this.configCache.value);
+    const changes = this.configChanges;
+    const watching = this.watchConfig();
     let stat;
     try { stat = fs.statSync(this.configPath); } catch { this.configCache = null; return undefined; }
     const cached = this.configCache;
@@ -558,7 +575,41 @@ class RuntimeSupervisor {
       this.configCache = null;
       this.configCache = { size: stat.size, mtimeMs: stat.mtimeMs, value: readJson(this.configPath) };
     }
+    this.configTrusted = watching && changes === this.configChanges;
     return structuredClone(this.configCache.value);
+  }
+
+  /**
+   * Watches config.json's folder (once; false when off or the watch cannot start). Even the one
+   * statSync readConfigJson makes per call froze every window up to 7.9 s on the busy hard disk
+   * (30 s in an hour from IPC and setup reads, 2026-10-31). The system reports a change without
+   * reading the disk, so the cached copy is used until one is reported. The watch starts before
+   * the check that makes the copy trusted, so a write in between is never missed.
+   */
+  watchConfig() {
+    if (!this.watchConfigFile) return false;
+    if (this.configWatcher) return true;
+    const name = path.basename(this.configPath).toLowerCase();
+    try {
+      this.configWatcher = fs.watch(path.dirname(this.configPath), { persistent: false }, (_event, file) => {
+        if (!file || String(file).toLowerCase() === name) this.forgetConfig();
+      });
+    } catch {
+      this.configWatcher = null;
+      return false;
+    }
+    this.configWatcher.on("error", () => {
+      try { this.configWatcher?.close(); } catch {}
+      this.configWatcher = null;
+      this.forgetConfig();
+    });
+    return true;
+  }
+
+  /** The next read checks config.json on disk (a reported change, or a writer that just ran). */
+  forgetConfig() {
+    this.configChanges += 1;
+    this.configTrusted = false;
   }
 
   /**
@@ -568,6 +619,9 @@ class RuntimeSupervisor {
    * disk holding it answered a read in 0.6 s on average and up to 7 s.
    */
   async readConfigJsonAsync() {
+    if (this.configTrusted && this.configCache) return structuredClone(this.configCache.value);
+    const changes = this.configChanges;
+    const watching = this.watchConfig();
     let stat;
     try { stat = await fs.promises.stat(this.configPath); } catch { this.configCache = null; return undefined; }
     const cached = this.configCache;
@@ -575,6 +629,7 @@ class RuntimeSupervisor {
       const value = JSON.parse((await fs.promises.readFile(this.configPath, "utf8")).replace(/^﻿/, ""));
       this.configCache = { size: stat.size, mtimeMs: stat.mtimeMs, value };
     }
+    this.configTrusted = watching && changes === this.configChanges;
     return structuredClone(this.configCache.value);
   }
 
@@ -603,7 +658,17 @@ class RuntimeSupervisor {
 
   readSetupConfig() {
     const config = this.readConfigJson();
-    if (config === undefined) return null;
+    return config === undefined ? null : this.setupConfigOf(config);
+  }
+
+  /** readSetupConfig for timers, which must not block the main process (readConfigJsonAsync). */
+  async readSetupConfigAsync() {
+    const config = await this.readConfigJsonAsync();
+    return config === undefined ? null : this.setupConfigOf(config);
+  }
+
+  /** The checks readSetupConfig makes on config.json's parsed contents. */
+  setupConfigOf(config) {
     if (!config || typeof config !== "object" || Array.isArray(config)) {
       throw new Error("Runtime configuration is not an object");
     }
@@ -1404,7 +1469,7 @@ class RuntimeSupervisor {
     try {
       const existing = await this.waitForKnownTunnelStatus(config);
       const matches = !existing.ready || this.reuseTunnelOnlyWhenMatching?.() !== true
-        || this.tunnelOwnerMatches(config, existing.pid);
+        || await this.tunnelOwnerMatches(config, existing.pid);
       if (existing.ready && !matches) {
         // Left running by another build (or by a version before this check): restarted, so it runs
         // the tunnel program this version ships. A 0.8.28 bridge once ran on under 0.8.29.
@@ -1417,7 +1482,17 @@ class RuntimeSupervisor {
           signalCode: null,
           managed: true,
         };
-        await this.waitForTunnelMcpTransport(config);
+        try {
+          await this.waitForTunnelMcpTransport(config);
+        } catch (error) {
+          // The tunnel reported ready (it outlived the app's quit); only finding its MCP endpoint
+          // timed out, on a machine still busy starting the app. Torn down here, MCP tools were gone
+          // until the watchdog started a new tunnel (seen live 2026-10-30 16:16, 2026-10-31 08:22).
+          // It is kept: the monitor finds the endpoint from the inventory and replaces the tunnel
+          // only on evidence that it failed.
+          if (!/health discovery timed out/.test(errorMessage(error))) throw error;
+          this.logger.warn("runtime.tunnel_adopted_unverified", { pid: existing.pid, detail: errorMessage(error).slice(0, 300) });
+        }
         this.startTunnelMonitor(config);
         this.logger.info("runtime.tunnel_adopted", { pid: existing.pid });
         return;
@@ -1447,7 +1522,7 @@ class RuntimeSupervisor {
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
       await this.waitForTunnelMcpTransport(config);
       this.startTunnelMonitor(config);
-      this.recordTunnelOwner(config, this.tunnel.pid);
+      await this.recordTunnelOwner(config, this.tunnel.pid);
     } catch (error) {
       let cleanupError;
       try {
@@ -1472,19 +1547,21 @@ class RuntimeSupervisor {
   }
 
   /** Which tunnel program a started tunnel runs: its size and change time (a release ships a new one). */
-  tunnelProgramSignature(config) {
+  // The owner record is read and written off the main thread: its synchronous write held every
+  // window 16.4 s on the busy hard disk as a tunnel started (2026-10-31).
+  async tunnelProgramSignature(config) {
     try {
-      const stat = fs.statSync(config.tunnel.binaryPath);
+      const stat = await fs.promises.stat(config.tunnel.binaryPath);
       return `${stat.size}:${Math.round(stat.mtimeMs)}`;
     } catch {
       return null;
     }
   }
 
-  recordTunnelOwner(config, pid) {
+  async recordTunnelOwner(config, pid) {
     try {
-      writePrivateFileAtomic(this.tunnelOwnerPath, `${JSON.stringify({
-        pid, program: this.tunnelProgramSignature(config), appVersion: this.app?.getVersion?.() ?? null,
+      await writePrivateFileAtomicAsync(this.tunnelOwnerPath, `${JSON.stringify({
+        pid, program: await this.tunnelProgramSignature(config), appVersion: this.app?.getVersion?.() ?? null,
       })}\n`);
     } catch (error) {
       this.logger.warn("runtime.tunnel_owner_unrecorded", { message: errorMessage(error) });
@@ -1492,10 +1569,10 @@ class RuntimeSupervisor {
   }
 
   /** Whether the running tunnel `pid` is one this app started, with the tunnel program it ships now. */
-  tunnelOwnerMatches(config, pid) {
+  async tunnelOwnerMatches(config, pid) {
     let owner;
-    try { owner = JSON.parse(fs.readFileSync(this.tunnelOwnerPath, "utf8")); } catch { return false; }
-    const program = this.tunnelProgramSignature(config);
+    try { owner = JSON.parse(await fs.promises.readFile(this.tunnelOwnerPath, "utf8")); } catch { return false; }
+    const program = await this.tunnelProgramSignature(config);
     return Boolean(program) && owner?.pid === pid && owner.program === program;
   }
 
@@ -2128,7 +2205,8 @@ class RuntimeSupervisor {
       env = { TUNNEL_CLIENT_STATE_DIR: stateDir, TEMP: tempDir, TMP: tempDir };
     }
     const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir,
-      env: { ...process.env, ...env }, timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
+      env: { ...process.env, ...env, CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath },
+      timeoutMs, maxBytes: MAX_CONTROL_OUTPUT_BYTES });
     if (reply.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
     if (reply.error) throw new Error(reply.error);
     return controlResult(reply.code, reply.stdout, reply.stderr);

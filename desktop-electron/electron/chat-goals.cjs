@@ -172,6 +172,10 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
     /** Resolves once every change so far is on disk (tests, and a caller about to exit). */
     async saved() { while (saving) await saving; },
     get: (workspaceId, taskId) => goals[key(workspaceId, taskId)] ?? null,
+    /** The projects with a goal still being pursued. */
+    activeWorkspaces: () => [...new Set(Object.entries(goals)
+      .filter(([, goal]) => goal?.status === "active")
+      .map(([name]) => name.slice(0, name.indexOf(":"))))],
     /** Every goal of one project, by chat. */
     forWorkspace(workspaceId) {
       const prefix = `${workspaceId}:`;
@@ -193,6 +197,15 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
       if (!STATUSES.has(goal.status)) throw new Error("Unknown goal status");
       persist();
       return goal;
+    },
+    /** A chat that moved to another project (move_chat) keeps its goal there. */
+    move(from, to, taskId) {
+      const goal = goals[key(from, taskId)];
+      if (!goal) return false;
+      delete goals[key(from, taskId)];
+      goals[key(to, taskId)] = goal;
+      persist();
+      return true;
     },
     clear(workspaceId, taskId) {
       const had = Boolean(goals[key(workspaceId, taskId)]);

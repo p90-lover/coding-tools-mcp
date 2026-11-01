@@ -1,13 +1,12 @@
 "use strict";
 
-// More MCP tunnels beside the main one the runtime supervisor owns. An OpenAI tunnel belongs to one
-// OpenAI account, and ChatGPT attaches a connector only through a tunnel of its own account, so each
-// further ChatGPT account needs its own tunnel. Every tunnel runs its own tunnel-client runtime and
-// its own MCP process (stdio); all of them reach the same turn broker, which serves many clients.
+// More MCP tunnels beside the main one the runtime supervisor owns. accountId is a local browser
+// profile's routing hint; setup checks the actual ChatGPT workspace and Platform tunnel owner.
+// Every tunnel runs its own tunnel-client runtime and MCP process (stdio); all reach the same broker.
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const TUNNEL_ID = /^tunnel_[a-f0-9]{32}$/;
 const ENTRY_ID = /^[a-f0-9]{8}$/;
@@ -15,6 +14,7 @@ const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_TUNNELS = 8;
 const MAX_LABEL_LENGTH = 60;
 const MAX_KEY_BYTES = 64 * 1024;
+const MAX_CONNECTOR_BINDINGS = 64;
 const TIMING = Object.freeze({
   monitorMs: 10_000,
   pollMs: 1_000,
@@ -37,6 +37,18 @@ function validEntry(entry) {
     && TUNNEL_ID.test(entry.tunnelId)
     && typeof entry.label === "string" && entry.label.trim() && entry.label.length <= MAX_LABEL_LENGTH
     && (entry.accountId === null || ACCOUNT_ID.test(entry.accountId)));
+}
+
+function connectorBinding(value, tunnelId, href = value?.href) {
+  if (!value || value.tunnelId !== tunnelId || !TUNNEL_ID.test(tunnelId)
+    || typeof value.userId !== "string" || !/^user-[A-Za-z0-9_-]{1,120}$/.test(value.userId)
+    || typeof value.workspaceId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value.workspaceId)
+    || typeof href !== "string" || href.length > 512) return null;
+  let url;
+  try { url = new URL(href, "https://chatgpt.com"); } catch { return null; }
+  if (url.origin !== "https://chatgpt.com" || url.username || url.password || !url.pathname.startsWith("/plugins/")) return null;
+  // The pathname is the connector identity. Directory query strings and unrelated fields are not.
+  return { userId: value.userId, workspaceId: value.workspaceId, tunnelId, href: url.pathname };
 }
 
 /** tunnel-client's local inventory as alias → { state, ready, pid }. */
@@ -73,6 +85,8 @@ class ExtraTunnels {
     this.monitorTimer = null;
     this.monitorInFlight = false;
     this.queue = Promise.resolve();
+    this.saved = null; // the registry's entries once read (entries())
+    this.writes = Promise.resolve(); // registry writes, in order (writeEntries)
   }
 
   /** Mutating work runs one at a time: starts, adds, removals, reconnects and monitor restarts. */
@@ -82,18 +96,45 @@ class ExtraTunnels {
     return run;
   }
 
+  // Only this class writes the registry, so it is read from disk once and kept: the monitor read it
+  // every 10 s and the Tunnels page on each refresh, and one read held every window 23.7 s on the
+  // busy hard disk (ExtraTunnels.check, 2026-10-31). A read that fails for another reason than a
+  // missing file is not kept, so the next call tries again.
   entries() {
-    let parsed;
-    try {
-      parsed = JSON.parse(fs.readFileSync(this.registryPath, "utf8"));
-    } catch {
-      return [];
+    if (!this.saved) {
+      let parsed;
+      try {
+        parsed = JSON.parse(fs.readFileSync(this.registryPath, "utf8"));
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) return [];
+        parsed = null;
+      }
+      this.saved = Array.isArray(parsed?.tunnels) ? parsed.tunnels.filter(validEntry) : [];
     }
-    return Array.isArray(parsed?.tunnels) ? parsed.tunnels.filter(validEntry) : [];
+    return [...this.saved];
   }
 
+  /**
+   * Keeps `tunnels` as the registry now and writes it off the main thread, one write at a time in
+   * the order asked: the synchronous write held every window 14.5 s when a connector was recorded
+   * on the busy hard disk (2026-10-31). Resolves once this write is in place; a failed write drops
+   * the kept copy, so the next read takes what is on disk.
+   */
   writeEntries(tunnels) {
-    writePrivateFileAtomic(this.registryPath, `${JSON.stringify({ version: 1, tunnels }, null, 2)}\n`);
+    const saved = tunnels.filter(validEntry);
+    this.saved = saved;
+    const text = `${JSON.stringify({ version: 1, tunnels }, null, 2)}\n`;
+    const write = this.writes.catch(() => undefined).then(() => writePrivateFileAtomicAsync(this.registryPath, text));
+    this.writes = write.catch(error => {
+      if (this.saved === saved) this.saved = null;
+      this.logger?.warn?.("runtime.extra_tunnels_save_failed", { message: message(error) });
+    });
+    return write;
+  }
+
+  /** Resolves once every registry write asked for so far is done (or failed). */
+  written() {
+    return this.writes;
   }
 
   keyPath(id) {
@@ -130,6 +171,8 @@ class ExtraTunnels {
         tunnelId: entry.tunnelId,
         accountId: entry.accountId,
         connectorHref: typeof entry.connectorHref === "string" ? entry.connectorHref : null,
+        connectorBindings: (Array.isArray(entry.connectorBindings) ? entry.connectorBindings : [])
+          .slice(-MAX_CONNECTOR_BINDINGS).map(binding => connectorBinding(binding, entry.tunnelId)).filter(Boolean),
         state: runtime?.state ?? "stopped",
         detail: runtime?.detail ?? "",
         pid: runtime?.pid ?? null,
@@ -279,12 +322,12 @@ class ExtraTunnels {
       let entryId;
       do entryId = crypto.randomBytes(4).toString("hex"); while (entries.some(entry => entry.id === entryId));
       const entry = { id: entryId, label: name, tunnelId: id, accountId };
-      writePrivateFileAtomic(this.keyPath(entryId), key);
-      this.writeEntries([...entries, entry]);
+      await writePrivateFileAtomicAsync(this.keyPath(entryId), key);
+      await this.writeEntries([...entries, entry]);
       try {
         await this.connect(entry, config);
       } catch (error) {
-        this.writeEntries(this.entries().filter(candidate => candidate.id !== entryId));
+        await this.writeEntries(this.entries().filter(candidate => candidate.id !== entryId)).catch(() => undefined);
         fs.rmSync(this.keyPath(entryId), { force: true });
         this.runtime.delete(entryId);
         this.onChange(this.status());
@@ -300,7 +343,7 @@ class ExtraTunnels {
       const entry = this.entries().find(candidate => candidate.id === id);
       if (!entry) throw new Error("That tunnel is not configured.");
       if (this.config) await this.stopAlias(this.tunnelFor(entry, this.config));
-      this.writeEntries(this.entries().filter(candidate => candidate.id !== id));
+      await this.writeEntries(this.entries().filter(candidate => candidate.id !== id));
       fs.rmSync(this.keyPath(id), { force: true });
       this.runtime.delete(id);
       this.onChange(this.status());
@@ -320,11 +363,18 @@ class ExtraTunnels {
     });
   }
 
-  /** Records the ChatGPT connector created for a tunnel. */
-  setConnector(id, href) {
+  /** Records scoped connector identities; saved records still require fresh remote verification. */
+  async setConnector(id, href, context) {
     const entries = this.entries();
-    if (!entries.some(entry => entry.id === id)) throw new Error("That tunnel is not configured.");
-    this.writeEntries(entries.map(entry => (entry.id === id ? { ...entry, connectorHref: href } : entry)));
+    const entry = entries.find(entry => entry.id === id);
+    if (!entry) throw new Error("That tunnel is not configured.");
+    const binding = context === undefined ? null : connectorBinding(context, entry.tunnelId, href);
+    if (context !== undefined && !binding) throw new Error("The connector binding does not match this tunnel and workspace.");
+    const bindings = (Array.isArray(entry.connectorBindings) ? entry.connectorBindings : [])
+      .map(saved => connectorBinding(saved, entry.tunnelId)).filter(Boolean);
+    const next = binding ? bindings.filter(saved => saved.userId !== binding.userId || saved.workspaceId !== binding.workspaceId)
+      .concat(binding).slice(-MAX_CONNECTOR_BINDINGS) : bindings;
+    await this.writeEntries(entries.map(entry => (entry.id === id ? { ...entry, connectorHref: href, connectorBindings: next } : entry)));
     this.onChange(this.status());
   }
 
@@ -333,7 +383,7 @@ class ExtraTunnels {
     const entries = this.entries();
     const owned = entries.filter(entry => entry.accountId === accountId).length;
     if (!owned) return 0;
-    this.writeEntries(entries.map(entry => (entry.accountId === accountId ? { ...entry, accountId: null } : entry)));
+    void this.writeEntries(entries.map(entry => (entry.accountId === accountId ? { ...entry, accountId: null } : entry))).catch(() => undefined);
     this.onChange(this.status());
     return owned;
   }

@@ -218,3 +218,16 @@ test("a window carried to a new model is fitted to the range that model takes", 
   walk(p.tree).find(item => item.type === "select" && item.props.value === "cpa/gpt").props.onChange({ target: { value: "cpa/small" } });
   assert.equal(p.changes.at(-1).context_window, 262144);
 });
+
+test("the Model scores leaderboard ranks like a benchmark: by the chosen view, then finished share; a model needs 3 missions to rank", () => {
+  const stats = (average, recent, best) => ({ count: 1, average, recent, best, last: recent });
+  const entry = (model, missions, passRate, average, recent = average, best = average) =>
+    ({ model, missions, finished: Math.round(missions * passRate), failed: missions - Math.round(missions * passRate), passRate, lastAt: null, overall: stats(average, recent, best), categories: {} });
+  const summary = [entry("a", 5, 0.8, 7.0, 9.0), entry("b", 4, 1, 8.0, 6.0), entry("c", 3, 0.5, 8.0, 8.0), entry("lucky", 1, 1, 10, 10, 10), entry("new", 2, 1, 6)];
+  const board = (view) => plain(scores.rankModels(summary, view)).map((item) => [item.model, item.rank]);
+  assert.deepEqual(board("average"), [["b", 1], ["c", 2], ["a", 3], ["lucky", null], ["new", null]],
+    "a tie on the score goes to the higher finished share; one lucky mission does not top the board");
+  assert.deepEqual(board("recent"), [["a", 1], ["c", 2], ["b", 3], ["lucky", null], ["new", null]], "the view chosen is what ranks");
+  assert.equal(scores.passText(entry("a", 5, 0.8, 7)), "80% (4/5)");
+  assert.equal(scores.passText({ missions: 2 }), "–", "an older backend's summary has no record");
+});

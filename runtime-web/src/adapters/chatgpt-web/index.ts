@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
-import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
+import { CHATGPT_CONNECTOR_NAME, defaultBrokerEndpoint, expandUserPath, getConfigDir, resolveBrokerEndpoint } from "../../config";
 import {
   cancelLauncherManualTurn,
   endLauncherManualTurn,
@@ -20,7 +20,7 @@ import {
 import { namespacedToolName, type AdapterEvent, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { ChatGptWebAdapterError } from "./adapter-error";
-import { ChatGptBrowserWorker } from "./browser-worker";
+import { ChatGptBrowserDiagnostics, ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -262,11 +262,19 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
   for (const event of events) emit(event);
 }
 
-function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
+function submittedTurnFailure(session: ChatGptTurnSession, error: unknown, provider: CodexProviderConfig): Error {
   const normalized = error instanceof Error ? error : new Error(String(error));
   if (normalized instanceof ChatGptWebAdapterError) return normalized;
   const phase = session.runtime.submission?.phase;
   if (!phase || phase === "prepared") return normalized;
+  try {
+    const root = provider.chatgptWeb?.browserDiagnosticsPath?.trim()
+      || (process.env.CODEX_CHATGPT_WEB_HOME?.trim() ? join(getConfigDir(), "diagnostics", "browser-turns") : undefined);
+    if (root && session.traceId) {
+      new ChatGptBrowserDiagnostics(session.traceId, resolve(expandUserPath(root)),
+        provider.chatgptWeb?.appName?.trim() || CHATGPT_CONNECTOR_NAME).captureFailureCause(phase, normalized);
+    }
+  } catch { /* Diagnostics must not replace the original failure or prevent cancellation. */ }
   const ambiguous = phase === "send_activated";
   return new ChatGptWebAdapterError(
     ambiguous
@@ -1395,7 +1403,7 @@ export function createChatGptWebAdapter(
             // owned DOM observer can continue proving the same accepted ChatGPT submission.
             throw error;
           }
-          const turnError = submittedTurnFailure(session, error);
+          const turnError = submittedTurnFailure(session, error, provider);
           const handledError = turnError instanceof ChatGptWebAdapterError && turnError.retryable
             ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, turnError)
             : turnError;

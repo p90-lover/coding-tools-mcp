@@ -19,10 +19,23 @@ function load(file, imports = {}) {
 const chat = load("ao-chat.ts");
 const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat, "./model-scores": load("model-scores.ts") });
 const markdown = load("ChatMarkdown.tsx", { "./chat-markdown": load("chat-markdown.ts") });
+
+test("visualize references are inert Markdown unless a completed answer supplies its Preview action", () => {
+  const reference = 'visualize{"path":"G:/task/counter_panel.html","title":"Counter"}';
+  const render = (text, onVisualize) => renderToStaticMarkup(React.createElement(markdown.ChatMarkdown, { text, onVisualize }));
+  assert.match(render(reference), /visualize/);
+  const final = render(reference, () => {});
+  assert.match(final, /button[^>]*>Counter/);
+  assert.doesNotMatch(final, /G:\/task|visualize/);
+  for (const inert of ['```text\n' + reference + '\n```', '> ' + reference, reference.slice(0, -1)]) {
+    assert.doesNotMatch(render(inert, () => {}), /class="cx-chip"/);
+  }
+});
 const menu = load("ChatMenu.tsx");
 const client = { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) };
+const visibility = load("page-visibility.ts");
 const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": menu, "./AgentOrchestratorRoleEditor": roles,
-  "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+  "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility });
 const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
 const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const clawd = load("Clawd.tsx");
@@ -32,12 +45,16 @@ const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
-  "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
+  "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client, "./page-visibility": visibility }),
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
   // controls and approval cards render only when a composer or an approval is passed.
   "./ChatBranchBar": { ChatBranchBar: () => null },
   "./HarnessLogo": { ModelLogo: () => null },
+  "./AgentOrchestratorRoleEditor": roles,
+  "./ChatReplyHead": load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null } }),
+  "./ChatReplyPlan": load("ChatReplyPlan.tsx"),
+  "./chat-reply-plan": load("chat-reply-plan.ts", { "./ao-chat": chat }),
   // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
   "./ChatAnnotations": load("ChatAnnotations.tsx", { "./ao-chat": chat }),
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
@@ -46,6 +63,20 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] },
   "./ComputerControlCard": { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
+
+test("visualize controls appear only in successful native WebGPT final answers", () => {
+  const answer = 'visualize{"path":"G:/task/counter.html","title":"Counter"}';
+  const props = { tasks: [{ id: "task", title: "Task", description: "User" }], selectedTaskId: "task", projectId: "ws", busy: false, approvals: [],
+    loadDescription: async () => "User", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  for (const variant of ["native", "cpa", "running", "failed"]) {
+    const node = { id: "lead", role: "planner", parents: [], x: 0, settings: {}, state: variant === "running" ? "running" : variant === "failed" ? "held" : "finished",
+      route: { harness_id: "codex-native", model: variant === "cpa" ? "gemini-flash" : "chatgpt-web/high" },
+      receipt: { answer, thread_id: "thread", started_at_ms: 1, finished_at_ms: 2, ...(variant === "failed" ? { error: "Failed" } : {}) } };
+    const runs = [{ id: "run", workspace_id: "ws", project_id: "task", execution_mode: "single", nodes: [node] }];
+    const rendered = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, runs }));
+    assert.equal(/class="cx-chip"[^>]*>Counter/.test(rendered), variant === "native", variant);
+  }
+});
 
 test("a project switch keeps its chat pane readable while loading and offers Retry after a failed read", () => {
   const props = { runs: [], tasks: [], selectedTaskId: "", deciding: true, busy: false, approvals: [],
@@ -99,6 +130,39 @@ test("a DeepSeek turn renders as DeepSeek Desktop's Standard view: a live group 
   const earlier = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("older"), live: false, expanded: false, useWork: doneWork }));
   assert.match(earlier, /dsh-turn-process-label">Completed<\/span>/, "an earlier turn says Completed");
   assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
+});
+
+test("a reply's head says who answered, how it stands, why it failed, a team's cards and the files it changed", () => {
+  const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null } });
+  const edit = (path, additions, deletions) => ({ id: `${path}${additions}`, kind: "edit", status: "completed", text: "", files: [{ path, additions, deletions }] });
+  // Seven one-line edits of one file read as that file once, with their lines summed.
+  const changes = head.turnChanges([edit("src/aistudio.js", 1, 1), { id: "c", kind: "command", status: "completed", text: "npm test" },
+    edit("src/aistudio.js", 4, 2), edit("tests/aistudio.test.cjs", 2, 0)]);
+  assert.equal(JSON.stringify(changes.map((file) => [file.path, file.additions, file.deletions]).sort()),
+    JSON.stringify([["src/aistudio.js", 5, 3], ["tests/aistudio.test.cjs", 2, 0]]));
+  const single = renderToStaticMarkup(React.createElement(head.ReplyHead, { team: false, name: "GPT-6.1 Sol", tone: "failed",
+    startedAtMs: 1_000, endedAtMs: 155_000, error: { step: "GPT-6.1 Sol", message: "API Error: 400 unknown provider" }, members: [], changes }));
+  assert.match(single, /cx-reply-who-name">GPT-6\.1 Sol</);
+  assert.match(single, /cx-reply-status is-failed">Failed</);
+  assert.match(single, /cx-reply-time[^>]*>2m 34s</, "how long it ran");
+  assert.match(single, /role="alert".*API Error: 400 unknown provider/, "the error leads the reply");
+  assert.match(single, /2 files <span class="cx-reply-diff"><span class="is-add">\+7<\/span> <span class="is-del">−3<\/span>/, "the turn's total change");
+  assert.doesNotMatch(single, /cx-reply-roster|cx-reply-mode/, "a single chat has no team");
+  const step = (key, name, extra) => ({ key, nodeId: key, role: "worker", name, detail: "", state: "finished", ...extra });
+  const members = [step("p", "Planner"), step("w", "Worker", { working: { detail: "", stalled: false, activity: "Running npm test" }, state: "running" }),
+    step("r", "Reviewer", { state: "pending" })].map((card) => ({ key: card.key, name: card.name, modelName: "GPT-6.1 Sol", tone: head.cardTone(card),
+    state: card.working?.activity ?? card.state }));
+  const team = renderToStaticMarkup(React.createElement(head.ReplyHead, { team: true, name: "Team", tone: "working", startedAtMs: Date.now() - 5_000,
+    members, changes: [] }));
+  assert.match(team, /cx-reply-mode">Team · 3</);
+  assert.match(team, /cx-reply-member is-done.*Planner.*cx-reply-member is-working.*Running npm test.*cx-reply-member is-queued.*Reviewer/, "each card, in order, with how it stands");
+  assert.doesNotMatch(team, /Changed files/, "no files strip before any edit");
+  // A live turn reads stuck as soon as one card is; an ended one by its failure first, then how the run ended.
+  const turn = (status, steps) => ({ key: "t", runId: "r", status, solo: false, steps });
+  assert.equal(head.replyTone(turn("running", [step("a", "A", { working: { detail: "", stalled: true } })]), true), "stalled");
+  assert.equal(head.replyTone(turn("stopped", [step("a", "A", { error: "boom" })]), false), "failed");
+  assert.equal(head.replyTone(turn("stopped", [step("a", "A")]), false), "stopped");
+  assert.equal(head.replyTone(turn("done", [step("a", "A")]), false), "done");
 });
 
 test("a DeepSeek group's rows read as DeepSeek Harness's: Think, Bash, Edit, and a failed command's exit capsule", () => {
@@ -526,7 +590,7 @@ test("a question the person answered shows as Claude Code shows one: the questio
 
 test("the side panel opens on an Overview of the chat: environment, context, changes, background tasks and usage", () => {
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat,
-    "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+    "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility });
   const html = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, {
     sessions: [{ id: "ao-1", label: "Claude Code", model: "cpa/cline-pass/glm-5.3-flash", contextWindow: 400000 }],
     tab: "overview", onTab: () => {}, onClose: () => {}, workspaceId: "ws" }));
@@ -550,7 +614,7 @@ test("a chat shows the subagents its own agents started, as Codex's panel does: 
   assert.equal(chat.subagentsSummary([]), null);
 
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat,
-    "./ChatMarkdown": markdown, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+    "./ChatMarkdown": markdown, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility });
   const props = { sessions: [{ id: "ao-1", label: "Claude Code" }], onTab: () => {}, onClose: () => {}, workspaceId: "ws", subagents: own };
   const overview = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, { ...props, tab: "overview" }));
   assert.match(overview, /<h4>Subagents<small>2 working<\/small>/, "the Overview lists them");

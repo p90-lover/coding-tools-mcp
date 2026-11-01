@@ -386,15 +386,17 @@ const WATCHED = new Set<string>();
  * `refusal`: CPA refusing the running turn's model (cpaRefusalNote), said on its "Deep diving" line.
  * `beforeStatus`: what goes right above that line while the turn runs (the chat's steers on their
  * way): the line stays the turn's last row, as DeepSeek Harness keeps its status under everything.
+ * `headed`: the chat's reply head (ChatReplyHead) already says how the turn ended and how long it
+ * took, so the fold reads "Show work" and a failed or stopped turn, always open, has no line at all.
  */
-export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null; beforeStatus?: ReactNode };
+export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null; beforeStatus?: ReactNode; headed?: boolean };
 
 /**
  * A DeepSeek turn's work. Running: its work in groups, the last one live, "Deep diving" under them. Ended: "Completed in
  * 1m 4s" heads it, folded unless the chat shows work details; a failed or stopped turn stays open.
  * The chat memoizes it with its own check of what a turn shows.
  */
-export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false, refusal = null, beforeStatus = null }: DshTurnWorkProps) {
+export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false, refusal = null, beforeStatus = null, headed = false }: DshTurnWorkProps) {
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
   const failed = steps.some((step) => step.error);
   const stopped = turn.status === "stopped";
@@ -414,9 +416,10 @@ export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = f
     : steps.map((step) => <DshAgent key={step.key} step={step} useWork={useWork} answer={step === turn.final ? answer : undefined} />);
   // The end its cards kept, or the moment this window saw it end (cards saved before builds that kept one).
   const ended = turn.endedAtMs ?? ENDED.get(turn.key);
-  const label = stopped ? "Stopped" : failed ? "Failed" : ended && turn.startedAtMs ? "Completed in " : "Completed";
+  const label = headed ? (open ? "Hide work" : "Show work")
+    : stopped ? "Stopped" : failed ? "Failed" : ended && turn.startedAtMs ? "Completed in " : "Completed";
   return <div className="dsh-turn-work">
-    {!live ? <button type="button" className="dsh-turn-process" data-open={open || undefined} disabled={alwaysOpen}
+    {!live && !(headed && alwaysOpen) ? <button type="button" className="dsh-turn-process" data-open={open || undefined} disabled={alwaysOpen}
       aria-expanded={open} onClick={() => setChosen(!open)}>
       <span className="dsh-turn-process-label">{label}{label === "Completed in " ? <span className="dsh-num">{dshDuration(ended! - turn.startedAtMs!)}</span> : null}</span>
       {alwaysOpen ? null : <span className="dsh-turn-process-chevron">{ICON.down}</span>}

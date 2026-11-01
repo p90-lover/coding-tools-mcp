@@ -2,10 +2,15 @@ import { useEffect, useState } from "react";
 import type { ComputerRequest } from "../api/contracts";
 import { getCodingToolsClient } from "../api/client";
 
-// A chat agent asking to control a window (electron/computer-control.cjs) is asked in that chat, on
-// a card like the agent's other requests: the window it may click and type in, for how long, and
-// Start. It was a window of its own that came up on top and took the focus from whatever the person
-// was doing (2026-10-31).
+// A chat agent asking to use an app through computer use (electron/computer-control.cjs) is asked in
+// that chat, on Codex's own app-approval card (computer-use-app-approval-request-card, Codex
+// 26.1016): "Allow <agent> to use <app>?" with Always allow, Deny and Allow this conversation, and
+// Codex's first-use notice until an app was ever allowed. It asked for a window and a duration
+// until 2026-10-31.
+
+// Codex's first-use disclosure (composer.computerUseAppApproval.disclosure), for this app's agents.
+const DISCLOSURE = "Computer Use lets the agent use apps on your computer. It may take screenshots of app contents while working. "
+  + "You can choose which apps it can access and stop actions at any time.";
 
 /** The requests waiting for the person, kept current as they come and go. */
 export function useComputerRequests(): ComputerRequest[] {
@@ -29,50 +34,51 @@ export function chatComputerRequests(requests: readonly ComputerRequest[], sessi
     || (!request.sessions.length && Boolean(workspaceId) && request.workspaceId === workspaceId));
 }
 
+/** Codex's computer-use mark: a screen with a pointer. */
+function ComputerUseMark() {
+  return <svg className="cx-computer-mark" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+    <rect x="1.5" y="2" width="13" height="9" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    <path d="M5.5 14h5M8 11v3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    <path d="M7 5l3.6 1.5-1.5.5-.5 1.5Z" fill="currentColor" />
+  </svg>;
+}
+
 export function ComputerControlCard({ request }: { request: ComputerRequest }) {
-  const [picked, setPicked] = useState<number | null>(null);
-  const [duration, setDuration] = useState(request.durations[0]?.id ?? "");
-  const [capture, setCapture] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const ready = picked !== null && (!request.captureOff || capture) && !busy;
-  const send = async (input: { cancel?: boolean; window?: number; duration?: string; capture?: boolean }) => {
+  const send = async (decision: "always" | "conversation" | "deny") => {
     setBusy(true); setError("");
     try {
-      const result = await getCodingToolsClient().computer.answer({ id: request.id, ...input });
-      if (!result.ok) setError(result.error || "Control did not start");
+      const result = await getCodingToolsClient().computer.answer({ id: request.id, decision });
+      if (!result.ok) setError(result.error || "That did not go through");
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally { setBusy(false); }
   };
-  const start = () => { if (ready && picked !== null) void send({ window: picked, duration, ...(request.captureOff ? { capture } : {}) }); };
-  return <div className="cdx-card cx-computer-card" role="alert" aria-label="Let the agent control a window"
+  // Codex's subtitle: the first-use notice, then what this request adds (here: the project's capture).
+  const subtitle = [
+    request.firstUse ? DISCLOSURE : "",
+    request.window ? `Window: ${request.window}` : "",
+    request.captureOff ? `Allowing it turns on screen capture for ${request.project}.` : "",
+  ].filter(Boolean).join("\n\n");
+  return <div className="cdx-card cx-computer-card" role="alert" aria-label={`Allow ${request.agent} to use ${request.app}?`}
     onKeyDown={(event) => {
-      if (event.key === "Escape") { event.preventDefault(); void send({ cancel: true }); }
-      else if (event.key === "Enter" && !(event.target instanceof HTMLSelectElement)) { event.preventDefault(); start(); }
+      if (event.key === "Escape") { event.preventDefault(); if (!busy) void send("deny"); }
     }}>
     <div className="cdx-body">
-      <span className="cdx-title">Let the agent control a window?</span>
-      <span className="cdx-reason">{request.chat} asked to control your screen in {request.project}. Pick the one window it may
-        click and type in. A bar stays on screen while control is on; Stop there or Ctrl+Alt+Escape ends it.</span>
-      {request.windows.length ? <div className="cdx-options cx-computer-windows" role="radiogroup" aria-label="Window">
-        {request.windows.map((item, index) => <button key={`${item.pid}:${index}`} type="button" role="radio" aria-checked={picked === index}
-          className={`cdx-option${picked === index ? " is-selected" : ""}`} disabled={busy} title={item.title} onClick={() => setPicked(index)}>
-          <span className="cdx-option-label">{item.title}</span>
-          <span className="cdx-option-description">pid {item.pid}</span>
-        </button>)}
-      </div> : <span className="cdx-reason">No window can be controlled right now.</span>}
-      {request.captureOff ? <label className="cx-computer-check">
-        <input type="checkbox" checked={capture} disabled={busy} onChange={(event) => setCapture(event.target.checked)} />
-        Turn on screen capture for {request.project} (control needs it)</label> : null}
+      <span className={request.elevated ? "cdx-kind cx-computer-head is-elevated" : "cdx-kind cx-computer-head"}>
+        {request.elevated ? <><span aria-hidden="true">⚠</span><span>Elevated Risk</span></> : <><ComputerUseMark /><span>Computer Use</span></>}
+      </span>
+      <span className="cdx-title">Allow {request.agent} to use {request.app}?</span>
+      {subtitle ? <span className="cdx-reason cx-computer-subtitle">{subtitle}</span> : null}
       {error ? <span className="cdx-reason cx-computer-error" role="status">{error}</span> : null}
     </div>
     <div className="cdx-foot">
-      <select className="cdx-input cx-computer-duration" aria-label="For how long" value={duration} disabled={busy} onChange={(event) => setDuration(event.target.value)}>
-        {request.durations.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-      </select>
-      <button type="button" className="cdx-button is-ghost" disabled={busy} onClick={() => void send({ cancel: true })}>Deny</button>
-      <button type="button" className="cdx-button is-primary" disabled={!ready} onClick={start}>Start</button>
+      {request.persistModes.includes("always")
+        ? <button type="button" className="cdx-button is-outline cx-computer-lead" disabled={busy} onClick={() => void send("always")}>Always allow</button>
+        : null}
+      <button type="button" className="cdx-button is-outline" disabled={busy} onClick={() => void send("deny")}>Deny</button>
+      <button type="button" className="cdx-button is-primary" disabled={busy} onClick={() => void send("conversation")}>Allow this conversation</button>
     </div>
   </div>;
 }

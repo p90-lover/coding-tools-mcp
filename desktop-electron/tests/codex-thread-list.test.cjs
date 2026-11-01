@@ -138,6 +138,25 @@ test("another open project lists its chats; opening one switches to its project 
   delete stored["coding-tools:ao:open-projects"];
 });
 
+test("a collapsed project you are not in still spins while one of its chats runs", async () => {
+  // The user: "it doesnt show the project have any running" with chats running in a collapsed
+  // project; only opened projects' chats were read, so its row had nothing to show.
+  const { props } = fixture();
+  const loaded = [];
+  const list = mount("ChatThreadList.tsx", { ...props, loadProjectChats: async (id) => {
+    loaded.push(id);
+    return [{ taskId: "b1", title: "Beta chat", status: "running", runIds: ["rb"], latestRunId: "rb" }];
+  } }, { effects: true });
+  list.render();
+  await new Promise((resolve) => setImmediate(resolve));
+  const view = list.render();
+  assert.ok(loaded.includes("b"), "the collapsed project is read");
+  assert.ok(!loaded.includes("a"), "the open project's chats come from the page");
+  assert.equal(projectButton(view, "Beta").props["aria-expanded"], false, "it stays collapsed");
+  const badge = walk(projectButton(view, "Beta")).find((element) => /cx-project-badge/.test(String(element.props?.className)));
+  assert.equal(badge?.props.className, "cx-project-badge is-running");
+});
+
 test("split-pane chat rows stay open across focus changes and clear their marker on close", async () => {
   const saved = { ...stored };
   for (const key of Object.keys(stored)) delete stored[key];

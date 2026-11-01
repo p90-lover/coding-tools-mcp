@@ -1,4 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
+import type { ComputerAllowedApp, JsonObject } from "../api/contracts";
+import { getCodingToolsClient } from "../api/client";
 import type { LauncherState, UpdateSettings, UpdateSettingValues, UpdateState } from "../types";
 import { ChatGlyph } from "./ChatMenu";
 import "./chat-settings.css";
@@ -11,12 +13,53 @@ import "./chat-settings.css";
  * sidebar's Settings row or Ctrl+, (pressed again, it closes, as in Codex).
  */
 
-type Section = "general" | "updates";
+type Section = "general" | "chat" | "computer-use" | "updates";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "general", label: "General" },
+  { id: "chat", label: "Chat" },
+  { id: "computer-use", label: "Computer use" },
   { id: "updates", label: "Updates" },
 ];
+const SECTION_GLYPHS = { general: "gear", chat: "compose", "computer-use": "monitor", updates: "update" } as const;
+
+/**
+ * Codex's "Always-allowed apps" (settings.computerUse.allowedApps): the apps a chat agent may use
+ * without asking, each with Remove; the agent asks again the next time it wants a removed one.
+ */
+function AllowedApps({ onError }: { onError: (message: string) => void }) {
+  const [apps, setApps] = useState<ComputerAllowedApp[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    try {
+      void getCodingToolsClient().computer.allowedApps().then((result) => { if (live) setApps(result.apps ?? []); }, () => { if (live) setFailed(true); });
+    } catch { setFailed(true); }
+    return () => { live = false; };
+  }, []);
+  const remove = (app: ComputerAllowedApp) => {
+    if (!window.confirm(`Remove “${app.name}” from always allowed apps?\n\nThe agent will ask to use “${app.name}” the next time it needs it.`)) return;
+    void getCodingToolsClient().computer.forgetApp({ app: app.app })
+      .then((result) => { if (result.ok && result.apps) setApps(result.apps); else onError(result.error || "Unable to save allowed apps"); },
+        () => onError("Unable to save allowed apps"));
+  };
+  if (failed) return <Row label="Unable to load allowed apps."><span /></Row>;
+  if (!apps) return <Row label="Loading allowed apps…"><span /></Row>;
+  if (!apps.length) return <Row label="None yet"><span /></Row>;
+  return <>{apps.map((app) => <Row key={app.app} label={app.name} description={app.app}>
+    <button type="button" className="cxs-button" aria-label={`Remove ${app.name}`} onClick={() => remove(app)}>Remove</button>
+  </Row>)}</>;
+}
+
+// How full a chat gets before its next message compacts it first; the bridge takes 20 to 100
+// (chat_auto_compact), and /autocompact any share in between.
+const COMPACT_CHOICES = [50, 60, 70, 80, 90, 95, 100];
+
+/** The chat's own preferences, kept by the bridge (agent-orchestrator-workflow.cjs), as Claude Code's settings. */
+type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean };
+const chatCall = (operation: string, args: JsonObject = {}) => getCodingToolsClient().apps
+  .call({ moduleId: "agent-orchestrator", operation, arguments: args })
+  .then((outer) => ((outer as { result?: Record<string, unknown> }).result ?? outer) as Record<string, unknown>);
 
 // The choices the minute settings offer; main (state.cjs) accepts any whole minute within the limits.
 const IDLE_CHOICES = [0, 5, 10, 15, 30, 60, 120];
@@ -76,6 +119,7 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
   const [updates, setUpdates] = useState<UpdateSettings | null>(null);
   const [update, setUpdate] = useState<UpdateState | null>(null);
   const [error, setError] = useState("");
+  const [chat, setChat] = useState<ChatPreferences | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -85,6 +129,14 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
     const offUpdate = api?.onUpdateState((next) => setUpdate(next));
     return () => { live = false; offState?.(); offUpdate?.(); };
   }, [api]);
+  useEffect(() => {
+    let live = true;
+    void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges")])
+      .then(([compact, retry, judges]) => {
+        if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true });
+      }, () => undefined);
+    return () => { live = false; };
+  }, []);
 
   // Every change goes through main, which checks it; the page shows what main kept.
   const run = (task: Promise<unknown> | undefined) => {
@@ -95,6 +147,15 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
     run(api?.updateSettings?.({ [key]: value }).then(setUpdates));
   };
 
+  // Like the update settings, a chat preference shows what the bridge kept.
+  const setChatPreference = (operation: string, args: JsonObject) => {
+    run(chatCall(operation, args).then((result) => setChat((current) => current && {
+      ...current,
+      ...(operation === "chat_auto_compact" ? { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || current.percent } : {}),
+      ...(operation === "chat_auto_retry" ? { autoRetry: result.autoRetry === true } : {}),
+      ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true } : {}),
+    })));
+  };
   const values = updates?.values;
   const title = SECTIONS.find((item) => item.id === section)?.label ?? "Settings";
 
@@ -107,7 +168,7 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
         </button>
         {SECTIONS.map((item) => <button key={item.id} type="button" aria-current={section === item.id ? "page" : undefined}
           className={section === item.id ? "cxs-nav-item is-active" : "cxs-nav-item"} onClick={() => setSection(item.id)}>
-          <span className="cxs-nav-icon"><ChatGlyph name={item.id === "general" ? "gear" : "update"} size={16} /></span>
+          <span className="cxs-nav-icon"><ChatGlyph name={SECTION_GLYPHS[item.id]} size={16} /></span>
           <span className="cxs-nav-label">{item.label}</span>
         </button>)}
       </nav>
@@ -128,6 +189,34 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
                 <Toggle label="Keep running when the window is closed" checked={state?.keepRunningOnClose === true} disabled={!state}
                   onChange={(next) => run(api?.setPreference("keepRunningOnClose", next).then(setState))} />
               </Row>
+            </Group>
+          </div> : section === "chat" ? <div className="cxs-sections">
+            <Group title="Context">
+              <Row label="Auto-compact" description="When a chat gets long, its earlier conversation becomes a summary before the next message, so it never stops full. Also /autocompact">
+                <Toggle label="Auto-compact" checked={chat?.autoCompact ?? true} disabled={!chat}
+                  onChange={(next) => setChatPreference("chat_auto_compact", { enabled: next })} />
+              </Row>
+              <Row label="Compact when the chat is" description="How full a chat gets before it compacts itself. Lower compacts sooner, with smaller summaries">
+                <select className="cxs-select" aria-label="Compact when the chat is" value={chat?.percent ?? 95} disabled={!chat || !chat.autoCompact}
+                  onChange={(event) => setChatPreference("chat_auto_compact", { percent: Number(event.target.value) })}>
+                  {(chat && !COMPACT_CHOICES.includes(chat.percent) ? [...COMPACT_CHOICES, chat.percent].sort((a, b) => a - b) : COMPACT_CHOICES)
+                    .map((percent) => <option key={percent} value={percent}>{percent}% full</option>)}
+                </select>
+              </Row>
+            </Group>
+            <Group title="Turns">
+              <Row label="Retry automatically" description="A failed step retries by itself, up to 8 times over about half an hour. Sign-in errors still wait for you">
+                <Toggle label="Retry automatically" checked={chat?.autoRetry === true} disabled={!chat}
+                  onChange={(next) => setChatPreference("chat_auto_retry", { enabled: next })} />
+              </Row>
+              <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead">
+                <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
+                  onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
+              </Row>
+            </Group>
+          </div> : section === "computer-use" ? <div className="cxs-sections">
+            <Group title="Always-allowed apps">
+              <AllowedApps onError={setError} />
             </Group>
           </div> : <div className="cxs-sections">
             <Group title="App updates">

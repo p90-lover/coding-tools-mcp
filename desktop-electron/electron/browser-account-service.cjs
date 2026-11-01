@@ -207,6 +207,32 @@ function createBrowserAccountService(deps) {
     return status();
   }
 
+  /**
+   * Removes several accounts at once (the management page's bulk delete): the ones not in use first,
+   * so a switch happens at most once, and only if the account in use is among them. One that cannot
+   * go (a turn running on it, or the last account) stays, and its reason is returned beside the rest.
+   */
+  async function removeMany(accountIds, context) {
+    const wanted = [...new Set(Array.isArray(accountIds) ? accountIds.filter((id) => typeof id === "string") : [])];
+    if (!wanted.length) throw new Error("Choose the accounts to remove");
+    const listed = new Set(deps.registry.status().accounts.map((entry) => entry.id));
+    if (wanted.every((id) => listed.has(id)) && wanted.length >= listed.size) throw new Error("Keep at least one account: the Browser tab needs one");
+    const active = deps.registry.activeId();
+    const order = [...wanted.filter((id) => id !== active), ...wanted.filter((id) => id === active)];
+    const removed = [];
+    const failed = [];
+    for (const id of order) {
+      try {
+        await remove(id, context);
+        removed.push(id);
+      } catch (error) {
+        failed.push({ id, message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    context?.logger?.info?.("browser_accounts.removed_many", { removed: removed.length, failed: failed.length });
+    return { ...status(), removed, failed };
+  }
+
   return {
     status,
     publish,
@@ -214,6 +240,7 @@ function createBrowserAccountService(deps) {
     switchTo,
     add,
     remove,
+    removeMany,
     switching: () => switching !== null,
     /** Whether a switch left this account's plan for the bridge to pick up (takeBridgeRefresh clears it). */
     bridgeRefreshPending: (accountId) => bridgeRefreshFor === accountId,

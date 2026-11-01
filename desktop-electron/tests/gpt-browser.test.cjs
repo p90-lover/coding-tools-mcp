@@ -4,7 +4,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createGptBrowserHost, browsableUrl, cleanUserAgent, partitionFor } = require("../electron/gpt-browser.cjs");
+const vm = require("node:vm");
+const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirname, "..")] }));
+const { createGptBrowserHost, browsableUrl, cleanUserAgent, partitionFor, readGptBrowserState } = require("../electron/gpt-browser.cjs");
 
 function fakeWorld() {
   const sessions = new Map();
@@ -94,6 +96,8 @@ test("each account gets its own persistent partition and survives a restart", as
 
   await first.switchTo(a);
   assert.equal([...world.attached][0].webContents.partition, partitionFor(a));
+  // Saved off the main thread: the restart reads what reached the disk.
+  await first.saved();
 
   const again = host(fakeWorld(), root);
   assert.deepEqual(again.status().accounts.map((entry) => entry.id), [a, b]);
@@ -123,6 +127,66 @@ test("removing an account erases its session and falls back to another", async (
   assert.equal(world.sessions.get(partitionFor(b)).cleared, 1);
   assert.equal(after.activeId, a);
   assert.deepEqual(after.accounts.map((entry) => entry.id), [a]);
+});
+
+function removalSurface() {
+  const slots = [], timers = new Map(), removed = []; let cursor = 0, nextTimer = 0, listener, activeId = "a", pending = [], dirty = false;
+  const status = () => ({ activeId, accounts: [{ id: "a", label: "Account A" }, { id: "b", label: "Account B" }], page: null });
+  const effect = (fn, deps) => { const at = cursor++, old = slots[at]; if (!old || deps?.some((value, i) => value !== old.deps?.[i])) {
+    const slot = slots[at] = { deps, cleanup: old?.cleanup }; pending.push(() => { slot.cleanup?.(); slot.cleanup = fn(); });
+  } };
+  const react = {
+    useState(initial) { const at = cursor++; if (!(at in slots)) slots[at] = typeof initial === "function" ? initial() : initial;
+      return [slots[at], value => { const next = typeof value === "function" ? value(slots[at]) : value; dirty ||= next !== slots[at]; slots[at] = next; }]; },
+    useRef(initial) { const at = cursor++; return slots[at] ?? (slots[at] = { current: initial }); },
+    useEffect: effect, useLayoutEffect() { cursor++; }, useCallback: fn => fn,
+  };
+  const api = { gptBrowserStatus: async () => status(), onGptBrowserChanged: fn => { listener = fn; return () => { listener = null; }; },
+    setGptBrowserSurfaceActive: async () => status(), switchGptBrowserAccount: async id => { activeId = id; return status(); },
+    removeGptBrowserAccount: async id => { removed.push(id); return status(); } };
+  const window = { setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; }, clearTimeout: id => timers.delete(id) };
+  const jsx = (type, props) => ({ type, props }), exports = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/GptBrowserSurface.tsx"), "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, { exports, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, window });
+  const props = { api, active: false, setError() {} };
+  const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
+  const render = (runEffects = true) => { let view; do { cursor = 0; pending = []; dirty = false; view = exports.GptBrowserSurface(props); if (runEffects) for (const run of pending) run(); } while (runEffects && dirty); return view; };
+  const button = (runEffects = true) => walk(render(runEffects)).find(item => item.props?.title === "Sign out and erase browser data");
+  return { timers, removed, render, button, click: () => button().props.onClick(),
+    select: id => walk(render()).find(item => item.type === "select").props.onChange({ target: { value: id } }),
+    push(id) { activeId = id; listener(status()); }, expire(id) { const timer = timers.get(id); timers.delete(id); timer.fn(); },
+    unmount() { for (const slot of slots) slot?.cleanup?.(); } };
+}
+
+test("removal confirmation belongs to the account selected by the picker or status event", async t => {
+  for (const via of ["picker", "status event"]) await t.test(via, async () => {
+    const ui = removalSurface(); ui.render(); await new Promise(setImmediate); ui.click();
+    if (via === "picker") ui.select("b"); else ui.push("b"); await new Promise(setImmediate);
+    assert.equal(ui.button().props.children, "Remove account"); assert.equal(ui.button().props.className, "button-secondary");
+    ui.click(); assert.deepEqual(ui.removed, []); assert.equal(ui.button().props.children, "Click again to remove");
+    assert.equal(ui.timers.size, 1); ui.click(); await new Promise(setImmediate); assert.deepEqual(ui.removed, ["b"]); ui.unmount();
+  });
+});
+
+test("switching away and back requires fresh removal confirmation", async () => {
+  const ui = removalSurface(); ui.render(); await new Promise(setImmediate); ui.click(); ui.push("b"); ui.render(); ui.push("a");
+  assert.equal(ui.button().props.children, "Remove account"); ui.click(); assert.deepEqual(ui.removed, []); ui.unmount();
+});
+
+test("account-owned confirmation protects the action before the account-change effect runs", async () => {
+  const ui = removalSurface(); ui.render(); await new Promise(setImmediate); ui.click(); ui.push("b");
+  const button = ui.button(false); assert.equal(button.props.children, "Remove account"); button.props.onClick();
+  assert.deepEqual(ui.removed, []); assert.equal(ui.timers.size, 1); ui.unmount();
+});
+
+test("same-account removal retains its four-second expiry and clears timers on removal or unmount", async () => {
+  const ui = removalSurface(); ui.render(); await new Promise(setImmediate); ui.click();
+  const [id, timer] = [...ui.timers][0]; assert.equal(timer.delay, 4000); ui.expire(id);
+  assert.equal(ui.button().props.children, "Remove account"); ui.click(); assert.deepEqual(ui.removed, []);
+  ui.push("a"); assert.equal(ui.button().props.children, "Click again to remove"); ui.click(); await new Promise(setImmediate);
+  assert.deepEqual(ui.removed, ["a"]); assert.equal(ui.timers.size, 0); ui.click(); assert.equal(ui.timers.size, 1);
+  ui.unmount(); assert.equal(ui.timers.size, 0);
 });
 
 test("web pages stay in the account's session; only mailto leaves the app", async () => {
@@ -167,6 +231,7 @@ test("overlapping surface activation creates one page and hiding detaches it", a
   const root = tempRoot();
   const saved = host(fakeWorld(), root);
   await saved.addAccount();
+  await saved.saved();
   saved.dispose();
 
   const world = fakeWorld();
@@ -196,6 +261,7 @@ test("a failed shared page preparation can be retried", async () => {
   const root = tempRoot();
   const saved = host(fakeWorld(), root);
   await saved.addAccount();
+  await saved.saved();
   saved.dispose();
 
   const world = fakeWorld();
@@ -226,6 +292,7 @@ test("removal and shutdown cancel pending page creation", async () => {
     const root = tempRoot();
     const saved = host(fakeWorld(), root);
     await saved.addAccount();
+    await saved.saved();
     saved.dispose();
 
     const world = fakeWorld();
@@ -253,4 +320,152 @@ test("hiding the pane takes the page out of the window", async () => {
   assert.equal(world.attached.size, 1);
   await browser.setSurfaceActive(false);
   assert.equal(world.attached.size, 0);
+});
+
+test("saved accounts are read off the main thread and handed to the host", async () => {
+  const root = tempRoot();
+  const first = host(fakeWorld(), root);
+  const id = (await first.addAccount()).activeId;
+  await first.saved();
+  first.dispose();
+
+  const readSync = fs.readFileSync;
+  let syncReads = 0;
+  fs.readFileSync = (...args) => { syncReads += 1; return readSync(...args); };
+  try {
+    const text = await readGptBrowserState(root);
+    const browser = host(fakeWorld(), root, { savedText: text });
+    assert.deepEqual(browser.status().accounts.map((entry) => entry.id), [id]);
+    assert.equal(syncReads, 0, "the host does not read the file again");
+    browser.dispose();
+    // None saved yet: an empty browser, with nothing logged.
+    const warnings = [];
+    const empty = await readGptBrowserState(tempRoot(), { warn: (...args) => warnings.push(args) });
+    assert.equal(empty, null);
+    assert.deepEqual(host(fakeWorld(), root, { savedText: empty }).status().accounts, []);
+    assert.deepEqual(warnings, []);
+  } finally {
+    fs.readFileSync = readSync;
+  }
+});
+
+function gptBrowserRecoveryFixture(content = JSON.stringify({
+  activeId: "abcdefghijkl", accounts: [{ id: "abcdefghijkl", label: "Existing" }],
+})) {
+  const vm = require("node:vm");
+  const captureRoot = path.resolve(__dirname, "../../aiTemp/gpt-browser-capture-only");
+  const file = path.join(captureRoot, "gpt-browser", "accounts.json");
+  const bytes = new Map([[file, content], [`${file}.bak`, content]]);
+  const writes = [], warnings = [], reads = [];
+  let fault = null;
+  const read = (target, mode) => {
+    assert.equal(target, file);
+    reads.push(mode);
+    if (fault) throw Object.assign(new Error("fixture accounts read failed"), { code: fault });
+    return bytes.get(file);
+  };
+  const durable = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/durable-state.cjs"), "utf8"), {
+    module: durable, require: name => name === "node:fs" ? {} : name === "./atomic-file.cjs" ? {
+      writePrivateFileAtomicAsync: async (target, text) => {
+        assert.ok(target === file || target === `${file}.bak`);
+        writes.push(target); bytes.set(target, text);
+      },
+    } : require(name),
+  });
+  const world = fakeWorld(), loaded = { exports: {} };
+  const context = vm.createContext({
+    module: loaded, URL,
+    require: name => name === "node:fs" ? {
+      readFileSync: target => read(target, "sync"),
+      promises: { readFile: async target => read(target, "async") },
+    } : name === "./durable-state.cjs" ? durable.exports : require(name),
+    gptBrowser: null, CORE_HOME: captureRoot, session: { fromPartition: world.sessionFor },
+    WebContentsView: function (options) { return world.createView(options.webPreferences.partition); },
+    mainWindow: null, routeGptBrowserSession: async () => {}, send() {},
+    shell: { openExternal: async () => {} }, openWebUrl: async () => {},
+  });
+  const source = fs.readFileSync(path.join(__dirname, "../electron/gpt-browser.cjs"), "utf8");
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const getHost = main.match(/function getGptBrowser\([^]*?\n}/)?.[0];
+  assert.ok(getHost, "exercise the current main-process load and failed-promise reset");
+  vm.runInContext(`${source}\n${getHost}`, context);
+  const logger = { warn: event => warnings.push(event) };
+  return {
+    writes, warnings, reads, world,
+    bytes: () => bytes.get(file), backup: () => bytes.get(`${file}.bak`),
+    fault: code => { fault = code; },
+    get: () => context.getGptBrowser(logger),
+    open: () => loaded.exports.createGptBrowserHost({ logger, dataRoot: path.dirname(file), ...world }),
+  };
+}
+
+test("an unreadable GPT Browser startup preserves both copies and retries a healthy async read", async t => {
+  for (const code of ["EIO", "EACCES"]) await t.test(code, async () => {
+    const f = gptBrowserRecoveryFixture(), original = f.bytes();
+    f.fault(code);
+    let browser, failure;
+    try {
+      browser = await f.get(); f.fault(null);
+      await browser.addAccount(); await browser.saved();
+    } catch (error) { failure = error; } finally { browser?.dispose(); }
+    assert.equal(f.writes.length, 0, "Add must not overwrite a fallback registry or its backup");
+    assert.equal(f.bytes(), original); assert.equal(f.backup(), original);
+    assert.equal(failure?.code, code);
+    assert.ok(f.warnings.includes("gpt_browser.state_unreadable"));
+    f.fault(null);
+    const recovered = await f.get();
+    try {
+      assert.deepEqual(Array.from(recovered.status().accounts, entry => entry.id), ["abcdefghijkl"]);
+      assert.equal(recovered.status().activeId, "abcdefghijkl");
+      await recovered.switchTo("abcdefghijkl");
+      assert.ok(f.world.sessions.has(partitionFor("abcdefghijkl")));
+      recovered.rename("abcdefghijkl", "Recovered"); await recovered.saved();
+      assert.equal(JSON.parse(f.bytes()).accounts[0].label, "Recovered");
+      assert.equal(f.reads.includes("sync"), false, "main startup stays off the synchronous read path");
+    } finally { recovered.dispose(); }
+  });
+});
+
+test("unusable GPT Browser JSON, root shape and direct reads cannot become writable empty hosts", async t => {
+  for (const content of ["{", "null", "{}", '{"accounts":"invalid"}']) await t.test(content, async () => {
+    const f = gptBrowserRecoveryFixture(content);
+    let browser, failure;
+    try { browser = await f.get(); await browser.addAccount(); await browser.saved(); }
+    catch (error) { failure = error; } finally { browser?.dispose(); }
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.bytes(), content); assert.equal(f.backup(), content);
+    assert.ok(failure, "invalid saved data must reject the load");
+    assert.ok(f.warnings.includes("gpt_browser.state_unreadable"));
+  });
+  await t.test("direct EIO", async () => {
+    const f = gptBrowserRecoveryFixture(), original = f.bytes(); f.fault("EIO");
+    let browser, failure;
+    try { browser = f.open(); f.fault(null); await browser.addAccount(); await browser.saved(); }
+    catch (error) { failure = error; } finally { browser?.dispose(); }
+    assert.equal(f.writes.length, 0); assert.equal(f.bytes(), original); assert.equal(f.backup(), original);
+    assert.equal(failure?.code, "EIO");
+  });
+});
+
+test("missing, valid empty and optional GPT Browser metadata retain their startup behavior", async () => {
+  for (const content of [null, '{"accounts":[]}']) {
+    const f = gptBrowserRecoveryFixture(content); if (content === null) f.fault("ENOENT");
+    const browser = await f.get();
+    try {
+      assert.equal(browser.status().accounts.length, 0);
+      await browser.addAccount(); await browser.saved();
+      assert.equal(JSON.parse(f.bytes()).accounts.length, 1);
+      assert.equal(f.backup(), f.bytes()); assert.equal(f.writes.length, 2);
+      assert.deepEqual(f.warnings, []);
+    } finally { browser.dispose(); }
+  }
+  const f = gptBrowserRecoveryFixture('{"activeId":"abcdefghijkl","accounts":[{"id":"abcdefghijkl"}]}');
+  const browser = await f.get();
+  try {
+    assert.deepEqual(Array.from(browser.status().accounts, entry => ({ ...entry })),
+      [{ id: "abcdefghijkl", label: "ChatGPT account", email: null }]);
+    browser.rename("abcdefghijkl", "Kept"); await browser.saved();
+    assert.equal(typeof JSON.parse(f.bytes()).accounts[0].createdAt, "string");
+  } finally { browser.dispose(); }
 });

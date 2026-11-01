@@ -347,6 +347,7 @@ export function bridgeToResponsesSSE(
               type: "custom_tool_call", id: currentToolCall.itemId,
               call_id: currentToolCall.callId, name: currentToolCall.name,
               input: freeformInput(currentToolCall.args), status: "completed",
+              ...(currentToolCall.namespace ? { namespace: currentToolCall.namespace } : {}),
             }
           : {
               type: "function_call", id: currentToolCall.itemId,
@@ -541,7 +542,7 @@ export function bridgeToResponsesSSE(
               const item = toolSearch
                 ? { type: "tool_search_call", id: itemId, call_id: event.id, execution: "client", arguments: {}, status: "in_progress" }
                 : freeform
-                ? { type: "custom_tool_call", id: itemId, call_id: event.id, name: realName, input: "", status: "in_progress" }
+                ? { type: "custom_tool_call", id: itemId, call_id: event.id, name: realName, input: "", status: "in_progress", ...(ns ? { namespace: ns } : {}) }
                 : {
                     type: "function_call", id: itemId, call_id: event.id, name: realName,
                     arguments: "", status: "in_progress", ...(ns ? { namespace: ns } : {}),
@@ -950,6 +951,7 @@ export function buildResponseJSON(
         type: "custom_tool_call", id: `ctc_${uuid()}`,
         call_id: currentToolCallId, name: realName,
         input: freeformInput(currentToolCallArgs), status: "completed",
+        ...(ns ? { namespace: ns } : {}),
       });
     } else {
       output.push({

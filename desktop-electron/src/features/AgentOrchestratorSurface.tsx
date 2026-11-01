@@ -495,6 +495,7 @@ const chatModelName = (model: string) => modelShortLabel(model.replace(/\((?:\d+
  * hears which chat it opened (`onChat`); a new chat asked for inside it opens another pane.
  */
 export type SplitPaneLink = {
+  id: string;
   workspaceId: string;
   taskId: string;
   onChat: (workspaceId: string, taskId: string) => void;
@@ -509,6 +510,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
 }) {
   const copy = words[language];
   const surfaceHidden = useSurfaceHidden();
+  const attachmentPreview = useCallback((file: string) => window.codexWebLauncher?.attachmentPreview?.(file)
+    ?? Promise.reject(new Error("Previews show in the desktop app")), []);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   // The project whose board and runs were last read in full: until it is the open one, the chat
@@ -521,6 +524,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [workspaceId, setWorkspaceId] = useState(() => { if (pane) return pane.workspaceId; try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
   // The chat a split pane is to show once its project has loaded (null: not a pane).
   const paneWanted = useRef(pane ? { workspaceId: pane.workspaceId, taskId: pane.taskId } : null);
+  const paneSelectionPending = useRef(false);
   // One project tree switches between the conversation and the selected graph above its workspace board.
   const [view, setView] = useState<"chat" | "overview" | "board">("chat");
   // Settings covers the chat area as Codex's does (ChatSettingsPage); the chat stays mounted below.
@@ -1132,6 +1136,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     if (wanted) {
       if (wanted.workspaceId !== workspaceId || loadedWorkspace !== workspaceId) return;
       const found = wanted.taskId ? chatList(missions, board.tasks, taskLifecycle).find((entry) => entry.taskId === wanted.taskId) : undefined;
+      // Project loading resolved the request, including a chat removed since it was chosen.
+      paneSelectionPending.current = false;
       setChatTaskId(found?.taskId ?? "");
       if (found) setSelectedRunId(found.latestRunId);
       return;
@@ -1910,6 +1916,12 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setSplitPanes((current) => normalizeSplit([...current, added]));
     setFocusedPane(added.id);
   };
+  /** A new chat in this pane, in place of the chat it showed. */
+  const newChatInPane = (paneId: string, id: string) => {
+    setView("chat"); setSheet("");
+    setSplitPanes((current) => current.map((item) => item.id === paneId ? { ...item, workspaceId: id, taskId: "" } : item));
+    setFocusedPane(paneId);
+  };
   /**
    * A pane dragged by its grip (Claude Code's pane move): to a new column or another cell, trading
    * places with the pane there; dropped in front of the window's own chat, it becomes that chat and
@@ -2046,10 +2058,14 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     }
     if (id === workspaceId) selectChat(taskId); else selectChatIn(id, taskId);
   };
-  /** New chat: in a split window it opens a pane of its own; otherwise it replaces the open chat. */
+  /**
+   * New chat: in the focused pane, in place of its chat. It opened a pane of its own in a split
+   * window, so each New chat added one more screen (2026-10-31: the user asked for it to open where
+   * they were). Ctrl+Alt+\ / Ctrl+Alt+- and dragging a chat still open more panes.
+   */
   const openNewChat = (id = workspaceId) => {
     if (pane) { pane.onNewChat(id); return; }
-    if (splitPanes.length) { openInSplit(id, ""); return; }
+    if (focusedSplit) { newChatInPane(focusedSplit.id, id); return; }
     if (id === workspaceId) startNewChat();
     else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); }
   };
@@ -2125,7 +2141,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     const launcher = window.codexWebLauncher;
     if (!launcher?.showChatWindow) throw new Error("Update Coding Tools to open chats in a new window");
     const title = taskName(taskId), turns = await chatTranscript(taskId);
-    const result = await launcher.showChatWindow({ key: taskId, title, page: chatWindowPage(title, turns), body: chatWindowBody(title, turns), mode });
+    const body = chatWindowBody(title, turns);
+    const result = await launcher.showChatWindow({ key: taskId, title, page: chatWindowPage(title, turns, body), body, mode });
     setChatWindowIds((current) => result.open ? (current.includes(taskId) ? current : [...current, taskId]) : current.filter((id) => id !== taskId));
   };
   const openChatWindow = (taskId: string) => void pushChatWindow(taskId, "open")
@@ -2243,6 +2260,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         switchToWorkspace(id);
       });
   };
+  // The open chat moved to another project (its agent's move_chat): follow it there.
+  useEffect(() => onAoPush((change) => {
+    const moved = change.moved?.find((entry) => entry.from === workspaceId && entry.taskId === chatTaskId);
+    if (moved) selectChatIn(moved.to, moved.taskId);
+  }), [workspaceId, chatTaskId, loadedWorkspace]);
   useEffect(() => {
     const pending = pendingSelect.current;
     if (!pending || pending.workspaceId !== workspaceId) return;
@@ -2264,6 +2286,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   useEffect(() => {
     if (!pane) return;
     paneWanted.current = { workspaceId: pane.workspaceId, taskId: pane.taskId };
+    paneSelectionPending.current = pane.workspaceId !== workspaceId || pane.taskId !== chatTaskId;
     if (pane.workspaceId !== workspaceId) { switchToWorkspace(pane.workspaceId); return; }
     if (chatTaskId === null || chatTaskId === pane.taskId) return;
     if (pane.taskId) selectChat(pane.taskId); else startNewChat();
@@ -2271,6 +2294,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // ...and tells it which chat it opened itself (a new chat's first send, a project picked in it).
   useEffect(() => {
     if (!pane || chatTaskId === null || loadedWorkspace !== workspaceId) return;
+    // Both effects read the same render: don't echo the old chat while the parent's request applies.
+    if (paneSelectionPending.current) {
+      if (pane.workspaceId !== workspaceId || pane.taskId !== chatTaskId) return;
+      paneSelectionPending.current = false;
+    }
     paneWanted.current = { workspaceId, taskId: chatTaskId };
     if (pane.workspaceId !== workspaceId || pane.taskId !== chatTaskId) pane.onChat(workspaceId, chatTaskId);
   }, [chatTaskId, workspaceId, loadedWorkspace]);
@@ -2395,14 +2423,32 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       await moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "edit", objective });
       await loadMissions(workspaceId);
     },
-    compact: async () => {
+    compact: async (instructions = "") => {
       if (!chatTaskId) throw new Error("Open a chat first");
-      const result = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId });
+      const result = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId, ...(instructions ? { instructions } : {}) });
       await loadBoard(workspaceId);
       const full = (size: number) => Math.round(size / CHAT_CONTEXT_LIMIT * 100);
       return result.compacted
         ? `Context compacted from ${Number(result.before).toLocaleString("en-US")} to ${Number(result.after).toLocaleString("en-US")} characters, now ${full(Number(result.after))}% full.`
         : `Nothing to compact yet. The context is ${Number(result.before).toLocaleString("en-US")} characters, ${full(Number(result.before))}% full.`;
+    },
+    autoCompact: async (change = {}) => {
+      const result = await moduleCall("chat_auto_compact", change);
+      return { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || 95, limit: Number(result.limit) || CHAT_CONTEXT_LIMIT };
+    },
+    context: async () => {
+      const description = board?.tasks.find(task => task.id === chatTaskId)?.description ?? "";
+      const setting = await moduleCall("chat_auto_compact", {});
+      const percent = Number(setting.percent) || 95;
+      const used = Math.round(description.length / CHAT_CONTEXT_LIMIT * 100);
+      // A compacted chat starts with its summary's heading (compactChat), which says when.
+      const compacted = /^Summary of the earlier conversation \(compacted ([^)]+) UTC\)/.exec(description)?.[1];
+      const rows: [string, string][] = [
+        ["Context", `${description.length.toLocaleString("en-US")} of ${CHAT_CONTEXT_LIMIT.toLocaleString("en-US")} characters (${used}% full)`],
+        ["Auto-compact", setting.autoCompact === false ? "Off: a full chat stops until you /compact" : `On: compacts before a message that would fill ${percent}%`],
+        ["Last compacted", compacted ? `${compacted} UTC` : "Never"],
+      ];
+      return { title: "Context", rows, text: "The chat's context is its messages, sent to every new agent session. Each agent also compacts its own session by itself." };
     },
     diff: async () => {
       const result = await moduleCall("chat_diff", { workspaceId });
@@ -2444,13 +2490,13 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // Archived chats of every project, for the list's Archived section (grouped by project there).
   // Reading them also moves chats archived longer than the set days to "deleted", so it runs when
   // the list opens, after any chat is archived or restored here, and hourly.
-  const [archivedAll, setArchivedAll] = useState<{ days: number; chats: ArchivedChat[] } | null>(null);
+  const [archivedAll, setArchivedAll] = useState<{ days: number; idleDays: number; chats: ArchivedChat[] } | null>(null);
   const workspaceIds = workspaces.map((item) => item.id).join("\n");
   const archivedKey = taskLifecycle.map((item) => `${item.task_id}:${item.visibility}`).join(",");
   const loadArchived = useCallback(async () => {
     if (!workspaceIds) return;
     const result = await moduleCall("archived_chats", { workspaceIds: workspaceIds.split("\n") }).catch(() => null);
-    if (result && Array.isArray(result.chats)) setArchivedAll({ days: Number(result.days) || 0, chats: result.chats as ArchivedChat[] });
+    if (result && Array.isArray(result.chats)) setArchivedAll({ days: Number(result.days) || 0, idleDays: Number(result.idleDays) || 0, chats: result.chats as ArchivedChat[] });
   }, [workspaceIds]);
   useEffect(() => {
     void loadArchived();
@@ -2462,9 +2508,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     await moduleCall("restore_task", { workspaceId: id, taskId });
     await loadArchived();
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-  const setArchiveDays = (days: number) => void (async () => {
-    const result = await moduleCall("archive_settings", { days });
-    setArchivedAll((current) => current && { ...current, days: Number(result.days) });
+  const setArchiveDays = (change: { days?: number; idleDays?: number }) => void (async () => {
+    const result = await moduleCall("archive_settings", change);
+    setArchivedAll((current) => current && { ...current, days: Number(result.days), idleDays: Number(result.idleDays) });
     await loadArchived();
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
 
@@ -2680,7 +2726,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
           onMovePane={pane ? undefined : moveSplitPane}
           panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError}
-            pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => openInSplit(id, ""), onClose: () => closeSplitPane(item.id),
+            pane={{ id: item.id, workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
               onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
         {view === "chat" ? (
           !workspaceId && workspaceReady
@@ -2689,6 +2735,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                 onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
                 runs={chatRuns}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
+                draftScope={pane?.id ?? "main"}
                 projectLoadError={projectLoadError} onRetryProject={() => setProjectLoadRevision((value) => value + 1)} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}
@@ -2707,7 +2754,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                 revealFile={(file) => {
                   void window.codexWebLauncher?.revealFile?.(file).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
                 }}
-                attachmentPreview={(file) => window.codexWebLauncher?.attachmentPreview?.(file) ?? Promise.reject(new Error("Previews show in the desktop app"))}
+                attachmentPreview={attachmentPreview}
                 structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
                   nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
                   selectedId="" busy={Boolean(busy)} describe={describeNode}

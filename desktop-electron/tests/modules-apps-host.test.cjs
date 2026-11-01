@@ -110,7 +110,8 @@ test("desktop shell wires codingTools.apps without constructing five-stack at bo
   assert.doesNotMatch(main, /createLazyFactory\(\(\) => createFiveStackControlPlane/);
   assert.match(preload, /"apps.list"/);
   assert.match(preload, /"apps.call"/);
-  assert.match(preload, /invoke: \(input\) => invokeContract\(ipcRenderer, "apps.call"/);
+  assert.match(preload, /invoke: \(input\) => callApps\(/);
+  assert.match(preload, /return invokeContract\(ipcRenderer, "apps.call", input\);/);
   assert.match(schema, /"apps.catalog"/);
   assert.match(contracts, /readonly apps:/);
   assert.match(contracts, /invoke\(input:/);

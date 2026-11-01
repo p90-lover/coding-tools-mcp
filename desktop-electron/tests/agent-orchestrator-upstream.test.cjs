@@ -944,6 +944,29 @@ test("observe says when the tool call still running began, so a steer can stop a
   assert.equal(idle.toolSince, undefined, "no tool call in flight");
 });
 
+test("observe reports the whole session's last sign of life and tool calls, for a turn queued behind another", async () => {
+  // A message queued behind a working turn has no activity of its own (2026-10-31).
+  const at = minutes => new Date(Date.parse("2026-10-31T11:00:00Z") + minutes * 60_000).toISOString();
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
+      turns: [{ id: "working", state: "running", createdAt: at(0), startedAt: at(0) }, { id: "queued", state: "queued", createdAt: at(9) }],
+      messages: [{ id: "m", turnId: "working", role: "assistant", text: "Checking the window.", streaming: false, createdAt: at(1), updatedAt: at(1) }],
+      activities: [
+        { id: "a1", turnId: "working", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "Read", createdAt: at(10), updatedAt: at(14), detail: {} },
+        { id: "a2", turnId: "working", sequence: 3, activityKind: "mcp_tool", status: "running", summary: "Bash", createdAt: at(15), updatedAt: at(15),
+          detail: { input: { command: "python macro.py", timeout: 600_000 } } },
+        { id: "r1", turnId: "working", sequence: 4, activityKind: "system", status: "running", summary: "Retrying Claude", createdAt: at(16), updatedAt: at(20),
+          detail: { event: "provider.failure", text: "API error 503." } },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const observed = await upstream.observe("s", "queued");
+  assert.equal(observed.turnState, "queued");
+  assert.equal(observed.lastActivityAt, Date.parse(at(9)), "the queued turn alone shows only when it was asked");
+  assert.equal(observed.sessionActivityAt, Date.parse(at(15)), "the session's newest real step, not the retry notice after it");
+  assert.deepEqual(JSON.parse(JSON.stringify(observed.sessionTools)), [{ timeoutMs: 600_000 }], "the command in flight in the turn ahead, with its own timeout");
+});
+
 test("exitAgent requires the selected agent's acknowledged exited state", async () => {
   for (const outcome of [{ ok: false }, { ok: true }, { ok: true, session: { id: "s", status: "working" } }, { ok: true, session: { id: "other", status: "exited" } }]) {
     const upstream = observeHarness({ internalApi: async () => outcome });
@@ -1754,6 +1777,40 @@ test("a running turn with no agent process behind it is over: interrupted, with 
   assert.equal(coming.agentGone, undefined);
 });
 
+test("a running turn whose controller stopped while its chat host is still up keeps running", async () => {
+  // Seen live 2026-10-31: at an app quit AO dropped every controller, and three cards read "stopped
+  // mid-turn" and were retried while two of the turns ran on in their hosts, so each chat got a
+  // needless "you were interrupted" turn queued behind its own.
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-ao-host-up-"));
+  const live = require("node:net").createServer().listen(0, "127.0.0.1");
+  await new Promise(resolve => live.once("listening", resolve));
+  const hostFile = path.join(dataRoot, "chat-hosts", "s", "host.json");
+  fs.mkdirSync(path.dirname(hostFile), { recursive: true });
+  fs.writeFileSync(hostFile, JSON.stringify({ address: `127.0.0.1:${live.address().port}`, pid: 1 }));
+  const interrupts = [];
+  const upstream = observeHarness({ dataRoot,
+    internalApi: async (_method, endpoint) => {
+      if (endpoint.includes("/conversation?limit=100&includePending=1")) return { controller: "stopped", turns: [{ id: "t", state: "running" }], messages: [], activities: [] };
+      if (endpoint.endsWith("/interrupt")) { interrupts.push(endpoint); return {}; }
+      return { session: { id: "s", mode: "chat", status: "working", provisionState: "ready" } };
+    },
+  });
+  try {
+    const kept = await upstream.observe("s");
+    assert.equal(kept.turnState, "running", "the host still runs the agent: the next AO reattaches it");
+    assert.equal(kept.error, undefined, "the card is not failed");
+    assert.deepEqual(interrupts, [], "nothing is interrupted");
+    // An agent that exits takes its host with it, and the host deletes its record.
+    fs.rmSync(hostFile);
+    const ended = await upstream.observe("s");
+    assert.equal(ended.turnState, "interrupted");
+    assert.equal(ended.agentGone, true);
+  } finally {
+    live.close();
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("a request left pending by an agent that is gone shows no card, since nothing can take the answer", async () => {
   // Seen live 2026-10-23: Allow on such a card failed twice with "the agent controller for this
   // session is not running (CHAT_CONTROLLER_NOT_READY)".
@@ -2036,4 +2093,56 @@ test("chats AO still calls working with no agent activity for long are listed, s
     internalApi: async (method, endpoint) => { assert.equal(endpoint, "/api/v1/sessions"); return { sessions }; } });
   assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now)], ["stranded"],
     "only a live chat quiet past the limit: not a busy one, an idle or ended one, a non-chat, or one with no activity time");
+});
+
+test("mission accounting reads the conversation only when normalized usage has no usable counters", async t => {
+  const vm = require("node:vm");
+  const { collectMissionAccounting, accountingMeasurements } = require("../electron/agent-orchestrator-accounting.cjs");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("      readAccounting: async scope =>");
+  const method = source.slice(start, source.indexOf("\n      listProjects:", start));
+  const catalog = { prices: [{ provider: "openai", model: "gpt-5.5", input_usd_per_million: 2,
+    output_usd_per_million: 8, cache_read_usd_per_million: 0.5, cache_creation_usd_per_million: 3,
+    request_usd: 0, source: "manual", updated_ms: 123 }] };
+  const measured = totals => ({ sessionId: "owned", harnesses: [{ harness: "codex", models: [{ modelId: "gpt-5.5", totals }] }] });
+  const snapshot = { usage: { inputTokens: 10, cachedTokens: 2, outputTokens: 3, totalTokens: 15 } };
+  const cases = [
+    { name: "reported normalized usage", normalized: measured({ uncachedInputTokens: 10, cachedInputTokens: 2, outputTokens: 3, processedTokens: 15 }), reads: 2, tokens: 15, cost: 25000, source: "normalized_session", coverage: "complete" },
+    { name: "measured zero", normalized: measured({ uncachedInputTokens: 0, cachedInputTokens: 0, outputTokens: 0, processedTokens: 0 }), reads: 2, tokens: 0, cost: 0, source: "normalized_session", coverage: "complete" },
+    { name: "empty normalized usage", normalized: { sessionId: "owned", harnesses: [] }, reads: 3 },
+    { name: "missing normalized counters", normalized: measured({}), reads: 3 },
+    { name: "invalid normalized counters", normalized: measured({ uncachedInputTokens: -1, cachedInputTokens: -1, outputTokens: -1, processedTokens: -1 }), reads: 3 },
+    { name: "normalized endpoint unavailable", unavailable: true, reads: 3 },
+    { name: "foreign session", foreign: true, reads: 1, tokens: null, cost: null, coverage: "unavailable" },
+  ];
+  for (const fixture of cases) await t.test(fixture.name, async () => {
+    const calls = [];
+    const readAccounting = vm.runInNewContext(`({${method}}).readAccounting`, {
+      collectMissionAccounting, accountingMeasurements, getCpaPricesPath: () => "prices", readCpaCatalog: () => catalog,
+      sessionId: id => id,
+      internalApi: async (verb, endpoint) => {
+        calls.push(`${verb} ${endpoint}`);
+        if (endpoint === "/api/v1/sessions/owned") return { session: { id: "owned", projectId: fixture.foreign ? "other" : "p" } };
+        if (endpoint === "/api/v1/usage/sessions/owned") {
+          if (fixture.unavailable) throw new Error("usage unavailable");
+          return fixture.normalized;
+        }
+        assert.equal(endpoint, "/api/v1/sessions/owned/conversation?limit=1");
+        return snapshot;
+      },
+    });
+    const result = (await readAccounting({ projectId: "p", runs: [{ id: "r", nodes: [{ receipt: {
+      thread_id: "owned", route: { harness_id: "ao:codex", model: "cpa/gpt-5.5" },
+    } }] }] })).r;
+    assert.equal(calls.length, fixture.reads);
+    assert.equal(calls.includes("GET /api/v1/sessions/owned/conversation?limit=1"), fixture.reads === 3);
+    assert.equal(result.processedTokens, fixture.tokens === undefined ? 15 : fixture.tokens);
+    assert.equal(result.cost.totalNanos, fixture.cost === undefined ? 25000 : fixture.cost);
+    assert.equal(result.cost.source, "CPA Helper");
+    assert.equal(result.coverage, fixture.coverage || "partial");
+    if (!fixture.foreign) {
+      assert.equal(result.sessions[0].measurements[0].source, fixture.source || "latest_snapshot");
+      assert.equal(result.cost.coverage, "partial", "unknown cache categories keep the existing partial price label");
+    }
+  });
 });

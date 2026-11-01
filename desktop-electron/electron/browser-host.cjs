@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
 const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { conversationPatchScript } = require("./chatgpt-conversation-actions.cjs");
 const {
   runBrowserHelperOperation,
@@ -11,6 +11,7 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { browserPartitionForLauncherProfile, isBrowserAccountPartition } = require("./profile.cjs");
+const { cleanUserAgent } = require("./gpt-browser.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
@@ -76,10 +77,11 @@ const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 // A finished turn's tab (and its saved ChatGPT chat) is kept this long for the next round of the same
 // task, then let go and the chat deleted. 30 minutes left finished task chats in the user's ChatGPT
-// history for half an hour; a later round simply starts a new chat with the task's context.
-const RETAINED_TURN_TAB_TTL_MS = 10 * 60 * 1000;
+// history for half an hour; a later round simply starts a new chat with the task's context. The
+// time counts from the tab's last use: one being looked at does not run out.
+const RETAINED_TURN_TAB_TTL_MS = 5 * 60 * 1000;
 
-/** How long a finished turn's tab stays open for the next turn: the setting, or ten minutes. */
+/** How long a finished turn's tab stays open for the next turn: the setting, or five minutes. */
 function retainedTabTtl(host) {
   const ms = typeof host.retainedTabTtlMs === "function" ? host.retainedTabTtlMs() : null;
   return Number.isFinite(ms) && ms > 0 ? ms : RETAINED_TURN_TAB_TTL_MS;
@@ -93,7 +95,7 @@ function tabLimitOf(host, partition) {
 
 /** The tabs on one account's partition: its Codex turns' tabs, and the Browser tab's own pages. */
 function tabsOnPartition(host, partition) {
-  const ownPages = partition === host.partition ? (host.userTabs?.size ?? 0) : 0;
+  const ownPages = partition === host.partition ? (host.userTabs?.size ?? 0) : (host.parkedHomes?.get(partition)?.userTabs?.size ?? 0);
   return ownPages + [...host.turnTabs.values()].filter((tab) => (tab.partition ?? host.partition) === partition).length;
 }
 
@@ -126,7 +128,8 @@ function makeTabRoom(host, partition, evict = true) {
   while (tabsOnPartition(host, partition) >= limit) {
     if (!evict || !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(host, partition)) return limit;
   }
-  while (host.turnTabs.size + (host.userTabs?.size ?? 0) >= MAX_TOTAL_BROWSER_TABS) {
+  const userTabs = (host.userTabs?.size ?? 0) + [...(host.parkedHomes?.values() ?? [])].reduce((sum, home) => sum + home.userTabs.size, 0);
+  while (host.turnTabs.size + userTabs >= MAX_TOTAL_BROWSER_TABS) {
     if (!evict || !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(host)) return MAX_TOTAL_BROWSER_TABS;
   }
   return null;
@@ -207,6 +210,17 @@ function keepPageOutOfWindowFrame(contents) {
   contents.on("dom-ready", () => {
     if (!contents.isDestroyed()) void contents.insertCSS(PAGE_NO_DRAG_CSS, { cssOrigin: "user" }).catch(() => {});
   });
+}
+
+// Sign-in pages (Google in particular) refuse a browser that announces itself as Electron: GPT
+// Browser drops it and signs in; the Browser tab's accounts did not. The session's agent covers
+// pages made later (sign-in popups too); a page that already exists keeps its own, so it is set too.
+function signInFriendlyUserAgent(contents) {
+  const browserSession = contents?.session;
+  if (typeof browserSession?.getUserAgent !== "function") return;
+  const clean = cleanUserAgent(browserSession.getUserAgent());
+  if (clean !== browserSession.getUserAgent()) browserSession.setUserAgent(clean);
+  if (typeof contents.setUserAgent === "function") contents.setUserAgent(clean);
 }
 
 const CHATGPT_VIEWPORT_CSS = `
@@ -404,6 +418,16 @@ function retainedConversationLocation(value, useSavedChats) {
   if (!temporary) return null;
   if (SAVED_CONVERSATION_PATH.test(parsed.pathname)) return `${parsed.pathname}?temporary-chat=true`;
   return parsed.pathname === "/" ? "/?temporary-chat=true" : null;
+}
+
+function turnConversationOwnershipLost(tab, useSavedChats, url) {
+  if (tab.conversationOwnershipLost) return true;
+  const expected = tab.retainedLocation
+    ?? (useSavedChats && tab.ownedConversation ? `/c/${tab.ownedConversation}` : null);
+  if (!expected) return false;
+  try { url ??= tab.view.webContents.getURL(); } catch { url = null; }
+  if (retainedConversationLocation(url, useSavedChats) !== expected) tab.conversationOwnershipLost = true;
+  return tab.conversationOwnershipLost === true;
 }
 
 function isNewChatUrl(value, useSavedChats) {
@@ -720,6 +744,7 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    signInFriendlyUserAgent(view.webContents);
     this.window.contentView.addChildView(view);
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
@@ -747,7 +772,7 @@ class BrowserHost {
     } finally {
       this.syncViewVisibility();
     }
-    this.writeDescriptor();
+    await this.writeDescriptor();
     this.logger.info("browser.initialized", { url: this.view.webContents.getURL() });
   }
 
@@ -861,14 +886,16 @@ class BrowserHost {
         viewportCssKey: null,
         state: { status: "idle", message: "No active task", url: "about:blank", title: "ChatGPT", authenticated: false, loading: false },
       });
+      this.parkedHomes.set(leaving.partition, leaving);
       try {
         await this.initializePrimaryView();
       } catch (error) {
         const failed = this.parkHome();
+        this.parkedHomes.delete(leaving.partition);
         this.restoreHome(leaving);
         this.unloadHome(failed);
         this.syncViewVisibility();
-        this.writeDescriptor();
+        void this.writeDescriptor();
         this.publishState?.(this.snapshot());
         throw error;
       }
@@ -877,11 +904,13 @@ class BrowserHost {
     this.parkedHomes.set(leaving.partition, leaving);
     this.trimParkedHomes();
     this.syncViewVisibility();
-    this.writeDescriptor();
+    // Shown at once; the switch settles once the bridge can read the new account's surface.
+    const published = this.writeDescriptor();
     this.publishState?.(this.snapshot());
     this.logger.info("browser.account_switched", { warm: Boolean(warm), parked: this.parkedHomes.size });
     // A parked page may have been signed out (or in) elsewhere meanwhile: check it again.
     if (warm && browserInteractionModeFor(this) === "automatic") void this.probeAuthentication().catch(() => {});
+    await published;
     return this.snapshot();
   }
 
@@ -971,7 +1000,7 @@ class BrowserHost {
     for (const tab of tabs) this.removeTurnTab(tab, false);
     if (tabs.length) {
       this.publishState?.(this.snapshot());
-      this.writeDescriptor();
+      void this.writeDescriptor();
     }
     return tabs.length;
   }
@@ -994,6 +1023,9 @@ class BrowserHost {
       id: tab.id,
       traceId: tab.traceId,
       ...(tab.accountId ? { accountId: tab.accountId } : {}),
+      // A Codex turn on an account the Browser tab is not showing: listed for ChatGPT browser
+      // management, kept out of the shown account's tab strip.
+      ...((tab.partition ?? this.partition) !== this.partition ? { otherAccount: true } : {}),
       ...(tab.nativeThreadId ? { threadId: tab.nativeThreadId } : {}),
       ...(conversationUrl ? { conversationUrl } : {}),
       title: tab.label,
@@ -1001,6 +1033,11 @@ class BrowserHost {
       loading: tab.loading === true,
       active: this.selectedTabId === tab.id,
       closable: true,
+      // For ChatGPT browser management: how long the tab ran, and when a finished one closes.
+      ...(tab.startedAt ? { startedAt: tab.startedAt } : {}),
+      ...(tab.finishedAt ? { finishedAt: tab.finishedAt } : {}),
+      ...(tab.status === "ready" && this.turnTabs?.get(tab.id) === tab && Number.isFinite(tab.lastHeartbeatAt)
+        ? { closesAt: tab.lastHeartbeatAt + retainedTabTtl(this) } : {}),
     };
     if (tab.interactionMode === "manual") {
       Object.assign(snapshot, {
@@ -1043,6 +1080,7 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    signInFriendlyUserAgent(view.webContents);
     const tab = {
       id,
       surfaceId,
@@ -1054,6 +1092,7 @@ class BrowserHost {
       conversationKey,
       connectorIdentity,
       connectorBound: false,
+      startedAt: Date.now(),
       helperPid,
       view,
       status: "running",
@@ -1113,9 +1152,7 @@ class BrowserHost {
     if (full) throw new Error(`ChatGPT Web already has ${full} browser tabs; close one before opening another`);
     if (!this.surfaceActive) throw new Error("Open the Browser before creating a tab");
     if (this.manualOperation) throw new Error(`Browser tabs cannot open during ${this.manualOperation}`);
-    if (browserInteractionModeFor(this) === "automatic" && this.state.authenticated !== true) {
-      throw new Error("Sign in to ChatGPT before opening another tab");
-    }
+    // A signed-out account opens tabs too, as in GPT Browser: the new tab is ChatGPT's own sign-in.
     const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values(), ...this.userTabs.values()]
         .some(tab => tab.ordinal === candidate));
@@ -1131,8 +1168,10 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    signInFriendlyUserAgent(view.webContents);
     const tab = {
       id: randomBytes(12).toString("base64url"),
+      startedAt: Date.now(),
       traceId: null,
       ordinal,
       label: `ChatGPT ${ordinal}`,
@@ -1183,9 +1222,11 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    signInFriendlyUserAgent(view.webContents);
     const tab = {
       id,
       surfaceId: null,
+      startedAt: Date.now(),
       traceId,
       // Kept: the Browser tab may show another account while this turn waits.
       partition: this.partition,
@@ -1346,6 +1387,7 @@ class BrowserHost {
     contents.on("will-redirect", blockAuthenticationNavigation);
     contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
       if (!mainFrame) return;
+      if (tab.status === "running") turnConversationOwnershipLost(tab, useSavedChatsFor(this), url);
       tab.url = url;
       tab.loading = true;
       if (!inPlace) {
@@ -1365,6 +1407,7 @@ class BrowserHost {
     });
     contents.on("did-finish-load", () => {
       tab.url = contents.getURL();
+      if (tab.status === "running") turnConversationOwnershipLost(tab, useSavedChatsFor(this), tab.url);
       tab.loading = false;
       tab.rendererReady = true;
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
@@ -1373,7 +1416,7 @@ class BrowserHost {
         this.publishState?.(this.snapshot());
         return;
       }
-      if (tab.initializingSurface) {
+      if (tab.initializingSurface || tab.conversationOwnershipLost) {
         this.publishState?.(this.snapshot());
         return;
       }
@@ -1393,7 +1436,10 @@ class BrowserHost {
       this.publishState?.(this.snapshot());
     });
     contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
-      if (mainFrame) tab.url = url;
+      if (mainFrame) {
+        if (tab.status === "running") turnConversationOwnershipLost(tab, useSavedChatsFor(this), url);
+        tab.url = url;
+      }
       this.publishState?.(this.snapshot());
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
@@ -1658,7 +1704,7 @@ class BrowserHost {
       void this.markOwnedSurface()
         .then(() => {
           if (this.initializationFailed) {
-            this.writeDescriptor();
+            void this.writeDescriptor();
             this.initializationFailed = false;
             this.initializationReady = Promise.resolve();
             this.logger.info("browser.initialization_recovered");
@@ -1945,7 +1991,10 @@ class BrowserHost {
       activeTabId: this.selectedTabId,
       tabs: this.turnTabs.size + (this.userTabs?.size ?? 0) > 0
         ? [
-            ...(this.selectedTabId === "home" || (this.userTabs?.size ?? 0) > 0 ? [homeTab] : []),
+            // Home is listed while chosen, beside tabs of the user's own, and whenever the chosen
+            // tab is a turn on another account (left out of the strip, which would show nothing).
+            ...(this.selectedTabId === "home" || (this.userTabs?.size ?? 0) > 0
+              || (selected && (selected.partition ?? this.partition) !== this.partition) ? [homeTab] : []),
             ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
             ...[...(this.userTabs?.values() ?? [])].map((tab) => this.tabSnapshot(tab)),
           ]
@@ -2046,6 +2095,8 @@ class BrowserHost {
         continue;
       }
       if (tab.status === "ready") {
+        // The tab on screen is in use, not idle: its time starts again once it is left.
+        if (this.visible && this.selectedTabId === tab.id) tab.lastHeartbeatAt = now;
         if (now - (tab.lastHeartbeatAt ?? 0) < retainedTabTtl(this)) continue;
         this.logger.info("browser.retained_tab_expired", { tabId: tab.id, traceId: tab.traceId });
         this.removeTurnTab(tab, false);
@@ -2189,7 +2240,7 @@ class BrowserHost {
     this.syncViewVisibility();
     if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
     this.publishState?.(this.snapshot());
-    this.writeDescriptor();
+    void this.writeDescriptor();
   }
 
   syncViewVisibility() {
@@ -2218,7 +2269,7 @@ class BrowserHost {
     this.syncViewVisibility();
     if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
     this.publishState?.(this.snapshot());
-    this.writeDescriptor();
+    void this.writeDescriptor();
     return this.snapshot();
   }
 
@@ -2253,6 +2304,7 @@ class BrowserHost {
 
   removeTurnTab(tab, abortRunning) {
     if (!this.turnTabs.has(tab.id)) return;
+    const ownershipLost = turnConversationOwnershipLost(tab, useSavedChatsFor(this));
     this.turnTabs.delete(tab.id);
     if (tab.interactionMode === "manual") {
       if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
@@ -2278,9 +2330,12 @@ class BrowserHost {
       // history behind; the hidden page closes once ChatGPT answered (or after a bounded wait).
       // A chat recorded for its Codex thread is kept: the thread's later turns reopen it, and it is
       // archived or deleted with the thread (codex-chat-lifecycle-sync.cjs).
-      if (tab.ownedConversation && !tab.persistedConversation && tab.interactionMode !== "manual" && useSavedChatsFor(this)) {
+      if (tab.ownedConversation && !ownershipLost && !tab.persistedConversation && tab.interactionMode !== "manual" && useSavedChatsFor(this)) {
         this.deleteOwnedConversation(tab);
       } else {
+        if (tab.ownedConversation && ownershipLost) {
+          this.logger?.warn?.("browser.conversation_delete_skipped", { reason: "conversation ownership changed" });
+        }
         tab.view.webContents.close();
       }
     }
@@ -2302,7 +2357,7 @@ class BrowserHost {
     // Reached from a page's load-failure and crash events and from the turn-tab sweep timer, where a
     // throw (a full disk, the file held open) was uncaught. The next change writes it again.
     try {
-      this.writeDescriptor();
+      void this.writeDescriptor();
     } catch (error) {
       this.logger?.warn?.("browser.descriptor_write_failed", { message: error instanceof Error ? error.message : String(error) });
     }
@@ -2557,11 +2612,18 @@ class BrowserHost {
   async reveal(inspectSession = true) {
     if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
     this.show();
-    if (!this.selectedTurnTab() && this.view.webContents.getURL() === IDLE_BROWSER_URL) {
-      await this.view.webContents.loadURL(newChatUrlFor(this));
-      if (inspectSession) await this.probeAuthentication();
-    }
+    await this.openHomePage(inspectSession);
     return this.snapshot();
+  }
+
+  /**
+   * Puts ChatGPT on the shown account's page while it still holds the blank idle document. An
+   * account switched to while the Browser tab was hidden stayed blank: only reveal loaded it.
+   */
+  async openHomePage(inspectSession = true) {
+    if (this.selectedTurnTab() || this.view.webContents.getURL() !== IDLE_BROWSER_URL) return;
+    await this.view.webContents.loadURL(newChatUrlFor(this));
+    if (inspectSession) await this.probeAuthentication();
   }
 
   hide() {
@@ -2810,7 +2872,7 @@ class BrowserHost {
     this.showWindow();
     this.show();
     this.publishState?.(this.snapshot());
-    this.writeDescriptor();
+    void this.writeDescriptor();
     this.logger.info("browser.manual_turn_started", {
       tabId: tab.id,
       traceId,
@@ -3062,6 +3124,9 @@ class BrowserHost {
     }
     const existing = sameTrace?.status === "running" ? sameTrace : exactRetained;
     if (existing) {
+      if (existing.status === "running" && turnConversationOwnershipLost(existing, useSavedChatsFor(this))) {
+        throw new BrowserTurnCancelledError(traceId);
+      }
       const reused = existing.status === "ready";
       if (reused && existing.conversationUrl && liveConversationUrl(existing) !== existing.conversationUrl) {
         const error = new Error("The retained ChatGPT tab has navigated away from its original conversation");
@@ -3099,7 +3164,7 @@ class BrowserHost {
       if (reveal) this.show();
       else this.syncViewVisibility();
       this.publishState?.(this.snapshot());
-      this.writeDescriptor();
+      await this.writeDescriptor();
       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
       const conversationUrl = liveConversationUrl(existing);
       return {
@@ -3134,7 +3199,7 @@ class BrowserHost {
         if (reveal) this.show();
         else this.syncViewVisibility();
         this.publishState?.(this.snapshot());
-        this.writeDescriptor();
+        await this.writeDescriptor();
         this.logger.info("browser.tab_conversation_restored", { tabId: restored.id, traceId });
         return {
           surfaceId: restored.surfaceId, tabId: restored.id, reused: true,
@@ -3159,7 +3224,7 @@ class BrowserHost {
     else this.syncViewVisibility();
     this.publishState?.(this.snapshot());
     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
-    this.writeDescriptor();
+    await this.writeDescriptor();
     return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
   }
 
@@ -3193,6 +3258,12 @@ class BrowserHost {
         `Browser helper ownership mismatch: expected ${tab.helperPid}, received ${helperPid}`,
       );
     }
+    if (turnConversationOwnershipLost(tab, useSavedChatsFor(this))) {
+      status = "failed";
+      retain = false;
+      connectorBound = false;
+      message = "The ChatGPT task page changed conversations.";
+    }
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
     // A connector turn tells whether the account's ChatGPT connector works: it bound, or it failed.
     if (tab.connectorIdentity && tab.interactionMode === "automatic") {
@@ -3207,6 +3278,7 @@ class BrowserHost {
     tab.message = status === "completed" ? "Task completed"
       : status === "superseded" ? "Continuing this Codex task" : message || `ChatGPT turn ${status}`;
     tab.loading = false;
+    tab.finishedAt = Date.now();
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
@@ -3214,12 +3286,8 @@ class BrowserHost {
     const retainedLocation = (status === "completed" || status === "superseded") && retain && !tab.view.webContents.isDestroyed()
       ? retainedConversationLocation(tab.view.webContents.getURL(), useSavedChatsFor(this))
       : null;
-    // The saved chat this turn wrote in, recorded now while the bridge still drives the tab, so its
-    // release deletes this chat (as a Temporary Chat would vanish) and never a page the user opened.
-    if (!tab.view.webContents.isDestroyed() && typeof tab.view.webContents.getURL === "function") {
-      tab.ownedConversation = ownedSavedConversationId(tab.view.webContents.getURL(), useSavedChatsFor(this))
-        ?? tab.ownedConversation ?? null;
-    }
+    // Direct tab cleanup must not adopt a DELETE target from the current URL. Keep any established
+    // cleanup ID immutable; fresh chats remain unless separate lifecycle or user actions remove them.
     if ((status === "completed" || status === "superseded") && retain && !retainedLocation) {
       this.logger.warn("browser.tab_retention_refused", { tabId: tab.id, traceId, reason: "no owned conversation page" });
     }
@@ -3250,8 +3318,24 @@ class BrowserHost {
       if (hideAfterTurn && !this.activeTraceId) this.hide();
       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
       this.publishState?.(this.snapshot());
-      this.writeDescriptor();
+      await this.writeDescriptor();
       return { cancelledByUser, ...(tab.conversationUrl ? { conversationUrl: tab.conversationUrl } : {}) };
+    }
+    // A finished tab that cannot carry the task on (its page left the conversation: a link was
+    // followed, or ChatGPT moved the chat) vanished the moment its turn ended. It now stays for the
+    // idle time like a kept tab, closing (and its chat let go) as one when that runs out, but no
+    // later turn can match it: it has no trace or conversation left, and the bridge no longer sees it.
+    if ((status === "completed" || status === "superseded") && retain && !retainedLocation && !tab.view.webContents.isDestroyed()) {
+      tab.traceId = null;
+      tab.conversationKey = null;
+      tab.retainedLocation = null;
+      tab.lingering = true;
+      tab.lastHeartbeatAt = Date.now();
+      if (hideAfterTurn && !this.activeTraceId) this.hide();
+      this.logger.info("browser.tab_lingering", { tabId: tab.id, traceId });
+      this.publishState?.(this.snapshot());
+      await this.writeDescriptor();
+      return { cancelledByUser };
     }
     // A browser tab represents an active Codex turn, not durable task history. The result already
     // lives in Codex, so release the terminal browser document without touching concurrent turns.
@@ -3846,11 +3930,17 @@ class BrowserHost {
     }
   }
 
-  writeDescriptor() {
+  /**
+   * Publishes the descriptor the bridge reads, off the main thread: the synchronous write held every
+   * window 14.7 s at a turn's start and 4.8 s at a tab's close on the busy hard disk (2026-10-31).
+   * Resolves once it is in place; a caller that hands the bridge a surface awaits it. `now` writes it
+   * before returning, for the one caller that reads it straight back (launcherControlEnvironment).
+   */
+  writeDescriptor({ now = false } = {}) {
     const surfaceTargets = {};
     if (browserInteractionModeFor(this) === "automatic") {
       const surfaces = [[this.surfaceId, this.view?.webContents],
-        ...[...this.turnTabs.values()].filter(tab => tab.interactionMode === "automatic")
+        ...[...this.turnTabs.values()].filter(tab => tab.interactionMode === "automatic" && !tab.lingering)
           .map(tab => [tab.surfaceId, tab.view.webContents])];
       for (const [surfaceId, contents] of surfaces) {
         if (!contents || contents.isDestroyed()) continue;
@@ -3876,12 +3966,35 @@ class BrowserHost {
     // main process (every window waits), seconds on the busy hard disk, so an unchanged descriptor
     // that this process already wrote stays as it is. Only this process writes or removes it.
     const unchanged = JSON.stringify(descriptor);
-    if (this.writtenDescriptor === unchanged) return;
+    if (this.writtenDescriptor === unchanged && !now) return this.descriptorWrites ?? Promise.resolve();
     descriptor.createdAt = new Date().toISOString();
-    writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+    const filePath = this.descriptorPath;
+    const text = `${JSON.stringify(descriptor, null, 2)}\n`;
+    if (now) {
+      writePrivateFileAtomic(filePath, text);
+      this.writtenDescriptor = unchanged;
+      // The app is back: the bridge no longer needs to wait out a restart.
+      try { fs.rmSync(restartMarkerPath(filePath), { force: true }); } catch {}
+      return Promise.resolve();
+    }
     this.writtenDescriptor = unchanged;
-    // The app is back: the bridge no longer needs to wait out a restart.
-    try { fs.rmSync(restartMarkerPath(this.descriptorPath), { force: true }); } catch {}
+    const generation = this.descriptorGeneration ?? 0;
+    const current = () => (this.descriptorGeneration ?? 0) === generation;
+    // One write at a time, in the order asked for. A write destroy() overtook removes what it wrote:
+    // the descriptor of a closed browser would send the bridge to a page that is gone.
+    const write = (this.descriptorWrites ?? Promise.resolve()).catch(() => {}).then(async () => {
+      if (!current()) return;
+      await writePrivateFileAtomicAsync(filePath, text);
+      if (!current()) await fs.promises.rm(filePath, { force: true }).catch(() => {});
+      else await fs.promises.rm(restartMarkerPath(filePath), { force: true }).catch(() => {});
+    });
+    this.descriptorWrites = write;
+    write.catch((error) => {
+      // Not on disk: the next call writes it again instead of taking it as unchanged.
+      if (this.writtenDescriptor === unchanged) this.writtenDescriptor = null;
+      this.logger?.warn?.("browser.descriptor_write_failed", { message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
+    });
+    return write;
   }
 
   async persistSession() {
@@ -3902,6 +4015,7 @@ class BrowserHost {
       if (current.pid === process.pid) fs.rmSync(this.descriptorPath, { force: true });
     } catch {}
     this.writtenDescriptor = null;
+    this.descriptorGeneration = (this.descriptorGeneration ?? 0) + 1;
     for (const [contents, handler] of this.shellZoomShortcutBindings) {
       if (!contents.isDestroyed()) contents.off("before-input-event", handler);
     }

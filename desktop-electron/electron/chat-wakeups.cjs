@@ -113,6 +113,15 @@ function createWakeupStore({ file = null, now = Date.now } = {}) {
       persist();
       return wakeup;
     },
+    /** A chat that moved to another project (move_chat) keeps its wake-up there. */
+    move(from, to, taskId) {
+      const saved = wakeups[key(from, taskId)];
+      if (!saved) return false;
+      delete wakeups[key(from, taskId)];
+      wakeups[key(to, taskId)] = { ...saved, workspaceId: to };
+      persist();
+      return true;
+    },
     /** Removes the chat's wake-up (only `id` when given, so a newer one is never cleared by mistake). */
     clear(workspaceId, taskId, id = null) {
       const wakeup = wakeups[key(workspaceId, taskId)];

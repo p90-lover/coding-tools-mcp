@@ -100,10 +100,13 @@ export type ThreadListProps = {
   projectRemote?: (folder: string) => Promise<string | null>;
   /** What each project folder is in git, for its row's label (read when the list shows it). */
   projectGit?: (folder: string) => Promise<ThreadProjectGit | null>;
-  /** Archived and deleted chats of every project, and the days an archived chat stays (0: for good). */
-  archivedAll?: { days: number; chats: ArchivedChat[] };
+  /**
+   * Archived and deleted chats of every project, the days an archived chat stays (0: for good), and
+   * the days without activity before an open chat is archived (idleDays, 0: never).
+   */
+  archivedAll?: { days: number; idleDays?: number; chats: ArchivedChat[] };
   restoreArchived?: (workspaceId: string, taskId: string) => void;
-  setArchiveDays?: (days: number) => void;
+  setArchiveDays?: (change: { days?: number; idleDays?: number }) => void;
   /** Another project's chats, for a project opened in the list without switching to it (Codex). */
   loadProjectChats?: (workspaceId: string) => Promise<ChatSummary[]>;
   /** The open project's chats are still being read (just switched to it): `chats` is not yet its list. */
@@ -404,18 +407,22 @@ export function ChatThreadList(props: ThreadListProps) {
     saveOpenOthers(others);
     if (collapsed.has(workspaceId)) { const next = new Set(collapsed); next.delete(workspaceId); saveCollapsed(next); }
   }, [workspaceId]);
-  // Other open projects' chats, read when opened and refreshed with the list's clock.
+  // Every other project's chats, read when one opens and refreshed with the list's clock (a minute,
+  // paused while the window is hidden). Collapsed projects are read too: their row's badge (running,
+  // waiting on you, unread) comes from them, and only opened projects were read, so a collapsed
+  // project with chats running showed nothing.
   const [otherChats, setOtherChats] = useState<Record<string, ChatSummary[]>>({});
   const { loadProjectChats } = props;
   const openOtherIds = [...openOthers].filter((id) => id !== workspaceId && workspaces.some((item) => item.id === id)).join("\n");
+  const otherIds = workspaces.map((item) => item.id).filter((id) => id !== workspaceId).join("\n");
   useEffect(() => {
-    if (!loadProjectChats || !openOtherIds) return undefined;
+    if (!loadProjectChats || !otherIds) return undefined;
     let live = true;
-    for (const id of openOtherIds.split("\n")) {
+    for (const id of otherIds.split("\n")) {
       void loadProjectChats(id).then((list) => { if (live) setOtherChats((current) => ({ ...current, [id]: list })); }, () => undefined);
     }
     return () => { live = false; };
-  }, [loadProjectChats, openOtherIds, now]);
+  }, [loadProjectChats, otherIds, openOtherIds, now]);
   // The order you dragged projects into. Before there was one, projects rose as they were used; the
   // first list seen keeps that order, so nothing moves on the update.
   const [projectOrderSaved, setProjectOrderSaved] = useState<string[] | null>(() => {
@@ -947,9 +954,17 @@ export function ChatThreadList(props: ThreadListProps) {
           <span>Keep running and waiting chats on top</span>
         </label>
         {props.setArchiveDays ? <label className="cx-popover-row">
+          <span>Archive chats with no activity for</span>
+          <input type="number" min={0} max={365} key={`idle-${props.archivedAll?.idleDays ?? 7}`} defaultValue={props.archivedAll?.idleDays ?? 7} aria-label="Days without activity before a chat is archived"
+            onBlur={(event) => { const value = Math.round(Number(event.target.value)); if (value >= 0 && value <= 365 && value !== (props.archivedAll?.idleDays ?? 7)) props.setArchiveDays?.({ idleDays: value }); }}
+            onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+          <span>days</span>
+        </label> : null}
+        {props.setArchiveDays ? <p className="cx-popover-hint">0 keeps them open. Archived chats leave the project list until restored.</p> : null}
+        {props.setArchiveDays ? <label className="cx-popover-row">
           <span>Move archived chats to Recently deleted after</span>
           <input type="number" min={0} max={365} key={props.archivedAll?.days ?? 5} defaultValue={props.archivedAll?.days ?? 5} aria-label="Days before archived chats are deleted"
-            onBlur={(event) => { const value = Math.round(Number(event.target.value)); if (value >= 0 && value <= 365 && value !== (props.archivedAll?.days ?? 5)) props.setArchiveDays?.(value); }}
+            onBlur={(event) => { const value = Math.round(Number(event.target.value)); if (value >= 0 && value <= 365 && value !== (props.archivedAll?.days ?? 5)) props.setArchiveDays?.({ days: value }); }}
             onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
           <span>days</span>
         </label> : null}

@@ -37,17 +37,18 @@ function tempTree() {
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
-  chatTitles = null, redaction = null, computerControl = null } = {}) {
+  chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, reviewCall = null, previewEnabled = () => true,
+  registry = [{ id: "ws1", path: path.join(os.tmpdir(), "task") }, { id: "ws2", path: path.join(os.tmpdir(), "other") }] } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory, appProcesses, captureApp,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups, goals, chatHistory, appProcesses, captureApp, previews, previewEnabled,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
-    ...(computerControl ? { computerControl } : {}),
+    ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}), ...(reviewCall ? { reviewCall } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -56,6 +57,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     },
     requestHeadless: async (endpoint, body, options) => {
       calls.push({ endpoint, body, options });
+      if (endpoint === "/api/v1/workspaces") return { ok: true, workspaces: registry };
       if (endpoint.startsWith("/api/v1/tools/catalog?")) return catalog;
       if (endpoint === "/api/v1/tools/call") {
         const given = results[body.tool];
@@ -97,6 +99,247 @@ function post(url, body, headers = {}) {
     if (headers[":method"] !== "GET") request.end(payload); else request.end();
   });
 }
+
+test("native preview leases expose only their own panel and expire without workspace tools", async () => {
+  let stamp = 10_000;
+  const panels = new Map(), closed = [];
+  const previews = {
+    call: async (owner, name, args) => {
+      if (name === "preview_render") panels.set(owner, args.html);
+      return { isError: false, content: [{ type: "text", text: panels.get(owner) || "" }] };
+    },
+    close: owner => { closed.push(owner); panels.delete(owner); },
+  };
+  const { tools, asked, calls } = fixture({ previews, now: () => stamp });
+  try {
+    const first = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: stamp + 30_000, nativeScope: { runId: "old", nodeId: "lead" } });
+    const second = await tools.lease({ agent: "codex", workspaceId: "ws2", previewOnly: true, expiresAt: stamp + 90_000, nativeScope: { runId: "other", nodeId: "lead" } });
+    assert.equal(first.bind("native:ws1:task:single"), true);
+    assert.equal(second.bind("native:ws2:task:single"), true);
+    let a = first.servers[0];
+    const b = second.servers[0];
+    const list = await post(a.url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, a.headers);
+    assert.ok(list.body.result.tools.some(tool => tool.name === "preview_render"));
+    assert.ok(list.body.result.tools.every(tool => tool.name.startsWith("preview_")), "no workspace, command, app or other-chat tools");
+    const call = (server, name, args = {}) => post(server.url, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } }, server.headers);
+    assert.equal((await call(a, "preview_render", { html: "first" })).body.result.isError, false);
+    assert.equal((await call(b, "preview_render", { html: "second" })).body.result.isError, false);
+    assert.deepEqual([...panels], [["native:ws1:task:single", "first"], ["native:ws2:task:single", "second"]]);
+    assert.equal((await post(b.url, { jsonrpc: "2.0", id: 3, method: "tools/list" }, a.headers)).status, 401);
+    assert.equal((await call(a, "read_file", { path: "secret" })).body.result.isError, true);
+    assert.equal(await tools.renew("native:ws1:task:single"), null, "an AO resume cannot turn a native preview lease into workspace tools");
+    assert.deepEqual(asked, [], "native previews never resolve an unrelated AO worktree");
+    assert.deepEqual(calls, [], "preview-only tools never query the workspace tool catalog");
+    const followup = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: stamp + 30_000, nativeScope: { runId: "followup", nodeId: "lead" } });
+    assert.equal(followup.bind("native:ws1:task:single"), true);
+    assert.equal((await call(a, "preview_read")).status, 401, "the follow-up retires the previous credential");
+    first.release({ ended: true });
+    assert.deepEqual(closed, [], "stopping an old run cannot close its follow-up's panel");
+    a = followup.servers[0];
+    assert.equal((await call(a, "preview_read")).body.result.content[0].text, "first", "the follow-up retains the same panel");
+    stamp += 30_001;
+    assert.equal((await call(a, "preview_read")).status, 401);
+    assert.deepEqual(closed, ["native:ws1:task:single"]);
+    assert.equal((await call(b, "preview_read")).body.result.isError, false);
+    second.release({ ended: true });
+    assert.equal((await call(b, "preview_read")).status, 401);
+  } finally { await tools.close(); }
+});
+
+test("native visualize references read only the bound workspace and retain an unchanged panel", async () => {
+  let enabled = true, html = '<div class="card"><button class="btn">0</button></div><script>const saved = window.openai?.widgetState; if (typeof window.openai?.setWidgetState === "function") window.openai.setWidgetState({modelContent:{counter:1},privateContent:null}).catch(() => {});</script>';
+  const rendered = [], closed = [], panels = new Map();
+  const { tools, calls } = fixture({ previewEnabled: () => enabled, previews: {
+    call: async (owner, name, args, options) => { panels.set(owner, args.html); rendered.push({ owner, name, html: args.html, options }); return { isError: false }; },
+    matchesPanel: (owner, html) => panels.get(owner) === html,
+    close: owner => { panels.delete(owner); closed.push(owner); },
+  }, results: { read_file: body => ({ state: "completed", result: { ok: true, content: html, total_bytes: Buffer.byteLength(html), truncated: false, next_offset: null } }) } });
+  const reference = 'visualize' + JSON.stringify({ path: path.join(os.tmpdir(), "task", "counter.html") }) + '';
+  const scope = { workspaceId: "ws1", runId: "run", nodeId: "lead" };
+  try {
+    const lease = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "run", nodeId: "lead" } });
+    lease.bind("native:ws1:task:single");
+    const render = answer => tools.renderNativeVisualization({ ...scope, answer, requestKey: "request", stillCurrent: async () => true });
+    await render(reference);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].endpoint, "/api/v1/workspaces");
+    assert.equal(calls[0].options.method, "GET");
+    assert.equal(calls[1].endpoint, "/api/v1/tools/call");
+    assert.equal(calls[1].body.workspace_id, "ws1");
+    assert.equal(calls[1].body.tool, "read_file");
+    assert.equal(calls[1].body.root, path.join(os.tmpdir(), "task"), "only the current registered workspace chooses the isolated read root");
+    assert.equal(calls[1].body.root_kind, "project_folder");
+    assert.equal(rendered[0].owner, "native:ws1:task:single");
+    assert.equal(rendered[0].options.visualization, true, "the engine supplies the offline theme/utility adapter");
+    assert.equal(rendered[0].html, html, "supported widget state does not turn the native counter into an unavailable notice");
+    await render(reference);
+    assert.equal(calls.length, 2, "a repeated completed observation does not re-read or reset interaction state");
+    const next = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "followup", nodeId: "lead" } });
+    next.bind("native:ws1:task:single");
+    await tools.renderNativeVisualization({ ...scope, runId: "followup", answer: reference, requestKey: "followup", stillCurrent: async () => true });
+    assert.equal(calls.length, 4, "a follow-up can update the same file under the current workspace registry");
+    assert.equal(rendered.length, 1, "unchanged content keeps the existing panel across follow-ups");
+    const server = next.servers[0];
+    await callTool(server.url, server.headers, "preview_render", { html: "<p>Explicit panel</p>" });
+    assert.equal(rendered.length, 2);
+    const afterExplicit = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "after-explicit", nodeId: "lead" } });
+    afterExplicit.bind("native:ws1:task:single");
+    await tools.renderNativeVisualization({ ...scope, runId: "after-explicit", answer: reference, requestKey: "after-explicit", stillCurrent: async () => true });
+    assert.equal(rendered.length, 3, "a newer final reference replaces the explicit panel from the previous turn");
+    assert.equal(panels.get("native:ws1:task:single"), html);
+    panels.delete("native:ws1:task:single");
+    const afterClose = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "after-close", nodeId: "lead" } });
+    afterClose.bind("native:ws1:task:single");
+    await tools.renderNativeVisualization({ ...scope, runId: "after-close", answer: reference, requestKey: "after-close", stillCurrent: async () => true });
+    assert.equal(rendered.length, 4, "a disposed panel is recreated even when the file digest is unchanged");
+    enabled = false;
+    await tools.renderNativeVisualization({ ...scope, runId: "after-close", answer: reference, requestKey: "disabled", stillCurrent: async () => true });
+    assert.equal(calls.length, 8);
+    afterClose.release({ ended: true });
+  } finally { await tools.close(); }
+});
+
+test("native visualize loading cannot outlive Stop, a follow-up, or an explicit preview render", async () => {
+  for (const action of ["stop", "followup", "explicit", "changed"]) {
+    let finishRead, readStarted;
+    const started = new Promise(resolve => { readStarted = resolve; });
+    const rendered = [];
+    const { tools } = fixture({ previews: { call: async (_owner, _name, args) => { rendered.push(args.html); return { isError: false }; }, close() {} },
+      results: { read_file: () => { readStarted(); return new Promise(resolve => { finishRead = resolve; }); } } });
+    let current = true;
+    try {
+      const lease = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "run", nodeId: "lead" } });
+      lease.bind("native:ws1:task:single");
+      const pending = tools.renderNativeVisualization({ workspaceId: "ws1", runId: "run", nodeId: "lead", requestKey: "r",
+        answer: 'visualize' + JSON.stringify({ path: path.join(os.tmpdir(), "task", "panel.html") }) + '', stillCurrent: async () => current });
+      await started;
+      if (action === "stop") lease.release({ ended: true });
+      if (action === "followup") (await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "next", nodeId: "lead" } })).bind("native:ws1:task:single");
+      if (action === "explicit") {
+        const server = lease.servers[0];
+        await callTool(server.url, server.headers, "preview_render", { html: "Explicit panel" });
+      }
+      if (action === "changed") current = false;
+      finishRead({ state: "completed", result: { ok: true, content: "<button>0</button>", total_bytes: 18, truncated: false, next_offset: null } });
+      await pending;
+      assert.deepEqual(rendered, action === "explicit" ? ["Explicit panel"] : [], action);
+    } finally { finishRead?.({ state: "failed" }); await tools.close(); }
+  }
+});
+
+test("native visualize provenance waits recheck Stop, expiry and opt-out before reading or rendering", async () => {
+  for (const pauseAt of [1, 2, 3]) for (const action of ["stop", "expiry", "opt-out", "explicit"]) {
+    let releaseProof, proofStarted, checks = 0, stamp = 10_000, enabled = true;
+    const started = new Promise(resolve => { proofStarted = resolve; });
+    const rendered = [];
+    const { tools, calls } = fixture({ now: () => stamp, previewEnabled: () => enabled,
+      previews: { call: async (_owner, _name, args) => { rendered.push(args.html); return { isError: false }; }, close() {} },
+      results: { read_file: () => ({ state: "completed", result: { ok: true, content: "<button>0</button>", total_bytes: 18, truncated: false, next_offset: null } }) } });
+    try {
+      const lease = await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: stamp + 120_000, nativeScope: { runId: "run", nodeId: "lead" } });
+      lease.bind("native:ws1:task:single");
+      const pending = tools.renderNativeVisualization({ workspaceId: "ws1", runId: "run", nodeId: "lead", requestKey: "r",
+        answer: 'visualize' + JSON.stringify({ path: path.join(os.tmpdir(), "task", "panel.html") }) + '',
+        stillCurrent: async () => { if (++checks !== pauseAt) return true; proofStarted(); return new Promise(resolve => { releaseProof = resolve; }); } });
+      await started;
+      if (action === "stop") lease.release({ ended: true });
+      if (action === "expiry") stamp += 120_001;
+      if (action === "opt-out") enabled = false;
+      if (action === "explicit") {
+        const server = lease.servers[0];
+        await callTool(server.url, server.headers, "preview_render", { html: "Explicit panel" });
+      }
+      releaseProof(true);
+      await pending;
+      assert.equal(calls.filter(call => call.endpoint === "/api/v1/workspaces").length, pauseAt === 1 ? 0 : 1,
+        `${action}: no workspace lookup after an ended first proof`);
+      assert.equal(calls.filter(call => call.body?.tool === "read_file").length, pauseAt < 3 ? 0 : 1,
+        `${action}: no file read after an ended workspace proof`);
+      assert.deepEqual(rendered, action === "explicit" ? ["Explicit panel"] : [], `${action}: no stale render after proof ${pauseAt}`);
+    } finally { releaseProof?.(false); await tools.close(); }
+  }
+});
+
+test("native visualize loading rejects inert references, scoped read failures and unsupported fragments", async () => {
+  let result = { ok: true, content: "<button>0</button>", total_bytes: 18, truncated: false, next_offset: null };
+  const rendered = [];
+  const { tools, calls } = fixture({ previews: { call: async (_owner, _name, args) => { rendered.push(args.html); return { isError: false }; }, close() {} },
+    results: { read_file: () => ({ state: "completed", result }) } });
+  const reference = 'visualize' + JSON.stringify({ path: path.join(os.tmpdir(), "task", "counter.html") }) + '';
+  let request = 0;
+  const render = (answer, workspaceId = "ws1") => tools.renderNativeVisualization({ workspaceId, runId: "run", nodeId: "lead", answer,
+    requestKey: `request-${++request}`, stillCurrent: async () => true });
+  try {
+    (await tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true, expiresAt: Date.now() + 120000, nativeScope: { runId: "run", nodeId: "lead" } })).bind("native:ws1:task:single");
+    for (const text of ['```\n' + reference + '\n```', '```html\n```not-a-close\n' + reference + '\n```', '> ' + reference, reference.slice(0, -1)]) await render(text);
+    await render(reference, "other-workspace");
+    assert.equal(calls.length, 0); assert.deepEqual(rendered, []);
+    await render('visualize{"path":"relative.html"}');
+    assert.equal(calls.length, 0); assert.match(rendered.at(-1), /invalid/);
+    result = { ok: false, error: { code: "OUTSIDE_WORKSPACE" } };
+    await render(reference);
+    assert.match(rendered.at(-1), /workspace permissions/);
+    result = { ok: true, content: "<div>partial", total_bytes: 200000, truncated: true, next_offset: 10 };
+    await render(reference);
+    assert.match(rendered.at(-1), /128 KiB/);
+    for (const [html, message] of [["<script>window.openai.callTool({})</script>", /native host APIs/],
+      ['<script src="https://cdn.jsdelivr.net/example.js"></script>', /offline/], ["<html><body>Document</body></html>", /fragment/]]) {
+      result = { ok: true, content: html, total_bytes: Buffer.byteLength(html), truncated: false, next_offset: null };
+      await render(reference);
+      assert.match(rendered.at(-1), message);
+    }
+    await tools.renderNativeVisualization({ workspaceId: "ws1", runId: "run", nodeId: "lead", answer: reference,
+      workingDirectory: "../elsewhere", requestKey: "outside-working-directory", stillCurrent: async () => true });
+    assert.match(rendered.at(-1), /workspace permissions/);
+    assert.ok(calls.filter(call => call.endpoint === "/api/v1/tools/call").every(call => call.body.workspace_id === "ws1"
+      && call.body.tool === "read_file" && call.body.root === path.join(os.tmpdir(), "task") && call.body.root_kind === "project_folder"));
+  } finally { await tools.close(); }
+});
+
+test("restored native preview leases revoke by exact run and node without a workflow cache", async () => {
+  const tree = tempTree();
+  const statePath = path.join(tree.base, "native-preview-leases.json");
+  const panels = new Map(), closed = [];
+  const previews = { call: async (owner, name, args) => {
+    if (name === "preview_render") panels.set(owner, args.html);
+    return { isError: false, content: [{ type: "text", text: panels.get(owner) || "" }] };
+  }, close: owner => { closed.push(owner); panels.delete(owner); } };
+  const first = fixture({ previews, statePath });
+  let restored, workflow;
+  try {
+    const create = async (runId, nodeId, owner) => {
+      const lease = await first.tools.lease({ agent: "codex", workspaceId: "ws1", previewOnly: true,
+        expiresAt: Date.now() + 120_000, nativeScope: { runId, nodeId } });
+      assert.equal(lease.bind(owner), true);
+      return lease.servers[0];
+    };
+    const previous = await create("old", "lead", "native:ws1:task:single");
+    const current = await create("current", "lead", "native:ws1:task:single");
+    const other = await create("current", "worker", "native:ws1:task:worker");
+    const call = (server, name, args = {}) => post(server.url, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, server.headers);
+    assert.equal((await call(previous, "preview_read")).status, 401);
+    await first.tools.close();
+    const saved = JSON.parse(fs.readFileSync(statePath));
+    const legacy = { ...saved.sessions[0], key: `${saved.sessions[0].key}x`, aoSession: "native:ws1:legacy:single" };
+    delete legacy.nativeScope;
+    saved.sessions.push(legacy);
+    fs.writeFileSync(statePath, JSON.stringify(saved));
+    restored = fixture({ previews, statePath });
+    await restored.tools.listen();
+    assert.equal((await call({ ...current, url: current.url.replace(/[^/]+$/, legacy.key) }, "preview_read")).status, 401, "unassociated legacy native credentials fail closed");
+    assert.equal((await call(current, "preview_render", { html: "restored" })).body.result.isError, false);
+    assert.equal((await call(other, "preview_render", { html: "other role" })).body.result.isError, false);
+    assert.equal(restored.tools.revokeNativePreviews({ workspaceId: "ws1", runId: "old", nodeId: "lead" }), 0);
+    assert.equal((await call(current, "preview_read")).body.result.isError, false, "stopping an old run preserves its restored follow-up");
+    const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
+    workflow = createAgentOrchestratorWorkflow({ nativePreviewTools: restored.tools, confirm: async () => true,
+      requestHeadless: async endpoint => { assert.equal(endpoint, "/api/v1/ao/harness/disconnect"); return { ok: true }; } });
+    await workflow.call("stop_harness", { workspaceId: "ws1", runId: "current", nodeId: "lead" });
+    assert.equal((await call(current, "preview_read")).status, 401);
+    assert.deepEqual(closed, ["native:ws1:task:single"]);
+    assert.equal((await call(other, "preview_read")).body.result.isError, false, "another role remains authorized");
+  } finally { workflow?.dispose(); await first.tools.close(); await restored?.tools.close(); tree.cleanup(); }
+});
 
 /** Dialog text with its hard wraps undone. */
 const unwrapped = (text) => text.replace(/\n↪ /g, "");
@@ -1077,6 +1320,61 @@ test("rename_chat names the agent's own chat, is in its instructions, and is off
   } finally { await tools.close(); await plain.tools.close(); }
 });
 
+test("moveTarget picks a project by id, name or folder, and says what is wrong otherwise", () => {
+  const projects = [
+    { id: "ws1", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" },
+    { id: "ws2", name: "Clash Macro", path: "G:\\Projects\\clash-of-clan-macro" },
+  ];
+  const { moveTarget } = require("../electron/chat-agent-tools.cjs");
+  assert.equal(moveTarget(projects, { project: "ws2" }, "win32").id, "ws2", "by id");
+  assert.equal(moveTarget(projects, { project: "clash macro" }, "win32").id, "ws2", "by name, any case");
+  assert.equal(moveTarget(projects, { path: "g:/projects/Clash-Of-Clan-Macro/" }, "win32").id, "ws2",
+    "a Windows folder matches whatever its case, slashes or trailing separator");
+  assert.throws(() => moveTarget(projects, { path: "G:\\Projects\\elsewhere" }, "win32"), /No project uses/);
+  assert.throws(() => moveTarget(projects, { path: "relative\\folder" }, "win32"), /absolute/);
+  assert.throws(() => moveTarget(projects, { project: "nope" }, "win32"), /No project/);
+  assert.throws(() => moveTarget(projects, {}, "win32"), /project.*path|path.*project/i);
+  assert.throws(() => moveTarget(projects, { project: "ws2", path: "G:\\Projects\\clash-of-clan-macro" }, "win32"), /one of/i);
+});
+
+test("move_chat asks the user, then moves the agent's own chat when its turn ends", async () => {
+  // The user: "add a allow model to move chat session and modify its path on chat tools".
+  const moves = [];
+  const chatMoves = {
+    projects: async () => [
+      { id: "ws1", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" },
+      { id: "ws2", name: "Clash Macro", path: "G:\\Projects\\clash-of-clan-macro" },
+    ],
+    move: async (request) => { moves.push(request); return { ok: true, taskId: "task-1", to: request.targetWorkspaceId, deferred: true }; },
+  };
+  let allow = true;
+  const { tools, confirmations } = fixture({ chatMoves, confirm: async () => allow });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "move-owner" });
+    assert.ok((await listed(client.url, client.auth)).includes("move_chat"));
+    const init = await post(client.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, client.auth);
+    assert.match(init.body.result.instructions, /move this chat to another project .*call move_chat/);
+    const moved = await callTool(client.url, client.auth, "move_chat", { project: "Clash Macro" });
+    assert.equal(moved.isError, undefined);
+    assert.match(moved.content[0].text, /moves to Clash Macro when this turn ends/);
+    assert.deepEqual(moves, [{ workspaceId: "ws1", session: "move-owner", targetWorkspaceId: "ws2" }],
+      "the chat and session are the server's own, never ones the agent names");
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0].message, /move its chat to another project/);
+    assert.match(JSON.stringify(confirmations[0].detail), /clash-of-clan-macro/, "the dialog shows where it goes");
+    allow = false;
+    const declined = await callTool(client.url, client.auth, "move_chat", { project: "ws2" });
+    assert.equal(declined.isError, true);
+    assert.match(declined.content[0].text, /did not allow/);
+    assert.equal((await callTool(client.url, client.auth, "move_chat", { project: "coding-tools-mcp" })).isError, true, "not to its own project");
+    assert.equal(moves.length, 1);
+    const other = await session(plain.tools, { id: "no-move" });
+    assert.equal((await listed(other.url, other.auth)).includes("move_chat"), false);
+    assert.equal((await callTool(other.url, other.auth, "move_chat", { project: "ws2" })).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
+});
+
 test("redact_message hides secrets in the agent's own chat, lists the user's kinds, and follows the setting", async () => {
   // The user: tools "that allow model to edit the message that user sent on chat when it contain secret",
   // with "a options on settings and with a list that tell ai what input message to blurr".
@@ -1753,7 +2051,8 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
     assert.deepEqual((await listed(opted.url, opted.auth)).filter((name) => !["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"].includes(name)),
       ["capture_screenshot", "list_windows", "computer_snapshot", "computer_action", "vision_status", "capture_process"]);
     const init = await post(opted.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, opted.auth);
-    assert.match(init.body.result.instructions, /confirms each screen capture/);
+    assert.match(init.body.result.instructions, /each call is reviewed before it runs/);
+    assert.match(init.body.result.instructions, /computer_select_window/);
 
     const shot = await callTool(opted.url, opted.auth, "capture_screenshot", { max_bytes: 4096 });
     assert.equal(shot.isError, false);
@@ -1772,21 +2071,17 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
     await callTool(opted.url, opted.auth, "computer_snapshot", { session_id: "lease" });
     assert.equal(calls.at(-1).body.tool, "computer_snapshot");
     assert.equal(confirmations.length, 4);
-    // Computer control needs the user's local enable (its lease, shared by the workspace) and,
-    // once per chat, the user's leave for this chat to use it.
+    // With no reviewer to answer, every control action is the person's, each time.
     approve = false;
-    assert.match((await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" })).content[0].text, /did not allow this chat/);
+    assert.match((await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" })).content[0].text, /declined computer_action/);
     assert.equal(calls.at(-1).body.tool, "computer_snapshot");
     approve = true;
     await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" });
     assert.equal(calls.at(-1).body.tool, "computer_action");
-    assert.match(confirmations.at(-1).detail, /every chat you allow here/);
+    assert.match(confirmations.at(-1).detail, /reviewer could not decide/);
     const asked = confirmations.length;
     await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" });
-    assert.equal(confirmations.length, asked, "asked once per chat, not per action");
-    const another = await session(tools, { id: "ao-3" });
-    await callTool(another.url, another.auth, "computer_action", { session_id: "lease" });
-    assert.equal(confirmations.length, asked + 1, "another chat is asked for itself");
+    assert.equal(confirmations.length, asked + 1, "asked per action, not once per chat");
 
     desktop = false;
     assert.match((await callTool(opted.url, opted.auth, "computer_action", {})).content[0].text, /Unknown tool/,
@@ -1885,58 +2180,115 @@ test("capture_process is a reviewed screen observation that returns the window a
   } finally { await tools.close(); tree.cleanup(); }
 });
 
-test("a chat asking for computer control while it is off is shown the window picker; picking a window allows that chat", async () => {
-  // Seen live: every chat's computer_status read "stopped" and the agent asked the person to "enable
-  // it in the app", which the Electron app had no way to do.
+test("every screen call goes to the chat's reviewer first, in any approval mode: allow runs it, deny refuses it, ask is the person's", async () => {
   const tree = tempTree();
-  let state = "stopped";
-  let answer = { started: true };
-  const picks = [];
-  let clock = 1_000_000;
-  const computerControl = {
-    status: async () => ({ state }),
-    pick: async (request) => { picks.push(request); if (answer.started) state = "active"; return answer; },
-  };
-  const { tools, calls, confirmations } = fixture({ root: tree.root, desktop: () => true, computerControl, now: () => clock });
+  let verdict = { action: "allow", reason: "" };
+  const reviewed = [];
+  const reviewCall = async (input) => { reviewed.push(input); return verdict; };
+  const { tools, calls, confirmations } = fixture({ root: tree.root, desktop: () => true, reviewCall, confirm: async () => true });
   try {
-    const chat = await session(tools, { id: "ao-1" });
-    assert.equal((await callTool(chat.url, chat.auth, "computer_status", {})).isError, false);
-    assert.equal(picks.length, 1, "the picker is shown");
-    assert.equal(picks[0].workspaceId, "ws1");
-    assert.equal((await callTool(chat.url, chat.auth, "computer_action", { session_id: "s", action: "click" })).isError, false);
-    assert.equal(confirmations.length, 0, "picking the window allowed this chat: no second question");
-    assert.equal(picks.length, 1, "control is on: no picker");
+    const chat = await session(tools, { id: "ao-1", approvalMode: "bypass-permissions" });
+    assert.equal((await callTool(chat.url, chat.auth, "capture_screenshot", {})).isError, false);
+    assert.deepEqual(reviewed.map(({ workspaceId, session: id, tool }) => [workspaceId, id, tool]), [["ws1", "ao-1", "capture_screenshot"]],
+      "reviewed even with permissions bypassed");
+    assert.equal(confirmations.length, 0, "the reviewer's allow is the approval");
+    assert.equal(calls.at(-1).body.tool, "capture_screenshot");
 
-    // Turned down: a control call is refused and reaches nothing; status reads on without asking again.
-    state = "stopped";
-    answer = { started: false, reason: "the user cancelled" };
-    const other = await session(tools, { id: "ao-2" });
-    const before = calls.filter((call) => call.endpoint === "/api/v1/tools/call").length;
-    const refused = await callTool(other.url, other.auth, "computer_action", { session_id: "s", action: "click" });
-    assert.equal(refused.isError, true);
-    assert.match(refused.content[0].text, /did not start computer control \(the user cancelled\)/);
-    assert.equal(calls.filter((call) => call.endpoint === "/api/v1/tools/call").length, before, "nothing reached the screen");
-    assert.equal((await callTool(other.url, other.auth, "computer_status", {})).isError, false);
-    assert.equal(picks.length, 2, "a declined chat's status reads do not ask again at once");
-    clock += 6 * 60_000;
-    await callTool(other.url, other.auth, "computer_status", {});
-    assert.equal(picks.length, 3, "after a while it may ask again");
+    verdict = { action: "deny", reason: "nothing in the task needs the screen" };
+    const before = calls.length;
+    const denied = await callTool(chat.url, chat.auth, "computer_action", { session_id: "lease", action: "click" });
+    assert.match(denied.content[0].text, /reviewer denied computer_action: nothing in the task needs the screen/);
+    assert.equal(calls.length, before, "a denied call never reaches the screen");
+    assert.equal(confirmations.length, 0);
+
+    verdict = { action: "ask", reason: "a password field" };
+    await callTool(chat.url, chat.auth, "computer_action", { session_id: "lease", action: "type" });
+    assert.equal(confirmations.length, 1, "what the reviewer cannot decide is the person's");
+    assert.match(confirmations[0].detail, /reviewer could not decide \(a password field\)/);
+
+    // Status, stop, route and vision see and touch nothing: never reviewed.
+    const count = reviewed.length;
+    for (const name of ["computer_status", "computer_stop", "computer_route", "vision_status"]) await callTool(chat.url, chat.auth, name, {});
+    assert.equal(reviewed.length, count);
   } finally { await tools.close(); tree.cleanup(); }
 });
 
-test("computer control is asked on a card in the chat, never in a window of its own that takes the focus", async () => {
+test("computer use asks to use the app, as Codex does: the agent names a window, the person allows its app, control starts on it", async () => {
+  const tree = tempTree();
+  const windows = [{ window_id: 7, pid: 70, title: "notes.txt - Notepad", app: "notepad.exe", appName: "Notepad" },
+    { window_id: 8, pid: 80, title: "Inbox - Google Chrome", app: "chrome.exe", appName: "Google Chrome" }];
+  let state = "stopped";
+  let controlled = null;
+  let answer = { allowed: true };
+  const asks = [];
+  const starts = [];
+  const allowed = new Set();
+  const computerControl = {
+    status: async () => ({ state, session_id: "lease-1" }),
+    targets: async () => windows,
+    controlled: () => controlled,
+    appName: (app) => windows.find((item) => item.app === app)?.appName ?? app,
+    appAllowed: (app, workspaceId, session) => allowed.has(`${workspaceId}:${session}:${app}`),
+    askApp: async (request) => {
+      asks.push(request);
+      if (answer.allowed) allowed.add(`${request.workspaceId}:${request.aoSession}:${request.target.app}`);
+      return answer;
+    },
+    start: async ({ target }) => { starts.push(target); state = "active"; controlled = target; return { state, session_id: "lease-1" }; },
+  };
+  const { tools, calls } = fixture({ root: tree.root, desktop: () => true, computerControl, reviewCall: async () => ({ action: "allow" }) });
+  try {
+    const chat = await session(tools, { agent: "claude-code", id: "ao-1" });
+    const listed = (await callTool(chat.url, chat.auth, "computer_list_windows", {})).structuredContent;
+    assert.deepEqual(listed.windows.map((item) => [item.window_id, item.app_name]), [[7, "Notepad"], [8, "Google Chrome"]],
+      "each window with its program, listed by the app itself");
+    assert.equal(calls.filter((call) => call.endpoint === "/api/v1/tools/call").length, 0);
+
+    const off = await callTool(chat.url, chat.auth, "computer_action", { session_id: "x", action: "click" });
+    assert.match(off.content[0].text, /Computer use is off\. Call computer_list_windows, then computer_select_window/);
+    assert.equal(asks.length, 0, "nothing is asked until the agent names a window");
+
+    const picked = await callTool(chat.url, chat.auth, "computer_select_window", { window_id: 7, pid: 70 });
+    assert.equal(picked.isError, false);
+    assert.equal(asks.length, 1);
+    assert.deepEqual([asks[0].agent, asks[0].target.app, asks[0].workspaceId, asks[0].aoSession], ["Claude Code", "notepad.exe", "ws1", "ao-1"]);
+    assert.deepEqual(starts.map((item) => item.window_id), [7], "control starts on the window it asked for");
+    assert.equal(picked.structuredContent.session_id, "lease-1");
+    assert.equal(picked.structuredContent.app, "Notepad");
+
+    assert.equal((await callTool(chat.url, chat.auth, "computer_action", { session_id: "lease-1", action: "click" })).isError, false);
+    assert.equal(calls.at(-1).body.tool, "computer_action");
+    assert.equal(asks.length, 1, "the allowed app is not asked again");
+
+    // Another chat using the same control is asked for itself.
+    const other = await session(tools, { agent: "codex", id: "ao-2" });
+    answer = { allowed: false, reason: "the user denied it" };
+    const before = calls.length;
+    const refused = await callTool(other.url, other.auth, "computer_action", { session_id: "lease-1", action: "click" });
+    assert.match(refused.content[0].text, /did not allow Codex to use Notepad \(the user denied it\)/);
+    assert.equal(calls.length, before, "nothing reached the screen");
+
+    const gone = await callTool(chat.url, chat.auth, "computer_select_window", { window_id: 99, pid: 1 });
+    assert.match(gone.content[0].text, /not open any more/);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("computer use asks on a card in the chat, Codex's own, and keeps Always allow across restarts", async () => {
   const { createComputerControl, barPage } = require("../electron/computer-control.cjs");
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "computer-approvals-"));
+  const approvalsFile = path.join(folder, "computer-app-approvals.json");
   const calls = [];
   const published = [];
   const windows = [];
   const request = async (endpoint, body) => {
     calls.push([endpoint, body]);
     if (endpoint === "/api/v1/computer/targets") {
-      return { targets: [{ window_id: 7, pid: 70, title: "<img src=x onerror=alert(1)>" }, { window_id: 8, pid: 1, title: "Coding Tools" }] };
+      return { targets: [{ window_id: 7, pid: 70, title: "<img src=x onerror=alert(1)>", app: "Chrome.exe" }, { window_id: 8, pid: 1, title: "Coding Tools", app: "coding tools.exe" }] };
     }
     if (endpoint === "/api/v1/workspaces") {
       return { workspaces: [{ id: "ws", name: "proj", screen_capture_enabled: false, permission_mode: "p", approval_mode: "a", tool_profile: "t" }] };
     }
+    if (endpoint === "/api/v1/computer/start") return { status: { state: "active", session_id: "lease-1" } };
     return {};
   };
   class FakeWindow {
@@ -1946,46 +2298,106 @@ test("computer control is asked on a card in the chat, never in a window of its 
     isDestroyed() { return false; }
     isVisible() { return true; }
   }
-  const control = createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1], onRequests: (list) => published.push(list),
+  const make = () => createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1], onRequests: (list) => published.push(list), approvalsFile,
     screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+  const control = make();
   const settle = async () => { for (let tick = 0; tick < 50 && !control.requests().length; tick += 1) await new Promise(setImmediate); };
   try {
-    const asked = control.pick({ workspaceId: "ws", aoSession: "s1", chat: "codex" });
+    const targets = await control.targets();
+    assert.deepEqual(targets.map((item) => [item.window_id, item.app, item.appName]), [[7, "chrome.exe", "Google Chrome"]], "never the app's own windows");
+    const asked = control.askApp({ workspaceId: "ws", aoSession: "s1", agent: "Claude Code", target: targets[0] });
     await settle();
     const [card] = control.requests();
     assert.equal(windows.length, 0, "no window comes up to ask");
-    assert.deepEqual(JSON.parse(JSON.stringify(card.windows)), [{ title: "<img src=x onerror=alert(1)>", pid: 70 }],
-      "the app's own windows are not offered; titles stay plain text for the card to show as text");
-    assert.equal(card.captureOff, true);
-    assert.deepEqual([...card.sessions], ["s1"]);
-    assert.equal(control.pick({ workspaceId: "ws", aoSession: "s2", chat: "other" }), asked, "a chat asking meanwhile shares the request");
-    assert.deepEqual([...control.requests()[0].sessions], ["s1", "s2"], "and its card shows in that chat too");
+    assert.deepEqual([card.agent, card.app, card.window, card.project, card.captureOff, card.firstUse], ["Claude Code", "Google Chrome", "<img src=x onerror=alert(1)>", "proj", true, true]);
+    assert.deepEqual([...card.persistModes], ["always", "conversation"]);
+    const again = control.askApp({ workspaceId: "ws", aoSession: "s1", target: targets[0] });
+    await new Promise(setImmediate);
+    assert.equal(control.requests().length, 1, "asking again while it waits shares the card");
 
-    assert.match((await control.answer({ id: card.id, window: 0 })).error, /screen capture/, "capture off needs the tick");
-    assert.equal((await control.answer({ id: "another", window: 0, capture: true })).ok, false, "a stale card starts nothing");
-    assert.deepEqual(await control.answer({ id: card.id, window: 0, duration: "300", capture: true }), { ok: true });
-    assert.deepEqual(await asked, { started: true });
-    assert.equal(calls.find(([endpoint]) => endpoint === "/api/v1/workspaces/policy")[1].screen_capture_enabled, true);
-    const start = calls.find(([endpoint]) => endpoint === "/api/v1/computer/start")[1];
-    assert.deepEqual([start.window_id, start.pid, start.duration_seconds], [7, 70, 300]);
+    assert.equal((await control.answer({ id: "another", decision: "always" })).ok, false, "a stale card allows nothing");
+    assert.deepEqual(await control.answer({ id: card.id, decision: "conversation" }), { ok: true });
+    assert.deepEqual(await asked, { allowed: true });
+    assert.deepEqual(await again, { allowed: true }, "and its answer");
+    assert.equal(calls.find(([endpoint]) => endpoint === "/api/v1/workspaces/policy")[1].screen_capture_enabled, true, "allowing turns capture on");
     assert.deepEqual(control.requests(), [], "the card goes once answered");
-    assert.deepEqual(published.at(-1), []);
+    assert.equal(control.appAllowed("chrome.exe", "ws", "s1"), true);
+    assert.equal(control.appAllowed("chrome.exe", "ws", "s2"), false, "this conversation only");
+
+    const status = await control.start({ workspaceId: "ws", target: targets[0] });
+    assert.equal(status.session_id, "lease-1");
+    const start = calls.find(([endpoint]) => endpoint === "/api/v1/computer/start")[1];
+    assert.deepEqual([start.window_id, start.pid, start.always_enabled], [7, 70, true], "until stopped on the control bar");
     assert.equal(windows.length, 1, "only the control bar is a window, shown without the focus (showInactive)");
+    assert.equal(control.controlled().app, "chrome.exe");
     await control.stop();
 
-    const declined = control.pick({ workspaceId: "ws", aoSession: "s1" });
+    const always = control.askApp({ workspaceId: "ws", aoSession: "s2", agent: "Codex", target: targets[0] });
     await settle();
-    assert.deepEqual(await control.answer({ id: control.requests()[0].id, cancel: true }), { ok: true });
-    assert.deepEqual(await declined, { started: false, reason: "the user cancelled" });
+    assert.equal(control.requests()[0].firstUse, false, "the notice shows until an app was allowed once");
+    assert.deepEqual(await control.answer({ id: control.requests()[0].id, decision: "always" }), { ok: true });
+    assert.deepEqual(await always, { allowed: true });
+
+    const restarted = make();
+    assert.deepEqual(await restarted.askApp({ workspaceId: "ws", aoSession: "s9", target: targets[0] }), { allowed: true }, "Always allow survives a restart");
+    assert.deepEqual(restarted.allowedApps().map((item) => [item.app, item.name]), [["chrome.exe", "Google Chrome"]]);
+    assert.equal(restarted.forgetApp("chrome.exe"), true);
+    assert.deepEqual(restarted.allowedApps(), []);
+
+    const denied = control.askApp({ workspaceId: "ws", aoSession: "s3", target: { ...targets[0], app: "notepad.exe" } });
+    await settle();
+    assert.deepEqual(await control.answer({ id: control.requests()[0].id, decision: "deny" }), { ok: true });
+    assert.deepEqual(await denied, { allowed: false, reason: "the user denied it" });
 
     const stopping = new AbortController();
-    const stopped = control.pick({ workspaceId: "ws", aoSession: "s1", signal: stopping.signal });
+    const stopped = control.askApp({ workspaceId: "ws", aoSession: "s4", target: { ...targets[0], app: "paint.exe" }, signal: stopping.signal });
     await settle();
     stopping.abort();
-    assert.deepEqual(await stopped, { started: false, reason: "the chat stopped" });
+    assert.deepEqual(await stopped, { allowed: false, reason: "the chat stopped" });
     assert.deepEqual(control.requests(), [], "a stopped chat's card goes");
-  } finally { control.dispose(); }
+  } finally { control.dispose(); fs.rmSync(folder, { recursive: true, force: true }); }
   assert.ok(!barPage({ title: "</span><script>" }).includes("</span><script>"));
+});
+
+// Seen live on 0.8.39 (2026-10-31): a data: page never navigates in-page, so the picker's Start and
+// the bar's Stop, both sent as a hash change, never reached the app.
+test("the control bar's Stop reaches the app on a data: page: it renames the page, not its hash", async () => {
+  const vm = require("node:vm");
+  const { createComputerControl, barPage } = require("../electron/computer-control.cjs");
+  const page = barPage({ title: "Calculator" });
+  assert.doesNotMatch(page, /location\.hash/, "a hash change never fires on a data: page");
+  // The page's own script, run against a stand-in document: Stop renames the page.
+  const elements = { stop: {}, left: {} };
+  const document = { title: "Computer control is on", getElementById: (id) => elements[id] };
+  vm.runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document, window: {} });
+  elements.stop.onclick();
+
+  const calls = [];
+  const handlers = {};
+  class FakeWindow {
+    constructor() { this.webContents = { on: (name, handler) => { handlers[name] = handler; }, setWindowOpenHandler() {}, executeJavaScript: async () => undefined }; }
+    setAlwaysOnTop() {} on() {} showInactive() {} destroy() {}
+    loadURL() { return Promise.resolve(); }
+    isDestroyed() { return false; }
+    isVisible() { return true; }
+  }
+  const request = async (endpoint, body) => {
+    calls.push(endpoint);
+    if (endpoint === "/api/v1/computer/targets") return { targets: [{ window_id: 7, pid: 70, title: "Calculator" }] };
+    if (endpoint === "/api/v1/workspaces") return { workspaces: [{ id: "ws", name: "proj", screen_capture_enabled: true }] };
+    return {};
+  };
+  const control = createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1],
+    screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+  try {
+    // The bar opens once the person has let the chat use the app (askApp's card, tested above).
+    await control.start({ workspaceId: "ws", target: { window_id: 7, pid: 70, title: "Calculator", app: "calc.exe" } });
+    let prevented = false;
+    handlers["page-title-updated"]({ preventDefault: () => { prevented = true; } }, document.title);
+    await new Promise(setImmediate);
+    assert.ok(calls.includes("/api/v1/computer/stop"), "Stop on the bar stops control");
+    assert.ok(prevented, "and the bar keeps its own title");
+  } finally { control.dispose(); }
 });
 
 test("turning the app's tools off refuses calls in running sessions", async () => {

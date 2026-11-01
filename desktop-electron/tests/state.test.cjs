@@ -248,3 +248,20 @@ test("session refresh reminders are deferred by exactly 48 hours", () => {
   assert.equal(nextSessionRefreshReminderAt(now), "2026-08-07T12:00:00.000Z");
   assert.throws(() => nextSessionRefreshReminderAt(Number.NaN), /must be finite/);
 });
+
+test("an update that changes nothing is not written again; the first one always is", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-launcher-state-"));
+  try {
+    const file = path.join(root, "launcher-state.json");
+    const store = createStateStore(file);
+    store.update({ codexRestartRequired: false });
+    assert.equal(fs.existsSync(file), true, "the session's first update writes");
+    fs.rmSync(file);
+    assert.equal(store.update({ codexRestartRequired: false }).codexRestartRequired, false);
+    assert.equal(fs.existsSync(file), false, "nothing changed, nothing written");
+    store.update({ codexRestartRequired: true });
+    assert.equal(createStateStore(file).read().codexRestartRequired, true, "a change is written");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

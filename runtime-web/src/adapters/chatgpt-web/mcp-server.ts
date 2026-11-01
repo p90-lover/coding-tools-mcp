@@ -285,6 +285,10 @@ interface GatewayToolCatalogPage {
   total: number;
 }
 
+const GATEWAY_CATALOG_BEGIN = "CODEX_NATIVE_TOOL_CATALOG_V1_BEGIN";
+const GATEWAY_CATALOG_END = "CODEX_NATIVE_TOOL_CATALOG_V1_END";
+const MAX_GATEWAY_CATALOG_BYTES = 1024 * 1024;
+
 function gatewayToolDescription(tool: GatewayToolDescriptor): string {
   if (!isGatewayAgentWaitTool(tool.name)) return tool.description;
   return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}`;
@@ -311,12 +315,14 @@ function gatewayToolCatalogProgram(options: {
     "    ...Object.fromEntries([\"outputSchema\", \"annotations\", \"_meta\"].filter(key => tool[key] && typeof tool[key] === \"object\" && !Array.isArray(tool[key])).map(key => [key, tool[key]])) }))",
     "  .filter(tool => inventoryMatches(tool.name + \"\\n\" + tool.description, needle));",
     `const page = matches.slice(${options.offset}, ${options.offset + options.limit});`,
-    "text(JSON.stringify({ tools: page, total: matches.length }));",
+    // Native exec adds its own text envelope; only this explicit frame carries the catalog.
+    `text(${JSON.stringify(`${GATEWAY_CATALOG_BEGIN}\n`)} + JSON.stringify({ tools: page, total: matches.length }) + ${JSON.stringify(`\n${GATEWAY_CATALOG_END}`)});`,
   ].join("\n");
 }
 
 function gatewayToolCatalogPage(response: {
   content: unknown[];
+  structuredContent?: unknown;
   isError?: boolean;
 }, excludedNames: ReadonlySet<string>): GatewayToolCatalogPage {
   const textBlocks = response.content
@@ -328,14 +334,38 @@ function gatewayToolCatalogPage(response: {
   if (response.isError) {
     throw new Error(`Native nested tool inventory failed: ${textBlocks.join("\n") || "unknown error"}`);
   }
-  if (textBlocks.length !== 1) {
-    throw new Error("Native nested tool inventory returned an invalid text response");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(textBlocks[0]!);
-  } catch {
-    throw new Error("Native nested tool inventory returned invalid JSON");
+  const structured = response.structuredContent;
+  let parsed: unknown = structured && typeof structured === "object" && !Array.isArray(structured)
+    && "tools" in structured && "total" in structured ? structured : undefined;
+  if (parsed !== undefined) {
+    const serialized = JSON.stringify(parsed);
+    if (typeof serialized !== "string" || Buffer.byteLength(serialized) > MAX_GATEWAY_CATALOG_BYTES) {
+      throw new Error("Native nested tool inventory exceeded the catalog size limit");
+    }
+  } else {
+    if (textBlocks.length !== 1) {
+      throw new Error("Native nested tool inventory returned an invalid text response");
+    }
+    if (Buffer.byteLength(textBlocks[0]!) > MAX_GATEWAY_CATALOG_BYTES) {
+      throw new Error("Native nested tool inventory exceeded the catalog size limit");
+    }
+    let text = textBlocks[0]!.replace(/\r\n/g, "\n");
+    const begin = `${GATEWAY_CATALOG_BEGIN}\n`;
+    const end = `\n${GATEWAY_CATALOG_END}`;
+    const start = text.indexOf(begin);
+    if (start >= 0) {
+      const finish = text.indexOf(end, start + begin.length);
+      if ((start > 0 && text[start - 1] !== "\n") || finish < 0
+        || text.indexOf(begin, start + begin.length) >= 0 || text.slice(finish + end.length).trim()) {
+        throw new Error("Native nested tool inventory returned an invalid catalog frame");
+      }
+      text = text.slice(start + begin.length, finish);
+    }
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error("Native nested tool inventory returned invalid JSON");
+    }
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Native nested tool inventory returned an invalid catalog");
@@ -632,7 +662,7 @@ export async function runChatGptMcpServer(options: {
     "coding_tools_agent_orchestrator",
     {
       title: "Manage Coding Tools missions",
-      description: "Create and run durable AO missions. Use board/runs/next to read tasks, models to inspect exact CPA worker models, create to add a task, and update_run to save its revisioned planner/worker/reviewer graph. Use start_run with workspaceId, runId and the configured native Codex executable to start or resume background execution; run_status reads progress and observe reads a node receipt without resubmitting it. WebGPT plans and reviews, while workers use their saved AO harness and CPA model. Tool approvals remain with the user and cannot be granted through this tool. Do not retry an unknown submission or claim success without completed receipts.",
+      description: "Create and run durable AO missions. Use board/runs/next to read tasks, models to list Native Codex's WebGPT tiers and shared CPA models by default, create to add a task, and update_run to save its revisioned planner/worker/reviewer graph. For a specific model catalog, set arguments.harness to codex-native, cpa, or ao:<agent>. A listed model does not establish live runtime readiness. Use start_run with workspaceId, runId and the configured native Codex executable to start or resume background execution; run_status reads progress and observe reads a node receipt without resubmitting it. WebGPT plans and reviews, while workers use their saved AO harness and CPA model. Tool approvals remain with the user and cannot be granted through this tool. Do not retry an unknown submission or claim success without completed receipts.",
       inputSchema: {
         workspace_id: z.string().min(1).max(128),
         operation: z.enum(["inspect", "board", "models", "runs", "update_run", "harness_status", "connect_harness", "stop_harness", "start_run", "run_status", "observe", "next", "create", "append", "move_task", "move_clause"]),
@@ -647,13 +677,16 @@ export async function runChatGptMcpServer(options: {
       }
       try {
         const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+        const operationArguments = operation === "models" && !Object.hasOwn(arguments_, "harness")
+          ? { ...arguments_, harness: "codex-native" }
+          : arguments_;
         const response = await fetch(`${descriptor.control.endpoint}/v1/coding-tools/agent-orchestrator`, {
           method: "POST",
           headers: {
             authorization: `Bearer ${descriptor.control.token}`,
             "content-type": "application/json",
           },
-          body: JSON.stringify({ workspace_id, operation, arguments: arguments_ }),
+          body: JSON.stringify({ workspace_id, operation, arguments: operationArguments }),
           signal: extra.signal,
         });
         if (!response.ok) throw new Error(`Agent Orchestrator returned HTTP ${response.status}`);

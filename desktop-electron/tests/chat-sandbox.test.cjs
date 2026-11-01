@@ -50,7 +50,18 @@ test("a command runs under codex sandbox, unelevated, with the worktree and cach
   const { sandbox, spawned, cleanup } = runner();
   try {
     assert.equal(sandbox.available(), true);
-    const id = sandbox.start({ cmd: 'echo "a b" && echo second', cwd: "G:/work/src", writable: "G:/work" });
+    // Seen live 2026-10-31: the synchronous script write held every window for 0.5 s per command.
+    const { mkdirSync, writeFileSync } = fs;
+    let blocking = 0;
+    fs.mkdirSync = (...args) => { blocking += 1; return mkdirSync(...args); };
+    fs.writeFileSync = (...args) => { blocking += 1; return writeFileSync(...args); };
+    let id;
+    try {
+      id = await sandbox.start({ cmd: 'echo "a b" && echo second', cwd: "G:/work/src", writable: "G:/work" });
+    } finally {
+      Object.assign(fs, { mkdirSync, writeFileSync });
+    }
+    assert.equal(blocking, 0, "the script is written without a synchronous disk call");
     assert.match(id, /^sbx-[A-Za-z0-9]+$/);
     const [{ file, args, options, script }] = spawned;
     assert.equal(file, "C:/codex/codex.exe");
@@ -77,12 +88,12 @@ test("AO's `ao` folder goes first on a command's PATH, and a broken provider cha
   const { sandbox, spawned, cleanup } = runner({ extraPath: () => [shim, "relative/ignored", null] });
   const broken = runner({ extraPath: () => { throw new Error("AO not started"); } });
   try {
-    sandbox.start({ cmd: "ao status", cwd: "G:/work", writable: "G:/work" });
+    await sandbox.start({ cmd: "ao status", cwd: "G:/work", writable: "G:/work" });
     const pathValue = spawned[0].options.env.PATH;
     assert.ok(pathValue.startsWith(`${shim}${process.platform === "win32" ? ";" : ":"}`), pathValue);
     assert.ok(pathValue.includes("C:/bin"), "the inherited PATH stays after it");
     assert.ok(!pathValue.includes("relative/ignored"), "only absolute folders");
-    broken.sandbox.start({ cmd: "echo ok", cwd: "G:/work", writable: "G:/work" });
+    await broken.sandbox.start({ cmd: "echo ok", cwd: "G:/work", writable: "G:/work" });
     assert.equal(broken.spawned[0].options.env.PATH, "C:/bin");
   } finally { cleanup(); broken.cleanup(); }
 });
@@ -90,8 +101,8 @@ test("AO's `ao` folder goes first on a command's PATH, and a broken provider cha
 test("a command in the worktree itself starts there without a folder change, and % in a folder survives cmd", async () => {
   const { sandbox, spawned, cleanup } = runner();
   try {
-    sandbox.start({ cmd: "echo here", cwd: "G:/work", writable: "G:/work" });
-    sandbox.start({ cmd: "echo there", cwd: "G:/work/50%off", writable: "G:/work" });
+    await sandbox.start({ cmd: "echo here", cwd: "G:/work", writable: "G:/work" });
+    await sandbox.start({ cmd: "echo there", cwd: "G:/work/50%off", writable: "G:/work" });
     const [root, odd] = spawned;
     assert.equal(root.options.cwd, "G:/work");
     assert.ok(!root.script.includes("cd /d"), "no folder change when it already starts there");
@@ -103,7 +114,7 @@ test("a command in the worktree itself starts there without a folder change, and
 test("output is kept with absolute offsets, stdin reaches the command, and the script is removed when it ends", async () => {
   const { sandbox, spawned, cleanup } = runner();
   try {
-    const id = sandbox.start({ cmd: "set /p NAME=", cwd: "G:/work", writable: "G:/work", stdin: "first\n" });
+    const id = await sandbox.start({ cmd: "set /p NAME=", cwd: "G:/work", writable: "G:/work", stdin: "first\n" });
     const { child, args } = spawned[0];
     child.stdout.write("hello ");
     child.stdout.write("world");
@@ -131,7 +142,7 @@ test("output is kept with absolute offsets, stdin reaches the command, and the s
 test("kill ends a running command; ids it never started are not its own", async () => {
   const { sandbox, cleanup } = runner();
   try {
-    const id = sandbox.start({ cmd: "npm run dev", cwd: "G:/work", writable: "G:/work" });
+    const id = await sandbox.start({ cmd: "npm run dev", cwd: "G:/work", writable: "G:/work" });
     assert.equal(sandbox.owns(id), true);
     assert.equal(sandbox.owns("c1"), false);
     const result = await sandbox.kill(id);
@@ -141,12 +152,12 @@ test("kill ends a running command; ids it never started are not its own", async 
   } finally { cleanup(); }
 });
 
-test("without the sandbox nothing starts, and the real locator finds nothing off Windows", () => {
+test("without the sandbox nothing starts, and the real locator finds nothing off Windows", async () => {
   const { sandbox, spawned, cleanup } = runner({ locate: () => null });
   try {
     assert.equal(sandbox.available(), false);
     assert.equal(sandbox.describe(), null);
-    assert.throws(() => sandbox.start({ cmd: "dir", cwd: "G:/work", writable: "G:/work" }), /not installed/);
+    await assert.rejects(() => sandbox.start({ cmd: "dir", cwd: "G:/work", writable: "G:/work" }), /not installed/);
     assert.equal(spawned.length, 0);
   } finally { cleanup(); }
   assert.equal(findCodexSandbox({ platform: "linux" }), null);
@@ -161,11 +172,11 @@ test("without the sandbox nothing starts, and the real locator finds nothing off
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
-test("an empty command is refused, and private environment names are recognised", () => {
+test("an empty command is refused, and private environment names are recognised", async () => {
   const { sandbox, cleanup } = runner();
   try {
-    assert.throws(() => sandbox.start({ cmd: "  ", cwd: "G:/work", writable: "G:/work" }), /required/);
-    assert.throws(() => sandbox.start({ cmd: "a\0b", cwd: "G:/work", writable: "G:/work" }), /required/);
+    await assert.rejects(() => sandbox.start({ cmd: "  ", cwd: "G:/work", writable: "G:/work" }), /required/);
+    await assert.rejects(() => sandbox.start({ cmd: "a\0b", cwd: "G:/work", writable: "G:/work" }), /required/);
   } finally { cleanup(); }
   for (const name of ["OPENAI_API_KEY", "GITHUB_TOKEN", "AWS_SECRET", "DB_PASSWORD", "CODING_TOOLS_PORT", "ELECTRON_RUN_AS_NODE", "NODE_OPTIONS"]) {
     assert.ok(PRIVATE_ENV.test(name), name);
@@ -203,10 +214,10 @@ test("a long Windows PATH is capped, keeping its first (highest-priority) entrie
   assert.ok(capped.startsWith(`${entries[0]};${entries[1]};`));
 });
 
-test("sandboxed commands on Windows carry the essential variables", () => {
+test("sandboxed commands on Windows carry the essential variables", async () => {
   const { sandbox, spawned, cleanup } = runner({ platform: "win32" });
   try {
-    sandbox.start({ cmd: "bash -lc ls", cwd: "G:/work", writable: "G:/work" });
+    await sandbox.start({ cmd: "bash -lc ls", cwd: "G:/work", writable: "G:/work" });
     const [{ options }] = spawned;
     for (const name of ["SystemRoot", "windir", "ComSpec", "PATHEXT", "TEMP", "TMP"]) assert.ok(options.env[name], name);
     assert.equal(options.env.OPENAI_API_KEY, undefined, "credentials still stay out");

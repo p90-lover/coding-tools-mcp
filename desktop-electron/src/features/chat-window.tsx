@@ -26,12 +26,12 @@ export function chatWindowBody(title: string, turns: ChatTurn[]): string {
 }
 
 /** The whole page for a new window. */
-export function chatWindowPage(title: string, turns: ChatTurn[]): string {
+export function chatWindowPage(title: string, turns: ChatTurn[], body = chatWindowBody(title, turns)): string {
   const escapedTitle = title.replace(/[&<>"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character]!);
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapedTitle}</title><style>${CHAT_WINDOW_CSS}</style></head>
-<body><main>${chatWindowBody(title, turns)}</main></body></html>`;
+<body><main>${body}</main></body></html>`;
 }
 
 const CHAT_WINDOW_CSS = `

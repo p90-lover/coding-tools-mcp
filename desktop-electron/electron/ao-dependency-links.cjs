@@ -58,6 +58,39 @@ function detectDependencyLinks(root, { fs: fsImpl = fs } = {}) {
   return found;
 }
 
+/**
+ * detectDependencyLinks without blocking, for the sync before each spawn: up to a few hundred
+ * stats on the main process, and one of them held every window for 2.3 s on the app's busy hard
+ * disk (2026-10-31). The same list, in the same order.
+ */
+async function detectDependencyLinksAsync(root, { fs: fsImpl = fs } = {}) {
+  const statAsync = file => fsImpl.promises.stat(file).catch(() => null);
+  const isFileAsync = async file => (await statAsync(file))?.isFile() === true;
+  const isDirAsync = async file => (await statAsync(file))?.isDirectory() === true;
+  const venvsIn = async folder => {
+    const present = await Promise.all(PYTHON_FOLDERS.map(name => isFileAsync(path.join(folder, name, "pyvenv.cfg"))));
+    return PYTHON_FOLDERS.filter((_, index) => present[index]);
+  };
+  const nodeIn = async folder => (await isFileAsync(path.join(folder, "package.json"))) && isDirAsync(path.join(folder, NODE_FOLDER));
+  const [rootNode, rootVenvs, entries] = await Promise.all([
+    nodeIn(root), venvsIn(root), fsImpl.promises.readdir(root, { withFileTypes: true }).catch(() => null),
+  ]);
+  const found = [...(rootNode ? [NODE_FOLDER] : []), ...rootVenvs];
+  if (!entries) return found;
+  const folders = entries
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== NODE_FOLDER && !PYTHON_FOLDERS.includes(entry.name))
+    .map(entry => entry.name).sort().slice(0, MAX_SUBFOLDERS);
+  const perFolder = await Promise.all(folders.map(async name => {
+    const folder = path.join(root, name);
+    const [node, python] = await Promise.all([
+      nodeIn(folder),
+      Promise.all(PYTHON_MANIFESTS.map(file => isFileAsync(path.join(folder, file)))).then(hits => hits.some(Boolean)),
+    ]);
+    return [...(node ? [`${name}/${NODE_FOLDER}`] : []), ...(python ? (await venvsIn(folder)).map(venv => `${name}/${venv}`) : [])];
+  }));
+  return [...found, ...perFolder.flat()];
+}
+
 const linkKey = value => String(value).trim().replace(/\\/g, "/").replace(/\/+$/, "");
 const isNodeFolder = entry => linkKey(entry).split("/").pop() === NODE_FOLDER;
 const strings = value => Array.isArray(value) ? value.filter(entry => typeof entry === "string") : [];
@@ -110,6 +143,13 @@ function createAoDependencyLinks({ file, request, logger = console }) {
       return { enabled: value?.enabled !== false, python: value?.python === true, projects: lists(value?.projects), farms: lists(value?.farms) };
     } catch { return { enabled: true, python: false, projects: {}, farms: {} }; }
   }
+  /** load for the sync before each spawn, without a synchronous read. */
+  async function loadAsync() {
+    try {
+      const value = JSON.parse(await fs.promises.readFile(file, "utf8"));
+      return { enabled: value?.enabled !== false, python: value?.python === true, projects: lists(value?.projects), farms: lists(value?.farms) };
+    } catch { return { enabled: true, python: false, projects: {}, farms: {} }; }
+  }
   // A backend-bundle module may only require Node built-ins and other bundle modules, so the
   // small atomic write is done here: a temp file next to the state, then a rename over it.
   function save(state) {
@@ -124,8 +164,8 @@ function createAoDependencyLinks({ file, request, logger = console }) {
   }
 
   async function syncNow(projectId, folder) {
-    const state = load();
-    const detected = state.enabled || state.python ? detectDependencyLinks(folder) : [];
+    const state = await loadAsync();
+    const detected = state.enabled || state.python ? await detectDependencyLinksAsync(folder) : [];
     const farmsWanted = state.enabled ? detected.filter(isNodeFolder) : [];
     // node_modules is never shared any more: an app entry for it in `symlinks` (an earlier
     // version put it there) is dropped below and the folder farmed instead.
@@ -220,4 +260,4 @@ function createAoDependencyLinks({ file, request, logger = console }) {
   };
 }
 
-module.exports = { createAoDependencyLinks, detectDependencyLinks, mergeManaged };
+module.exports = { createAoDependencyLinks, detectDependencyLinks, detectDependencyLinksAsync, mergeManaged };

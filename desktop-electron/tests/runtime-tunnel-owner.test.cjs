@@ -51,7 +51,7 @@ test("with the setting on, a ready tunnel this app did not start with its curren
 test("a tunnel started by this app with the same program is adopted; a new program restarts it", async () => {
   const { root, binaryPath, supervisor, config, did, logs } = harness({ reuse: true });
   try {
-    supervisor.recordTunnelOwner(config, 4321);
+    await supervisor.recordTunnelOwner(config, 4321);
     await supervisor.startTunnel(config);
     assert.deepEqual(did, ["monitor"], "adopted without a restart");
     assert.ok(logs.includes("runtime.tunnel_adopted"));
@@ -60,6 +60,26 @@ test("a tunnel started by this app with the same program is adopted; a new progr
     fs.writeFileSync(binaryPath, "tunnel program v2, a different size");
     await supervisor.startTunnel(config);
     assert.deepEqual(did, ["stop", "connect", "monitor"], "the update shipped a new tunnel program");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a ready tunnel whose endpoint discovery times out at adoption is kept, not stopped; other failures still stop it", async () => {
+  // Seen live 2026-10-31 08:22: after a relaunch the surviving tunnel was ready, discovery timed out
+  // twice on the busy machine, and the cleanup stopped the tunnel the agents were using.
+  const { root, supervisor, config, did, logs } = harness({ reuse: false });
+  try {
+    supervisor.waitForTunnelMcpTransport = async () => { throw new Error("Local tunnel health discovery timed out after 5000ms"); };
+    await supervisor.startTunnel(config);
+    assert.deepEqual(did, ["monitor"], "kept and watched, never stopped");
+    assert.ok(logs.includes("runtime.tunnel_adopted_unverified"));
+    assert.equal(supervisor.tunnel?.pid, 4321);
+
+    did.length = 0;
+    supervisor.waitForTunnelMcpTransport = async () => { throw new Error("MCP transport returned internal HTTP 502 for initialize"); };
+    await assert.rejects(supervisor.startTunnel(config), /HTTP 502/);
+    assert.deepEqual(did, ["stop"], "a tunnel that answers with failures is still cleaned up");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

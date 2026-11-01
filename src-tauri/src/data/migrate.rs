@@ -14,6 +14,8 @@ const LEGACY_SETTINGS_FILE: &str = "app_settings.json";
 
 #[cfg(test)]
 thread_local! { static TEST_DATA_FILE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+thread_local! { static FAIL_NEXT_VALID_BACKUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 // Fixtures that replace the process-wide trusted-origin registry or saturate
 // process-wide HTTP admission must own that shared resource, even when the Rust
@@ -278,9 +280,12 @@ fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> 
         }
         return Err(profile_io("install data file", error));
     }
-    restrict_file_permissions(path)?;
-    copy_valid_backup(path, app_root)?;
-    prune_backups(&app_root.join("Trash").join("data-backups"), KEPT_BACKUPS);
+    // The installed inode already has the staged file's restricted permissions.
+    // Backup maintenance cannot undo this commit or discard its caller's result.
+    match copy_valid_backup(path, app_root) {
+        Ok(_) => prune_backups(&app_root.join("Trash").join("data-backups"), KEPT_BACKUPS),
+        Err(_) => eprintln!("Profile data was saved; recovery backup maintenance failed"),
+    }
     Ok(())
 }
 
@@ -317,6 +322,13 @@ fn copy_valid_backup(path: &Path, app_root: &Path) -> AppResult<PathBuf> {
     let dir = app_root.join("Trash").join("data-backups");
     fs::create_dir_all(&dir)?;
     let target = dir.join(unique_name("profiles-valid", "json"));
+    #[cfg(test)]
+    if FAIL_NEXT_VALID_BACKUP.with(|fail| fail.replace(false)) {
+        return Err(profile_io(
+            "copy valid backup",
+            std::io::Error::from(std::io::ErrorKind::Other),
+        ));
+    }
     fs::copy(path, &target).map_err(|error| profile_io("copy valid backup", error))?;
     restrict_file_permissions(&target)?;
     Ok(target)
@@ -424,6 +436,192 @@ fn merge_settings(data: &mut AppData, settings: AppSettings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn profile_commit_fixture() -> tempfile::TempDir {
+        let parent = std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/profile-commit-tests");
+        fs::create_dir_all(&parent).unwrap();
+        tempfile::tempdir_in(parent).unwrap()
+    }
+
+    fn with_failed_valid_backup<R>(f: impl FnOnce() -> R) -> R {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                FAIL_NEXT_VALID_BACKUP.with(|fail| fail.set(self.0));
+            }
+        }
+        let _restore = Restore(FAIL_NEXT_VALID_BACKUP.with(|fail| fail.replace(true)));
+        f()
+    }
+
+    #[test]
+    fn committed_profile_write_survives_backup_failure_without_pruning_recovery() {
+        let root = profile_commit_fixture();
+        let path = root.path().join("data/profiles.json");
+        let mut before = AppData {
+            last_workspace_id: "before".into(),
+            ..AppData::default()
+        };
+        before
+            .computer_permissions
+            .push(crate::tools::computer::permissions::SavedPermission {
+                restore_on_start: true,
+                suspended: false,
+                ..Default::default()
+            });
+        write_data_at(&path, root.path(), &before).unwrap();
+        let backup_dir = root.path().join("Trash/data-backups");
+        for index in 0..KEPT_BACKUPS {
+            fs::write(backup_dir.join(format!("incomplete-{index}.json")), "{").unwrap();
+        }
+        let backup_count = fs::read_dir(&backup_dir).unwrap().count();
+        let mut after = before.clone();
+        after.last_workspace_id = "after".into();
+        with_failed_valid_backup(|| write_data_at(&path, root.path(), &after))
+            .expect("installing the primary commits the write");
+        assert_eq!(read_valid_data(&path).unwrap().last_workspace_id, "after");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), backup_count + 1);
+        fs::write(&path, "{").unwrap();
+        let recovered = load_or_recover_at(&path, root.path()).unwrap();
+        assert_eq!(recovered.last_workspace_id, "before");
+        assert!(recovered.computer_permissions[0].suspended);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn committed_refresh_rotation_returns_usable_successor_when_backup_fails() {
+        use crate::auth::{token_exchange, OAuthRuntime, TokenForm};
+        use axum::http::{HeaderMap, StatusCode};
+        use sha2::{Digest, Sha256};
+
+        let root = profile_commit_fixture();
+        let path = root.path().join("data/profiles.json");
+        let original = "rt_profile_commit_fixture";
+        let mut data = AppData::default();
+        data.oauth_refresh_tokens.insert(
+            "profile-commit:mcp".into(),
+            vec![crate::data::OAuthRefreshTokenRecord {
+                token_hash: format!("{:x}", Sha256::digest(original.as_bytes())),
+                client_id: "fixture-client".into(),
+                family_id: "fixture-family".into(),
+                generation: 0,
+                issued_at: 0,
+                expires_at: u64::MAX,
+            }],
+        );
+        write_data_at(&path, root.path(), &data).unwrap();
+        let oauth = OAuthRuntime::new(
+            "profile-commit:mcp".into(),
+            "fixture-client".into(),
+            None,
+            "fixture-password-long-enough".into(),
+            "fixture-signing-secret-with-at-least-32-bytes".into(),
+        );
+        let exchange = |token: &str| {
+            token_exchange(
+                &oauth,
+                &HeaderMap::new(),
+                TokenForm {
+                    grant_type: "refresh_token".into(),
+                    client_id: "fixture-client".into(),
+                    refresh_token: token.into(),
+                    ..Default::default()
+                },
+                "http://127.0.0.1:28767",
+            )
+        };
+        let response = with_test_file(path.clone(), || {
+            with_failed_valid_backup(|| exchange(original))
+        });
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let successor = body["refresh_token"].as_str().expect("usable successor");
+        assert_ne!(successor, original);
+        let replay = with_test_file(path.clone(), || exchange(original));
+        let body = axum::body::to_bytes(replay.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], "invalid_grant");
+        let next = with_test_file(path, || exchange(successor));
+        assert_eq!(next.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn live_policy_publishes_committed_primary_but_preserves_precommit_failure() {
+        use crate::data::DataStore;
+        use crate::tools::{live_policy::commit_updates, ToolContext};
+        use std::sync::Arc;
+
+        let root = profile_commit_fixture();
+        let path = root.path().join("data/profiles.json");
+        let context = Arc::new(
+            ToolContext::for_test(root.path().to_path_buf(), root.path().join("harness")).unwrap(),
+        );
+        let initial = context.for_request().unwrap();
+        let mut policy = initial.policy.clone();
+        policy.permission_mode = "read-only".into();
+        let profile = crate::workspace::WorkspaceProfile::new(
+            root.path().to_string_lossy().into_owned(),
+            None,
+        );
+        let data = AppData {
+            profiles: vec![profile],
+            ..Default::default()
+        };
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
+        let blocker = root.path().join("aiTemp");
+        fs::write(&blocker, "blocks staged writes").unwrap();
+        with_test_file(path.clone(), || {
+            let persist = || {
+                DataStore::update_file(|data| {
+                    data.profiles[0].runtime.permission_mode = "read-only".into();
+                    Ok(())
+                })
+            };
+            let failed = commit_updates(
+                vec![(context.clone(), policy.clone(), "core".into())],
+                persist,
+            );
+            assert!(matches!(failed, Err(AppError::Io(_))));
+            assert_eq!(context.for_request().unwrap().policy_revision, 0);
+            assert!(initial.policy_execution_guard().is_ok());
+            assert_eq!(
+                read_valid_data(&path).unwrap().profiles[0]
+                    .runtime
+                    .permission_mode,
+                "workspace-write"
+            );
+            fs::remove_file(&blocker).unwrap();
+            with_failed_valid_backup(|| {
+                commit_updates(vec![(context.clone(), policy, "core".into())], persist)
+            })
+            .expect("a committed primary must publish its policy");
+            assert_eq!(
+                read_valid_data(&path).unwrap().profiles[0]
+                    .runtime
+                    .permission_mode,
+                "read-only"
+            );
+            let current = context.for_request().unwrap();
+            assert_eq!(current.policy_revision, 1);
+            assert_eq!(current.permission_mode, "read-only");
+            assert!(initial.policy_execution_guard().is_err());
+        });
+    }
 
     #[test]
     fn failed_profile_write_identifies_stage_without_disclosing_path() {
