@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
 import type { JsonObject } from "../api/contracts";
 import "./original-ui.css";
 import "./agent-orchestrator-original.css";
-import { useSurfaceHidden } from "./page-visibility";
+import { NativeViewsCoveredContext, SurfaceHiddenContext, useSurfaceHidden } from "./page-visibility";
 
 async function callUpstream(operation: string, args: JsonObject = {}) {
   const response = await getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation, arguments: args });
@@ -26,12 +26,18 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
   terminal?: AoTerminalView;
 }) {
   const surfaceHidden = useSurfaceHidden();
+  // Main has one AO view for every screen that hosts it. Only the screen in view, with nothing laid
+  // over it, shows the view; the others' cleanup has hidden it, so a hidden tab can't take it back.
+  const laidOver = useContext(NativeViewsCoveredContext);
+  const tabHidden = useContext(SurfaceHiddenContext);
+  const covered = laidOver || tabHidden;
   const panel = useRef<HTMLDivElement>(null);
   const [state, setState] = useState("starting");
   const [error, setError] = useState("");
   const [generation, setGeneration] = useState(0);
 
   useEffect(() => {
+    if (covered) return;
     let disposed = false;
     let ready = false;
     let animation = 0;
@@ -69,7 +75,7 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
       observer.disconnect(); window.removeEventListener("resize", resize);
       void callUpstream("upstream_hide").catch(() => undefined);
     };
-  }, [generation, projectBoard, workspaceId, terminal?.handle, terminal?.generation, terminal?.title]);
+  }, [covered, generation, projectBoard, workspaceId, terminal?.handle, terminal?.generation, terminal?.title]);
 
   const reconnect = () => setGeneration((value) => value + 1);
   return (

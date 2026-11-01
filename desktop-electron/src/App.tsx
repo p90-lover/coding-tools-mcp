@@ -15,7 +15,7 @@ import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
-import { SurfaceHiddenContext } from "./features/page-visibility";
+import { NativeViewsCoveredContext, SurfaceHiddenContext } from "./features/page-visibility";
 import { PartErrorBoundary } from "./PartErrorBoundary";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { McpTunnelsPanel } from "./features/McpTunnelsPanel";
@@ -926,6 +926,7 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
+        <NativeViewsCoveredContext.Provider value={sidebarCovers || biggerContextRecommendationOpen}>
         <div className="surface-transition">
             {keepAlive("browser", () => (
               <BrowserSurface
@@ -1086,6 +1087,7 @@ function LauncherShell({
               />
             ))}
         </div>
+        </NativeViewsCoveredContext.Provider>
       </section>
 
       <AnimatePresence>
