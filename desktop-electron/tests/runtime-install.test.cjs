@@ -8,8 +8,10 @@ const path = require("node:path");
 const { runtimeInvocation } = require("../electron/runtime-command.cjs");
 const {
   ensurePackagedRuntime,
+  installedRuntimeForLaunch,
   pruneOldRuntimes,
   validateRuntimeBundle,
+  validateRuntimeBundleAsync,
   waitForPackagedRuntimeSource,
 } = require("../electron/runtime-install.cjs");
 
@@ -194,8 +196,11 @@ test("a launch after the runtime was hashed does not read its files again, and s
   const coreHome = path.join(root, "core-home");
   const app = { isPackaged: true, getVersion: () => "0.2.0" };
   const originalRead = fs.readFileSync;
+  const originalAsyncRead = fs.promises.readFile;
   const reads = [];
   fs.readFileSync = function (file, ...rest) { reads.push(String(file)); return originalRead.call(this, file, ...rest); };
+  // The startup wait checks off the main thread, so its reads go through fs.promises.
+  fs.promises.readFile = function (file, ...rest) { reads.push(String(file)); return originalAsyncRead.call(this, file, ...rest); };
   try {
     const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
     assert.ok(reads.some(file => file.endsWith("cli.js")), "the first launch hashes the files");
@@ -218,7 +223,83 @@ test("a launch after the runtime was hashed does not read its files again, and s
     assert.equal(originalRead(path.join(repaired, "app", "cli.js"), "utf8"), "cli");
   } finally {
     fs.readFileSync = originalRead;
+    fs.promises.readFile = originalAsyncRead;
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the launch check of a whole installed copy holds no synchronous call on its files", async () => {
+  // Seen live 2026-11-01: one readdirSync or lstatSync after another over ~6,150 runtime files held
+  // the main process 22.7 s + 6.5 s on the busy hard disk before the window opened.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-launch-async-"));
+  const resourcesPath = runtimeFixture(root);
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  const names = ["readdirSync", "lstatSync", "statSync", "readFileSync", "realpathSync", "existsSync", "openSync"];
+  const originals = Object.fromEntries(names.map(name => [name, fs[name]]));
+  const originalAsyncRead = fs.promises.readFile;
+  try {
+    // The first launch installs and hashes it; the launch check trusts what that remembered.
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    const syncTouches = [];
+    const asyncReads = [];
+    for (const name of names) {
+      fs[name] = function (file, ...rest) {
+        if (String(file).startsWith(installed)) syncTouches.push(`${name} ${file}`);
+        return originals[name].call(this, file, ...rest);
+      };
+    }
+    fs.promises.readFile = function (file, ...rest) {
+      if (!String(file).endsWith("manifest.json")) asyncReads.push(String(file));
+      return originalAsyncRead.call(this, file, ...rest);
+    };
+    assert.equal(await installedRuntimeForLaunch({ app, coreHome, resourcesPath }), installed);
+    assert.deepEqual(syncTouches, [], "no synchronous call on the installed runtime's files");
+    assert.deepEqual(asyncReads, [], "the remembered verification is shared with the synchronous check");
+  } finally {
+    Object.assign(fs, originals);
+    fs.promises.readFile = originalAsyncRead;
+  }
+  try {
+    const installed = path.join(coreHome, "versions", `0.2.0-${process.platform}-${process.arch}`);
+    // Same size, different content: rehashed and refused, and the launch falls back to the repair.
+    fs.writeFileSync(path.join(installed, "app", "cli.js"), "CLI");
+    assert.equal(await installedRuntimeForLaunch({ app, coreHome, resourcesPath }), null);
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), installed);
+    assert.equal(fs.readFileSync(path.join(installed, "app", "cli.js"), "utf8"), "cli");
+    assert.equal(await installedRuntimeForLaunch({ app, coreHome, resourcesPath }), installed);
+    // A stray file, a missing version directory and a source run are left to ensurePackagedRuntime.
+    fs.writeFileSync(path.join(installed, "app", "stray.js"), "x");
+    assert.equal(await installedRuntimeForLaunch({ app, coreHome, resourcesPath }), null);
+    fs.rmSync(installed, { recursive: true, force: true });
+    assert.equal(await installedRuntimeForLaunch({ app, coreHome, resourcesPath }), null);
+    assert.equal(await installedRuntimeForLaunch({ app: { ...app, isPackaged: false }, coreHome, resourcesPath }), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the asynchronous runtime check refuses what the synchronous one refuses", async () => {
+  const identity = { version: "0.2.0", platform: process.platform, arch: process.arch };
+  const damages = [
+    ["a missing file", source => fs.rmSync(path.join(source, "app", "cli.js")), /file is missing/],
+    ["an unmanifested file", source => fs.writeFileSync(path.join(source, "app", "extra.js"), "x"), /unmanifested file/],
+    ["a size change", source => fs.writeFileSync(path.join(source, "app", "cli.js"), "longer cli"), /size mismatch/],
+    ["a same-size edit", source => fs.writeFileSync(path.join(source, "app", "cli.js"), "CLI"), /checksum mismatch/],
+    ["a wrong version", () => {}, /identity mismatch/, { ...identity, version: "0.3.0" }],
+    ["a missing manifest", source => fs.rmSync(path.join(source, "manifest.json")), /manifest is missing/],
+  ];
+  for (const [label, damage, message, checkedAs = identity] of damages) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-async-refuse-"));
+    try {
+      const source = path.join(runtimeFixture(root), "runtime");
+      assert.equal(await validateRuntimeBundleAsync(source, identity), validateRuntimeBundle(source, identity));
+      damage(source);
+      assert.throws(() => validateRuntimeBundle(source, checkedAs), message, `sync: ${label}`);
+      await assert.rejects(validateRuntimeBundleAsync(source, checkedAs), message, `async: ${label}`);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

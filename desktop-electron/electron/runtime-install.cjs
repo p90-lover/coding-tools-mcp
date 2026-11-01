@@ -39,12 +39,32 @@ function validateManifestPath(relativePath) {
   return relativePath;
 }
 
-function readRuntimeManifest(runtimeRoot, { version, platform, arch, bundleId }) {
+function readRuntimeManifest(runtimeRoot, identity) {
   const manifestPath = path.join(runtimeRoot, "manifest.json");
   if (!fs.existsSync(manifestPath)) throw new Error(`Runtime manifest is missing: ${manifestPath}`);
+  let text;
+  try { text = fs.readFileSync(manifestPath, "utf8"); } catch (error) { text = error; }
+  return parseRuntimeManifest(text, manifestPath, identity);
+}
+
+async function readRuntimeManifestAsync(runtimeRoot, identity) {
+  const manifestPath = path.join(runtimeRoot, "manifest.json");
+  let text;
+  try {
+    text = await fs.promises.readFile(manifestPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error(`Runtime manifest is missing: ${manifestPath}`);
+    text = error;
+  }
+  return parseRuntimeManifest(text, manifestPath, identity);
+}
+
+/** `text` is the manifest's contents, or the error its read failed with. */
+function parseRuntimeManifest(text, manifestPath, { version, platform, arch, bundleId }) {
   let manifest;
   try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (text instanceof Error) throw text;
+    manifest = JSON.parse(text);
   } catch (error) {
     throw new Error(
       `Runtime manifest is invalid: ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -140,6 +160,10 @@ function statRuntimeFile(runtimeRoot, canonicalRoot, file) {
     if (error instanceof Error && error.message.startsWith("Runtime bundle")) throw error;
     throw new Error(`Runtime bundle file is missing: ${absolutePath}`);
   }
+  return checkedMetadata(absolutePath, file, metadata);
+}
+
+function checkedMetadata(absolutePath, file, metadata) {
   if (!metadata.isFile()) throw new Error(`Runtime bundle entry is not a file: ${absolutePath}`);
   if (metadata.size !== file.size) {
     throw new Error(`Runtime bundle file size mismatch: ${absolutePath}`);
@@ -186,8 +210,8 @@ function rememberVerified(stampDir, bundleId, signature) {
   }
 }
 
-function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
-  const manifest = readRuntimeManifest(runtimeRoot, identity);
+/** The manifest's file paths, after checking it declares every file the app starts from. */
+function declaredPaths(runtimeRoot, identity, manifest) {
   const expectedPaths = manifest.files.map(file => file.path);
   const expectedSet = new Set(expectedPaths);
   const paths = runtimeBundlePaths(runtimeRoot, identity.platform);
@@ -202,8 +226,11 @@ function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
       throw new Error(`Runtime manifest does not declare required file: ${required}`);
     }
   }
+  return { expectedPaths, expectedSet, paths };
+}
 
-  const actualPaths = runtimeFilePaths(runtimeRoot);
+/** Fails unless the files found on disk are exactly the declared ones. */
+function compareListing(runtimeRoot, { expectedPaths, expectedSet }, actualPaths) {
   const actualSet = new Set(actualPaths);
   const missing = expectedPaths.find(relativePath => !actualSet.has(relativePath));
   if (missing) throw new Error(`Runtime bundle file is missing: ${path.join(runtimeRoot, ...missing.split("/"))}`);
@@ -214,6 +241,13 @@ function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
   if (actualPaths.length !== expectedPaths.length) {
     throw new Error(`Runtime bundle file count mismatch: expected ${expectedPaths.length}, received ${actualPaths.length}`);
   }
+}
+
+function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
+  const manifest = readRuntimeManifest(runtimeRoot, identity);
+  const declared = declaredPaths(runtimeRoot, identity, manifest);
+  const { paths } = declared;
+  compareListing(runtimeRoot, declared, runtimeFilePaths(runtimeRoot));
 
   const canonicalRoot = fs.realpathSync(runtimeRoot);
   const stats = createHash("sha256");
@@ -236,6 +270,115 @@ function validateRuntimeBundle(runtimeRoot, identity, options = {}) {
   return inspectRuntimeBundle(runtimeRoot, identity, options).runtimeRoot;
 }
 
+// The same check as inspectRuntimeBundle without holding the main thread. Each launch checks the
+// packaged and the installed copy, about 6,150 files each; one synchronous lstat or readdir after
+// another held the main process 22.7 s + 6.5 s on the busy hard disk before the window opened
+// (2026-11-01). Up to RUNTIME_CHECK_CONCURRENCY requests are in flight, so the disk serves them in
+// the order its head reaches them instead of one seek per call.
+const RUNTIME_CHECK_CONCURRENCY = 32;
+
+// Whole files are read to hash them (bun.exe is about 100 MB), so fewer are read at once.
+const RUNTIME_HASH_CONCURRENCY = 4;
+
+/** Runs `run` over `items` with at most `limit` in flight; the first failure stops new work. */
+async function mapLimit(items, limit, run) {
+  const results = new Array(items.length);
+  let next = 0;
+  let failed = false;
+  const lane = async () => {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await run(items[index], index);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  return results;
+}
+
+async function runtimeFilePathsAsync(runtimeRoot, limit) {
+  const paths = [];
+  let level = [runtimeRoot];
+  while (level.length > 0) {
+    const listings = await mapLimit(level, limit, directory => fs.promises.readdir(directory, { withFileTypes: true }));
+    const nextLevel = [];
+    listings.forEach((entries, index) => {
+      for (const entry of entries) {
+        const absolutePath = path.join(level[index], entry.name);
+        const relativePath = path.relative(runtimeRoot, absolutePath).split(path.sep).join("/");
+        if (relativePath === "manifest.json") continue;
+        if (!entry.isDirectory() && SET_ASIDE_FILE.test(entry.name)) continue;
+        if (entry.isDirectory()) nextLevel.push(absolutePath);
+        else paths.push(relativePath);
+      }
+    });
+    level = nextLevel;
+  }
+  return paths.sort(comparePaths);
+}
+
+async function statRuntimeFileAsync(runtimeRoot, canonicalRoot, file) {
+  const absolutePath = path.join(runtimeRoot, ...file.path.split("/"));
+  let metadata;
+  try {
+    metadata = await fs.promises.lstat(absolutePath);
+    if (metadata.isSymbolicLink()) {
+      const target = await fs.promises.realpath(absolutePath);
+      if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${path.sep}`)) {
+        throw new Error(`Runtime bundle symlink escapes the bundle: ${absolutePath}`);
+      }
+      metadata = await fs.promises.stat(absolutePath);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Runtime bundle")) throw error;
+    throw new Error(`Runtime bundle file is missing: ${absolutePath}`);
+  }
+  return checkedMetadata(absolutePath, file, metadata);
+}
+
+async function hashRuntimeFileAsync(runtimeRoot, file) {
+  const absolutePath = path.join(runtimeRoot, ...file.path.split("/"));
+  const sha256 = createHash("sha256").update(await fs.promises.readFile(absolutePath)).digest("hex");
+  if (sha256 !== file.sha256) {
+    throw new Error(`Runtime bundle file checksum mismatch: ${absolutePath}`);
+  }
+}
+
+async function inspectRuntimeBundleAsync(runtimeRoot, identity, {
+  stampDir = null,
+  concurrency = RUNTIME_CHECK_CONCURRENCY,
+} = {}) {
+  const manifest = await readRuntimeManifestAsync(runtimeRoot, identity);
+  const declared = declaredPaths(runtimeRoot, identity, manifest);
+  const { paths } = declared;
+  compareListing(runtimeRoot, declared, await runtimeFilePathsAsync(runtimeRoot, concurrency));
+
+  const canonicalRoot = await fs.promises.realpath(runtimeRoot);
+  const metadata = await mapLimit(manifest.files, concurrency, file => statRuntimeFileAsync(runtimeRoot, canonicalRoot, file));
+  // Hashed in manifest order, so the signature is the synchronous check's.
+  const stats = createHash("sha256");
+  manifest.files.forEach((file, index) => {
+    stats.update(`${file.path}\0${metadata[index].size}\0${metadata[index].mtimeMs}\0${metadata[index].ctimeMs}\0`);
+  });
+  const signature = stats.digest("hex");
+  if (!verifiedSignatures(stampDir, manifest.bundleId).includes(signature)) {
+    await mapLimit(manifest.files, Math.min(concurrency, RUNTIME_HASH_CONCURRENCY), file => hashRuntimeFileAsync(runtimeRoot, file));
+    rememberVerified(stampDir, manifest.bundleId, signature);
+  }
+  if (identity.platform !== "win32" && ((await fs.promises.stat(paths.executable)).mode & 0o111) === 0) {
+    throw new Error(`Bundled Bun runtime is not executable: ${paths.executable}`);
+  }
+  return { manifest, runtimeRoot: paths.runtimeRoot };
+}
+
+async function validateRuntimeBundleAsync(runtimeRoot, identity, options = {}) {
+  return (await inspectRuntimeBundleAsync(runtimeRoot, identity, options)).runtimeRoot;
+}
+
 /** Where verified bundles are remembered (see verifiedSignatures), outside every bundle. */
 function runtimeVerifiedDir(coreHome) {
   return path.join(coreHome, "runtime-verified");
@@ -251,6 +394,36 @@ function installedPackagedRuntime({ app, coreHome }) {
   const identity = { version: app.getVersion(), platform: process.platform, arch: process.arch };
   const destination = path.join(coreHome, "versions", `${identity.version}-${identity.platform}-${identity.arch}`);
   try { return validateRuntimeBundle(destination, identity, { stampDir: runtimeVerifiedDir(coreHome) }); } catch { return null; }
+}
+
+/**
+ * ensurePackagedRuntime's common launch, checked without holding the main thread: this release's
+ * version directory is already installed and whole. Returns its runtime root, or null for every
+ * other case (first launch of a release, a damaged or side bundle), which ensurePackagedRuntime
+ * then handles as before.
+ */
+async function installedRuntimeForLaunch({ app, coreHome, resourcesPath }) {
+  if (!app.isPackaged) return null;
+  const identity = { version: app.getVersion(), platform: process.platform, arch: process.arch };
+  let sourceManifest;
+  try {
+    sourceManifest = await readRuntimeManifestAsync(path.join(resourcesPath, "runtime"), identity);
+  } catch {
+    return null;
+  }
+  const versionsRoot = path.join(coreHome, "versions");
+  const destination = path.join(versionsRoot, `${identity.version}-${identity.platform}-${identity.arch}`);
+  try {
+    const root = await validateRuntimeBundleAsync(
+      destination,
+      { ...identity, bundleId: sourceManifest.bundleId },
+      { stampDir: runtimeVerifiedDir(coreHome) },
+    );
+    retireSideBundles(versionsRoot, path.basename(destination));
+    return root;
+  } catch {
+    return null;
+  }
 }
 
 async function waitForPackagedRuntimeSource({
@@ -277,7 +450,7 @@ async function waitForPackagedRuntimeSource({
   let lastError;
   for (;;) {
     try {
-      return validateRuntimeBundle(source, identity, verify);
+      return await validateRuntimeBundleAsync(source, identity, verify);
     } catch (error) {
       lastError = error;
       // A whole installed copy of this version runs the app; a damaged source is reported, not fatal.
@@ -520,6 +693,8 @@ module.exports = {
   ensurePackagedRuntime,
   pruneOldRuntimes,
   installedPackagedRuntime,
+  installedRuntimeForLaunch,
   validateRuntimeBundle,
+  validateRuntimeBundleAsync,
   waitForPackagedRuntimeSource,
 };

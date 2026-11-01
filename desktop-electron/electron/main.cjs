@@ -58,7 +58,12 @@ const {
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
-const { ensurePackagedRuntime, pruneOldRuntimes, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
+const {
+  ensurePackagedRuntime,
+  installedRuntimeForLaunch,
+  pruneOldRuntimes,
+  waitForPackagedRuntimeSource,
+} = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
@@ -3793,6 +3798,19 @@ async function start() {
     }
     return installedRuntimeRoot;
   };
+  // A launch whose version directory is already whole is checked without holding the main thread
+  // (installedRuntimeForLaunch); a first launch of a release or a damaged copy goes through
+  // ensurePackagedRuntime as before.
+  const launchRuntimeRoot = await installedRuntimeForLaunch({
+    app,
+    coreHome: CORE_HOME,
+    resourcesPath: process.resourcesPath,
+  }).catch(() => null);
+  if (launchRuntimeRoot) {
+    installedRuntimeRoot = launchRuntimeRoot;
+    runtimeRootResolved = true;
+    runtimeRootCheck.at = Date.now();
+  }
   installedRuntimeRoot = runtimeRootProvider();
   // Older versions' runtime copies (165 MB each) are removed in the background (pruneOldRuntimes).
   void pruneOldRuntimes({ app, coreHome: CORE_HOME }).catch(() => undefined);
