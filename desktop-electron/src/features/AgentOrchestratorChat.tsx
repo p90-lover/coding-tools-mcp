@@ -1211,13 +1211,16 @@ export function AgentOrchestratorChat({
   }, [requestKeys]);
   // Each chat keeps its own unsent draft. A new composer belongs to its project and pane.
   const draftOwner = useRef(draftKey);
-  const composing = useRef({ taskId: selectedTaskId, cacheKey: draftKey, draft, attachments, annotations });
-  composing.current = { taskId: selectedTaskId, cacheKey: draftOwner.current, draft, attachments, annotations };
+  const composing = useRef({ taskId: selectedTaskId, cacheKey: draftKey, draft, attachments, annotations, queuedRecovery: [] as { text: string; applied: boolean }[] });
+  const queueRecoveries = composing.current.queuedRecovery ?? [];
+  composing.current = { taskId: selectedTaskId, cacheKey: draftOwner.current, draft, attachments, annotations,
+    queuedRecovery: queueRecoveries.filter((entry) => !entry.applied) };
   // Leaving the chat view (the Mission Board, the structure view) unmounts this chat without
   // changing chats: everything unsent is kept for when it comes back.
   useEffect(() => () => {
-    const { cacheKey, draft, attachments, annotations } = composing.current;
-    if (draft) CHAT_DRAFTS.set(cacheKey, draft); else CHAT_DRAFTS.delete(cacheKey);
+    const { cacheKey, draft, attachments, annotations, queuedRecovery } = composing.current;
+    const keptDraft = (queuedRecovery ?? []).filter((entry) => !entry.applied).reduce((typed, entry) => typed.trim() ? `${entry.text}\n\n${typed}` : entry.text, draft);
+    if (keptDraft) CHAT_DRAFTS.set(cacheKey, keptDraft); else CHAT_DRAFTS.delete(cacheKey);
     if (attachments.length) CHAT_ATTACHMENTS.set(cacheKey, attachments); else CHAT_ATTACHMENTS.delete(cacheKey);
     if (annotations.length) CHAT_ANNOTATIONS.set(cacheKey, annotations); else CHAT_ANNOTATIONS.delete(cacheKey);
   }, []);
@@ -1230,11 +1233,13 @@ export function AgentOrchestratorChat({
       CHAT_ANNOTATIONS.delete(draftKey);
       return;
     }
-    if (draft) CHAT_DRAFTS.set(draftOwner.current, draft); else CHAT_DRAFTS.delete(draftOwner.current);
+    const queuedRecovery = composing.current.queuedRecovery;
+    const keptDraft = (queuedRecovery ?? []).filter((entry) => !entry.applied).reduce((typed, entry) => typed.trim() ? `${entry.text}\n\n${typed}` : entry.text, draft);
+    if (keptDraft) CHAT_DRAFTS.set(draftOwner.current, keptDraft); else CHAT_DRAFTS.delete(draftOwner.current);
     if (attachments.length) CHAT_ATTACHMENTS.set(draftOwner.current, attachments); else CHAT_ATTACHMENTS.delete(draftOwner.current);
     if (annotations.length) CHAT_ANNOTATIONS.set(draftOwner.current, annotations); else CHAT_ANNOTATIONS.delete(draftOwner.current);
     const restored = { taskId: selectedTaskId, cacheKey: draftKey, draft: CHAT_DRAFTS.get(draftKey) ?? "",
-      attachments: CHAT_ATTACHMENTS.get(draftKey) ?? [], annotations: CHAT_ANNOTATIONS.get(draftKey) ?? [] };
+      attachments: CHAT_ATTACHMENTS.get(draftKey) ?? [], annotations: CHAT_ANNOTATIONS.get(draftKey) ?? [], queuedRecovery: [] };
     // Unmount can win the queued state render: cleanup already owns the restored composer.
     composing.current = restored;
     setDraft(restored.draft);
@@ -1458,12 +1463,29 @@ export function AgentOrchestratorChat({
       return;
     }
     if (queueing || queueWhileSending) {
+      const owner = composing.current;
       // Several messages typed during one turn go together, in order.
       setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
       // Not queued: it goes back into the composer, ahead of anything typed since.
       void enqueue(selectedTaskId, { what: "Message", message: text }).catch((error) => {
-        setDraft((typed) => (typed.trim() ? `${text}\n\n${typed}` : text));
-        say("Message", `Couldn't queue the message: ${error instanceof Error ? error.message : String(error)}`);
+        const here = () => alive.current && composing.current.taskId === owner.taskId && composing.current.cacheKey === owner.cacheKey;
+        if (!here()) {
+          const typed = CHAT_DRAFTS.get(owner.cacheKey) ?? "";
+          CHAT_DRAFTS.set(owner.cacheKey, typed.trim() ? `${text}\n\n${typed}` : text);
+          return;
+        }
+        // Retain it until its state updater runs. A switch or unmount can win that updater,
+        // and must still save it for the originating chat without undoing a later user edit.
+        const recovery = { text, applied: false };
+        composing.current.queuedRecovery.push(recovery);
+        setDraft((typed) => {
+          if (!here() || !composing.current.queuedRecovery.includes(recovery)) return typed;
+          const restored = typed.trim() ? `${text}\n\n${typed}` : text;
+          composing.current.draft = restored;
+          recovery.applied = true;
+          return restored;
+        });
+        setCard((current) => here() ? { title: "Message", text: `Couldn't queue the message: ${error instanceof Error ? error.message : String(error)}` } : current);
       });
       return;
     }
