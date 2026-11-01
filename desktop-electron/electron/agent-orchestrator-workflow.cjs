@@ -946,17 +946,19 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (!response.ok) return null;
       const listing = await response.json();
       if (!Array.isArray(listing?.files)) return null;
+      const upstreams = new Set();
       const files = listing.files.map(normalizedAuthFile).filter(Boolean).flatMap(entry => {
         // Provider Manager registers all upstreams under one auth provider, but each marker's
         // filename names the upstream that owns its models. Judge those switches separately.
-        const upstream = entry.provider === "provider-manager" && /^cpa-provider-manager-(.+)\.json$/i.exec(entry.name)?.[1];
+        const upstream = entry.provider === "provider-manager" && /^cpa-provider-manager-(.+)\.json$/i.exec(entry.name)?.[1]?.toLowerCase();
+        if (upstream) upstreams.add(upstream);
         return upstream ? [entry, { ...entry, provider: upstream }] : [entry];
       });
       const enabled = new Set(files.filter(entry => entry.status !== "disabled").map(entry => entry.provider));
       // Why a provider has none: its accounts are all disabled in CPA, or none was added. The model
       // menu and a refused send say so, instead of only "not offered right now".
       const disabled = new Set(files.filter(entry => entry.status === "disabled" && !enabled.has(entry.provider)).map(entry => entry.provider));
-      return Object.assign(enabled, { disabled });
+      return Object.assign(enabled, { disabled, upstreams });
     } catch { return null; }
   }
   const PLUGIN_NAMES = { cline: "Cline Pass", "commandcode-go": "CommandCode Go", commandcode: "CommandCode", grok: "Grok", kimi: "Kimi" };
@@ -1286,8 +1288,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : await modelOwners(cpa);
     const unserved = id => Boolean(accountProviders && owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
       && !accountProviders.has(owners.get(id)));
-    const disabled = (id, provider) => accountProviders?.disabled?.has(provider || owners?.get(id) || knownModels[id]?.capability.provider)
-      || id.includes("/") && accountProviders?.disabled?.has(id.slice(0, id.indexOf("/")));
+    const disabled = (id, provider, live = false) => {
+      const owner = [provider, owners?.get(id), knownModels[id]?.capability.provider]
+        .find(value => typeof value === "string" && value.trim())?.trim().toLowerCase();
+      const prefix = id.includes("/") ? id.slice(0, id.indexOf("/")).toLowerCase() : "";
+      // An auth file cannot account for config API keys. A live built-in model is authoritative;
+      // only provider plugins and explicit Provider Manager switches override a live listing.
+      return accountProviders?.disabled?.has(owner)
+        && (!live || PLUGIN_PROVIDERS.has(owner) || accountProviders.upstreams.has(owner))
+        || accountProviders?.upstreams?.has(prefix) && accountProviders.disabled.has(prefix);
+    };
     const capabilities = Object.create(null);
     const ids = [];
     const plugins = new Set();
@@ -1300,7 +1310,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     for (const entry of rows || []) {
       const id = entry?.slug ?? entry?.id;
       if (entry?.visibility === "hide" && typeof id === "string" && id && id.length <= 128 && !hidden.includes(id)) hidden.push(id);
-      if (typeof id === "string" && id && id.length <= 128 && disabled(id, entry.provider ?? entry.owned_by ?? entry.ownedBy)) {
+      if (typeof id === "string" && id && id.length <= 128 && disabled(id, entry.provider ?? entry.owned_by ?? entry.ownedBy, true)) {
         unavailable[id] = pluginUnavailable(owners?.get(id) || entry.provider || knownModels[id]?.capability.provider || id.split("/")[0], accountProviders);
         continue;
       }
@@ -1310,7 +1320,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
       // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
-      const provider = [entry.provider, entry.owned_by, entry.ownedBy, owners?.get(id)].find(value => typeof value === "string" && value.trim());
+      const provider = [entry.provider, entry.owned_by, entry.ownedBy, owners?.get(id), knownModels[id]?.capability.provider].find(value => typeof value === "string" && value.trim());
       const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
       if (verbatim) plugins.add(id);
       const reportedLevels = verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
@@ -1348,8 +1358,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     for (const [id, entry] of Object.entries(knownModels)) {
       // Explicit switches override outage/cooldown history, including when CPA already removed
       // the disabled provider from its live model list. Do not revive it on a later failed read.
-      if (disabled(id)) unavailable[id] = pluginUnavailable(owners?.get(id) || entry.capability.provider || id.split("/")[0], accountProviders);
-      if (disabled(id) || at - entry.seen > KNOWN_MODEL_MS) { delete knownModels[id]; changed = true; }
+      const switchedOff = !ids.includes(id) && disabled(id);
+      if (switchedOff) unavailable[id] = pluginUnavailable(owners?.get(id) || entry.capability.provider || id.split("/")[0], accountProviders);
+      if (switchedOff || at - entry.seen > KNOWN_MODEL_MS) { delete knownModels[id]; changed = true; }
     }
     rememberedModels(ids, capabilities, plugins, held, id => unavailable[id] || HELD_NOTE, at);
     for (const id of Object.keys(held)) delete unavailable[id];

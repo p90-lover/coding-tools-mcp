@@ -3372,6 +3372,52 @@ test("CPA's model list leaves out a provider plugin's models when nobody is sign
   assert.match(agent.unavailable["cpa/commandcode-go/deepseek-v4.1-flash"], /disabled in CPA/, "an agent's catalog names it by its CPA route");
 });
 
+test("disabled OAuth files do not hide live API-key models or erase their remembered capabilities", async () => {
+  let clock = 1_000_000;
+  let metadataOffline = false;
+  let ownersOffline = false;
+  let offline = false;
+  let unownedListed = true;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async url => {
+      if (offline) throw new Error("CPA offline");
+      if (String(url).includes("/auth-files")) return metadataOffline
+        ? { ok: false, status: 503 }
+        : { ok: true, json: async () => ({ files: [{ name: "codex-oauth.json", provider: "codex", disabled: true }] }) };
+      const rows = [{ id: "gpt-5.5", owned_by: "codex", context_window: 272000, supported_reasoning_levels: ["low", "high"] },
+        ...(unownedListed ? [{ id: "codex/unowned", context_window: 128000 }] : [])];
+      if (!ownersOffline) return { ok: true, json: async () => ({ data: rows }) };
+      // The enhanced catalog still answers; the separate owner metadata request fails.
+      return String(url).includes("client_version")
+        ? { ok: true, json: async () => ({ models: rows.map(({ id, owned_by, ...entry }) => ({ slug: id, ...entry })) }) }
+        : { ok: false, status: 503 };
+    },
+  });
+  const first = await workflow.call("models", {});
+  assert.deepEqual(first.models, ["gpt-5.5", "codex/unowned"], "a live built-in model can still be served by a configured API key");
+  assert.equal(first.capabilities["gpt-5.5"].provider, "codex");
+  assert.equal(first.capabilities["gpt-5.5"].contextLimit, 272000);
+  const capabilities = first.capabilities;
+  metadataOffline = true;
+  clock += 60_001;
+  assert.deepEqual((await workflow.call("models", {})).capabilities, capabilities, "unreadable account metadata removes nothing");
+  metadataOffline = false;
+  ownersOffline = true;
+  unownedListed = false;
+  clock += 60_001;
+  const withoutOwners = await workflow.call("models", {});
+  assert.deepEqual(withoutOwners.models, first.models, "an unknown owner's namespace alone is no disabled-provider verdict");
+  assert.deepEqual(withoutOwners.capabilities, capabilities, "a failed owner lookup keeps the last known provider");
+  offline = true;
+  clock += 60_001;
+  const remembered = await workflow.call("models", {});
+  assert.equal(remembered.stale, true);
+  assert.deepEqual(remembered.models, first.models);
+  assert.deepEqual(remembered.capabilities, capabilities, "an outage keeps the healthy API-key model's effort and window");
+});
+
 test("disabling a CPA provider removes remembered models without hiding enabled Provider Manager upstreams", async () => {
   let clock = 1_000_000;
   let disabled = false;
@@ -3389,9 +3435,10 @@ test("disabling a CPA provider removes remembered models without hiding enabled 
       ] }) };
       return { ok: true, json: async () => ({ data: [
         { id: "other/model", owned_by: "other" },
-        // A plugin may still advertise a disabled model; CPA may omit the others entirely.
+        // Plugins may still advertise disabled models; CPA may omit built-in ones entirely.
         { id: "cline-pass/model", owned_by: "cline" },
-        ...(!disabled ? [{ id: "opencode-go/model", owned_by: "opencode-go" }, { id: "gpt-5.5", owned_by: "codex" }] : []),
+        { id: "opencode-go/model", owned_by: "opencode-go" },
+        ...(!disabled ? [{ id: "gpt-5.5", owned_by: "codex" }] : []),
       ] }) };
     },
   });

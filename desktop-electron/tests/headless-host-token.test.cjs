@@ -168,18 +168,25 @@ test("the headless control token is kept in memory only: its file is deleted onc
   delete process.env.CODING_TOOLS_HEADLESS_BINARY;
   const logger = { info() {}, warn() {}, error() {} };
   const host = new HeadlessHost({ app: { getPath: () => userData, isPackaged: false }, logger, sourceRoot: base, binaryRoot });
+  let child = null;
   t.after(() => {
     if (saved !== undefined) process.env.CODING_TOOLS_HEADLESS_BINARY = saved;
-    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 });
   });
   try {
     const control = await host.ensureStarted();
+    child = host.child;
     assert.deepEqual(fs.readdirSync(tokenDir), ["keep-me.txt"], "no token file is left behind, an earlier run's included; nothing else is touched");
     assert.equal(fs.existsSync(control.tokenPath), false);
     const answer = await host.request("/api/v1/anything", null, { method: "GET" });
     assert.deepEqual(answer, { ok: true, token_file_exists: false }, "the app still talks to the service with the token it holds");
   } finally {
     await host.shutdown("test");
+    // Shutdown waits for exit; await any pipes still closing, without missing an earlier close.
+    if (child && (child.exitCode === null && child.signalCode === null
+      || child.stdio.some(stream => stream && !stream.closed))) {
+      await require("node:events").once(child, "close", { signal: AbortSignal.timeout(5_000) });
+    }
   }
 });
 
