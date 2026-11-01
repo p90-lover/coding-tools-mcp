@@ -93,6 +93,22 @@ export function chatProcessRows(commands: Command[], page: LivePage | null): Cha
   return [...rows, ...running.map(row), ...ended.slice(0, OFFLINE_PROCESS_ROWS).map(row)];
 }
 
+// A slow IPC read must finish before another starts. Hidden keep-alive tabs do no work, and
+// returning to the window refreshes immediately instead of waiting for the fallback interval.
+export function startWorkbenchPoll(tick: () => Promise<unknown>, intervalMs: number, hidden: () => boolean): () => void {
+  let live = true, inFlight = false;
+  const refresh = async () => {
+    if (!live || inFlight || hidden()) return;
+    inFlight = true;
+    try { await tick(); } catch { /* the next tick tries again */ }
+    finally { inFlight = false; }
+  };
+  void refresh();
+  const timer = window.setInterval(() => void refresh(), intervalMs);
+  const offFocus = onWindowFocus(() => void refresh());
+  return () => { live = false; window.clearInterval(timer); offFocus(); };
+}
+
 const PROCESSES_POLL_MS = 4000;
 /** The commands this chat's agents and the user ran (chat_processes), read while `wanted` (the details panel is open). */
 export function useChatProcesses(sessionIds: string[], wanted: boolean, workspaceId?: string): Command[] {
@@ -111,9 +127,8 @@ export function useChatProcesses(sessionIds: string[], wanted: boolean, workspac
         setCommands((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
       } catch { /* the next tick tries again */ }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), PROCESSES_POLL_MS);
-    return () => { live = false; window.clearInterval(timer); };
+    const stop = startWorkbenchPoll(tick, PROCESSES_POLL_MS, hidden);
+    return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, wanted, workspaceId, hidden]);
   return commands;
@@ -203,11 +218,10 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
         if (tab) onOpenNow.current(tab);
       } catch { /* the next tick tries again */ }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), 4000);
-    return () => { live = false; window.clearInterval(timer); };
+    const stop = startWorkbenchPoll(tick, 4000, hidden);
+    return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, hidden]);
+  }, [key, workspaceId, hidden]);
   return livePage;
 }
 
@@ -247,10 +261,8 @@ export function useChatSubagents(sessionIds: string[], onStarted: () => void): C
         if (!first && fresh.some(subagentActive)) onStartedNow.current();
       } catch { /* the next tick tries again */ }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), SUBAGENTS_POLL_MS);
-    const offFocus = onWindowFocus(() => void tick());
-    return () => { live = false; window.clearInterval(timer); offFocus(); };
+    const stop = startWorkbenchPoll(tick, SUBAGENTS_POLL_MS, hidden);
+    return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, hidden]);
   return runs;
@@ -638,20 +650,15 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     let live = true;
-    const tick = () => {
-      if (!live || hidden()) return;
-      void paneCall("chat_preview_state", { sessionIds: [sessionId] })
-        .then((result) => {
-          if (!live) return;
-          const next = (result.previews as Record<string, PreviewState> | undefined)?.[sessionId] ?? null;
-          if (next) rememberPage(sessionId, next.url, next.title);
-          setState(next);
-        })
-        .catch(() => undefined);
-    };
-    tick();
-    const timer = window.setInterval(tick, PREVIEW_POLL_MS);
-    return () => { live = false; window.clearInterval(timer); };
+    const tick = () => paneCall("chat_preview_state", { sessionIds: [sessionId] })
+      .then((result) => {
+        if (!live) return;
+        const next = (result.previews as Record<string, PreviewState> | undefined)?.[sessionId] ?? null;
+        if (next) rememberPage(sessionId, next.url, next.title);
+        setState((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+      });
+    const stop = startWorkbenchPoll(tick, PREVIEW_POLL_MS, hidden);
+    return () => { live = false; stop(); };
   }, [sessionId, hidden]);
   useEffect(() => { if (!editing) setAddress(state?.url && state.url !== "about:blank" ? state.url : ""); }, [state?.url, editing]);
 
