@@ -234,16 +234,13 @@ pub(crate) async fn stop_recorded_frpc_instance(workspace_id: &str) -> AppResult
         let force_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         while platform().is_process_alive(pid) && tokio::time::Instant::now() < force_deadline {
             let _ = platform().terminate_process_tree(pid);
-            // Also match by image path in case the PID was recycled or the
-            // process tree root no longer owns child frpc workers.
-            let _ = platform().terminate_processes_by_image_path(Path::new(recorded_image));
             sleep(Duration::from_millis(100)).await;
         }
     }
 
     if platform().is_process_alive(pid) {
-        // Last resort: kill every process running our managed frpc binary.
-        let _ = platform().terminate_processes_by_image_path(Path::new(recorded_image));
+        // The binary is shared by independent workspaces; retry only this PID tree.
+        let _ = platform().terminate_process_tree(pid);
         sleep(Duration::from_millis(200)).await;
     }
 
