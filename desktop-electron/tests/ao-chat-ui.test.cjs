@@ -33,8 +33,9 @@ test("visualize references are inert Markdown unless a completed answer supplies
 });
 const menu = load("ChatMenu.tsx");
 const client = { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) };
+const visibility = load("page-visibility.ts");
 const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": menu, "./AgentOrchestratorRoleEditor": roles,
-  "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+  "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility });
 const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
 const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const clawd = load("Clawd.tsx");
@@ -44,7 +45,7 @@ const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
-  "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
+  "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client, "./page-visibility": visibility }),
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
   // controls and approval cards render only when a composer or an approval is passed.
@@ -589,7 +590,7 @@ test("a question the person answered shows as Claude Code shows one: the questio
 
 test("the side panel opens on an Overview of the chat: environment, context, changes, background tasks and usage", () => {
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat,
-    "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+    "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility });
   const html = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, {
     sessions: [{ id: "ao-1", label: "Claude Code", model: "cpa/cline-pass/glm-5.3-flash", contextWindow: 400000 }],
     tab: "overview", onTab: () => {}, onClose: () => {}, workspaceId: "ws" }));
@@ -613,7 +614,7 @@ test("a chat shows the subagents its own agents started, as Codex's panel does: 
   assert.equal(chat.subagentsSummary([]), null);
 
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat,
-    "./ChatMarkdown": markdown, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+    "./ChatMarkdown": markdown, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility });
   const props = { sessions: [{ id: "ao-1", label: "Claude Code" }], onTab: () => {}, onClose: () => {}, workspaceId: "ws", subagents: own };
   const overview = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, { ...props, tab: "overview" }));
   assert.match(overview, /<h4>Subagents<small>2 working<\/small>/, "the Overview lists them");

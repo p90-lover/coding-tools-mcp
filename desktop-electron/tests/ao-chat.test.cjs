@@ -1090,7 +1090,8 @@ function rendererCallback(file, name, globals) {
   let body;
   const visit = node => {
     if (ts.isVariableDeclaration(node) && node.name.getText(tree) === name) body ??= node.initializer;
-    if (name.startsWith("effect:") && ts.isCallExpression(node) && node.expression.getText(tree) === "useEffect"
+    const hook = name.startsWith("layout:") ? "useLayoutEffect" : "useEffect";
+    if ((name.startsWith("effect:") || name.startsWith("layout:")) && ts.isCallExpression(node) && node.expression.getText(tree) === hook
       && node.arguments[0]?.getText(tree).includes(name.slice(7))) body ??= node.arguments[0];
     ts.forEachChild(node, visit);
   };
@@ -1453,10 +1454,125 @@ test("with Retry automatically on, opening a project retries a single chat's fai
   assert.equal(settledRuns.current.size, 0);
 });
 
+function childPoll(file, selector, options = {}) {
+  const { hidden: initiallyHidden = true, ...overrides } = options;
+  let surfaceHidden = initiallyHidden, away = false, timerId = 0;
+  const latest = { current: surfaceHidden }, timers = new Map(), focus = new Set(), clicks = new Set(), calls = [];
+  const window = { setInterval: fn => { timers.set(++timerId, fn); return timerId; }, clearInterval: id => timers.delete(id),
+    addEventListener: (_event, fn) => focus.add(fn), removeEventListener: (_event, fn) => focus.delete(fn) };
+  const document = { visibilityState: "visible", hasFocus: () => true, documentElement: { hasAttribute: () => away } };
+  const visibility = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/page-visibility.ts"), "utf8"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText, { exports: visibility, window, document, require: () => ({ createContext: value => ({ value }),
+    useContext: () => surfaceHidden, useRef: () => latest, useCallback: fn => fn }) });
+  const hidden = visibility.useSurfaceHidden();
+  const request = async operation => {
+    calls.push(operation);
+    if (operation === "chat_processes") return { sessions: [] };
+    if (operation === "chat_context") return { sessions: { session: { usage: null } } };
+    return { previews: {}, runs: [], timeline: [], entries: [], nextOffset: 0, content: "" };
+  };
+  const noop = () => {};
+  const globals = { hidden, window, document, onWindowFocus: visibility.onWindowFocus, windowUnfocused: visibility.windowUnfocused,
+    getCodingToolsClient: () => ({ apps: { call: async input => ({ result: await request(input.operation) }) } }), paneCall: request,
+    readCpaUsage: async range => { calls.push(`usage:${range}`); return { available: false }; },
+    sessionId: "session", sessionIds: ["session"], workspaceId: "workspace", earlierKey: "", currentContext: (sessions, id) => sessions?.[id],
+    wanted: true, key: "cpa/model", from: 1, running: true, active: true, isOpen: true, run: { subagent_id: "subagent" }, range: "24h",
+    onCpaCodex: true, onCpaCline: false, onCpaOther: false, USAGE_RANGE: "7d", session: {},
+    POLL_MS: 4000, QUOTA_POLL_MS: 60000, DETAIL_POLL_MS: 10000, PROCESSES_POLL_MS: 4000, SUBAGENTS_POLL_MS: 3000,
+    OVERVIEW_POLL_MS: 5000, SUBAGENT_WORK_POLL_MS: 2000, PREVIEW_POLL_MS: 1500, COMMANDS_POLL_MS: 2000, OUTPUT_POLL_MS: 1000,
+    button: { current: { addEventListener: (_event, fn) => clicks.add(fn), removeEventListener: (_event, fn) => clicks.delete(fn) } },
+    seen: { current: null }, polled: { current: new Set() }, openNow: { current: false }, onOpenNow: { current: noop }, onStartedNow: { current: noop },
+    startsNewChat: () => true, chatSubagents: chat.chatSubagents, subagentActive: chat.subagentActive, isLive: () => true,
+    selected: "command", selectedAgentShell: false, offsets: { current: {} }, pinned: { current: false }, shownRequest: { current: "" },
+    plain: value => value, TAIL_BYTES: 1024, MAX_OUTPUT_CHARS: 10000,
+    ...overrides,
+  };
+  for (const name of ["Snapshot", "Quota", "UsageReport", "DaySpend", "MonthSpend", "Breakdown", "Stats", "Commands", "LivePage", "Runs", "Context", "Changes", "Tasks", "Usage", "Items", "Error", "State", "Now", "Selected", "ShowHistory", "Output"])
+    globals[`set${name}`] = noop;
+  const cleanup = rendererCallback(file, selector, globals)();
+  return { calls, timers, focus, clicks, cleanup,
+    hide(value) { surfaceHidden = value; visibility.useSurfaceHidden(); },
+    away(value) { away = value; }, page(value) { document.visibilityState = value; },
+    pulse() { for (const callback of [...timers.values(), ...focus, ...clicks]) callback(); } };
+}
+
+test("chat child refreshes skip hidden surfaces, minimized windows and hidden pages, then resume", async t => {
+  for (const [file, selector, expected] of [
+    ["ChatContextMeter.tsx", "effect:const earlier = earlierKey", ["chat_context"]],
+    ["ChatContextMeter.tsx", "effect:setQuota(null)", ["cpa_quota", "usage:7d"]],
+    ["ChatContextMeter.tsx", "effect:let pending = false", ["chat_context"]],
+    ["ChatTurnStats.tsx", "effect:const [first, ...rest]", ["chat_turn_stats"]],
+    ["ChatWorkbench.tsx", "effect:!wanted", ["chat_processes"]],
+    ["ChatWorkbench.tsx", "effect:setLivePage(null)", ["chat_preview_state", "chat_processes"]],
+    ["ChatWorkbench.tsx", "effect:seen.current = null", ["subagents_runs"]],
+    ["ChatWorkbench.tsx", "effect:countChanges", ["chat_context", "chat_changes", "chat_processes"]],
+    ["ChatWorkbench.tsx", "effect:readCpaUsage(range)", ["usage:24h"]],
+    ["ChatWorkbench.tsx", "effect:subagent_transcript", ["subagent_transcript"]],
+    ["ChatWorkbench.tsx", "effect:rememberPage(sessionId", ["chat_preview_state"]],
+    ["ChatWorkbench.tsx", "effect:shownRequest.current", ["chat_processes"]],
+    ["ChatWorkbench.tsx", "effect:offsets.current = { stdout: 0", ["chat_process_output"]],
+  ]) await t.test(`${file} ${selector}`, async () => {
+    const f = childPoll(file, selector);
+    try {
+      f.pulse(); await new Promise(setImmediate);
+      assert.deepEqual(f.calls, [], "automatic initial reads, timers, focus and panel clicks wait while hidden");
+      f.hide(false); f.pulse(); await new Promise(setImmediate);
+      for (const operation of expected) assert.ok(f.calls.includes(operation), `${operation} resumes without remounting`);
+      f.calls.length = 0;
+      for (const reason of ["surface", "minimized", "page"]) {
+        f.hide(reason === "surface"); f.away(reason === "minimized"); f.page(reason === "page" ? "hidden" : "visible");
+        f.pulse(); await new Promise(setImmediate);
+        assert.deepEqual(f.calls, [], reason);
+      }
+      f.hide(false); f.away(false); f.page("visible"); f.pulse(); await new Promise(setImmediate);
+      for (const operation of expected) assert.ok(f.calls.includes(operation), `${operation} resumes after the window returns`);
+    } finally { f.cleanup?.(); }
+    assert.equal(f.timers.size, 0); assert.equal(f.focus.size, 0); assert.equal(f.clicks.size, 0);
+  });
+});
+
+test("ended turn and subagent reads defer while hidden, issue once when shown and retire their timer", async t => {
+  for (const [file, selector, options] of [
+    ["ChatTurnStats.tsx", "effect:const [first, ...rest]", { running: false }],
+    ["ChatWorkbench.tsx", "effect:subagent_transcript", { active: false }],
+  ]) for (const hidden of [true, false]) await t.test(`${file} hidden=${hidden}`, async () => {
+    const f = childPoll(file, selector, { ...options, hidden });
+    try {
+      await new Promise(setImmediate);
+      assert.equal(f.calls.length, hidden ? 0 : 1);
+      assert.equal(f.timers.size, hidden ? 1 : 0);
+      if (hidden) {
+        const abandoned = childPoll(file, selector, { ...options, hidden: true });
+        abandoned.cleanup(); abandoned.hide(false); abandoned.pulse(); await new Promise(setImmediate);
+        assert.equal(abandoned.timers.size, 0); assert.equal(abandoned.calls.length, 0, "unmount cancels the deferred final read");
+      }
+      f.hide(false); f.pulse(); await new Promise(setImmediate);
+      assert.equal(f.calls.length, 1); assert.equal(f.timers.size, 0);
+      f.pulse(); await new Promise(setImmediate); assert.equal(f.calls.length, 1);
+    } finally { f.cleanup?.(); }
+    assert.equal(f.timers.size, 0);
+  });
+});
+
+test("a hidden preview still hides its native view and disposes its observer on cleanup", () => {
+  const calls = [], remeasure = { current: null }; let disconnected = 0;
+  const cleanup = rendererCallback("ChatWorkbench.tsx", "layout:const measure = () =>", {
+    hidden: () => true, sessionId: "session", hasPage: true, coveredNow: { current: false }, remeasure,
+    slot: { current: { getBoundingClientRect: () => ({ width: 0, height: 0 }) } },
+    paneCall: async operation => { calls.push(operation); }, requestAnimationFrame: fn => { fn(); return 1; }, cancelAnimationFrame() {},
+    ResizeObserver: class { observe() {} disconnect() { disconnected += 1; } }, window: { addEventListener() {}, removeEventListener() {} },
+  })();
+  assert.deepEqual(calls, ["chat_preview_hide"]);
+  cleanup(); assert.deepEqual(calls, ["chat_preview_hide", "chat_preview_hide"]);
+  assert.equal(disconnected, 1); assert.equal(remeasure.current, null);
+});
+
 test("an old terminal read cannot advance a newly selected command's output cursor", async () => {
   const old = delayedReply(), offsets = { current: { stdout: 0, stderr: 0 } };
   const read = rendererCallback("ChatWorkbench.tsx", "effect:offsets.current = { stdout: 0", {
-    selected: "old", sessionId: "session", workspaceId: "a", selectedAgentShell: false, offsets,
+    selected: "old", sessionId: "session", workspaceId: "a", selectedAgentShell: false, offsets, hidden: () => false,
     pinned: { current: false }, setOutput() {}, TAIL_BYTES: 1000, MAX_OUTPUT_CHARS: 10000, OUTPUT_POLL_MS: 1000,
     window: { setInterval: () => 1, clearInterval() {} }, plain: value => value,
     paneCall: async (_operation, args) => args.stream === "stdout" && args.offset === Number.MAX_SAFE_INTEGER
