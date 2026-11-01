@@ -29,8 +29,8 @@ concurrency:
 
 env:
   NODE_VERSION: '22'
-  BUN_VERSION: 1.4.3
-  GO_VERSION: 1.27.1
+  BUN_VERSION: 1.4.4
+  GO_VERSION: 1.27.3
   RUST_TOOLCHAIN: 1.98.1
   TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12
   TUNNEL_ARCHIVE: tunnel-client-v0.0.12-windows-amd64.zip
