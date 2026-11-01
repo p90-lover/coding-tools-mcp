@@ -417,6 +417,12 @@ struct NativeApproval {
     reason: String,
     expires_at: Instant,
 }
+struct NativeResponse<'a> {
+    id: &'a str,
+    thread_id: &'a str,
+    turn_id: &'a str,
+    response: &'a Value,
+}
 impl NativeApproval {
     fn display_path(&self) -> Value {
         if self.method.is_empty() {
@@ -549,6 +555,28 @@ struct LedgerEntry {
     result: Option<Value>,
     completed_at: Option<Instant>,
 }
+struct PendingAdmission {
+    key: String,
+    fingerprint: String,
+    charged: u32,
+}
+impl PendingAdmission {
+    fn capture(memory: &Memory, key: String, before: u32, fresh: bool) -> Result<Option<Self>> {
+        if !fresh {
+            return Ok(None);
+        }
+        let entry = memory
+            .ledger
+            .get(&key)
+            .filter(|entry| entry.result.is_none() && entry.completed_at.is_none())
+            .ok_or("Native admission receipt unavailable")?;
+        Ok(Some(Self {
+            key,
+            fingerprint: entry.fingerprint.clone(),
+            charged: memory.requests_used.saturating_sub(before),
+        }))
+    }
+}
 #[derive(Default)]
 struct Memory {
     threads: BTreeMap<String, ThreadState>,
@@ -559,6 +587,22 @@ struct Memory {
 }
 
 impl Memory {
+    fn fail_admission(&mut self, pending: &PendingAdmission, result: Value) -> bool {
+        let Some(entry) = self.ledger.get_mut(&pending.key) else {
+            return false;
+        };
+        if entry.fingerprint != pending.fingerprint
+            || entry.result.is_some()
+            || entry.completed_at.is_some()
+        {
+            return false;
+        }
+        entry.result = Some(result);
+        entry.completed_at = Some(Instant::now());
+        self.requests_used = self.requests_used.saturating_sub(pending.charged);
+        true
+    }
+
     fn record_stop_reason(&mut self, reason: &str) {
         // A delayed resumable writer must never undo explicit revocation.
         if sessions::resumable_stop(self.stop_reason.as_deref())
@@ -610,6 +654,37 @@ impl Memory {
         }
         Ok(None)
     }
+}
+
+fn persist_admission(
+    memory: &Mutex<Memory>,
+    pending: Option<&PendingAdmission>,
+    mut persist: impl FnMut() -> Result<()>,
+    failure: impl FnOnce(&str) -> Value,
+    stop: impl FnOnce(),
+) -> Result<()> {
+    let error = match persist() {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let Some(pending) = pending else {
+        return Err(error);
+    };
+    let result = failure(&error);
+    let settled = {
+        match memory.lock() {
+            Ok(mut memory) => memory.fail_admission(pending, result),
+            Err(_) => false,
+        }
+    };
+    if settled {
+        // Persist compensation only after its memory guard is released. If this
+        // also fails, disk recovery keeps its conservative unknown outcome.
+        let _ = persist();
+    } else {
+        stop();
+    }
+    Err(error)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -723,6 +798,76 @@ struct Bridge {
     memory: Arc<Mutex<Memory>>,
     operation: Mutex<()>,
 }
+#[derive(Debug)]
+enum EnqueueFailure {
+    Expired,
+    Stopped,
+    Unavailable,
+}
+
+fn finish_enqueue(
+    result: std::result::Result<(), EnqueueFailure>,
+    on_expired: impl FnOnce(),
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(EnqueueFailure::Expired) => {
+            on_expired();
+            Err("Native session stopped; request not submitted".into())
+        }
+        Err(EnqueueFailure::Stopped) => Err("Native session stopped; request not submitted".into()),
+        Err(EnqueueFailure::Unavailable) => {
+            Err("Native outgoing queue unavailable; request not submitted".into())
+        }
+    }
+}
+
+fn resolve_native_response(
+    memory: &Mutex<Memory>,
+    approvals: &Mutex<BTreeMap<String, NativeApproval>>,
+    answer: NativeResponse<'_>,
+    is_live: impl FnOnce() -> bool,
+    send: impl FnOnce(Value) -> std::result::Result<(), EnqueueFailure>,
+    on_expired: impl FnOnce(),
+) -> Result<Value> {
+    let (sent, value) = {
+        let mut memory = lock(memory)?;
+        let mut pending = lock(approvals)?;
+        let request = pending
+            .get(answer.id)
+            .ok_or("Native request expired or was already answered")?;
+        if request.method.is_empty() {
+            return Err("Use the legacy approval response for this request".into());
+        }
+        if !request.belongs_to(
+            answer.thread_id,
+            answer.turn_id,
+            memory.threads.get(&request.thread_id),
+            is_live(),
+        ) {
+            return Err("Native response is stale or belongs to another thread/turn".into());
+        }
+        consent::validate(&request.method, &request.request, answer.response)?;
+        let approved = consent::granted(&request.method, &request.request, answer.response);
+        let method = request.method.clone();
+        // Validation, queue insertion and removal stay atomic for competing replies.
+        let sent = send(json!({"id":request.rpc_id,"result":answer.response}));
+        if sent.is_ok() {
+            pending.remove(answer.id);
+            if let Some(thread) = memory.threads.get_mut(answer.thread_id) {
+                thread.notice = None;
+            }
+        }
+        (
+            sent,
+            json!({"ok":true,"approved":approved,"method":method,"scope":answer.response["scope"]}),
+        )
+    };
+    // Expiry shutdown also locks memory and approvals, so neither guard may survive here.
+    finish_enqueue(sent, on_expired)?;
+    Ok(value)
+}
+
 fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
     m.lock()
         .map_err(|_| "Native bridge state unavailable".into())
@@ -1443,33 +1588,19 @@ impl Hub {
         response: &Value,
     ) -> Result<Value> {
         let bridge = self.bridge()?;
-        let mut memory = lock(&bridge.memory)?;
-        let mut pending = lock(&bridge.approvals)?;
-        let request = pending
-            .get(id)
-            .ok_or("Native request expired or was already answered")?;
-        if request.method.is_empty() {
-            return Err("Use the legacy approval response for this request".into());
-        }
-        if !request.belongs_to(
-            thread_id,
-            turn_id,
-            memory.threads.get(&request.thread_id),
-            bridge.live.load(Ordering::SeqCst),
-        ) {
-            return Err("Native response is stale or belongs to another thread/turn".into());
-        }
-        consent::validate(&request.method, &request.request, response)?;
-        let approved = consent::granted(&request.method, &request.request, response);
-        // Holding the queue lock makes check + response + removal atomic for competing replies.
-        bridge.enqueue(json!({"id":request.rpc_id,"result":response}))?;
-        let method = request.method.clone();
-        pending.remove(id);
-        drop(pending);
-        if let Some(thread) = memory.threads.get_mut(thread_id) {
-            thread.notice = None;
-        }
-        Ok(json!({"ok":true,"approved":approved,"method":method,"scope":response["scope"]}))
+        resolve_native_response(
+            &bridge.memory,
+            &bridge.approvals,
+            NativeResponse {
+                id,
+                thread_id,
+                turn_id,
+                response,
+            },
+            || bridge.live.load(Ordering::SeqCst),
+            |reply| bridge.try_enqueue(reply),
+            || bridge.stop("local_consent_expired"),
+        )
     }
     /// The thread state with the first page of its answer.
     pub fn read(&self, id: &str) -> Result<Value> {
@@ -1510,20 +1641,45 @@ impl Hub {
     pub fn admit(&self, request: Control) -> Result<Ticket> {
         let uses_model = validate_control(&request)?;
         let bridge = self.bridge()?;
-        let replay = {
+        let (replay, pending) = {
             let mut memory = lock(&bridge.memory)?;
-            reserve(
+            let before = memory.requests_used;
+            let replay = reserve(
                 &mut memory,
                 &request,
                 uses_model,
                 &bridge.options,
                 bridge.live.load(Ordering::SeqCst),
                 bridge.ready.load(Ordering::SeqCst),
-            )?
+            )?;
+            let pending = PendingAdmission::capture(
+                &memory,
+                request.request_id.clone(),
+                before,
+                replay.is_none(),
+            );
+            (replay, pending)
+        };
+        let pending = match pending {
+            Ok(pending) => pending,
+            Err(error) => {
+                bridge.stop("native_session_persistence_failed");
+                return Err(error);
+            }
         };
         // Persist admission before any RPC, so a process restart cannot turn an unknown
         // submitted request into a fresh model call with the same request ID.
-        bridge.save_session()?;
+        persist_admission(
+            &bridge.memory,
+            pending.as_ref(),
+            || bridge.save_session(),
+            |error| {
+                json!({"ok":false,"request_id":request.request_id,
+                "error":format!("Native request was not submitted because its admission journal could not be saved: {error}"),
+                "outcome":"not_submitted","replayed":false})
+            },
+            || bridge.stop("native_session_persistence_failed"),
+        )?;
         Ok(Ticket {
             bridge,
             request,
@@ -1656,17 +1812,22 @@ fn exact_external_write(root: &Path, permissions: &Value) -> Option<PathBuf> {
 
 impl Bridge {
     fn enqueue(&self, value: Value) -> Result<()> {
+        finish_enqueue(self.try_enqueue(value), || {
+            self.stop("local_consent_expired")
+        })
+    }
+    fn try_enqueue(&self, value: Value) -> std::result::Result<(), EnqueueFailure> {
         if self.options.lifetime_seconds != 0
             && self.started.elapsed() >= Duration::from_secs(self.options.lifetime_seconds)
         {
-            self.stop("local_consent_expired");
+            return Err(EnqueueFailure::Expired);
         }
         if !self.live.load(Ordering::SeqCst) {
-            return Err("Native session stopped; request not submitted".into());
+            return Err(EnqueueFailure::Stopped);
         }
         self.outgoing
             .try_send(value)
-            .map_err(|_| "Native outgoing queue unavailable; request not submitted".into())
+            .map_err(|_| EnqueueFailure::Unavailable)
     }
     fn rpc(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -2704,6 +2865,77 @@ mod tests {
         assert!(!ready.load(Ordering::SeqCst));
     }
 
+    fn journal_admission_fixture() -> (Mutex<Memory>, PendingAdmission) {
+        let mut memory = Memory {
+            requests_used: 4,
+            ..Default::default()
+        };
+        for key in ["fresh-request", "other-pending", "restored-unknown"] {
+            memory.ledger.insert(
+                key.into(),
+                LedgerEntry {
+                    fingerprint: key.into(),
+                    result: (key == "restored-unknown").then_some(Value::Null),
+                    completed_at: None,
+                },
+            );
+        }
+        let pending = PendingAdmission::capture(&memory, "fresh-request".into(), 3, true)
+            .unwrap()
+            .unwrap();
+        (Mutex::new(memory), pending)
+    }
+
+    #[test]
+    fn admission_journal_failure_settles_only_its_fresh_charge_once() {
+        use std::cell::Cell;
+        for settlement_succeeds in [false, true] {
+            let (memory, pending) = journal_admission_fixture();
+            let writes = Cell::new(0);
+            let dispatched = Cell::new(false);
+            let result = persist_admission(
+                &memory,
+                Some(&pending),
+                || {
+                    assert!(memory.try_lock().is_ok(), "persist held the memory guard");
+                    writes.set(writes.get() + 1);
+                    if writes.get() == 1 {
+                        Err("first journal failure".into())
+                    } else if settlement_succeeds {
+                        Ok(())
+                    } else {
+                        Err("settlement also failed".into())
+                    }
+                },
+                |error| {
+                    assert_eq!(error, "first journal failure");
+                    Value::Null
+                },
+                || panic!("owned receipt should settle without stopping"),
+            );
+            if result.is_ok() {
+                dispatched.set(true);
+            }
+            assert_eq!(result.unwrap_err(), "first journal failure");
+            assert!(!dispatched.get());
+            assert_eq!(writes.get(), 2);
+            let mut memory = lock(&memory).unwrap();
+            assert_eq!(memory.requests_used, 3);
+            let entry = &memory.ledger["fresh-request"];
+            assert_eq!(entry.fingerprint, "fresh-request");
+            assert_eq!(entry.result, Some(Value::Null));
+            let completed = entry.completed_at;
+            assert!(completed.is_some());
+            assert!(!memory.fail_admission(&pending, Value::Null));
+            assert_eq!(memory.requests_used, 3);
+            assert_eq!(memory.ledger["fresh-request"].completed_at, completed);
+            assert!(memory.ledger["other-pending"].result.is_none());
+            assert!(memory.ledger["other-pending"].completed_at.is_none());
+            assert_eq!(memory.ledger["restored-unknown"].result, Some(Value::Null));
+            assert!(memory.ledger["restored-unknown"].completed_at.is_none());
+        }
+    }
+
     #[test]
     fn late_initialization_failure_preserves_an_existing_resumable_stop() {
         for reason in [
@@ -2730,6 +2962,149 @@ mod tests {
                 assert!(sessions::resumable_stop(memory.stop_reason.as_deref()));
             }
         }
+    }
+
+    #[test]
+    fn admission_journal_success_and_replay_failure_preserve_receipts() {
+        use std::cell::Cell;
+        let (memory, pending) = journal_admission_fixture();
+        persist_admission(
+            &memory,
+            Some(&pending),
+            || Ok(()),
+            |_| panic!("successful admission must remain pending"),
+            || panic!("successful admission must not stop"),
+        )
+        .unwrap();
+        let completed = Instant::now();
+        let replay = {
+            let mut memory = lock(&memory).unwrap();
+            assert_eq!(memory.requests_used, 4);
+            assert!(memory.ledger["fresh-request"].result.is_none());
+            assert!(memory.ledger["fresh-request"].completed_at.is_none());
+            let entry = memory.ledger.get_mut("fresh-request").unwrap();
+            entry.result = Some(Value::Null);
+            entry.completed_at = Some(completed);
+            PendingAdmission::capture(&memory, "fresh-request".into(), 3, false).unwrap()
+        };
+        assert!(replay.is_none());
+        let writes = Cell::new(0);
+        let failed = persist_admission(
+            &memory,
+            replay.as_ref(),
+            || {
+                writes.set(writes.get() + 1);
+                Err("replay journal failure".into())
+            },
+            |_| panic!("a replay does not own a fresh reservation"),
+            || panic!("a replay failure must not alter its receipt"),
+        );
+        assert_eq!(failed.unwrap_err(), "replay journal failure");
+        assert_eq!(writes.get(), 1);
+        let memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 4);
+        assert_eq!(memory.ledger["fresh-request"].result, Some(Value::Null));
+        assert_eq!(memory.ledger["fresh-request"].completed_at, Some(completed));
+    }
+
+    #[test]
+    fn admission_journal_unavailable_state_stops_after_guards_drop() {
+        use std::cell::Cell;
+        let (memory, pending) = journal_admission_fixture();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = memory.lock().unwrap();
+            panic!("poison admission fixture");
+        });
+        let stopped = Cell::new(false);
+        let result = persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| Value::Null,
+            || {
+                assert!(!matches!(
+                    memory.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+                stopped.set(true);
+            },
+        );
+        assert_eq!(result.unwrap_err(), "journal unavailable");
+        assert!(stopped.get());
+
+        let (memory, pending) = journal_admission_fixture();
+        lock(&memory)
+            .unwrap()
+            .ledger
+            .get_mut("fresh-request")
+            .unwrap()
+            .fingerprint = "replacement".into();
+        let stopped = Cell::new(false);
+        assert!(persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| Value::Null,
+            || {
+                assert!(memory.try_lock().is_ok());
+                stopped.set(true);
+            },
+        )
+        .is_err());
+        assert!(stopped.get());
+        let memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 4);
+        assert_eq!(memory.ledger["fresh-request"].fingerprint, "replacement");
+        assert!(memory.ledger["fresh-request"].result.is_none());
+    }
+
+    #[test]
+    fn model_journal_failure_preserves_replay_identity_and_refunds_new_charge() {
+        let options: Connection =
+            serde_json::from_value(json!({"executable":"/not-executed/codex",
+            "expected_sha256":"0".repeat(64),"codex_home":"/not-opened/home",
+            "allow_model_usage":true,"model":"fixture","request_limit":1,"lifetime_seconds":60}))
+            .unwrap();
+        let request = Control {
+            operation: "start".into(),
+            request_id: "journal-model".into(),
+            thread_id: None,
+            text: Some("must not be submitted".into()),
+            model: None,
+            effort: None,
+        };
+        let mut state = Memory::default();
+        let before = state.requests_used;
+        assert!(reserve(&mut state, &request, true, &options, true, true)
+            .unwrap()
+            .is_none());
+        let pending = PendingAdmission::capture(&state, request.request_id.clone(), before, true)
+            .unwrap()
+            .unwrap();
+        let memory = Mutex::new(state);
+        assert!(persist_admission(
+            &memory,
+            Some(&pending),
+            || Err("journal unavailable".into()),
+            |_| json!({"ok":false,"outcome":"not_submitted"}),
+            || panic!("fresh receipt should settle"),
+        )
+        .is_err());
+        let mut memory = lock(&memory).unwrap();
+        assert_eq!(memory.requests_used, 0);
+        let replay = reserve(&mut memory, &request, true, &options, true, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay["outcome"], "not_submitted");
+        assert_eq!(memory.requests_used, 0);
+        let mut changed = request.clone();
+        changed.text = Some("different arguments".into());
+        assert!(reserve(&mut memory, &changed, true, &options, true, true).is_err());
+        changed.request_id = "fresh-model".into();
+        assert!(reserve(&mut memory, &changed, true, &options, true, true)
+            .unwrap()
+            .is_none());
+        assert_eq!(memory.requests_used, 1);
     }
 
     #[test]
@@ -3247,9 +3622,8 @@ mod tests {
         assert_eq!(memory.ledger.len(), MAX_LEDGER);
     }
 
-    #[test]
-    fn native_request_scope_rejects_wrong_turn_expiry_and_stopped_connection() {
-        let mut request = NativeApproval {
+    fn native_request_fixture() -> (NativeApproval, ThreadState) {
+        let request = NativeApproval {
             rpc_id: json!(7),
             method: "item/permissions/requestApproval".into(),
             request: json!({"permissions":{"network":{"enabled":true}}}),
@@ -3267,6 +3641,12 @@ mod tests {
             turn_id: Some("turn-one".into()),
             ..Default::default()
         };
+        (request, thread)
+    }
+
+    #[test]
+    fn native_request_scope_rejects_wrong_turn_expiry_and_stopped_connection() {
+        let (mut request, thread) = native_request_fixture();
         assert!(request.belongs_to("thread-one", "turn-one", Some(&thread), true));
         assert!(!request.belongs_to("unrelated", "turn-one", Some(&thread), true));
         assert!(!request.belongs_to("thread-one", "stale", Some(&thread), true));
@@ -3299,6 +3679,155 @@ mod tests {
         request.expires_at = Instant::now() - Duration::from_secs(1);
         assert!(!request.belongs_to("thread-one", "turn-one", Some(&thread), true));
     }
+
+    #[test]
+    fn native_response_expiry_stops_after_both_guards_are_released() {
+        let (request, mut thread) = native_request_fixture();
+        thread.notice = Some("waiting".into());
+        let memory = Mutex::new(Memory {
+            threads: BTreeMap::from([("thread-one".into(), thread)]),
+            ..Default::default()
+        });
+        let approvals = Mutex::new(BTreeMap::from([("approval-one".into(), request)]));
+        let response = json!({"permissions":{"network":{"enabled":true}},"scope":"turn"});
+        let stopped = AtomicBool::new(false);
+        let result = resolve_native_response(
+            &memory,
+            &approvals,
+            NativeResponse {
+                id: "approval-one",
+                thread_id: "thread-one",
+                turn_id: "turn-one",
+                response: &response,
+            },
+            || true,
+            |_| Err(EnqueueFailure::Expired),
+            || {
+                let memory = memory.try_lock().expect("expiry stop must not hold memory");
+                let approvals = approvals
+                    .try_lock()
+                    .expect("expiry stop must not hold approvals");
+                assert!(approvals.contains_key("approval-one"));
+                assert_eq!(
+                    memory.threads["thread-one"].notice.as_deref(),
+                    Some("waiting")
+                );
+                stopped.store(true, Ordering::SeqCst);
+            },
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "Native session stopped; request not submitted"
+        );
+        assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn native_response_queue_failures_retain_requests_and_success_is_once() {
+        for (sent, expected_error) in [
+            (
+                Err(EnqueueFailure::Unavailable),
+                Some("Native outgoing queue unavailable; request not submitted"),
+            ),
+            (
+                Err(EnqueueFailure::Stopped),
+                Some("Native session stopped; request not submitted"),
+            ),
+            (Ok(()), None),
+        ] {
+            let (request, mut thread) = native_request_fixture();
+            thread.notice = Some("waiting".into());
+            let memory = Mutex::new(Memory {
+                threads: BTreeMap::from([("thread-one".into(), thread)]),
+                ..Default::default()
+            });
+            let mut other = native_request_fixture().0;
+            other.rpc_id = json!(8);
+            let approvals = Mutex::new(BTreeMap::from([
+                ("approval-one".into(), request),
+                ("approval-other".into(), other),
+            ]));
+            let response = json!({"permissions":{"network":{"enabled":true}},"scope":"turn"});
+            for (turn_id, live) in [("stale-turn", true), ("turn-one", false)] {
+                let stale = resolve_native_response(
+                    &memory,
+                    &approvals,
+                    NativeResponse {
+                        id: "approval-one",
+                        thread_id: "thread-one",
+                        turn_id,
+                        response: &response,
+                    },
+                    || live,
+                    |_| panic!("stale response must not be queued"),
+                    || panic!("stale response must not stop the bridge"),
+                );
+                assert_eq!(
+                    stale.unwrap_err(),
+                    "Native response is stale or belongs to another thread/turn"
+                );
+            }
+            let result = resolve_native_response(
+                &memory,
+                &approvals,
+                NativeResponse {
+                    id: "approval-one",
+                    thread_id: "thread-one",
+                    turn_id: "turn-one",
+                    response: &response,
+                },
+                || true,
+                |reply| {
+                    assert!(
+                        memory.try_lock().is_err(),
+                        "queue insertion must hold memory"
+                    );
+                    assert!(
+                        approvals.try_lock().is_err(),
+                        "queue insertion must hold approvals"
+                    );
+                    assert_eq!(reply, json!({"id":7,"result":response}));
+                    sent
+                },
+                || panic!("non-expiry queue result must not stop the bridge"),
+            );
+            assert!(approvals.lock().unwrap().contains_key("approval-other"));
+            if let Some(error) = expected_error {
+                assert_eq!(result.unwrap_err(), error);
+                assert!(approvals.lock().unwrap().contains_key("approval-one"));
+                assert_eq!(
+                    memory.lock().unwrap().threads["thread-one"]
+                        .notice
+                        .as_deref(),
+                    Some("waiting")
+                );
+            } else {
+                assert_eq!(result.unwrap()["approved"], true);
+                assert!(!approvals.lock().unwrap().contains_key("approval-one"));
+                assert!(memory.lock().unwrap().threads["thread-one"]
+                    .notice
+                    .is_none());
+                let duplicate = resolve_native_response(
+                    &memory,
+                    &approvals,
+                    NativeResponse {
+                        id: "approval-one",
+                        thread_id: "thread-one",
+                        turn_id: "turn-one",
+                        response: &response,
+                    },
+                    || true,
+                    |_| panic!("answered response must not be queued twice"),
+                    || panic!("answered response must not stop the bridge"),
+                );
+                assert_eq!(
+                    duplicate.unwrap_err(),
+                    "Native request expired or was already answered"
+                );
+            }
+        }
+    }
+
     #[test]
     fn ao_command_approval_is_bounded_and_always_a_single_decision() {
         let root =

@@ -73,6 +73,8 @@ export function App() {
   const [apiReady, setApiReady] = useState(() => Boolean(api));
   const [apiTimedOut, setApiTimedOut] = useState(false);
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const [snapshotAttempt, setSnapshotAttempt] = useState(0);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
   const lastOperationRef = useRef<OperationState | null>(null);
@@ -113,7 +115,7 @@ export function App() {
   }, [documentLanguage]);
 
   useEffect(() => {
-    if (!api) return undefined;
+    if (!apiReady || !api) return undefined;
     let cancelled = false;
     void api.snapshot().then((next) => {
       if (cancelled) return;
@@ -125,7 +127,12 @@ export function App() {
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
         setError(next.operation.message);
       }
-    }).catch((cause) => setError(messageOf(cause)));
+    }).catch((cause) => { if (!cancelled) setSnapshotError(messageOf(cause)); });
+    return () => { cancelled = true; };
+  }, [apiReady, snapshotAttempt]);
+
+  useEffect(() => {
+    if (!apiReady || !api) return undefined;
     const unsubscribeState = api.onStateChanged((state) => {
       setSnapshot((current) => current
         ? {
@@ -153,7 +160,6 @@ export function App() {
       setSnapshot((current) => current ? { ...current, update } : current);
     });
     return () => {
-      cancelled = true;
       unsubscribeState();
       unsubscribeBrowser();
       unsubscribeOperation();
@@ -172,13 +178,19 @@ export function App() {
         }
       : current);
   }, []);
+  const updateSnapshot = useCallback((next: LauncherSnapshot) => {
+    setSnapshot(next);
+  }, []);
 
   if (!apiReady || !api) {
     return apiTimedOut
       ? <FatalMessage message="Can't reach the launcher. Restart the app." />
       : <LaunchLoading />;
   }
-  if (!snapshot) return <LaunchLoading />;
+  if (!snapshot) return snapshotError === null ? <LaunchLoading /> : <FatalMessage
+    message={`Couldn't load the launcher. ${snapshotError}`}
+    onRetry={() => { setSnapshotError(null); setSnapshotAttempt((current) => current + 1); }}
+  />;
 
   const language = snapshot.state.language ?? "en";
   const copy = copyFor(language);
@@ -209,6 +221,7 @@ export function App() {
             operation={operation}
             setError={setError}
             snapshot={snapshot}
+            updateSnapshot={updateSnapshot}
             updateState={updateState}
           />
         )}
@@ -415,6 +428,7 @@ function LauncherShell({
   operation,
   setError,
   snapshot,
+  updateSnapshot,
   updateState,
 }: {
   browser: BrowserState | null;
@@ -423,6 +437,7 @@ function LauncherShell({
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
+  updateSnapshot: (snapshot: LauncherSnapshot) => void;
   updateState: (state: LauncherState) => void;
 }) {
   const interactionSetupComplete = snapshot.state.coreSetupComplete === true
@@ -931,6 +946,7 @@ function LauncherShell({
                   navigateSurface("mcp");
                 }}
                 snapshot={snapshot}
+                updateSnapshot={updateSnapshot}
                 updateState={updateState}
               />
             ))}
@@ -947,6 +963,7 @@ function LauncherShell({
                 operation={operation}
                 setError={setError}
                 snapshot={snapshot}
+                updateSnapshot={updateSnapshot}
                 updateState={updateState}
               />
             ) : null}
@@ -1025,6 +1042,7 @@ function LauncherShell({
                 operation={operation}
                 setError={setError}
                 snapshot={snapshot}
+                updateSnapshot={updateSnapshot}
                 updateState={updateState}
               />
             ))}
@@ -1515,6 +1533,7 @@ function SetupSurface({
   setError,
   showMcp,
   snapshot,
+  updateSnapshot,
   updateState,
 }: {
   activateBrowser: (show?: boolean) => Promise<void>;
@@ -1525,6 +1544,7 @@ function SetupSurface({
   setError: (error: string | null) => void;
   showMcp: () => void;
   snapshot: LauncherSnapshot;
+  updateSnapshot: (snapshot: LauncherSnapshot) => void;
   updateState: (state: LauncherState) => void;
 }) {
   const [localBusy, setLocalBusy] = useState(false);
@@ -1583,11 +1603,11 @@ function SetupSurface({
   const smoke = () => run(async () => {
     await activateBrowser();
     await api!.smokeTest();
-    updateState((await api!.snapshot()).state);
+    updateSnapshot(await api!.snapshot());
   });
   const install = () => run(async () => {
     await api!.setupCore();
-    updateState((await api!.snapshot()).state);
+    updateSnapshot(await api!.snapshot());
   });
   const setZeroRiskPro = (enabled: boolean) => run(async () => {
     updateState(await api!.setZeroRiskPro(enabled));
@@ -1698,6 +1718,7 @@ function McpSurface({
   operation,
   setError,
   snapshot,
+  updateSnapshot,
   updateState,
 }: {
   copy: Copy;
@@ -1708,6 +1729,7 @@ function McpSurface({
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
+  updateSnapshot: (snapshot: LauncherSnapshot) => void;
   updateState: (state: LauncherState) => void;
 }) {
   const configuringInactiveMode = interactionMode !== snapshot.state.browserInteractionMode;
@@ -1774,7 +1796,7 @@ function McpSurface({
       setTunnelId("");
       setCredentialsConfigured(true);
       setReplacingCredentials(false);
-      updateState((await api!.snapshot()).state);
+      updateSnapshot(await api!.snapshot());
       await move(2);
     } catch (cause) {
       setError(messageOf(cause));
@@ -1790,7 +1812,7 @@ function McpSurface({
     try {
       const result = await api!.createMcpConnector();
       setConnectorResult(result.created ? copy.connectorCreated : copy.connectorAlreadyExists);
-      updateState((await api!.snapshot()).state);
+      updateSnapshot(await api!.snapshot());
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -1805,7 +1827,7 @@ function McpSurface({
     setDoctor(null);
     try {
       setDoctor(await api!.verifyMcp());
-      updateState((await api!.snapshot()).state);
+      updateSnapshot(await api!.snapshot());
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -2083,6 +2105,7 @@ function SettingsSurface({
   operation,
   setError,
   snapshot,
+  updateSnapshot,
   updateState,
 }: {
   configureInteractionMode: (mode: BrowserInteractionMode) => void;
@@ -2094,6 +2117,7 @@ function SettingsSurface({
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
+  updateSnapshot: (snapshot: LauncherSnapshot) => void;
   updateState: (state: LauncherState) => void;
 }) {
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
@@ -2183,6 +2207,7 @@ function SettingsSurface({
       const result = await api!.setBrowserInteractionMode(mode);
       updateState(result.state);
       if (result.credentialsRequired) configureInteractionMode(result.targetMode);
+      else updateSnapshot(await api!.snapshot());
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -3435,12 +3460,13 @@ function LaunchLoading() {
   );
 }
 
-function FatalMessage({ message }: { message: string }) {
+function FatalMessage({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <main className="fatal-message">
+    <main className="fatal-message" role="alert">
       <BrandMark />
       <h1>Coding Tools</h1>
       <p>{message}</p>
+      {onRetry ? <SecondaryButton onClick={onRetry}>Try again</SecondaryButton> : null}
     </main>
   );
 }

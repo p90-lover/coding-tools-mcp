@@ -72,32 +72,136 @@ test("a chat's head sits under the window's drag strip and is not padded by the 
   assert.match(head[1], /min-height:\s*48px/);
 });
 
-test("the MCP wizard matches the bundled upstream surface and keeps live tools separate", () => {
-  const app = read("src/App.tsx");
-  const upstream = fs.readFileSync(
-    path.resolve(root, "..", "vendor", "codex-chatgpt-web-v5.0.6", "launcher", "src", "App.tsx"),
-    "utf8",
-  );
-  const extract = (source, name, next) => {
-    const start = source.indexOf(`function ${name}(`);
-    const end = source.indexOf(`\nfunction ${next}(`, start + 1);
-    assert.ok(start >= 0 && end > start, `${name} must remain a standalone surface`);
-    return source.slice(start, end).replaceAll("\r\n", "\n");
-  };
+const mcpSnapshot = (state = {}, metadata = {}) => ({
+  state: { language: "en", onboardingComplete: true, browserInteractionMode: "automatic", codexCatalogVerified: true,
+    mcpGuideStep: 1, mcpRuntimeInstalled: false, ...state },
+  mcpCredentialsConfigured: false, connectorName: "old-connector", connectorNames: { automatic: "Auto", manual: "Manual" },
+  urls: { tunnels: "https://example.test/tunnels", keys: "https://example.test/keys", connectors: "https://example.test/connectors" },
+  smokePassed: true, update: { status: "idle" }, platform: "win32", version: "test", ...metadata,
+});
 
-  // Coding Tools adds an automatic connector-creation action to the upstream wizard. Every upstream
-  // line must still be present, in order; only additions are allowed.
-  const ours = extract(app, "McpSurface", "ActivitySurface").split("\n");
-  const theirs = extract(upstream, "McpSurface", "ActivitySurface").split("\n");
-  let at = 0;
-  for (const line of theirs) {
-    while (at < ours.length && ours[at] !== line) at += 1;
-    assert.ok(at < ours.length, `upstream McpSurface line missing or reordered: ${line.trim()}`);
-    at += 1;
-  }
-  assert.match(extract(app, "McpSurface", "ActivitySurface"), /createMcpConnector/);
-  assert.match(app, /function InstantMcpToolsSurface[\s\S]*?<WorkspacePanel/);
-  assert.match(app, /surface === "instant-mcp"/);
+// Run the real App setters and setup/settings JSX with hook state kept per mounted component.
+function mcpUi(initial = mcpSnapshot()) {
+  const ts = require("typescript"), vm = require("node:vm");
+  const file = ts.createSourceFile("App.tsx", read("src/App.tsx"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const names = ["App", "McpSurface", "SetupSurface", "SettingsSurface"];
+  const functions = file.statements.filter(node => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
+  const hooks = Object.fromEntries(functions.map(node => [node.name.text,
+    [...node.getText(file).matchAll(/const \[([A-Za-z_]+),[^\]]+\] = useState/g)].map(match => match[1])]));
+  const states = { App: { snapshot: initial, browser: { live: true, authenticated: true, status: "ready" }, operation: { status: "completed", name: "live-operation" } } };
+  let component, index, snapshotReads = 0, logsReplaced = 0;
+  const calls = [], errors = [], configuredModes = [], setupInputs = [];
+  const backend = { snapshot: mcpSnapshot({ ...initial.state, mcpRuntimeInstalled: true }, { mcpCredentialsConfigured: true, connectorName: "fresh-connector" }) };
+  const api = {
+    snapshot: async () => { snapshotReads++; return structuredClone(backend.snapshot); },
+    setupMcp: async input => { calls.push("setupMcp"); setupInputs.push(input); backend.snapshot.state.browserInteractionMode = input.interactionMode; },
+    setMcpStep: async next => { calls.push("setMcpStep"); backend.snapshot.state.mcpGuideStep = next; return structuredClone(backend.snapshot.state); },
+    setupCore: async () => { calls.push("setupCore"); }, smokeTest: async () => { calls.push("smokeTest"); },
+    createMcpConnector: async () => { calls.push("createMcpConnector"); return { created: true }; },
+    verifyMcp: async () => { calls.push("verifyMcp"); return { ok: true, checks: [] }; },
+    setBrowserInteractionMode: async mode => { calls.push("setBrowserInteractionMode"); backend.snapshot.state.browserInteractionMode = mode;
+      return { state: structuredClone(backend.snapshot.state), credentialsRequired: false, targetMode: mode }; },
+    setPreference: async (key, value) => { calls.push("setPreference"); return { ...states.App.snapshot.state, [key]: value }; },
+  };
+  const tags = ["LauncherShell", "Onboarding", "ErrorToast", "ContentSurface", "SectionHeading", "SettingRow", "Switch", "InteractionModePicker",
+    "PrimaryButton", "SecondaryButton", "NoticeRow", "McpMark", "TutorialVideo", "DoctorSummary", "FieldRow", "McpTunnelsPanel", "Icon", "SetupRow", "BrandMark", "LanguageMenu"];
+  const jsx = (type, props) => ({ type, props: props || {} }), exports = {}, copy = new Proxy({}, { get: (_target, name) => name });
+  vm.runInNewContext(ts.transpileModule(functions.map(node => node.getText(file)).join("\n")
+    + "\nexports.McpSurface = McpSurface; exports.SetupSurface = SetupSurface; exports.SettingsSurface = SettingsSurface;", {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, {
+    exports, api, Error, ...Object.fromEntries(tags.map(name => [name, name])), AnimatePresence: "presence", motion: { section: "section" },
+    MCP_GUIDE_MEDIA: ["video-1", "video-2", "video-3"], copyFor: () => copy, platformLabel: value => value, messageOf: cause => cause.message,
+    replaceLogs: () => { logsReplaced++; }, useEffect() {}, useMemo: calculate => calculate(), useCallback: callback => callback,
+    useRef: () => ({ current: null }), useState(initialValue) {
+      const state = states[component] ??= {}, name = hooks[component][index++]; assert.ok(name);
+      if (!(name in state)) state[name] = typeof initialValue === "function" ? initialValue() : initialValue;
+      return [state[name], next => { state[name] = typeof next === "function" ? next(state[name]) : next; }];
+    }, require: () => ({ jsx, jsxs: jsx }),
+  });
+  const nodes = tree => !tree || typeof tree !== "object" ? [] : Array.isArray(tree) ? tree.flatMap(nodes) : [tree, ...nodes(tree.props?.children)];
+  const render = (name, props) => { component = name; index = 0; return exports[name](props); };
+  const current = () => nodes(render("App")).find(node => node.type === "LauncherShell").props;
+  const common = () => ({ ...current(), copy, devProfile: false, language: "en", operation: null, setError: error => errors.push(error) });
+  return { api, backend, states, calls, errors, configuredModes, setupInputs, current, nodes,
+    reads: () => snapshotReads, logsReplaced: () => logsReplaced,
+    wizard: mode => render("McpSurface", { ...common(), interactionMode: mode || current().snapshot.state.browserInteractionMode, onDone() {} }),
+    setup: () => render("SetupSurface", { ...common(), activateBrowser: async () => {}, showMcp() {} }),
+    settings: () => render("SettingsSurface", { ...common(), configureInteractionMode: mode => configuredModes.push(mode), openPlugins() {} }),
+    remountWizard() { delete states.McpSurface; },
+    autoConnect() { const row = nodes(this.settings()).find(node => node.type === "SettingRow" && node.props.label === "autoConnectExistingMcp");
+      return nodes(row).find(node => node.type === "Switch"); },
+  };
+}
+
+test("MCP setup refreshes root metadata, a reopened wizard and Settings without replacing live channels", async () => {
+  const ui = mcpUi(); let wizard = ui.wizard();
+  const controls = () => ui.nodes(wizard), connect = () => controls().find(node => node.type === "PrimaryButton");
+  assert.equal(controls().find(node => node.props.className === "wizard-stepper").props.children.length, 3);
+  assert.equal(connect().props.disabled, true);
+  const inputs = controls().filter(node => node.type === "input"); assert.equal(inputs.length, 2); assert.equal(inputs[1].props.type, "password");
+  inputs[0].props.onChange({ target: { value: "synthetic-tunnel" } }); inputs[1].props.onChange({ target: { value: "synthetic-key" } });
+  wizard = ui.wizard(); assert.equal(connect().props.disabled, false); connect().props.onClick(); await new Promise(setImmediate);
+  assert.equal(ui.current().snapshot.mcpCredentialsConfigured, true);
+  assert.equal(ui.current().snapshot.connectorName, "fresh-connector"); assert.equal(ui.current().snapshot.state.mcpRuntimeInstalled, true);
+  assert.equal(ui.reads(), 1); assert.equal(ui.setupInputs[0].interactionMode, "automatic"); assert.equal(ui.setupInputs[0].replace, true);
+  assert.equal(ui.current().browser.live, true); assert.equal(ui.current().operation.name, "live-operation"); assert.equal(ui.logsReplaced(), 0);
+  ui.remountWizard(); wizard = ui.wizard();
+  ui.nodes(wizard).find(node => node.type === "button" && node.props.children === "previous").props.onClick(); await new Promise(setImmediate);
+  assert.ok(ui.nodes(ui.wizard()).some(node => node.props.className === "saved-credentials"));
+  assert.equal(ui.autoConnect().props.disabled, false);
+  assert.match(read("src/App.tsx"), /function InstantMcpToolsSurface[\s\S]*?<WorkspacePanel/);
+  assert.match(read("src/App.tsx"), /surface === "instant-mcp"/);
+});
+
+test("setup smoke/install and MCP connector/verification consume their existing full snapshot reads", async t => {
+  for (const action of ["smokeTest", "setupCore", "createMcpConnector", "verifyMcp"]) await t.test(action, async () => {
+    const ui = mcpUi(mcpSnapshot({ mcpGuideStep: 2 }, { mcpCredentialsConfigured: true }));
+    let control;
+    if (action === "smokeTest" || action === "setupCore") control = ui.nodes(ui.setup()).find(node => node.type === "SetupRow" && node.props.index === (action === "smokeTest" ? 2 : 3));
+    else control = ui.nodes(ui.wizard()).find(node => node.type === (action === "createMcpConnector" ? "SecondaryButton" : "PrimaryButton") && node.props.children === (action === "createMcpConnector" ? "autoCreateConnector" : "verifyRuntime"));
+    assert.ok(control); assert.equal(Boolean(control.props.disabled), false);
+    (control.props.onAction || control.props.onClick)(); await new Promise(setImmediate);
+    assert.ok(ui.calls.includes(action)); assert.equal(ui.reads(), 1); assert.equal(ui.current().snapshot.connectorName, "fresh-connector");
+  });
+});
+
+test("successful mode commits refresh authoritative metadata while missing credentials and failed changes do not", async t => {
+  for (const outcome of ["committed", "credentials-required", "failed"]) await t.test(outcome, async () => {
+    const ui = mcpUi(mcpSnapshot({ browserInteractionMode: "manual", mcpRuntimeInstalled: true }));
+    if (outcome === "credentials-required") ui.api.setBrowserInteractionMode = async mode => ({ state: ui.current().snapshot.state, credentialsRequired: true, targetMode: mode });
+    if (outcome === "failed") ui.api.setBrowserInteractionMode = async () => { throw new Error("mode change failed"); };
+    ui.nodes(ui.settings()).find(node => node.type === "InteractionModePicker").props.onChange("automatic"); await new Promise(setImmediate);
+    assert.equal(ui.reads(), outcome === "committed" ? 1 : 0);
+    assert.equal(ui.current().snapshot.mcpCredentialsConfigured, outcome === "committed");
+    assert.equal(ui.current().snapshot.state.browserInteractionMode, outcome === "committed" ? "automatic" : "manual");
+    if (outcome === "committed") assert.equal(ui.autoConnect().props.disabled, false);
+    if (outcome === "credentials-required") assert.deepEqual(ui.configuredModes, ["automatic"]);
+    if (outcome === "failed") assert.equal(ui.errors.at(-1), "mode change failed");
+  });
+});
+
+test("failed setup and failed metadata reads preserve backend-derived flags", async t => {
+  for (const failure of ["setup", "snapshot"]) await t.test(failure, async () => {
+    const ui = mcpUi(); ui.states.McpSurface = { tunnelId: "synthetic-tunnel", runtimeKey: "synthetic-key" };
+    if (failure === "setup") ui.api.setupMcp = async () => { throw new Error("setup failed"); };
+    else ui.api.snapshot = async () => { throw new Error("snapshot failed"); };
+    ui.nodes(ui.wizard()).find(node => node.type === "PrimaryButton").props.onClick(); await new Promise(setImmediate);
+    assert.equal(ui.current().snapshot.mcpCredentialsConfigured, false); assert.equal(ui.current().snapshot.connectorName, "old-connector");
+    assert.equal(ui.errors.at(-1), failure + " failed"); assert.equal(ui.autoConnect().props.disabled, true);
+  });
+});
+
+test("state-only updates and preferences retain metadata without fetching or guessing credentials", async () => {
+  const ui = mcpUi();
+  ui.current().updateState({ ...ui.current().snapshot.state, mcpRuntimeInstalled: true, mcpSetupComplete: true });
+  assert.equal(ui.current().snapshot.mcpCredentialsConfigured, false); assert.equal(ui.reads(), 0);
+  assert.equal(ui.autoConnect().props.disabled, true);
+  ui.nodes(ui.settings()).find(node => node.type === "SettingRow" && node.props.label === "keepRunningOnClose").props.children.props.onChange(true);
+  await new Promise(setImmediate);
+  assert.equal(ui.current().snapshot.state.keepRunningOnClose, true); assert.equal(ui.current().snapshot.connectorName, "old-connector"); assert.equal(ui.reads(), 0);
+  const otherMode = mcpUi(mcpSnapshot({}, { mcpCredentialsConfigured: true }));
+  assert.ok(otherMode.nodes(otherMode.wizard("manual")).some(node => node.type === "input"), "active-mode credentials do not imply inactive-mode credentials");
 });
 
 test("live MCP tool controls call the typed Coding Tools API", () => {
