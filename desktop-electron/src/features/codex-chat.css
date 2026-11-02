@@ -623,7 +623,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-activity-head:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-activity-head svg { flex: none; transition: transform .15s ease; }
 .cx-activity-head svg.is-open { transform: rotate(90deg); }
-.cx-group-verb { flex: none; color: var(--color-text-primary); font-weight: 500; }
+.cx-group-verb { min-width: 0; overflow: hidden; color: var(--color-text-primary); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .cx-group-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cx-group .cx-live { margin: 2px 0 4px 7px; }
 .cx-live.cx-group-now { margin: 0 0 2px 7px; opacity: .85; }
@@ -637,8 +637,13 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* Thinking reads as an aside, as Claude Code sets it: italic and quieter than the tool calls. */
 .cx-live-item.kind-reasoning .cx-live-text { font-style: italic; }
 .cx-live-item.kind-reasoning .cx-reasoning { width: 100%; }
-.cx-reasoning summary { margin: 0 -6px; padding: 2px 6px; border-radius: 6px; }
+.cx-reasoning summary { align-items: center; min-height: 24px; margin: 0 -6px; padding: 2px 6px; border-radius: 6px; }
+.cx-reasoning summary > svg { flex: none; transition: transform .12s ease-out; }
+.cx-reasoning[open] > summary > svg { transform: rotate(90deg); }
+.cx-reasoning summary .cx-live-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cx-reasoning summary:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-reasoning summary:focus-visible, .cx-activity-head:focus-visible { outline: 2px solid var(--color-focus, var(--ao-blue)); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .cx-reasoning summary > svg { transition: none; } }
 /* A tool call: a dot for how it ended, its name, one line; opening shows what it ran and got back. */
 .cx-live-item.kind-command, .cx-live-item.kind-tool { display: block; }
 .cx-tool summary, .cx-tool-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 0 -6px; padding: 2px 6px; border-radius: 6px; list-style: none; }
@@ -715,6 +720,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 @media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
 
 .cx-answer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.cx-reply > .cx-answer:not(:first-child) { padding-top: 10px; border-top: 1px solid var(--ao-line); }
 /* A reply (ChatReplyHead.tsx): one card per turn — why it failed, if it did, then its work and
    answer, then its summary: the files it changed, a team's cards, who answered, how it stands and for
    how long. The card's edge takes the turn's tone, so a failed or stuck reply is seen while scrolling past. */
@@ -780,6 +786,17 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* A reply's steps in the chosen chat style (ChatReplyPlan). One list, four looks. */
 .cx-rplan { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 4px; font-size: 12.5px; line-height: 18px; }
 .cx-rplan-head { display: flex; align-items: baseline; gap: 8px; }
+/* Real tasks are visible in the default transcript too, separate from thinking and tool details. */
+.cx-rplan.is-transcript { padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 8px; }
+.cx-rplan-toggle { align-items: center; width: 100%; min-height: 28px; padding: 0; border: 0; background: none; font: inherit; text-align: left; cursor: pointer; }
+.cx-rplan-toggle:hover .cx-rplan-title { color: var(--reply-live); }
+.cx-rplan-toggle:focus-visible { outline: 2px solid var(--color-focus, var(--ao-blue)); outline-offset: 3px; border-radius: 3px; }
+.cx-rplan-chevron { flex: none; color: var(--ao-muted); transition: transform .12s ease-out; }
+.cx-rplan-toggle[aria-expanded="true"] .cx-rplan-chevron { transform: rotate(90deg); }
+.cx-rplan-toggle .cx-rplan-title, .cx-rplan-toggle .cx-rplan-count { flex: none; }
+.cx-rplan-current { min-width: 0; overflow: hidden; color: var(--ao-muted); text-overflow: ellipsis; white-space: nowrap; }
+.cx-rplan.is-transcript .cx-rplan-step-title { white-space: normal; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .cx-rplan-chevron { transition: none; } }
 .cx-rplan-title { color: var(--color-text-primary); font-weight: 600; }
 .cx-rplan-count { color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .cx-rplan-steps { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
