@@ -2487,6 +2487,31 @@ test("shared workflow reads keep 13 pending callers together and start freshness
   } finally { release(); await Promise.allSettled(pending); workflow.dispose(); }
 });
 
+test("a chat reads its own runs, apart from the project's newest 100 and without sweeping the project", async () => {
+  // Seen live (2026-11-02): four goal chats filled the project's 100-run read, so a 63-run chat
+  // showed its newest 26 replies and the project's other chats opened with none.
+  const reads = [];
+  const chatRun = { id: "old", workspace_id: "ws-1", project_id: "task-1", revision: 1, cancelled: false, nodes: [] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      assert.equal(endpoint, "/api/v1/ao/read");
+      reads.push(structuredClone(body));
+      return { ok: true, runs: body.task_id ? [structuredClone(chatRun)] : [] };
+    },
+  });
+  try {
+    const own = await workflow.call("runs", { workspaceId: "ws-1", taskId: "task-1" });
+    assert.deepEqual(own.runs.map(run => run.id), ["old"]);
+    await workflow.call("runs", { workspaceId: "ws-1" });
+    await workflow.call("runs", { workspaceId: "ws-1", runId: "run-1", taskId: "task-1" });
+    assert.deepEqual(reads, [
+      { workspace_id: "ws-1", task_id: "task-1" },
+      { workspace_id: "ws-1" },
+      { workspace_id: "ws-1", run_id: "run-1" },
+    ], "a chat's read and the project's are read apart; a run's read stays a run's");
+  } finally { workflow.dispose(); }
+});
+
 test("shared workflow reads coalesce boards without invalidating runs and isolate workspace/task keys", async (t) => {
   t.mock.method(Date, "now", () => 1_000);
   const boards = [], pending = [];

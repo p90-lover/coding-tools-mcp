@@ -1702,11 +1702,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   // Callers only read what comes back (none changes a run in place), so one response is shared.
-  function runs({ workspaceId, runId } = {}) {
-    const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "";
-    const key = JSON.stringify([id, run]);
+  // `taskId` reads one chat's runs: the project's read holds only its newest 100, shared by all of
+  // its chats, so a busy project's other chats opened with few or none of their replies.
+  function runs({ workspaceId, runId, taskId } = {}) {
+    const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "", task = !run && taskId ? clean(taskId, 128) : "";
+    const key = JSON.stringify(task ? [id, run, task] : [id, run]);
     return sharedWorkflowRead(key, async () => {
-      const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}) });
+      const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}), ...(task ? { task_id: task } : {}) });
       if (response?.ok !== true || !Array.isArray(response.runs)) {
         throw new Error("AO run read failed");
       }
@@ -7478,7 +7480,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const saved = await runs(args);
         // A goal whose round settled unwatched (the app was closed meanwhile) is judged now, and a
         // queued message whose chat's settle was missed goes on.
-        if (!args.runId) sweepWorkspace(clean(args.workspaceId, 128), saved);
+        if (!args.runId && !args.taskId) sweepWorkspace(clean(args.workspaceId, 128), saved);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)),
