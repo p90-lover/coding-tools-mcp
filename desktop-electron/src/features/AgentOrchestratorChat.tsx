@@ -1,4 +1,6 @@
-import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { ImagePreviewDialog, type MarkupResult } from "./ImagePreview";
+import { markupReadable } from "./image-markup";
 import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
 import { ModelJudgesToggle } from "./ModelJudgesToggle";
@@ -654,7 +656,7 @@ function SentMessage({ text }: { text: string }) {
         </button>)}
     </div> : null}
     {parts.annotations?.length ? <SentAnnotations annotations={parts.annotations} /> : null}
-    {parts.text ? <div className="cx-bubble"><p>{hasHiddenSecret(parts.text) ? <SecretText text={parts.text} /> : parts.text}</p></div> : null}
+    {parts.text ? <div className="cx-bubble"><p>{hasHiddenSecret(parts.text) ? <SecretText text={markupReadable(parts.text)} /> : markupReadable(parts.text)}</p></div> : null}
     {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
   </>;
 }
@@ -939,6 +941,8 @@ export function AgentOrchestratorChat({
   // `turnKey`/`messageIndex`: the turn it was sent in, where it stays shown (steerTurnIndex).
   const [pendingSteers, setPendingSteers] = useState<PendingSteer[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>(() => CHAT_ATTACHMENTS.get(draftKey) ?? []);
+  // The chat box image open in the preview, by its place among the attachments.
+  const [previewing, setPreviewing] = useState<number | null>(null);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
   // Ones kept when this chat was last left (another view, another chat) come back with it.
@@ -1552,7 +1556,9 @@ export function AgentOrchestratorChat({
     if (!canSend) return;
     // The annotation block goes outermost (after plan mode's wrapper), where the chat reads it back
     // as a chip; inside the wrapper the sent bubble showed its JSON.
-    const body = chatMessageWithAttachments(draft, attachments);
+    // A marked-up image's pin lines go first, then what was typed (Codex's order).
+    const marked = attachments.map((item) => item.markup ?? "").filter(Boolean);
+    const body = chatMessageWithAttachments([...marked, draft.trim()].filter(Boolean).join("\n\n"), attachments);
     const text = chatMessageWithAnnotations(commands?.planMode ? planMessage(body) : body, annotations);
     // The chat sends at most 8,192 characters; long selections could pass that and the send failed.
     if (text.length > CHAT_MESSAGE_LIMIT) {
@@ -1959,7 +1965,17 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
 
   // The conversation, kept while only the composer changes: each keystroke re-rendered every turn,
   // and a long running turn's hundreds of rows with it, which made typing lag.
-  const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile }), [attachmentPreview, revealFile]);
+  // Markup from an image's preview lands in this chat box as a "Markup" card (Codex's composer row):
+  // the marked image saved for the agent to open, and its pin lines kept for the message.
+  const saver = useRef(saveAttachment);
+  saver.current = saveAttachment;
+  const addMarkup = useCallback(async ({ bytes, preview, prompt }: MarkupResult) => {
+    if (!saver.current) throw new Error("Could not prepare markup. Try again");
+    const { path } = await saver.current({ name: "markup.png", type: "image/png", bytes });
+    setAttachments((current) => [...current, { name: "Markup", path, image: true, preview, markup: prompt }].slice(0, 8));
+  }, []);
+  const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile, markup: saveAttachment ? addMarkup : undefined }),
+    [attachmentPreview, revealFile, Boolean(saveAttachment), addMarkup]);
   // One work reader per run for DeepSeek turns, kept across renders so a finished turn stays memoized.
   const dshReaders = useMemo(() => new Map<string, UseStepWork>(), [loadWork]);
   // A failed step waiting for the person: the card shows its error, so its turn does not repeat it.
@@ -2441,24 +2457,35 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             onRemove={(id) => setAnnotations((current) => current.filter((item) => item.id !== id))} onClear={() => setAnnotations([])} />
           {attachments.length || attachNote ? <div className="cx-attachments">
             {/* As Claude Code shows them: an image as its thumbnail, a file as its name; where it lives
-                is on hover, and a click shows it in its folder. */}
-            {attachments.map((item, index) => <span key={`${item.name}:${index}`} className={`cx-attachment${item.preview ? " is-image" : ""}`}>
-              <button type="button" className="cx-attachment-open" disabled={!item.path || !revealFile}
-                title={item.path ? `${item.path}${revealFile ? "\nClick to show in folder" : ""}` : `${item.name} · sent inline`}
-                onClick={() => { if (item.path) revealFile?.(item.path); }}>
+                is on hover. A click opens an image in the preview (Codex's, with Markup) and shows a
+                file in its folder. */}
+            {attachments.map((item, index) => <span key={`${item.name}:${index}`}
+              className={`cx-attachment${item.preview ? " is-image" : ""}${item.markup !== undefined ? " is-markup" : ""}`}>
+              <button type="button" className="cx-attachment-open" disabled={item.preview ? false : !item.path || !revealFile}
+                title={item.preview ? `${item.path ?? item.name}\nClick to preview${saveAttachment ? " or mark up" : ""}`
+                  : item.path ? `${item.path}${revealFile ? "\nClick to show in folder" : ""}` : `${item.name} · sent inline`}
+                onClick={() => { if (item.preview) setPreviewing(index); else if (item.path) revealFile?.(item.path); }}>
                 {item.preview ? <img src={item.preview} alt={item.name} /> : <span aria-hidden="true">{item.image ? "🖼" : "📄"}</span>}
                 <span className="cx-attachment-name">{item.name}</span>
               </button>
-              <button type="button" className="cx-attachment-remove" aria-label={`Remove ${item.name}`} data-tip={`Remove ${item.name}`}
+              <button type="button" className="cx-attachment-remove" aria-label={item.markup !== undefined ? "Remove markup" : `Remove ${item.name}`}
+                data-tip={item.markup !== undefined ? "Remove markup" : `Remove ${item.name}`}
                 onClick={() => setAttachments((current) => current.filter((_, at) => at !== index))}>
                 <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
               </button>
             </span>)}
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
+            {previewing !== null && attachments[previewing]?.preview ? <ImagePreviewDialog url={attachments[previewing].preview!} onClose={() => setPreviewing(null)}
+              // The marked image takes the place of the one it was drawn on: only it is sent (Codex's).
+              onMarkup={saveAttachment ? async (result) => {
+                const source = attachments[previewing];
+                await addMarkup(result);
+                setAttachments((current) => current.filter((item) => item !== source));
+              } : undefined} /> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
             placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above. New messages send after it"
-              : queueing ? "Running. New messages send when it finishes" : !accepts ? "Running. Send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
+              : attachments.some((item) => item.markup !== undefined) && !queueing ? "Add instructions…" : queueing ? "Running. New messages send when it finishes" : !accepts ? "Running. Send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
