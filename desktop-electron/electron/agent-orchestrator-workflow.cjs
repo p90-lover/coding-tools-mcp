@@ -5087,6 +5087,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind } = {}, checkCurrent = () => {}) {
     checkCurrent();
     const id = clean(workspaceId, 128);
+    if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
+      const progress = await compactSession({ workspaceId: id, taskId, status: true });
+      if (progress.status !== "completed") throw new Error("This chat is still running its context compaction");
+    }
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
     const asked = boardText(clean(message, 8192, false));
@@ -5295,7 +5299,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // ---- Chat commands (/goal, /compact, /diff) ----
 
   // A chat is working when its latest run is being driven or has a card running.
+  const sessionCompactions = new Map();
   function chatWorking(id, task, runsOfWorkspace) {
+    if (sessionCompactions.get(runKey(id, task))?.status === "in_progress") return true;
     return runsOfWorkspace.filter(run => run.project_id === task && !runSettled(run)).some(run => {
       const live = backgroundRuns.get(runKey(id, run.id));
       return Boolean(live && (live.starting || live.driving || live.status === "running"))
@@ -6645,11 +6651,78 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return `${cut}${utf8Tail(transcript, maxBytes - utf8Bytes(cut + end))}${end}`;
   }
 
-  // /compact: a chat's context is its task text (every follow-up is appended to it, up to 8,192
-  // characters). Replace it with a handoff summary so the chat can keep going.
-  // `instructions` are the person's (/compact focus on the API changes), as Claude Code's /compact
-  // takes them. `reserve` is the room, in UTF-8 bytes, the summary leaves for the follow-up that
-  // made the chat compact itself (chatSend).
+  // Codex compacts its owned thread, not the board's short task record. Acceptance is pending;
+  // only the provider's completion (or a changed compaction timestamp) settles it.
+  async function compactSession({ workspaceId, taskId, status = false, compactionId, instructions = "" } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128), key = runKey(id, task);
+    if (instructions) throw new Error("Codex /compact does not accept focus instructions");
+    const saved = await runs({ workspaceId: id });
+    const latest = saved.runs.filter(run => run.workspace_id === id && run.project_id === task).at(-1);
+    const card = latest?.execution_mode === "single" && latest.nodes?.length === 1 ? latest.nodes[0] : null;
+    if (!card?.receipt?.thread_id) throw new Error("Open a single-model chat with a live agent session first");
+    const scope = { workspace_id: id, run_id: latest.id, node_id: card.id };
+    const existing = sessionCompactions.get(key);
+    const same = existing && existing.runId === latest.id && existing.sessionId === card.receipt.thread_id;
+    if (status) {
+      if (compactionId && existing?.id !== compactionId) throw new Error("The chat compaction was replaced");
+      if (!same) { sessionCompactions.delete(key); throw new Error("The chat session changed while compacting"); }
+      if (existing.status !== "in_progress" || !existing.accepted) return { ok: true, status: existing.status, compactionId: existing.id };
+      const progress = externalAgent(card)
+        ? await harnessService().compactionStatus(existing.sessionId, existing.before)
+        : await requestHeadless("/api/v1/ao/harness/compact", { ...scope, status: true });
+      // Do not let an old response mark a replacement's compaction complete.
+      if (sessionCompactions.get(key) !== existing) throw new Error("The chat session changed while compacting");
+      if (progress.status === "completed") existing.status = "completed";
+      else if (["failed", "interrupted", "unknown_stopped"].includes(progress.status)) {
+        existing.status = "failed";
+        throw new Error("The agent stopped before compaction completed");
+      }
+      return { ok: true, status: existing.status, compactionId: existing.id };
+    }
+    if (same && existing.status === "in_progress") {
+      const progress = await compactSession({ workspaceId: id, taskId: task, status: true, compactionId: existing.id });
+      if (progress.status === "completed") return progress;
+      throw new Error("This chat is already compacting");
+    }
+    if (existing && !same) {
+      if (existing.timer) clearTimer(existing.timer);
+      sessionCompactions.delete(key);
+    }
+    if (chatWorking(id, task, saved.runs)) throw new Error("Compact is disabled while a chat is in progress");
+    const entry = { id: randomUUID(), runId: latest.id, sessionId: card.receipt.thread_id, status: "in_progress", accepted: false, before: null };
+    sessionCompactions.set(key, entry);
+    try {
+      if (externalAgent(card)) {
+        if (typeof harnessService().compact !== "function") throw new Error("This agent cannot compact its session");
+        const accepted = await harnessService().compact(entry.sessionId);
+        entry.before = accepted?.compactedAt ?? null;
+      } else {
+        const accepted = await requestHeadless("/api/v1/ao/harness/compact", { ...scope, status: false }, { localConfirmation: true });
+        if (accepted?.ok !== true) throw new Error("The agent did not accept compaction");
+      }
+      entry.accepted = true;
+      let observations = 0;
+      const observeCompletion = async () => {
+        if (++observations > 120 || sessionCompactions.get(key) !== entry || entry.status !== "in_progress") return;
+        try { await compactSession({ workspaceId: id, taskId: task, status: true, compactionId: entry.id }); }
+        catch { /* An uncertain read is not completion; the next observation may recover. */ }
+        if (sessionCompactions.get(key) === entry && entry.status === "in_progress") {
+          entry.timer = setTimer(observeCompletion, 1000);
+          entry.timer?.unref?.();
+        }
+      };
+      entry.timer = setTimer(observeCompletion, 1000);
+      entry.timer?.unref?.();
+      return { ok: true, status: "in_progress", compactionId: entry.id };
+    } catch (error) {
+      if (sessionCompactions.get(key) === entry) sessionCompactions.delete(key);
+      throw error;
+    }
+  }
+
+  // The board's bounded task record is separate from the agent's token context. This legacy
+  // helper only makes room for task metadata when appending a follow-up; /compact never calls it.
+  // `reserve` is the room, in UTF-8 bytes, left for that follow-up.
   async function compactChat({ workspaceId, taskId, instructions = "", reserve = 0 } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const focus = instructions ? boardText(clean(String(instructions), 1000, false)) : "";
@@ -7234,6 +7307,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return ended;
   }
   function dispose() {
+    for (const entry of sessionCompactions.values()) if (entry.timer) clearTimer(entry.timer);
+    sessionCompactions.clear();
     for (const entry of nativePreviewLeases.values()) entry.lease.release({ ended: true });
     nativePreviewLeases.clear();
     stopTracking();
@@ -7323,7 +7398,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_auto_retry": return chatAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
       case "chat_auto_compact": return chatAutoCompact(args);
-      case "compact_chat": return compactChat(args);
+      case "compact_chat": return compactSession(args);
       case "chat_diff": return chatDiff(args);
       case "update_run": return updateRun(args);
       case "team_update": return teamUpdate(args);

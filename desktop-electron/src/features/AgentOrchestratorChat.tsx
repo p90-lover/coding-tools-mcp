@@ -30,7 +30,7 @@ import {
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
-  autoCompactArg, chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
+  chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -1326,7 +1326,10 @@ export function AgentOrchestratorChat({
   // it here on every key forced a layout of the whole chat each time, which typing felt.
 
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
-  const accepts = chatAcceptsMessage(chat?.status, working);
+  const [compactingTasks, setCompactingTasks] = useState<string[]>([]);
+  const compactionStarts = useRef(new Set<string>());
+  const compacting = Boolean(selectedTaskId && compactingTasks.includes(selectedTaskId));
+  const accepts = !compacting && chatAcceptsMessage(chat?.status, working);
   // Starting to type gets the agent the message needs ready (the surface throttles it); a run that
   // is open already has its agent.
   const hasDraft = Boolean(draft.trim());
@@ -1350,7 +1353,7 @@ export function AgentOrchestratorChat({
   // A request waiting on an answer does not turn steering into queueing: with "Approve for me" each
   // tool call shows as one for a moment, and every message typed then waited for the whole turn.
   // The steer waits for the request to be answered, then reaches the agent.
-  const steering = !accepts && steerOn && steerable && Boolean(steer && selectedTaskId);
+  const steering = !compacting && !accepts && steerOn && steerable && Boolean(steer && selectedTaskId);
   // Otherwise a message typed while the chat runs waits and is sent when the turn finishes, as in Codex.
   const queueing = !accepts && !steering && runOpen && Boolean(selectedTaskId);
   // While a project opens the chat to send into is not chosen yet: sending then started a new chat
@@ -1369,7 +1372,8 @@ export function AgentOrchestratorChat({
   const queueWhileSending = Boolean(selectedTaskId) && (sending || (busy && !steering));
   const canSend = !(deciding && !selectedTaskId) && (!sending || queueWhileSending)
     && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing || queueWhileSending);
-  const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
+  const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen })
+    .filter(command => command.name !== "autocompact");
 
   // What a command shows above the composer (its result, or why it couldn't run).
   const [card, setCard] = useState<ChatCommandCard | null>(null);
@@ -1788,24 +1792,29 @@ export function AgentOrchestratorChat({
           commands?.setPlanMode(!commands.planMode);
           say("Plan mode", commands?.planMode ? "Plan mode is off." : "Plan mode is on. Messages ask for a plan, not changes. Send /plan to turn it off.");
           break;
-        case "compact":
+        case "compact": {
           if (!commands || !selectedTaskId) break;
-          if (!accepts) { say("Compact", "Can't compact while the chat is running."); break; }
-          say("Compact", arg ? `Compacting this chat's context, focused on: ${arg}` : "Compacting this chat's context…");
-          say("Compact", await commands.compact(arg));
-          break;
-        case "autocompact": {
-          if (!commands?.autoCompact) break;
-          const change = autoCompactArg(arg);
-          if (change && "error" in change) { say("Auto-compact", change.error); setDraft(`/autocompact ${arg}`); break; }
-          const setting = await commands.autoCompact(change ?? {});
-          const now = setting.autoCompact
-            ? `Auto-compact is on: before a message that would fill ${setting.percent}% of the chat's ${setting.limit.toLocaleString("en-US")}-byte limit, the earlier conversation becomes a summary.`
-            : "Auto-compact is off: a full chat stops until you /compact it.";
-          say("Auto-compact", change ? now : `${now}
-Change it with /autocompact on, off, or a share like /autocompact 80.`);
+          if (!accepts || compactionStarts.current.has(selectedTaskId)) { say("Compact", "Compact is disabled while a chat is in progress"); break; }
+          if (arg) { say("Compact", "Codex /compact does not accept focus instructions"); break; }
+          const owner = composing.current;
+          const here = () => alive.current && composing.current.taskId === owner.taskId && composing.current.cacheKey === owner.cacheKey;
+          compactionStarts.current.add(selectedTaskId);
+          setCompactingTasks(tasks => [...tasks, selectedTaskId]);
+          setCard(null);
+          try {
+            const result = await commands.compact();
+            if (here()) say("Compact", result);
+          } catch (error) {
+            if (here()) say("Compact", error instanceof Error ? error.message : String(error));
+          } finally {
+            compactionStarts.current.delete(selectedTaskId);
+            setCompactingTasks(tasks => tasks.filter(task => task !== selectedTaskId));
+          }
           break;
         }
+        case "autocompact":
+          say("Auto-compact", "Auto-compaction is managed by the agent using its model's token limit, as in local Codex. Task-record length is not the context window.");
+          break;
         case "context": if (commands?.context) setCard(await commands.context()); break;
         case "review":
           if (await dispatch("Review", reviewPrompt(arg), undefined, arg ? `/review ${arg}` : "/review") === "sent" && !accepts) say("Review", "Sent to the working agent.");
@@ -2423,7 +2432,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
           {slash.length ? <ul className="cx-slash" role="listbox" aria-label="Commands">
             {slash.map((command, index) => <li key={command.name} role="option" aria-selected={index === slashIndex % slash.length}>
               <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => pick(command.name)}>
-                <span>/{command.name}{command.args ? <em> {command.args}</em> : null}</span><small>{command.hint}</small></button>
+                <span>/{command.name}{command.args ? <em> {command.args}</em> : null}</span><small>{command.name === "compact" && contextShare !== null ? `Compact this chat's context (${Math.round(contextShare * 100)}% full)` : command.hint}</small></button>
             </li>)}
           </ul> : null}
           {typing && !slash.length ? <p className="cx-slash-usage" role="status">/{typing.name} {typing.args} — {typing.hint}. Press Enter to run.</p> : null}
@@ -2484,7 +2493,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                 && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
               agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
               launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
-              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} /> : null}
+              canCompact={Boolean(commands && accepts && agentSessions[0]?.id)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} compacting={compacting} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
             {/* A run waiting out an automatic retry (or an answer) takes a message, yet it is still open: with
@@ -2497,6 +2506,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                   <Icon name="forward" width="18" height="18" /></button>}
           </div>
         </form>
+        {compacting ? <p className="cx-ctx-meta" role="status">Compacting context…</p> : null}
         {selectedTaskId ? <ChatTurnStats model={agentSessions[0]?.model} rounds={turns.filter((turn) => turn.runId).length}
           from={statsSpan.from} models={statsSpan.models} running={runOpen} onRefusal={setCpaRefusal} /> : null}
         {/* A command's card (its choices) and the delete confirmation sit below the chat box, as wide

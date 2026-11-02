@@ -332,6 +332,26 @@ test("IME candidate keys leave slash commands alone and normal command navigatio
   });
 });
 
+test("manual compaction stays pending until the provider finishes and never posts into another chat", async () => {
+  let complete;
+  const commands = { compact: () => new Promise(resolve => { complete = resolve; }) };
+  const props = base({ projectId: "ws", selectedTaskId: "t", working: false,
+    tasks: [{ id: "t", title: "Chat", description: "Keep this history" }],
+    runs: [run("r", "t", [node("lead", "planner", "finished", { route: { harness_id: "ao:codex" }, receipt: { thread_id: "session" } })], { execution_mode: "single" })], commands }).props;
+  const view = mount(props);
+  const input = () => walk(view.render()).find(element => element.type === "textarea");
+  input().props.onChange({ target: { value: "/compact" } });
+  input().props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(text(view.render()), /Compacting context…/);
+  assert.doesNotMatch(text(view.render()), /Context compacted/);
+  const other = { ...props, selectedTaskId: "other", runs: [], tasks: [{ id: "other", title: "Other", description: "Another chat" }] };
+  assert.doesNotMatch(text(view.render(other)), /Compacting context…/);
+  complete("Context compacted");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.doesNotMatch(text(view.render(other)), /Context compacted/);
+});
+
 test("Codex slash commands run from the composer in a Single chat or a team, with their real actions", async () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const actions = [];
@@ -391,7 +411,7 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   type(teamChat, "/goal pause"); await enter(teamChat);
   assert.deepEqual(actions.at(-1), ["goal", "pause"]);
   type(teamChat, "/compact"); await enter(teamChat);
-  assert.match(text(cardOf(teamChat)), /Can't compact while the chat is running/);
+  assert.match(text(cardOf(teamChat)), /Compact is disabled while a chat is in progress/);
   type(teamChat, "/review"); await enter(teamChat);
   // Claude Code queues a command as it queues a message: in its queued-message bar, as typed. The
   // user: "remake the steer message panel exact the same as claude code" (the "Queued: it's sent

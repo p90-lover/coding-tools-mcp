@@ -29,6 +29,24 @@ const defaultWindow = (route: AoRoute, capability: AoModelCapabilities | undefin
   if (!context || !capability?.contextLimit && !isWebModel(route.model)) return null;
   return Math.max(context.min, Math.min(DEFAULT_CONTEXT_WINDOW, context.max ?? DEFAULT_CONTEXT_WINDOW));
 };
+type ModelTuning = { effort?: string | null; context_window?: number | null };
+const tuningKey = (route: AoRoute) => `coding-tools:ao:model-tuning:${JSON.stringify([route.harness_id, route.provider_id, route.account_id, route.model])}`;
+/** Only explicit picks are saved: fitting a smaller model must not replace the person's preference. */
+function savedTuning(route: AoRoute): ModelTuning {
+  try {
+    const saved = JSON.parse(localStorage.getItem(tuningKey(route)) || "null");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+    const tuning: ModelTuning = {};
+    if (saved.effort === null || ["auto", "none", ...EFFORTS].includes(saved.effort)) tuning.effort = saved.effort;
+    if (saved.context_window === null || Number.isSafeInteger(saved.context_window) && saved.context_window > 0) tuning.context_window = saved.context_window;
+    return tuning;
+  } catch { return {}; }
+}
+function rememberTuning(route: AoRoute, field: keyof ModelTuning) {
+  if (!route.model) return;
+  try { localStorage.setItem(tuningKey(route), JSON.stringify({ ...savedTuning(route), [field]: route[field] ?? null })); } catch { /* The current chat still keeps its pick. */ }
+}
+
 /**
  * The effort a chat starts on when its CPA model lists efforts but no "auto": sent without one, CPA
  * had nothing to serve DeepSeek V4.1 Flash (None/Low/High/Max) and the chip read "Auto" anyway.
@@ -46,6 +64,28 @@ const startEffort = (route: AoRoute, efforts: readonly string[] | undefined) => 
   const real = efforts.filter(effort => effort !== "none").sort((a, b) => rank(a) - rank(b));
   return ["medium", "high"].find(effort => efforts.includes(effort)) ?? real[0] ?? efforts[0];
 };
+
+/** Restore unset fields, then fit this chat without writing over the saved model preference. */
+function tunedRoute(route: AoRoute, capability: AoModelCapabilities | undefined): AoRoute {
+  const next = { ...route };
+  const saved = savedTuning(route);
+  const { context, efforts } = routeTuning(route, capability);
+  if (!next.effort && saved.effort) next.effort = saved.effort;
+  if (capability && next.effort && next.effort !== "auto" && efforts && !efforts.includes(next.effort)) delete next.effort;
+  const tier = webTier(route.model);
+  if (tier) next.effort = tier.effort;
+  if (!next.context_window && saved.context_window) next.context_window = saved.context_window;
+  const fits = next.context_window && context && next.context_window >= context.min
+    && (context.max === undefined || next.context_window <= context.max);
+  if (!next.context_window || !fits && (capability || route.harness_id === NATIVE_HARNESS)) {
+    const window = next.context_window && next.context_window === saved.context_window && context
+      ? Math.max(context.min, Math.min(context.max ?? next.context_window, next.context_window)) : defaultWindow(next, capability);
+    if (window) next.context_window = window; else delete next.context_window;
+  }
+  const effort = startEffort(next, efforts);
+  if (effort) next.effort = effort;
+  return next;
+}
 
 export type ComposerControlsProps = {
   mode: "single" | "team"; onModeChange: (mode: "single" | "team") => void;
@@ -181,21 +221,8 @@ export function AgentOrchestratorComposerControls({
       rememberCpaProviders(loaded);
       const current = latest.current;
       if (current.harness_id !== route.harness_id || current.model !== route.model) return;
-      // A window carried from another harness or model (the harness chip keeps it) that this model
-      // does not take is dropped, then the model's own start applies. A model the catalog does not
-      // describe is left alone: it is flagged as unavailable and its send is refused anyway.
-      const capability = loaded[current.model];
-      const { context, efforts } = routeTuning(current, capability);
-      const fits = current.context_window && context && current.context_window >= context.min
-        && (context.max === undefined || current.context_window <= context.max);
-      const next = { ...current };
-      if (!current.context_window || !fits && (capability || current.harness_id === NATIVE_HARNESS)) {
-        const start = defaultWindow(current, capability);
-        if (start) next.context_window = start; else delete next.context_window;
-      }
-      // A model without "auto" gets a real effort too (a chat opened or rewound on an older route included).
-      const effort = startEffort(current, efforts);
-      if (effort) next.effort = effort;
+      // A late catalog fits restored preferences too; existing chat picks keep priority over them.
+      const next = tunedRoute(current, loaded[current.model]);
       // Reported as an adjustment: it is this chat's fit, not a pick the next new chat should start on.
       if (next.context_window !== current.context_window || next.effort !== current.effort) onRouteChange(next, true);
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
@@ -226,8 +253,8 @@ export function AgentOrchestratorComposerControls({
   // "auto" is always takeable: the model runs at its own effort and nothing is sent (aoLaunchArgs).
   const effortUnsupported = Boolean(route.effort && route.effort !== "auto" && efforts && !efforts.includes(route.effort));
   const levels = (efforts ?? []).filter(effort => effort !== "auto");
-  const setEffort = (effort: string | null) => { const next = { ...route }; if (effort) next.effort = effort; else delete next.effort; onRouteChange(next); };
-  const setWindow = (tokens: number | null) => { const next = { ...route }; if (tokens) next.context_window = tokens; else delete next.context_window; onRouteChange(next); };
+  const setEffort = (effort: string | null) => { const next = { ...route }; if (effort) next.effort = effort; else delete next.effort; rememberTuning(next, "effort"); onRouteChange(next); };
+  const setWindow = (tokens: number | null) => { const next = { ...route }; if (tokens) next.context_window = tokens; else delete next.context_window; rememberTuning(next, "context_window"); onRouteChange(next); };
   const inRange = (tokens: number) => Boolean(context) && Number.isSafeInteger(tokens) && tokens >= context!.min && (context!.max === undefined || tokens <= context!.max);
   // No "Default" window: a chat starts at 400K (or the model's limit, if lower). The model list sets
   // it once it knows the model's range, and so does picking a model. A model whose limit is not
@@ -249,21 +276,13 @@ export function AgentOrchestratorComposerControls({
   // A WebGPT model is one ChatGPT effort, so the effort chip picks the WebGPT model and the model
   // list sets the effort: the two can never disagree (High model, Low effort).
   const tier = webTier(route.model);
-  const pickModel = (model: string) => {
-    // The carried window is fitted to the new model, or dropped where it takes none.
-    const next = withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route, caps);
-    const picked = webTier(model);
-    if (picked) next.effort = picked.effort;
-    const tuning = routeTuning(next, caps[model]);
-    const kept = next.context_window && tuning.context && next.context_window >= tuning.context.min
-      && (tuning.context.max === undefined || next.context_window <= tuning.context.max);
-    if (!kept) {
-      const start = defaultWindow(next, caps[model]);
-      if (start) next.context_window = start; else delete next.context_window;
-    }
-    const effort = startEffort(next, tuning.efforts);
-    if (effort) next.effort = effort;
-    onRouteChange(next);
+  const pickModel = (model: string, harness = route.harness_id) => {
+    if (model === route.model && harness === route.harness_id) return;
+    const next = withTuning(workerRoute(harness, model, nativePermission(route)), route);
+    // Tuning belongs to the destination model, not the one we just left. Unset fields use defaults.
+    delete next.context_window;
+    const capability = next.harness_id === route.harness_id || isWebModel(model) ? caps[model] : undefined;
+    onRouteChange(tunedRoute(next, capability));
   };
   return <div className="ao-composer-controls">
     {permissions}
@@ -287,7 +306,7 @@ export function AgentOrchestratorComposerControls({
             onPick={() => {
               // Each harness starts on an explicit model; one without a known model shows "Choose a model".
               const model = item.id === NATIVE_HARNESS ? WEB_ROUTE.model : item.id === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
-              if (item.id !== route.harness_id) onRouteChange(withTuning(workerRoute(item.id, model, nativePermission(route)), route));
+              if (item.id !== route.harness_id) pickModel(model, item.id);
               close();
             }}>
             <span className={item.runnable ? "ao-harness-option" : "ao-harness-option is-missing"}>

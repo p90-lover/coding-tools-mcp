@@ -72,7 +72,7 @@ const SPECS = Object.freeze({
   chat_auto_retry: { readOnly: false, description: "Read or set \"Retry automatically\": a failed single-model step runs again by itself, up to three times." },
   chat_model_judges: { readOnly: false, description: "Read or set \"Let the model judge\": requests the command reviewer would hand to you, and goal rounds that end needing you or failed, are judged by the model, which may also end the goal." },
   chat_auto_compact: { readOnly: false, description: "Read or set auto-compact (/autocompact): whether a chat compacts itself, and at what share (20-100%) of its size limit before its next message." },
-  compact_chat: { readOnly: false, description: "Replace a settled chat's context with a handoff summary (/compact), focused as optional instructions say." },
+  compact_chat: { readOnly: false, description: "Compact the settled chat's owned live agent session (/compact). Acceptance is pending until the provider confirms completion; task history stays unchanged." },
   chat_delete_message: { readOnly: false, description: "Delete one message of a settled chat with its reply: the message leaves the task, its run is hidden from the chat, and the next turn starts a fresh agent session." },
   chat_diff: { readOnly: true, description: "Read the project's uncommitted git changes (/diff)." },
   codex_executable: { readOnly: true, description: "Locate the installed Codex desktop app's codex.exe used to run missions." },
