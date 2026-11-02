@@ -21,6 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use tokio::sync::Notify;
 
+mod grant_failure;
+
 const CONTROL_PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 const MAX_RESULT_BYTES: usize = tools::workspace::MAX_SERIALIZED_TOOL_RESULT_BYTES;
@@ -4742,10 +4744,15 @@ async fn ao_run_grant(
     .await;
     match result {
         Ok(Ok(run)) => Json(json!({"ok":true,"grant":run.grant,"run":run})).into_response(),
-        _ => json_error(
+        Ok(Err(error)) => json_error(
             StatusCode::CONFLICT,
             "AO_GRANT_FAILED",
-            "AO run, graph, or executable changed; refresh before confirming",
+            grant_failure::message(Some(&error)),
+        ),
+        Err(_) => json_error(
+            StatusCode::CONFLICT,
+            "AO_GRANT_FAILED",
+            grant_failure::message(None),
         ),
     }
 }
