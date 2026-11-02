@@ -100,9 +100,10 @@ function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirect
   }
   try {
     renameAtomicFile(temporary, filePath);
+    temporary = null; // The rename consumed it; later cleanup must not turn a committed write into failure.
     try { fs.chmodSync(filePath, mode); } catch {}
   } finally {
-    fs.rmSync(temporary, { force: true });
+    if (temporary !== null) fs.rmSync(temporary, { force: true });
   }
 }
 
