@@ -508,19 +508,21 @@ export const SELF_ANSWER_GRACE_MS = 30_000;
  * Whether a pending request's card stays hidden because the app answers it for the person: on a
  * card set to "Approve for me" or "Full access" a command or tool request is reviewed and answered
  * at once, so a card would only flash up and offer a click that arrives after the answer. A
- * question or a plan is the person's and always shows; so does a request still waiting after the
- * grace period (an answer that could not be sent), so nothing sits hidden. In a team with a
- * Command approver the card's own reviewer stands aside, so its requests always show; and one the
- * reviewer left at "ask" is the person's, waiting for them with no timer, so it shows at once.
+ * question or a plan is the person's and always shows. The backend owns an active review's
+ * deadline, including a team's Command approver: client elapsed time must not turn it into a
+ * question. An explicit "ask" shows at once. Unmarked legacy requests retain the grace period
+ * so an answer that was never sent cannot leave the agent hidden forever.
  */
 export function approvalAnsweredForYou(
-  approval: { kind?: string; recommendation?: { action?: string } },
+  approval: { kind?: string; awaiting_review?: boolean; recommendation?: { action?: string } },
   route: { approval_policy?: string; approvals_reviewer?: string } | null | undefined,
   waitingMs: number,
   teamHasApprover = false,
 ): boolean {
-  if (approval.kind === "question" || approval.kind === "plan" || teamHasApprover) return false;
+  if (approval.kind === "question" || approval.kind === "plan") return false;
   if (approval.recommendation?.action === "ask") return false;
+  if (approval.awaiting_review) return true;
+  if (teamHasApprover) return false;
   const answersForYou = route?.approvals_reviewer === "auto_review" || route?.approval_policy === "never";
   return answersForYou && waitingMs < SELF_ANSWER_GRACE_MS;
 }
