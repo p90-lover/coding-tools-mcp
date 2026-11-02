@@ -561,14 +561,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       logger?.info?.("ao.effort_fitted", { model: baseModel.slice(0, 120), effort, fitted: fitted || "auto" });
       effort = fitted;
     }
-    // Claude Code and Codex send the effort in the request body (Claude Code's output_config.effort,
-    // Codex's reasoning.effort), which CPA hands to the provider's own field. A "(level)" model suffix
-    // was refused outright by every Cline Pass model for "(auto)" and for any level outside its list,
-    // while the same levels in the body went through (tried 2026-10-22 on MiMo V2.6 Pro, DeepSeek V4.1
-    // Flash, GLM 5.3 Flash and Gemini 3.8 Flash). opencode has no body transport in AO and keeps it.
+    // Keep the body setting for harnesses that can forward it, but Claude Code also needs the
+    // validated suffix: AO clears AgentConfig.Effort for gateway sessions before its ACP driver
+    // runs, so a bare model lost "max" and DeepSeek requests fell back to "low". CPA's providers
+    // and Provider Manager read the suffix before the translated body's effort. Only a fitted
+    // level goes in the name: never "auto", an unsupported level, or a verbatim plugin's model.
     const bodyEffort = Boolean(viaCpa) && !verbatim && BODY_EFFORT_AGENTS.has(agent);
     let wireModel = viaCpa ? (verbatim || bodyEffort ? baseModel : viaCpa) : viaCpa;
-    if (viaCpa && effort && !verbatim && !bodyEffort) {
+    if (viaCpa && effort && !verbatim && (!bodyEffort || agent === "claude-code")) {
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = baseModel + "(" + effort + ")";
     }
