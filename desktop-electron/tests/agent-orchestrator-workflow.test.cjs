@@ -9517,7 +9517,7 @@ function workflowInternals(options) {
   fixture.filename = filename;
   fixture.paths = module.paths;
   const source = fs.readFileSync(filename, "utf8").replace("return Object.freeze({ call, restoreSchedules,",
-    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, stopExternalTurn, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
+    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
   fixture._compile(source, filename);
   return fixture.exports.createAgentOrchestratorWorkflow(options);
 }
@@ -9647,6 +9647,39 @@ test("concurrent host-release upgrades recheck the in-flight stop after its firs
     assert.equal(children, 1, "one descendant shutdown");
     assert.equal(interrupts, 2, "the two release upgrades share their settlement check");
   } finally { releaseObservation(); workflow.dispose(); }
+});
+
+test("an automatic stop that skips fresh activity does not swallow a waiting explicit Stop", async (t) => {
+  for (const autoRelease of [false, true]) for (const force of [false, true]) {
+    await t.test(`auto release ${autoRelease}, explicit force ${force}`, async () => {
+      let observationStarted, releaseObservation, first = true;
+      const entered = new Promise(resolve => { observationStarted = resolve; });
+      const gate = new Promise(resolve => { releaseObservation = resolve; });
+      const calls = [];
+      let current = { turnId: "owned-turn", turnState: "running", status: "working", lastActivityAt: 2_000_000_000_000 };
+      const workflow = workflowInternals({
+        chatPreferencesFile: null, findCodexExecutable: () => null,
+        setTimer: (resolve, ms) => ms === 250 ? queueMicrotask(resolve) : setTimeout(resolve, ms),
+        aoHarness: {
+          observe: async () => {
+            if (first) { first = false; observationStarted(); await gate; }
+            return current;
+          },
+          interrupt: async () => { calls.push("interrupt"); current = { ...current, turnState: "interrupted", status: "idle" }; },
+          exitAgent: async () => { calls.push("exit"); return { ok: true }; },
+        },
+      });
+      try {
+        const automatic = workflow.stopExternalTurn("session", { owner: "owner", turnId: "owned-turn", escalate: true,
+          isStalled: () => false, ...(autoRelease ? { releaseAgent: true } : {}) });
+        await entered;
+        const explicit = workflow.stopExternalTurn("session", force ? { owner: "owner", turnId: "owned-turn", releaseAgent: true } : undefined);
+        releaseObservation();
+        await Promise.all([automatic, explicit]);
+        assert.deepEqual(calls, force ? ["interrupt", "exit"] : ["interrupt"], "the waiting explicit intent must perform its own stop");
+      } finally { releaseObservation(); workflow.dispose(); }
+    });
+  }
 });
 
 test("follow-ups and warmed sessions wait for Stop to exit the host before checking its restoration", async () => {
@@ -9999,7 +10032,7 @@ test("with Retry automatically on, a turn silent past its limit is stopped so it
   let observed;
   const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
     route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
-    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1", turn_id: "turn-1" } };
   const workflow = createAgentOrchestratorWorkflow({
     now: () => clock,
     requestHeadless: async (endpoint) => {
@@ -10044,7 +10077,7 @@ test("a message queued behind a working turn is not stopped as hung: the whole s
   let observed;
   const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
     route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
-    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1", turn_id: "queued-turn" } };
   const workflow = createAgentOrchestratorWorkflow({
     now: () => clock,
     requestHeadless: async (endpoint) => {
@@ -10076,6 +10109,105 @@ test("a message queued behind a working turn is not stopped as hung: the whole s
   workflow.dispose();
 });
 
+test("the stall watchdog stops only its captured current owned turn", async (t) => {
+  const cases = [
+    "a newer request and turn replace the awaited observation",
+    "the original request key changes in place",
+    "the expected turn changes while the observation waits",
+    "the current harness turn changes",
+    "the saved card no longer runs",
+    "the saved card changes sessions",
+    "the original owned turn ID is missing",
+    "the returned observation has the wrong turn ID",
+    "the fresh current turn ID is missing",
+    "the fresh same turn reports recent activity",
+    "the fresh same turn starts a tool within its timeout",
+    "a new turn appears during stop settlement",
+    "the current turn ID disappears during stop settlement",
+    "a new turn appears after a refused interrupt",
+    "the current turn ID disappears after a refused interrupt",
+    "a different run owns the session",
+    "the current turn has recent activity",
+    "a quiet tool is within its timeout",
+    "the known owned turn is truly hung",
+    "only the saved receipt owns the hung turn",
+    "only the dispatched expected ID owns the hung turn",
+  ];
+  for (const name of cases) await t.test(name, async () => {
+    const clock = 2_000_000_000_000, calls = [];
+    let releaseObservation, observationStarted, first = true, reads = 0;
+    const entered = new Promise(resolve => { observationStarted = resolve; });
+    const gate = new Promise(resolve => { releaseObservation = resolve; });
+    const missingOwned = name === "the original owned turn ID is missing";
+    const node = { id: "worker", role: "worker", state: "running", route: { harness_id: "ao:claude-code", model: "fixture" },
+      receipt: { thread_id: "session", request_key: "original-key",
+        ...(missingOwned || name === "only the dispatched expected ID owns the hung turn" ? {} : { turn_id: "original-turn" }) } };
+    const mission = { id: "run", workspace_id: "ws", cancelled: false, nodes: [node] };
+    const hung = { turnId: "original-turn", turnState: "running", status: "working", approvals: [], timeline: [],
+      lastActivityAt: clock - 15 * 60_000, sessionActivityAt: clock - 15 * 60_000, sessionTools: [] };
+    const current = { ...hung };
+    if (name === "the fresh same turn reports recent activity") current.lastActivityAt = current.sessionActivityAt = clock;
+    if (name === "the fresh same turn starts a tool within its timeout") current.sessionTools = [{ timeoutMs: 3_600_000 }];
+    if (name === "the current harness turn changes" || name === cases[0]) current.turnId = "new-turn";
+    if (name === "the fresh current turn ID is missing") delete current.turnId;
+    const workflow = workflowInternals({
+      now: () => clock, chatPreferencesFile: null, findCodexExecutable: () => null,
+      setTimer: (resolve, ms) => ms === 250 ? queueMicrotask(resolve) : setTimeout(resolve, ms),
+      requestHeadless: async endpoint => {
+        assert.equal(endpoint, "/api/v1/ao/read", "this fixture performs no headless writes");
+        reads++;
+        return { ok: true, runs: [mission] };
+      },
+      aoHarness: {
+        observe: async (_session, expected) => {
+          if (first) {
+            first = false;
+            assert.equal(expected, missingOwned ? undefined : "original-turn");
+            observationStarted();
+            return gate;
+          }
+          return current;
+        },
+        interrupt: async () => {
+          calls.push("interrupt");
+          if (name === "a new turn appears during stop settlement" || name === "a new turn appears after a refused interrupt") current.turnId = "new-turn";
+          if (["the current turn ID disappears during stop settlement", "the current turn ID disappears after a refused interrupt"].includes(name)) delete current.turnId;
+          if (["a new turn appears after a refused interrupt", "the current turn ID disappears after a refused interrupt"].includes(name)) throw new Error("fixture interrupt refused");
+        },
+        exitAgent: async () => { calls.push("exit"); return { ok: true }; },
+      },
+    });
+    try {
+      workflow.sessionOwners.set("session", JSON.stringify(["ws", "run"]));
+      if (!missingOwned && name !== "only the saved receipt owns the hung turn") workflow.expectedTurns.set("session", "original-turn");
+      await workflow.call("chat_auto_retry", { enabled: true });
+      const reading = workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "worker" });
+      await entered;
+      const observed = { ...hung };
+      if (name === cases[0]) {
+        node.receipt = { thread_id: "session", request_key: "new-key", turn_id: "new-turn" };
+        workflow.expectedTurns.set("session", "new-turn");
+      }
+      if (name === "the original request key changes in place") node.receipt.request_key = "new-key";
+      if (name === "the expected turn changes while the observation waits") workflow.expectedTurns.set("session", "new-turn");
+      if (name === "the saved card no longer runs") node.state = "cancelled";
+      if (name === "the saved card changes sessions") node.receipt.thread_id = "other-session";
+      if (name === "the returned observation has the wrong turn ID") observed.turnId = "other-turn";
+      if (name === "a different run owns the session") workflow.sessionOwners.set("session", JSON.stringify(["ws", "other-run"]));
+      if (name === "the current turn has recent activity") observed.sessionActivityAt = clock;
+      if (name === "a quiet tool is within its timeout") observed.sessionTools = [{ timeoutMs: 3_600_000 }];
+      releaseObservation(observed);
+      await reading;
+      const expectedCalls = ["the known owned turn is truly hung", "only the saved receipt owns the hung turn", "only the dispatched expected ID owns the hung turn"].includes(name) ? ["interrupt", "exit"]
+        : ["a new turn appears during stop settlement", "the current turn ID disappears during stop settlement", "a new turn appears after a refused interrupt", "the current turn ID disappears after a refused interrupt"].includes(name) ? ["interrupt"] : [];
+      assert.deepEqual(calls, expectedCalls, name);
+      if (["the current turn has recent activity", "a quiet tool is within its timeout"].includes(name)) {
+        assert.equal(reads, 1, "healthy polling does not make an additional card read");
+      }
+    } finally { releaseObservation(hung); workflow.dispose(); }
+  });
+});
+
 // Seen live 2026-11-02: two chats "may be stuck" for over an hour with Retry automatically on. Every
 // 10 minutes one stall stop failed "Owned turn is still working; stop needs attention", and the other
 // logged "stopped" while its turn stayed running (idle 4914 s, then 5514 s). Neither card retried.
@@ -10085,7 +10217,7 @@ test("a hung turn the stall stop cannot interrupt has its agent shut down, so th
     const calls = [];
     const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
       route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
-      receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+      receipt: { request_key: "k", status: "submitted", thread_id: "sess-1", turn_id: "turn-1" } };
     const workflow = createAgentOrchestratorWorkflow({
       now: () => clock,
       // The 15 s settle window's 250 ms polls run at once; other timers keep their length.
@@ -10122,13 +10254,13 @@ test("a hung turn the stall stop cannot interrupt has its agent shut down, so th
   assert.deepEqual(orphaned.calls, [["interrupt", "sess-1"], ["exit", "sess-1"]], "a session with no controller is shut down at once");
   orphaned.workflow.dispose();
 
-  // The interrupt reads as settled once (the session's newest turn), yet the card's own turn stays hung.
+  // The owned turn reads as settled once, yet the card's next observation still finds it hung.
   let settled = false;
   const stale = stallWorld({
     observe: (_expected, clock) => {
       if (!settled) return hung(clock);
       settled = false;
-      return { turnId: "turn-2", turnState: "interrupted", status: "idle" };
+      return { turnId: "turn-1", turnState: "interrupted", status: "idle" };
     },
     interrupt: () => { settled = true; },
   });
