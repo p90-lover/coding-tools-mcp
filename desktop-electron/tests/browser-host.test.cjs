@@ -1896,7 +1896,7 @@ test("an uninitialized browser surface is reaped instead of remaining as a gray 
     snapshot: () => ({ tabs: [] }),
     publishState() {},
     writeDescriptor() {},
-    logger: { warn: (event, detail) => warnings.push([event, detail]) },
+    logger: { info() {}, warn: (event, detail) => warnings.push([event, detail]) },
   });
 
   BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 101);
@@ -1925,7 +1925,7 @@ test("a tab its start is still loading is held to the bootstrap deadline, not th
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[tab.id, tab]]), closedTurnOwners: new Map(), selectedTabId: tab.id,
     window: { contentView: { removeChildView() {} } }, syncViewVisibility() {}, snapshot: () => ({ tabs: [] }),
-    publishState() {}, writeDescriptor() {}, logger: { warn: (event, detail) => warnings.push([event, detail.evidence]) },
+    publishState() {}, writeDescriptor() {}, logger: { info() {}, warn: (event, detail) => warnings.push([event, detail.evidence]) },
   });
   fixture.lastTurnSweepAt = 89_000;
   BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 90_000);
@@ -2587,7 +2587,12 @@ test("a repeated start of a turn waits for its tab to load, and opens a new one 
   events = [];
   const retry = fixtureWith(failed, events);
   const created = [];
-  retry.createTurnTab = async (traceId) => { created.push(traceId); return { id: "tab-new", surfaceId: "surface-new" }; };
+  retry.createTurnTab = async (traceId, _pid, _key, _connector, _thread, _account, startRequest) => {
+    created.push(traceId);
+    const tab = { id: "tab-new", surfaceId: "surface-new", startRequest };
+    retry.turnTabs.set(tab.id, tab);
+    return tab;
+  };
   const restarted = BrowserHost.prototype.beginTurn.call(retry, "trace_same", false, 333);
   await new Promise((resolve) => setImmediate(resolve));
   retry.turnTabs.delete(failed.id);
@@ -2689,7 +2694,11 @@ for (const [useSavedChats, retainedLocation, nowAt] of [
     userCancelledTurnOwners: new Map(),
     getUseSavedChats: () => useSavedChats,
     removeTurnTab(tab, abortRunning) { removed.push([tab.id, abortRunning]); this.turnTabs.delete(tab.id); },
-    createTurnTab: async () => created,
+    async createTurnTab(_trace, _pid, _key, _connector, _thread, _account, startRequest) {
+      created.startRequest = startRequest;
+      this.turnTabs.set(created.id, created);
+      return created;
+    },
     writeDescriptor() {}, syncViewVisibility() {}, publishState() {},
     snapshot: () => ({ tabs: [] }),
     logger: { info() {}, warn: (event) => warnings.push(event) },
@@ -2805,10 +2814,12 @@ test("a retained conversation is not reused for a different connector identity",
     manualOperation: null,
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
-    createTurnTab: (...args) => {
+    createTurnTab(...args) {
       // The fifth is the native thread id (#583), which this turn has none of, so the sixth (the
       // thread's ChatGPT account) is none either: the tab runs on the host's own account.
-      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector", undefined, null]);
+      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector", undefined, null, null]);
+      created.startRequest = args[6];
+      this.turnTabs.set(created.id, created);
       return created;
     },
     writeDescriptor() {},
@@ -2851,7 +2862,11 @@ test("an Automatic turn never reuses a retained Zero Risk conversation", async (
     manualOperation: null,
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
-    createTurnTab: () => ({ id: "automatic-fresh", surfaceId: "surface-fresh" }),
+    createTurnTab(_trace, _pid, _key, _connector, _thread, _account, startRequest) {
+      const tab = { id: "automatic-fresh", surfaceId: "surface-fresh", startRequest };
+      this.turnTabs.set(tab.id, tab);
+      return tab;
+    },
     writeDescriptor() {},
     syncViewVisibility() {},
     publishState() {},
@@ -2904,7 +2919,11 @@ test("a connector conversation is not reused until its connector was bound", asy
     manualOperation: null,
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
-    createTurnTab: () => ({ id: "fresh", surfaceId: "surface-fresh" }),
+    createTurnTab(_trace, _pid, _key, _connector, _thread, _account, startRequest) {
+      const tab = { id: "fresh", surfaceId: "surface-fresh", startRequest };
+      this.turnTabs.set(tab.id, tab);
+      return tab;
+    },
     writeDescriptor() {},
     syncViewVisibility() {},
     publishState() {},

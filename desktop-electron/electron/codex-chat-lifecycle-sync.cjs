@@ -71,6 +71,8 @@ class CodexChatLifecycleSync {
     this.now = now;
     this.indexedThread = indexedThread;
     this.entries = new Map();
+    this.lineageRevisions = new Map();
+    this.lineageSequence = 0;
     this.seenAlive = new Set();
     this.timer = null;
     this.polling = false;
@@ -126,6 +128,7 @@ class CodexChatLifecycleSync {
         || (connectorIdentity && previous.connectorIdentity !== connectorIdentity)) {
         if (conversationKey) previous.conversationKey = conversationKey;
         if (connectorIdentity) previous.connectorIdentity = connectorIdentity;
+        this.lineageRevisions.set(id, ++this.lineageSequence);
         this.save();
       }
       return true;
@@ -135,6 +138,7 @@ class CodexChatLifecycleSync {
       remoteDeleted: false, everSeen: false,
       ...(conversationKey ? { conversationKey } : {}),
       ...(connectorIdentity ? { connectorIdentity } : {}) });
+    this.lineageRevisions.set(id, ++this.lineageSequence);
     this.save();
     if (this.timer) queueMicrotask(() => { void this.poll(); });
     return true;
@@ -150,6 +154,11 @@ class CodexChatLifecycleSync {
       && entry.conversationKey === conversationKey
       && entry.connectorIdentity === connectorIdentity && entry.remoteDeleted !== true);
     return matches.length === 1 ? matches[0].conversationUrl : undefined;
+  }
+
+  /** Admission fences track lineage changes, independent of seen/archive metadata and disk saves. */
+  lineageRevision(threadId) {
+    return this.lineageRevisions.get(String(threadId ?? "").toLowerCase()) ?? 0;
   }
 
   threadIds() {
@@ -179,8 +188,12 @@ class CodexChatLifecycleSync {
 
   /** Forgets one of a thread's saved chats once it is deleted on ChatGPT. */
   forget(threadId, conversationUrl) {
-    const removed = this.entries.delete(`${String(threadId).toLowerCase()}|${conversationUrl}`);
-    if (removed) this.save();
+    const id = String(threadId).toLowerCase();
+    const removed = this.entries.delete(`${id}|${conversationUrl}`);
+    if (removed) {
+      this.lineageRevisions.set(id, ++this.lineageSequence);
+      this.save();
+    }
     return removed;
   }
 
@@ -218,7 +231,9 @@ class CodexChatLifecycleSync {
           if (synced !== true) continue;
           if (action === "delete") {
             entry.remoteDeleted = true;
-            this.entries.delete(`${entry.threadId}|${entry.conversationUrl}`);
+            if (this.entries.delete(`${entry.threadId}|${entry.conversationUrl}`)) {
+              this.lineageRevisions.set(entry.threadId, ++this.lineageSequence);
+            }
           } else {
             entry.remoteArchived = action === "archive";
           }
