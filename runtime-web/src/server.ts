@@ -1,5 +1,6 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
+import { resolveChatGptWebTurnCapabilities } from "./adapters/chatgpt-web/model";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
@@ -417,7 +418,10 @@ function logChatGptWebModelFallback(requested: string, route: ChatGptWebModelRou
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
-  const route = requireChatGptWebModelRoute(parsed.modelId, config);
+  const capabilities = resolveChatGptWebTurnCapabilities(parsed, {
+    localToolsEnabled: config.mode === "full", solAvailable: config.solAvailable, proAvailable: config.proAvailable,
+  }, config);
+  const route = requireChatGptWebModelRoute(parsed.modelId, { ...config, ...capabilities });
   logChatGptWebModelFallback(parsed.modelId, route);
   parsed.modelId = route.backendModel;
   // Zero Risk preserves a distinct backend identity. Its immutable Codex effort is only a
