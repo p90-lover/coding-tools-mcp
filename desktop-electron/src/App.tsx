@@ -36,6 +36,7 @@ import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
 import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
 import { RegisterSurface } from "./features/RegisterSurface";
+import { MCP_CATALOG, catalogServer, isWindows, parseMcpPaste, placeholdersIn, type McpCatalogEntry } from "./features/mcp-catalog";
 
 import type {
   BrowserInteractionMode,
@@ -2604,7 +2605,7 @@ const pairsText = (pairs: Record<string, string> | undefined, separator: "=" | "
 
 type McpDraft = { id?: string; enabled: boolean; name: string; type: "stdio" | "http"; command: string; args: string; env: string; url: string; headers: string };
 const emptyMcpDraft = (): McpDraft => ({ enabled: true, name: "", type: "stdio", command: "", args: "", env: "", url: "", headers: "" });
-const mcpDraftOf = (server: McpServerEntry): McpDraft => ({ id: server.id, enabled: server.enabled, name: server.name, type: server.type,
+const mcpDraftOf = (server: McpServerInput): McpDraft => ({ id: server.id, enabled: server.enabled, name: server.name, type: server.type,
   command: server.command ?? "", args: (server.args ?? []).join("\n"), env: pairsText(server.env, "="), url: server.url ?? "", headers: pairsText(server.headers, ": ") });
 type AppToolKey = "chatAgentTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "chatAgentDesktopTools";
 
@@ -2626,6 +2627,12 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  // A ready-to-add server waiting for its token (the connect panel), and the paste panel.
+  const [connect, setConnect] = useState<McpCatalogEntry | null>(null);
+  const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [readOnly, setReadOnly] = useState(false);
+  const [pasting, setPasting] = useState<string | null>(null);
+  const [draftNote, setDraftNote] = useState("");
   useEffect(() => {
     if (!active || !api?.mcpServers) return;
     void api.mcpServers().then(setServers, (cause) => setError(messageOf(cause)));
@@ -2648,6 +2655,9 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
     setSaving(true);
     setFormError("");
     try {
+      // A pasted README's ${input:token} or YOUR_API_KEY would be sent as it is, and the server refuse every call.
+      const left = draftNote ? placeholdersIn([draft.command, draft.args, draft.env, draft.url, draft.headers].join("\n")) : [];
+      if (left.length) throw new Error(`Replace ${left.join(", ")} with your own value first`);
       const base = { ...(draft.id ? { id: draft.id } : {}), enabled: draft.enabled, name: draft.name.trim(), type: draft.type };
       const input: McpServerInput = draft.type === "stdio"
         ? { ...base, command: draft.command.trim(), args: draft.args.split(/\r?\n/).filter((line) => line.trim()), env: parsePairs(draft.env, "=", "Environment variable") }
@@ -2655,8 +2665,7 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
       setServers(await api!.saveMcpServer(input));
       setDraft(null);
     } catch (cause) {
-      // Electron prefixes a main-process error with the IPC channel; the form shows the reason only.
-      setFormError(messageOf(cause).replace(/^Error invoking remote method '[^']+': (Error: )?/, ""));
+      setFormError(reason(cause));
     } finally {
       setSaving(false);
     }
@@ -2665,7 +2674,59 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
     value: draft?.[key] ?? "",
     onChange: (event: { target: { value: string } }) => setDraft((current) => current && { ...current, [key]: event.target.value }),
   });
-  const startDraft = (next: McpDraft) => { setAddOpen(false); setTab("mcps"); setFormError(""); setDraft(next); };
+  const closePanels = () => { setAddOpen(false); setTab("mcps"); setFormError(""); setDraft(null); setConnect(null); setPasting(null); setDraftNote(""); };
+  const startDraft = (next: McpDraft, note = "") => { closePanels(); setDraft(next); setDraftNote(note); };
+  // Main-process errors arrive prefixed with the IPC channel; the panels show the reason only.
+  const reason = (cause: unknown) => messageOf(cause).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
+  const added = (entry: McpCatalogEntry) => (servers ?? []).some((server) => server.name.toLowerCase() === entry.name);
+  /** A ready-to-add server: in one click when it needs nothing, else through its connect panel. */
+  const addFromCatalog = async (entry: McpCatalogEntry, githubCli = false) => {
+    setSaving(true);
+    setFormError("");
+    try {
+      const input = catalogServer(entry, secrets, { windows: isWindows(), readOnly, githubCli });
+      setServers(await api!.saveMcpServer(input, githubCli ? { githubCliToken: true } : undefined));
+      setConnect(null);
+      setSecrets({});
+    } catch (cause) {
+      // A one-click add has no panel to show its error in.
+      (entry.secrets?.length ? setFormError : setError)(reason(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const openCatalog = (entry: McpCatalogEntry) => {
+    if (!entry.secrets?.length) { void addFromCatalog(entry); return; }
+    closePanels();
+    setSecrets({});
+    setReadOnly(false);
+    setConnect(entry);
+  };
+  /** A pasted README snippet or install command: one server opens in the form to check, several are added as they are. */
+  const readPaste = async () => {
+    if (pasting === null) return;
+    setFormError("");
+    try {
+      const { servers: found, placeholders } = parseMcpPaste(pasting, { windows: isWindows() });
+      const fill = placeholders.length ? `Replace ${placeholders.join(", ")} with your own value before saving.` : "";
+      if (found.length === 1) { startDraft(mcpDraftOf(found[0]), fill); return; }
+      if (fill) throw new Error(`${fill} Or paste one server at a time to fill it in here.`);
+      setSaving(true);
+      let next = servers;
+      for (const server of found) next = await api!.saveMcpServer(server);
+      setServers(next);
+      setPasting(null);
+    } catch (cause) {
+      setFormError(reason(cause));
+      // Some of several may have been added before one was refused: the list shows what was.
+      void api!.mcpServers().then(setServers, () => undefined);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const openLink = (url: string) => void api!.openExternal(url).catch((cause) => setError(messageOf(cause)));
+  // A panel opens at the top of the tab, often from an Add far below it: it is brought into view.
+  const revealPanel = useCallback((node: HTMLDivElement | null) => node?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }), []);
   return (
     <ContentSurface narrow title="Plugins" subtitle="Tools chat agents can use: the app's own, and MCP servers you add.">
       <div className="plugins-bar">
@@ -2678,7 +2739,8 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
             <Icon name="plus" /><span>Add</span>
           </button>
           {addOpen ? <div className="refresh-menu-list" role="menu">
-            <button type="button" role="menuitem" onClick={() => startDraft(emptyMcpDraft())}>Add MCP server</button>
+            <button type="button" role="menuitem" onClick={() => { closePanels(); setPasting(""); }}>Paste config or command</button>
+            <button type="button" role="menuitem" onClick={() => startDraft(emptyMcpDraft())}>Add MCP server by hand</button>
           </div> : null}
         </div>
       </div>
@@ -2688,8 +2750,42 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
         </SettingRow>)}
       </div> : null}
       {tab === "mcps" ? <>
-        {draft ? <div className="mcp-server-form mcp-live-fields">
+        {connect ? <div ref={revealPanel} className="mcp-server-form mcp-live-fields" aria-label={`Add ${connect.title}`}>
+          <h2>Add {connect.title}</h2>
+          <p className="mcp-catalog-blurb">{connect.blurb}</p>
+          {connect.githubCli ? <div className="mcp-connect-cli">
+            <PrimaryButton disabled={saving} onClick={() => void addFromCatalog(connect, true)}>{saving ? "Adding…" : "Use my GitHub CLI sign-in"}</PrimaryButton>
+            <span>Signed in with <code>gh auth login</code>? The app reads its token itself; nothing to copy.</span>
+          </div> : null}
+          {(connect.secrets ?? []).map((secret) => <label key={secret.key} className="field-row">
+            <span>{connect.githubCli ? "Or paste a token" : secret.label}
+              {secret.createUrl ? <> · <button type="button" className="button-link" onClick={() => openLink(secret.createUrl!)}>Create one</button></> : null}</span>
+            <input type="password" autoComplete="off" spellCheck={false} placeholder={secret.placeholder} value={secrets[secret.key] ?? ""}
+              onChange={(event) => setSecrets((current) => ({ ...current, [secret.key]: event.target.value }))} />
+          </label>)}
+          {connect.readOnlyUrl ? <SettingRow label="Read-only" body="Only tools that read: agents can't open issues, push or merge.">
+            <Switch checked={readOnly} onChange={setReadOnly} />
+          </SettingRow> : null}
+          {formError ? <p className="mcp-server-error" role="alert">{formError}</p> : null}
+          <div className="inline-actions">
+            <PrimaryButton disabled={saving} onClick={() => void addFromCatalog(connect)}>{saving ? "Adding…" : connect.githubCli ? "Add with this token" : "Add"}</PrimaryButton>
+            <SecondaryButton disabled={saving} onClick={() => setConnect(null)}>Cancel</SecondaryButton>
+          </div>
+        </div> : null}
+        {pasting !== null ? <div ref={revealPanel} className="mcp-server-form mcp-live-fields" aria-label="Paste config or command">
+          <h2>Paste config or command</h2>
+          <label className="field-row is-stacked"><span>The JSON from a server's README (Claude, Cursor or VS Code), or its <code>claude mcp add</code> / <code>codex mcp add</code> line</span>
+            <textarea value={pasting} onChange={(event) => setPasting(event.target.value)} rows={7} spellCheck={false} autoFocus
+              placeholder={'{\n  "mcpServers": {\n    "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] }\n  }\n}'} /></label>
+          {formError ? <p className="mcp-server-error" role="alert">{formError}</p> : null}
+          <div className="inline-actions">
+            <PrimaryButton disabled={saving || !pasting.trim()} onClick={() => void readPaste()}>{saving ? "Adding…" : "Continue"}</PrimaryButton>
+            <SecondaryButton disabled={saving} onClick={() => setPasting(null)}>Cancel</SecondaryButton>
+          </div>
+        </div> : null}
+        {draft ? <div ref={revealPanel} className="mcp-server-form mcp-live-fields">
           <h2>{draft.id ? `Edit ${draft.name}` : "Add MCP server"}</h2>
+          {draftNote ? <p className="mcp-catalog-blurb is-warn" role="note">{draftNote}</p> : null}
           <label className="field-row"><span>Name</span><input {...field("name")} maxLength={64} placeholder="my-server" autoFocus /></label>
           <div className="field-row"><span>Type</span>
             <div className="plugins-tabs is-compact" role="radiogroup" aria-label="Transport">
@@ -2724,8 +2820,23 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
             </div>
           </SettingRow>)}
         </div>
-        <p className="surface-empty-note">{servers && !servers.length ? "No MCP servers of your own yet. Choose Add, then Add MCP server. " : ""}
+        <p className="surface-empty-note">{servers && !servers.length ? "No MCP servers of your own yet. Add one below, or choose Add to paste any server's config. " : ""}
           New chats get every server that is on; a chat already open gets it when its agent restarts. Streamable HTTP servers go to Claude Code, Codex and opencode chats, STDIO servers to every chat agent.</p>
+        <SectionHeading label="Ready to add" />
+        <div className="mcp-catalog" aria-label="Ready to add">
+          {MCP_CATALOG.map((entry) => <div key={entry.id} className="mcp-catalog-card">
+            <div className="mcp-catalog-text">
+              <strong>{entry.title}</strong>
+              <span className="mcp-catalog-kind">{entry.server.type === "http" ? "Hosted" : "Runs locally"}{entry.secrets?.some((secret) => !secret.optional) ? " · needs a token" : ""}</span>
+              <p>{entry.blurb}</p>
+            </div>
+            <div className="mcp-catalog-actions">
+              <button type="button" className="button-link" onClick={() => openLink(entry.homepage)}>Docs</button>
+              {added(entry) ? <span className="rtk-chip">Added</span>
+                : <SecondaryButton disabled={saving} onClick={() => openCatalog(entry)}>Add</SecondaryButton>}
+            </div>
+          </div>)}
+        </div>
       </> : null}
     </ContentSurface>
   );

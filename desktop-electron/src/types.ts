@@ -1114,7 +1114,8 @@ export interface LauncherApi {
   rtkGain(): Promise<RtkGain>;
   rtkInstall(): Promise<{ code: number | null; output: string; status: RtkStatus }>;
   mcpServers(): Promise<McpServerEntry[]>;
-  saveMcpServer(server: McpServerInput): Promise<McpServerEntry[]>;
+  /** `githubCliToken`: the main process adds the GitHub CLI's sign-in as the header (GitHub's MCP server only). */
+  saveMcpServer(server: McpServerInput, options?: { githubCliToken?: boolean }): Promise<McpServerEntry[]>;
   removeMcpServer(id: string): Promise<McpServerEntry[]>;
   setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerEntry[]>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;

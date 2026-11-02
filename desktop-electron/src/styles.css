@@ -3176,6 +3176,22 @@ code {
 .mcp-server-error { margin: 10px 0 0; color: var(--color-text-error); font-size: 13px; }
 .mcp-server-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .mcp-server-actions .button-secondary { height: 26px; }
+.plugins-add .refresh-menu-list { min-width: 220px; }
+/* Ready to add (src/features/mcp-catalog.ts): one card per server, its Docs link and Add on the right. */
+.mcp-catalog { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; margin: 0 0 18px; }
+.mcp-catalog-card { display: flex; align-items: flex-start; gap: 12px; min-width: 0; padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 10px; }
+.mcp-catalog-text { display: grid; flex: 1 1 auto; gap: 2px; min-width: 0; }
+.mcp-catalog-text strong { font-size: var(--text-sm); font-weight: 600; }
+.mcp-catalog-text p { margin: 4px 0 0; color: var(--color-text-secondary); font-size: 12.5px; line-height: 1.45; }
+.mcp-catalog-kind { color: var(--color-text-disabled); font-size: 11.5px; }
+.mcp-catalog-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.mcp-catalog-actions .button-secondary { height: 26px; }
+.mcp-catalog-blurb { margin: 0 0 6px; color: var(--color-text-secondary); font-size: 13px; }
+.mcp-catalog-blurb.is-warn { color: var(--color-text-warning, #a86b12); }
+.mcp-connect-cli { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0 6px; color: var(--color-text-secondary); font-size: 12.5px; }
+.mcp-server-form code { padding: 0 4px; border-radius: 4px; background: var(--color-background-control); font-size: 12px; }
+.button-link { flex: none; padding: 0; border: 0; background: none; color: var(--color-text-secondary); font: inherit; font-size: 12.5px; cursor: pointer; }
+.button-link:hover { color: var(--color-text-primary); text-decoration: underline; text-underline-offset: 2px; }
 
 /* PartErrorBoundary: one tab or chat message that failed to render, in its own place. */
 .part-error {
