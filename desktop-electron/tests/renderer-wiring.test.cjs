@@ -16,7 +16,7 @@ const servicesSource = fs.readFileSync(path.join(launcherRoot, "src", "features"
 const proxySource = fs.readFileSync(path.join(launcherRoot, "src", "features", "NetworkProxySurface.tsx"), "utf8");
 
 test("a new chat's Team picker sits in the chat header, with no setting bar above the chat (Codex)", () => {
-  assert.match(aoSource, /headerExtra=\{chatTaskId === "" && savedTeams\.length \? <label className="cx-head-team"/, "the picker is passed to the chat header");
+  assert.match(aoSource, /headerExtra=\{chatTaskId === "" && composerMode === "team" && savedTeams\.length \? <label className="cx-head-team"/, "the picker is passed to the chat header for a new team chat");
   assert.match(aoSource, /aria-label="New chat team"/);
   assert.doesNotMatch(aoSource, /className="ao-new-chat-team"/, "the full-width Team row is gone");
   const css = fs.readFileSync(path.join(launcherRoot, "src/features/agent-orchestrator.css"), "utf8");
