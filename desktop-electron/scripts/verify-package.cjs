@@ -557,6 +557,28 @@ function validateCpaPlugins(resourcesRoot, expectedManifest = readJson(
   });
 }
 
+// The file tools GPT chats run (electron/unified-agent-tools.cjs): the vendored server, byte for byte.
+function validateUnifiedAgentTools(resourcesRoot, expectedManifest = readJson(
+  path.join(desktopRoot, "vendor", "unified-agent-tools", "BUNDLE.json"),
+  "PACKAGE_UNIFIED_AGENT_TOOLS_SOURCE_MANIFEST_INVALID",
+)) {
+  const prefix = "unified-agent-tools";
+  const packaged = regularFile(resourcesRoot, `${prefix}/BUNDLE.json`, "PACKAGE_UNIFIED_AGENT_TOOLS_MANIFEST");
+  const manifest = readJson(packaged.absolutePath, "PACKAGE_UNIFIED_AGENT_TOOLS_MANIFEST_INVALID");
+  if (JSON.stringify(manifest) !== JSON.stringify(expectedManifest) || manifest.id !== "unified-agent-tools"
+    || !plain(manifest.files) || !Object.hasOwn(manifest.files, manifest.entrypoint)) {
+    fail("PACKAGE_UNIFIED_AGENT_TOOLS_MANIFEST_MISMATCH", packaged.absolutePath);
+  }
+  return Object.entries(manifest.files).map(([name, sha256]) => {
+    const relative = safePath(name, "PACKAGE_UNIFIED_AGENT_TOOLS_PATH_UNSAFE");
+    const file = regularFile(resourcesRoot, `${prefix}/${relative}`, "PACKAGE_UNIFIED_AGENT_TOOLS");
+    if (!SHA256.test(sha256) || digest(fs.readFileSync(file.absolutePath)) !== sha256) {
+      fail("PACKAGE_UNIFIED_AGENT_TOOLS_CHECKSUM_MISMATCH", relative);
+    }
+    return relative;
+  });
+}
+
 function validatePackageManifest(resourcesRoot, appManifest, options = {}) {
   if (!plain(appManifest) || appManifest.name !== PRODUCT.packageName || appManifest.version !== PRODUCT.version) {
     fail("PACKAGE_APP_IDENTITY_MISMATCH", JSON.stringify({ name: appManifest?.name, version: appManifest?.version }));
@@ -586,6 +608,7 @@ function validatePackageManifest(resourcesRoot, appManifest, options = {}) {
   validateCpaRuntime(path.join(resourcesRoot, "five-stack-runtime"), PRODUCT.platform, PRODUCT.arch,
     pinnedCpaSha256(desktopRoot, PRODUCT.platform, PRODUCT.arch));
   validateCpaPlugins(resourcesRoot);
+  validateUnifiedAgentTools(resourcesRoot);
   validateMigrationRollback(resourcesRoot);
   // The AO daemon must come from a Go with the crypto/x509 fix, however it reached the build output
   // (the daemon installed on 2026-10-31 was go1.27.1 although the AO build asked for 1.27.3).
@@ -764,6 +787,7 @@ module.exports = {
   validatePackageManifest,
   validateCpaPlugins,
   validateRuntimeBundle,
+  validateUnifiedAgentTools,
   validateTunnelSupplyChain,
   verifyPackage,
 };

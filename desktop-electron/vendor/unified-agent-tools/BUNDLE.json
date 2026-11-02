@@ -1,0 +1,12 @@
+{
+  "id": "unified-agent-tools",
+  "strategy": "vendored-source",
+  "repository": "p90-lover/unified-agent-tools",
+  "commit": "36a2b1528ec1271867d9dd5f3d21bc60764cc4d0",
+  "version": "0.5.0",
+  "entrypoint": "mcp/server.mjs",
+  "source": "package-time extraResources (resources/unified-agent-tools)",
+  "files": {
+    "mcp/server.mjs": "a70ff72ddcd3ae55558defe11738083878af8f4fd9e7609fefb35b9a02db0c1f"
+  }
+}

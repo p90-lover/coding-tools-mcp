@@ -6,3 +6,4 @@
 
 # Pinned third-party releases are verified by SHA-256; checkouts must keep their exact bytes.
 desktop-electron/assets/keysmith/** -text
+desktop-electron/vendor/unified-agent-tools/** -text

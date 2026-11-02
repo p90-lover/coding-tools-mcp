@@ -118,6 +118,14 @@
         "to": "."
       },
       {
+        "from": "vendor/unified-agent-tools",
+        "to": "unified-agent-tools",
+        "filter": [
+          "BUNDLE.json",
+          "mcp/server.mjs"
+        ]
+      },
+      {
         "from": "../app-handler",
         "to": "app-handler",
         "filter": [
