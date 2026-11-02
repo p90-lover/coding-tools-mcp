@@ -20,6 +20,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { TextDecoder } = require("node:util");
 
 const STREAM_LIMIT = 4 * 1024 * 1024;
 const MAX_KEPT = 64;
@@ -133,6 +134,24 @@ function cacheRoots({ localAppData = process.env.LOCALAPPDATA, env = process.env
 /** A TOML literal string (single quotes; a path never holds one) for a `-c` override. */
 const tomlPath = (value) => `'${String(value).replace(/\\/g, "/").replace(/'/g, "")}'`;
 
+/** Keep raw cursors on complete scalars; invalid bytes still use Buffer's lossy decoding. */
+function outputPageEnd(bytes, limit, complete) {
+  const end = Math.min(bytes.length, limit);
+  for (let start = Math.max(0, end - 3); start < end; start += 1) {
+    const lead = bytes[start];
+    const width = lead >= 0xc2 && lead <= 0xdf ? 2 : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
+    if (!width || start + width <= end) continue;
+    const candidate = bytes.subarray(start, Math.min(bytes.length, start + width));
+    const partial = candidate.length < width;
+    if (partial && complete) continue;
+    try { new TextDecoder("utf-8", { fatal: true }).decode(candidate, { stream: partial }); }
+    catch { continue; }
+    if (start > 0) return start;
+    return partial ? { code: "OUTPUT_PENDING" } : { code: "OUTPUT_LIMIT_TOO_SMALL", required_min_limit: width };
+  }
+  return end;
+}
+
 function createSandboxRunner({
   // Where command scripts go: a folder on the app data drive. No default: the system temp folder is
   // on C:, which holds no app storage (AGENTS.md).
@@ -224,10 +243,12 @@ function createSandboxRunner({
     const record = {
       id, cmd, cwd, startedAt: now(), status: "running", exitCode: null, child, script, stdinOpen: true,
       streams: { stdout: { chunks: [], size: 0, total: 0 }, stderr: { chunks: [], size: 0, total: 0 } },
-      exited: null,
+      exited: null, outputComplete: false,
     };
     record.exited = new Promise((resolve) => {
       child.on("close", (code, signal) => {
+        // Node emits close after all stdio closes; killed/spawn_failed alone is not stream EOF.
+        record.outputComplete = true;
         if (record.status === "running") record.status = "exited";
         record.exitCode = Number.isInteger(code) ? code : record.exitCode;
         record.signal = signal ?? null;
@@ -293,15 +314,33 @@ function createSandboxRunner({
     const buffer = record.streams[stream];
     const all = Buffer.concat(buffer.chunks);
     const retainedStart = buffer.total - all.length;
-    const requested = Math.max(0, Number(offset) || 0);
+    const requested = Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(Number(offset) || 0)));
     const start = Math.min(Math.max(requested, retainedStart), buffer.total);
-    const size = Math.max(1, Math.min(Number(limit) || 65_536, 1_048_576));
-    const chunk = all.subarray(start - retainedStart, Math.min(all.length, start - retainedStart + size));
+    const size = Math.max(1, Math.min(Math.trunc(Number(limit) || 65_536), 1_048_576));
+    const remaining = all.subarray(start - retainedStart);
+    const end = outputPageEnd(remaining, size, record.outputComplete);
+    if (typeof end !== "number") {
+      const pending = end.code === "OUTPUT_PENDING";
+      return { ok: false, error: {
+        code: end.code, category: pending ? "runtime" : "validation", retryable: pending,
+        message: pending
+          ? "The stream ends in an incomplete UTF-8 character and its reader has not completed. Read the same output reference and offset again; do not rerun the command."
+          : `The next UTF-8 character requires at least ${end.required_min_limit} raw bytes. Read the same output reference and offset with limit >= ${end.required_min_limit}; do not rerun the command.`,
+        details: { command_id: id, session_id: id, stream, offset: start, next_read_offset: start,
+          requested_offset: requested, retained_start_offset: retainedStart, output_gap: requested < retainedStart,
+          limit: size, total_stream_bytes: buffer.total, status: record.status === "running" ? "running" : "exited",
+          exit_code: record.exitCode, termination_reason: record.status,
+          ...(pending ? {} : { required_min_limit: end.required_min_limit }) },
+      } };
+    }
+    const chunk = remaining.subarray(0, end);
     return {
       ok: true, command_id: id, session_id: id, stream, offset: start, next_read_offset: start + chunk.length,
       retained_start_offset: retainedStart, output_gap: requested < retainedStart, content: chunk.toString("utf8"),
       total_stream_bytes: buffer.total, truncated: start + chunk.length < buffer.total,
       status: record.status === "running" ? "running" : "exited", exit_code: record.exitCode, termination_reason: record.status,
+      warnings: record.status !== "running" && !record.outputComplete
+        ? ["Command exited, but the stream reader has not completed; more output may arrive. Continue reading from next_read_offset."] : [],
     };
   }
 

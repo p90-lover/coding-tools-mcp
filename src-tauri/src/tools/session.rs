@@ -171,7 +171,34 @@ pub struct ExecSession {
     monitor_started: AtomicBool,
     policy_revoked: AtomicBool,
     termination_reason: Mutex<Option<String>>,
+    readers_started: AtomicBool,
+    reader_complete: [Arc<AtomicBool>; 2],
     reader_tasks: AsyncMutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+struct ReaderCompletion(Arc<AtomicBool>);
+
+impl Drop for ReaderCompletion {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+async fn read_stream<T>(
+    mut stream: T,
+    output_cache: &super::ram_cache::OutputCache,
+    output_key: &str,
+    _completion: ReaderCompletion,
+) where
+    T: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => output_cache.append(output_key, &buf[..n]),
+        }
+    }
 }
 
 impl ExecSession {
@@ -251,32 +278,55 @@ impl ExecSession {
             monitor_started: AtomicBool::new(false),
             policy_revoked: AtomicBool::new(false),
             termination_reason: Mutex::new(None),
+            readers_started: AtomicBool::new(false),
+            reader_complete: [
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            ],
             reader_tasks: AsyncMutex::new(Vec::new()),
         }
     }
 
     pub async fn spawn_readers(self: &Arc<Self>) {
-        let stdout = {
+        if self.readers_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // Construct guards before any await; cancellation also completes unstarted readers.
+        let stdout_complete = ReaderCompletion(Arc::clone(&self.reader_complete[0]));
+        let stderr_complete = ReaderCompletion(Arc::clone(&self.reader_complete[1]));
+        let (stdout, stderr) = {
             let mut guard = self.child.lock().await;
-            guard.stdout.take()
-        };
-        let stderr = {
-            let mut guard = self.child.lock().await;
-            guard.stderr.take()
+            (guard.stdout.take(), guard.stderr.take())
         };
         if let Some(stream) = stdout {
             let session = Arc::clone(self);
             let task = tauri::async_runtime::spawn(async move {
-                session.read_stream(stream, true).await;
+                read_stream(
+                    stream,
+                    &session.output_cache,
+                    &session.output_keys[0],
+                    stdout_complete,
+                )
+                .await;
             });
             self.reader_tasks.lock().await.push(task);
+        } else {
+            drop(stdout_complete);
         }
         if let Some(stream) = stderr {
             let session = Arc::clone(self);
             let task = tauri::async_runtime::spawn(async move {
-                session.read_stream(stream, false).await;
+                read_stream(
+                    stream,
+                    &session.output_cache,
+                    &session.output_keys[1],
+                    stderr_complete,
+                )
+                .await;
             });
             self.reader_tasks.lock().await.push(task);
+        } else {
+            drop(stderr_complete);
         }
     }
 
@@ -284,24 +334,6 @@ impl ExecSession {
         let mut tasks = self.reader_tasks.lock().await;
         while let Some(task) = tasks.pop() {
             let _ = tokio::time::timeout(std::time::Duration::from_millis(500), task).await;
-        }
-    }
-
-    async fn read_stream<T>(&self, mut stream: T, is_stdout: bool)
-    where
-        T: tokio::io::AsyncRead + Unpin,
-    {
-        let mut buf = [0u8; 4096];
-        loop {
-            match stream.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    let chunk = &buf[..n];
-                    self.output_cache
-                        .append(&self.output_keys[usize::from(!is_stdout)], chunk);
-                }
-                Err(_) => break,
-            }
         }
     }
 
@@ -594,6 +626,45 @@ fn truncate_tail(bytes: &[u8], max_bytes: usize) -> Truncated {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum OutputPageError {
+    LimitTooSmall(usize),
+    Pending,
+}
+
+fn output_page_len(bytes: &[u8], limit: usize, complete: bool) -> Result<usize, OutputPageError> {
+    let end = bytes.len().min(limit);
+    // Only a scalar starting in the last three bytes can cross the raw page boundary.
+    for start in end.saturating_sub(3)..end {
+        let width = match bytes[start] {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => continue,
+        };
+        if start + width <= end {
+            continue;
+        }
+        let candidate = &bytes[start..bytes.len().min(start + width)];
+        let partial = candidate.len() < width;
+        let valid = match std::str::from_utf8(candidate) {
+            Ok(_) => true,
+            Err(error) => partial && !complete && error.error_len().is_none(),
+        };
+        if valid {
+            if start > 0 {
+                return Ok(start);
+            }
+            return Err(if partial {
+                OutputPageError::Pending
+            } else {
+                OutputPageError::LimitTooSmall(width)
+            });
+        }
+    }
+    Ok(end)
+}
+
 pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {
     let output_ref = args
         .get("output_ref")
@@ -631,6 +702,9 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         "stdout"
     };
 
+    // A completed reader cannot append after this snapshot. Process exit/join timeout is not EOF.
+    let stream_complete =
+        session.reader_complete[usize::from(stream == "stderr")].load(Ordering::Acquire);
     let (data, total_stream_bytes) = session.retained_stream_bytes(stream);
     let requested_offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = args
@@ -641,12 +715,6 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     let retained_start = total_stream_bytes.saturating_sub(data.len());
     let absolute_offset = requested_offset.max(retained_start).min(total_stream_bytes);
     let buffer_offset = absolute_offset.saturating_sub(retained_start);
-    let chunk = &data[buffer_offset..data.len().min(buffer_offset + limit)];
-    let next_offset = if buffer_offset + chunk.len() < data.len() {
-        Some((absolute_offset + chunk.len()) as u64)
-    } else {
-        None
-    };
 
     // Whether the command still runs, so a reader following its output knows when it ended
     // without sending it anything.
@@ -659,7 +727,45 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         .clone()
         .unwrap_or_else(|| status.into());
 
+    let chunk_len = output_page_len(&data[buffer_offset..], limit, stream_complete).map_err(|error| {
+        let mut details = json!({
+            "command_id": command_id,
+            "session_id": command_id,
+            "output_ref": output_ref,
+            "stream": stream,
+            "offset": absolute_offset,
+            "next_read_offset": absolute_offset,
+            "requested_offset": requested_offset,
+            "retained_start_offset": retained_start,
+            "output_gap": requested_offset < retained_start,
+            "limit": limit,
+            "total_stream_bytes": total_stream_bytes,
+            "status": status,
+            "exit_code": exit_code,
+            "termination_reason": termination_reason,
+        });
+        let (code, category, retryable, message) = match error {
+            OutputPageError::LimitTooSmall(required) => {
+                details["required_min_limit"] = json!(required);
+                ("OUTPUT_LIMIT_TOO_SMALL", "validation", false,
+                    format!("The next UTF-8 character requires at least {required} raw bytes. Read the same output reference and offset with limit >= {required}; do not rerun the command."))
+            }
+            OutputPageError::Pending => ("OUTPUT_PENDING", "runtime", true,
+                "The stream ends in an incomplete UTF-8 character and its reader has not completed. Read the same output reference and offset again; do not rerun the command.".into()),
+        };
+        WorkspaceError::ToolDetails { code, message, category, retryable, details }
+    })?;
+    let chunk = &data[buffer_offset..buffer_offset + chunk_len];
+    let next_offset = if buffer_offset + chunk.len() < data.len() {
+        Some((absolute_offset + chunk.len()) as u64)
+    } else {
+        None
+    };
+
     let mut warnings = Vec::<String>::new();
+    if exited && !stream_complete {
+        warnings.push("Command exited, but the stream reader has not completed; more output may arrive. Continue reading from next_read_offset.".into());
+    }
     if parts[0] == "session" {
         warnings.push(
             "Legacy session:<id>:... output_ref accepted; prefer command:<command_id>:stdout|stderr."
@@ -924,5 +1030,179 @@ fn send_session_signal(pid: u32, _signal: &str) {
             let _ = TerminateProcess(handle, 1);
             let _ = CloseHandle(handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn audit_output_paging_preserves_unicode_and_strict_raw_limits() {
+        let text = format!("{}éz", "a".repeat(4095));
+        let mut offset = 0;
+        let mut rebuilt = String::new();
+        while offset < text.len() {
+            let len = output_page_len(&text.as_bytes()[offset..], 4096, true).unwrap();
+            assert!(len > 0 && len <= 4096);
+            if offset == 0 {
+                assert_eq!(len, 4095);
+            }
+            rebuilt.push_str(&text[offset..offset + len]);
+            offset += len;
+        }
+        assert_eq!(rebuilt, text);
+        for scalar in ["é", "中", "💡"] {
+            for limit in 1..=4 {
+                let result = output_page_len(scalar.as_bytes(), limit, true);
+                if limit < scalar.len() {
+                    assert_eq!(result, Err(OutputPageError::LimitTooSmall(scalar.len())));
+                } else {
+                    assert_eq!(result, Ok(scalar.len()));
+                }
+                let prefixed = format!("a{scalar}z");
+                let len = output_page_len(prefixed.as_bytes(), limit, true).unwrap();
+                assert!(len > 0 && len <= limit);
+                assert!(prefixed.is_char_boundary(len));
+            }
+        }
+        assert_eq!(output_page_len(b"ascii", 3, true), Ok(3));
+        assert_eq!(output_page_len(b"", 1, false), Ok(0));
+    }
+
+    #[test]
+    fn audit_output_paging_preserves_live_tails_invalid_bytes_and_raw_starts() {
+        for scalar in ["é", "中", "💡"] {
+            for len in 1..scalar.len() {
+                let partial = &scalar.as_bytes()[..len];
+                assert_eq!(
+                    output_page_len(partial, 4, false),
+                    Err(OutputPageError::Pending)
+                );
+                assert_eq!(output_page_len(partial, 4, true), Ok(len));
+                let mut prefixed = b"a".to_vec();
+                prefixed.extend(partial);
+                assert_eq!(output_page_len(&prefixed, 4, false), Ok(1));
+            }
+        }
+        // Caller offsets and retention gaps may start inside a scalar; never rewind or skip.
+        let inside = &"éz".as_bytes()[1..];
+        assert_eq!(output_page_len(inside, 1, false), Ok(1));
+        assert_eq!(String::from_utf8_lossy(&inside[..1]), "�");
+        for invalid in [
+            &[0x80, 0xbf, 0xff][..],
+            &[0xe0, 0x80],
+            &[0xed, 0xa0],
+            &[0xf0, 0x8f],
+        ] {
+            assert_eq!(
+                output_page_len(invalid, invalid.len(), false),
+                Ok(invalid.len())
+            );
+        }
+        // A real invalid byte before a boundary must not hide the valid scalar crossing it.
+        assert_eq!(output_page_len(&[0xff, 0xc3, 0xa9], 2, true), Ok(1));
+    }
+
+    #[tokio::test]
+    async fn audit_output_readers_complete_only_after_eof_error_or_future_drop() {
+        let cache = super::super::ram_cache::OutputCache::isolated_for_test();
+        let (mut writer, stream) = tokio::io::duplex(8);
+        let complete = Arc::new(AtomicBool::new(false));
+        let mut reader = Box::pin(read_stream(
+            stream,
+            &cache,
+            "stdout",
+            ReaderCompletion(complete.clone()),
+        ));
+        writer.write_all(&[0xc3]).await.unwrap();
+        assert!(futures_util::poll!(reader.as_mut()).is_pending());
+        assert!(!complete.load(Ordering::Acquire));
+        let (bytes, total) = cache.tail("stdout", 8);
+        assert_eq!((bytes.as_slice(), total), (&[0xc3][..], 1));
+        assert_eq!(
+            output_page_len(&bytes, 4, false),
+            Err(OutputPageError::Pending)
+        );
+        writer.write_all(&[0xa9, b'z']).await.unwrap();
+        assert!(futures_util::poll!(reader.as_mut()).is_pending());
+        assert!(!complete.load(Ordering::Acquire));
+        drop(writer);
+        reader.await;
+        assert!(complete.load(Ordering::Acquire));
+        assert_eq!(cache.tail("stdout", 8), ("éz".as_bytes().to_vec(), 3));
+
+        let (mut writer, stream) = tokio::io::duplex(8);
+        let complete = Arc::new(AtomicBool::new(false));
+        writer.write_all(&[0xc3]).await.unwrap();
+        drop(writer);
+        read_stream(
+            stream,
+            &cache,
+            "terminal",
+            ReaderCompletion(complete.clone()),
+        )
+        .await;
+        assert!(complete.load(Ordering::Acquire));
+        let (bytes, total) = cache.tail("terminal", 8);
+        assert_eq!(total, 1);
+        assert_eq!(output_page_len(&bytes, 4, true), Ok(1));
+        assert_eq!(String::from_utf8_lossy(&bytes), "�");
+
+        let (mut writer, stream) = tokio::io::duplex(8);
+        let complete = Arc::new(AtomicBool::new(false));
+        let mut reader = Box::pin(read_stream(
+            stream,
+            &cache,
+            "cancelled",
+            ReaderCompletion(complete.clone()),
+        ));
+        writer.write_all(&[0xf0, 0x9f]).await.unwrap();
+        assert!(futures_util::poll!(reader.as_mut()).is_pending());
+        assert!(!complete.load(Ordering::Acquire));
+        drop(reader);
+        assert!(complete.load(Ordering::Acquire));
+        assert!(writer.write_all(&[0x92, 0xa1]).await.is_err());
+        let (bytes, total) = cache.tail("cancelled", 8);
+        assert_eq!(total, 2);
+        assert_eq!(output_page_len(&bytes, 4, true), Ok(2));
+
+        let (_writer, stream) = tokio::io::duplex(8);
+        let complete = Arc::new(AtomicBool::new(false));
+        let other_stream = Arc::new(AtomicBool::new(false));
+        let never_polled = read_stream(
+            stream,
+            &cache,
+            "never-polled",
+            ReaderCompletion(complete.clone()),
+        );
+        let absent_pipe = ReaderCompletion(other_stream.clone());
+        drop(never_polled);
+        assert!(complete.load(Ordering::Acquire));
+        assert!(!other_stream.load(Ordering::Acquire));
+        drop(absent_pipe);
+        assert!(other_stream.load(Ordering::Acquire));
+        assert_eq!(cache.tail("never-polled", 8), (Vec::new(), 0));
+
+        struct FailingReader;
+        impl tokio::io::AsyncRead for FailingReader {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("reader failed")))
+            }
+        }
+        let complete = Arc::new(AtomicBool::new(false));
+        read_stream(
+            FailingReader,
+            &cache,
+            "failed",
+            ReaderCompletion(complete.clone()),
+        )
+        .await;
+        assert!(complete.load(Ordering::Acquire));
     }
 }

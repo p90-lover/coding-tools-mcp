@@ -2556,6 +2556,14 @@ function createChatAgentTools({
   async function readCommand(entry, command, stream, offset) {
     if (command.sandboxed && sandbox?.owns(command.id)) {
       const value = sandbox.read(command.id, stream, Math.max(0, Number(offset) || 0), MAX_PANE_READ_BYTES);
+      if (value.ok === false) {
+        if (value.error?.code !== "OUTPUT_PENDING") throw new Error(String(value.error?.message ?? "The command's output could not be read").slice(0, 300));
+        const details = value.error.details ?? {};
+        if (typeof details.status === "string") command.status = details.termination_reason === "killed" ? "killed" : details.status;
+        if (Number.isInteger(details.exit_code)) command.exitCode = details.exit_code;
+        return { content: "", nextOffset: Number(value.error.details?.next_read_offset ?? offset) || 0,
+          gap: value.error.details?.output_gap === true, status: command.status, exitCode: command.exitCode };
+      }
       command.status = value.termination_reason === "killed" ? "killed" : value.status;
       command.exitCode = Number.isInteger(value.exit_code) ? value.exit_code : command.exitCode;
       return { content: value.content, nextOffset: value.next_read_offset, gap: value.output_gap, status: command.status, exitCode: command.exitCode };
@@ -2571,6 +2579,12 @@ function createChatAgentTools({
     }, root);
     if (read.failed) throw new Error(read.failed.content?.[0]?.text ?? "The command's output could not be read");
     const failure = read.result?.ok === false ? read.result.error : null;
+    if (failure?.code === "OUTPUT_PENDING") {
+      if (typeof failure.details?.status === "string") command.status = failure.details.status;
+      if (Number.isInteger(failure.details?.exit_code)) command.exitCode = failure.details.exit_code;
+      return { content: "", nextOffset: Number(failure.details?.next_read_offset ?? offset) || 0,
+        gap: failure.details?.output_gap === true, status: command.status, exitCode: command.exitCode };
+    }
     if (failure && failure.code !== "SESSION_NOT_FOUND") throw new Error(String(failure.message ?? failure.code ?? "The command's output could not be read").slice(0, 300));
     if (!read.result || typeof read.result !== "object") throw new Error("The command's output could not be read");
     const value = failure ? null : read.result;
