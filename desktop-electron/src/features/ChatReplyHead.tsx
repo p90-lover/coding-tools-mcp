@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ModelLogo } from "./HarnessLogo";
+import { ChatChangedFiles } from "./ChatChangedFiles";
 import { dshDuration, type ChatLiveItem, type ChatStep, type ChatTurn } from "./ao-chat";
 
 /**
@@ -58,7 +59,7 @@ export function turnChanges(items: ChatLiveItem[]): ChangedFile[] {
 // Files nobody reads in a diff: lockfiles, build output, snapshots. They go last, whatever their size.
 const NOISE_FILE = /(^|[\\/])(package-lock\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|go\.sum|[^\\/]+\.snap|[^\\/]+\.min\.(js|css))$|(^|[\\/])(dist|build|out|node_modules)[\\/]/i;
 /**
- * Which changed files the head lists first: it shows CHANGES_SHOWN of them, the rest behind "N more".
+ * Which changed files the hover lists first.
  * The biggest changes lead (most lines added and removed), ties keep the order first touched, and
  * lockfiles and build output sink to the end: a 900-line package-lock.json took the first slot.
  */
@@ -69,9 +70,6 @@ export function orderChanges(files: ChangedFile[]): ChangedFile[] {
     .map(({ file }) => file);
 }
 
-const CHANGES_SHOWN = 4;
-const baseName = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
-
 /** A 1-second clock for the head's time only, so the turn under it never re-renders on a tick. */
 function useNow(live: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -81,10 +79,6 @@ function useNow(live: boolean): number {
     return () => window.clearInterval(timer);
   }, [live]);
   return now;
-}
-
-function Diff({ additions, deletions }: { additions: number; deletions: number }) {
-  return <span className="cx-reply-diff"><span className="is-add">+{additions}</span> <span className="is-del">−{deletions}</span></span>;
 }
 
 export type ReplyHeadProps = {
@@ -101,6 +95,7 @@ export type ReplyHeadProps = {
   /** A team's cards, in pipeline order; empty for a single chat. */
   members: ReplyMember[];
   changes: ChangedFile[];
+  onOpenChanges?: (path?: string) => void;
 };
 
 /** Why a turn failed, at the top of its reply: the one part of the summary read before the work. */
@@ -111,23 +106,13 @@ export function ReplyError({ team, error }: { team: boolean; error: { step: stri
   </p>;
 }
 
-export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, verdict, attempt = 1, members, changes }: ReplyHeadProps) {
+export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, verdict, attempt = 1, members, changes, onOpenChanges }: ReplyHeadProps) {
   const live = tone === "working" || tone === "stalled" || tone === "queued";
   const now = useNow(live);
   const end = live ? now : endedAtMs;
   const time = startedAtMs && end && end > startedAtMs ? dshDuration(end - startedAtMs) : "";
-  const added = changes.reduce((sum, file) => sum + file.additions, 0);
-  const removed = changes.reduce((sum, file) => sum + file.deletions, 0);
-  const shown = changes.slice(0, CHANGES_SHOWN);
-  const rest = changes.slice(CHANGES_SHOWN);
-  // Read top to bottom after the answer: the files it changed, a team's cards, then who answered and how it ended.
+  // The file list is available on demand beside the runtime, not repeated inside the reply.
   return <footer className="cx-reply-head">
-    {changes.length ? <ul className="cx-reply-files" aria-label="Changed files">
-      {shown.map((file) => <li key={file.path} className="cx-reply-file" title={file.path}>
-        <span className="cx-reply-file-name">{baseName(file.path)}</span><Diff additions={file.additions} deletions={file.deletions} />
-      </li>)}
-      {rest.length ? <li className="cx-reply-file is-more" title={rest.map((file) => file.path).join("\n")}>{rest.length} more</li> : null}
-    </ul> : null}
     {members.length ? <ul className="cx-reply-roster" aria-label="Team">
       {members.map((member) => <li key={member.key} className={`cx-reply-member is-${member.tone}`} title={member.model || undefined}>
         <span className="cx-reply-dot" aria-hidden="true" />
@@ -144,12 +129,9 @@ export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, ver
       {team ? <span className="cx-reply-mode">Team · {members.length}</span> : null}
       <span className={`cx-reply-status is-${tone}`} role={live ? "status" : undefined}>{TONE_LABEL[tone]}</span>
       {time ? <span className="cx-reply-time" title={startedAtMs ? `Started ${new Date(startedAtMs).toLocaleString()}` : undefined}>{time}</span> : null}
+      <ChatChangedFiles files={changes} onOpen={onOpenChanges} />
       {attempt > 1 ? <span className="cx-reply-attempt" title={`${attempt - 1} earlier ${attempt === 2 ? "attempt" : "attempts"} folded under the work`}>Attempt {attempt}</span> : null}
       {verdict ? <span className={`cx-verdict is-${verdict.toLowerCase()}`}>{verdict}</span> : null}
-      <span className="cx-reply-spacer" />
-      {changes.length ? <span className="cx-reply-total" title={changes.map((file) => file.path).join("\n")}>
-        {changes.length === 1 ? "1 file" : `${changes.length} files`} <Diff additions={added} deletions={removed} />
-      </span> : null}
     </div>
   </footer>;
 }
