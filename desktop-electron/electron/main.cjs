@@ -199,6 +199,8 @@ let createBrowserHostForAccount = null;
 // registry (shared by every BrowserHost: a thread's tab may run on an account the Browser tab does
 // not show), the hidden pages that archive or delete chats, and the one scan that follows Codex.
 let threadAccounts = null;
+const threadBindingEpochs = new Map();
+let threadBindingSequence = 0;
 const accountLifecycleSyncs = new Map();
 let conversationActions = null;
 let lifecycleScan = null;
@@ -1028,17 +1030,29 @@ async function resolveThreadAccount(threadId, logger, { requireRetainedConversat
     throw error;
   }
   if (!threadAccounts || !isThreadId(threadId)) return null;
+  threadId = threadId.toLowerCase();
   const accountId = bound && browserAccountExists(bound) ? bound : newSessionAccount();
   threadAccounts.bind(threadId, accountId);
+  if (bound !== accountId || !threadBindingEpochs.has(threadId)) {
+    threadBindingEpochs.set(threadId, ++threadBindingSequence);
+  }
+  const epoch = threadBindingEpochs.get(threadId);
+  const chatLifecycleSync = lifecycleSyncFor(accountId, logger);
+  const savedLineage = chatLifecycleSync.lineageRevision(threadId);
+  const assertCurrent = () => {
+    if (browserAccountExists(accountId) && threadAccounts?.accountFor(threadId) === accountId
+      && threadBindingEpochs.get(threadId) === epoch
+      && accountLifecycleSyncs.get(accountId) === chatLifecycleSync
+      && chatLifecycleSync.lineageRevision(threadId) === savedLineage) return;
+    const error = new Error("The Codex thread's ChatGPT binding changed while starting a turn");
+    error.code = requireRetainedConversation ? "retained_conversation_unavailable" : "turn_cancelled";
+    throw error;
+  };
   const partition = browserAccounts.partitionOf(accountId);
   await routeIdleAccountPartition(partition, logger);
   // Routing can yield before a running tab prevents the thread from being moved or forgotten.
-  if (requireRetainedConversation && (!browserAccountExists(accountId) || threadAccounts?.accountFor(threadId) !== accountId)) {
-    const error = new Error("The retained ChatGPT conversation's account binding changed while routing");
-    error.code = "retained_conversation_unavailable";
-    throw error;
-  }
-  return { accountId, partition, chatLifecycleSync: lifecycleSyncFor(accountId, logger) };
+  assertCurrent();
+  return { accountId, partition, chatLifecycleSync, assertCurrent };
 }
 
 // Codex thread titles from Codex's own index (one JSON line per rename; the last one wins). Read
@@ -1099,6 +1113,7 @@ async function codexThreadAction(input, logger) {
     if (target !== accountId) {
       browserHost?.releaseThreadTabs?.(threadId);
       threadAccounts.bind(threadId, target);
+      threadBindingEpochs.set(threadId, ++threadBindingSequence);
     }
   } else if (action === "archive" || action === "unarchive" || action === "delete") {
     const sync = lifecycleSyncFor(accountId, logger);
@@ -1108,9 +1123,13 @@ async function codexThreadAction(input, logger) {
       if (action === "delete") sync.forget(threadId, chat.conversationUrl);
       else sync.setArchived(threadId, chat.conversationUrl, action === "archive");
     }
-    if (action === "delete") threadAccounts.unbind(threadId);
+    if (action === "delete") {
+      threadAccounts.unbind(threadId);
+      threadBindingEpochs.delete(threadId);
+    }
   } else if (action === "forget") {
     threadAccounts.unbind(threadId);
+    threadBindingEpochs.delete(threadId);
   } else {
     throw new Error("Unknown Codex thread action");
   }
