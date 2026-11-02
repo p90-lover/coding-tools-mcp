@@ -636,18 +636,30 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the releaseRound \d+( of \d+)? · 5m \d+s$/, "Codex's goal bar: state, objective, round, running time");
-  // While pursued, why the last check found the goal not met yet shows in a box of its own under
-  // the bar (user: "separate ... as 2 box ... the model not yet box should always below goal box").
-  const toldModes = walk(teamChat.render({ commands: { ...commands(), goal: { ...commands().goal, feedback: "Two tests still fail." } } }))
+  // While pursued, why the last check found the goal not met yet stays folded behind the bar's
+  // target, a dot saying it is there; a click opens it in a box of its own above the bar (user: "the
+  // goal met transcript should toggle when click on the goal box logo and it shows on goal above,
+  // but default is off").
+  const told = () => walk(teamChat.render({ commands: { ...commands(), goal: { ...commands().goal, feedback: "Two tests still fail." } } }))
     .find((element) => element.props?.className === "cx-composer-modes");
+  const verdictOf = (modes) => walk(modes).find((element) => element.props?.className === "cx-goal-verdict");
+  const targetOf = (modes) => walk(modes).find((element) => String(element.props?.className).includes("cx-goal-target"));
+  assert.equal(verdictOf(told()), undefined, "folded by default");
+  assert.equal(targetOf(told()).props["aria-expanded"], false);
+  assert.ok(walk(targetOf(told())).some((element) => element.props?.className === "cx-goal-dot"), "a dot on the target says there is a check to read");
+  targetOf(told()).props.onClick();
+  const toldModes = told();
   const toldBar = walk(toldModes).find((element) => String(element.props?.className).startsWith("cx-goal "));
-  const verdict = walk(toldModes).find((element) => element.props?.className === "cx-goal-verdict");
+  const verdict = verdictOf(toldModes);
   assert.equal(text(verdict), "Not met yet: Two tests still fail.");
+  assert.equal(targetOf(toldModes).props["aria-expanded"], true);
   assert.doesNotMatch(text(toldBar), /Not met yet/, "the goal bar keeps only the goal");
-  const modeKids = [toldModes.props.children].flat(Infinity).filter(Boolean);
-  assert.ok(modeKids.indexOf(verdict) > modeKids.indexOf(toldBar), "the verdict comes after the goal bar");
-  assert.match(fs.readFileSync(path.join(__dirname, "../src/features/codex-chat.css"), "utf8"), /\.cx-goal-verdict \{[^}]*flex: 1 0 100%; order: 1;/,
-    "and wraps to the last row, under the bar and the plan chip");
+  const modeKids = walk(toldModes);
+  assert.ok(modeKids.indexOf(verdict) < modeKids.indexOf(toldBar), "the verdict opens above the goal bar");
+  assert.match(fs.readFileSync(path.join(__dirname, "../src/features/codex-chat.css"), "utf8"), /\.cx-goal-verdict \{ flex: 1 0 100%; box-sizing/,
+    "on a row of its own, with no order that would move it below the bar");
+  targetOf(told()).props.onClick();
+  assert.equal(verdictOf(told()), undefined, "a second click folds it again");
   assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
   // The bar's icons are buttons, not typed commands: what is typed in the box stays.
   type(teamChat, "half a message");

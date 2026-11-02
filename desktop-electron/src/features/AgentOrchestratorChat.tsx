@@ -30,7 +30,7 @@ import {
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
-  cpaRefusalNote, type ChatWakeup, type CpaRefusal,
+  cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
 } from "./ao-chat";
@@ -806,6 +806,39 @@ function WakeupBar({ wakeup, onEdit, onDelete }: { wakeup: ChatWakeup; onEdit?: 
     <button type="button" className="cx-goal-icon" title="Delete wake-up" aria-label="Delete wake-up" onClick={onDelete}><GoalGlyph name="trash" /></button>
     {onEdit ? <button type="button" className="cx-goal-icon" title="Edit wake-up" aria-label="Edit wake-up" onClick={onEdit}><GoalGlyph name="expand" /></button> : null}
   </div>;
+}
+
+/**
+ * Codex's goal bar: state, objective, how long it has run, then Clear / Resume or Pause / Edit. What
+ * the last check said (or why the goal waits) is folded behind the target until it is clicked, then
+ * opens above the bar; a dot on the target says there is one to read. Open, its three lines under
+ * every goal pushed a split pane's chat up by a fifth (the user: "the goal met transcript should
+ * toggle when click on the goal box logo and it shows on goal above, but default is off").
+ */
+export function GoalBar({ goal, busy, onCommand }: { goal: ChatGoal; busy: boolean; onCommand: (action: "clear" | "pause" | "resume" | "edit") => void }) {
+  const [open, setOpen] = useState(false);
+  const detail = goalDetail(goal);
+  return <>
+    {open && detail ? <div className="cx-goal-verdict" role="note" title={detail}><span>{detail}</span></div> : null}
+    <div className={`cx-goal is-${goal.status}`} role="status">
+      {detail ? <button type="button" className="cx-goal-icon cx-goal-target" aria-expanded={open} onClick={() => setOpen(!open)}
+        aria-label={open ? "Hide the last check" : "Show the last check"} title={open ? "Hide the last check" : `Show the last check\n\n${detail}`}>
+        <GoalGlyph name="target" />{open ? null : <i className="cx-goal-dot" aria-hidden="true" />}</button> : <GoalGlyph name="target" />}
+      <span className="cx-goal-state" title={goal.note || `Round ${goalRounds(goal)}`}>{GOAL_SUMMARY[goal.status]}</span>
+      <span className="cx-goal-objective" title={goal.objective}>{goal.objective}</span>
+      <span className="cx-goal-meta" title={`Round ${goalRounds(goal)}`}>
+        {/* Which round it is on, then how long it has run, to the second as Codex shows it. */}
+        <span className="cx-goal-round">Round {goalRounds(goal)} · </span>
+        <Elapsed since={goal.startedAt} live={goal.status === "active"} until={goal.updatedAt}
+          format={(ms) => goalElapsed(0, ms)} /></span>
+      <ModelJudgesToggle compact />
+      <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" disabled={busy} onClick={() => onCommand("clear")}><GoalGlyph name="trash" /></button>
+      {goal.status === "active"
+        ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" disabled={busy} onClick={() => onCommand("pause")}><GoalGlyph name="pause" /></button>
+        : goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" disabled={busy} onClick={() => onCommand("resume")}><GoalGlyph name="play" /></button> : null}
+      <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => onCommand("edit")}><GoalGlyph name="expand" /></button>
+    </div>
+  </>;
 }
 
 /** The chat's loop (/loop): how often it runs and when next, its prompt, then Stop. The label ticks alone. */
@@ -2459,26 +2492,9 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             onEdit={commands.editWakeup ? () => { setCard(null); setWakeupEditing({ reason: commands.wakeup!.reason,
               minutes: String(Math.min(720, Math.max(1, Math.ceil((commands.wakeup!.dueAt - Date.now()) / 60_000)))) }); } : undefined}
             onDelete={() => { setWakeupEditing(null); void commands.cancelWakeup?.().catch((cause) => say("Delete wake-up", cause instanceof Error ? cause.message : String(cause))); }} /> : null}
-          {/* Codex's goal bar: state, objective, how long it has run, then Clear / Resume or Pause / Edit. */}
-          {commands?.goal ? <div className={`cx-goal is-${commands.goal.status}`} role="status">
-            <GoalGlyph name="target" />
-            <span className="cx-goal-state" title={commands.goal.note || `Round ${goalRounds(commands.goal)}`}>{GOAL_SUMMARY[commands.goal.status]}</span>
-            <span className="cx-goal-objective" title={commands.goal.objective}>{commands.goal.objective}</span>
-            <span className="cx-goal-meta" title={`Round ${goalRounds(commands.goal)}`}>
-              {/* Which round it is on, then how long it has run, to the second as Codex shows it. */}
-              <span className="cx-goal-round">Round {goalRounds(commands.goal)} · </span>
-              <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
-                format={(ms) => goalElapsed(0, ms)} /></span>
-            <ModelJudgesToggle compact />
-            <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" disabled={goalBusy} onClick={() => void runCommand("goal", "clear", false)}><GoalGlyph name="trash" /></button>
-            {commands.goal.status === "active"
-              ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" disabled={goalBusy} onClick={() => void runCommand("goal", "pause", false)}><GoalGlyph name="pause" /></button>
-              : commands.goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" disabled={goalBusy} onClick={() => void runCommand("goal", "resume", false)}><GoalGlyph name="play" /></button> : null}
-            <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => void runCommand("goal", "edit", false)}><GoalGlyph name="expand" /></button>
-          </div> : null}
-          {/* What the last check said (or why the goal waits), in its own box that always sits under the
-              goal bar: in the bar it was cut to a few words beside the objective. */}
-          {commands?.goal && goalDetail(commands.goal) ? <div className="cx-goal-verdict" role="note" title={goalDetail(commands.goal)}><span>{goalDetail(commands.goal)}</span></div> : null}
+          {/* Keyed by chat: another chat's goal opens with its last check folded again. */}
+          {commands?.goal ? <GoalBar key={selectedTaskId} goal={commands.goal} busy={goalBusy}
+            onCommand={(action) => void runCommand("goal", action, false)} /> : null}
           {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
             <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
         </div> : null}
