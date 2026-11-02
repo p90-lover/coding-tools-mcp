@@ -23,8 +23,11 @@ on:
 permissions:
   contents: read
 
+# A group keeps one run going and one waiting; a newer waiting run cancels the older one. A publish
+# started by hand waited behind main's push build, and the next version bump's push build replaced
+# it: 0.8.55's publish was cancelled that way (2026-11-02). Each event therefore queues apart.
 concurrency:
-  group: electron-windows-release-${{ github.ref }}
+  group: electron-windows-release-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
 env:
