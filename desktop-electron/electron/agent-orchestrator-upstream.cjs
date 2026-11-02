@@ -433,22 +433,36 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * Whether the chat host recorded for an AO session (dataRoot/chat-hosts/<id>/host.json) is
    * gone. A missing or unreadable record is not treated as gone. The recorded loopback address
    * is probed rather than the PID: Windows reuses PIDs, so a dead host's PID can belong to an
-   * unrelated process (seen: the restarted AO daemon itself).
+   * unrelated process (seen: the restarted AO daemon itself). With `reuseAliveMs`, an address that
+   * accepted a connection that recently is taken as still up without connecting again.
    */
-  async function chatHostGone(id) {
+  async function chatHostGone(id, { reuseAliveMs = 0 } = {}) {
     let address;
     try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
     catch { return false; }
     const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
     if (!match) return false;
+    if (Date.now() - (chatHostAcceptedAt.get(address) ?? -Infinity) < reuseAliveMs) return false;
     return new Promise(resolve => {
       const socket = net.connect({ host: "127.0.0.1", port: Number(match[1]) });
-      const settle = gone => { socket.destroy(); resolve(gone); };
+      const settle = gone => { socket.destroy(); if (gone) chatHostAcceptedAt.delete(address); resolve(gone); };
       socket.setTimeout(1500, () => settle(false));
-      socket.once("connect", () => settle(false));
+      socket.once("connect", () => {
+        const at = Date.now();
+        for (const [known, seen] of chatHostAcceptedAt) if (at - seen > CHAT_HOST_ALIVE_REUSE_MS) chatHostAcceptedAt.delete(known);
+        chatHostAcceptedAt.set(address, at);
+        settle(false);
+      });
       socket.once("error", error => settle(error?.code === "ECONNREFUSED"));
     });
   }
+  // Every read of a running card asks whether its host is gone, and the chat reads each running
+  // card about twice a second: with four chats working, main made 7 loopback connects a second at
+  // ~6.6 ms of its own CPU each, and on a CPU-saturated machine those connects filled main for 2-7 s
+  // at a time (profile, 2026-11-02). Those reads reuse a live answer this long; a host that died is
+  // still found within it, and a gone answer, a new address or a send's own check always connects.
+  const CHAT_HOST_ALIVE_REUSE_MS = 10000;
+  const chatHostAcceptedAt = new Map();
   /**
    * Whether the chat host recorded for an AO session is known to be up: its record is there and its
    * loopback address accepts a connection. A host deletes its record when its agent exits, so a
@@ -510,6 +524,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   const continuing = new Map();
   // "exited" chat sessions already exited again this run to stop a leftover host (idleChatSessions).
   const exitedReleased = new Set();
+  // Agents being stopped right now (exitAgent calls in flight, counted by session), and those whose
+  // stop AO was already carrying out, handed to a worker that waits for them to exit (releaseAgent).
+  // Neither is continued: a message sent to one was lost when its stop landed.
+  const stoppingAgents = new Map();
+  const exitingAgents = new Map();
   /**
    * The newest items of a session's conversation. AO counts messages and tool activities alike,
    * and a tool's output can be tens of KB (an MCP browser tool's page dumps), so 100 items reached
@@ -1398,7 +1417,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // retried, while two of the turns ran on, so each chat got a needless "you were interrupted"
       // turn queued behind its own. An agent that really exited took its host with it.
       const deadAgent = agentGone && turn?.state === "running" && !(await chatHostAlive(id));
-      if (reconciled || deadAgent || ((settling || settled) && await chatHostGone(id))) {
+      if (reconciled || deadAgent || ((settling || settled) && await chatHostGone(id, { reuseAliveMs: CHAT_HOST_ALIVE_REUSE_MS }))) {
         if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
         return {
           status, turnId: turn.id, turnState: "interrupted",
@@ -1495,6 +1514,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             provisionState: session.provisionState ?? null, terminated: session.isTerminated === true } : {}), ...extra });
           return false;
         };
+        // An agent on its way out is not continued: the retry starts a fresh agent with the chat so
+        // far. Seen live 2026-11-02: a retry went to the agent its Stop was still ending, failed
+        // "already exiting", and the next attempt's turn died with it ("the app restarted").
+        if (stoppingAgents.has(String(id)) || exitingAgents.has(String(id))) return refuse("exiting", null);
         let session = await read();
         if (invalid(session)) return refuse(session ? "invalid" : "not_found", session);
         if (session.id !== key) throw uncertain();
@@ -1557,9 +1580,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           try { return await restore(); }
           catch (error) {
             if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
-            const stopped = await this.exitAgent(key).then(() => true, () => false);
-            logger?.info?.("ao.restore_unconfirmed", { session: key, attempt, stopped,
+            const release = await this.releaseAgent(key).catch(() => null);
+            const stopped = release?.ok === true;
+            logger?.info?.("ao.restore_unconfirmed", { session: key, attempt, stopped, exiting: release?.exiting === true,
               cause: String(error.cause?.message ?? "").slice(0, 200) });
+            // A stop AO was already carrying out ends it in the background: start the fresh agent now.
+            if (release?.exiting) return refuse("restore_unconfirmed_exiting", null, { attempts: attempt });
             // One that could not be stopped may still come back: a second agent beside it would
             // split the chat, so the message fails as before.
             if (!stopped) throw error;
@@ -1578,31 +1604,74 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * Stops a session's agent (its chat host and model process) but keeps the session, worktree and
      * provider conversation; continuable() resumes it on the next message.
      */
-    async exitAgent(id) {
+    async exitAgent(id, { busyTries = 20 } = {}) {
       agentTools?.cancelSessionCalls?.(id);
-      let outcome;
-      // A stop or start already under way holds the agent for a moment. Failing on the first
-      // "already exiting" failed the launch that asked, and its retries hit the same lock: 23
-      // launches in a row, seen live 2026-10-30. That stop ends in AGENT_EXITED, so wait it out.
-      for (let busy = 0; ; busy++) {
-        try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); break; }
-        catch (error) {
-          if (error?.status === 409 && ["AGENT_EXIT_IN_PROGRESS", "AGENT_RESUME_IN_PROGRESS"].includes(error.code) && busy < 20) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            continue;
+      const key = String(id);
+      stoppingAgents.set(key, (stoppingAgents.get(key) ?? 0) + 1);
+      try {
+        let outcome;
+        // A stop or start already under way holds the agent for a moment. Failing on the first
+        // "already exiting" failed the launch that asked, and its retries hit the same lock: 23
+        // launches in a row, seen live 2026-10-30. That stop ends in AGENT_EXITED, so wait it out.
+        for (let busy = 0; ; busy++) {
+          try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); break; }
+          catch (error) {
+            if (error?.status === 409 && ["AGENT_EXIT_IN_PROGRESS", "AGENT_RESUME_IN_PROGRESS"].includes(error.code) && busy < busyTries) {
+              await new Promise(resolve => setTimeout(resolve, 500));
+              continue;
+            }
+            if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
+            // AO stopped any host the exited session still had; the idle sweep need not ask again.
+            exitedReleased.add(key);
+            if (exitedReleased.size > 2000) exitedReleased.delete(exitedReleased.values().next().value);
+            outcome = { ok: true, ...await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`) };
+            break;
           }
-          if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
-          // AO stopped any host the exited session still had; the idle sweep need not ask again.
-          exitedReleased.add(String(id));
-          if (exitedReleased.size > 2000) exitedReleased.delete(exitedReleased.values().next().value);
-          outcome = { ok: true, ...await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`) };
-          break;
         }
+        if (outcome?.ok !== true || outcome.session?.id !== id || outcome.session?.status !== "exited") {
+          throw new Error(`Agent ${id} shutdown is unconfirmed`);
+        }
+        return { ok: true };
+      } finally {
+        const left = (stoppingAgents.get(key) ?? 1) - 1;
+        if (left > 0) stoppingAgents.set(key, left); else stoppingAgents.delete(key);
       }
-      if (outcome?.ok !== true || outcome.session?.id !== id || outcome.session?.status !== "exited") {
-        throw new Error(`Agent ${id} shutdown is unconfirmed`);
-      }
-      return { ok: true };
+    },
+    /**
+     * Stops a session's agent as exitAgent does, without waiting on a stop or start AO is already
+     * carrying out for it. Such an agent is handed to a worker that keeps asking until AO reports it
+     * exited, so a Stop or a retry goes on at once: { ok: true, exiting: true, exited } where
+     * `exited` settles true once it is gone (false if it never was, after REAP_LIMIT_MS). Seen live
+     * 2026-11-02: Stop failed "Agent stop could not be confirmed: The agent is already exiting" and
+     * the card's retry failed its launch the same way, each after a 10 s wait on the same lock.
+     */
+    async releaseAgent(id) {
+      const key = String(id);
+      if (exitingAgents.has(key)) return { ok: true, exiting: true, exited: exitingAgents.get(key) };
+      const busy = error => error?.status === 409 && ["AGENT_EXIT_IN_PROGRESS", "AGENT_RESUME_IN_PROGRESS"].includes(error.code);
+      try { return { ...await this.exitAgent(id, { busyTries: 0 }), exiting: false }; }
+      catch (error) { if (!busy(error)) throw error; }
+      const REAP_POLL_MS = 2000, REAP_LIMIT_MS = 10 * 60_000;
+      const started = Date.now();
+      const exited = (async () => {
+        let last = "";
+        for (let tries = 1; tries * REAP_POLL_MS <= REAP_LIMIT_MS && Date.now() - started <= REAP_LIMIT_MS; tries++) {
+          await new Promise(resolve => setTimeout(resolve, REAP_POLL_MS));
+          try {
+            await this.exitAgent(id, { busyTries: 0 });
+            logger?.info?.("ao.agent_reaped", { session: key, tries, waitedMs: Date.now() - started });
+            return true;
+          } catch (error) {
+            // A session AO no longer has, or has ended, has no agent left to wait for.
+            if (["SESSION_NOT_FOUND", "SESSION_TERMINATED"].includes(error?.code)) return true;
+            last = busy(error) ? "" : String(error?.message || error).slice(0, 200);
+          }
+        }
+        logger?.warn?.("ao.agent_reap_gave_up", { session: key, waitedMs: Date.now() - started, ...(last ? { error: last } : {}) });
+        return false;
+      })().finally(() => exitingAgents.delete(key));
+      exitingAgents.set(key, exited);
+      return { ok: true, exiting: true, exited };
     },
     /**
      * Chat sessions whose agent is up but idle, with their last turn finished at least `idleMs`
@@ -1615,7 +1684,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // restarts, but its chat host lives on for a reattach that never comes (five such agents held
       // 1.4 GB on 2026-10-21). Exiting it again stops that host (AO's ExitAgent), once per app run.
       const candidates = sessions.filter(session => session?.mode === "chat" && !session.isTerminated
-        && (session.status === "idle" || (session.status === "exited" && !exitedReleased.has(String(session.id)))));
+        && !exitingAgents.has(String(session.id)) && (session.status === "idle" || (session.status === "exited" && !exitedReleased.has(String(session.id)))));
       const idle = await Promise.all(candidates.map(async session => {
         const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
         const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
@@ -1641,7 +1710,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async quietWorkingChatSessions(quietMs, now = Date.now(), unavailableMs = quietMs) {
       const list = await internalApi("GET", "/api/v1/sessions");
       const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
-      return sessions.filter(session => session?.mode === "chat" && !session.isTerminated
+      // One the exit worker already waits on (releaseAgent) is not stopped again by the sweep.
+      return sessions.filter(session => session?.mode === "chat" && !session.isTerminated && !exitingAgents.has(String(session.id))
         && (session.status === "working" || session.statusReadiness === "unavailable"))
         .filter(session => {
           const at = Date.parse(session.activity?.lastActivityAt ?? "");

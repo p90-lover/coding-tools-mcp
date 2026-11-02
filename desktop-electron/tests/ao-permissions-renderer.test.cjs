@@ -57,8 +57,11 @@ test("composer mode clicks show only the corresponding real selector without sen
   let tree = view.render("AgentOrchestratorComposerControls", props);
   for (const heading of ["Harness", "Model", "Reasoning effort", "Context window"]) assert.ok(menuNamed(tree, heading), `${heading} has its own chip`);
   assert.equal(menuNamed(tree, "Orchestrator / Team"), undefined);
-  const option = label => elements(tree, item => item.type === "button" && item.props["aria-pressed"] !== undefined && item.props.children === label)[0];
+  const option = label => elements(tree, item => item.type === "button" && item.props["aria-pressed"] !== undefined && item.props["aria-label"] === label)[0];
   assert.equal(option("Single").props["aria-pressed"], true, "the switch names both modes and marks the active one");
+  // Each mode is a logo, not a word: one person answers alone, a group is a saved team.
+  assert.deepEqual(["Single", "Team"].map(label => option(label).props.children.props.name), ["user", "team"]);
+  assert.equal(elements(tree, item => item.props?.className === "ao-mode-switch")[0].props["data-mode"], "single", "the thumb sits on the picked mode");
   option("Single").props.onClick();
   assert.deepEqual(changes, [], "choosing the active mode changes nothing");
   option("Team").props.onClick();

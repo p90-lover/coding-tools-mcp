@@ -30,7 +30,7 @@ import {
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
-  cpaRefusalNote, type ChatWakeup, type CpaRefusal,
+  cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
 } from "./ao-chat";
@@ -133,18 +133,20 @@ export type ChatQueueActions = {
 };
 type DraftSnapshot = { text: string; sent?: boolean };
 type DraftRecovery = { text: string; error: string; applied: boolean };
-type DraftEntry = { snapshot: DraftSnapshot; pending: DraftRecovery[]; owner?: { restore: (recovery: DraftRecovery) => void } };
+type DraftEntry = { snapshot: DraftSnapshot; pending: DraftRecovery[]; attaching: number; preparing: ChatAttachment[]; attachmentNote?: string;
+  owner?: { restore: (recovery: DraftRecovery) => void; attach: (files: ChatAttachment[]) => boolean } };
 /** A draft keeps its identity across remounts; failed queue messages belong to it until adopted. */
 const CHAT_DRAFTS = new Map<string, DraftEntry>();
 const draftEntry = (key: string): DraftEntry => {
   let entry = CHAT_DRAFTS.get(key);
-  if (!entry) { entry = { snapshot: { text: "" }, pending: [] }; CHAT_DRAFTS.set(key, entry); }
+  if (!entry) { entry = { snapshot: { text: "" }, pending: [], attaching: 0, preparing: [] }; CHAT_DRAFTS.set(key, entry); }
   return entry;
 };
 const trimDraftEntry = (key: string, entry: DraftEntry) => {
   entry.pending = entry.pending.filter((recovery) => !recovery.applied);
   if (entry.snapshot.sent) entry.snapshot = { text: "" };
-  if (!entry.owner && !entry.snapshot.text && !entry.pending.length && CHAT_DRAFTS.get(key) === entry) CHAT_DRAFTS.delete(key);
+  if (!entry.owner && !entry.snapshot.text && !entry.pending.length && !entry.attaching && !entry.attachmentNote
+    && CHAT_DRAFTS.get(key) === entry) CHAT_DRAFTS.delete(key);
 };
 /** Each chat's unsent attachments, kept alongside its draft so a file never rides into another chat. */
 const CHAT_ATTACHMENTS = new Map<string, ChatAttachment[]>();
@@ -155,6 +157,8 @@ let annotationIds = 0;
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 /** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
 const PET_KEY = "coding-tools:ao:pet";
+/** A chat this narrow (a squeezed split pane) moves Preview, Show cards and Side panel from its head to the More menu; codex-chat.css's last @container. */
+const NARROW_HEAD_PX = 300;
 /** Sent to every chat in the window when the pet is shown or hidden (its detail: shown). */
 const PET_EVENT = "coding-tools:ao:pet-shown";
 /** What an AO agent is started with; a follow-up with any of them changed gets a new agent (continuationCard). */
@@ -451,11 +455,15 @@ function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }
 }
 
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
-function LiveTimeline({ items, live = false, finished = false, reply }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string }) {
+function LiveTimeline({ items, live = false, finished = false, reply, collapsed = false }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string; collapsed?: boolean }) {
   const compact = useContext(CompactActivity);
   // A message the reply below already holds is not shown twice (withoutReplied).
   const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), reply)
+    // Fold tools and thoughts, never what the assistant or person said. Tidy first so messages
+    // separated by a tool retain their original boundaries even while that tool is folded.
+    .filter((item) => !collapsed || item.kind === "message" || item.kind === "steer" || item.answered)
     .map((item) => !live && item.status === "running" ? { ...item, status: "completed" as const } : item);
+  if (!tidy.length) return null;
   if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} />)}</ol>;
   const segments = groupTimeline(tidy);
   return <ol className="cx-live is-compact">
@@ -489,6 +497,10 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
   const workKey = stepWorkKey(step);
   const live = step.working?.timeline;
   const [, setLoaded] = useState(0);
+  const mounted = useRef(false);
+  const currentKey = useRef(workKey);
+  currentKey.current = workKey;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   // A poll carries only the turn's newest items; the ones before them stay (mergeTimeline).
   if (live?.length) { CHAT_WORK.set(workKey, mergeTimeline(CHAT_WORK.get(workKey), live)); CHAT_WORK_LIVE.add(workKey); }
   const known = CHAT_WORK.get(workKey) ?? null;
@@ -496,23 +508,23 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
   useEffect(() => {
     if (!wanted || !step.hasWork || !loadWork || (known && !(settled && CHAT_WORK_LIVE.has(workKey)))) return;
     CHAT_WORK_LIVE.delete(workKey);
-    let current = true;
     void loadWork(runId, step.nodeId).then((items) => {
       if (!items.length) return;
       // A finished turn read back whole keeps every entry; only live polls are capped.
       CHAT_WORK.set(workKey, mergeTimeline(CHAT_WORK.get(workKey), items, { cap: Infinity }));
-      if (current) setLoaded((count) => count + 1);
+      // Folding can finish before this read does. Its speech still belongs on the mounted row;
+      // only leaving that row (or moving to another attempt) makes this notification obsolete.
+      if (mounted.current && currentKey.current === workKey) setLoaded((count) => count + 1);
     }).catch(() => undefined);
-    return () => { current = false; };
   }, [wanted, known, settled, step.hasWork, workKey, step.nodeId, runId, loadWork]);
   return known;
 }
 
-function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loadWork?: LoadWork }) {
+function StepRow({ step, runId, loadWork, folded = false, reply = step.text }: { step: ChatStep; runId: string; loadWork?: LoadWork; folded?: boolean; reply?: string }) {
   // A failed step opens on its error and a working one on its live turn, as Codex shows them;
   // once the user toggles a row, their choice wins.
   const [chosen, setOpen] = useState<boolean | null>(null);
-  const open = chosen ?? Boolean(step.error || step.working?.timeline?.length);
+  const open = !folded && (chosen ?? Boolean(step.error || step.working?.timeline?.length));
   const work = useStepWork(step, runId, open, loadWork);
   const compact = useContext(CompactActivity);
   const body = step.error || step.text || (work?.length || step.hasWork || step.earlier?.length ? "work" : "");
@@ -521,26 +533,27 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
   // foot (TurnRunning), and its tool calls are right below. Any other state leads the line.
   const state = step.working ? (step.working.stalled ? "may be stuck" : "")
     : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state);
+  if (folded && !step.text && !step.error && !work?.some((item) => item.kind === "message" || item.kind === "steer" || item.answered)) return null;
   return <li className={`cx-step tone-${stepTone(step)}`}>
-    <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
+    {!folded ? <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
       title={step.working?.detail || step.detail || undefined}>
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
       <span className="cx-step-meta">{[state, step.detail].filter(Boolean).join(" · ")}</span>
       {body ? <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} /> : null}
-    </button>
-    {open ? <div className="cx-step-body">
-      {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
+    </button> : <span className="cx-step-name">{step.name}</span>}
+    <div className="cx-step-body">
+      {open && step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
       {/* Its earlier rounds first, folded (oldest first), then the attempt now: a retried card's
           failed attempt showed under the new attempt's work, as if it came after it. */}
-      <EarlierRounds rounds={step.earlier} />
+      {open ? <EarlierRounds rounds={step.earlier} /> : null}
       {work?.length ? <SteerReader.Provider value={steerReader(step)}>
-        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={step.text} />
+        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={reply} collapsed={!open} />
       </SteerReader.Provider> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
       {step.text ? <ChatMarkdown text={step.text} /> : null}
-    </div> : null}
+    </div>
   </li>;
 }
 
@@ -560,13 +573,13 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? work?.length ? <SteerReader.Provider value={steerReader(step)}>
-      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} />
-    </SteerReader.Provider> : <p className="cx-tool-empty">Loading…</p> : null}
+    {work?.length ? <SteerReader.Provider value={steerReader(step)}>
+      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} collapsed={!open} />
+    </SteerReader.Provider> : open ? <p className="cx-tool-empty">Loading…</p> : null}
   </div>;
 }
 
-type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork };
+type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork; workRevision?: number };
 
 /** A turn still being worked on: its steps change on every update, so it always re-renders. */
 const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
@@ -591,7 +604,7 @@ const sameTurnWork = (a: ChatTurn, b: ChatTurn) => a.runId === b.runId && a.stat
  * the page for up to a second each time; only the live turn needs the work.
  */
 export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
-  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork) return false;
+  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork || prev.workRevision !== next.workRevision) return false;
   if (prev.turn === next.turn) return true;
   if (liveTurn(prev.turn) || liveTurn(next.turn)) return false;
   return sameTurnWork(prev.turn, next.turn);
@@ -625,7 +638,8 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
       <span>{`Worked · ${rows.length} ${rows.length === 1 ? "step" : "steps"}`}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>}
-    {open || working ? <ol className="cx-steps">{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
+    <ol className="cx-steps">{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork}
+      folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} />)}</ol>
   </div>;
 }
 
@@ -794,6 +808,39 @@ function WakeupBar({ wakeup, onEdit, onDelete }: { wakeup: ChatWakeup; onEdit?: 
   </div>;
 }
 
+/**
+ * Codex's goal bar: state, objective, how long it has run, then Clear / Resume or Pause / Edit. What
+ * the last check said (or why the goal waits) is folded behind the target until it is clicked, then
+ * opens above the bar; a dot on the target says there is one to read. Open, its three lines under
+ * every goal pushed a split pane's chat up by a fifth (the user: "the goal met transcript should
+ * toggle when click on the goal box logo and it shows on goal above, but default is off").
+ */
+export function GoalBar({ goal, busy, onCommand }: { goal: ChatGoal; busy: boolean; onCommand: (action: "clear" | "pause" | "resume" | "edit") => void }) {
+  const [open, setOpen] = useState(false);
+  const detail = goalDetail(goal);
+  return <>
+    {open && detail ? <div className="cx-goal-verdict" role="note" title={detail}><span>{detail}</span></div> : null}
+    <div className={`cx-goal is-${goal.status}`} role="status">
+      {detail ? <button type="button" className="cx-goal-icon cx-goal-target" aria-expanded={open} onClick={() => setOpen(!open)}
+        aria-label={open ? "Hide the last check" : "Show the last check"} title={open ? "Hide the last check" : `Show the last check\n\n${detail}`}>
+        <GoalGlyph name="target" />{open ? null : <i className="cx-goal-dot" aria-hidden="true" />}</button> : <GoalGlyph name="target" />}
+      <span className="cx-goal-state" title={goal.note || `Round ${goalRounds(goal)}`}>{GOAL_SUMMARY[goal.status]}</span>
+      <span className="cx-goal-objective" title={goal.objective}>{goal.objective}</span>
+      <span className="cx-goal-meta" title={`Round ${goalRounds(goal)}`}>
+        {/* Which round it is on, then how long it has run, to the second as Codex shows it. */}
+        <span className="cx-goal-round">Round {goalRounds(goal)} · </span>
+        <Elapsed since={goal.startedAt} live={goal.status === "active"} until={goal.updatedAt}
+          format={(ms) => goalElapsed(0, ms)} /></span>
+      <ModelJudgesToggle compact />
+      <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" disabled={busy} onClick={() => onCommand("clear")}><GoalGlyph name="trash" /></button>
+      {goal.status === "active"
+        ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" disabled={busy} onClick={() => onCommand("pause")}><GoalGlyph name="pause" /></button>
+        : goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" disabled={busy} onClick={() => onCommand("resume")}><GoalGlyph name="play" /></button> : null}
+      <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => onCommand("edit")}><GoalGlyph name="expand" /></button>
+    </div>
+  </>;
+}
+
 /** The chat's loop (/loop): how often it runs and when next, its prompt, then Stop. The label ticks alone. */
 function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
   const [now, setNow] = useState(() => Date.now());
@@ -939,7 +986,10 @@ export function AgentOrchestratorChat({
   const [attachments, setAttachments] = useState<ChatAttachment[]>(() => CHAT_ATTACHMENTS.get(draftKey) ?? []);
   // The chat box image open in the preview, by its place among the attachments.
   const [previewing, setPreviewing] = useState<number | null>(null);
-  const [attachNote, setAttachNote] = useState("");
+  const [attachmentWork, setAttachmentWork] = useState(() => ({ count: CHAT_DRAFTS.get(draftKey)?.attaching ?? 0,
+    previews: CHAT_DRAFTS.get(draftKey)?.preparing ?? [] }));
+  const { count: attaching, previews: preparing } = attachmentWork;
+  const [attachNote, setAttachNote] = useState(() => CHAT_DRAFTS.get(draftKey)?.attachmentNote ?? "");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
   // Ones kept when this chat was last left (another view, another chat) come back with it.
   const [annotations, setAnnotations] = useState<DraftAnnotation[]>(() => CHAT_ANNOTATIONS.get(draftKey) ?? []);
@@ -1263,7 +1313,11 @@ export function AgentOrchestratorChat({
     entry.snapshot = snapshot;
     entry.owner = undefined;
     trimDraftEntry(cacheKey, entry);
-    if (attachments.length) CHAT_ATTACHMENTS.set(cacheKey, attachments); else CHAT_ATTACHMENTS.delete(cacheKey);
+    // A save may have completed between the next chat's render and this cleanup, when this owner
+    // could no longer adopt it. Preserve that completion alongside the draft being released.
+    const completed = CHAT_ATTACHMENTS.get(cacheKey);
+    const kept = completed?.length ? [...new Set([...attachments, ...completed])].slice(0, 8) : attachments;
+    if (kept.length) CHAT_ATTACHMENTS.set(cacheKey, kept); else CHAT_ATTACHMENTS.delete(cacheKey);
     if (annotations.length) CHAT_ANNOTATIONS.set(cacheKey, annotations); else CHAT_ANNOTATIONS.delete(cacheKey);
   };
   useEffect(() => () => releaseDraft(), []);
@@ -1280,13 +1334,25 @@ export function AgentOrchestratorChat({
       setDraft(restored.draft);
       setAttachments(restored.attachments);
       setAnnotations(restored.annotations);
-      setAttachNote("");
+      setAttachmentWork({ count: entry.attaching, previews: entry.preparing });
+      setAttachNote(entry.attachmentNote ?? "");
       draftOwner.current = draftKey;
     }
     const entry = draftEntry(draftKey), taskId = selectedTaskId;
-    const owner = { restore: (recovery: DraftRecovery) => {
-      const here = () => alive.current && entry.owner === owner && CHAT_DRAFTS.get(draftKey) === entry
-        && composing.current.taskId === taskId && composing.current.cacheKey === draftKey;
+    const here = () => alive.current && entry.owner === owner && CHAT_DRAFTS.get(draftKey) === entry
+      && composing.current.taskId === taskId && composing.current.cacheKey === draftKey;
+    const owner: NonNullable<DraftEntry["owner"]> = { attach: (files: ChatAttachment[]) => {
+      if (!here()) return false;
+      // Update the ref before React commits: leaving the pane now must preserve these files too.
+      if (files.length) {
+        const next = [...composing.current.attachments, ...files].slice(0, 8);
+        composing.current.attachments = next;
+        setAttachments(next);
+      }
+      setAttachmentWork({ count: entry.attaching, previews: entry.preparing });
+      setAttachNote(entry.attachmentNote ?? "");
+      return true;
+    }, restore: (recovery: DraftRecovery) => {
       if (!here() || recovery.applied || composing.current.queuedRecovery.includes(recovery)) return;
       composing.current.queuedRecovery.push(recovery);
       setDraft((typed) => {
@@ -1370,7 +1436,7 @@ export function AgentOrchestratorChat({
   // returned. The composer never refuses, as in Claude Code: it waits in the queued-message bar and
   // goes (steered or sent) the moment the send or the lock is done.
   const queueWhileSending = Boolean(selectedTaskId) && (sending || (busy && !steering));
-  const canSend = !(deciding && !selectedTaskId) && (!sending || queueWhileSending)
+  const canSend = !attaching && !(deciding && !selectedTaskId) && (!sending || queueWhileSending)
     && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing || queueWhileSending);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen })
     .filter(command => command.name !== "autocompact");
@@ -1549,6 +1615,9 @@ export function AgentOrchestratorChat({
   } : undefined;
 
   const submit = async () => {
+    // Paste saves asynchronously. Enter in the same frame must not send only the text and leave
+    // the image to ride with the next message, even before the disabled button has rendered.
+    if (CHAT_DRAFTS.get(draftKey)?.attaching) return;
     // A whole draft that is a command runs it, even while the chat is working (/status, /goal pause);
     // with files or annotations attached it is a message, so they go with it as shown.
     const command = attachments.length || annotations.length ? null : chatSlashParse(draft);
@@ -1893,6 +1962,7 @@ export function AgentOrchestratorChat({
   const typing = chatSlashTyping(draft);
   // Picking a command that takes an argument fills it in to type the rest, as Codex does.
   const pick = (name: string) => {
+    if (CHAT_DRAFTS.get(draftKey)?.attaching) return;
     const command = slash.find((entry) => entry.name === name);
     // A fully typed command ("/review") runs; picking a partly typed one fills it in to add the argument.
     if (command?.args && draft.trim().toLowerCase() !== `/${name}`) { setDraft(`/${name} `); setSlashIndex(0); window.setTimeout(() => input.current?.focus(), 0); return; }
@@ -1900,42 +1970,74 @@ export function AgentOrchestratorChat({
   };
 
   const addFiles = async (files: FileList | File[]) => {
+    const picked = Array.from(files);
+    if (!picked.length) return;
+    const prepared: ChatAttachment[] = picked.map((file) => ({ name: file.name || "Pasted file", image: file.type.startsWith("image/"),
+      ...(file.type.startsWith("image/") ? { preview: previewOf(file) } : {}) }));
+    const entry = draftEntry(draftKey);
+    entry.attaching += 1;
+    // The clipboard bytes already belong to this renderer. Show them now instead of waiting for
+    // the main process and disk, while keeping Send gated until the file has its durable path.
+    entry.preparing = [...entry.preparing, ...prepared];
+    entry.attachmentNote = "";
+    entry.owner?.attach([]);
     const added: ChatAttachment[] = [];
     const notes: string[] = [];
-    for (const file of Array.from(files)) {
-      const image = file.type.startsWith("image/");
-      const preview = image ? previewOf(file) : undefined;
-      let path = filePath?.(file) || "";
-      // A pasted screenshot or clipboard file has no path: saved for the agent to open, as Claude
-      // Code does. A small text file without one still goes inline.
-      if (!path && saveAttachment && (image || file.size > INLINE_ATTACHMENT_BYTES || !file.type.startsWith("text/"))) {
-        try {
-          path = (await saveAttachment({ name: file.name || (image ? "pasted-image" : "pasted"), type: file.type, bytes: new Uint8Array(await file.arrayBuffer()) })).path;
-        } catch (cause) {
-          freePreview(preview);
-          notes.push(`${file.name || "Pasted file"}: ${cause instanceof Error ? cause.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : String(cause)}`);
-          continue;
+    try {
+      for (const [index, file] of picked.entries()) {
+        const image = file.type.startsWith("image/");
+        const preview = prepared[index].preview;
+        let path = filePath?.(file) || "";
+        // A pasted screenshot or clipboard file has no path: saved for the agent to open, as Claude
+        // Code does. A small text file without one still goes inline.
+        if (!path && saveAttachment && (image || file.size > INLINE_ATTACHMENT_BYTES || !file.type.startsWith("text/"))) {
+          try {
+            path = (await saveAttachment({ name: file.name || (image ? "pasted-image" : "pasted"), type: file.type, bytes: new Uint8Array(await file.arrayBuffer()) })).path;
+          } catch (cause) {
+            freePreview(preview);
+            notes.push(`${file.name || "Pasted file"}: ${cause instanceof Error ? cause.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : String(cause)}`);
+            continue;
+          }
         }
+        if (path) { added.push({ name: file.name || fileName(path), path, image, ...(preview ? { preview } : {}) }); continue; }
+        if (image) { freePreview(preview); notes.push(`${file.name}: can't attach an image without its file path`); continue; }
+        if (file.size > INLINE_ATTACHMENT_BYTES) { notes.push(`${file.name}: over 200 KB, too large to attach inline`); continue; }
+        added.push({ name: file.name, text: await file.text() });
       }
-      if (path) { added.push({ name: file.name || fileName(path), path, image, ...(preview ? { preview } : {}) }); continue; }
-      if (image) { freePreview(preview); notes.push(`${file.name}: can't attach an image without its file path`); continue; }
-      if (file.size > INLINE_ATTACHMENT_BYTES) { notes.push(`${file.name}: over 200 KB, too large to attach inline`); continue; }
-      added.push({ name: file.name, text: await file.text() });
+    } catch (cause) {
+      notes.push(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      entry.attaching -= 1;
+      entry.preparing = entry.preparing.filter((item) => !prepared.includes(item));
+      entry.attachmentNote = notes.join("; ");
+      // The originating draft can be in another pane now, or unmounted. Never append to whichever
+      // chat this component happens to show after the file's bytes finish saving.
+      if (!entry.owner?.attach(added) && added.length) {
+        CHAT_ATTACHMENTS.set(draftKey, [...(CHAT_ATTACHMENTS.get(draftKey) ?? []), ...added].slice(0, 8));
+      }
+      trimDraftEntry(draftKey, entry);
     }
-    if (added.length) setAttachments((current) => [...current, ...added].slice(0, 8));
-    setAttachNote(notes.join("; "));
   };
   // Thumbnails are object URLs: freed when their card leaves the chat box (removed or sent).
   const shownPreviews = useRef(new Set<string>());
   useEffect(() => {
-    const now = new Set(attachments.map((item) => item.preview).filter((url): url is string => Boolean(url)));
-    const kept = new Set([...CHAT_ATTACHMENTS.values()].flatMap(files => files.map(file => file.preview)));
+    const now = new Set([...attachments, ...preparing].map((item) => item.preview).filter((url): url is string => Boolean(url)));
+    const kept = new Set([...CHAT_ATTACHMENTS.values(), ...[...CHAT_DRAFTS.values()].map(entry => entry.preparing)]
+      .flatMap(files => files.map(file => file.preview)));
     for (const url of shownPreviews.current) if (!now.has(url) && !kept.has(url)) freePreview(url);
     shownPreviews.current = now;
-  }, [attachments]);
+  }, [attachments, preparing]);
 
   const chatRoot = useRef<HTMLDivElement>(null);
-  const headerMenu = (): ChatMenuItem[] => [
+  /** `narrow`: the head is too narrow for Preview, Show cards and Side panel (codex-chat.css hides them), so the menu has them. */
+  const headerMenu = (narrow = false): ChatMenuItem[] => [
+    ...(narrow && selectedTaskId ? [
+      { label: "Preview", checked: workbench === "preview", run: () => setWorkbench((open) => (open === "preview" ? null : "preview")) },
+      ...(structure || latest ? [{ label: "Show cards", checked: showStructure,
+        ...(latest ? { run: () => structure ? setShowStructure((value) => !value) : openStructure(latest.id) } : { reason: "This chat has no mission yet" }) }] : []),
+      { label: "Side panel", checked: workbench !== null, run: () => setWorkbench((open) => (open ? null : "overview")) },
+      { kind: "separator" },
+    ] as ChatMenuItem[] : []),
     ...(thread && chat ? [
       { label: "Rename", shortcut: "Alt+Ctrl+R", run: () => setRenaming(chat.title) },
       { label: thread.pinned ? "Unpin" : "Pin", shortcut: "Alt+Ctrl+P", run: thread.togglePin },
@@ -2103,7 +2205,7 @@ export function AgentOrchestratorChat({
                 ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
                   errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null}
                   beforeStatus={live ? steerViews.get(turnIndex) : undefined} headed />
-                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork} />}
+                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork} workRevision={detailsWorkTick} />}
               {/* A steer on its way sits above the turn's running line ("Deep diving", "Working"), never
                   under it: a running DeepSeek turn draws it inside its work, right above that line. */}
               {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
@@ -2184,7 +2286,10 @@ export function AgentOrchestratorChat({
             title={detailsOpen ? "Hide chat details" : "Chat details: changes, agents, setup, outputs and sources"} aria-label="Chat details"
             aria-pressed={detailsOpen} onClick={toggleDetails}><ChatGlyph name="section" size={16} /></button> : null}
           <button type="button" className="cx-icon-button" title="More" aria-label="More chat actions" aria-haspopup="menu"
-            onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }))}>⋯</button>
+            onClick={(event) => {
+              const narrow = (event.currentTarget.closest(".cx-thread")?.clientWidth ?? Infinity) <= NARROW_HEAD_PX;
+              toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(narrow), label: "Chat actions" }));
+            }}>⋯</button>
           {/* Claude Code's pane close: on every split view pane, the window's own chat included. */}
           {onClosePane ? <button type="button" className="cx-icon-button cx-pane-close" aria-label="Close split view" title="Close split view (Ctrl+Alt+W)"
             onMouseDown={(event) => event.preventDefault()} onClick={onClosePane}><Icon name="close" width="14" height="14" /></button> : null}
@@ -2387,26 +2492,9 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             onEdit={commands.editWakeup ? () => { setCard(null); setWakeupEditing({ reason: commands.wakeup!.reason,
               minutes: String(Math.min(720, Math.max(1, Math.ceil((commands.wakeup!.dueAt - Date.now()) / 60_000)))) }); } : undefined}
             onDelete={() => { setWakeupEditing(null); void commands.cancelWakeup?.().catch((cause) => say("Delete wake-up", cause instanceof Error ? cause.message : String(cause))); }} /> : null}
-          {/* Codex's goal bar: state, objective, how long it has run, then Clear / Resume or Pause / Edit. */}
-          {commands?.goal ? <div className={`cx-goal is-${commands.goal.status}`} role="status">
-            <GoalGlyph name="target" />
-            <span className="cx-goal-state" title={commands.goal.note || `Round ${goalRounds(commands.goal)}`}>{GOAL_SUMMARY[commands.goal.status]}</span>
-            <span className="cx-goal-objective" title={commands.goal.objective}>{commands.goal.objective}</span>
-            <span className="cx-goal-meta" title={`Round ${goalRounds(commands.goal)}`}>
-              {/* Which round it is on, then how long it has run, to the second as Codex shows it. */}
-              <span className="cx-goal-round">Round {goalRounds(commands.goal)} · </span>
-              <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
-                format={(ms) => goalElapsed(0, ms)} /></span>
-            <ModelJudgesToggle compact />
-            <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" disabled={goalBusy} onClick={() => void runCommand("goal", "clear", false)}><GoalGlyph name="trash" /></button>
-            {commands.goal.status === "active"
-              ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" disabled={goalBusy} onClick={() => void runCommand("goal", "pause", false)}><GoalGlyph name="pause" /></button>
-              : commands.goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" disabled={goalBusy} onClick={() => void runCommand("goal", "resume", false)}><GoalGlyph name="play" /></button> : null}
-            <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => void runCommand("goal", "edit", false)}><GoalGlyph name="expand" /></button>
-          </div> : null}
-          {/* What the last check said (or why the goal waits), in its own box that always sits under the
-              goal bar: in the bar it was cut to a few words beside the objective. */}
-          {commands?.goal && goalDetail(commands.goal) ? <div className="cx-goal-verdict" role="note" title={goalDetail(commands.goal)}><span>{goalDetail(commands.goal)}</span></div> : null}
+          {/* Keyed by chat: another chat's goal opens with its last check folded again. */}
+          {commands?.goal ? <GoalBar key={selectedTaskId} goal={commands.goal} busy={goalBusy}
+            onCommand={(action) => void runCommand("goal", action, false)} /> : null}
           {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
             <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
         </div> : null}
@@ -2461,26 +2549,27 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
           </div> : null}
           <AnnotationTray annotations={annotations} onComment={commentAnnotation}
             onRemove={(id) => setAnnotations((current) => current.filter((item) => item.id !== id))} onClear={() => setAnnotations([])} />
-          {attachments.length || attachNote ? <div className="cx-attachments">
+          {attachments.length || attachNote || attaching ? <div className="cx-attachments">
             {/* As Claude Code shows them: an image as its thumbnail, a file as its name; where it lives
                 is on hover. A click opens an image in the preview (Codex's, with Markup) and shows a
                 file in its folder. */}
-            {attachments.map((item, index) => <span key={`${item.name}:${index}`}
+            {[...attachments, ...preparing].map((item, index) => <span key={`${item.name}:${index}`}
               className={`cx-attachment${item.preview ? " is-image" : ""}${item.markup !== undefined ? " is-markup" : ""}`}>
-              <button type="button" className="cx-attachment-open" disabled={item.preview ? false : !item.path || !revealFile}
-                title={item.preview ? `${item.path ?? item.name}\nClick to preview${saveAttachment ? " or mark up" : ""}`
+              <button type="button" className="cx-attachment-open" disabled={preparing.includes(item) || (item.preview ? false : !item.path || !revealFile)}
+                title={preparing.includes(item) ? "Saving attachment…" : item.preview ? `${item.path ?? item.name}\nClick to preview${saveAttachment ? " or mark up" : ""}`
                   : item.path ? `${item.path}${revealFile ? "\nClick to show in folder" : ""}` : `${item.name} · sent inline`}
                 onClick={() => { if (item.preview) setPreviewing(index); else if (item.path) revealFile?.(item.path); }}>
                 {item.preview ? <img src={item.preview} alt={item.name} /> : <span aria-hidden="true">{item.image ? "🖼" : "📄"}</span>}
                 <span className="cx-attachment-name">{item.name}</span>
               </button>
-              <button type="button" className="cx-attachment-remove" aria-label={item.markup !== undefined ? "Remove markup" : `Remove ${item.name}`}
+              <button type="button" className="cx-attachment-remove" disabled={preparing.includes(item)} aria-label={item.markup !== undefined ? "Remove markup" : `Remove ${item.name}`}
                 data-tip={item.markup !== undefined ? "Remove markup" : `Remove ${item.name}`}
                 onClick={() => setAttachments((current) => current.filter((_, at) => at !== index))}>
                 <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
               </button>
             </span>)}
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
+            {attaching ? <span className="cx-attach-note" role="status">Attaching files…</span> : null}
             {previewing !== null && attachments[previewing]?.preview ? <ImagePreviewDialog url={attachments[previewing].preview!} onClose={() => setPreviewing(null)}
               // The marked image takes the place of the one it was drawn on: only it is sent (Codex's).
               onMarkup={saveAttachment ? (result) => addMarkup(result, attachments[previewing]) : undefined} /> : null}

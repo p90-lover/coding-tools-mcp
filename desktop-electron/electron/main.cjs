@@ -28,6 +28,7 @@ const {
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
+const { prepareBrowserDebugging } = require("./browser-debugging.cjs");
 const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
 const { codexThreadStats } = require("./codex-thread-stats.cjs");
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
@@ -199,6 +200,8 @@ let createBrowserHostForAccount = null;
 // registry (shared by every BrowserHost: a thread's tab may run on an account the Browser tab does
 // not show), the hidden pages that archive or delete chats, and the one scan that follows Codex.
 let threadAccounts = null;
+const threadBindingEpochs = new Map();
+let threadBindingSequence = 0;
 const accountLifecycleSyncs = new Map();
 let conversationActions = null;
 let lifecycleScan = null;
@@ -259,7 +262,12 @@ let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
-let automaticMcpAttemptPid = null;
+// The automatic MCP check for the running bridge: { pid, failures, retryAt }, retryAt null once it
+// passed or ran out of retries. A failed check retries after each delay below, then waits for a new
+// round (a tunnel restart, a sign-in, an account switch, the setting); one try per bridge left MCP
+// unconnected for the whole session after one slow ChatGPT page.
+let automaticMcpAttempt = null;
+const AUTOMATIC_MCP_RETRY_DELAYS_MS = [60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
 let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
 let mcpConnectorCommand = null;
@@ -280,6 +288,8 @@ let rendererLoaded = false;
 let cpaUpdater = null;
 // Connections > App plugins (app-plugins.cjs): CPA and its plugins, their versions and updates.
 let appPluginsService = null;
+// The Antigravity CLI service, made with the backend (startBackendFrom); App plugins updates it.
+let antigravityCliService = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
@@ -315,19 +325,6 @@ const appsMcp = createCodingToolsAppsMcp({
 });
 const ipcRegistrar = createIpcRegistrar();
 const registeredIpcChannels = new Set();
-
-function findFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address && typeof address === "object" ? address.port : 0;
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
 
 function send(channel, value) {
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
@@ -700,10 +697,14 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
   if (!health || health.service !== "codex-chatgpt-web" || health.status !== "ok"
     || health.mode !== "full" || health.accepting_turns !== true
     || !Number.isInteger(health.pid) || !(health.successful_model_catalog_requests > 0)) return true;
-  if (automaticMcpAttemptPid === health.pid) return false;
+  const attempt = automaticMcpAttempt?.pid === health.pid ? automaticMcpAttempt : null;
+  if (attempt && (attempt.retryAt === null || Date.now() < attempt.retryAt)) return attempt.retryAt !== null;
   const browser = browserHost?.snapshot();
+  // The browser is what the check uses, so only browser work defers it. Open HTTP turns do not:
+  // Codex keeps its bridge connections open between turns, so they never reached zero while any
+  // chat was open and the check never ran (seen live 2026-11-02: 9-12 open, none in the browser).
   if (!verifyMcpConnection || browser?.authenticated !== true || browser.surfaceActive
-    || health.active_http_turns !== 0 || health.active_browser_turns !== 0
+    || health.active_browser_turns !== 0
     || browserHost.activeTraceId || browserHost.currentOperation() || runtimeHost.currentOperation()) return true;
   const contents = browserHost.view?.webContents;
   if (!contents || contents.isDestroyed()) return true;
@@ -716,17 +717,41 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
   const config = knownConfig !== undefined ? knownConfig : runtimeSupervisor?.readConfig();
   if (config?.mode !== "full") return false;
   if (health.version !== config.releaseVersion || health.pid !== runtimeSupervisor.readState()?.daemonPid) return true;
+  // A ChatGPT page without its composer is still loading; the blank page the browser parks on
+  // between turns has nothing to keep (counted as a draft, it held the check off for good).
   const hasDraft = await contents.executeJavaScript(`(() => {
     const composer = document.querySelector('#prompt-textarea');
-    return !composer || Boolean((composer.innerText || composer.value || '').trim())
+    if (!composer) return location.hostname === 'chatgpt.com';
+    return Boolean((composer.innerText || composer.value || '').trim())
       || [...document.querySelectorAll('input[type="file"]')].some(input => input.files.length > 0)
       || [...document.querySelectorAll('button[aria-label]')].some(button => /^Remove\\b/i.test(button.getAttribute('aria-label')));
   })()`);
   if (hasDraft || browserHost.currentOperation() || browserHost.activeTraceId) return true;
-  automaticMcpAttemptPid = health.pid;
+  const failures = attempt?.failures ?? 0;
+  automaticMcpAttempt = { pid: health.pid, failures, retryAt: null };
   await verifyMcpConnection();
-  logger.info("mcp.automatic_verification_finished", { ready: stateStore.read().mcpSetupComplete === true });
-  return false;
+  const ready = stateStore.read().mcpSetupComplete === true;
+  // A new round that began during the check (the tunnel restarted) runs a fresh check next.
+  const restarted = automaticMcpAttempt?.pid !== health.pid;
+  const retryInMs = ready || restarted ? undefined : AUTOMATIC_MCP_RETRY_DELAYS_MS[failures];
+  if (retryInMs !== undefined) {
+    automaticMcpAttempt = { pid: health.pid, failures: failures + 1, retryAt: Date.now() + retryInMs };
+  }
+  logger.info("mcp.automatic_verification_finished", { ready, attempt: failures + 1, ...(retryInMs !== undefined ? { retryInMs } : {}) });
+  return restarted || retryInMs !== undefined;
+}
+
+/**
+ * Starts a new round of automatic MCP checks: after the MCP tunnel restarts, a sign-in, or an
+ * account switch, ChatGPT's connector list can be out of date until the check reloads the page.
+ */
+function restartAutomaticMcpVerification({ logger, stateStore, reason }) {
+  automaticMcpAttempt = null;
+  const state = stateStore.read();
+  if (IS_DEV_PROFILE || quitting || shutdownInProgress || !state.autoConnectExistingMcp
+    || state.coreSetupComplete !== true) return;
+  logger.info("mcp.automatic_verification_restarted", { reason });
+  if (!catalogVerificationTimer) startCatalogVerificationMonitor({ logger, stateStore });
 }
 
 function startCatalogVerificationMonitor({ logger, stateStore }) {
@@ -915,6 +940,8 @@ async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reaso
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready" && runtime.status !== "degraded") return { skipped: true, reason: runtime.status, runtime };
     const route = await runtimeHost.connectBridgeRoute();
+    // A sign-in or an account switch checks the connector again, in that account's ChatGPT.
+    if (/^(browser-|setup-signin)/.test(reason)) automaticMcpAttempt = null;
     applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: route.changed === true });
     logger.info("bridge.auto_connected", { reason, changed: route.changed === true });
     const workflow = activeAoWorkflow;
@@ -1028,17 +1055,29 @@ async function resolveThreadAccount(threadId, logger, { requireRetainedConversat
     throw error;
   }
   if (!threadAccounts || !isThreadId(threadId)) return null;
+  threadId = threadId.toLowerCase();
   const accountId = bound && browserAccountExists(bound) ? bound : newSessionAccount();
   threadAccounts.bind(threadId, accountId);
+  if (bound !== accountId || !threadBindingEpochs.has(threadId)) {
+    threadBindingEpochs.set(threadId, ++threadBindingSequence);
+  }
+  const epoch = threadBindingEpochs.get(threadId);
+  const chatLifecycleSync = lifecycleSyncFor(accountId, logger);
+  const savedLineage = chatLifecycleSync.lineageRevision(threadId);
+  const assertCurrent = () => {
+    if (browserAccountExists(accountId) && threadAccounts?.accountFor(threadId) === accountId
+      && threadBindingEpochs.get(threadId) === epoch
+      && accountLifecycleSyncs.get(accountId) === chatLifecycleSync
+      && chatLifecycleSync.lineageRevision(threadId) === savedLineage) return;
+    const error = new Error("The Codex thread's ChatGPT binding changed while starting a turn");
+    error.code = requireRetainedConversation ? "retained_conversation_unavailable" : "turn_cancelled";
+    throw error;
+  };
   const partition = browserAccounts.partitionOf(accountId);
   await routeIdleAccountPartition(partition, logger);
   // Routing can yield before a running tab prevents the thread from being moved or forgotten.
-  if (requireRetainedConversation && (!browserAccountExists(accountId) || threadAccounts?.accountFor(threadId) !== accountId)) {
-    const error = new Error("The retained ChatGPT conversation's account binding changed while routing");
-    error.code = "retained_conversation_unavailable";
-    throw error;
-  }
-  return { accountId, partition, chatLifecycleSync: lifecycleSyncFor(accountId, logger) };
+  assertCurrent();
+  return { accountId, partition, chatLifecycleSync, assertCurrent };
 }
 
 // Codex thread titles from Codex's own index (one JSON line per rename; the last one wins). Read
@@ -1099,6 +1138,7 @@ async function codexThreadAction(input, logger) {
     if (target !== accountId) {
       browserHost?.releaseThreadTabs?.(threadId);
       threadAccounts.bind(threadId, target);
+      threadBindingEpochs.set(threadId, ++threadBindingSequence);
     }
   } else if (action === "archive" || action === "unarchive" || action === "delete") {
     const sync = lifecycleSyncFor(accountId, logger);
@@ -1108,9 +1148,13 @@ async function codexThreadAction(input, logger) {
       if (action === "delete") sync.forget(threadId, chat.conversationUrl);
       else sync.setArchived(threadId, chat.conversationUrl, action === "archive");
     }
-    if (action === "delete") threadAccounts.unbind(threadId);
+    if (action === "delete") {
+      threadAccounts.unbind(threadId);
+      threadBindingEpochs.delete(threadId);
+    }
   } else if (action === "forget") {
     threadAccounts.unbind(threadId);
+    threadBindingEpochs.delete(threadId);
   } else {
     throw new Error("Unknown Codex thread action");
   }
@@ -3055,7 +3099,7 @@ function registerIpc({ logger, stateStore }) {
           autoConnectExistingMcp: true,
           ...(result.created ? { mcpSetupComplete: false } : {}),
         });
-        automaticMcpAttemptPid = null;
+        automaticMcpAttempt = null;
         send("launcher:state-changed", state);
         startCatalogVerificationMonitor({ logger, stateStore });
       }
@@ -3553,7 +3597,7 @@ function registerIpc({ logger, stateStore }) {
     }
     const state = stateStore.update({ [key]: value === true });
     if (key === "autoConnectExistingMcp") {
-      automaticMcpAttemptPid = null;
+      automaticMcpAttempt = null;
       send("launcher:state-changed", state);
       if (state.autoConnectExistingMcp) startCatalogVerificationMonitor({ logger, stateStore });
     }
@@ -3786,6 +3830,12 @@ async function start() {
     app.quit();
     return;
   }
+  const browserDebuggingReady = prepareBrowserDebugging(app);
+  if (process.platform === "linux") {
+    app.commandLine.appendSwitch("class", IS_DEV_PROFILE ? "codex-web-gpt-dev" : "codex-web-gpt");
+  }
+  // Keep shader caches off before Chromium starts, including while runtime files are prepared.
+  app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
   app.on("second-instance", (_event, argv) => {
     const commandAction = mcpConnectorCommandAction(argv);
     if (commandAction) {
@@ -3856,18 +3906,8 @@ async function start() {
   runtimeRootResolved = true;
   runtimeRootCheck.at = Date.now();
 
-  cdpPort = await findFreePort();
-  if (process.platform === "linux") {
-    app.commandLine.appendSwitch("class", IS_DEV_PROFILE ? "codex-web-gpt-dev" : "codex-web-gpt");
-  }
-  app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
-  app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
-  // Chromium's GPU shader caches (GPUCache, DawnGraphiteCache and DawnWebGPUCache, in the app's
-  // folder and in every session partition) were rewritten every few minutes. Shaders are compiled
-  // again after a restart instead.
-  app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
-
   await app.whenReady();
+  cdpPort = await browserDebuggingReady();
   session.defaultSession.setCertificateVerifyProc(caDistrust.verifyCertificate);
   // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them.
   if (process.platform === "win32" && app.isPackaged) {
@@ -4115,6 +4155,8 @@ async function start() {
     services: () => externalServicesController,
     // A plugin DLL loads when CPA starts.
     restartCpa: () => externalServicesController.restart("cpa"),
+    antigravityCli: () => antigravityCliService,
+    rtk,
     logger,
   });
   managedBootstrapController = createManagedBootstrap({
@@ -4480,6 +4522,7 @@ async function start() {
       toolsRoot: path.join(app.getPath("userData"), "tools"),
       confirm: confirmAoAction, getWorkspaces: listHeadlessWorkspaces, logger,
     });
+    antigravityCliService = antigravityCli;
     antigravityAuthBrowser = createAntigravityAuthBrowser({
       BrowserWindow, sessionFor: partition => session.fromPartition(partition),
       proxyEnvironment: antigravityProxyEnvironment, cleanUserAgent,
@@ -4824,6 +4867,10 @@ async function start() {
       setTimeout(() => { void requestQuit({ keepBridge: true, relaunch }); }, 100);
       return { ok: true, status: relaunch ? "restarting" : "quitting" };
     },
+    // Freezes, memory warnings and errors from the in-memory Activity ring, already redacted;
+    // nothing else in it (turns, accounts) leaves through this route.
+    readActivity: () => logger.notable().filter((record) => record.level === "error"
+      || /^launcher\.(main_blocked|main_stalled|main_stall_caller|memory_high|memory_growth)$/.test(record.event)),
     onTurnEvent: (event) => {
       if (event.type === "native_fetch_failed") mcpEventMonitor.nativeFetchFailed(event);
       else if (event.type === "native_fetch_ok") mcpEventMonitor.nativeFetchSucceeded();
@@ -4846,6 +4893,9 @@ async function start() {
     // Settings → Updates: a tunnel left running by another build is restarted, not adopted.
     reuseTunnelOnlyWhenMatching: () => resolveUpdateSettings(stateStore.read()).updateReuseMatchingOnly,
     onExtraTunnelsChange: tunnels => send("launcher:mcp-tunnels-changed", tunnels),
+    onTunnelReady: ({ adopted }) => restartAutomaticMcpVerification({
+      logger, stateStore, reason: adopted ? "tunnel-adopted" : "tunnel-started",
+    }),
     watchConfigFile: true,
   });
   runtimeHost = new RuntimeHost({

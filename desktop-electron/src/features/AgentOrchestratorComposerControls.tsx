@@ -286,11 +286,14 @@ export function AgentOrchestratorComposerControls({
   };
   return <div className="ao-composer-controls">
     {permissions}
-    <div className="ao-mode-switch" role="group" aria-label="Who answers">
+    {/* Who answers, as two logos on a sliding thumb: one person (one model by itself) or a group (a
+        saved team). "Single | Team" in words took ~100 px of a split pane's chat box and read alike. */}
+    <div className="ao-mode-switch" role="group" aria-label="Who answers" data-mode={mode}>
       {(["single", "team"] as const).map(option => <button key={option} type="button" aria-pressed={mode === option}
-        className={mode === option ? "is-active" : undefined} disabled={busy}
-        title={option === "single" ? "One model answers by itself" : "A saved team works on it"}
-        onClick={() => { if (mode !== option) onModeChange(option); }}>{option === "single" ? "Single" : "Team"}</button>)}
+        aria-label={option === "single" ? "Single" : "Team"} className={mode === option ? "is-active" : undefined} disabled={busy}
+        title={option === "single" ? "Single: one model answers by itself" : "Team: a saved team works on it"}
+        onClick={() => { if (mode !== option) onModeChange(option); }}>
+        <Icon name={option === "single" ? "user" : "team"} width="15" height="15" /></button>)}
     </div>
     {mode === "single" ? <>
       {/* The harness shows only its logo; its name is in the tooltip and the accessible label. */}

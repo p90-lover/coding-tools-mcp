@@ -12,6 +12,11 @@
  *   plugin-updates.json, so CPA's start keeps it over an older bundled copy.
  * - Plugins rebuilt for Coding Tools from someone else's repository show that repository's latest
  *   version; its releases have no Windows build of ours, so a new one arrives in an app update.
+ * - The Antigravity CLI updates to the latest release's archive for this platform, checked against
+ *   GitHub's size and SHA-256 and unpacked with the pinned install's archive checks
+ *   (antigravity-cli.cjs update).
+ * - RTK, installed with winget, updates with `winget upgrade` (rtk.cjs upgrade). Its releases are
+ *   mostly dev-* prereleases, so both read GitHub's latest stable release.
  *
  * Private repositories (the p90-lover plugins) need a GitHub token: GH_TOKEN/GITHUB_TOKEN, or the
  * signed-in `gh` CLI. The token goes only to api.github.com, never to a download host.
@@ -22,6 +27,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { compareVersions } = require("./update.cjs");
+const { releaseManifest, platformAsset } = require("./antigravity-cli.cjs");
 
 const PLUGIN_SOURCES = Object.freeze({
   "cpa-helper": { name: "CPA Helper", repository: "p90-lover/cpa-helper-plugin" },
@@ -31,6 +37,12 @@ const PLUGIN_SOURCES = Object.freeze({
   "auth-commandcode": { name: "CommandCode login", repository: "UNICKCHENG/cliproxyapi-plugins", tagPrefix: "auth-commandcode-v", rebuilt: true },
   "grok-login-provider": { name: "Grok login", repository: "chenyme/grok2api", rebuilt: true },
   "cline-pass-switcher": { name: "Cline Pass switcher", repository: "munmunjaklin458-afk/cline-pass-switcher", rebuilt: true },
+});
+
+/** Tools agents run, read from GitHub's latest stable release (`latest`). */
+const TOOL_SOURCES = Object.freeze({
+  "antigravity-cli": { name: "Antigravity CLI", repository: "google-antigravity/antigravity-cli", latest: true },
+  rtk: { name: "RTK", repository: "rtk-ai/rtk", latest: true },
 });
 
 const PLUGIN_FILE = /^([a-z0-9][a-z0-9_-]*?)(?:-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?))?\.dll$/i;
@@ -92,6 +104,9 @@ function createAppPlugins({
   cpaStateDir,
   services,
   restartCpa,
+  // The Antigravity CLI service, made with the backend (null until it starts), and RTK's.
+  antigravityCli = () => null,
+  rtk = null,
   logger = console,
   fetchImpl = fetch,
   env = process.env,
@@ -135,10 +150,12 @@ function createAppPlugins({
     if (!force && cached && now() - cached.at < CHECK_TTL_MS) return cached;
     let entry;
     try {
-      const list = await github(`/repos/${source.repository}/releases?per_page=30`);
       const prefix = source.tagPrefix || "";
-      const release = (Array.isArray(list) ? list : []).find((item) => !item.draft && !item.prerelease
-        && String(item.tag_name || "").startsWith(prefix));
+      // GitHub's own latest: the newest stable release, however many prereleases came after it.
+      const release = source.latest
+        ? await github(`/repos/${source.repository}/releases/latest`)
+        : (await github(`/repos/${source.repository}/releases?per_page=30`).then((list) => (Array.isArray(list) ? list : [])))
+          .find((item) => !item.draft && !item.prerelease && String(item.tag_name || "").startsWith(prefix));
       entry = release
         ? { at: now(), tag: release.tag_name, version: release.tag_name.slice(prefix.length).replace(/^v/u, ""), url: release.html_url, assets: release.assets || [] }
         : { at: now(), error: "No release yet" };
@@ -214,10 +231,87 @@ function createAppPlugins({
       note: newer && !dll ? "This release has no Windows build to install." : null };
   }
 
+  const toolBase = (id) => ({
+    id, kind: "tool", name: TOOL_SOURCES[id].name, repository: TOOL_SOURCES[id].repository, installed: null, latest: null,
+    updateAvailable: false, canUpdate: false, note: null, error: null, updating: updating.has(id), releaseUrl: null,
+  });
+
+  /** The manifest the latest Antigravity CLI release installs from here, or null when it has no build for this platform. */
+  function antigravityTarget(cli, release) {
+    if (typeof cli?.update !== "function" || !cli.manifest) return null;
+    try {
+      const target = releaseManifest(cli.manifest, { tag_name: release.tag, assets: release.assets });
+      platformAsset(target, platform, arch);
+      return target;
+    } catch { return null; }
+  }
+
+  async function antigravityItem(force) {
+    const base = toolBase("antigravity-cli");
+    const cli = antigravityCli();
+    if (!cli) return { ...base, note: "Starts with Agent Orchestrator." };
+    const current = cli.status();
+    const installed = current.installed ? current.version : null;
+    const item = { ...base, installed, updating: base.updating || Boolean(current.installing) };
+    const release = await latestRelease(TOOL_SOURCES["antigravity-cli"], force);
+    if (release.error) return { ...item, error: release.error };
+    const latest = release.version;
+    const shown = { ...item, latest, releaseUrl: release.url };
+    if (!installed) return { ...shown, note: "Not installed: install it on the Antigravity CLI page." };
+    const newer = compare(latest, installed) > 0;
+    const target = newer ? antigravityTarget(cli, release) : null;
+    return { ...shown, updateAvailable: newer, canUpdate: Boolean(target),
+      note: newer && !target ? "This release has no build to install here: it arrives in an app update." : null };
+  }
+
+  /** winget's own install (a Packages folder or its Links shim): the one `winget upgrade` can update. */
+  const fromWinget = (file) => platform === "win32" && /[\\/]WinGet[\\/](Packages|Links)[\\/]/iu.test(String(file || ""));
+
+  async function rtkItem(force) {
+    const base = toolBase("rtk");
+    if (!rtk) return { ...base, note: "Starts with the app." };
+    const current = await rtk.status();
+    const item = { ...base, installed: current.version || null, updating: base.updating || Boolean(current.installing) };
+    const release = await latestRelease(TOOL_SOURCES.rtk, force);
+    if (release.error) return { ...item, error: release.error };
+    const shown = { ...item, latest: release.version, releaseUrl: release.url };
+    if (!item.installed) return { ...shown, note: "Not installed: install it on the RTK page." };
+    const newer = compare(release.version, item.installed) > 0;
+    const winget = fromWinget(current.path) && typeof rtk.upgrade === "function";
+    return { ...shown, updateAvailable: newer, canUpdate: newer && winget,
+      note: !newer ? null : winget ? "Updates with winget (rtk-ai.rtk)." : "Installed without winget: update it the way you installed it." };
+  }
+
   async function list({ refresh = false } = {}) {
-    const items = [await cpaItem(refresh)];
+    const items = [await cpaItem(refresh), await antigravityItem(refresh), await rtkItem(refresh)];
     for (const plugin of await installedPlugins()) items.push(await pluginItem(plugin, refresh));
     return { items, checkedAt: new Date(now()).toISOString() };
+  }
+
+  async function updateAntigravity() {
+    const cli = antigravityCli();
+    if (!cli) throw new Error("The Antigravity CLI hasn't started yet");
+    const release = await latestRelease(TOOL_SOURCES["antigravity-cli"], true);
+    if (release.error) throw new Error(release.error);
+    const target = antigravityTarget(cli, release);
+    if (!target) throw new Error("This release has no build to install here");
+    const from = cli.status().version;
+    const status = await cli.update(target);
+    if (status?.version !== target.version) throw new Error(`The Antigravity CLI is still ${status?.version ?? from}`);
+    logger.info?.("app-plugins.updated", { plugin: "antigravity-cli", from, to: target.version });
+  }
+
+  async function updateRtk() {
+    if (!rtk || typeof rtk.upgrade !== "function") throw new Error("RTK can't be updated from here");
+    const before = await rtk.status();
+    if (!fromWinget(before.path)) throw new Error("RTK wasn't installed with winget: update it the way you installed it");
+    const { code, output, status } = await rtk.upgrade();
+    const after = status?.version || null;
+    // winget answers non-zero when it has nothing newer (its catalog can trail GitHub): the version says what happened.
+    if (!after || compare(after, before.version) <= 0) {
+      throw new Error(`winget didn't update rtk ${before.version} (exit ${code})${output ? `: ${output.split(/\r?\n/u).filter(Boolean).pop()}` : ""}`);
+    }
+    logger.info?.("app-plugins.updated", { plugin: "rtk", from: before.version, to: after });
   }
 
   /** Streams one release asset to `target`, following GitHub's redirect without the token. */
@@ -294,6 +388,10 @@ function createAppPlugins({
       if (key === "cpa") {
         const result = await services().updateManagedComponent("cpa", { swap: true });
         if (result?.rolledBack) throw new Error(`CPA ${result.to} failed its health check, so CPA ${result.from} stays: ${result.error}`);
+      } else if (key === "antigravity-cli") {
+        await updateAntigravity();
+      } else if (key === "rtk") {
+        await updateRtk();
       } else if (key.startsWith("cpa-plugin:")) {
         await updatePlugin(key.slice("cpa-plugin:".length));
       } else {
@@ -308,4 +406,4 @@ function createAppPlugins({
   return { list, update };
 }
 
-module.exports = { PLUGIN_SOURCES, parsePluginFile, readPluginUpdates, baseVersion, createAppPlugins };
+module.exports = { PLUGIN_SOURCES, TOOL_SOURCES, parsePluginFile, readPluginUpdates, baseVersion, createAppPlugins };
