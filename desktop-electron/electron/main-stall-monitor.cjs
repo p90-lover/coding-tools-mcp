@@ -76,6 +76,10 @@ let seen = Atomics.load(counter, 0);
 let changedAt = Date.now();
 let probing = false;
 let probedThisHold = false;
+// When the hold being probed began. The pause handler below is registered once, on the first
+// probe: as that probe's argument it kept the first hold's start, and every later report gave the
+// time since then (6.4 M ms, 2026-11-02) instead of how long that stall held main.
+let heldSince = 0;
 let session = null;
 const timer = setInterval(() => {
   const value = Atomics.load(counter, 0);
@@ -92,7 +96,8 @@ function shortFrame(frame) {
   const file = frameUrl(frame).split(/[\\\\/]/).pop() || "(script)";
   return (frame.functionName || "(anonymous)") + " " + file + ":" + (frame.location.lineNumber + 1);
 }
-function probe(heldSince) {
+function probe(since) {
+  heldSince = since;
   if (!session) {
     try {
       session = new inspector.Session();
