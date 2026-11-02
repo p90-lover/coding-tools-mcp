@@ -16,6 +16,11 @@ function fixture(harness = "ao:codex", options = {}) {
       calls.push({ endpoint, body });
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: world.runs };
       if (endpoint === "/api/v1/ao/harness/compact") return world.nativeRequest ? world.nativeRequest(endpoint, body) : { ok: true, status: body.status ? world.settled ? "completed" : "compacting" : "in_progress" };
+      if (endpoint === "/api/v1/ao/harness/disconnect" || endpoint === "/api/v1/ao/control") {
+        if (world.stopRequest) return world.stopRequest(endpoint, body);
+        return endpoint.endsWith("disconnect") ? { ok: true, connected: false, owned: false }
+          : { ok: true, run: { ...world.run, cancelled: true } };
+      }
       throw new Error(`Compaction must not edit a task or invoke a summarizer: ${endpoint}`);
     },
     aoHarness: {
@@ -24,11 +29,150 @@ function fixture(harness = "ao:codex", options = {}) {
         assert.equal(id, "session-1"); assert.equal(before, "earlier");
         return { status: world.settled ? "completed" : "in_progress" };
       },
+      observe: async () => ({ exited: true }),
+      exitAgent: async () => { if (world.agentStopError) throw world.agentStopError; return { ok: true }; },
     },
     fetchImpl: async () => { throw new Error("No separate model request is allowed"); },
   });
   return world;
 }
+
+function nativeFixture(options = {}) {
+  const timers = new Set();
+  const world = fixture("codex-native", {
+    confirm: async () => true,
+    setTimer(callback) { const timer = { callback, unref() {} }; timers.add(timer); return timer; },
+    clearTimer: timer => timers.delete(timer),
+    ...options,
+  });
+  world.timers = timers;
+  return world;
+}
+
+const scope = { workspaceId: "ws-1", taskId: "task-1" };
+const owner = { workspaceId: "ws-1", runId: "run-1", nodeId: "lead" };
+
+test("confirmed native Stop clears only the matching owner's pending compaction and timer", async t => {
+  let admissions = 0;
+  const world = nativeFixture({ findCodexExecutable: () => { admissions += 1; return "G:/fixture/codex.exe"; }, exists: () => true });
+  t.after(() => world.workflow.dispose());
+  world.runs.push({ ...world.run, id: "run-2", project_id: "task-2", nodes: [{ ...world.run.nodes[0], receipt: { thread_id: "session-2" } }] },
+    { ...world.run, workspace_id: "ws-2" });
+  const otherScopes = [{ workspaceId: "ws-1", taskId: "task-2" }, { workspaceId: "ws-2", taskId: "task-1" }];
+  const first = await world.workflow.call("compact_chat", scope);
+  const others = await Promise.all(otherScopes.map(args => world.workflow.call("compact_chat", args)));
+  assert.equal(world.timers.size, 3);
+  await world.workflow.call("stop_harness", { ...owner, nodeId: "another-node" });
+  assert.equal(world.timers.size, 3, "another node's acknowledgement cannot release this owner");
+  await world.workflow.call("stop_harness", owner);
+  assert.equal(world.timers.size, 2);
+  assert.equal(world.calls.filter(call => call.endpoint?.endsWith("/compact") && !call.body.status).length, 3, "Stop never submits model work");
+  world.nativeRequest = async (_endpoint, body) => {
+    if (body.status && body.workspace_id === owner.workspaceId && body.run_id === owner.runId) {
+      const error = new Error("The chat's native agent is not connected"); error.code = "AO_HARNESS_NOT_CONNECTED"; throw error;
+    }
+    return { ok: true, status: "in_progress" };
+  };
+  await assert.rejects(world.workflow.call("chat_send", { ...scope, message: "continue" }), /saved team wasn't found/);
+  assert.equal(admissions, 1, "public chat_send reaches normal admission rather than the stopped compaction's missing receipt");
+  world.nativeRequest = null;
+  for (let i = 0; i < otherScopes.length; i++) assert.equal((await world.workflow.call("compact_chat", { ...otherScopes[i], status: true })).compactionId, others[i].compactionId);
+  const next = await world.workflow.call("compact_chat", scope);
+  assert.notEqual(next.compactionId, first.compactionId, "a new explicit request can pass the stopped compaction gate");
+});
+
+test("uncertain or nonterminal native Stop retains the stable compaction without replay", async t => {
+  for (const response of [new Error("lost stop response"), { ok: false }, { ok: true },
+    { ok: true, connected: true, owned: false }, { ok: true, connected: false, owned: true }]) await t.test(JSON.stringify(response), async t => {
+    const world = nativeFixture(); t.after(() => world.workflow.dispose());
+    const first = await world.workflow.call("compact_chat", scope);
+    world.stopRequest = async () => { if (response instanceof Error) throw response; return response; };
+    await world.workflow.call("stop_harness", owner).catch(() => {});
+    assert.equal(world.timers.size, 1);
+    await assert.rejects(world.workflow.call("compact_chat", scope), /already compacting/);
+    assert.equal((await world.workflow.call("compact_chat", { ...scope, status: true })).compactionId, first.compactionId);
+    assert.equal(world.calls.filter(call => call.endpoint?.endsWith("/compact") && !call.body.status).length, 1);
+  });
+});
+
+test("mission Stop releases compaction only after a terminal owner acknowledgement, not synthesized success", async t => {
+  for (const outcome of ["confirmed", "lost", "refused", "foreign", "nonterminal"]) await t.test(outcome, async t => {
+    const world = nativeFixture(); t.after(() => world.workflow.dispose());
+    const first = await world.workflow.call("compact_chat", scope);
+    world.stopRequest = async () => {
+      if (outcome === "lost") throw new Error("lost owner Stop");
+      if (outcome === "refused") return { ok: false };
+      return { ok: true, run: { ...world.run, id: outcome === "foreign" ? "other-run" : world.run.id, cancelled: outcome !== "nonterminal" } };
+    };
+    const stopped = await world.workflow.call("control_run", { ...owner, action: "stop" });
+    assert.equal(stopped.ok, true, "the existing uncertain Stop fallback may synthesize success");
+    if (outcome === "confirmed") {
+      assert.equal(world.timers.size, 0);
+      await assert.rejects(world.workflow.call("compact_chat", { ...scope, status: true, compactionId: first.compactionId }), /replaced/);
+    } else {
+      assert.equal(world.timers.size, 1);
+      assert.equal((await world.workflow.call("compact_chat", { ...scope, status: true })).compactionId, first.compactionId);
+    }
+    assert.equal(world.calls.filter(call => call.endpoint?.endsWith("/compact") && !call.body.status).length, 1);
+  });
+});
+
+test("late native compaction start and status replies cannot resurrect or replace a stopped operation", async t => {
+  for (const waiting of ["start", "status"]) await t.test(waiting, async t => {
+    const world = nativeFixture(); t.after(() => world.workflow.dispose());
+    let release, observed;
+    const entered = new Promise(resolve => { observed = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    let waitingOnce = true;
+    world.nativeRequest = async (_endpoint, body) => {
+      if (waitingOnce && body.status === (waiting === "status")) { waitingOnce = false; observed(); return gate; }
+      return { ok: true, status: "in_progress" };
+    };
+    let pending;
+    if (waiting === "start") pending = world.workflow.call("compact_chat", scope);
+    else {
+      await world.workflow.call("compact_chat", scope);
+      pending = world.workflow.call("compact_chat", { ...scope, status: true });
+    }
+    const rejected = assert.rejects(pending, /changed|replaced|stopped/);
+    await entered;
+    await world.workflow.call("stop_harness", owner);
+    const replacement = await world.workflow.call("compact_chat", scope);
+    release({ ok: true, status: "completed" });
+    await rejected;
+    assert.equal((await world.workflow.call("compact_chat", { ...scope, status: true })).compactionId, replacement.compactionId);
+    assert.equal(world.timers.size, 1, "only the replacement watcher survives");
+  });
+});
+
+test("a late Stop acknowledgement cannot clear a replacement compaction under the same chat key", async t => {
+  const world = nativeFixture(); t.after(() => world.workflow.dispose());
+  await world.workflow.call("compact_chat", scope);
+  let acknowledge, entered;
+  const stopping = new Promise(resolve => { entered = resolve; });
+  world.stopRequest = () => { entered(); return new Promise(resolve => { acknowledge = resolve; }); };
+  const stop = world.workflow.call("stop_harness", owner);
+  await stopping;
+  world.settled = true;
+  assert.equal((await world.workflow.call("compact_chat", { ...scope, status: true })).status, "completed");
+  world.settled = false;
+  const replacement = await world.workflow.call("compact_chat", scope);
+  acknowledge({ ok: true, connected: false, owned: false });
+  await stop;
+  const current = await world.workflow.call("compact_chat", { ...scope, status: true });
+  assert.equal(current.compactionId, replacement.compactionId);
+  assert.equal(current.status, "in_progress");
+});
+
+test("a partial mission Stop with unconfirmed external shutdown retains the pending compaction", async t => {
+  const world = fixture(); t.after(() => world.workflow.dispose());
+  const first = await world.workflow.call("compact_chat", scope);
+  world.agentStopError = new Error("external shutdown is uncertain");
+  await assert.rejects(world.workflow.call("control_run", { ...owner, action: "stop" }), /stop could not be confirmed/);
+  assert.equal((await world.workflow.call("compact_chat", { ...scope, status: true })).compactionId, first.compactionId);
+  await assert.rejects(world.workflow.call("compact_chat", scope), /already compacting/);
+  assert.equal(world.calls.filter(call => call.compact).length, 1, "no model operation is replayed after partial Stop");
+});
 
 test("/compact uses the owned AO session, and acceptance is not completion", async () => {
   const world = fixture();

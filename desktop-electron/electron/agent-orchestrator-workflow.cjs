@@ -2331,10 +2331,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       message: "Stop this Codex session?",
       detail: `Workspace: ${id}\nRun: ${run}\nNode: ${node}\nWork in progress may stop.`,
     })) return { ok: false, cancelled: true };
+    const clearCompactions = pendingCompactionStop(id, run, node);
     const response = await requestHeadless("/api/v1/ao/harness/disconnect", {
       workspace_id: id, run_id: run, node_id: node, confirm: true,
     }, { localConfirmation: true });
     if (response?.ok !== true) throw new Error("Couldn't confirm the session stopped. Check its status.");
+    if (response.connected === false && response.owned === false) clearCompactions();
     releaseNativePreviews(id, run, node);
     return response;
   }
@@ -2621,6 +2623,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function controlRun({ workspaceId, runId, action, executable, nodeId } = {}) {
     if (!["pause", "resume", "stop", "retry", "retry_auto", "review_failures"].includes(action)) throw new Error("Choose a mission control");
     const id = clean(workspaceId, 128), run = clean(runId, 80);
+    const clearCompactions = action === "stop" ? pendingCompactionStop(id, run) : null;
+    let stopConfirmed = false;
     const stopping = action === "stop" ? backgroundRuns.get(runKey(id, run)) : null;
     if (stopping) {
       stopping.stopped = true;
@@ -2638,6 +2642,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     try {
       result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, ...(nodeId ? { node_id: clean(nodeId, 80) } : {}), confirm: true }, { localConfirmation: true });
       if (result?.ok !== true || result.run?.workspace_id !== id) throw new Error("Mission control needs a fresh status check");
+      stopConfirmed = action === "stop" && result.run.id === run && result.run.cancelled === true
+        && Array.isArray(result.run.nodes) && !result.run.nodes.some(node => ["running", "reserved"].includes(node.state));
     } catch (error) {
       // Stop the local loop and known owned agents even when saved mission cancellation
       // cannot be confirmed; report that uncertainty instead of claiming the saved state changed.
@@ -2702,6 +2708,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (stopping) { stopping.detail = message; reportRun(id, run, stopping, null); }
         throw new Error(message);
       }
+      if (stopConfirmed) clearCompactions();
     }
     const current = backgroundRuns.get(runKey(id, run));
     if (action === "resume") {
@@ -5356,6 +5363,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   // A chat is working when its latest run is being driven or has a card running.
   const sessionCompactions = new Map();
+  function pendingCompactionStop(workspaceId, runId, nodeId = null) {
+    const pending = [...sessionCompactions].filter(([, entry]) => entry.status === "in_progress"
+      && entry.scope.workspace_id === workspaceId && entry.scope.run_id === runId
+      && (!nodeId || entry.scope.node_id === nodeId));
+    // Capture the operation before awaiting Stop; a late acknowledgement cannot clear its replacement.
+    return () => {
+      for (const [key, entry] of pending) {
+        if (sessionCompactions.get(key) !== entry || entry.status !== "in_progress") continue;
+        if (entry.timer) clearTimer(entry.timer);
+        sessionCompactions.delete(key);
+      }
+    };
+  }
   function chatWorking(id, task, runsOfWorkspace) {
     if (sessionCompactions.get(runKey(id, task))?.status === "in_progress") return true;
     return runsOfWorkspace.filter(run => run.project_id === task && !runSettled(run)).some(run => {
@@ -6751,7 +6771,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       sessionCompactions.delete(key);
     }
     if (chatWorking(id, task, saved.runs)) throw new Error("Compact is disabled while a chat is in progress");
-    const entry = { id: randomUUID(), runId: latest.id, sessionId: card.receipt.thread_id, status: "in_progress", accepted: false, starting: true, submitted: false, before: null };
+    const entry = { id: randomUUID(), scope, runId: latest.id, sessionId: card.receipt.thread_id, status: "in_progress", accepted: false, starting: true, submitted: false, before: null };
     sessionCompactions.set(key, entry);
     try {
       if (externalAgent(card)) {
@@ -6775,6 +6795,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A lost HTTP response says nothing about submitted provider work. Keep this request's
       // stable receipt and reconcile it; a retry must never manufacture a second admission key.
     }
+    if (sessionCompactions.get(key) !== entry) throw new Error("The chat session changed while compacting");
     entry.starting = false;
     let observations = 0;
     const observeCompletion = async () => {
@@ -7008,6 +7029,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!hiding) throw new Error("Owned session identity is unknown; stop needs attention");
       logger?.warn?.("ao.stop.unnamed_card", { run: mission.id });
     }
+    const clearCompactions = pendingCompactionStop(workspaceId, mission.id);
     const result = await requestHeadless("/api/v1/ao/control", {
       workspace_id: workspaceId, run_id: mission.id, action: "stop", confirm: true,
     }, { localConfirmation: true });
@@ -7024,6 +7046,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.info?.("ao.stop_owned_no_controller", { run: mission.id });
       });
     }
+    if (result.run.cancelled === true) clearCompactions();
     return result.run;
   }
   async function resolveStoppedIntents(workspaceId,taskId,saved) {
