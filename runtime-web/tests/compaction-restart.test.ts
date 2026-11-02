@@ -75,7 +75,12 @@ function runProcess(home: string, operation: Record<string, unknown>): {
   ].join("\n");
   const result = spawnSync(process.execPath, ["--eval", script], {
     encoding: "utf8", timeout: 15_000, windowsHide: true,
-    env: { ...process.env, CODEX_CHATGPT_WEB_HOME: home },
+    env: {
+      ...process.env,
+      CODEX_CHATGPT_WEB_HOME: home,
+      // Use the durable launcher seam for this evaluated fixture.
+      CODEX_CHATGPT_WEB_LAUNCHER: process.execPath,
+    },
   });
   if (result.status !== 0) throw new Error(result.error?.message || result.stderr || result.stdout);
   return JSON.parse(result.stdout.trim());

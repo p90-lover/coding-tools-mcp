@@ -816,7 +816,7 @@ test.each(["plain", "legacy", "reordered", "missing Pro"])("probe admission pres
     .rejects.toThrow(scenario === "missing Pro" ? 'no "6 Pro" stop' : '"6 Pro" stop is locked');
 });
 
-test.each(["missing", "locked"])("an available Pro never substitutes for unavailable Extra High, which runs as High (%s)", async state => {
+test.each(["missing", "locked"])("an available Pro preserves the Extra High preference but cannot unlock its picker stop (%s)", async state => {
   const picker = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6",
     stops: state === "missing" ? PLAIN_STOPS.filter(name => name !== "Extra High") : PLAIN_STOPS,
     lockedStops: state === "locked" ? ["Extra High"] : [] });
@@ -825,15 +825,23 @@ test.each(["missing", "locked"])("an available Pro never substitutes for unavail
   const capabilities = await detectChatGptAccountCapabilities(picker.pageOver(fixture) as never,
     { onEffortSnapshot: snapshot => { snapshots.push(snapshot); } });
   expect(capabilities).toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: true });
-  // v6 runs Extra High as High on such an account; Pro is never the substitute.
+  // The legacy Pro flag admits both upper-tier requests; the exact page stop still owns selection.
   const route = requireChatGptWebModelRoute("chatgpt-web/extra-high", capabilities);
-  expect(route.slug).toBe("chatgpt-web/high");
+  expect(route.slug).toBe("chatgpt-web/extra-high");
   const workerCapabilities = { ...capabilities, localToolsEnabled: false };
-  expect(resolveChatGptWebModelMode(route.backendModel, route.adapterEffort, workerCapabilities).effort).toBe("high");
-  expect(() => resolveChatGptWebModelMode(route.backendModel, "xhigh", workerCapabilities)).toThrow("Extra High effort is not available");
+  expect(resolveChatGptWebModelMode(route.backendModel, route.adapterEffort, workerCapabilities))
+    .toMatchObject({ effort: "xhigh", displayLabel: "Extra High" });
+  const lowerTierOnly = { ...workerCapabilities, proAvailable: false };
+  expect(requireChatGptWebModelRoute("chatgpt-web/extra-high", lowerTierOnly).slug).toBe("chatgpt-web/high");
+  expect(() => resolveChatGptWebModelMode(route.backendModel, "xhigh", lowerTierOnly)).toThrow("Extra High effort is not available");
+  expect(() => resolveChatGptWebModelMode(route.backendModel, "max", lowerTierOnly)).toThrow("Pro effort is not available");
   expect(chatGptEffortTierAvailability(snapshots[0]!)).toEqual([true, true, true, false, true]);
+  const unavailable = selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    route.backendModel, route.adapterEffort, workerCapabilities);
+  await expect(unavailable).rejects.toMatchObject({ code: "chatgpt_model_pick_failed", retryable: false });
+  await expect(unavailable).rejects.toThrow(state === "missing" ? 'no "6 Extra High" stop' : '"6 Extra High" stop is locked');
   await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
-    route.backendModel, route.adapterEffort, workerCapabilities)).resolves.toMatchObject({ effort: "high", displayLabel: "High" });
+    route.backendModel, "high", workerCapabilities)).resolves.toMatchObject({ effort: "high", displayLabel: "High" });
   expect(picker.label()).toBe("High");
 });
 
