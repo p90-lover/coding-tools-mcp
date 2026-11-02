@@ -9777,6 +9777,56 @@ test("a reviewer's deny tells the agent why, and that the user did not refuse it
   assert.equal(none, "", "an allowed call needs no explanation");
 });
 
+test("parallel tool requests are reviewed at the same time with one lookup of where the agent works", async () => {
+  // Reviews ran one after another (each up to a whole review budget), and a request that arrived
+  // meanwhile waited for the whole pass; each review also looked up the agent's folder again.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "allow", kind: "allow_once", label: "Allow Once" }, { id: "reject", kind: "reject_once", label: "Deny" }];
+  const ask = (id, command) => ({ approval_id: id, source: "ao", kind: "command", command, tool: "Bash", decisions });
+  let pending = [ask("a", "python tools/a.py --apply"), ask("b", "python tools/b.py --apply"), ask("c", "python tools/c.py --apply")];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [];
+  let inFlight = 0, most = 0, reviews = 0, lookups = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      // Only completions are reviews; any other CPA read answers nothing useful.
+      if (!String(url).endsWith("/chat/completions")) return { ok: false, status: 404, json: async () => ({}) };
+      reviews++; inFlight++; most = Math.max(most, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 80));
+      inFlight--;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"a project script"}' } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: pending }),
+      resolveApproval: async (_session, requestId, decisionId) => {
+        resolved.push([requestId, decisionId]);
+        pending = pending.filter(approval => approval.approval_id !== requestId);
+        return { ok: true };
+      },
+      sessionWorkspace: async () => { lookups++; return { root: "G:\\Projects\\app" }; },
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  try {
+    for (let tries = 0; tries < 300 && resolved.length < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved.map(([id]) => id).sort(), ["a", "b", "c"]);
+    assert.deepEqual(resolved.map(([, decision]) => decision), ["allow", "allow", "allow"]);
+    assert.ok(most >= 2, `reviews overlapped (at most ${most} at once)`);
+    assert.equal(reviews, 3);
+    assert.equal(lookups, 1, "one lookup of where the agent works served all three reviews");
+  } finally {
+    mission.nodes[0].state = "finished";
+  }
+});
+
 test("after a restart the interrupted chats launch their agents one after another, not all at once", async () => {
   // Seen 2026-10-31: after an update six interrupted chats launched together on the busy hard
   // disk, and some timed out getting ready.
