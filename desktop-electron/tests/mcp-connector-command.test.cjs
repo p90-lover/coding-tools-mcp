@@ -186,7 +186,7 @@ test("account setup keeps its captured account and tunnel across awaited workspa
   const start = source.indexOf('  handle("launcher:mcp-create-connector",');
   const end = source.indexOf('\n  handle("launcher:doctor",', start);
   for (const scenario of [
-    { name: "no assigned tunnel cannot borrow the global primary", missing: true },
+    { name: "an unconfigured primary cannot be borrowed", missing: true },
     { name: "a global switch during readiness aborts", readySwitch: true },
     { name: "a global switch during cookie inspection aborts", cookieSwitch: true },
     { name: "a target partition remap during routing aborts", remap: true },
@@ -213,7 +213,8 @@ test("account setup keeps its captured account and tunnel across awaited workspa
       quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
       browserAccounts: { has: id => id === "account-2", partitionOf: () => partition,
         recordConnector: (_id, value) => { if (value.bound) calls.bound++; return true; } },
-      browserHost: host, runtimeHost: { currentOperation: () => runtimeOperation },
+      browserHost: host, runtimeHost: { currentOperation: () => runtimeOperation, runtimeConfigSnapshot: () => ({ configured: false }) },
+      currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
       session: { fromPartition: () => ({ cookies: { get: async () => { if (scenario.cookieSwitch) host.partition = "persist:other"; return []; } } }) },
       signedInFromCookies: () => true,
       routeIdleAccountPartition: async () => { if (scenario.remap) partition = "persist:remapped"; },
@@ -248,6 +249,82 @@ test("account setup keeps its captured account and tunnel across awaited workspa
     assert.equal(calls.create, scenario.setupSwitch || scenario.unconfirmed || saving ? 1 : 0);
     assert.equal(calls.save, saving ? 1 : 0);
     assert.equal(calls.bound, scenario.completes ? 1 : 0);
+  });
+});
+
+test("account setup verifies the configured main tunnel without an extra assignment", async t => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const start = source.indexOf('  handle("launcher:mcp-create-connector",');
+  const end = source.indexOf('\n  handle("launcher:doctor",', start);
+  assert(start >= 0 && end > start);
+  const { currentConnectorSettings } = require("../electron/mcp-connector-setup.cjs");
+  for (const scenario of [
+    { name: "connects after the helper confirms the exact main tunnel", completes: true },
+    { name: "another account's extra tunnel does not hide the main tunnel", unrelated: true, completes: true },
+    { name: "unconfigured runtime cannot offer a primary candidate", unconfigured: true },
+    { name: "missing credentials cannot offer a primary candidate", noCredentials: true },
+    { name: "fresh ownership denial cannot record success", denied: true, creates: true },
+    { name: "an unconfirmed connection cannot record success", unconfirmed: true, creates: true },
+    { name: "a different returned tunnel cannot record success", wrongTunnel: true, creates: true },
+    { name: "a primary change during readiness aborts", readyRetarget: true },
+    { name: "a connector rename during cookie inspection aborts", cookieRename: true },
+    { name: "a new extra assignment during routing aborts", routeAssignment: true },
+    { name: "a primary change during setup aborts", setupRetarget: true, creates: true },
+    { name: "a primary change while account state is saved cannot finish", saveRetarget: true, creates: true },
+  ]) await t.test(scenario.name, async () => {
+    let handler, name = "Coding Tools Native2", browserOperation = null;
+    const tunnelId = "tunnel_" + "a".repeat(32), otherId = "tunnel_" + "b".repeat(32);
+    const config = { mode: "full", automaticTunnel: { tunnelId } };
+    const tunnels = scenario.unrelated ? [{ id: "extra-other", accountId: "other", tunnelId: otherId, state: "ready" }] : [];
+    const created = [], records = [], operations = [];
+    const host = { partition: "persist:global", currentOperation: () => browserOperation,
+      ready: async () => { if (scenario.readyRetarget) config.automaticTunnel = { tunnelId: otherId }; } };
+    const context = {
+      Error, handle: (_channel, callback) => { handler = callback; }, assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+      quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
+      browserAccounts: { has: id => id === "account-2", partitionOf: () => "persist:account-2",
+        recordConnector: async (_id, value) => {
+          records.push(value);
+          if (scenario.saveRetarget && value.bound) config.automaticTunnel = { tunnelId: otherId };
+          return true;
+        } },
+      browserHost: host, runtimeHost: { currentOperation: () => null,
+        runtimeConfigSnapshot: () => ({ configured: !scenario.unconfigured, owner: "launcher", config }),
+        mcpCredentialsConfigured: () => !scenario.noCredentials, mcpConnectorName: () => name },
+      currentConnectorSettings,
+      session: { fromPartition: () => ({ cookies: { get: async () => {
+        if (scenario.cookieRename) name = "Changed connector";
+        return [];
+      } } }) }, signedInFromCookies: () => true,
+      routeIdleAccountPartition: async () => {
+        if (scenario.routeAssignment) tunnels.push({ id: "extra-new", accountId: "account-2", tunnelId: otherId, state: "ready" });
+      },
+      runtimeSupervisor: { extraTunnels: { status: () => tunnels,
+        reconnect: async () => assert.fail("primary setup must not reconnect an unrelated extra tunnel"),
+        setConnector: async () => assert.fail("primary setup must not persist an extra tunnel binding") } },
+      createWorkspaceConnector: async options => {
+        created.push(options); browserOperation = "MCP connector creation";
+        try {
+          assert.equal(options.target.partition, "persist:account-2");
+          assert.equal(options.target.tunnelId, tunnelId);
+          assert.equal(options.target.requireTunnelMatch, true);
+          options.assertCurrent();
+          if (scenario.denied) throw new Error("The selected tunnel belongs to a different Platform user. Choose a tunnel created by the signed-in account.");
+          if (scenario.setupRetarget) config.automaticTunnel = { tunnelId: otherId };
+          return { connected: !scenario.unconfirmed, created: false, href: "/plugins/fresh-proof",
+            binding: { tunnelId: scenario.wrongTunnel ? otherId : tunnelId } };
+        } finally { browserOperation = null; }
+      },
+      app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
+      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation: value => operations.push(value),
+    };
+    vm.runInNewContext(source.slice(start, end), context);
+    if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
+    else await assert.rejects(handler({}, "account-2"));
+    assert.equal(created.length, scenario.completes || scenario.creates ? 1 : 0);
+    assert.equal(records.filter(value => value.bound).length, scenario.completes || scenario.saveRetarget ? 1 : 0);
+    assert.equal(records.at(-1)?.bound, scenario.completes ? true : undefined);
+    assert.equal(operations.at(-1)?.status, scenario.completes ? "completed" : "failed");
   });
 });
 
