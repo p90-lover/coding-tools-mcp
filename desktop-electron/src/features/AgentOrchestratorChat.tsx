@@ -27,7 +27,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
   autoCompactArg, chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
@@ -276,17 +276,12 @@ function ReasoningItem({ item }: { item: ChatLiveItem }) {
   // Live reasoning arrives as its newest part, so it headlines the current thought, not the first.
   const current = running ? lines.filter((line) => line.trim()).at(-1) ?? lines[0] : lines[0];
   const headline = current.replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
-  // A model that thinks in one long paragraph shows it as one line, the whole of it a click away.
-  const rest = running
-    ? (lines.length > 1 || headline.length > 140 ? item.text.trim() : "")
-    : lines.slice(1).join("\n").trim() || (headline.length > 140 ? headline : "");
-  // The body is parsed only while it is open: a long thought streams in on every poll, and parsing
-  // it inside a closed <details> cost the chat its frame rate for nothing anyone saw.
-  return rest
-    ? <details className="cx-reasoning" onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
-      {open ? <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div> : null}</details>
-    : <><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></>;
+  // Every thought has the same disclosure, even a single paragraph. Parse it only while open:
+  // mounting Markdown behind closed details made long streaming thoughts expensive.
+  return <details className="cx-reasoning" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary><Icon name="chevron" width="12" height="12" /><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
+    {open ? <div className="cx-reasoning-body"><ChatMarkdown text={item.text.trim()} /></div> : null}
+  </details>;
 }
 
 /**
@@ -297,7 +292,7 @@ function ReasoningItem({ item }: { item: ChatLiveItem }) {
 function toolHeadline(item: ChatLiveItem): string {
   // The agent's own words say what the call is for; the command itself is one click away.
   if (item.description) return item.description;
-  return item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
+  return dshItemDetail(item) || item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
 }
 
 /** How a tool call ended, for its dot: AO's activity status, "pending" while it waits on approval. */
@@ -442,11 +437,11 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
 function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
   const [open, setOpen] = useState(false);
   const latest = items[items.length - 1];
+  const title = live ? dshLiveTitle(items).label : dshProcessTitle(items);
   return <div className={`cx-group${live ? " is-live" : ""}`}>
-    <button type="button" className="cx-activity-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+    <button type="button" className="cx-activity-head" aria-expanded={open} onClick={() => setOpen(!open)} title={activitySummary(items)}>
       <Icon name="chevron" width="11" height="11" className={open ? "is-open" : undefined} />
-      <span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{live ? "Working" : "Explored"}</span>
-      <span className="cx-group-text">{activitySummary(items)}</span>
+      <span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{title}</span>
     </button>
     {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} />)}</ol>
       : live && latest ? <ol className="cx-live cx-group-now"><LiveRow item={latest} /></ol> : null}
@@ -457,7 +452,8 @@ function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }
 function LiveTimeline({ items, live = false, finished = false, reply }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string }) {
   const compact = useContext(CompactActivity);
   // A message the reply below already holds is not shown twice (withoutReplied).
-  const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), reply);
+  const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), reply)
+    .map((item) => !live && item.status === "running" ? { ...item, status: "completed" as const } : item);
   if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} />)}</ol>;
   const segments = groupTimeline(tidy);
   return <ol className="cx-live is-compact">
@@ -2037,8 +2033,9 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
     const headError = failing && turn !== failedTurn ? { step: failing.name, message: failing.error! } : undefined;
     const items = cards.flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? []);
     const changes = turnChanges(items);
-    // The reply as steps, drawn in the chat style (ChatReplyPlan); the transcript's rows are its steps.
-    const plan = replyStyle === "transcript" ? null : replyPlan(items, live, failing?.error);
+    // An agent's own tasks belong in every style, including the default transcript. Other styles
+    // may also summarize work as steps; the transcript never invents a task list from tool calls.
+    const plan = replyPlan(items, live, failing?.error);
     // Focus keeps the work behind Show work whatever the chat's setting: its progress line says where the turn is.
     const turnWork = replyStyle === "focus" ? false : showWork;
     const hasReply = Boolean(cards.length || live);
@@ -2071,7 +2068,7 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
                 </div>)}</SteerReader.Provider> : null}
               {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} aria-label="Reply">
               {headError ? <ReplyError team={teamAnswer} error={headError} /> : null}
-              {plan ? <ReplyPlanView plan={plan} style={replyStyle} live={live} /> : null}
+              <ReplyPlanView plan={plan} style={replyStyle} live={live} />
               {/* The reply's top says the error, so the DeepSeek turn leaves its own copy out. */}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
@@ -2082,7 +2079,7 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
                   under it: a running DeepSeek turn draws it inside its work, right above that line. */}
               {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
               {!dsh && live ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
-              {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
+              {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`} role="region" aria-label="Answer">
                 {/* Who answered and its verdict are in the summary below; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
                 <ChatMarkdown text={turn.final.text ?? ""} onVisualize={turn.status === "done" && !turn.final.working

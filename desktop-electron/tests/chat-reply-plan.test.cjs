@@ -53,6 +53,16 @@ test("the agent's own todo list is the plan when it kept one (TodoWrite or updat
   assert.deepEqual([newest.source, newest.done, newest.steps.length], ["agent", 2, 2]);
 });
 
+test("a failed task update cannot replace the agent's accepted tasks, and an empty update clears them", () => {
+  const accepted = { id: "accepted", kind: "tool", status: "completed", label: "update_plan", text: "update_plan",
+    input: JSON.stringify({ plan: [{ step: "Actual task", status: "in_progress" }] }) };
+  const failed = { ...accepted, id: "failed", status: "failed", input: JSON.stringify({ plan: [{ step: "Rejected update", status: "completed" }] }) };
+  assert.deepEqual(plain(plan.agentPlan([accepted, failed])), [{ title: "Actual task", status: "in_progress" }]);
+  const empty = { ...accepted, id: "empty", input: JSON.stringify({ plan: [] }) };
+  assert.deepEqual(plain(plan.agentPlan([accepted, empty])), []);
+  assert.deepEqual(plain(plan.replyPlan([accepted, empty], false)), { source: "agent", steps: [], done: 0 });
+});
+
 test("a goal's rounds are numbered from the person's message, and all but the newest two fold", () => {
   const feedback = (reason) => ({ text: `Stop hook feedback:\n[ship it]: ${reason}` });
   const turns = [{ key: "a", user: { text: "hello" } }, { key: "g", user: { text: "ship it" } },

@@ -66,7 +66,7 @@ const runningItem = (item: ChatLiveItem) => /^(running|pending|in_progress)$/i.t
 export function agentPlan(items: ChatLiveItem[]): { title: string; status: string }[] | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
-    if (!WORK_KINDS.has(item.kind) || !["todo_write", "todowrite", "update_plan"].includes(dshToolName(item)) || !item.input) continue;
+    if (!WORK_KINDS.has(item.kind) || failedItem(item) || !["todo_write", "todowrite", "update_plan"].includes(dshToolName(item)) || !item.input) continue;
     let input: unknown;
     try { input = JSON.parse(item.input); } catch { continue; }
     const record = input as { todos?: unknown; plan?: unknown };
@@ -77,7 +77,8 @@ export function agentPlan(items: ChatLiveItem[]): { title: string; status: strin
       const title = typeof todo?.content === "string" ? todo.content : typeof todo?.step === "string" ? todo.step : "";
       return title.trim() ? [{ title: stepTitle(title), status: typeof todo.status === "string" ? todo.status : "pending" }] : [];
     });
-    if (todos.length) return todos;
+    // An empty update clears the list; falling back to an older one revived tasks the agent removed.
+    if (!list.length || todos.length) return todos;
   }
   return null;
 }

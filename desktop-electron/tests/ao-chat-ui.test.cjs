@@ -132,6 +132,53 @@ test("a DeepSeek turn renders as DeepSeek Desktop's Standard view: a live group 
   assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
 });
 
+test("the default transcript shows real task progress for both ordinary and DeepSeek models", () => {
+  const timeline = [{ id: "todo", kind: "tool", status: "completed", label: "TodoWrite", text: "TodoWrite",
+    input: JSON.stringify({ todos: [{ content: "Inspect the failure", status: "completed" },
+      { content: "Fix the renderer", status: "in_progress" }, { content: "Verify the result", status: "pending" }] }) }];
+  for (const model of ["cpa/gpt-6.1-sol", "cpa/deepseek-v4.1-flash"]) {
+    const runId = `tasks:${model}`;
+    const props = { runs: [{ id: runId, project_id: "task", execution_mode: "single", nodes: [
+      { id: "lead", role: "planner", state: "running", route: { harness_id: "ao:codex", model } }] }],
+      tasks: [{ id: "task", title: "Task", description: "Make responses clearer" }], selectedTaskId: "task", busy: false, approvals: [],
+      activity: { [`${runId}:lead`]: { timeline, activity: "Fixing the renderer", started_at_ms: Date.now() } },
+      loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+    const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+    assert.match(html, /aria-label="Tasks"/, model);
+    assert.match(html, /cx-rplan-count">1 of 3 done</);
+    assert.match(html, /is-done.*Inspect the failure.*is-running.*Fix the renderer.*is-pending.*Verify the result/);
+  }
+});
+
+test("transcript tasks fold when finished and never invent a checklist from ordinary tool calls", () => {
+  const plans = load("chat-reply-plan.ts", { "./ao-chat": chat });
+  const view = load("ChatReplyPlan.tsx");
+  const tool = { id: "p", kind: "tool", status: "completed", label: "update_plan", text: "update_plan",
+    input: JSON.stringify({ plan: [{ step: "Inspect the parser", status: "completed" }, { step: "Run tests", status: "completed" }] }) };
+  const plan = plans.replyPlan([tool], false);
+  const render = (plan, live) => renderToStaticMarkup(React.createElement(view.ReplyPlanView, { plan, style: "transcript", live }));
+  const done = render(plan, false);
+  assert.match(done, /aria-label="Tasks".*aria-expanded="false".*2 of 2 done/);
+  assert.doesNotMatch(done, /cx-rplan-steps/, "finished tasks are not mounted until opened");
+  assert.match(render(plan, true), /aria-expanded="true".*Inspect the parser.*Run tests/);
+  assert.equal(render(plans.replyPlan([{ id: "c", kind: "command", status: "completed", text: "npm test" }], false), false), "");
+});
+
+test("ordinary model activity uses specific DeepSeek headings rather than unexplained Working", () => {
+  const runId = "clear:activity";
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, {
+    runs: [{ id: runId, project_id: "task", execution_mode: "single", nodes: [
+      { id: "lead", role: "planner", state: "running", route: { harness_id: "ao:codex", model: "cpa/gpt-6.1-sol" } }] }],
+    tasks: [{ id: "task", title: "Task", description: "Check the project" }], selectedTaskId: "task", busy: false, approvals: [],
+    activity: { [`${runId}:lead`]: { timeline: [{ id: "read", kind: "tool", status: "running", text: "Read",
+      input: JSON.stringify({ path: "README.md" }) }], started_at_ms: Date.now() } },
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},
+  }));
+  assert.match(html, /cx-group-verb cx-shimmer">Reading files · README\.md</);
+  assert.doesNotMatch(html, /cx-group-verb[^>]*>Working</);
+  assert.match(html, /cx-live-text">README\.md</, "the tool summary shows its path, not Read · Read");
+});
+
 test("a reply's head says who answered, how it stands, why it failed, a team's cards and the files it changed", () => {
   const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null } });
   const edit = (path, additions, deletions) => ({ id: `${path}${additions}`, kind: "edit", status: "completed", text: "", files: [{ path, additions, deletions }] });
