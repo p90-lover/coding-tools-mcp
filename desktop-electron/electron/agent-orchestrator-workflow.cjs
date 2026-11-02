@@ -360,17 +360,31 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       entry.lease.release({ ended: true });
     }
   }
-  // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
+  // One board/run read serves every caller for a moment (as the upstream shares a conversation tail). A
   // working chat's activity poll, the run loop and their per-node checks each read the same run
   // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
-  // serialization of the run in coding-tools-headless. Any other request may change a run, so it
+  // serialization of the run in coding-tools-headless. A mutation may change a run, so it
   // drops what was read, before it is sent and again once it is answered. The app turns it on
   // (runReadFreshMs); off by default, so a caller that changes runs some other way reads afresh.
   const HEADLESS_READS = new Set(["/api/v1/ao/read", "/api/v1/ao/harness/status", "/api/v1/ao/harness/permission-profiles"]);
-  const runReads = new Map(); // JSON [workspace, run] -> { at, read }
+  const runReads = new Map(); // JSON read key -> { at, pending, read }
+  function sharedWorkflowRead(key, load) {
+    if (!(runReadFreshMs > 0)) return load();
+    const known = runReads.get(key);
+    if (known && (known.pending || Date.now() - known.at < runReadFreshMs)) return known.read;
+    const entry = { at: 0, pending: true, read: load() };
+    runReads.set(key, entry);
+    entry.read.then(() => {
+      entry.pending = false;
+      entry.at = Date.now();
+    }, () => { if (runReads.get(key) === entry) runReads.delete(key); });
+    if (runReads.size > 64) runReads.delete(runReads.keys().next().value);
+    return entry.read;
+  }
   // Every argument passes through (a confirmed action's third is its localConfirmation).
   const requestHeadless = (endpoint, ...rest) => {
-    if (HEADLESS_READS.has(endpoint)) return sendHeadless(endpoint, ...rest);
+    if (HEADLESS_READS.has(endpoint)
+      || endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list") return sendHeadless(endpoint, ...rest);
     runReads.clear();
     return Promise.resolve(sendHeadless(endpoint, ...rest)).finally(() => runReads.clear());
   };
@@ -912,13 +926,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   async function board({ workspaceId, taskId } = {}) {
-    const result = checked(await tool(workspaceId, "workflow_list", {
-      ...(taskId ? { task_id: clean(taskId, 128) } : {}),
-      // Archived and deleted tasks stay listed; the chat list filters them by their lifecycle.
-      limit: 100, include_archived: true,
-    }));
-    return { ok: true, revision: result.revision, steps: result.steps, tasks: result.tasks ?? [],
-      task: result.task ?? null, workspaceId: result.workspace_id };
+    const id = clean(workspaceId, 128), task = taskId ? clean(taskId, 128) : "";
+    return sharedWorkflowRead(JSON.stringify(["board", id, task]), async () => {
+      const result = checked(await tool(id, "workflow_list", {
+        ...(task ? { task_id: task } : {}),
+        // Archived and deleted tasks stay listed; the chat list filters them by their lifecycle.
+        limit: 100, include_archived: true,
+      }));
+      return { ok: true, revision: result.revision, steps: result.steps, tasks: result.tasks ?? [],
+        task: result.task ?? null, workspaceId: result.workspace_id };
+    });
   }
 
   function connection() {
@@ -1687,21 +1704,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   function runs({ workspaceId, runId } = {}) {
     const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "";
     const key = JSON.stringify([id, run]);
-    const known = runReads.get(key);
-    if (known && Date.now() - known.at < runReadFreshMs) return known.read;
-    const read = (async () => {
+    return sharedWorkflowRead(key, async () => {
       const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}) });
       if (response?.ok !== true || !Array.isArray(response.runs)) {
         throw new Error("AO run read failed");
       }
       return response;
-    })();
-    if (runReadFreshMs > 0) {
-      runReads.set(key, { at: Date.now(), read });
-      read.catch(() => { if (runReads.get(key)?.read === read) runReads.delete(key); });
-      if (runReads.size > 64) runReads.delete(runReads.keys().next().value);
-    }
-    return read;
+    });
   }
 
   async function updateRun({ workspaceId, change } = {}) {

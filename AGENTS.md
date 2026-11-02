@@ -76,6 +76,29 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 - A silent install (`/S /D=H:\Apps\Coding Tools`) copies the old install to `%TEMP%` as a rollback: set `TEMP`/`TMP` to a folder on H: (outside the install folder) before running it.
 - Keep scratch, backups and Trash out of `H:\Apps\Coding Tools`: every update copies that whole folder.
 
+## Delivery: every change ships as a release
+
+Every agent working in this repository follows this: Claude Code, Codex, opencode and Coding Tools' own chat agents. A task with file changes is not done until its change is merged and released.
+
+1. **Pull request.** Every change goes into a pull request against `main`. Never push to `main` directly. Never leave a change only in a worktree or as uncommitted edits. One PR per task, pushed as few times as possible: this repository's GitHub Actions were once suspended for using too much compute.
+2. **Merge.** Once the PR's required checks pass, merge it yourself. Don't leave it open for someone else unless the user said to wait. Fix a failing check and push again. Don't re-run CI in a loop.
+3. **Plugins.** Plugin repositories, for example `G:\Projects\cpa_provider_manager` (`p90-lover/cpa_provider_manager`) and `G:\Projects\cpa-helper-plugin`, follow the same steps in their own repository: PR, merge to its `main`, then that plugin's release. If this app pins or bundles the plugin, the app's update is a separate PR here.
+4. **Release.** After a merge to `main`, release a new version:
+   - First check that no release is already under way:
+     - `gh pr list --state open --search "release: in:title"`
+     - `gh run list --workflow electron-windows-release.yml --limit 3`
+
+     If a release PR is open or a `workflow_dispatch` run is in progress, stop: that release includes everything on `main` at its commit.
+   - Open a version-bump PR titled `release: 0.8.x`. It changes the version line in `desktop-electron/electron/product.cjs`, `desktop-electron/package.json`, `desktop-electron/scripts/prepare-package-resources.cjs`, `desktop-electron/scripts/verify-package.cjs`, `desktop-electron/tests/product-identity.test.cjs` and `desktop-electron/tests/rc12-release-identity.test.cjs`, plus new notes in `docs/releases/v0.8.x.md` (English and 繁體中文). Search `desktop-electron` for the old version to catch every line, but leave the `@xmldom/xmldom` override in `package.json` alone. Merge it once green.
+   - Publish from CI: `gh workflow run electron-windows-release.yml --ref main -f publish=true`. CI builds, verifies and publishes the installer. Don't build a release installer locally.
+   - Merges that land close together share one release.
+   - A change that ships nothing in the installer (agent instructions, docs, CI-only files) needs no release of its own. The next release carries it.
+5. **Local builds** (`bun run package:win`) only when the user asks for an installer on this machine:
+   - Run one build at a time.
+   - `G:\Projects\coding-tools-worktrees\ct-build` is shared: check its `git reflog` and look for running `electron-builder`/`cargo`/`bun` processes there first.
+   - Build at low I/O priority, because the installed app runs from the same disk and freezes during a full-priority build.
+6. **The installed app.** Never install over, patch or restart the user's installed app (`H:\Apps\Coding Tools`) unless the user asks.
+
 ## xyTom 0.3 integration invariants
 
 - `old/` is a lossless source snapshot pinned by `old/UPSTREAM_SNAPSHOT.md` to `xyTom/coding-tools-mcp` 0.3.0. Never delete prior snapshot files: move replaced or upstream-removed content under `old/Trash/` and use `aiTemp/` for synchronization/build artifacts.
