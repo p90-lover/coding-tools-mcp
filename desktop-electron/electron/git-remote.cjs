@@ -4,7 +4,26 @@
 // (https://user:token@host/...), so the URL itself is never returned.
 const fs = require("node:fs");
 const path = require("node:path");
-const { execFile } = require("node:child_process");
+const { runOffThread } = require("./off-thread-run.cjs");
+
+/**
+ * execFile's callback shape, with git started from a worker thread: on Windows starting a program
+ * holds the thread that starts it until it is loaded, and every project card asks git for its
+ * remote, branch and kind (one held main for 2 s on the busy hard disk, 0.8.49, 2026-11-02).
+ */
+function execFileOffThread(file, args, { timeout } = {}, callback) {
+  void runOffThread({ file, args, timeoutMs: timeout, maxBytes: 256 * 1024 }).then((reply) => {
+    if (reply?.error) callback(new Error(reply.error), "", "");
+    else if (reply?.timedOut) callback(Object.assign(new Error(`${file} timed out`), { killed: true }), "", "");
+    else callback(reply.code === 0 ? null : Object.assign(new Error(`${file} exited with ${reply.code}`), { code: reply.code }),
+      reply.stdout ?? "", reply.stderr ?? "");
+  });
+}
+
+/** Whether `folder` is an existing directory, asked without holding main. */
+async function isDirectory(folder) {
+  return (await fs.promises.stat(folder).catch(() => null))?.isDirectory() === true;
+}
 
 /** "owner/repo" from an https, ssh or scp-style git URL; null when it has no such path. */
 function repoSlug(url) {
@@ -23,9 +42,9 @@ function repoSlug(url) {
 }
 
 /** A read-only git command's output in an existing absolute folder, or null on any failure. */
-function gitOutput(folder, args, { run = execFile, timeoutMs = 3000 } = {}) {
-  if (typeof folder !== "string" || folder.length > 4096 || !path.isAbsolute(folder)) return Promise.resolve(null);
-  if (!fs.statSync(folder, { throwIfNoEntry: false })?.isDirectory()) return Promise.resolve(null);
+async function gitOutput(folder, args, { run = execFileOffThread, timeoutMs = 3000 } = {}) {
+  if (typeof folder !== "string" || folder.length > 4096 || !path.isAbsolute(folder)) return null;
+  if (!await isDirectory(folder)) return null;
   return new Promise((resolve) => {
     // Windows can refuse the process outright ("spawn UNKNOWN" under memory pressure): execFile
     // then throws instead of calling back, which failed the whole IPC call.
@@ -38,7 +57,7 @@ function gitOutput(folder, args, { run = execFile, timeoutMs = 3000 } = {}) {
 const GIT_INFO_TIMEOUT_MS = 15_000;
 
 /** A read-only git command's outcome: its output, or whether and why it failed (stderr; a timeout has none). */
-function gitResult(folder, args, { run = execFile, timeoutMs = 3000 } = {}) {
+function gitResult(folder, args, { run = execFileOffThread, timeoutMs = 3000 } = {}) {
   return new Promise((resolve) => {
     try {
       run("git", ["-C", folder, ...args], { windowsHide: true, timeout: timeoutMs }, (error, stdout, stderr) =>
@@ -58,12 +77,16 @@ async function readBranch(folder, options) {
   return name && name !== "HEAD" && /^[\w./-]{1,200}$/.test(name) ? name : null;
 }
 
-const samePath = (left, right) => {
+const samePath = async (left, right) => {
   // Compared where they really are: git names a folder by its long, junction-resolved path, so a
   // project opened by a short (8.3) name or through a junction read as "inside" its own repository.
-  const real = (value) => { try { return fs.realpathSync.native(value); } catch { return value; } };
-  const norm = (value) => path.resolve(real(path.resolve(value))).replace(/[\\/]+$/, "");
-  return process.platform === "win32" ? norm(left).toLowerCase() === norm(right).toLowerCase() : norm(left) === norm(right);
+  const norm = async (value) => {
+    const resolved = path.resolve(value);
+    const real = await fs.promises.realpath(resolved).catch(() => resolved);
+    return path.resolve(real).replace(/[\\/]+$/, "");
+  };
+  const [a, b] = await Promise.all([norm(left), norm(right)]);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 };
 
 /**
@@ -80,7 +103,7 @@ async function readGitInfo(folder, options) {
   // since only Windows reads the prefixed spelling as absolute.
   const local = folder.replace(/^\\\\\?\\/, "");
   if (!path.isAbsolute(local)) return null;
-  if (!fs.statSync(local, { throwIfNoEntry: false })?.isDirectory()) return { kind: "missing", root: null, mainRepo: null, branch: null };
+  if (!await isDirectory(local)) return { kind: "missing", root: null, mainRepo: null, branch: null };
   // Git on a busy hard disk took 5-9 s here at app start; the short default timed out and a real
   // repository read as "not git". Only git saying so means "none"; any other failure is unknown (null).
   const result = await gitResult(local, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"],
@@ -90,13 +113,13 @@ async function readGitInfo(folder, options) {
   if (!root || !gitDir || !commonDir) return null;
   const branch = head && head !== "HEAD" && /^[\w./-]{1,200}$/.test(head) ? head : null;
   const toNative = (value) => path.resolve(value);
-  if (!samePath(gitDir, commonDir)) {
+  if (!await samePath(gitDir, commonDir)) {
     // A linked worktree: its git dir is <main>/.git/worktrees/<name>; the main checkout holds <main>/.git.
     const common = toNative(commonDir);
     const mainRepo = path.basename(common).toLowerCase() === ".git" ? path.dirname(common) : common;
     return { kind: "worktree", root: toNative(root), mainRepo, branch };
   }
-  return { kind: samePath(root, local) ? "repo" : "inside", root: toNative(root), mainRepo: null, branch };
+  return { kind: await samePath(root, local) ? "repo" : "inside", root: toNative(root), mainRepo: null, branch };
 }
 
 module.exports = { readBranch, readGitInfo, readRemote, repoSlug };

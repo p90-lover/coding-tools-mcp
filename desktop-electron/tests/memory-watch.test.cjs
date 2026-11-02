@@ -75,6 +75,33 @@ test("a process past the high mark is told to the person once per quiet period",
   assert.equal(notices.length, 2);
 });
 
+test("a high main process is logged with where its memory is, every half hour while it lasts", () => {
+  // 0.8.49 logged "Browser 11313 MB" once, with nothing to say whether JS, buffers or a worker held it.
+  let clock = 0;
+  const warnings = [];
+  const notices = [];
+  const MB = 1024 * 1024;
+  const watch = createMemoryWatch({
+    appMetrics: () => [{ pid: 40, type: "Browser", memory: { workingSetSize: 11_000 * 1024 } }],
+    memoryUsage: () => ({ rss: 11_000 * MB, heapTotal: 80 * MB, heapUsed: 52 * MB, external: 9_000 * MB, arrayBuffers: 8_990 * MB }),
+    logger: { warn: (event, detail) => warnings.push({ event, detail }) },
+    notify: (notice) => notices.push(notice),
+    now: () => clock,
+    mainPid: 40,
+  });
+  const high = () => warnings.filter((entry) => entry.event === "launcher.memory_high");
+  watch.sample();
+  assert.deepEqual(high()[0].detail, { kind: "Browser", pid: 40, mb: 11_000, totalMb: 11_000,
+    main: { rssMb: 11_000, heapUsedMb: 52, heapTotalMb: 80, externalMb: 9_000, arrayBuffersMb: 8_990, otherMb: 1_920 } });
+  clock += 5 * MIN;
+  watch.sample();
+  assert.equal(high().length, 1, "logged again within half an hour");
+  clock += 25 * MIN;
+  watch.sample();
+  assert.equal(high().length, 2);
+  assert.equal(notices.length, 1, "the person is still told only once");
+});
+
 test("the watch samples at start and on a timer until stopped; a failed read is logged, not thrown", () => {
   const timers = [];
   const warnings = [];
