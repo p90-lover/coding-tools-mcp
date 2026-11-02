@@ -127,6 +127,28 @@ test("a project switch keeps its chat pane readable while loading and offers Ret
   assert.match(failed, /Retry loading/);
 });
 
+test("a turn waiting for you has a button beside its time: Answer with a request shown, Continue once none has been for two minutes", () => {
+  // Seen live 2026-11-02: "Deep diving for 1h 11m · waiting for you for 57m" in a split pane, with
+  // no request anywhere to answer (its agent's link to AO had gone).
+  const now = Date.now();
+  const turnAt = (quietMs) => ({ key: "k", runId: "run", status: "running", solo: false, startedAtMs: now - 3_600_000,
+    steps: [{ key: "s", nodeId: "n", role: "planner", name: "DeepSeek V4.1 Flash", detail: "", state: "running", startedAtMs: now - 3_600_000,
+      working: { detail: "", stalled: false, activity: "waiting for approval", heardAtMs: now - quietMs, timeline: [] } }] });
+  const render = (value, quietMs) => renderToStaticMarkup(React.createElement(toolParts.TurnRestart.Provider, { value },
+    React.createElement(dsh.DshTurnWork, { turn: turnAt(quietMs), live: true, expanded: false, useWork: () => null })));
+  const button = (html) => html.match(/<button[^>]*class="cx-turn-restart cx-turn-answer"[^>]*>([^<]*)<\/button>/)?.[1] ?? null;
+  const both = { restarting: false, onAnswer() {}, onContinue() {} };
+  const waiting = render(both, 30 * 60_000);
+  assert.match(waiting, /waiting for you for 30m 0s/);
+  assert.equal(button(waiting), "Answer", "a request shown in the chat is one click away");
+  assert.equal(button(render({ restarting: false, onContinue() {} }, 30 * 60_000)), "Continue", "with none shown, the agent can be restarted to ask again");
+  assert.equal(button(render({ restarting: false, onContinue() {} }, 90_000)), null, "not while the request poll may still bring it");
+  assert.equal(button(render({ restarting: false }, 30 * 60_000)), null, "a chat that cannot send offers nothing");
+  assert.equal(button(renderToStaticMarkup(React.createElement(toolParts.TurnRestart.Provider, { value: both },
+    React.createElement(dsh.DshTurnWork, { turn: { ...turnAt(30 * 60_000), steps: [{ ...turnAt(0).steps[0], working: { detail: "", stalled: false, activity: "running npm test", heardAtMs: now, timeline: [] } }] },
+      live: true, expanded: false, useWork: () => null })))), null, "a turn at work has no Answer");
+});
+
 test("a DeepSeek turn renders as DeepSeek Desktop's Standard view: a live group heading and Deep diving while it runs, Completed once it ends", () => {
   const timeline = [
     { id: "r1", kind: "reasoning", status: "completed", text: "**Let me check health.**\nThen the configs." },

@@ -10032,6 +10032,46 @@ test("a stuck tool call whose interrupt never settles is restarted by shutting i
   assert.deepEqual(world.steered, [], "nothing is steered into the hung turn");
 });
 
+// Seen live 2026-11-02: "keep going" on a chat "waiting for you" after an AO restart queued behind a
+// turn held by a request AO no longer listed, so the chat deadlocked. The steer releases that turn.
+function orphanedAskWorld({ quietMs }) {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const exited = [], steered = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + quietMs,
+    setTimer: (callback) => { callback(); return 0; },
+    aoHarness: {
+      observe: async () => {
+        const released = exited.length > 0;
+        return { turnId: "t1", turnState: released ? "interrupted" : "running", status: released ? "ready" : "needs_input", needsInput: !released,
+          agentGone: true, exited: released, lastActivityAt: 1_000_000, timeline: [{ kind: "approval", status: "pending" }], approvals: [] };
+      },
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async () => { throw new Error("CHAT_CONTROLLER_NOT_READY"); },
+      exitAgent: async id => { exited.push(id); return { ok: true }; },
+    } });
+  return { workflow, exited, steered };
+}
+
+test("keep going on a turn held by a request nobody can answer releases it, and the message goes as the next turn", async () => {
+  const world = orphanedAskWorld({ quietMs: 70 * 60_000 });
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true);
+  assert.deepEqual(world.exited, ["sess-1"], "its host is shut down; AO keeps the session to resume");
+  assert.deepEqual(world.steered, [], "nothing is steered into the held turn");
+});
+
+test("a message to a recently active gone agent is queued without a shutdown, unless the person asked for Continue", async () => {
+  const quiet = orphanedAskWorld({ quietMs: 60_000 });
+  assert.equal((await quiet.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and lint" })).restarted, true);
+  assert.deepEqual(quiet.exited, [], "a minute of quiet is not a stall");
+  const asked = orphanedAskWorld({ quietMs: 60_000 });
+  assert.equal((await asked.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "Continue.", restart: true })).restarted, true);
+  assert.deepEqual(asked.exited, ["sess-1"], "Continue is the person's call: released at once");
+});
+
 test("a stuck turn whose interrupt is refused is still restarted", async () => {
   const world = stuckToolWorld({ refuses: true });
   const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
@@ -10346,6 +10386,23 @@ test("a hung turn the stall stop cannot interrupt has its agent shut down, so th
   assert.deepEqual(stale.calls, [["interrupt", "sess-1"], ["interrupt", "sess-1"], ["exit", "sess-1"]],
     "still hung a stall period later: the agent is shut down");
   stale.workflow.dispose();
+
+  // Seen live the same day: after an AO restart a turn sat "waiting for you" on a request AO no
+  // longer listed (needs input, no approvals, no controller). Nothing could answer it, so it is
+  // released even with Retry automatically off (the default).
+  const asking = (clock) => hung(clock, { status: "needs_input", needsInput: true, agentGone: true, timeline: [{ kind: "approval", status: "pending" }] });
+  const orphanedAsk = stallWorld({ observe: (_expected, clock) => asking(clock) });
+  await orphanedAsk.look();
+  assert.deepEqual(orphanedAsk.calls, [["interrupt", "sess-1"], ["exit", "sess-1"]], "an orphaned request is released with Retry off");
+  orphanedAsk.workflow.dispose();
+
+  // A request still listed is the person's to answer: never stopped, whatever Retry says.
+  const listed = stallWorld({ observe: (_expected, clock) => ({ ...asking(clock), agentGone: undefined,
+    approvals: [{ approval_id: "q", source: "ao", kind: "command", command: "npm test", decisions: [] }] }) });
+  await listed.workflow.call("chat_auto_retry", { enabled: true });
+  await listed.look();
+  assert.deepEqual(listed.calls, [], "a shown request is left for the person");
+  listed.workflow.dispose();
 });
 
 test("a held worker whose unspent grant names another build of the agent's program is started on a fresh grant", async () => {

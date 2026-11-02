@@ -517,6 +517,12 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   color: var(--color-text-primary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; vertical-align: baseline; }
 .cx-turn-restart:hover:not(:disabled) { background: var(--cx-hover); }
 .cx-turn-restart:disabled { opacity: .5; cursor: default; }
+/* Answer / Continue beside "waiting for you" (WaitingAnswer). In a narrow split pane the line is cut
+   short with an ellipsis, so the button stays in view next to the time. */
+.cx-turn-running .cx-turn-answer { margin-left: 6px; }
+.dsh-running-content { max-width: 100%; }
+.dsh-running-content .dsh-shimmer { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-running-content .cx-turn-restart { flex: none; }
 .cx-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 /* A message steered into a working turn: the user's own bubble, in the live timeline where it was sent. */
 .cx-live-item.kind-steer { display: block; margin: 6px 0; }
