@@ -224,6 +224,33 @@ const COMMANDCODE_PLUGINS = [
   { id: "codex-review-account-selector", file: "codex-review-account-selector-v0.2.0-codingtools.1.dll", sha256: "6db11afab12333a1977d997182115a44a2c11d3b11f7a73f072d25d53cdc7cfa" },
 ];
 
+/** Plugins updated from GitHub by App plugins (app-plugins.cjs), by id; {} when there are none. */
+function updatedPlugins(state) {
+  try {
+    const record = JSON.parse(fs.readFileSync(path.join(state, "plugin-updates.json"), "utf8"));
+    return record && typeof record.plugins === "object" && record.plugins ? record.plugins : {};
+  } catch { return {}; }
+}
+
+/**
+ * x.y.z[-pre] ordering, as update.cjs compares app releases (a release outranks its prereleases,
+ * prereleases compare numerically). Kept here: this file runs unpacked as CPA's adapter, and
+ * everything it requires has to be unpacked with it.
+ */
+function newerVersion(candidate, current) {
+  const parse = (value) => /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(String(value || "").trim());
+  const a = parse(candidate);
+  const b = parse(current);
+  if (!a || !b) return false;
+  for (const index of [1, 2, 3]) {
+    if (Number(a[index]) !== Number(b[index])) return Number(a[index]) > Number(b[index]);
+  }
+  if ((a[4] || null) === (b[4] || null)) return false;
+  if (!a[4]) return true;
+  if (!b[4]) return false;
+  return a[4].localeCompare(b[4], "en", { numeric: true }) > 0;
+}
+
 function installBundledCommandCodePlugin(state) {
   if (process.platform !== "win32" || process.arch !== "x64") return [];
   const bundle = path.join(__dirname, "..", "vendor", "bundled", "cpa-plugins", "windows", "amd64");
@@ -237,14 +264,25 @@ function installBundledCommandCodePlugin(state) {
 
   const directory = path.join(state, "plugins", "windows", "amd64");
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const updates = updatedPlugins(state);
   return sources.map((plugin) => {
-    const target = path.join(directory, plugin.file);
+    // A plugin updated from GitHub (Connections > App plugins) stays while it is newer than the
+    // bundled copy and is still the file that was checked; an app update bringing a newer one wins.
+    const updated = updates[plugin.id];
+    const bundledVersion = plugin.file.slice(plugin.id.length + 2, -".dll".length);
+    const updatedPath = typeof updated?.file === "string" && path.basename(updated.file) === updated.file
+      && updated.file.startsWith(`${plugin.id}-v`) && updated.file.endsWith(".dll") ? path.join(directory, updated.file) : null;
+    const keepUpdate = Boolean(updatedPath && /^[a-f0-9]{64}$/.test(String(updated.sha256))
+      && newerVersion(updated.version, bundledVersion) && fs.existsSync(updatedPath)
+      && fs.lstatSync(updatedPath).isFile() && digest(updatedPath) === updated.sha256);
+    const file = keepUpdate ? updated.file : plugin.file;
+    const target = path.join(directory, file);
     const stat = fs.existsSync(target) ? fs.lstatSync(target) : null;
     if (stat && !stat.isFile()) throw new Error(`${plugin.id} CPA plugin path is not a regular file`);
-    const current = stat && digest(target) === plugin.sha256;
+    const current = keepUpdate || (stat && digest(target) === plugin.sha256);
     const old = fs.readdirSync(directory).filter((name) => (
       (name === `${plugin.id}.dll` || (name.startsWith(`${plugin.id}-v`) && name.endsWith(".dll")))
-      && (name !== plugin.file || !current)
+      && (name !== file || !current)
     ));
     if (old.length) {
       const archive = path.join(state, "Trash", "plugins", `${Date.now()}-${plugin.id}`);
