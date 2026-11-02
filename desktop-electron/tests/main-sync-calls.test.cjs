@@ -21,6 +21,8 @@ const ALLOWED = {
   "agent-orchestrator-workflow.cjs": 10, "agent-orchestrator-workspace.cjs": 1, "antigravity-cli.cjs": 19,
   "ao-db-maintenance.cjs": 3, "ao-dependency-links.cjs": 7, "app-handler-paths.cjs": 1, "app-plugins.cjs": 10, "app-update-worker.cjs": 50,
   "app-update.cjs": 19, "atomic-file.cjs": 11, "autostart.cjs": 2, "backend-bundle.cjs": 18, "browser-accounts.cjs": 1,
+  // The prior port record is captured before the first await; ready apps are rejected before IO.
+  "browser-debugging.cjs": 1,
   "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 10, "chat-archive.cjs": 4, "chat-edits.cjs": 4,
   "chat-goals.cjs": 2, "chat-loops.cjs": 4, "chat-mcp-servers.cjs": 1, "chat-sandbox.cjs": 5, "chat-wakeups.cjs": 4,
   "chatgpt-desktop-sync.cjs": 1, "chatgpt-desktop.cjs": 25, "codex-chat-lifecycle-sync.cjs": 9,
