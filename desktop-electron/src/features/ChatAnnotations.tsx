@@ -233,12 +233,13 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
 
 const plural = (count: number) => `${count} annotation${count === 1 ? "" : "s"}`;
 
-/** The composer's "N annotations" chip; hovering it lists them, each with edit and remove. */
-export function AnnotationTray({ annotations, onComment, onRemove, onClear }: {
-  annotations: DraftAnnotation[];
-  onComment: (id: number, comment: string) => void;
-  onRemove: (id: number) => void;
-  onClear: () => void;
+/** Codex's attachment pill and numbered details, shared by drafts and sent messages. */
+function AnnotationAttachment({ annotations, onComment, onRemove, onClear, sent = false }: {
+  annotations: (ChatAnnotation & { id?: number })[];
+  onComment?: (id: number, comment: string) => void;
+  onRemove?: (id: number) => void;
+  onClear?: () => void;
+  sent?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<{ id: number; draft: string } | null>(null);
@@ -246,47 +247,62 @@ export function AnnotationTray({ annotations, onComment, onRemove, onClear }: {
   useEffect(() => () => window.clearTimeout(closer.current), []);
   if (!annotations.length) return null;
   const show = () => { window.clearTimeout(closer.current); setOpen(true); };
-  const hide = () => { closer.current = window.setTimeout(() => { if (!editing) setOpen(false); }, 180); };
-  const finish = () => { if (editing) onComment(editing.id, editing.draft.trim()); setEditing(null); };
-  return <div className="cx-annotation-tray cx-annotation-ui" onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}>
+  const hide = () => { closer.current = window.setTimeout(() => { if (!editing) setOpen(false); }, 100); };
+  const finish = () => {
+    if (editing && annotations.some((item) => item.id === editing.id)) onComment?.(editing.id, editing.draft.trim());
+    setEditing(null);
+  };
+  return <div className={`cx-annotation-tray cx-annotation-ui${sent ? " cx-sent-annotations" : ""}`}
+    onMouseEnter={show} onMouseLeave={hide} onFocus={show}
+    onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) hide(); }}
+    onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOpen(false); setEditing(null); } }}>
     {open ? <ol className="cx-annotation-list" aria-label="Annotations">
-      {annotations.map((item, index) => <li key={item.id}>
+      {annotations.map((item, index) => <li key={item.id ?? index}>
         <span className="cx-annotation-number">{index + 1}.</span>
         <div className="cx-annotation-body">
-          <small>Selected text:</small>
-          <span className="cx-annotation-quote">{item.text}</span>
-          {editing?.id === item.id
-            ? <input autoFocus aria-label={`Comment on annotation ${index + 1}`} placeholder="Add an optional comment…" value={editing.draft}
-              onChange={(event) => setEditing({ id: item.id, draft: event.target.value })} onBlur={finish}
-              onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); finish(); } else if (event.key === "Escape") { event.preventDefault(); setEditing(null); } }} />
-            : item.comment ? <span className="cx-annotation-comment">{item.comment}</span> : null}
+          <div><small>Selected text:</small><span className="cx-annotation-quote">{item.text}</span></div>
+          {editing && editing.id === item.id
+            ? <input autoFocus aria-label={`Comment on annotation ${index + 1}`} placeholder="Add an optional comment…" value={editing.draft} maxLength={2000}
+              onChange={(event) => setEditing({ id: editing.id, draft: event.target.value })} onBlur={finish}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); finish(); }
+                else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setEditing(null); }
+              }} />
+            : item.comment ? <div><small>User comment:</small><span className="cx-annotation-comment">{item.comment}</span></div> : null}
         </div>
-        <button type="button" aria-label={`Edit annotation ${index + 1}`} title="Edit comment"
-          onClick={() => setEditing({ id: item.id, draft: item.comment })}>
+        {onComment ? <button type="button" aria-label={`Edit annotation ${index + 1}`} title="Edit comment"
+          onClick={() => { if (item.id !== undefined) setEditing({ id: item.id, draft: item.comment }); }}>
           <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 2.5l3 3L6 13H3v-3z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /></svg>
-        </button>
-        <button type="button" aria-label={`Remove annotation ${index + 1}`} title="Remove"
-          onClick={() => { onRemove(item.id); if (annotations.length === 1) setOpen(false); }}>
+        </button> : null}
+        {onRemove ? <button type="button" aria-label={`Remove annotation ${index + 1}`} title="Remove"
+          onClick={() => { if (item.id !== undefined) onRemove(item.id); setEditing(null); if (annotations.length === 1) setOpen(false); }}>
           <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
-        </button>
+        </button> : null}
       </li>)}
     </ol> : null}
     <span className="cx-annotation-chip">
-      <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} title={plural(annotations.length)}>
+      <button type="button" aria-expanded={open} onClick={show}>
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h10v7H7l-3 3v-3H3z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /></svg>
         {plural(annotations.length)}
       </button>
-      <button type="button" className="cx-annotation-clear" aria-label="Remove annotations attachment" onClick={() => { onClear(); setOpen(false); }}>
+      {onClear ? <button type="button" className="cx-annotation-clear" aria-label="Remove annotations attachment" onClick={() => { onClear(); setOpen(false); }}>
         <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
-      </button>
+      </button> : null}
     </span>
   </div>;
 }
 
-/** A sent message's annotations, above its bubble: the count, and each one on hover. */
+/** The composer's annotation attachment; editing/removing uses each draft's stable id. */
+export function AnnotationTray({ annotations, onComment, onRemove, onClear }: {
+  annotations: DraftAnnotation[];
+  onComment: (id: number, comment: string) => void;
+  onRemove: (id: number) => void;
+  onClear: () => void;
+}) {
+  return <AnnotationAttachment annotations={annotations} onComment={onComment} onRemove={onRemove} onClear={onClear} />;
+}
+
+/** The same attachment above a sent message, with read-only details instead of a native tooltip. */
 export function SentAnnotations({ annotations }: { annotations: ChatAnnotation[] }) {
-  return <div className="cx-sent-annotations" title={annotations.map((item, index) => `${index + 1}. "${item.text.slice(0, 160)}"${item.comment ? ` — ${item.comment}` : ""}`).join("\n")}>
-    <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h10v7H7l-3 3v-3H3z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /></svg>
-    {plural(annotations.length)}
-  </div>;
+  return <AnnotationAttachment annotations={annotations} sent />;
 }
