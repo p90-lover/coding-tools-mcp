@@ -276,6 +276,62 @@ test("opening a working role shows live step and output, not a final-result plac
   assert.ok(html.includes('aria-selected="true">output'));
 });
 
+test("the first prompt and its attachments stay inside the agent reply, exactly once", () => {
+  const prompt = "Keep this first request with its agent";
+  const description = `${prompt}\n\nAttached image: G:\\task\\first-request.png`;
+  for (const model of ["cpa/gpt-6.1", "cpa/deepseek-flash"]) {
+    for (const mode of ["single", "team"]) {
+      for (const state of ["pending", "running", "finished", "held"]) {
+        const node = { id: "lead", role: "planner", state, route: { harness_id: "ao:claude-code", model },
+          receipt: { thread_id: "first-request", started_at_ms: 1, ...(state === "finished" ? { answer: "Finished checking" } : {}) } };
+        const props = { runs: [{ id: "run", project_id: "task", execution_mode: mode, nodes: [node] }],
+          tasks: [{ id: "task", title: "Task" }], pendingMessage: description, selectedTaskId: "task", busy: false, approvals: [],
+          loadDescription: async () => description, send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+        const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+        const reply = html.match(/<section class="cx-reply\b[^>]*>[\s\S]*?<\/section>/)?.[0];
+        assert.ok(reply?.includes(prompt), `${model} ${mode} ${state}: the prompt belongs to the reply card`);
+        assert.match(reply, /cx-sent-attachments/, "its attachment stays with it");
+        assert.equal(html.split(prompt).length - 1, 1, "no duplicate outside bubble");
+        assert.doesNotMatch(reply, /Attached image:/, "the attachment is rendered, not printed as a raw path");
+        assert.ok(reply.indexOf(prompt) < reply.indexOf("cx-reply-head"), "the request precedes the agent summary");
+        assert.match(reply, /Copy message/, "message actions stay inside the card");
+      }
+    }
+  }
+});
+
+test("saved steers stay with the initial message, including when no reply card exists", () => {
+  const prompt = "First saved request", steer = "Also check the saved follow-up";
+  const description = `${prompt}\n\n↳ Steer (2026-11-02 07:12 UTC): ${steer}`;
+  for (const cancelled of [false, true]) {
+    const node = { id: "lead", role: "planner", state: cancelled ? "pending" : "finished",
+      route: { harness_id: "ao:claude-code", model: "cpa/gpt-6.1" },
+      ...(!cancelled ? { receipt: { thread_id: "saved", answer: "Checked both requests" } } : {}) };
+    const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, {
+      runs: [{ id: "run", project_id: "task", cancelled, execution_mode: "single", nodes: [node] }],
+      tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", pendingMessage: description, busy: false, approvals: [],
+      loadDescription: async () => description, send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},
+    }));
+    assert.equal(html.split(prompt).length - 1, 1);
+    assert.equal(html.split(steer).length - 1, 1, "a saved steer must not disappear or duplicate");
+    assert.ok(html.indexOf(prompt) < html.indexOf(steer));
+    const reply = html.match(/<section class="cx-reply\b[^>]*>[\s\S]*?<\/section>/)?.[0];
+    if (!cancelled) assert.ok(reply?.includes(prompt) && reply.includes(steer), "both requests belong to the agent card");
+    else assert.equal(reply, undefined, "the cancelled run has no agent work to wrap");
+  }
+});
+
+test("a message with no agent reply remains visible outside a nonexistent card", () => {
+  const prompt = "This message still needs an agent";
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, {
+    runs: [], tasks: [{ id: "task", title: "Task" }], pendingMessage: prompt, selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => prompt, send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},
+  }));
+  assert.ok(html.includes(prompt));
+  assert.equal(html.split(prompt).length - 1, 1);
+  assert.doesNotMatch(html, /<section class="cx-reply\b/, "no invented agent reply for an unsent message");
+});
+
 test("sending a new chat displays its task title and user message before startup completes", () => {
   const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, {
     runs: [], tasks: [], selectedTaskId: "", busy: true, approvals: [],
