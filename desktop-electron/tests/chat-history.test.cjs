@@ -104,6 +104,31 @@ test("chat_read returns the chat's turns oldest first: the user's messages with 
   assert.equal((await history.call({ session: "ao-self", workspaceId: "ws1", name: "chat_read", args: {}, permit: allow })).isError, true);
 });
 
+test("restart and replacement replies do not consume the next user message or count as new requests", async (t) => {
+  for (const lineage of [null, "restarts_run_id", "replaces_run_id"]) await t.test(lineage ?? "normal turns", async () => {
+    const runs = [
+      { id: "r1", project_id: "t", nodes: [node("first")] },
+      ...(lineage ? [{ id: "continued", project_id: "t", [lineage]: "r1", nodes: [node("continued")] }] : []),
+      { id: "r2", project_id: "t", nodes: [node("second")] },
+    ];
+    const { history } = fixture({ ws1: { runs, tasks: [{ id: "t", title: "Turns", description:
+      "first ask\n\nFollow-up (2026-10-22 10:00 UTC):\nsecond ask\n\nFollow-up (2026-10-22 11:00 UTC):\nnot sent yet" }] } });
+    const read = parse(await history.call({ workspaceId: "ws1", name: "chat_read", args: { chat_id: "t" } }));
+    const users = (turns) => turns.map((turn) => turn.messages.find((message) => message.role === "user")?.text ?? null);
+    assert.deepEqual(users(read.turns), ["first ask", ...(lineage ? [null] : []), "second ask", "not sent yet"]);
+    assert.equal(read.turns.at(-1).status, "queued", "a restart cannot consume the pending request either");
+    if (lineage === "restarts_run_id") assert.deepEqual(read.turns[1].messages,
+      [{ role: "agent", name: "Orchestrator", text: "answer continued" }], "restart stays silent apart from its actual reply");
+    if (lineage === "replaces_run_id") assert.deepEqual(read.turns[1].messages[0],
+      { role: "status", text: "Configuration changed; the chat continued in a new session." });
+    const listed = parse(await history.call({ workspaceId: "ws1", name: "chat_list" }));
+    assert.equal(listed.projects[0].chats[0].turns, 2, "only the original requests count");
+    const page = parse(await history.call({ workspaceId: "ws1", name: "chat_read", args: { chat_id: "t", max_turns: 2, skip_turns: 1 } }));
+    assert.deepEqual(users(page.turns), lineage ? [null, "second ask"] : ["first ask", "second ask"]);
+    assert.deepEqual(page.turns.at(-1).messages.at(-1), { role: "agent", name: "Orchestrator", text: "answer second" });
+  });
+});
+
 test("chat_read stays within its turn and character limits, newest kept, and pages back with skip_turns", async () => {
   const runs = [];
   let description = "";
@@ -129,6 +154,22 @@ test("chat_read stays within its turn and character limits, newest kept, and pag
   const clamped = parse(await history.call({ session: "ao-self", workspaceId: "ws1", name: "chat_read", args: { chat_id: "t-big", max_turns: 10_000, max_chars: 10_000_000 }, permit: allow }));
   assert.equal(clamped.turns.length <= 50, true);
   assert.ok(clamped.turns.flatMap((turn) => turn.messages.map((message) => message.text)).join("").length <= 60_000);
+});
+
+test("chat_read keeps its character budget when only one character remains for an earlier message", async () => {
+  const { history } = fixture({ ws1: {
+    runs: [
+      { id: "r1", project_id: "t", nodes: [node("first", { receipt: { answer: "x".repeat(499) } })] },
+      { id: "r2", project_id: "t", nodes: [node("second", { receipt: { answer: "y".repeat(499) } })] },
+    ],
+    tasks: [{ id: "t", description: "hello\n\nFollow-up (2026-10-22 10:00 UTC):\nb" }],
+  } });
+  const read = parse(await history.call({ workspaceId: "ws1", name: "chat_read", args: { chat_id: "t", max_chars: 1000 } }));
+  const messages = read.turns.flatMap((turn) => turn.messages);
+  assert.ok(messages.reduce((total, message) => total + message.text.length, 0) <= 1000);
+  assert.equal(messages[0].cut, true);
+  assert.ok(messages[0].text.length <= 1);
+  assert.equal(messages.at(-1).text, "y".repeat(499), "the newest reply stays intact");
 });
 
 test("chat_list caps each project's chats and says how many more there are", async () => {
@@ -158,4 +199,12 @@ test("helpers: messages split from a task description, and a middle cut keeps he
   assert.equal(cut, true);
   assert.ok(text.startsWith("HEAD") && text.endsWith("TAIL") && text.length <= 200);
   assert.deepEqual(cutMiddle("short", 200), { text: "short", cut: false });
+  for (const source of ["HEAD" + "m".repeat(80) + "TAIL", "HEAD" + "m".repeat(1000) + "TAIL"]) {
+    for (const cap of [0, 1, 2, 27, 28, 29, 30, 31, 32, 99, 100, 200]) {
+      const result = cutMiddle(source, cap);
+      assert.ok(result.text.length <= cap, `cap ${cap} includes the omission marker`);
+      const marker = result.text.match(/\n… \[(\d+) characters omitted\] …\n/);
+      if (marker) assert.equal(Number(marker[1]), source.length - (result.text.length - marker[0].length), "the count includes room used by the marker");
+    }
+  }
 });

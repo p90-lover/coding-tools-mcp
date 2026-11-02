@@ -68,8 +68,16 @@ const short = (value, max) => {
 /** A text cut to `max` characters: its head and tail, with how much was left out between them. */
 function cutMiddle(text, max) {
   if (text.length <= max) return { text, cut: false };
-  const note = `\n… [${text.length - max} characters omitted] …\n`;
-  const room = Math.max(0, max - note.length);
+  let note = `\n… [${text.length - max} characters omitted] …\n`;
+  let room = Math.max(0, max - note.length);
+  // The count includes text displaced by the marker; its digit width can change the room.
+  while (room > 0) {
+    const counted = `\n… [${text.length - room} characters omitted] …\n`;
+    if (counted === note) break;
+    note = counted;
+    room = Math.max(0, max - note.length);
+  }
+  if (!room) return { text: "…".slice(0, Math.max(0, max)), cut: true };
   const head = Math.ceil(room * 0.4);
   return { text: `${text.slice(0, head)}${note}${text.slice(text.length - (room - head))}`, cut: true };
 }
@@ -150,7 +158,7 @@ function chatsOf(saved, tasks, session) {
     const last = isoTime(task?.updated_at) ?? isoTime(latest.updated_at) ?? isoTime(latest.created_at);
     return { taskId, runs: entry.runs, visibility, task,
       summary: { chat_id: taskId, title: short(task?.title || lifecycle?.title || "New task", MAX_TITLE), status,
-        ...(last ? { last_activity: last } : {}), turns: entry.runs.filter((run) => !run.replaces_run_id).length,
+        ...(last ? { last_activity: last } : {}), turns: entry.runs.filter((run) => !run.replaces_run_id && !run.restarts_run_id).length,
         ...(visibility !== "active" ? { archived: true } : {}),
         ...(entry.runs.some((run) => holdsSession(run, session)) ? { current: true } : {}) } };
   });
@@ -162,7 +170,7 @@ function turnsOf(chat, description) {
   let messageIndex = 0;
   const turns = chat.runs.map((run) => {
     const messages = [];
-    const user = run.replaces_run_id ? undefined : said[messageIndex++];
+    const user = (run.replaces_run_id || run.restarts_run_id) ? undefined : said[messageIndex++];
     if (run.replaces_run_id) messages.push({ role: "status", text: "Configuration changed; the chat continued in a new session." });
     if (user) messages.push({ role: "user", text: user.text, ...(user.at ? { at: user.at } : {}) });
     const nodes = [...(run.nodes || [])].sort((a, b) => (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9) || (a.x ?? 0) - (b.x ?? 0));
