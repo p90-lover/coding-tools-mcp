@@ -3220,10 +3220,12 @@ test("background command approver leaves typed non-command, truncated and unoffe
       },
     });
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    // Wait for the state asserted below, not a fixed number of reads: on a loaded CI runner (#964) the
+    // failed answer was still "The reviewer is checking the agent's request" after 40 reads.
     let status;
-    for (let tries = 0; tries < 40; tries++) {
+    for (let tries = 0; tries < 300; tries++) {
       status = await workflow.call("run_status", { workspaceId: "ws", runId: "run" });
-      if (status.detail === "Waiting for your tool approval" || status.status === "held") break;
+      if (/Waiting for your tool approval|checking it yourself/.test(status.detail ?? "") || status.status === "held") break;
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     await new Promise(resolve => setTimeout(resolve, 20)); // let the mock advisor complete its awaited callbacks
