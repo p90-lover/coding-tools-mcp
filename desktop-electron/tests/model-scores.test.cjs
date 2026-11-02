@@ -102,3 +102,129 @@ test("the score log is saved, replaces a round scored again, keeps its newest re
   await recovered.saved();
   assert.deepEqual(createModelScoreStore({ file }).records(), []);
 });
+
+// Run the actual panel's hooks and handlers with deferred IPC, without loading Electron.
+function scorePanel() {
+  const vm = require("node:vm");
+  const ts = require("typescript");
+  const slots = [], effects = [], calls = [], errors = [];
+  let cursor = 0, dirty = false, stopped = false, tree;
+  const changed = (before, after) => !before || after.some((value, index) => value !== before[index]);
+  const react = {
+    useState(initial) {
+      const at = cursor++;
+      slots[at] ??= { value: typeof initial === "function" ? initial() : initial };
+      return [slots[at].value, value => { slots[at].value = typeof value === "function" ? value(slots[at].value) : value; dirty = true; }];
+    },
+    useRef(value) { const at = cursor++; return slots[at] ??= { current: value }; },
+    useCallback(callback, dependencies) {
+      const at = cursor++;
+      if (changed(slots[at]?.dependencies, dependencies)) slots[at] = { callback, dependencies };
+      return slots[at].callback;
+    },
+    useEffect(callback, dependencies) {
+      const at = cursor++;
+      if (changed(slots[at]?.dependencies, dependencies)) {
+        const previous = slots[at]; slots[at] = { dependencies };
+        effects.push(() => { previous?.cleanup?.(); slots[at].cleanup = callback(); });
+      }
+    },
+  };
+  const jsx = (type, props) => ({ type, props: props || {} });
+  const helpers = {}, exports = {};
+  const compile = filename => ts.transpileModule(fs.readFileSync(path.resolve(__dirname, filename), "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText;
+  vm.runInNewContext(compile("../src/features/model-scores.ts"), { exports: helpers });
+  vm.runInNewContext(compile("../src/features/ModelScoresPanel.tsx"), {
+    exports, Error, localStorage: { getItem: () => null, setItem() {} }, window: { confirm: () => true },
+    require: name => {
+      if (name === "react") return react;
+      if (name === "react/jsx-runtime") return { jsx, jsxs: jsx };
+      if (name === "./model-scores") return helpers;
+      if (name === "./AgentOrchestratorRoleEditor") return { modelLabel: value => value };
+      assert.equal(name, "./AgentOrchestratorSurface");
+      return { moduleCall: (operation, args) => new Promise((resolve, reject) => calls.push({ operation, args, resolve, reject })) };
+    },
+  });
+  const setError = value => errors.push(value);
+  const render = () => {
+    do { dirty = false; cursor = 0; tree = exports.ModelScoresPanel({ setError }); while (effects.length) effects.shift()(); } while (dirty);
+    return tree;
+  };
+  const walk = value => !value || typeof value !== "object" ? [] : Array.isArray(value) ? value.flatMap(walk) : [value, ...walk(value.props?.children)];
+  const text = value => value == null || typeof value === "boolean" ? "" : typeof value !== "object" ? String(value)
+    : Array.isArray(value) ? value.map(text).join("") : text(value.props?.children);
+  const button = label => walk(render()).find(node => node.type === "button" && text(node).trim() === label);
+  const settle = async () => { await new Promise(resolve => setImmediate(resolve)); if (!stopped) render(); };
+  render();
+  return {
+    calls, errors, render, button, text: () => text(render()),
+    open: model => { walk(render()).find(node => node.props.className === "ao-score-row" && text(node).includes(model)).props.onClick(); render(); },
+    role: role => { walk(render()).find(node => node.type === "select").props.onChange({ target: { value: role } }); render(); },
+    reply: async (index, value) => { calls[index].resolve(value); await settle(); },
+    reject: async (index, value) => { calls[index].reject(new Error(value)); await settle(); },
+    stop: () => { stopped = true; for (const slot of slots) slot?.cleanup?.(); },
+    settle,
+  };
+}
+
+function panelResult(message, includeHistory = true) {
+  const stats = { count: 3, average: 8, recent: 8, best: 8, last: 8 };
+  return { ok: true, total: 2, recent: [],
+    summary: ["model-A", "model-B"].map(model => ({ model, missions: 3, lastAt: null, overall: stats, categories: {} })),
+    ...(includeHistory ? { history: [{ id: message, at: "2026-11-03T00:00:00.000Z", outcome: "finished", categories: [], score: 8, cards: [], message }] } : {}),
+  };
+}
+
+test("model history belongs to the selected model despite pending and older leaderboard replies", async () => {
+  const panel = scorePanel();
+  await panel.reply(0, panelResult("", false));
+  panel.open("model-A"); await panel.reply(1, panelResult("A mission"));
+  panel.button("‹ Leaderboard").props.onClick(); panel.render(); panel.open("model-B");
+  assert.doesNotMatch(panel.text(), /A mission/);
+  assert.match(panel.text(), /Loading missions/);
+  await panel.reply(3, panelResult("B mission")); await panel.reply(2, panelResult("", false));
+  assert.match(panel.text(), /B mission/);
+  panel.stop();
+});
+
+test("older role failures cannot publish errors or finish the current score read", async () => {
+  const panel = scorePanel();
+  await panel.reply(0, panelResult("", false));
+  panel.role("worker"); panel.role("reviewer");
+  await panel.reject(1, "old worker failure");
+  assert.deepEqual(panel.errors, []);
+  assert.equal(panel.button("Refresh").props.disabled, true);
+  await panel.reply(2, panelResult("", false));
+  assert.equal(panel.button("Refresh").props.disabled, false);
+  panel.role("planner"); await panel.reject(3, "current planner failure");
+  assert.deepEqual(panel.errors, ["current planner failure"]);
+  assert.equal(panel.button("Refresh").props.disabled, false);
+  panel.stop();
+});
+
+test("clear refreshes the current role and rejects reads that began before clearing finished", async () => {
+  const panel = scorePanel();
+  await panel.reply(0, panelResult("", false));
+  panel.button("Clear scores").props.onClick(); panel.render();
+  panel.role("worker");
+  await panel.reply(1, { ok: true });
+  const reads = panel.calls.slice(3);
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].args.role, "worker");
+  assert.equal(reads[0].args.model, undefined);
+  await panel.reply(3, { ok: true, total: 0, summary: [], recent: [] });
+  await panel.reply(2, panelResult("", false));
+  assert.match(panel.text(), /No scores yet/);
+  panel.stop();
+});
+
+test("closing Model scores prevents late errors from its pending read and clear", async () => {
+  const read = scorePanel(); read.stop(); await read.reject(0, "closed read failure");
+  assert.deepEqual(read.errors, []);
+  const clear = scorePanel(); await clear.reply(0, panelResult("", false));
+  clear.button("Clear scores").props.onClick(); clear.stop(); await clear.reject(1, "closed clear failure");
+  assert.deepEqual(clear.errors, []);
+  assert.equal(clear.calls.length, 2);
+});

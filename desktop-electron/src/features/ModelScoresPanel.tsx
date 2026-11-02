@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { moduleCall } from "./AgentOrchestratorSurface";
 import { modelLabel } from "./AgentOrchestratorRoleEditor";
 import {
@@ -39,19 +39,26 @@ export function ModelScoresPanel({ setError }: { setError: (error: string | null
     try { return (localStorage.getItem("coding-tools:ao:score-view") as View) || "average"; } catch { return "average"; }
   });
   const [role, setRole] = useState("");
-  const [data, setData] = useState<ModelScoresResult | null>(null);
-  const [loading, setLoading] = useState(true);
-  // The model whose missions are open, and its history once read.
   const [opened, setOpened] = useState<string | null>(null);
-  const [history, setHistory] = useState<ModelMission[] | null>(null);
+  const [loaded, setLoaded] = useState<{ role: string; model: string | null; value: ModelScoresResult } | null>(null);
+  const [pending, setPending] = useState<{ role: string; model: string | null; loading: boolean }>({ role: "", model: null, loading: true });
+  const [revision, setRevision] = useState(0);
+  const request = useRef(0);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; request.current++; };
+  }, []);
   const load = useCallback(() => {
-    setLoading(true);
+    const ticket = ++request.current;
+    const current = () => mounted.current && request.current === ticket;
+    setPending({ role, model: opened, loading: true });
     void moduleCall("model_scores", { role, limit: 50, ...(opened ? { model: opened } : {}) })
-      .then(result => { setData(result as ModelScoresResult); setHistory((result as ModelScoresResult).history ?? null); })
-      .catch(cause => setError(String(cause instanceof Error ? cause.message : cause)))
-      .finally(() => setLoading(false));
+      .then(result => { if (current()) setLoaded({ role, model: opened, value: result as ModelScoresResult }); })
+      .catch(cause => { if (current()) setError(String(cause instanceof Error ? cause.message : cause)); })
+      .finally(() => { if (current()) setPending({ role, model: opened, loading: false }); });
   }, [role, opened, setError]);
-  useEffect(load, [load]);
+  useEffect(() => { load(); return () => { request.current++; }; }, [load, revision]);
   const choose = (next: View) => {
     setView(next);
     setOpened(null);
@@ -59,8 +66,20 @@ export function ModelScoresPanel({ setError }: { setError: (error: string | null
   };
   const clear = async () => {
     if (!window.confirm("Delete every saved model score?\n\nThe model picker's hints start again from the next finished Team mission.")) return;
-    try { await moduleCall("model_scores_clear", {}); setOpened(null); load(); } catch (cause) { setError(String(cause instanceof Error ? cause.message : cause)); }
+    request.current++;
+    setPending({ role, model: opened, loading: true });
+    try {
+      await moduleCall("model_scores_clear", {});
+      if (mounted.current) { setLoaded(null); setOpened(null); }
+    } catch (cause) {
+      if (mounted.current) setError(String(cause instanceof Error ? cause.message : cause));
+    } finally {
+      if (mounted.current) { request.current++; setRevision(value => value + 1); }
+    }
   };
+  const data = loaded?.role === role ? loaded.value : null;
+  const history: ModelMission[] | null = loaded?.role === role && loaded.model === opened ? loaded.value.history ?? null : null;
+  const loading = pending.role !== role || pending.model !== opened || pending.loading;
   const rankView: RankView = view === "log" ? "average" : view;
   const board = rankModels(data?.summary ?? [], rankView);
   const columns = SCORE_CATEGORIES.filter(category => board.some(entry => entry.categories[category]));
