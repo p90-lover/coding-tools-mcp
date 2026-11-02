@@ -17,6 +17,7 @@ const {
   managedTunnelConnectArgs,
   validateConfig,
   watchdogExternalBackoff,
+  windowsProcessInfo,
 } = require("../electron/runtime-supervisor.cjs");
 
 function tunnelPreparationFixture() {
@@ -419,6 +420,30 @@ test("a process is inspected without blocking the main thread", { skip: process.
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("PowerShell for a process lookup is started off the main thread and its answer parsed", { skip: process.platform !== "win32" }, async () => {
+  // Even execFile's own process start held main 0.4-0.9 s per watchdog check on 0.8.57.
+  const { EventEmitter } = require("node:events");
+  const { PassThrough } = require("node:stream");
+  const starts = [];
+  const fakeStart = (output, code) => async (file, args, options) => {
+    starts.push({ file, args, options });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.kill = () => true;
+    setImmediate(() => { child.stdout.end(output); child.emit("close", code, null); });
+    return child;
+  };
+  const answer = JSON.stringify({ executablePath: "C:\\bridge\\node.exe", commandLine: "node bridge.js", parentPid: 42 });
+  assert.deepEqual(await windowsProcessInfo(1234, { start: fakeStart(answer, 0) }),
+    { executablePath: "C:\\bridge\\node.exe", commandLine: "node bridge.js", parentPid: 42 });
+  assert.match(starts[0].file, /powershell\.exe$/i);
+  assert.match(starts[0].args.at(-1), /ProcessId=1234/);
+  assert.deepEqual(starts[0].options.stdio, ["ignore", "pipe", "ignore"]);
+  assert.equal(await windowsProcessInfo(1234, { start: fakeStart(answer, 1) }), null, "a failed PowerShell gives no answer");
+  assert.equal(await windowsProcessInfo(1234, { start: fakeStart("", 0) }), null, "an exited process gives no answer");
+  assert.equal(await windowsProcessInfo(1234, { start: async () => { throw new Error("no start"); } }), null);
 });
 
 test("the runtime config is parsed once per change, not on every monitor read", () => {
