@@ -15,7 +15,7 @@ const {
   waitForPackagedRuntimeSource,
 } = require("../electron/runtime-install.cjs");
 
-test("older versions' runtime copies are removed, keeping this version, the newest other and fresh temporaries", async () => {
+test("older versions' runtime copies are removed, keeping this version, the newest other and fresh temporaries", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-prune-"));
   const coreHome = path.join(root, "core-home");
   const versions = path.join(coreHome, "versions");
@@ -34,19 +34,38 @@ test("older versions' runtime copies are removed, keeping this version, the newe
   make(`0.8.10${suffix}`, 5 * hour);                       // newest other: kept for a rollback
   make(`0.8.6${suffix}`, 30 * hour);
   make(`0.7.0-rc.26${suffix}`, 90 * hour);
+  make(`0.8.5${suffix}-0123456789ab`, 40 * hour);           // a previous version's side bundle
+  make(`0.7.0-rc.20${suffix}-abcdef012345`, 90 * hour);     // a prerelease side bundle
+  const busy = `0.8.4${suffix}-123456789abc`;
+  make(busy, 60 * hour);
+  const unrelated = [`backup-0.8.3${suffix}-0123456789ab`, `0.8.3${suffix}-not-a-bundle`, `0.8.3${suffix}-ABCDEF012345`,
+    `1.2.3-.preview${suffix}-0123456789ab`, `1.2.3--preview${suffix}-0123456789ab`];
+  for (const name of unrelated) make(name, 90 * hour);
   make(`0.8.1${suffix}.tmp-35972-1792488529502`, 50 * hour); // stale temporary
   make(`0.8.9${suffix}.tmp-1-2`, 5 * 60_000);              // a temporary still being written
   make(`0.8.11${suffix}.tmp-7-8`, 3 * hour);               // this version's copy cut off by a full disk
   make(`0.8.11${suffix}.previous-7-9`, 20 * 60_000);       // ...and one just replaced: not yet
   fs.writeFileSync(path.join(versions, "stray.txt"), "x");
+  const rename = fs.promises.rename;
+  t.mock.method(fs.promises, "rename", async (from, to) => {
+    if (from === path.join(versions, busy)) throw Object.assign(new Error("owned fixture in use"), { code: "EPERM" });
+    return rename(from, to);
+  });
   try {
     const removed = await pruneOldRuntimes({ app: { isPackaged: true, getVersion: () => "0.8.11" }, coreHome, now });
-    assert.deepEqual(removed.sort(), [`0.7.0-rc.26${suffix}`, `0.8.1${suffix}.tmp-35972-1792488529502`, `0.8.6${suffix}`,
+    assert.deepEqual(removed.sort(), [`0.7.0-rc.20${suffix}-abcdef012345`, `0.7.0-rc.26${suffix}`, `0.8.1${suffix}.tmp-35972-1792488529502`,
+      `0.8.5${suffix}-0123456789ab`, `0.8.6${suffix}`,
       `0.8.11${suffix}.tmp-7-8`].sort());
     assert.deepEqual(fs.readdirSync(versions).sort(), [`0.8.10${suffix}`, `0.8.11${suffix}`, `0.8.11${suffix}-0123456789ab`,
-      `0.8.11${suffix}.previous-7-9`, `0.8.9${suffix}.tmp-1-2`, "stray.txt"].sort());
+      `0.8.11${suffix}.previous-7-9`, `0.8.9${suffix}.tmp-1-2`, busy, ...unrelated, "stray.txt"].sort());
     assert.deepEqual(await pruneOldRuntimes({ app: { isPackaged: false, getVersion: () => "0.8.11" }, coreHome, now }), [],
       "a development run leaves the core home alone");
+    const newestSide = `0.8.10${suffix}-abcdef012345`;
+    make(newestSide, 2 * hour);
+    assert.deepEqual(await pruneOldRuntimes({ app: { isPackaged: true, getVersion: () => "0.8.11" }, coreHome, now }),
+      [`0.8.10${suffix}`], "the newest other side bundle is kept as the rollback instead of the older normal copy");
+    assert.equal(fs.existsSync(path.join(versions, newestSide)), true);
+    assert.equal(fs.existsSync(path.join(versions, `0.8.11${suffix}-0123456789ab`)), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
