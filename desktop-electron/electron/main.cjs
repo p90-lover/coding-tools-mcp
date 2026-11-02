@@ -60,9 +60,8 @@ const { RuntimeHost } = require("./runtime.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
 const {
   ensurePackagedRuntime,
-  ensurePackagedRuntimeAsync,
+  preparePackagedRuntime,
   pruneOldRuntimes,
-  waitForPackagedRuntimeSource,
 } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
@@ -169,6 +168,7 @@ app.setPath("userData", launcherUserData);
 app.setAppLogsPath(path.join(launcherUserData, "logs"));
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
+  persist: process.env.CODING_TOOLS_PERSIST_LOGS === "1",
 });
 
 let mainWindow = null;
@@ -3530,12 +3530,14 @@ function registerIpc({ logger, stateStore }) {
     const copy = nativeCopyFor(stateStore.read().language);
     const result = await dialog.showSaveDialog(mainWindow, {
       title: copy.exportDiagnostics,
-      defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-diagnostics-${date}.jsonl`),
+      defaultPath: path.join(app.getPath("userData"), `codex-web-gpt-diagnostics-${date}.jsonl`),
       filters: [{ name: "JSON Lines", extensions: ["jsonl"] }],
     });
     if (result.canceled || !result.filePath) return null;
+    await logger.flush();
     const recordCount = exportSanitizedLogs({
       filePath: logger.filePath,
+      records: logger.filePath ? [] : logger.recent(300),
       destinationPath: result.filePath,
     });
     logger.info("launcher.logs_exported", { recordCount });
@@ -3764,8 +3766,6 @@ async function start() {
     }
   }
   let runtimeSourceFallback = null;
-  await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath, coreHome: CORE_HOME,
-    onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); } });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
   // Whether the runtime folder was removed is checked off the main thread, at most every 30 s:
@@ -3798,22 +3798,17 @@ async function start() {
     }
     return installedRuntimeRoot;
   };
-  // The launch checks, and on a new version's first start copies, the runtime without holding the
-  // main thread (ensurePackagedRuntimeAsync). If that fails, the synchronous call below runs the
-  // same steps again and reports the failure as before.
-  const launchRuntimeRoot = await ensurePackagedRuntimeAsync({
+  // Prepare exactly once. A whole installed copy needs no walk of the packaged source, and a
+  // failed asynchronous preparation must not repeat every disk operation on the main thread.
+  const launchRuntimeRoot = await preparePackagedRuntime({
     app,
     coreHome: CORE_HOME,
     resourcesPath: process.resourcesPath,
-  }).catch(() => null);
-  if (launchRuntimeRoot) {
-    installedRuntimeRoot = launchRuntimeRoot;
-    runtimeRootResolved = true;
-    runtimeRootCheck.at = Date.now();
-  }
-  installedRuntimeRoot = runtimeRootProvider();
-  // Older versions' runtime copies (165 MB each) are removed in the background (pruneOldRuntimes).
-  void pruneOldRuntimes({ app, coreHome: CORE_HOME }).catch(() => undefined);
+    onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); },
+  });
+  installedRuntimeRoot = launchRuntimeRoot;
+  runtimeRootResolved = true;
+  runtimeRootCheck.at = Date.now();
 
   cdpPort = await findFreePort();
   if (process.platform === "linux") {
@@ -3877,6 +3872,7 @@ async function start() {
   }
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
+    persist: process.env.CODING_TOOLS_PERSIST_LOGS === "1",
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
@@ -4725,6 +4721,11 @@ async function start() {
     windowStatePath: path.join(app.getPath("userData"), "window-state.json"),
     startHidden,
   });
+  // Reclaim old copies after the window paints, not while this launch is loading its files.
+  mainWindow.once("ready-to-show", () => {
+    const timer = setTimeout(() => { void pruneOldRuntimes({ app, coreHome: CORE_HOME }).catch(() => undefined); }, 30_000);
+    timer.unref?.();
+  });
   registerIpc({ logger, stateStore });
   await ensureRendererLoaded(mainWindow, logger);
   rendererLoaded = true;
@@ -5200,9 +5201,11 @@ async function start() {
 
 void start().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
-  try {
-    fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
-  } catch {}
+  if (process.env.CODING_TOOLS_PERSIST_LOGS === "1") {
+    try {
+      fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
+    } catch {}
+  }
   // A version an update just placed that cannot start is undone: the previous one starts instead.
   try {
     if (app.isPackaged && handOffUpdateRecovery(path.dirname(process.execPath), { currentVersion: app.getVersion(), startFailed: message })) {
