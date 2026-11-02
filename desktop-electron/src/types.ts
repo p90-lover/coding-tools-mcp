@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "chatgpt-browser-management" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "chatgpt-browser-management" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "app-plugins" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 /** Plugins > MCPs (chat-mcp-servers.cjs): one of the person's own MCP servers for chat agents. */
 export interface McpServerEntry {
@@ -29,6 +29,30 @@ export interface RtkStatus {
   version: string | null;
   minimum?: string;
   installCommand?: string;
+}
+/** Connections > App plugins (app-plugins.cjs): CPA or one of its plugins, installed vs. GitHub. */
+export interface AppPlugin {
+  /** "cpa", or "cpa-plugin:<plugin id>". */
+  id: string;
+  kind: "service" | "cpa-plugin";
+  name: string;
+  /** The plugin's DLL in CPA's plugins folder. */
+  file?: string;
+  /** owner/name on GitHub, when known. */
+  repository: string | null;
+  installed: string | null;
+  latest: string | null;
+  updateAvailable: boolean;
+  /** The update can be installed from here (a checked Windows build, or CPA's own updater). */
+  canUpdate: boolean;
+  note: string | null;
+  error: string | null;
+  updating: boolean;
+  releaseUrl: string | null;
+}
+export interface AppPluginsSnapshot {
+  items: AppPlugin[];
+  checkedAt: string;
 }
 /** rtk's own savings report: `rtk gain` as text, and its JSON export when rtk gives one. */
 export interface RtkGain {
@@ -1113,6 +1137,8 @@ export interface LauncherApi {
   rtkStatus(): Promise<RtkStatus>;
   rtkGain(): Promise<RtkGain>;
   rtkInstall(): Promise<{ code: number | null; output: string; status: RtkStatus }>;
+  appPlugins(refresh?: boolean): Promise<AppPluginsSnapshot>;
+  updateAppPlugin(id: string): Promise<AppPluginsSnapshot>;
   mcpServers(): Promise<McpServerEntry[]>;
   /** `githubCliToken`: the main process adds the GitHub CLI's sign-in as the header (GitHub's MCP server only). */
   saveMcpServer(server: McpServerInput, options?: { githubCliToken?: boolean }): Promise<McpServerEntry[]>;

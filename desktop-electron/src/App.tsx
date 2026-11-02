@@ -39,6 +39,8 @@ import { RegisterSurface } from "./features/RegisterSurface";
 import { MCP_CATALOG, catalogServer, isWindows, parseMcpPaste, placeholdersIn, type McpCatalogEntry } from "./features/mcp-catalog";
 
 import type {
+  AppPlugin,
+  AppPluginsSnapshot,
   BrowserInteractionMode,
   BrowserState,
   DoctorReport,
@@ -57,6 +59,8 @@ import type {
 
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
 const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
+/** The hidden docked sidebar's rail of icons (also --sidebar-rail-width). */
+const SIDEBAR_RAIL_WIDTH = 52;
 const IPC_API_RETRY_DELAYS_MS = [0, 50, 200, 500, 1_500, 3_000] as const;
 const MCP_GUIDE_MEDIA = [
   new URL("./assets/mcp-create-tunnel.mp4", import.meta.url).href,
@@ -476,6 +480,8 @@ function LauncherShell({
   // over the page until the pointer leaves, and the toggle pins it open again.
   const sidebarPinned = useRef(snapshot.state.sidebarOpen !== false);
   const [sidebarPeek, setSidebarPeek] = useState(false);
+  // The panel keeps its full layout while it slides shut, so its labels don't vanish mid-way.
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const sidebarPeekTimer = useRef(0);
   // Rarely used surfaces, folded under "More" so the everyday ones stay in view.
   const moreSurfaces = [
@@ -483,7 +489,6 @@ function LauncherShell({
     { surface: "rtk", icon: "gauge", label: "RTK" },
     { surface: "agent-orchestrator-original", icon: "orchestrator", label: "Agent Orchestrator" },
     { surface: "antigravity-cli", icon: "terminal", label: "Antigravity CLI" },
-    { surface: "integrations", icon: "link", label: copy.integrations },
     { surface: "cpa", icon: "providers", label: "CPA" },
     { surface: "network", icon: "globe", label: copy.networkProxy },
   ] as const;
@@ -500,7 +505,7 @@ function LauncherShell({
   const sidebarRail = !compactSidebar && !sidebarOpen;
   // Native views (browser, ChatGPT, Register) are drawn above the page, so they step aside while
   // a sidebar is laid over them.
-  const sidebarCovers = (compactSidebar && sidebarOpen) || (sidebarRail && sidebarPeek);
+  const sidebarCovers = (compactSidebar && sidebarOpen) || (sidebarRail && sidebarExpanded);
   const browserSurfaceActive = surface === "browser"
     && !sidebarCovers
     && !biggerContextRecommendationOpen;
@@ -618,16 +623,56 @@ function LauncherShell({
       .catch((cause) => setError(messageOf(cause)));
   };
 
-  // A short delay either way: passing the window's edge doesn't throw the panel open, and the
-  // pointer can cross the gap between the rail and its panel.
-  const peekSidebar = (show: boolean) => {
-    window.clearTimeout(sidebarPeekTimer.current);
-    if (!show) {
-      sidebarPeekTimer.current = window.setTimeout(() => setSidebarPeek(false), 220);
-      return;
+  // The hover panel follows where the pointer is, not which element it is over: the title bar's
+  // buttons sit on the rail's top, and entering and leaving them threw the panel open and shut.
+  // It opens over the rail and stays open until the pointer is clearly past the panel (or leaves
+  // the window). A short delay each way: passing the window's edge doesn't throw it open.
+  const sidebarPeekState = useRef(false);
+  sidebarPeekState.current = sidebarPeek;
+  useEffect(() => {
+    if (!sidebarRail) return undefined;
+    let pending: boolean | null = null;
+    const settle = (want: boolean) => {
+      if (want === sidebarPeekState.current) {
+        window.clearTimeout(sidebarPeekTimer.current);
+        pending = null;
+        return;
+      }
+      if (pending === want) return;
+      pending = want;
+      window.clearTimeout(sidebarPeekTimer.current);
+      sidebarPeekTimer.current = window.setTimeout(() => {
+        pending = null;
+        setSidebarPeek(want);
+      }, want ? 120 : 200);
+    };
+    const move = (event: PointerEvent) => {
+      if (event.clientX <= SIDEBAR_RAIL_WIDTH) settle(true);
+      else if (event.clientX > sidebarWidth + 16) settle(false);
+      else settle(sidebarPeekState.current);
+    };
+    const leave = () => settle(false);
+    window.addEventListener("pointermove", move, { passive: true });
+    document.documentElement.addEventListener("pointerleave", leave);
+    window.addEventListener("blur", leave);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      document.documentElement.removeEventListener("pointerleave", leave);
+      window.removeEventListener("blur", leave);
+      window.clearTimeout(sidebarPeekTimer.current);
+      setSidebarPeek(false);
+    };
+  }, [sidebarRail, sidebarWidth]);
+
+  useEffect(() => {
+    if (sidebarPeek) {
+      setSidebarExpanded(true);
+      return undefined;
     }
-    if (sidebarRail) sidebarPeekTimer.current = window.setTimeout(() => setSidebarPeek(true), 140);
-  };
+    // Matches the panel's 180 ms slide in styles.css.
+    const timer = window.setTimeout(() => setSidebarExpanded(false), 190);
+    return () => window.clearTimeout(timer);
+  }, [sidebarPeek]);
 
   const closeSidebarPeek = () => {
     window.clearTimeout(sidebarPeekTimer.current);
@@ -746,7 +791,7 @@ function LauncherShell({
       animate={{ opacity: 1 }}
       className={`app-shell${compactSidebar ? " is-compact" : ""}${sidebarOpen ? " is-sidebar-open" : ""}${sidebarRail ? " is-sidebar-rail" : ""}`}
       initial={{ opacity: 0 }}
-      style={{ "--sidebar-width": `${sidebarWidth}px` } as Record<string, string>}
+      style={{ "--sidebar-width": `${sidebarWidth}px`, "--sidebar-rail-width": `${SIDEBAR_RAIL_WIDTH}px` } as Record<string, string>}
     >
       <TitleBar
         copy={copy}
@@ -769,10 +814,8 @@ function LauncherShell({
 
       <motion.aside
         animate={{ width: sidebarOpen ? "var(--sidebar-width)" : compactSidebar ? 0 : "var(--sidebar-rail-width)" }}
-        className={`app-sidebar${sidebarRail && sidebarPeek ? " is-peek" : ""}`}
+        className={`app-sidebar${sidebarRail && sidebarPeek ? " is-peek" : ""}${sidebarRail && sidebarExpanded ? " is-expanded" : ""}`}
         initial={false}
-        onPointerEnter={() => peekSidebar(true)}
-        onPointerLeave={() => peekSidebar(false)}
         transition={{ type: "spring", duration: 0.5, bounce: 0.08 }}
       >
         <div className="sidebar-clip">
@@ -871,8 +914,7 @@ function LauncherShell({
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.connections}>
-                {/* ProviderHubIntegration portals its Providers row into this slot. */}
-                <div className="sidebar-provider-slot" />
+                <SidebarItem active={surface === "app-plugins"} icon="update" label={copy.appPlugins} onClick={() => navigateSurface("app-plugins")} />
                 <SidebarItem active={surface === "oauth"} icon="key" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
                 <SidebarItem active={surface === "register"} icon="userPlus" label={copy.register} onClick={() => navigateSurface("register")} />
                 <SidebarItem active={surface === "workspace-auth"} icon="shield" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
@@ -1041,6 +1083,9 @@ function LauncherShell({
             ))}
             {keepAlive("plugins", () => (
               <PluginsSurface active={surface === "plugins"} copy={copy} setError={setError} snapshot={snapshot} updateState={updateState} />
+            ))}
+            {keepAlive("app-plugins", () => (
+              <AppPluginsSurface active={surface === "app-plugins"} setError={setError} />
             ))}
             {keepAlive("rtk", () => (
               <RtkSurface active={surface === "rtk"} enabled={snapshot.state.rtkEnabled !== false} setError={setError} updateState={updateState} />
@@ -2581,6 +2626,80 @@ function RtkSurface({ active, enabled, setError, updateState }: {
       <SectionHeading label="Savings" />
       {gain?.available && gain.text ? <pre className="rtk-gain">{gain.text}</pre>
         : <p className="surface-empty-note">{status?.installed ? "No savings yet. rtk reports them after agents run commands through it." : "rtk shows its savings here once it's installed."}</p>}
+    </ContentSurface>
+  );
+}
+
+/**
+ * Connections > App plugins (app-plugins.cjs): CPA and its plugins, the version installed and the
+ * newest release on GitHub, and Update where the app can install it (CPA's own updater, or a
+ * plugin's Windows build checked against GitHub's SHA-256).
+ */
+function AppPluginsSurface({ active, setError }: { active: boolean; setError: (error: string | null) => void }) {
+  const [snapshot, setSnapshot] = useState<AppPluginsSnapshot | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [updating, setUpdating] = useState<string | null>(null);
+  const [done, setDone] = useState<Record<string, string>>({});
+  const load = useCallback(async (refresh: boolean) => {
+    setChecking(true);
+    try {
+      setSnapshot(await api!.appPlugins(refresh));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setChecking(false);
+    }
+  }, [setError]);
+  useEffect(() => { if (active) void load(false); }, [active, load]);
+  const update = async (item: AppPlugin) => {
+    setUpdating(item.id);
+    try {
+      setSnapshot(await api!.updateAppPlugin(item.id));
+      setDone((current) => ({ ...current, [item.id]: `Updated from ${item.installed ?? "an unknown version"} to ${item.latest}.` }));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setUpdating(null);
+    }
+  };
+  const row = (item: AppPlugin, last: boolean) => {
+    const github = item.latest ? `latest on GitHub ${item.latest}` : item.error ? `GitHub: ${item.error}` : "GitHub not checked yet";
+    const body = [`Installed ${item.installed ?? "(version unknown)"} · ${github}`, item.repository, done[item.id] ?? item.note]
+      .filter(Boolean).join(". ");
+    const busy = updating === item.id || item.updating;
+    return (
+      <SettingRow body={body} flushAfter={last} key={item.id} label={item.name}>
+        <div className="inline-actions">
+          {item.updateAvailable && item.canUpdate
+            ? <PrimaryButton disabled={busy || updating !== null} onClick={() => void update(item)}>{busy ? "Updating…" : `Update to ${item.latest}`}</PrimaryButton>
+            : <span className={`rtk-chip${item.updateAvailable ? " is-attention" : ""}`}>
+              {item.updateAvailable ? "Comes with the app" : item.latest ? "Up to date" : item.error ? "Not checked" : "…"}
+            </span>}
+          {item.releaseUrl ? <IconButton icon="external" label="Open the release on GitHub"
+            onClick={() => void api!.openExternal(item.releaseUrl!).catch((cause) => setError(messageOf(cause)))} /> : null}
+        </div>
+      </SettingRow>
+    );
+  };
+  const services = snapshot?.items.filter((item) => item.kind === "service") ?? [];
+  const plugins = snapshot?.items.filter((item) => item.kind === "cpa-plugin") ?? [];
+  return (
+    <ContentSurface narrow title="App plugins" subtitle="What Coding Tools runs from other projects: the version installed and the newest release on GitHub. Private repositories are read with your GitHub CLI sign-in (gh auth login).">
+      <div className="inline-actions app-plugins-bar">
+        <SecondaryButton disabled={checking || updating !== null} icon="reload" onClick={() => void load(true)}>{checking ? "Checking GitHub…" : "Check GitHub now"}</SecondaryButton>
+        {snapshot ? <small>Checked {new Date(snapshot.checkedAt).toLocaleString()}</small> : null}
+      </div>
+      <SectionHeading label="Services" />
+      <div className="settings-list">
+        {services.length ? services.map((item, index) => row(item, index === services.length - 1))
+          : <p className="surface-empty-note">{snapshot ? "No services." : "Checking…"}</p>}
+      </div>
+      <SectionHeading label="CPA plugins" />
+      <div className="settings-list">
+        {plugins.length ? plugins.map((item, index) => row(item, index === plugins.length - 1))
+          : <p className="surface-empty-note">{snapshot ? "No CPA plugins are installed (they run on Windows x64)." : "Checking…"}</p>}
+      </div>
+      <p className="surface-empty-note">Updating a plugin restarts CPA so it loads the new one; chats using CPA reconnect.</p>
     </ContentSurface>
   );
 }

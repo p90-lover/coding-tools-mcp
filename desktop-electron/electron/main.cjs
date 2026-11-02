@@ -74,6 +74,7 @@ const {
 } = require("./app-update.cjs");
 const { createUpdateHealthGate } = require("./update-health-gate.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
+const { createAppPlugins } = require("./app-plugins.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
@@ -277,6 +278,8 @@ let autoInstaller = null;
 // Set once the main window's renderer has loaded (the update health gate's window check).
 let rendererLoaded = false;
 let cpaUpdater = null;
+// Connections > App plugins (app-plugins.cjs): CPA and its plugins, their versions and updates.
+let appPluginsService = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
@@ -3496,6 +3499,17 @@ function registerIpc({ logger, stateStore }) {
     if (!rtkService) throw new Error("RTK is unavailable in this build");
     return rtk.install();
   });
+  // Connections > App plugins: versions installed and on GitHub; an update is the person's own click.
+  handle("launcher:app-plugins", async (event, refresh) => {
+    assertFocusedMainWindow(event, false);
+    if (!appPluginsService) throw new Error("App plugins are still starting");
+    return appPluginsService.list({ refresh: refresh === true });
+  });
+  handle("launcher:app-plugin-update", async (event, id) => {
+    assertFocusedMainWindow(event, true);
+    if (!appPluginsService) throw new Error("App plugins are still starting");
+    return appPluginsService.update(String(id || ""));
+  });
   // Plugins > MCPs: the person's own MCP servers for chat agents. Adding, changing or turning one on
   // runs its command (or reaches its address) in every new chat, so it is their own click in the
   // visible app; errors name the field, never a value (env and headers carry tokens).
@@ -4083,6 +4097,13 @@ async function start() {
         return null;
       }
     },
+    logger,
+  });
+  appPluginsService = createAppPlugins({
+    cpaStateDir: path.join(app.getPath("userData"), "integrations", "state", "cpa"),
+    services: () => externalServicesController,
+    // A plugin DLL loads when CPA starts.
+    restartCpa: () => externalServicesController.restart("cpa"),
     logger,
   });
   managedBootstrapController = createManagedBootstrap({

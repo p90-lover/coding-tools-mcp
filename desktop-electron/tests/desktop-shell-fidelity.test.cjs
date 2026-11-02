@@ -19,9 +19,12 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(app, /<details className="sidebar-more"/);
   const more = app.slice(app.indexOf('<details className="sidebar-more"'), app.indexOf("</details>", app.indexOf('<details className="sidebar-more"')));
   assert.doesNotMatch(more, /navigateSurface\("providers"\)/, "the retired Provider Hub is not a More navigation item");
-  assert.match(read("src/providers/ProviderHubIntegration.tsx"), /provider-sidebar-item/, "Connections keeps its independent Providers entry");
-  assert.match(app, /SidebarGroup label=\{copy\.connections\}>[\s\S]{0,160}<div className="sidebar-provider-slot" \/>/, "Providers is the first row of the shell's Connections group");
-  assert.match(read("src/providers/ProviderHubIntegration.tsx"), /querySelector<HTMLElement>\("\.sidebar-provider-slot"\)/);
+  // Connections opens with App plugins; the Providers row (ProviderHubIntegration) and More's
+  // Integrations row left the sidebar on 2026-11-02.
+  assert.match(app, /SidebarGroup label=\{copy\.connections\}>\s*<SidebarItem active=\{surface === "app-plugins"\}[^\n]*navigateSurface\("app-plugins"\)/);
+  assert.doesNotMatch(app, /sidebar-provider-slot/);
+  assert.doesNotMatch(read("src/main.tsx"), /import \{ ProviderHubIntegration \}|<ProviderHubIntegration/);
+  assert.doesNotMatch(more, /surface: "integrations"/);
   // `.sidebar-item > span { flex: 1 }` is for the label; without this the icon span took half the row (seen live in 0.8.35).
   // A bare `.provider-nav-icon` loses to that rule on specificity, so it is scoped under `.sidebar-item >`.
   assert.match(read("src/providers/provider-manager.css"), /\.sidebar-item > \.provider-nav-icon,\s*\.provider-nav-icon\s*\{[^}]*flex:\s*none;/);
