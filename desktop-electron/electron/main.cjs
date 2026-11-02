@@ -64,7 +64,7 @@ const {
   preparePackagedRuntime,
   pruneOldRuntimes,
 } = require("./runtime-install.cjs");
-const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
+const { RuntimeSupervisor, watchdogExternalBackoff } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
@@ -545,6 +545,9 @@ const BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART = 2;
 let bridgeWatchdogTimer = null;
 let bridgeWatchdogBusy = false;
 let bridgeWatchdogMisses = 0;
+// While another process owns the bridge port, restarts wait (watchdogExternalBackoff).
+let bridgeWatchdogExternalBackoffMs = 0;
+let bridgeWatchdogQuietUntil = 0;
 function startBridgeWatchdog(logger, stateStore) {
   if (IS_DEV_PROFILE || bridgeWatchdogTimer) return;
   bridgeWatchdogTimer = setInterval(async () => {
@@ -567,8 +570,11 @@ function startBridgeWatchdog(logger, stateStore) {
       const check = await runtimeSupervisor.ownedRuntimeCheck(config);
       if (check.ready) {
         bridgeWatchdogMisses = 0;
+        bridgeWatchdogExternalBackoffMs = 0;
+        bridgeWatchdogQuietUntil = 0;
         return;
       }
+      if (Date.now() < bridgeWatchdogQuietUntil) return;
       bridgeWatchdogMisses += 1;
       // Which part failed and how long the check took: a slow daemon_health on a stalled machine
       // reads differently from a tunnel that is down.
@@ -580,7 +586,14 @@ function startBridgeWatchdog(logger, stateStore) {
       bridgeWatchdogMisses = 0;
       logger.warn("runtime.watchdog_restart", miss);
       const result = await runtimeSupervisor.startIfConfigured();
-      logger.info("runtime.watchdog_result", { status: result?.status });
+      if (result?.status === "external") {
+        bridgeWatchdogExternalBackoffMs = watchdogExternalBackoff(bridgeWatchdogExternalBackoffMs);
+        bridgeWatchdogQuietUntil = Date.now() + bridgeWatchdogExternalBackoffMs;
+      } else {
+        bridgeWatchdogExternalBackoffMs = 0;
+      }
+      logger.info("runtime.watchdog_result", { status: result?.status,
+        ...(result?.status === "external" ? { retryInMinutes: Math.round(bridgeWatchdogExternalBackoffMs / 60_000) } : {}) });
       // Point Codex back at the bridge once it is running again (a failed launch restores the old route).
       if (result?.status === "ready" || result?.status === "degraded") {
         scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "watchdog" });

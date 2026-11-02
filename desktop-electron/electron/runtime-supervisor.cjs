@@ -17,6 +17,14 @@ const { ExtraTunnels } = require("./extra-tunnels.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
+// After the launcher watchdog's restart finds another process owning the bridge port, how long it
+// waits before trying again: 10 min, doubling to 1 h. On 0.8.57 a bridge kept from an older version
+// was found every 2 min, and each round read the ownership marker and ran PowerShell on main.
+const WATCHDOG_EXTERNAL_BACKOFF_FIRST_MS = 10 * 60_000;
+const WATCHDOG_EXTERNAL_BACKOFF_MAX_MS = 60 * 60_000;
+function watchdogExternalBackoff(previousMs) {
+  return previousMs > 0 ? Math.min(previousMs * 2, WATCHDOG_EXTERNAL_BACKOFF_MAX_MS) : WATCHDOG_EXTERNAL_BACKOFF_FIRST_MS;
+}
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
 const MAX_CONTROL_OUTPUT_BYTES = 1024 * 1024;
 const DRAIN_IDLE_TIMEOUT_MS = 15_000;
@@ -2748,5 +2756,6 @@ module.exports = {
   RuntimeSupervisor,
   managedTunnelConnectArgs,
   validateConfig,
+  watchdogExternalBackoff,
   windowsProcessInfo,
 };

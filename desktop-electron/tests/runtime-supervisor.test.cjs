@@ -16,6 +16,7 @@ const {
   RuntimeSupervisor,
   managedTunnelConnectArgs,
   validateConfig,
+  watchdogExternalBackoff,
   windowsProcessInfo,
 } = require("../electron/runtime-supervisor.cjs");
 
@@ -2796,4 +2797,17 @@ server.listen(config.port, config.host);
     if (stale.exitCode === null) stale.kill("SIGTERM");
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the watchdog waits longer each time another process still owns the bridge port", () => {
+  // On 0.8.57 a bridge kept from an older version was found every 2 min, and each round read the
+  // ownership marker and ran PowerShell on main.
+  const minutes = [];
+  let backoff = 0;
+  for (let round = 0; round < 5; round += 1) {
+    backoff = watchdogExternalBackoff(backoff);
+    minutes.push(backoff / 60_000);
+  }
+  assert.deepEqual(minutes, [10, 20, 40, 60, 60]);
+  assert.equal(watchdogExternalBackoff(0), 10 * 60_000, "a ready bridge resets it");
 });
