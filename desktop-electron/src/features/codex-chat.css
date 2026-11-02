@@ -1821,3 +1821,42 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-archived-count { margin-left: auto; padding-left: 6px; color: var(--ao-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .cx-thread-badge.is-quiet { color: var(--ao-muted); }
 .cx-deleted-head .cx-thread-title { color: var(--ao-muted); }
+
+/* ---------- A narrow chat (a split pane, a small window) ----------
+   The head's buttons and the chat box's chips kept one row however narrow the chat got: flex shrank
+   every button with the title, to its 16 px icon (17 px even in a 640 px pane), the permission, model
+   and effort chips shrank to nothing, and under ~480 px the head ran over into the next pane, where
+   clicks landed on the other chat (2026-11-02). Buttons keep their size now. A narrow chat drops what
+   its More menu repeats, shows chips as icons, then folds the chips onto rows of their own.
+   Measured on the thread, not the window: split panes share one window width. */
+.cx-thread { container: cx-thread / inline-size; }
+.cx-thread-head > :is(.cx-icon-button, .cx-browser-chip), .cx-composer-bar > :is(.cx-icon-button, .cx-send) { flex: none; }
+@container cx-thread (max-width: 560px) {
+  .cx-thread-head { gap: 4px; padding: 0 10px 0 14px; }
+  /* Both are in the More menu: "Compact activity" and "Mission Board". */
+  .cx-thread-head > :is(.cx-compact-toggle, [aria-label="Open Mission Board"]) { display: none; }
+  .cx-browser-chip { padding: 0 8px; }
+  .cx-browser-chip > span:last-child { display: none; }
+  .cx-head-team { min-width: 0; }
+  .cx-head-team select { min-width: 0; max-width: 120px; }
+  .cx-composer { width: calc(100% - 24px); }
+  /* The mic is a placeholder ("isn't available yet"); the permission chip keeps its icon, its name on hover. */
+  .cx-composer-bar > .cx-mic { display: none; }
+  .ao-workflow .cx-composer .ao-permissions > .ao-composer-chip > span { display: none; }
+  .cx-composer-bar .ao-composer-controls { flex-wrap: wrap; row-gap: 2px; }
+}
+@container cx-thread (max-width: 400px) {
+  .cx-thread-head > :is(.cx-head-folder, .cx-status) { display: none; }
+  .cx-composer { width: calc(100% - 16px); }
+  /* The chips take the full width, the attach, context and send buttons the row under them. */
+  .cx-composer-bar { flex-wrap: wrap; row-gap: 4px; }
+  .cx-composer-bar .ao-composer-controls { order: -1; flex-basis: 100%; }
+  .cx-composer-bar > .cx-icon-button:first-child { margin-right: auto; }
+}
+/* A window narrowed under split panes squeezes them below the 320 px a dragged divider keeps. Preview
+   (or the browser chip), Show cards and Side panel move to the More menu (NARROW_HEAD_PX in
+   AgentOrchestratorChat.tsx); Chat details stays, its panel opens under its button. */
+@container cx-thread (max-width: 300px) {
+  .cx-thread-head { padding: 0 6px 0 10px; }
+  .cx-thread-head > :is(.cx-browser-chip, [aria-label="Preview"], [aria-label="Show cards"], [aria-label="Show side panel"]) { display: none; }
+}
