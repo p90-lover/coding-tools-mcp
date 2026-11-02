@@ -402,11 +402,13 @@ function pendingAppliedUpdate(installRoot, currentVersion) {
 async function commitAppliedUpdate(installRoot, currentVersion) {
   const journal = readJournal(installRoot);
   if (journal?.state !== "placed" || journal.version !== currentVersion) return null;
-  const asides = [...journal.changed.map((file) => file.rel), ...journal.obsolete]
-    .map((rel) => ({ aside: `${path.join(installRoot, ...rel.split("/"))}.old-${journal.stamp}` }))
-    .filter((entry) => fs.existsSync(entry.aside));
-  const leftover = sweepAsides({ installRoot }, asides);
-  fs.rmSync(path.join(installRoot, STAGE_DIRECTORY, JOURNAL), { force: true });
+  // All async: this runs on the main thread while the new version's first start still loads the disk.
+  const candidates = [...journal.changed.map((file) => file.rel), ...journal.obsolete]
+    .map((rel) => ({ aside: `${path.join(installRoot, ...rel.split("/"))}.old-${journal.stamp}` }));
+  const present = await Promise.all(candidates.map((entry) => fs.promises.access(entry.aside).then(() => true, () => false)));
+  const asides = candidates.filter((_entry, index) => present[index]);
+  const leftover = await sweepAsides({ installRoot }, asides);
+  await fs.promises.rm(path.join(installRoot, STAGE_DIRECTORY, JOURNAL), { force: true });
   recordResult(installRoot, { version: journal.version, ok: true, stage: "started" });
   await fs.promises.rm(journal.stageRoot, { recursive: true, force: true }).catch(() => undefined);
   await fs.promises.rm(path.join(installRoot, STAGE_DIRECTORY, "recover-worker.cjs"), { force: true }).catch(() => undefined);
