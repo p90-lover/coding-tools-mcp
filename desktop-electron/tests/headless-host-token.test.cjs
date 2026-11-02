@@ -50,7 +50,7 @@ function startupFixture(t, source) {
   t.after(() => {
     if (saved === undefined) delete process.env.CODING_TOOLS_HEADLESS_BINARY;
     else process.env.CODING_TOOLS_HEADLESS_BINARY = saved;
-    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 });
   });
   return { base, binaryRoot };
 }
