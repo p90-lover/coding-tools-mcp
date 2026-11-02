@@ -3072,7 +3072,7 @@ class BrowserHost {
     }
     // The ChatGPT account this Codex thread is bound to; a turn with no thread runs on this host's.
     const account = nativeThreadId && typeof this.resolveTurnAccount === "function"
-      ? await this.resolveTurnAccount(nativeThreadId)
+      ? await this.resolveTurnAccount(nativeThreadId, { requireRetainedConversation })
       : null;
     if (account && !isBrowserAccountPartition(this.profile, account.partition)) {
       throw new Error("The Codex thread's ChatGPT account partition does not match this profile");

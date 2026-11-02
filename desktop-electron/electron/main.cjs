@@ -1020,13 +1020,24 @@ function lifecycleSyncFor(accountId, logger) {
 
 // The account a Codex thread's turn runs on: the one it is bound to, or (first turn, or its account
 // was removed) the one new sessions start on, which it is then bound to.
-async function resolveThreadAccount(threadId, logger) {
+async function resolveThreadAccount(threadId, logger, { requireRetainedConversation = false } = {}) {
+  const bound = threadAccounts && isThreadId(threadId) ? threadAccounts.accountFor(threadId) : null;
+  if (requireRetainedConversation && (!bound || !browserAccountExists(bound))) {
+    const error = new Error("The retained ChatGPT conversation's original account binding is no longer available");
+    error.code = "retained_conversation_unavailable";
+    throw error;
+  }
   if (!threadAccounts || !isThreadId(threadId)) return null;
-  const bound = threadAccounts.accountFor(threadId);
   const accountId = bound && browserAccountExists(bound) ? bound : newSessionAccount();
   threadAccounts.bind(threadId, accountId);
   const partition = browserAccounts.partitionOf(accountId);
   await routeIdleAccountPartition(partition, logger);
+  // Routing can yield before a running tab prevents the thread from being moved or forgotten.
+  if (requireRetainedConversation && (!browserAccountExists(accountId) || threadAccounts?.accountFor(threadId) !== accountId)) {
+    const error = new Error("The retained ChatGPT conversation's account binding changed while routing");
+    error.code = "retained_conversation_unavailable";
+    throw error;
+  }
   return { accountId, partition, chatLifecycleSync: lifecycleSyncFor(accountId, logger) };
 }
 
@@ -4933,7 +4944,7 @@ async function start() {
       getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
       getUseSavedChats: () => savedChatsInUse(),
       // Each Codex thread runs on the ChatGPT account it is bound to, whichever one this host shows.
-      resolveTurnAccount: (threadId) => resolveThreadAccount(threadId, logger),
+      resolveTurnAccount: (threadId, options) => resolveThreadAccount(threadId, logger, options),
       tabLimitFor: (partition) => browserAccounts.tabLimitForPartition(partition),
       retainedTabTtlMs: () => browserAccounts.settings().keepFinishedTabsMinutes * 60_000,
       // What turns and inspections show about each account, for ChatGPT browser management.
