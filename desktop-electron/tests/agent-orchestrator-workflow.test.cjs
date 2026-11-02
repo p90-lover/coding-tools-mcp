@@ -9759,6 +9759,72 @@ test("a message queued behind a working turn is not stopped as hung: the whole s
   workflow.dispose();
 });
 
+// Seen live 2026-11-02: two chats "may be stuck" for over an hour with Retry automatically on. Every
+// 10 minutes one stall stop failed "Owned turn is still working; stop needs attention", and the other
+// logged "stopped" while its turn stayed running (idle 4914 s, then 5514 s). Neither card retried.
+test("a hung turn the stall stop cannot interrupt has its agent shut down, so the step is retried", async () => {
+  const stallWorld = (harness) => {
+    let clock = 2_000_000_000_000;
+    const calls = [];
+    const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
+      route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
+      receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+    const workflow = createAgentOrchestratorWorkflow({
+      now: () => clock,
+      // The 15 s settle window's 250 ms polls run at once; other timers keep their length.
+      setTimer: (resolve, ms) => setTimeout(resolve, ms === 250 ? 0 : ms),
+      requestHeadless: async (endpoint) => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single", nodes: [node] }] };
+        throw new Error(`Unexpected AO endpoint ${endpoint}`);
+      },
+      aoHarness: {
+        observe: async (_session, expected) => harness.observe(expected, clock),
+        interrupt: async (session) => { calls.push(["interrupt", session]); return harness.interrupt?.(); },
+        exitAgent: async (session) => { calls.push(["exit", session]); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    return { workflow, calls, look: () => workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "w" }),
+      advance: (ms) => { clock += ms; } };
+  };
+  const hung = (clock, extra = {}) => ({ turnId: "turn-1", turnState: "running", status: "working",
+    lastActivityAt: clock - 15 * 60_000, timeline: [], approvals: [], ...extra });
+
+  // The interrupt is accepted but never settles.
+  const unsettled = stallWorld({ observe: (_expected, clock) => hung(clock) });
+  await unsettled.workflow.call("chat_auto_retry", { enabled: true });
+  await unsettled.look();
+  assert.deepEqual(unsettled.calls, [["interrupt", "sess-1"], ["exit", "sess-1"]], "no 'stop needs attention': the agent is shut down");
+  unsettled.workflow.dispose();
+
+  // AO dropped the session's controller: the interrupt is refused and the turn row stays running.
+  const orphaned = stallWorld({ observe: (_expected, clock) => hung(clock, { agentGone: true }),
+    interrupt: () => { throw new Error("CHAT_CONTROLLER_NOT_READY: the agent controller for this session is not running"); } });
+  await orphaned.workflow.call("chat_auto_retry", { enabled: true });
+  await orphaned.look();
+  assert.deepEqual(orphaned.calls, [["interrupt", "sess-1"], ["exit", "sess-1"]], "a session with no controller is shut down at once");
+  orphaned.workflow.dispose();
+
+  // The interrupt reads as settled once (the session's newest turn), yet the card's own turn stays hung.
+  let settled = false;
+  const stale = stallWorld({
+    observe: (_expected, clock) => {
+      if (!settled) return hung(clock);
+      settled = false;
+      return { turnId: "turn-2", turnState: "interrupted", status: "idle" };
+    },
+    interrupt: () => { settled = true; },
+  });
+  await stale.workflow.call("chat_auto_retry", { enabled: true });
+  await stale.look();
+  assert.deepEqual(stale.calls, [["interrupt", "sess-1"]], "the first stop is the interrupt alone");
+  stale.advance(11 * 60_000);
+  await stale.look();
+  assert.deepEqual(stale.calls, [["interrupt", "sess-1"], ["interrupt", "sess-1"], ["exit", "sess-1"]],
+    "still hung a stall period later: the agent is shut down");
+  stale.workflow.dispose();
+});
+
 test("a held worker whose unspent grant names another build of the agent's program is started on a fresh grant", async () => {
   // Activity log 2026-10-24 08:31: start_run refused "AO running turn has no matching background
   // grant": Claude Code (or the app) had updated since the grant, so nothing could start on it.
