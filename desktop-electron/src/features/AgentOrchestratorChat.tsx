@@ -205,8 +205,9 @@ export type ChatThreadActions = {
   /**
    * Delete a message and its reply from the chat (asked to confirm first). `runIds` are the runs
    * its turn showed: the run it started first, then any restart or replacement of that run.
+   * The description and workspace belong to the rendered snapshot that supplied the index.
    */
-  deleteMessage?: (messageIndex: number, runIds: string[]) => Promise<void>;
+  deleteMessage?: (messageIndex: number, runIds: string[], sourceDescription: string, sourceWorkspaceId: string) => Promise<void>;
   copyConversation: () => void;
   togglePin: () => void;
   pinned: boolean;
@@ -1757,23 +1758,25 @@ export function AgentOrchestratorChat({
   }
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
   const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
-  // Delete message: the turn whose message waits for the in-chat confirmation, or null. A message
-  // goes with its reply and the steers sent during its turn; the agent's files stay as they are.
-  const [deleting, setDeleting] = useState<number | null>(null);
+  // Keep the intent from the rendered transcript, even if it changes before confirmation.
+  const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
+    && projectId && typeof shownDescription === "string"
+    ? { taskId: selectedTaskId, workspaceId: projectId, index: turn.messageIndex,
+      runIds: chatRunsOfMessage(chatRuns, turn.runId), sourceDescription: shownDescription } : null;
+  const [deleting, setDeleting] = useState<ReturnType<typeof deletion>>(null);
   const [deletingBusy, setDeletingBusy] = useState(false);
-  useEffect(() => { setDeleting(null); }, [selectedTaskId]);
+  useEffect(() => { setDeleting(null); }, [selectedTaskId, projectId]);
   const deleteBlocked = runOpen || working ? "Stop the chat first to delete a message"
     : rewindPoints.length <= 1 ? "This is the chat's only message; archive or delete the chat instead" : "";
-  // A message is deleted with the runs its turn showed, so exactly that reply leaves the chat.
-  const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
-    ? { index: turn.messageIndex, runIds: chatRunsOfMessage(chatRuns, turn.runId) } : null;
   const notYet = "This message hasn't run yet. Delete it after its turn runs";
   const confirmDelete = async () => {
-    const target = deleting === null ? null : deletion(turns[deleting]), task = selectedTaskId;
+    const target = deleting;
     if (!target || !thread?.deleteMessage || deleteBlocked) return;
+    if (target.taskId !== selectedTaskId || target.workspaceId !== projectId) { setDeleting(null); return; }
+    const task = target.taskId;
     setDeletingBusy(true);
     try {
-      await thread.deleteMessage(target.index, target.runIds);
+      await thread.deleteMessage(target.index, target.runIds, target.sourceDescription, target.workspaceId);
       void loadDescription(task).then((text) => setDescriptions((current) => ({ ...current, [task]: text }))).catch(() => {});
     } catch {
       // The surface already shows why it could not be deleted.
@@ -1915,14 +1918,18 @@ export function AgentOrchestratorChat({
           const pick = Number(arg);
           if (arg) {
             const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
-            if (point && !deletion(turns[point.turnIndex])) say("Delete message", `${notYet}.`);
-            else if (point) { setCard(null); setDeleting(point.turnIndex); }
+            const target = point ? deletion(turns[point.turnIndex]) : null;
+            if (point && !target) say("Delete message", `${notYet}.`);
+            else if (target) { setCard(null); setDeleting(target); }
             else say("Delete message", `Choose a message from 1 to ${rewindPoints.length}, like /delete ${rewindPoints.length}.`);
             break;
           }
           setCard({ title: "Delete message", text: "Choose a message to delete. You confirm before it goes.",
-            items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
-              run: () => deletion(turns[point.turnIndex]) ? setDeleting(point.turnIndex) : say("Delete message", `${notYet}.`) })).reverse() });
+            items: rewindPoints.map((point, index) => {
+              const target = deletion(turns[point.turnIndex]);
+              return { label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
+                run: () => target ? setDeleting(target) : say("Delete message", `${notYet}.`) };
+            }).reverse() });
           break;
         }
         case "status": if (commands) setCard(commands.status()); break;
@@ -2177,7 +2184,7 @@ export function AgentOrchestratorChat({
         {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
         {thread?.rewind ? <button type="button" title="Rewind and resend this message (files are unchanged)" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
         {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
-          disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}><ChatGlyph name="delete" /></button> : null}
+          disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(deletion(turn))}><ChatGlyph name="delete" /></button> : null}
       </MessageActions></div>
       {turn.user.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
     </div> : null;

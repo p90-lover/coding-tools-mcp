@@ -6894,41 +6894,57 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // and every restart of it) are hidden from the chat, so every other run keeps its own message.
   // The files the agent changed stay as they are. The agent's session still remembers the
   // exchange, so the next turn starts a fresh one (freshSessionRequired).
-  async function chatDeleteMessage({ workspaceId, taskId, index, runId, runIds = [] } = {}) {
+  async function chatDeleteMessage({ workspaceId, taskId, index, runId, runIds = [], sourceDescription } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     if (!Number.isSafeInteger(index) || index < 0) throw new Error("Choose a message to delete");
     if (typeof runId !== "string" || !runId) throw new Error("This message has no reply yet. Delete it after its turn runs.");
     if (!Array.isArray(runIds) || runIds.length > 50) throw new Error("This message's reply was not found; reload the chat");
+    if (typeof sourceDescription !== "string") throw new Error("Deleting requires sourceDescription from the displayed chat; reload it and try again");
     const own = [runId, ...runIds].map(value => clean(value, 80));
-    const saved = await runs({ workspaceId: id, taskId: task });
-    const chatRuns = saved.runs.filter(run => run.workspace_id === id && run.project_id === task);
-    const latest = chatRuns.at(-1);
-    // The open chat can still show cached replies older than its newest-200 read. Read only
-    // those requested IDs, with the same workspace/task ownership and visibility checks below.
-    for (const requested of new Set(own)) {
-      if (chatRuns.some(run => run.id === requested)) continue;
-      const older = await runs({ workspaceId: id, runId: requested });
-      const found = older.runs.find(run => run.id === requested && run.workspace_id === id && run.project_id === task);
-      if (found) chatRuns.push(found);
-    }
-    if ((latest && !runSettled(latest)) || chatWorking(id, task, chatRuns)
-      || chatRuns.some(run => own.includes(run.id) && !runSettled(run))) throw new Error("Stop the chat first to delete a message");
-    const detail = await board({ workspaceId: id, taskId: task });
-    if (!detail.task) throw new Error("This chat's task no longer exists");
-    // The chat says which of its runs answered this message; each must be one it shows.
-    const shown = new Set(chatEdits.visible(id, chatRuns).map(run => run.id));
-    if (!own.every(run => shown.has(run))) throw new Error("This message's reply was not found; reload the chat");
-    const description = chatDescriptionWithout(detail.task.description || "", index);
-    const hidden = [...new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own])];
-    const before = chatEdits.get(id, task);
-    chatEdits.deleteMessage(id, task, hidden);
+    // Share the sender's per-chat admission: another delete must retry, while an already
+    // requested send can wait for this edit and read the resulting transcript normally.
+    const key = JSON.stringify([id, task]);
+    if (chatSends.has(key)) throw new Error("A chat operation is already in progress; wait for it to finish and try again");
+    let release;
+    const mine = new Promise(resolve => { release = resolve; });
+    chatSends.set(key, mine);
     try {
-      await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
-    } catch (error) {
-      chatEdits.restore(id, task, before);
-      throw error;
+      const saved = await runs({ workspaceId: id, taskId: task });
+      const chatRuns = saved.runs.filter(run => run.workspace_id === id && run.project_id === task);
+      const latest = chatRuns.at(-1);
+      // The open chat can still show cached replies older than its newest-200 read. Read only
+      // those requested IDs, with the same workspace/task ownership and visibility checks below.
+      for (const requested of new Set(own)) {
+        if (chatRuns.some(run => run.id === requested)) continue;
+        const older = await runs({ workspaceId: id, runId: requested });
+        const found = older.runs.find(run => run.id === requested && run.workspace_id === id && run.project_id === task);
+        if (found) chatRuns.push(found);
+      }
+      if ((latest && !runSettled(latest)) || chatWorking(id, task, chatRuns)
+        || chatRuns.some(run => own.includes(run.id) && !runSettled(run))) throw new Error("Stop the chat first to delete a message");
+      const detail = await board({ workspaceId: id, taskId: task });
+      if (!detail.task) throw new Error("This chat's task no longer exists");
+      // The chat says which of its runs answered this message; each must be one it shows.
+      const shown = new Set(chatEdits.visible(id, chatRuns).map(run => run.id));
+      if (!own.every(run => shown.has(run))) throw new Error("This message's reply was not found; reload the chat");
+      if ((detail.task.description || "") !== sourceDescription) throw new Error("The chat changed before deletion; reload it and try again");
+      const description = chatDescriptionWithout(sourceDescription, index);
+      const hidden = [...new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own])];
+      const before = chatEdits.get(id, task);
+      try {
+        chatEdits.deleteMessage(id, task, hidden);
+        await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+      } catch (error) {
+        // Restore changes memory before persisting. A second persistence failure must not
+        // replace the original error or leave this failed delete hidden in memory.
+        try { chatEdits.restore(id, task, before); } catch {}
+        throw error;
+      }
+      return { ok: true, taskId: task, index, runIds: hidden };
+    } finally {
+      release();
+      if (chatSends.get(key) === mine) chatSends.delete(key);
     }
-    return { ok: true, taskId: task, index, runIds: hidden };
   }
 
   // /diff: the project's uncommitted changes (staged and unstaged), through the workspace git tool.
