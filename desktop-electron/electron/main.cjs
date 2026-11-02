@@ -4824,6 +4824,10 @@ async function start() {
       setTimeout(() => { void requestQuit({ keepBridge: true, relaunch }); }, 100);
       return { ok: true, status: relaunch ? "restarting" : "quitting" };
     },
+    // Freezes, memory warnings and errors from the in-memory Activity ring, already redacted;
+    // nothing else in it (turns, accounts) leaves through this route.
+    readActivity: () => logger.recent().filter((record) => record.level === "error"
+      || /^launcher\.(main_blocked|main_stalled|main_stall_caller|memory_high|memory_growth)$/.test(record.event)),
     onTurnEvent: (event) => {
       if (event.type === "native_fetch_failed") mcpEventMonitor.nativeFetchFailed(event);
       else if (event.type === "native_fetch_ok") mcpEventMonitor.nativeFetchSucceeded();
