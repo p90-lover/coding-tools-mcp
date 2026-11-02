@@ -1569,6 +1569,22 @@ export function chatRunsOfMessage(runs: ChatRun[], runId: string): string[] {
   return found;
 }
 
+/**
+ * The project's runs (`recent`) with the open chat's older ones put back. The project's read holds
+ * its newest 100 runs, shared by all of its chats: seen live (2026-11-02), four goal chats filled
+ * it, a 63-run chat showed only its newest 26 replies and the project's 38 other chats opened with
+ * none. `history` is the chat's own read, oldest first. Every run `recent` lacks is older than every
+ * run in it, so they go first; only those older than the chat's runs `recent` still holds are
+ * taken, so a run it leaves out on purpose (a deleted message's) does not come back.
+ */
+export function chatRunsWithHistory<T extends { id: string }>(recent: T[], history: T[]): T[] {
+  if (!history.length) return recent;
+  const shown = new Set(recent.map((run) => run.id));
+  const first = history.findIndex((run) => shown.has(run.id));
+  const older = (first < 0 ? history : history.slice(0, first)).filter((run) => !shown.has(run.id));
+  return older.length ? [...older, ...recent] : recent;
+}
+
 /** The description up to and including the user's message at `turnIndex`, for "Fork from here". */
 export function chatDescriptionUpTo(description: string | undefined, turnIndex: number): string {
   const said = chatMessagesFromDescription(description).slice(0, turnIndex + 1);
