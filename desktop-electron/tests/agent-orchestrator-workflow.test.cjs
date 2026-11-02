@@ -2458,6 +2458,118 @@ test("with runReadFreshMs, the activity poll and its per-card checks share one r
   assert.equal(shared.reads.filter(entry => entry === "run-1").length, 3);
 });
 
+test("shared workflow reads keep 13 pending callers together and start freshness at completion", async (t) => {
+  let clock = 1_000, reads = 0, release;
+  t.mock.method(Date, "now", () => clock);
+  const held = new Promise(resolve => { release = resolve; }), pending = [];
+  const workflow = createAgentOrchestratorWorkflow({ runReadFreshMs: 300,
+    requestHeadless: async endpoint => {
+      assert.equal(endpoint, "/api/v1/ao/read");
+      const readId = ++reads;
+      await held;
+      return { ok: true, runs: [], readId };
+    },
+  });
+  try {
+    for (let caller = 0; caller < 13; caller++) {
+      clock = 1_000 + caller * 301;
+      pending.push(workflow.call("runs", { workspaceId: "ws-1", runId: "run-1" }));
+    }
+    assert.equal(reads, 1, "an unresolved backend read remains shared beyond the freshness window");
+    clock = 10_000;
+    release();
+    assert.ok((await Promise.all(pending)).every(result => result.readId === 1));
+    clock = 10_299;
+    assert.equal((await workflow.call("runs", { workspaceId: "ws-1", runId: "run-1" })).readId, 1,
+      "freshness begins when the response completes, not when its request starts");
+    clock = 10_301;
+    assert.equal((await workflow.call("runs", { workspaceId: "ws-1", runId: "run-1" })).readId, 2);
+  } finally { release(); await Promise.allSettled(pending); workflow.dispose(); }
+});
+
+test("shared workflow reads coalesce boards without invalidating runs and isolate workspace/task keys", async (t) => {
+  t.mock.method(Date, "now", () => 1_000);
+  const boards = [], pending = [];
+  let reads = 0, release;
+  const held = new Promise(resolve => { release = resolve; });
+  const workflow = createAgentOrchestratorWorkflow({ runReadFreshMs: 300,
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") { reads++; return { ok: true, runs: [] }; }
+      assert.equal(endpoint, "/api/v1/tools/call");
+      assert.equal(body.tool, "workflow_list");
+      boards.push([body.workspace_id, body.arguments.task_id ?? ""]);
+      await held;
+      return { ok: true, operation: { state: "completed", result: { ok: true, revision: 1,
+        workspace_id: body.workspace_id, tasks: [], ...(body.arguments.task_id ? { task: { id: body.arguments.task_id } } : {}) } } };
+    },
+  });
+  try {
+    await workflow.call("runs", { workspaceId: "ws-1", runId: "run-1" });
+    for (let caller = 0; caller < 13; caller++) pending.push(workflow.call("board", { workspaceId: "ws-1", taskId: "task-1" }));
+    await workflow.call("runs", { workspaceId: "ws-1", runId: "run-1" });
+    assert.deepEqual({ runs: reads, boards: boards.length }, { runs: 1, boards: 1 },
+      "read-only board requests share one response and leave run freshness intact");
+    release();
+    await Promise.all(pending);
+    await workflow.call("runs", { workspaceId: "ws-1", runId: "run-1" });
+    assert.equal(reads, 1, "a completed board read also leaves run freshness intact");
+    const results = await Promise.all([
+      workflow.call("board", { workspaceId: "ws-1", taskId: "task-1" }),
+      workflow.call("board", { workspaceId: "ws-1", taskId: "task-2" }),
+      workflow.call("board", { workspaceId: "ws-2", taskId: "task-1" }),
+      workflow.call("board", { workspaceId: "ws-1" }),
+    ]);
+    assert.deepEqual(boards, [["ws-1", "task-1"], ["ws-1", "task-2"], ["ws-2", "task-1"], ["ws-1", ""]]);
+    assert.deepEqual(results.map(result => [result.workspaceId, result.task?.id ?? ""]), boards);
+  } finally { release(); await Promise.allSettled(pending); workflow.dispose(); }
+});
+
+test("shared workflow reads invalidate pending and settled entries without old rejection evicting a replacement", async (t) => {
+  t.mock.method(Date, "now", () => 1_000);
+  for (const kind of ["runs", "board"]) {
+    let reads = 0;
+    const held = [], pending = [];
+    const workflow = createAgentOrchestratorWorkflow({ runReadFreshMs: 300,
+      requestHeadless: async (endpoint, body, options) => {
+        if (endpoint === "/api/v1/ao/update") {
+          assert.deepEqual(options, { localConfirmation: true });
+          return { ok: true, team: { id: "team-1", revision: 2 } };
+        }
+        assert.equal(endpoint, kind === "runs" ? "/api/v1/ao/read" : "/api/v1/tools/call");
+        if (kind === "board") assert.equal(body.tool, "workflow_list");
+        const readId = ++reads;
+        const response = kind === "runs" ? { ok: true, runs: [], readId }
+          : { ok: true, operation: { state: "completed", result: { ok: true, revision: readId, tasks: [] } } };
+        if (readId > 2) return response;
+        return new Promise((resolve, reject) => { held.push({ resolve: () => resolve(response), reject }); });
+      },
+    });
+    const read = () => {
+      const result = workflow.call(kind, { workspaceId: "ws-1", ...(kind === "runs" ? { runId: "run-1" } : { taskId: "task-1" }) });
+      pending.push(result);
+      return result;
+    };
+    try {
+      const stale = read(), rejected = assert.rejects(stale, /stale read/);
+      pending.push(rejected);
+      await workflow.call("team_update", { workspaceId: "ws-1", change: { operation: "set_limits" } });
+      const current = read();
+      assert.equal(reads, 2, `${kind}: a mutation invalidates the pending entry`);
+      held[0].reject(new Error("stale read"));
+      await rejected;
+      const shared = read();
+      assert.equal(reads, 2, `${kind}: the old rejection cannot evict the newer pending entry`);
+      held[1].resolve();
+      await Promise.all([current, shared]);
+      await read();
+      assert.equal(reads, 2, `${kind}: the replacement is shared after settling`);
+      await workflow.call("team_update", { workspaceId: "ws-1", change: { operation: "set_limits" } });
+      await read();
+      assert.equal(reads, 3, `${kind}: a mutation also invalidates the settled entry`);
+    } finally { held.forEach(entry => entry.resolve()); await Promise.allSettled(pending); workflow.dispose(); }
+  }
+});
+
 test("activity reports each working card's runtime and current step without advancing the run", async () => {
   const calls = [];
   const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },

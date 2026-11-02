@@ -5,6 +5,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
+use std::time::{Duration, SystemTime};
 
 use coding_tools_mcp_desktop_lib::tools::{list_tools_for_profile, ToolContext};
 use serde_json::{json, Value};
@@ -236,6 +237,238 @@ fn checkpoint_reports_missing_raw_user_input() {
         .expect("warnings")
         .iter()
         .any(|warning| warning.as_str().unwrap_or("").contains("raw_user_input")));
+}
+
+#[test]
+fn history_recovery_uses_accepted_turn_order_for_focus_and_bounded_items() {
+    let (_workspace, _harness, ctx) = test_context();
+    let boot = invoke_ok(
+        &ctx,
+        "history_session_bootstrap",
+        json!({"session_key": "recovery-order", "initial_user_input": "initial goal"}),
+    );
+    let newest_items = (0..13)
+        .map(|index| format!("new-{index:02}"))
+        .collect::<Vec<_>>();
+    for (turn, raw, files, next, revision) in [
+        (
+            "z-old",
+            "old goal",
+            vec!["old-first".to_string()],
+            vec!["old-first".to_string()],
+            1,
+        ),
+        (
+            "z-old",
+            "revised old goal",
+            vec!["old-revised".to_string()],
+            vec!["old-revised".to_string()],
+            2,
+        ),
+        (
+            "a-new",
+            "latest goal",
+            newest_items.clone(),
+            newest_items.clone(),
+            1,
+        ),
+    ] {
+        let checkpoint = invoke_ok(
+            &ctx,
+            "history_session_checkpoint",
+            json!({
+                "session_key": boot["session_key"], "expected_path": boot["current_path"],
+                "turn_id": turn, "raw_user_input": raw, "user_intent": "intent fallback",
+                "files_changed": files, "next_actions": next
+            }),
+        );
+        assert_eq!(checkpoint["revision"], revision);
+    }
+    let recovered = invoke_ok(
+        &ctx,
+        "history_session_bootstrap",
+        json!({"session_key": boot["session_key"]}),
+    );
+    assert_eq!(recovered["state"]["current_focus"], "latest goal");
+    assert_eq!(
+        recovered["state"]["recent_changes"],
+        json!(&newest_items[..12])
+    );
+    assert_eq!(recovered["state"]["open_items"], json!(&newest_items[..12]));
+}
+
+#[test]
+fn history_recovery_preserves_revision_ties_and_input_fallbacks() {
+    let (workspace, _harness, ctx) = test_context();
+    let boot = invoke_ok(
+        &ctx,
+        "history_session_bootstrap",
+        json!({"session_key": "recovery-fallback", "initial_user_input": "initial goal"}),
+    );
+    let revised = invoke_ok(
+        &ctx,
+        "history_session_bootstrap",
+        json!({"session_key": boot["session_key"], "initial_user_input": "revised initial goal"}),
+    );
+    assert_eq!(revised["state"]["current_focus"], "revised initial goal");
+    let path = workspace
+        .path()
+        .join(boot["current_path"].as_str().unwrap());
+    let initial = fs::read_to_string(&path).unwrap();
+    for (records, expected_focus, expected_changes) in [
+        (
+            vec![
+                json!({"turn_id":"z-old", "revision":2, "raw_user_input":"highest revision", "files_changed":["kept"]}),
+                json!({"turn_id":"z-old", "revision":1, "raw_user_input":"stale lower revision", "files_changed":["discarded"]}),
+            ],
+            "highest revision",
+            json!(["kept"]),
+        ),
+        (
+            vec![
+                json!({"turn_id":"z-old", "revision":2, "raw_user_input":"older goal", "files_changed":["older"]}),
+                json!({"turn_id":"a-new", "revision":1, "raw_user_input":"earlier tie", "files_changed":["discarded"]}),
+                json!({"turn_id":"a-new", "revision":1, "raw_user_input":" ", "user_intent":"latest intent", "files_changed":["latest"]}),
+            ],
+            "latest intent",
+            json!(["latest", "older"]),
+        ),
+        (
+            vec![json!({"turn_id":"empty", "revision":1})],
+            "revised initial goal",
+            json!([]),
+        ),
+    ] {
+        let mut content = initial.clone();
+        for record in records {
+            content.push_str(&format!("\n```json\n{}\n```\n", record));
+        }
+        fs::write(&path, content).unwrap();
+        let recovered = invoke_ok(
+            &ctx,
+            "history_session_bootstrap",
+            json!({"session_key": boot["session_key"]}),
+        );
+        assert_eq!(recovered["state"]["current_focus"], expected_focus);
+        assert_eq!(recovered["state"]["recent_changes"], expected_changes);
+    }
+}
+
+#[test]
+fn history_duplicate_calls_preserve_derived_files_but_advance_state() {
+    let (workspace, _harness, ctx) = test_context();
+    let boot_args = json!({"session_key":"unchanged-derived", "initial_user_input":"initial goal"});
+    let boot = invoke_ok(&ctx, "history_session_bootstrap", boot_args.clone());
+    let checkpoint_args = json!({
+        "session_key":boot["session_key"], "expected_path":boot["current_path"],
+        "turn_id":"saved-turn", "raw_user_input":"saved goal"
+    });
+    invoke_ok(&ctx, "history_session_checkpoint", checkpoint_args.clone());
+    let dir = workspace.path().join("docs/history-session");
+    let derived = [dir.join("index.json"), dir.join("memory/manifest.json")];
+    let expected = derived
+        .iter()
+        .map(|path| fs::read(path).unwrap())
+        .collect::<Vec<_>>();
+    let state_path = dir.join("memory/state.json");
+    let marker = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    let archives = archive_hashes(workspace.path());
+    for (tool, args) in [
+        ("history_session_checkpoint", checkpoint_args),
+        ("history_session_bootstrap", boot_args),
+    ] {
+        for path in derived.iter().chain(std::iter::once(&state_path)) {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(marker)
+                .unwrap();
+        }
+        let before: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        let result = invoke_ok(&ctx, tool, args);
+        if tool == "history_session_checkpoint" {
+            assert_eq!(result["duplicate_ignored"], true);
+        }
+        for (path, bytes) in derived.iter().zip(&expected) {
+            assert_eq!(&fs::read(path).unwrap(), bytes);
+            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), marker);
+        }
+        let after: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            after["state_revision"].as_u64(),
+            Some(before["state_revision"].as_u64().unwrap() + 1)
+        );
+        assert!(after["generated_at"].as_str().unwrap().starts_with("unix:"));
+        assert_ne!(
+            fs::metadata(&state_path).unwrap().modified().unwrap(),
+            marker
+        );
+        assert_existing_archives_unchanged(workspace.path(), &archives);
+    }
+}
+
+#[test]
+fn history_duplicate_calls_repair_each_missing_corrupt_or_stale_derived_file() {
+    let (workspace, _harness, ctx) = test_context();
+    let boot_args = json!({"session_key":"repair-derived", "initial_user_input":"initial goal"});
+    let boot = invoke_ok(&ctx, "history_session_bootstrap", boot_args.clone());
+    let checkpoint_args = json!({
+        "session_key":boot["session_key"], "expected_path":boot["current_path"],
+        "turn_id":"saved-turn", "raw_user_input":"saved goal"
+    });
+    invoke_ok(&ctx, "history_session_checkpoint", checkpoint_args.clone());
+    let dir = workspace.path().join("docs/history-session");
+    let derived = [dir.join("index.json"), dir.join("memory/manifest.json")];
+    let expected = derived
+        .iter()
+        .map(|path| fs::read(path).unwrap())
+        .collect::<Vec<_>>();
+    let marker = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    let archives = archive_hashes(workspace.path());
+    for (tool, args) in [
+        ("history_session_checkpoint", checkpoint_args),
+        ("history_session_bootstrap", boot_args),
+    ] {
+        for damaged in 0..derived.len() {
+            for damage in ["missing", "corrupt", "stale"] {
+                for path in &derived {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(path)
+                        .unwrap()
+                        .set_modified(marker)
+                        .unwrap();
+                }
+                match damage {
+                    "missing" => fs::remove_file(&derived[damaged]).unwrap(),
+                    "corrupt" => fs::write(&derived[damaged], "{invalid").unwrap(),
+                    _ => {
+                        let mut stale: Value = serde_json::from_slice(&expected[damaged]).unwrap();
+                        stale["version"] = json!(9);
+                        fs::write(
+                            &derived[damaged],
+                            serde_json::to_vec_pretty(&stale).unwrap(),
+                        )
+                        .unwrap();
+                    }
+                }
+                let result = invoke_ok(&ctx, tool, args.clone());
+                if tool == "history_session_checkpoint" {
+                    assert_eq!(result["duplicate_ignored"], true);
+                }
+                for (index, path) in derived.iter().enumerate() {
+                    assert_eq!(fs::read(path).unwrap(), expected[index]);
+                    if index == damaged {
+                        assert_ne!(fs::metadata(path).unwrap().modified().unwrap(), marker);
+                    } else {
+                        assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), marker);
+                    }
+                }
+                assert_existing_archives_unchanged(workspace.path(), &archives);
+            }
+        }
+    }
 }
 
 #[test]

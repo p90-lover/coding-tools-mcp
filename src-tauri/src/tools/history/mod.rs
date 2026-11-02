@@ -158,8 +158,12 @@ pub fn bootstrap(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
         &now_timestamp(),
         previous_state_revision + 1,
     );
-    storage::write_index(&history_dir, &storage::rebuild_index(&refreshed))?;
-    storage::write_manifest(&history_dir, &manifest)?;
+    storage::write_index(
+        &ctx.workspace,
+        &history_dir,
+        &storage::rebuild_index(&refreshed),
+    )?;
+    storage::write_manifest(&ctx.workspace, &history_dir, &manifest)?;
     storage::write_state(&history_dir, &state)?;
 
     let mut result = json!({
@@ -294,8 +298,12 @@ pub fn checkpoint(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
         &now_timestamp(),
         state_revision,
     );
-    storage::write_index(&history_dir, &storage::rebuild_index(&refreshed))?;
-    storage::write_manifest(&history_dir, &manifest)?;
+    storage::write_index(
+        &ctx.workspace,
+        &history_dir,
+        &storage::rebuild_index(&refreshed),
+    )?;
+    storage::write_manifest(&ctx.workspace, &history_dir, &manifest)?;
     storage::write_state(&history_dir, &state)?;
 
     let mut warnings: Vec<String> = Vec::new();
@@ -513,8 +521,12 @@ pub fn validate(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
             &now_timestamp(),
             state_revision,
         );
-        storage::write_index(&history_dir, &storage::rebuild_index(&locked_report))?;
-        storage::write_manifest(&history_dir, &manifest)?;
+        storage::write_index(
+            &ctx.workspace,
+            &history_dir,
+            &storage::rebuild_index(&locked_report),
+        )?;
+        storage::write_manifest(&ctx.workspace, &history_dir, &manifest)?;
         storage::write_state(&history_dir, &state)?;
         true
     } else {
