@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { runInNewContext } from "node:vm";
+import * as ts from "typescript";
 import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
 
@@ -443,3 +447,170 @@ test("turn broker names the finished turn that owns a replayed handle", async ()
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// Evaluate the actual class with fake fs/net so lifecycle interleavings need no real endpoint.
+function processlessBroker(options: { windows?: boolean; stale?: boolean } = {}) {
+  const source = readFileSync(join(import.meta.dir, "../src/adapters/chatgpt-web/turn-broker.ts"), "utf8");
+  const tree = ts.createSourceFile("turn-broker.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const find = (predicate: (node: ts.Node) => boolean) => { let found: ts.Node | undefined;
+    const visit = (node: ts.Node) => { if (!found && predicate(node)) found = node; ts.forEachChild(node, visit); }; visit(tree); expect(found).toBeDefined(); return found!; };
+  const declarations = ["closeTurnBrokers", "opaqueId", "handleFingerprint", "errorOf", "retiredTurnLabel", "environmentIdentity", "ownerEnvironment", "assertSurfaceNonce", "TurnBroker"]
+    .map(name => find(node => (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name?.text === name).getText(tree).replace(/^export\s+/, "")).join("\n");
+  const constants = ["MAX_BROKER_LINE_CHARS", "MAX_RETIRED_TURN_HANDLES", "MAX_UNIX_SOCKET_PATH_BYTES", "WINDOWS_PIPE_LISTEN_RETRY_MS"]
+    .map(name => `const ${name}=${(find(node => ts.isVariableDeclaration(node) && node.name.getText(tree) === name) as ts.VariableDeclaration).initializer!.getText(tree)};`).join("\n");
+  const state = { socket: options.stale ? { dev: 1, ino: 1 } : undefined as { dev: number; ino: number } | undefined,
+    failListen: undefined as Error | undefined, failStat: undefined as Error | undefined, closeError: undefined as Error | undefined, holdClose: false, holdReady: false };
+  const unlinked: number[] = [], heldCloses: Array<() => void> = [], heldStarts: Array<() => void> = [], timers = new Map<number, () => void>();
+  let nextInode = 1, nextTimer = 0, compactionStarts = 0;
+  class FakeSocket extends EventEmitter {
+    destroyed = false;
+    setEncoding() { return this; }
+    setTimeout() { return this; }
+    destroy() { this.destroyed = true; queueMicrotask(() => this.emit("close")); return this; }
+  }
+  class FakeServer extends EventEmitter {
+    listening = false;
+    constructor(readonly onConnection: (socket: FakeSocket) => void) { super(); }
+    listen(_endpoint: string, ready: () => void) {
+      const error = state.failListen; state.failListen = undefined;
+      if (error) queueMicrotask(() => this.emit("error", error));
+      else { const started = () => { this.listening = true; state.socket = { dev: 1, ino: ++nextInode }; ready(); };
+        if (state.holdReady) heldStarts.push(started); else queueMicrotask(started); }
+      return this;
+    }
+    close(done: (error?: Error) => void) {
+      this.listening = false;
+      const error = state.closeError; state.closeError = undefined;
+      if (state.holdClose) heldCloses.push(() => done(error)); else queueMicrotask(() => done(error));
+      return this;
+    }
+  }
+  const servers: FakeServer[] = [], probes: FakeSocket[] = [];
+  const context: Record<string, any> = { createHash, randomBytes, dirname, isAbsolute, relative, resolve, Buffer, DOMException, AbortController, structuredClone,
+    console: { info() {}, error() {} }, process: { getuid: () => 1000 }, isWindowsPipeEndpoint: () => options.windows === true,
+    mkdirSync() {}, chmodSync() {}, existsSync: () => state.socket !== undefined,
+    lstatSync: () => { const error = state.failStat; state.failStat = undefined; if (error) throw error;
+      if (!state.socket) throw Object.assign(new Error("fake missing socket"), { code: "ENOENT" });
+      return { ...state.socket, uid: 1000, mode: 0o600, isSocket: () => true }; },
+    unlinkSync: () => { unlinked.push(state.socket!.ino); state.socket = undefined; },
+    createConnection: () => { const probe = new FakeSocket(); probes.push(probe); return probe; },
+    createServer: (onConnection: (socket: FakeSocket) => void) => { const server = new FakeServer(onConnection); servers.push(server); return server; },
+    setTimeout: (callback: () => void) => { timers.set(++nextTimer, callback); return nextTimer; }, clearTimeout: (timer: number) => timers.delete(timer),
+    CompactionTransactionStore: class { close() {} begin() { compactionStarts += 1; return { token: "fake-control", handoffId: "fake-handoff" }; } },
+  };
+  runInNewContext(ts.transpileModule("const brokers=new Map();\n" + constants + "\n" + declarations
+    + "\nglobalThis.subject={TurnBroker,brokers,closeTurnBrokers};", { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText, context);
+  const subject = context.subject as { TurnBroker: typeof TurnBroker; brokers: Map<string, TurnBroker>; closeTurnBrokers(): Promise<void> };
+  const endpoint = options.windows ? "fake-pipe" : "/fake/turn-broker.sock";
+  return { ...subject, endpoint, state, servers, probes, unlinked, heldCloses, heldStarts,
+    create: () => subject.TurnBroker.forSocket(endpoint),
+    identity: () => state.socket ? { ...state.socket } : undefined,
+    channelCount: (broker: TurnBroker) => (broker as unknown as { channels: Map<string, unknown> }).channels.size,
+    compactionCount: () => compactionStarts,
+    fireTimer: () => { const [id, callback] = [...timers][0]!; timers.delete(id); callback(); },
+    accept: () => { const socket = new FakeSocket(); servers.at(-1)!.onConnection(socket); return socket; } };
+}
+
+test("processless broker fences closed Unix probes before unlink or binding a replacement", async () => {
+  for (const replace of [false, true]) {
+    const fixture = processlessBroker({ stale: true }), broker = fixture.create();
+    const starting = broker.listen().then(() => "ready", error => error.message);
+    const probe = fixture.probes[0]!;
+    await fixture.closeTurnBrokers();
+    let replacement: TurnBroker | undefined;
+    try {
+      expect(fixture.state.socket?.ino).toBe(1); // An unbound broker never owned this old pathname.
+      if (replace) { fixture.state.socket = undefined; replacement = fixture.create(); await replacement.listen(); }
+      const ownedInode = fixture.state.socket?.ino, priorServers = fixture.servers.length;
+      probe.emit("error", Object.assign(new Error("fake stale endpoint"), { code: "ECONNREFUSED" }));
+      expect(await starting).toMatch(/closed while binding/);
+      expect(fixture.servers).toHaveLength(priorServers);
+      expect(fixture.state.socket?.ino).toBe(ownedInode);
+      expect(fixture.unlinked).toEqual([]);
+      if (replacement) expect(fixture.brokers.get(fixture.endpoint)).toBe(replacement);
+    } finally { await broker.close(); if (replacement) await replacement.close(); }
+  }
+  const replaced = processlessBroker({ stale: true }), owner = replaced.create();
+  const starting = owner.listen().then(() => "ready", error => error.message);
+  replaced.state.socket = { dev: 3, ino: 901 }; // The registry is unchanged while another process replaces the pathname.
+  replaced.probes[0]!.emit("error", Object.assign(new Error("fake old probe"), { code: "ECONNREFUSED" }));
+  expect(await starting).toMatch(/replaced while checking/);
+  expect(replaced.identity()).toEqual({ dev: 3, ino: 901 });
+  expect(replaced.unlinked).toEqual([]); expect(replaced.servers).toEqual([]);
+  await owner.close();
+}, 15_000);
+
+test("processless broker protects replacement paths across close waits and stale second close", async () => {
+  const fixture = processlessBroker(), broker = fixture.create(); await broker.listen();
+  fixture.state.holdClose = true;
+  const closing = broker.close();
+  fixture.state.socket = { dev: 2, ino: 900 }; // Another owner acquires the pathname while close is pending.
+  fixture.heldCloses.shift()!(); await closing;
+  expect(fixture.state.socket).toEqual({ dev: 2, ino: 900 });
+  expect(fixture.unlinked).toEqual([]);
+  fixture.state.holdClose = false; fixture.state.socket = undefined;
+  const replacement = fixture.create(); await replacement.listen(); const ownedInode = fixture.identity()?.ino;
+  try {
+    await broker.close();
+    expect(fixture.brokers.get(fixture.endpoint)).toBe(replacement);
+    expect(fixture.identity()?.ino).toBe(ownedInode);
+    expect(fixture.servers.at(-1)!.listening).toBe(true);
+  } finally { await replacement.close(); }
+}, 15_000);
+
+test("processless broker preserves owned cleanup, startup errors and Windows retry guards", async () => {
+  const normal = processlessBroker(), broker = normal.create(); await broker.listen();
+  const token = await broker.register({ cwd: import.meta.dir, roots: [import.meta.dir], writableRoots: [import.meta.dir],
+    sandboxPolicy: { type: "dangerFullAccess" }, tools: [] });
+  expect(token).toMatch(/^turn_/); expect(normal.channelCount(broker)).toBe(1);
+  expect(await broker.beginCompactionTransaction("healthy-trace", 1_000)).toEqual({ token: "fake-control", handoffId: "fake-handoff" });
+  expect(normal.compactionCount()).toBe(1);
+  const socket = normal.accept(), ownedInode = normal.state.socket!.ino;
+  await broker.close();
+  expect(normal.channelCount(broker)).toBe(0);
+  expect(socket.destroyed).toBe(true); expect(normal.servers[0]!.listening).toBe(false);
+  expect(normal.unlinked).toEqual([ownedInode]); expect(normal.state.socket).toBeUndefined();
+  const failure = processlessBroker(), retry = failure.create();
+  failure.state.failListen = Object.assign(new Error("fake bind denied"), { code: "EACCES" });
+  await expect(retry.listen()).rejects.toThrow("fake bind denied");
+  await retry.listen();
+  failure.state.closeError = new Error("fake close error");
+  await expect(retry.close()).rejects.toThrow("fake close error");
+  expect(failure.servers.at(-1)!.listening).toBe(false);
+  const unknown = processlessBroker(), unidentified = unknown.create();
+  unknown.state.failStat = new Error("fake identity read failed");
+  await expect(unidentified.listen()).rejects.toThrow("fake identity read failed");
+  expect(unknown.servers[0]!.listening).toBe(false); expect(unknown.unlinked).toEqual([]);
+  await unidentified.close();
+  for (const operation of ["listen", "register", "compaction"] as const) {
+    const admission = processlessBroker(), owner = admission.create(); admission.state.holdReady = true;
+    const pending = (operation === "listen" ? owner.listen() : operation === "register" ? owner.register({
+      cwd: import.meta.dir, roots: [import.meta.dir], writableRoots: [import.meta.dir], sandboxPolicy: { type: "dangerFullAccess" }, tools: [],
+    }) : owner.beginCompactionTransaction("fake-trace", 1_000)).then(() => "accepted", error => error.message);
+    admission.heldStarts.shift()!();
+    await owner.close();
+    expect(await pending).toMatch(/closed while starting/);
+    expect(admission.channelCount(owner)).toBe(0); expect(admission.brokers.has(admission.endpoint)).toBe(false);
+    expect(admission.compactionCount()).toBe(0);
+  }
+  for (const cleanupFails of [false, true]) {
+    const delayed = processlessBroker(), late = delayed.create(); delayed.state.holdReady = true;
+    const starting = late.listen().then(() => "ready", error => error.message);
+    await late.close();
+    if (cleanupFails) delayed.state.closeError = new Error("fake late close failed");
+    delayed.heldStarts.shift()!();
+    expect(await starting).toMatch(cleanupFails ? /fake late close failed/ : /closed while binding/);
+    expect(delayed.servers[0]!.listening).toBe(false); expect(delayed.unlinked).toEqual([]);
+  }
+  for (const closeDuringRetry of [false, true]) {
+    const windows = processlessBroker({ windows: true }), pipe = windows.create();
+    windows.state.failListen = Object.assign(new Error("fake busy pipe"), { code: "EADDRINUSE" });
+    const starting = pipe.listen().then(() => "ready", error => error.message);
+    await Promise.resolve();
+    if (closeDuringRetry) await pipe.close();
+    windows.fireTimer();
+    expect(await starting).toMatch(closeDuringRetry ? /closed while binding/ : /^ready$/);
+    expect(windows.servers).toHaveLength(closeDuringRetry ? 1 : 2);
+    await pipe.close();
+  }
+}, 15_000);

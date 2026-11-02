@@ -19,9 +19,8 @@ const DEFAULT_SEARCH_TIME_BUDGET_MS: u64 = 15_000;
 const MAX_SEARCH_TIME_BUDGET_MS: u64 = 60_000;
 const SEARCH_READ_CHUNK_BYTES: u64 = 64 * 1024;
 const BINARY_PEEK_BYTES: usize = 8192;
-/// Largest `content` one read_file call returns. Tool results pass through the headless service,
-/// which keeps at most 256 KiB of serialized result, so a page stays under that even after JSON
-/// escaping. Larger files are read in pages with `next_offset`; there is no whole-file limit.
+/// Raw-byte upper bound for one read_file page. Shared dispatch can return a smaller page so the
+/// complete decorated result fits its serialized budget. Larger files use `next_offset`.
 const MAX_READ_PAGE_BYTES: u64 = 192 * 1024;
 const DEFAULT_READ_PAGE_BYTES: u64 = 128 * 1024;
 /// UTF-16 text is decoded whole (Windows tools often write it), so it keeps a size limit.
@@ -43,6 +42,132 @@ struct ReadWindow {
     truncated: bool,
     cut_mid_line: bool,
     next_line: usize,
+}
+
+pub(super) struct ReadFilePage {
+    window: ReadWindow,
+    path: String,
+    encoding: &'static str,
+    total_bytes: u64,
+    total_lines: Option<usize>,
+    warnings: Vec<String>,
+    requested_max: Option<u64>,
+}
+
+impl ReadFilePage {
+    pub(super) fn value(&self) -> Value {
+        self.value_for(&self.window)
+    }
+
+    fn value_for(&self, window: &ReadWindow) -> Value {
+        let mut warnings = self.warnings.clone();
+        let content = match String::from_utf8(window.content.clone()) {
+            Ok(text) => text,
+            Err(error) => {
+                warnings.push("invalid UTF-8 bytes were replaced with U+FFFD".to_string());
+                String::from_utf8_lossy(error.as_bytes()).into_owned()
+            }
+        };
+        if self
+            .requested_max
+            .is_some_and(|requested| requested > MAX_READ_PAGE_BYTES)
+        {
+            warnings.push(format!(
+                "max_bytes is capped at {MAX_READ_PAGE_BYTES} per call"
+            ));
+        }
+        if window.truncated {
+            warnings.push("content truncated; continue with next_offset".to_string());
+        }
+        let more = window.end < self.total_bytes;
+        let mut result = json!({
+            "path": self.path,
+            "content": content,
+            "encoding": self.encoding,
+            "start_line": window.first_line,
+            "end_line": window.last_line,
+            "total_bytes": self.total_bytes,
+            "bytes_read": window.end - window.begin,
+            "offset": window.begin,
+            "truncated": window.truncated,
+            "truncated_by": window.truncated.then_some("bytes"),
+            "cut_mid_line": window.cut_mid_line,
+            "next_offset": more.then_some(window.end),
+            "next_start_line": (more && !window.cut_mid_line).then_some(window.next_line),
+            "warnings": warnings
+        });
+        if let Some(lines) = self.total_lines {
+            result["total_lines"] = json!(lines);
+        }
+        tool_ok(result)
+    }
+
+    pub(super) fn fit_result(self, mut output: Value, limit: usize) -> Value {
+        let mut buffer = vec![0; limit];
+        let mut fits = |value: &Value| {
+            let mut writer = std::io::Cursor::new(buffer.as_mut_slice());
+            serde_json::to_writer(&mut writer, value).is_ok()
+        };
+        if fits(&output) {
+            return output;
+        }
+
+        let mut candidate = output.clone();
+        let mut raw_cap = self.window.content.len();
+        while raw_cap > 4 {
+            raw_cap = (raw_cap / 2).max(4);
+            // This is an already-owned window: offset=Some(0) would skip leading invalid
+            // continuation bytes. Only the original file read performs offset alignment.
+            let mut window = read_window(
+                std::io::Cursor::new(self.window.content.as_slice()),
+                0,
+                None,
+                1,
+                None,
+                raw_cap,
+            )
+            .expect("reading an in-memory file page");
+            if window.content.is_empty() || window.content.len() >= self.window.content.len() {
+                break;
+            }
+            window.begin += self.window.begin;
+            window.end += self.window.begin;
+            let line_shift = self.window.first_line - 1;
+            window.first_line += line_shift;
+            window.last_line += line_shift;
+            window.next_line += line_shift;
+            window.truncated |= self.window.truncated;
+            let Value::Object(fields) = self.value_for(&window) else {
+                unreachable!("file result is an object")
+            };
+            candidate
+                .as_object_mut()
+                .expect("decorated file result is an object")
+                .extend(fields);
+            if fits(&candidate) {
+                return candidate;
+            }
+        }
+
+        let mut error = crate::tools::workspace::tool_err(WorkspaceError::Tool {
+            code: "RESULT_TOO_LARGE",
+            message: "Required response metadata and the minimum file page exceed the tool-result byte budget; no file page or continuation cursor was returned.".into(),
+            category: "validation",
+            retryable: false,
+        });
+        // Required metadata is never trimmed or loaded again. If it alone exceeds the limit,
+        // the transport's existing whole-value guard still reports the explicit failure.
+        for key in [
+            "project_instructions",
+            "project_scope",
+            "server_dispatch_ms",
+        ] {
+            if let Some(value) = output.as_object_mut().and_then(|object| object.remove(key)) {
+                error[key] = value;
+            }
+        }
+        error
+    }
 }
 
 /// Reads at most `max_bytes` starting either at byte `offset` or at line `start_line`, stopping
@@ -181,6 +306,10 @@ fn count_lines<R: Read>(mut reader: R) -> std::io::Result<usize> {
 }
 
 pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
+    read_file_page(ws, args).map(|page| page.value())
+}
+
+pub(super) fn read_file_page(ws: &Workspace, args: &Value) -> Result<ReadFilePage, WorkspaceError> {
     let path = args
         .get("path")
         .and_then(Value::as_str)
@@ -320,42 +449,15 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         .map_err(read_error)?;
         (window, "utf-8", file_bytes, total_lines)
     };
-    let content = match String::from_utf8(window.content) {
-        Ok(text) => text,
-        Err(error) => {
-            warnings.push("invalid UTF-8 bytes were replaced with U+FFFD".to_string());
-            String::from_utf8_lossy(error.as_bytes()).into_owned()
-        }
-    };
-    if requested_max.is_some_and(|requested| requested > MAX_READ_PAGE_BYTES) {
-        warnings.push(format!(
-            "max_bytes is capped at {MAX_READ_PAGE_BYTES} per call"
-        ));
-    }
-    let more = window.end < total_bytes;
-    if window.truncated {
-        warnings.push("content truncated; continue with next_offset".to_string());
-    }
-    let mut result = json!({
-        "path": resolved.display,
-        "content": content,
-        "encoding": encoding,
-        "start_line": window.first_line,
-        "end_line": window.last_line,
-        "total_bytes": total_bytes,
-        "bytes_read": window.end - window.begin,
-        "offset": window.begin,
-        "truncated": window.truncated,
-        "truncated_by": window.truncated.then_some("bytes"),
-        "cut_mid_line": window.cut_mid_line,
-        "next_offset": more.then_some(window.end),
-        "next_start_line": (more && !window.cut_mid_line).then_some(window.next_line),
-        "warnings": warnings
-    });
-    if let Some(lines) = total_lines {
-        result["total_lines"] = json!(lines);
-    }
-    Ok(tool_ok(result))
+    Ok(ReadFilePage {
+        window,
+        path: resolved.display,
+        encoding,
+        total_bytes,
+        total_lines,
+        warnings,
+        requested_max,
+    })
 }
 
 pub fn list_dir(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
@@ -1222,6 +1324,212 @@ mod tests {
             self.consumed.set(self.consumed.get() + count);
             self.largest_read.set(self.largest_read.get().max(count));
         }
+    }
+
+    #[test]
+    fn read_file_fitter_preserves_owned_bytes_and_metadata() {
+        let decorate = |mut value: Value| {
+            value["project_instructions"] = json!({"instructions":"keep this rule","revision":"r"});
+            value["project_scope"] = json!({"root":".","workspace_id":"fixture"});
+            value["server_dispatch_ms"] = json!(u64::MAX);
+            value
+        };
+        for raw in [
+            b"\x80\xbfX\xff\r\n".repeat(1024),
+            "界🙂\r\n".repeat(1024).into_bytes(),
+        ] {
+            let mut source = b"skip\r\n".to_vec();
+            source.extend_from_slice(&raw);
+            let page = ReadFilePage {
+                window: read_window(Cursor::new(&source), 0, None, 2, None, 128 * 1024).unwrap(),
+                path: "fixture.txt".into(),
+                encoding: "utf-8",
+                total_bytes: source.len() as u64,
+                total_lines: Some(count_lines(source.as_slice()).unwrap()),
+                warnings: Vec::new(),
+                requested_max: None,
+            };
+            let original = decorate(page.value());
+            assert!(serde_json::to_vec(&original).unwrap().len() > 2048);
+            let fitted = page.fit_result(original.clone(), 2048);
+            assert_eq!(fitted["ok"], true);
+            assert!(serde_json::to_vec(&fitted).unwrap().len() <= 2048);
+            for key in [
+                "project_instructions",
+                "project_scope",
+                "server_dispatch_ms",
+            ] {
+                assert_eq!(fitted[key], original[key]);
+            }
+            let consumed = fitted["bytes_read"].as_u64().unwrap() as usize;
+            assert!(consumed > 0 && consumed < raw.len());
+            assert_eq!(fitted["offset"], 6);
+            assert_eq!(fitted["next_offset"], (6 + consumed) as u64);
+            assert_eq!(fitted["start_line"], 2);
+            assert_eq!(
+                fitted["content"],
+                String::from_utf8_lossy(&raw[..consumed]).as_ref()
+            );
+            assert_eq!(
+                fitted["end_line"],
+                (1 + count_lines(&raw[..consumed]).unwrap()) as u64
+            );
+            assert_eq!(fitted["cut_mid_line"], raw[consumed - 1] != b'\n');
+            assert_eq!(fitted["truncated"], true);
+        }
+
+        let small = || ReadFilePage {
+            window: read_window(Cursor::new(b"ok\n"), 0, None, 1, None, 4).unwrap(),
+            path: "small.txt".into(),
+            encoding: "utf-8",
+            total_bytes: 3,
+            total_lines: Some(1),
+            warnings: Vec::new(),
+            requested_max: None,
+        };
+        let original = decorate(small().value());
+        let exact = serde_json::to_vec(&original).unwrap().len();
+        assert_eq!(small().fit_result(original.clone(), exact), original);
+        for limit in [0, exact - 1] {
+            let failed = small().fit_result(original.clone(), limit);
+            assert_eq!(failed["ok"], false);
+            assert_eq!(failed["error"]["code"], "RESULT_TOO_LARGE");
+            assert!(failed.get("content").is_none());
+            assert!(failed.get("next_offset").is_none());
+            assert_eq!(
+                failed["project_instructions"],
+                original["project_instructions"]
+            );
+        }
+        let mut irreducible = original.clone();
+        irreducible["project_instructions"]["instructions"] = json!("x".repeat(4096));
+        let failed = small().fit_result(irreducible.clone(), 2048);
+        assert_eq!(failed["ok"], false);
+        assert_eq!(
+            failed["project_instructions"],
+            irreducible["project_instructions"]
+        );
+        assert!(serde_json::to_vec(&failed).unwrap().len() > 2048);
+        assert!(failed.get("next_offset").is_none());
+
+        let raw = "🙂".repeat(16).into_bytes();
+        let page = ReadFilePage {
+            window: read_window(Cursor::new(&raw), 0, None, 1, None, raw.len()).unwrap(),
+            path: "emoji.txt".into(),
+            encoding: "utf-8",
+            total_bytes: raw.len() as u64,
+            total_lines: Some(1),
+            warnings: Vec::new(),
+            requested_max: None,
+        };
+        let minimum = read_window(Cursor::new(&raw), 0, None, 1, None, 4).unwrap();
+        let exact = serde_json::to_vec(&decorate(page.value_for(&minimum)))
+            .unwrap()
+            .len();
+        let original = decorate(page.value());
+        let fitted = page.fit_result(original, exact);
+        assert_eq!(fitted["ok"], true);
+        assert_eq!(fitted["content"], "🙂");
+        assert_eq!(fitted["bytes_read"], 4);
+        assert_eq!(fitted["next_offset"], 4);
+        assert_eq!(serde_json::to_vec(&fitted).unwrap().len(), exact);
+    }
+
+    #[test]
+    fn read_file_shared_result_fits_with_instructions_and_raw_cursors() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aiTemp/read-file-budget-tests");
+        fs::create_dir_all(&base).unwrap();
+        let tree = tempfile::Builder::new()
+            .prefix("shared-")
+            .tempdir_in(&base)
+            .unwrap();
+        let root = tree.path().join("project");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("AGENTS.md"), "\u{1}".repeat(16 * 1024)).unwrap();
+        fs::write(root.join("nested/agent.md"), "\u{1}".repeat(16 * 1024)).unwrap();
+        let ctx =
+            crate::tools::ToolContext::for_test(root.clone(), tree.path().join("harness")).unwrap();
+        let wide = "界🙂\r\n".repeat(20_000);
+        let mut utf16 = vec![0xff, 0xfe];
+        for unit in wide.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        let cases = [
+            ("control.txt", b"\x01\r\n".repeat(44_000), None, None),
+            (
+                "quotes.txt",
+                vec![b'"'; 192 * 1024 + 64],
+                Some(192 * 1024),
+                None,
+            ),
+            ("invalid.txt", vec![0xff; 128 * 1024 + 64], None, None),
+            ("wide.txt", utf16, None, Some(wide)),
+        ];
+        for (name, source, maximum, decoded) in cases {
+            let path = format!("nested/{name}");
+            fs::write(root.join(&path), &source).unwrap();
+            let expected = decoded.unwrap_or_else(|| String::from_utf8_lossy(&source).into_owned());
+            let total_bytes = if name == "wide.txt" {
+                expected.len()
+            } else {
+                source.len()
+            };
+            let instructions =
+                crate::tools::project_context::for_tool(&ctx, "read_file", &json!({"path":path}));
+            let mut offset = 0u64;
+            let mut joined = String::new();
+            for page_index in 0..128 {
+                let mut args = json!({"path":path,"offset":offset});
+                if let Some(maximum) = maximum {
+                    args["max_bytes"] = json!(maximum);
+                }
+                let value = crate::tools::call_tool(&ctx, "read_file", &args);
+                assert_eq!(value["ok"], true);
+                assert!(
+                    serde_json::to_vec(&value).unwrap().len()
+                        <= crate::tools::workspace::MAX_SERIALIZED_TOOL_RESULT_BYTES
+                );
+                assert_eq!(value["project_instructions"], instructions);
+                assert!(value["project_scope"].is_object());
+                assert!(value["server_dispatch_ms"].is_number());
+                assert_eq!(value["offset"], offset);
+                assert_eq!(value["total_bytes"], total_bytes as u64);
+                joined.push_str(value["content"].as_str().unwrap());
+                if let Some(next) = value["next_offset"].as_u64() {
+                    assert!(next > offset);
+                    assert_eq!(next - offset, value["bytes_read"].as_u64().unwrap());
+                    offset = next;
+                    assert!(page_index < 127, "paging did not finish");
+                } else {
+                    assert_eq!(
+                        offset + value["bytes_read"].as_u64().unwrap(),
+                        total_bytes as u64
+                    );
+                    break;
+                }
+            }
+            assert_eq!(joined, expected);
+            let acknowledged = crate::tools::dispatch::call_tool_mcp(
+                &ctx,
+                "read_file",
+                &json!({"path":path,"max_bytes":4,"known_project_instructions_revision":instructions["revision"]}),
+            );
+            assert_eq!(acknowledged["ok"], true);
+            assert_eq!(acknowledged["project_instructions"]["instructions"], "");
+            assert_eq!(acknowledged["project_instructions"]["unchanged"], true);
+            assert_eq!(
+                acknowledged["project_instructions"]["revision"],
+                instructions["revision"]
+            );
+        }
+        fs::write(root.join("small.txt"), b"ok\n").unwrap();
+        let direct = read_file(&ctx.workspace, &json!({"path":"small.txt"})).unwrap();
+        let shared = crate::tools::call_tool(&ctx, "read_file", &json!({"path":"small.txt"}));
+        for (key, value) in direct.as_object().unwrap() {
+            assert_eq!(&shared[key], value);
+        }
+        assert_eq!(direct["content"], "ok\n");
+        assert_eq!(direct["bytes_read"], 3);
     }
 
     #[test]

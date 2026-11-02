@@ -139,7 +139,7 @@ function controllerFixture({ fetchImpl, allowNetworkInstall = true, createContro
     })(),
     ...overrides,
   });
-  return { controller, dataRoot, payload, children };
+  return { controller, dataRoot, manifestRoot, payload, children };
 }
 
 test("a running component's shown state is read once and rechecked off the main thread", async () => {
@@ -711,6 +711,574 @@ test("CPA bundled-source Start fails closed when app resources are missing", asy
     /bundled runtime is missing|bundled inside Coding Tools Desktop/i,
   );
   controller.dispose();
+});
+
+// The worker has not published a PID until finish() runs. Every child and process-tree
+// operation is fake, including handles adopted from a previous launcher.
+async function managedOwnerFixture(t, { persistent = false, prepare = false, install = true, healthProbe = async () => true, fetchImpl } = {}) {
+  const { createRequire, wrap } = require("node:module");
+  const vm = require("node:vm");
+  const sourcePath = require.resolve("../electron/managed-components.cjs");
+  const localRequire = createRequire(sourcePath);
+  const alive = new Set();
+  const launches = [];
+  const killed = [];
+  const control = { refuseKill: false, deferExit: false, exits: [] };
+  const terminate = (child, signal) => {
+    if (control.refuseKill) throw new Error("fake tree cleanup refused");
+    killed.push(child.pid);
+    child.killed = true;
+    alive.delete(child.pid);
+    child.release?.();
+    const finish = () => {
+      child.exitCode = 0;
+      child.signalCode = signal;
+      child.emit("exit", 0, signal);
+    };
+    if (control.deferExit) control.exits.push(finish);
+    else queueMicrotask(finish);
+  };
+  const loaded = { exports: {} };
+  const polls = new Map();
+  const factory = vm.runInThisContext("(function(setInterval, clearInterval) { return "
+    + wrap(fs.readFileSync(sourcePath, "utf8")) + "; })", { filename: sourcePath });
+  factory((callback) => {
+    const timer = { unref() {} };
+    polls.set(timer, callback);
+    return timer;
+  }, (timer) => polls.delete(timer))(
+    loaded.exports, (name) => name === "./process-tree.cjs"
+      ? { processRunning: (pid) => alive.has(pid), terminateOwnedProcessTree: terminate }
+      : name === "node:child_process"
+        ? { spawnSync: () => assert.fail("no real process is permitted") }
+        : localRequire(name), loaded, sourcePath, path.dirname(sourcePath));
+  const fixture = controllerFixture({
+    platform: "win32",
+    persistentComponents: persistent ? ["cpa"] : [],
+    healthProbe,
+    fetchImpl,
+    createController: (options) => {
+      const file = path.join(options.manifestRoot, "cpa.json");
+      const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+      manifest.platforms.win32 = manifest.platforms[process.platform];
+      if (prepare) manifest.install.steps.splice(2, 0, {
+        id: "prepare", kind: "command", executable: "{runtime}", arguments: [],
+      });
+      manifest.launch.primaryProcessId = "service";
+      manifest.launch.adopt = [{ id: "refresh", executable: "{runtime}", arguments: [], timeoutMs: 1000 }];
+      writeJson(file, manifest);
+      return loaded.exports.createManagedComponentController(options);
+    },
+    spawnProcess: (_file, _args, options) => new Promise((resolve) => {
+      const child = mockChild(9_000_000 + launches.length);
+      child.unref = () => {};
+      launches.push({ child, options, finish() { alive.add(child.pid); resolve(child); } });
+    }),
+    terminateProcessTree: terminate,
+  });
+  t.after(async () => {
+    control.refuseKill = false;
+    control.deferExit = false;
+    for (const finish of control.exits.splice(0)) finish();
+    const dispose = () => {
+      try { fixture.controller.dispose(); }
+      catch (error) { if (!/needs attention/i.test(error.message)) throw error; }
+    };
+    dispose();
+    for (const launch of launches) {
+      launch.finish();
+      if (launch.child.exitCode === null && launch.child.signalCode === null) terminate(launch.child, "SIGTERM");
+    }
+    alive.clear();
+    for (const callback of [...polls.values()]) callback();
+    await new Promise(setImmediate);
+    try { await fixture.controller.stopComponent("cpa"); }
+    catch (error) { if (!/needs attention/i.test(error.message)) throw error; }
+    dispose();
+    assert.equal(polls.size, 0, "all fake PID monitors have been released");
+    for (const directory of [fixture.dataRoot, fixture.manifestRoot]) {
+      assert.equal(path.dirname(directory), path.resolve(__dirname, "..", "..", "aiTemp"));
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  const installed = install ? await fixture.controller.installComponent("cpa") : null;
+  const recordPath = path.join(fixture.dataRoot, "state", "cpa.process.json");
+  const seed = (pid) => {
+    alive.add(pid);
+    const bundle = path.resolve(path.dirname(sourcePath), "..", "vendor", "bundled", "cpa-plugins", "BUNDLE.json");
+    writeJson(recordPath, {
+      pid, version: "1.0.0",
+      dependencyFingerprint: crypto.createHash("sha256").update(fs.readFileSync(bundle)).digest("hex"),
+    });
+  };
+  return { ...fixture, launches, killed, control, alive, installed, recordPath, seed,
+    poll: () => { for (const callback of [...polls.values()]) callback(); },
+  };
+}
+
+async function waitManagedOwner(check) {
+  for (let tries = 0; tries < 200; tries += 1) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("fake managed lifecycle did not reach its expected boundary");
+}
+
+test("managed owner: autostart and manual Start coalesce before PID publication", async (t) => {
+  const f = await managedOwnerFixture(t);
+  const first = f.controller.startComponent("cpa");
+  const second = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length > 0);
+  await new Promise(setImmediate);
+  assert.equal(f.launches.length, 1);
+  f.launches[0].finish();
+  const results = await Promise.all([first, second]);
+  assert.equal(results[0].processes[0].pid, results[1].processes[0].pid);
+  await f.controller.startComponent("cpa");
+  assert.equal(f.launches.length, 1);
+});
+
+test("managed owner: Stop cancels an unknown PID without waiting and retires its late child", async (t) => {
+  const f = await managedOwnerFixture(t, { persistent: true });
+  let rejected;
+  const first = f.controller.startComponent("cpa").catch((error) => { rejected = error; });
+  await waitManagedOwner(() => f.launches.length === 1);
+  await f.controller.stopComponent("cpa");
+  assert.match(rejected?.message || "", /canceled by Stop/);
+  await assert.rejects(f.controller.startComponent("cpa"), /retiring|stopping/);
+  await assert.rejects(f.controller.restartComponent("cpa"), /retiring|stopping/);
+  f.launches[0].finish();
+  await first;
+  await waitManagedOwner(() => f.launches[0].child.killed);
+  await f.controller.stopComponent("cpa");
+  assert.equal(fs.existsSync(f.recordPath), false);
+  assert.deepEqual(f.controller.project("cpa").processes, []);
+  const retry = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 2);
+  f.launches[1].finish();
+  await retry;
+  assert.equal(JSON.parse(fs.readFileSync(f.recordPath, "utf8")).pid, f.launches[1].child.pid);
+});
+
+test("managed owner: restart cancels a pending Start instead of launching beside it", async (t) => {
+  const f = await managedOwnerFixture(t);
+  const first = f.controller.startComponent("cpa");
+  first.catch(() => {});
+  await waitManagedOwner(() => f.launches.length === 1);
+  await assert.rejects(f.controller.restartComponent("cpa"), /canceled|retiring|stopping/);
+  await assert.rejects(first, /canceled/);
+  assert.equal(f.launches.length, 1);
+  f.launches[0].finish();
+  await waitManagedOwner(() => f.launches[0].child.killed);
+});
+
+test("managed owner: concurrent restarts share the complete stop and replacement", async (t) => {
+  const f = await managedOwnerFixture(t, { persistent: true });
+  const initial = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await initial;
+  const first = f.controller.restartComponent("cpa");
+  const second = f.controller.restartComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 2);
+  await new Promise(setImmediate);
+  assert.equal(f.launches.length, 2, "one replacement is admitted");
+  f.launches[1].finish();
+  await Promise.all([first, second]);
+  f.launches[0].child.emit("error", new Error("late retired-worker error"));
+  assert.equal(f.controller.project("cpa").error, null);
+  assert.equal(JSON.parse(fs.readFileSync(f.recordPath, "utf8")).pid, f.launches[1].child.pid);
+});
+
+test("managed owner: Stop during source refresh cannot dispatch a later spawn", async (t) => {
+  const f = await managedOwnerFixture(t);
+  await f.controller.refreshInstallState("cpa");
+  const original = fs.promises.access;
+  let release, held = false;
+  const gate = new Promise((resolve) => { release = resolve; });
+  fs.promises.access = async (file, ...args) => {
+    if (!held && file === f.installed.managedHome) { held = true; await gate; }
+    return original(file, ...args);
+  };
+  try {
+    const pending = f.controller.startComponent("cpa");
+    pending.catch(() => {});
+    await waitManagedOwner(() => held);
+    await f.controller.stopComponent("cpa");
+    await assert.rejects(pending, /canceled/);
+    release();
+    await f.controller.refreshInstallState("cpa");
+    await new Promise(setImmediate);
+    assert.equal(f.launches.length, 0);
+  } finally {
+    release();
+    fs.promises.access = original;
+  }
+});
+
+test("managed owner: Stop retires a preparation command whose PID arrives later", async (t) => {
+  const f = await managedOwnerFixture(t, { prepare: true, install: false });
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => f.launches.length === 1);
+  await f.controller.stopComponent("cpa");
+  await assert.rejects(pending, /canceled/);
+  f.launches[0].finish();
+  await waitManagedOwner(() => f.launches[0].child.killed);
+  assert.equal(f.launches.length, 1, "the foreground service is never dispatched");
+});
+
+test("managed owner: failed late cleanup retains a handle and blocks replacement until retry", async (t) => {
+  const f = await managedOwnerFixture(t);
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => f.launches.length === 1);
+  await f.controller.stopComponent("cpa");
+  await assert.rejects(pending, /canceled/);
+  f.control.refuseKill = true;
+  f.launches[0].finish();
+  await waitManagedOwner(() => /fake tree cleanup refused/.test(f.controller.project("cpa").error || ""));
+  assert.equal(f.controller.project("cpa").processes[0].pid, f.launches[0].child.pid);
+  await assert.rejects(f.controller.startComponent("cpa"), /stopping|retiring/);
+  await assert.rejects(f.controller.stopComponent("cpa"), /fake tree cleanup refused/);
+  f.control.refuseKill = false;
+  await f.controller.stopComponent("cpa");
+  assert.deepEqual(f.controller.project("cpa").processes, []);
+});
+
+test("managed owner: explicit Stop stays canceled during keep-running disposal", async (t) => {
+  const f = await managedOwnerFixture(t, { persistent: true });
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => f.launches.length === 1);
+  await f.controller.stopComponent("cpa");
+  f.controller.dispose({ keepPersistent: true });
+  await assert.rejects(pending, /canceled/);
+  f.launches[0].finish();
+  await waitManagedOwner(() => f.launches[0].child.killed);
+  assert.equal(fs.existsSync(f.recordPath), false);
+});
+
+test("managed owner: PID-less errors clean admission and a later Start succeeds", async (t) => {
+  const f = await managedOwnerFixture(t);
+  const initial = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].child.pid = undefined;
+  f.launches[0].finish();
+  await initial;
+  f.launches[0].child.emit("error", new Error("fake ENOENT"));
+  assert.deepEqual(f.controller.project("cpa").processes, []);
+  const retry = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 2);
+  f.launches[1].finish();
+  await retry;
+  assert.equal(f.controller.project("cpa").processes[0].pid, f.launches[1].child.pid);
+});
+
+test("managed owner: a nonterminal worker error keeps its live child stoppable", async (t) => {
+  const f = await managedOwnerFixture(t);
+  const pending = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await pending;
+  f.launches[0].child.emit("error", new Error("fake worker output lost"));
+  assert.equal(f.controller.project("cpa").processes[0].running, true);
+  await assert.rejects(f.controller.startComponent("cpa"), /stopping/);
+  await f.controller.stopComponent("cpa");
+  assert.equal(f.launches[0].child.killed, true);
+});
+
+test("managed owner: an unverified saved PID is never killed by Stop or a late failed health reply", async (t) => {
+  let release, probed = false;
+  const health = new Promise((resolve) => { release = resolve; });
+  const f = await managedOwnerFixture(t, { persistent: true, healthProbe: () => { probed = true; return health; } });
+  f.seed(9_100_001);
+  const original = fs.readFileSync(f.recordPath);
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => probed);
+  await assert.rejects(f.controller.stopComponent("cpa"), /needs attention/);
+  await assert.rejects(pending, /canceled/);
+  assert.deepEqual(f.killed, []);
+  assert.deepEqual(fs.readFileSync(f.recordPath), original);
+  release(false);
+  await new Promise(setImmediate);
+  await assert.rejects(f.controller.startComponent("cpa"), /needs attention/);
+  await assert.rejects(f.controller.stopComponent("cpa"), /needs attention/);
+  assert.throws(() => f.controller.dispose({ keepPersistent: true }), /needs attention/);
+  assert.deepEqual(f.killed, []);
+  assert.deepEqual(fs.readFileSync(f.recordPath), original);
+});
+
+test("managed owner: Stop also fences an adopted CPA refresh command", async (t) => {
+  const f = await managedOwnerFixture(t, { persistent: true });
+  f.seed(9_100_002);
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => f.launches.length === 1);
+  await f.controller.stopComponent("cpa");
+  await assert.rejects(pending, /canceled/);
+  assert.equal(f.alive.has(9_100_002), false);
+  f.launches[0].finish();
+  await waitManagedOwner(() => f.launches[0].child.killed);
+  assert.equal(fs.existsSync(f.recordPath), false);
+  assert.equal(f.launches.length, 1);
+});
+
+test("managed owner: an idempotent Start preserves the current child's later exit status", async (t) => {
+  const f = await managedOwnerFixture(t);
+  const initial = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await initial;
+  await f.controller.startComponent("cpa");
+  const child = f.launches[0].child;
+  child.exitCode = 7;
+  child.emit("exit", 7, null);
+  assert.match(f.controller.project("cpa").error, /service exited \(7\)/);
+});
+
+test("managed owner: Stop during download cannot dispatch a later preparation command", async (t) => {
+  let release, downloading = false;
+  const download = new Promise((resolve) => { release = resolve; });
+  const f = await managedOwnerFixture(t, {
+    install: false, prepare: true,
+    fetchImpl: () => { downloading = true; return download; },
+  });
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => downloading);
+  await f.controller.stopComponent("cpa");
+  await assert.rejects(pending, /canceled/);
+  release(new Response(f.payload, { status: 200 }));
+  await waitManagedOwner(() => /canceled/.test(f.controller.project("cpa").error || ""));
+  assert.equal(f.launches.length, 0);
+});
+
+test("managed owner: unverified disposal preserves the record and does not grant PID kill authority", async (t) => {
+  for (const keepPersistent of [true, false]) {
+    let release, probed = false;
+    const health = new Promise((resolve) => { release = resolve; });
+    const f = await managedOwnerFixture(t, { persistent: true, healthProbe: () => { probed = true; return health; } });
+    f.seed(9_200_000 + Number(keepPersistent));
+    const original = fs.readFileSync(f.recordPath);
+    const pending = f.controller.startComponent("cpa");
+    pending.catch(() => {});
+    await waitManagedOwner(() => probed);
+    if (keepPersistent) {
+      f.controller.dispose({ keepPersistent: true });
+      await assert.rejects(pending, /disposed/);
+    } else {
+      assert.throws(() => f.controller.dispose(), /needs attention/);
+      await assert.rejects(pending, /needs attention/);
+    }
+    release(false);
+    await new Promise(setImmediate);
+    assert.equal(f.killed.length, 0);
+    assert.deepEqual(fs.readFileSync(f.recordPath), original);
+    if (!keepPersistent) {
+      // A refused dispose did not mark the controller disposed or erase the failed Stop.
+      await assert.rejects(f.controller.startComponent("cpa"), /needs attention/);
+      assert.throws(() => f.controller.dispose({ keepPersistent: true }), /needs attention/);
+    }
+  }
+});
+
+test("managed owner: explicit Stop owns an in-flight restart's stop-to-start handoff", async (t) => {
+  const f = await managedOwnerFixture(t);
+  const initial = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await initial;
+  f.control.deferExit = true;
+  const restarting = f.controller.restartComponent("cpa");
+  restarting.catch(() => {});
+  await waitManagedOwner(() => f.control.exits.length === 1);
+  const stopping = f.controller.stopComponent("cpa");
+  for (const finish of f.control.exits.splice(0)) finish();
+  await stopping;
+  await assert.rejects(restarting, /canceled/);
+  f.control.deferExit = false;
+  assert.equal(f.launches.length, 1);
+  assert.deepEqual(f.controller.project("cpa").processes, []);
+});
+
+test("managed owner: a known-dead adopted PID cannot finish as installed after health or refresh", async (t) => {
+  for (const exitAt of ["health", "refresh", "none"]) {
+    let release, probed = false;
+    const health = new Promise((resolve) => { release = resolve; });
+    const f = await managedOwnerFixture(t, { persistent: true, healthProbe: () => { probed = true; return health; } });
+    const pid = 9_300_000 + ["health", "refresh", "none"].indexOf(exitAt);
+    f.seed(pid);
+    const pending = f.controller.startComponent("cpa");
+    pending.catch(() => {});
+    await waitManagedOwner(() => probed);
+    if (exitAt === "health") { f.alive.delete(pid); f.poll(); }
+    release(true);
+    if (exitAt !== "health") {
+      await waitManagedOwner(() => f.launches.length === 1);
+      f.launches[0].finish();
+      await waitManagedOwner(() => f.controller.project("cpa").processes.some((entry) => entry.id === "refresh"));
+      if (exitAt === "refresh") { f.alive.delete(pid); f.poll(); }
+      f.launches[0].child.exitCode = 0;
+      f.launches[0].child.emit("exit", 0, null);
+    }
+    if (exitAt === "none") {
+      const result = await pending;
+      assert.equal(result.processes[0].pid, pid, "a healthy completed adoption is still accepted");
+      assert.equal(result.error, null);
+    } else {
+      await assert.rejects(pending, /stopped while.*adopt/i);
+      assert.equal(f.controller.project("cpa").processes.some((entry) => entry.pid === pid), false);
+      assert.match(f.controller.project("cpa").error, /stopped while.*adopt/i);
+      assert.equal(fs.existsSync(f.recordPath), false);
+      if (exitAt === "health") assert.equal(f.launches.length, 0);
+    }
+  }
+});
+
+test("managed owner: a second Restart coalesces during its admitted known-child stop", async (t) => {
+  const f = await managedOwnerFixture(t);
+  const initial = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await initial;
+  f.control.deferExit = true;
+  const first = f.controller.restartComponent("cpa");
+  const secondPending = [];
+  await waitManagedOwner(() => f.control.exits.length === 1);
+  const second = f.controller.restartComponent("cpa");
+  second.catch((error) => secondPending.push(error));
+  for (const finish of f.control.exits.splice(0)) finish();
+  f.control.deferExit = false;
+  await waitManagedOwner(() => f.launches.length === 2);
+  f.launches[1].finish();
+  const result = await Promise.all([first, second]);
+  assert.equal(secondPending.length, 0);
+  assert.equal(f.launches.length, 2);
+  assert.equal(result[0].processes[0].pid, result[1].processes[0].pid);
+});
+
+test("managed owner: failed unverified Stop survives stale-version, changed-record and missing-record retries", async (t) => {
+  let release, probed = false, healthy = false;
+  const health = new Promise((resolve) => { release = resolve; });
+  const f = await managedOwnerFixture(t, {
+    persistent: true, healthProbe: () => { if (!probed) { probed = true; return health; } return healthy; },
+  });
+  f.seed(9_400_001);
+  const original = fs.readFileSync(f.recordPath);
+  const originalRecord = JSON.parse(original);
+  const initial = f.controller.startComponent("cpa");
+  initial.catch(() => {});
+  await waitManagedOwner(() => probed);
+  await assert.rejects(f.controller.stopComponent("cpa"), /needs attention/);
+  await assert.rejects(initial, /canceled/);
+  release(false);
+  await new Promise(setImmediate);
+  for (const replacement of [
+    { ...originalRecord, version: "0.9.0" },
+    { ...originalRecord, dependencyFingerprint: "changed-by-another-owner" },
+  ]) {
+    writeJson(f.recordPath, replacement);
+    const bytes = fs.readFileSync(f.recordPath);
+    await assert.rejects(f.controller.startComponent("cpa"), /needs attention/);
+    await assert.rejects(f.controller.stopComponent("cpa"), /needs attention/);
+    assert.deepEqual(fs.readFileSync(f.recordPath), bytes);
+    assert.deepEqual(f.killed, []);
+  }
+  fs.rmSync(f.recordPath);
+  await assert.rejects(f.controller.startComponent("cpa"), /needs attention/);
+  assert.throws(() => f.controller.dispose({ keepPersistent: true }), /needs attention/);
+  assert.equal(fs.existsSync(f.recordPath), false);
+  assert.deepEqual(f.killed, []);
+
+  // An explicit fresh successful verification, rather than another failed Stop, resolves attention.
+  fs.writeFileSync(f.recordPath, original);
+  healthy = true;
+  const retry = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await waitManagedOwner(() => f.controller.project("cpa").processes.some((entry) => entry.id === "refresh"));
+  f.launches[0].child.exitCode = 0;
+  f.launches[0].child.emit("exit", 0, null);
+  assert.equal((await retry).processes[0].pid, originalRecord.pid);
+  await f.controller.stopComponent("cpa");
+  assert.deepEqual(f.killed, [originalRecord.pid]);
+  assert.equal(fs.existsSync(f.recordPath), false);
+  f.controller.dispose({ keepPersistent: true });
+});
+
+test("managed owner: a proven-gone candidate permits a fresh known spawned child", async (t) => {
+  let release, probed = false;
+  const health = new Promise((resolve) => { release = resolve; });
+  const f = await managedOwnerFixture(t, { persistent: true, healthProbe: () => { probed = true; return health; } });
+  f.seed(9_400_002);
+  const initial = f.controller.startComponent("cpa");
+  initial.catch(() => {});
+  await waitManagedOwner(() => probed);
+  await assert.rejects(f.controller.stopComponent("cpa"), /needs attention/);
+  await assert.rejects(initial, /canceled/);
+  release(false);
+  await new Promise(setImmediate);
+  f.alive.delete(9_400_002);
+  const retry = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await retry;
+  assert.deepEqual(f.killed, []);
+  await f.controller.stopComponent("cpa");
+  assert.deepEqual(f.killed, [f.launches[0].child.pid]);
+});
+
+test("managed owner: record replacement during verification is retained without killing either PID", async (t) => {
+  let release, probed = false;
+  const health = new Promise((resolve) => { release = resolve; });
+  const f = await managedOwnerFixture(t, { persistent: true, healthProbe: () => { probed = true; return health; } });
+  f.seed(9_400_003);
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => probed);
+  const replacement = { ...JSON.parse(fs.readFileSync(f.recordPath)), pid: 9_500_003, startedAt: "another-owner" };
+  f.alive.add(replacement.pid);
+  writeJson(f.recordPath, replacement);
+  const bytes = fs.readFileSync(f.recordPath);
+  release(true);
+  await assert.rejects(pending, /needs attention/);
+  await assert.rejects(f.controller.stopComponent("cpa"), /needs attention/);
+  assert.throws(() => f.controller.dispose({ keepPersistent: true }), /needs attention/);
+  assert.deepEqual(fs.readFileSync(f.recordPath), bytes);
+  assert.deepEqual(f.killed, []);
+  assert.equal(f.launches.length, 0);
+});
+
+test("managed owner: an owned exit cannot erase a same-PID record from another owner", async (t) => {
+  const f = await managedOwnerFixture(t, { persistent: true });
+  const pending = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await pending;
+  writeJson(f.recordPath, { ...JSON.parse(fs.readFileSync(f.recordPath)), startedAt: "another-owner" });
+  const bytes = fs.readFileSync(f.recordPath);
+  f.launches[0].child.exitCode = 7;
+  f.launches[0].child.emit("exit", 7, null);
+  assert.deepEqual(fs.readFileSync(f.recordPath), bytes);
+  await assert.rejects(f.controller.stopComponent("cpa"), /needs attention/);
+  assert.deepEqual(fs.readFileSync(f.recordPath), bytes);
+});
+
+test("managed owner: a record written during worker start cannot be overwritten by the late PID", async (t) => {
+  const f = await managedOwnerFixture(t, { persistent: true, healthProbe: async () => false });
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.seed(9_500_004);
+  const bytes = fs.readFileSync(f.recordPath);
+  f.launches[0].finish();
+  await assert.rejects(pending, /needs attention/);
+  assert.deepEqual(f.killed, [f.launches[0].child.pid], "only the child this launcher actually started is retired");
+  assert.deepEqual(fs.readFileSync(f.recordPath), bytes);
+  await assert.rejects(f.controller.startComponent("cpa"), /needs attention/);
+  assert.deepEqual(fs.readFileSync(f.recordPath), bytes);
 });
 
 test("Windows managed cleanup terminates owned trees and retains failed handles", { skip: process.platform !== "win32" }, async () => {
