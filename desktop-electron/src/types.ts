@@ -30,11 +30,11 @@ export interface RtkStatus {
   minimum?: string;
   installCommand?: string;
 }
-/** Connections > App plugins (app-plugins.cjs): CPA or one of its plugins, installed vs. GitHub. */
+/** Connections > App plugins (app-plugins.cjs): CPA, a tool agents run, or a CPA plugin, installed vs. GitHub. */
 export interface AppPlugin {
-  /** "cpa", or "cpa-plugin:<plugin id>". */
+  /** "cpa", "antigravity-cli", "rtk", or "cpa-plugin:<plugin id>". */
   id: string;
-  kind: "service" | "cpa-plugin";
+  kind: "service" | "tool" | "cpa-plugin";
   name: string;
   /** The plugin's DLL in CPA's plugins folder. */
   file?: string;
