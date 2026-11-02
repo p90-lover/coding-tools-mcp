@@ -74,6 +74,40 @@ function normalizeServer(input, existing = []) {
   return { ...base, url: checkUrl(typeof input.url === "string" ? input.url.trim() : ""), headers: stringMap(input.headers, "Header", HEADER_NAME, 32) };
 }
 
+// GitHub's hosted MCP server (github/github-mcp-server, "Remote GitHub MCP Server"): the only host
+// the GitHub CLI's sign-in is ever attached to, whatever the page asks for.
+const GITHUB_MCP_HOST = "api.githubcopilot.com";
+const GITHUB_TOKEN = /^[A-Za-z0-9_]{20,255}$/;
+
+/** The GitHub CLI's token (`gh auth token`), read without a console window; never logged. */
+function readGithubCliToken({ execFile = require("node:child_process").execFile } = {}) {
+  return new Promise((resolve, reject) => {
+    execFile("gh", ["auth", "token"], { timeout: 15_000, windowsHide: true, encoding: "utf8" }, (error, stdout) => {
+      const token = String(stdout ?? "").trim();
+      // Neither the output nor gh's own error text is quoted back: either can hold the token.
+      if (error || !GITHUB_TOKEN.test(token)) {
+        reject(fail(error?.code === "ENOENT" ? "GitHub CLI (gh) isn't installed. Install it, or paste a token instead"
+          : "GitHub CLI isn't signed in. Run `gh auth login`, or paste a token instead"));
+        return;
+      }
+      resolve(token);
+    });
+  });
+}
+
+/**
+ * A GitHub MCP server with the GitHub CLI's sign-in as its Authorization header, so one click adds
+ * it without a token to create and paste. Refused for any other host: the token is the person's
+ * whole GitHub CLI login and goes only to GitHub.
+ */
+async function withGithubCliToken(input, readToken = readGithubCliToken) {
+  let host = "";
+  try { host = new URL(String(input?.url ?? "")).hostname.toLowerCase(); } catch { /* checked below */ }
+  if (input?.type !== "http" || host !== GITHUB_MCP_HOST) throw fail("The GitHub CLI sign-in is used only for GitHub's MCP server");
+  const token = await readToken();
+  return { ...input, headers: { ...(input.headers ?? {}), Authorization: `Bearer ${token}` } };
+}
+
 /** The AO session config for one saved server (POST /sessions and /resume-agent mcpServers). */
 function sessionConfig(server) {
   return server.type === "stdio"
@@ -140,4 +174,4 @@ function createChatMcpServers({ filePath, logger = null }) {
   });
 }
 
-module.exports = Object.freeze({ MAX_SESSION_SERVERS, createChatMcpServers, normalizeServer, sessionConfig });
+module.exports = Object.freeze({ MAX_SESSION_SERVERS, createChatMcpServers, normalizeServer, readGithubCliToken, sessionConfig, withGithubCliToken });

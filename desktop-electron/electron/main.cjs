@@ -149,7 +149,14 @@ const X_URL = "https://x.com/GIBUSHAT";
 const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
-const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
+// Plugins > MCPs' ready-to-add servers (src/features/mcp-catalog.ts): their pages and where to make their tokens.
+const MCP_CATALOG_URLS = [
+  "https://github.com/github/github-mcp-server", "https://github.com/settings/personal-access-tokens/new",
+  "https://github.com/microsoft/playwright-mcp", "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+  "https://github.com/upstash/context7", "https://context7.com/dashboard",
+  "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
+];
+const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL, ...MCP_CATALOG_URLS]);
 const PACKAGED_RENDERER_PATH = path.join(__dirname, "..", "dist", "index.html");
 const PACKAGED_RENDERER_URL = pathToFileURL(PACKAGED_RENDERER_PATH).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
@@ -3507,9 +3514,12 @@ function registerIpc({ logger, stateStore }) {
   // runs its command (or reaches its address) in every new chat, so it is their own click in the
   // visible app; errors name the field, never a value (env and headers carry tokens).
   handle("mcp-servers:list", () => userMcpServers(logger).list());
-  handle("mcp-servers:save", (event, server) => {
+  handle("mcp-servers:save", async (event, server, options) => {
     assertFocusedMainWindow(event, true);
-    return userMcpServers(logger).save(server);
+    // "Use my GitHub CLI sign-in": the token is read here and never passes through the page.
+    const input = options?.githubCliToken === true
+      ? await require("./chat-mcp-servers.cjs").withGithubCliToken(server) : server;
+    return userMcpServers(logger).save(input);
   });
   handle("mcp-servers:remove", (event, id) => {
     assertFocusedMainWindow(event, true);

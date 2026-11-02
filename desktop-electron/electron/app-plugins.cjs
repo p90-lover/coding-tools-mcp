@@ -53,18 +53,20 @@ function compare(left, right) {
 /** A "-codingtools.N" rebuild compares with its upstream by the version it was built from. */
 const baseVersion = (version) => String(version || "").replace(/-codingtools\.\d+$/u, "");
 
-function readPluginUpdates(stateDir) {
+// Every read and write here is async: they run on Electron main from the sidebar's list and its
+// Update button, and a synchronous call on the busy disk holds every window (main-sync-calls.test.cjs).
+async function readPluginUpdates(stateDir) {
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(stateDir, UPDATES_FILE), "utf8"));
+    const parsed = JSON.parse(await fs.promises.readFile(path.join(stateDir, UPDATES_FILE), "utf8"));
     return parsed && typeof parsed.plugins === "object" && parsed.plugins ? parsed : { schemaVersion: 1, plugins: {} };
   } catch { return { schemaVersion: 1, plugins: {} }; }
 }
 
-function writePluginUpdates(stateDir, record) {
+async function writePluginUpdates(stateDir, record) {
   const target = path.join(stateDir, UPDATES_FILE);
   const staging = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(staging, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(staging, target);
+  await fs.promises.writeFile(staging, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  await fs.promises.rename(staging, target);
 }
 
 /** `gh auth token` (the user's signed-in GitHub CLI), or null. Never logged. */
@@ -147,10 +149,10 @@ function createAppPlugins({
     return entry;
   }
 
-  function installedPlugins() {
+  async function installedPlugins() {
     if (platform !== "win32" || arch !== "x64") return [];
     let names = [];
-    try { names = fs.readdirSync(pluginDir).filter((name) => name.toLowerCase().endsWith(".dll")); } catch { return []; }
+    try { names = (await fs.promises.readdir(pluginDir)).filter((name) => name.toLowerCase().endsWith(".dll")); } catch { return []; }
     const byId = new Map();
     for (const name of names) {
       const parsed = parsePluginFile(name);
@@ -214,7 +216,7 @@ function createAppPlugins({
 
   async function list({ refresh = false } = {}) {
     const items = [await cpaItem(refresh)];
-    for (const plugin of installedPlugins()) items.push(await pluginItem(plugin, refresh));
+    for (const plugin of await installedPlugins()) items.push(await pluginItem(plugin, refresh));
     return { items, checkedAt: new Date(now()).toISOString() };
   }
 
@@ -255,7 +257,7 @@ function createAppPlugins({
   }
 
   async function updatePlugin(id) {
-    const plugin = installedPlugins().find((item) => item.id === id);
+    const plugin = (await installedPlugins()).find((item) => item.id === id);
     const source = PLUGIN_SOURCES[id];
     if (!plugin || !source || source.rebuilt) throw new Error("This plugin can't be updated from GitHub");
     const release = await latestRelease(source, true);
@@ -264,22 +266,22 @@ function createAppPlugins({
     const dll = releaseDll(release, id);
     if (!dll) throw new Error("This release has no Windows build to install");
     const downloads = path.join(cpaStateDir, "plugin-downloads");
-    fs.mkdirSync(downloads, { recursive: true, mode: 0o700 });
+    await fs.promises.mkdir(downloads, { recursive: true, mode: 0o700 });
     const staging = path.join(downloads, `${now()}-${dll.name}.part`);
     try {
       await download(source.repository, dll, staging);
       // A DLL CPA has loaded can be renamed but not deleted: the old copies move to Trash.
-      const old = fs.readdirSync(pluginDir).filter((name) => parsePluginFile(name)?.id === id && name !== dll.name);
+      const old = (await fs.promises.readdir(pluginDir)).filter((name) => parsePluginFile(name)?.id === id && name !== dll.name);
       const trash = path.join(cpaStateDir, "Trash", "plugins", `${now()}-${id}`);
-      if (old.length) fs.mkdirSync(trash, { recursive: true, mode: 0o700 });
-      for (const name of old) fs.renameSync(path.join(pluginDir, name), path.join(trash, name));
-      fs.renameSync(staging, path.join(pluginDir, dll.name));
+      if (old.length) await fs.promises.mkdir(trash, { recursive: true, mode: 0o700 });
+      for (const name of old) await fs.promises.rename(path.join(pluginDir, name), path.join(trash, name));
+      await fs.promises.rename(staging, path.join(pluginDir, dll.name));
     } finally {
-      fs.rmSync(staging, { force: true });
+      await fs.promises.rm(staging, { force: true });
     }
-    const record = readPluginUpdates(cpaStateDir);
+    const record = await readPluginUpdates(cpaStateDir);
     record.plugins[id] = { version: release.version, file: dll.name, sha256: dll.sha256, repository: source.repository, installedAt: new Date(now()).toISOString() };
-    writePluginUpdates(cpaStateDir, record);
+    await writePluginUpdates(cpaStateDir, record);
     logger.info?.("app-plugins.updated", { plugin: id, from: plugin.version, to: release.version });
     await restartCpa();
   }

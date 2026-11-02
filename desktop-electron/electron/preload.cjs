@@ -183,7 +183,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   updateAppPlugin: (id) => ipcRenderer.invoke("launcher:app-plugin-update", id),
   // Plugins > MCPs: the person's own MCP servers for chat agents.
   mcpServers: () => ipcRenderer.invoke("mcp-servers:list"),
-  saveMcpServer: (server) => ipcRenderer.invoke("mcp-servers:save", server),
+  saveMcpServer: (server, options) => ipcRenderer.invoke("mcp-servers:save", server, options),
   removeMcpServer: (id) => ipcRenderer.invoke("mcp-servers:remove", id),
   setMcpServerEnabled: (id, enabled) => ipcRenderer.invoke("mcp-servers:set-enabled", id, enabled),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
