@@ -2315,6 +2315,86 @@ test("final review independently returns healthy activity and coalesces a slow o
   } finally { release(); await first; }
 });
 
+for (const count of [1, 3, 24]) {
+  test(`live activity fits the IPC response budget across ${count} node timelines`, async () => {
+    const nodes = Array.from({ length: count }, (_, index) => ({
+      id: `node-${index}`, state: "running", route: { harness_id: "ao:claude-code" },
+      receipt: { request_key: `request-${index}`, thread_id: `session-${index}`, turn_id: "owned" },
+    }));
+    const run = { id: "budget", workspace_id: "ws-1", nodes };
+    const messages = Array.from({ length: 24 }, (_, index) => ({
+      id: `message-${index}`, kind: "message", status: "completed",
+      text: `Visible reply ${index}: ${"中文字🙂".repeat(7000)}`,
+    }));
+    let hold = false, release;
+    const stalled = new Promise(resolve => { release = resolve; });
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async () => ({ ok: true, runs: [run] }),
+      aoHarness: { observe: async () => {
+        if (hold) await stalled;
+        return { turnId: "owned", turnState: "running", liveOutput: "Current reply 中文🙂".repeat(240), timeline: messages };
+      } },
+    });
+    try {
+      const input = { workspaceId: "ws-1", runId: "budget" };
+      await workflow.call("activity", input);
+      await new Promise(resolve => setImmediate(resolve));
+      hold = true;
+      const frame = await workflow.call("activity", input);
+      const wrapped = { moduleId: "agent-orchestrator", operation: "activity", result: frame };
+      const received = await invokeContract({ invoke: async () => wrapped }, "apps.call", {
+        moduleId: "agent-orchestrator", operation: "activity", arguments: input,
+      });
+      assert.equal(Object.keys(received.result.nodes).length, count);
+      assert.ok(Buffer.byteLength(JSON.stringify(wrapped)) < 1024 * 1024);
+      for (const node of nodes) {
+        const current = received.result.nodes[node.id];
+        assert.match(current.output, /^Current reply 中文🙂/);
+        assert.match(current.timeline.at(-1).text, /^Visible reply 23: 中文字🙂/);
+      }
+      if (count === 24) {
+        const sharedLength = frame.nodes["node-0"].timeline.at(-1).text.length;
+        run.nodes = [nodes[0]];
+        const single = await workflow.call("activity", input);
+        assert.ok(single.nodes["node-0"].timeline.at(-1).text.length > sharedLength,
+          "a shared response budget must not permanently trim the cached frame");
+      }
+      assert.equal(messages[0].text, `Visible reply 0: ${"中文字🙂".repeat(7000)}`);
+    } finally { release(); workflow.dispose(); }
+  });
+}
+
+test("live activity drops an oversized structured steer whole while keeping fitting replies", async () => {
+  const run = { id: "steer-budget", workspace_id: "ws-1", nodes: Array.from({ length: 24 }, (_, index) => ({
+    id: `node-${index}`, state: "running", route: { harness_id: "ao:claude-code" },
+    receipt: { thread_id: `session-${index}`, turn_id: "owned" },
+  })) };
+  const steer = JSON.stringify({ message: "中文字".repeat(7000), annotations: [] });
+  const timeline = [
+    { id: "reply", kind: "message", status: "running", text: "A fitting visible reply" },
+    { id: "steer", kind: "steer", status: "completed", text: steer },
+  ];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => ({ ok: true, runs: [run] }),
+    aoHarness: { observe: async () => ({ turnId: "owned", turnState: "running", timeline }) },
+  });
+  try {
+    const input = { workspaceId: "ws-1", runId: run.id };
+    await workflow.call("activity", input);
+    await new Promise(resolve => setImmediate(resolve));
+    const frame = await workflow.call("activity", input);
+    const received = await invokeContract({ invoke: async () => ({ moduleId: "agent-orchestrator", operation: "activity", result: frame }) },
+      "apps.call", { moduleId: "agent-orchestrator", operation: "activity", arguments: input });
+    for (const current of Object.values(received.result.nodes)) {
+      assert.deepEqual(current.timeline, [timeline[0]]);
+    }
+    assert.equal(JSON.parse(timeline[1].text).message.length, 21000);
+    run.nodes = [run.nodes[0]];
+    const single = await workflow.call("activity", input);
+    assert.deepEqual(single.nodes["node-0"].timeline, timeline, "a small response keeps full structured content");
+  } finally { workflow.dispose(); }
+});
+
 test("final review refreshes an old planner-only APPROVED review for newly failed evidence", async () => {
   const world = failedWorkerReviewWorld();
   world.reviewer.parents = ["planner"];
@@ -6388,6 +6468,45 @@ test("a follow-up that cannot continue its agent says which session and why befo
 
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
 test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
+
+test("activity follows a continued chat's in-memory turn binding before its receipt has a turn ID", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Task", description: "first ask", state: "in_progress", clauses: [] }], runs: [previous] });
+  let current;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/read" && body.run_id) {
+        current ??= { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+          grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+        return { ok: true, runs: [current], worker_capacity: { [body.run_id]: 1 } };
+      }
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: current, grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/external/reserve") { current.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "follow-up" }; }
+      if (endpoint === "/api/v1/ao/external/submitted") { current.nodes[0].state = "running"; current.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: current }; }
+      return world.requestHeadless(endpoint, body, options);
+    },
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      continuable: async () => true,
+      send: async () => ({ turnId: "turn-2", state: "running" }),
+      observe: async (_id, expected) => ({ turnId: expected || "turn-1", turnState: "running",
+        liveOutput: expected === "turn-2" ? "The follow-up response" : "The previous response", timeline: [] }),
+    },
+  });
+  try {
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "follow-up", executionMode: "single", singleRoute: route });
+    await until(() => current?.nodes[0].state === "running");
+    assert.equal(current.nodes[0].receipt.turn_id, undefined);
+    const args = { workspaceId: "ws-1", runId: current.id };
+    await workflow.call("activity", args);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await workflow.call("activity", args)).nodes.one.output, "The follow-up response");
+  } finally { workflow.dispose(); }
+});
 
 test("steering hands the message to the running AO agent and notes it in the chat", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
