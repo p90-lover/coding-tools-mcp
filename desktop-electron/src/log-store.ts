@@ -1,4 +1,5 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useContext, useSyncExternalStore } from "react";
+import { pageHidden, SurfaceHiddenContext } from "./features/page-visibility";
 import type { LogRecord } from "./types";
 
 // The launcher's recent log lines live here, outside React state. As App state, every line
@@ -32,15 +33,27 @@ export function appendLog(record: LogRecord) {
   emit();
 }
 
-function subscribe(listener: () => void) {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
+function subscribe(listener: () => void, hidden: boolean) {
+  if (hidden) return () => {};
+  const doc = typeof document === "undefined" ? undefined : document;
+  const visibilityChanged = () => {
+    if (pageHidden()) listeners.delete(listener);
+    else { listeners.add(listener); listener(); }
+  };
+  if (!pageHidden()) listeners.add(listener);
+  doc?.addEventListener("visibilitychange", visibilityChanged);
+  return () => {
+    listeners.delete(listener);
+    doc?.removeEventListener("visibilitychange", visibilityChanged);
+  };
 }
 
 const read = () => records;
 
 export function useLogs(): readonly LogRecord[] {
-  return useSyncExternalStore(subscribe, read, read);
+  const hidden = useContext(SurfaceHiddenContext);
+  const subscribeVisible = useCallback((listener: () => void) => subscribe(listener, hidden), [hidden]);
+  return useSyncExternalStore(subscribeVisible, read, read);
 }
 
 /** A key that stays with the record while lines are added and the oldest ones drop off. */
