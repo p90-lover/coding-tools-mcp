@@ -274,11 +274,9 @@
 .ao-workflow .cx-chat .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip { color: var(--claude-text-2); }
 .ao-workflow .cx-chat .cx-composer .ao-composer-chip:hover:not(:disabled), .ao-workflow .cx-chat .cx-composer .ao-composer-chip[aria-expanded="true"] {
   background: var(--cx-hover); color: var(--claude-text); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch { border-color: var(--claude-line); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch::before { background: var(--claude-accent-soft); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch button { color: var(--claude-text-2); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch button.is-active { color: var(--claude-accent); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch button:hover:not(:disabled, .is-active) { color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-toggle { border-color: var(--claude-line); background: var(--claude-accent-soft); color: var(--claude-accent); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-toggle:hover:not(:disabled) { background: color-mix(in srgb, var(--claude-accent) 20%, transparent); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-toggle:focus-visible { outline-color: var(--claude-accent); }
 .ao-workflow .cx-chat .cx-goal-dot { background: var(--claude-accent); box-shadow: 0 0 0 1.5px var(--claude-raised); }
 .ao-workflow .cx-chat .cx-goal:is(.is-stalled, .is-limited) .cx-goal-dot { background: var(--ao-amber); }
 .ao-workflow .cx-chat .cx-composer .cx-icon-button { color: var(--claude-text-2); }
