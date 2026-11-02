@@ -28,6 +28,7 @@ const {
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
+const { prepareBrowserDebugging } = require("./browser-debugging.cjs");
 const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
 const { codexThreadStats } = require("./codex-thread-stats.cjs");
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
@@ -315,19 +316,6 @@ const appsMcp = createCodingToolsAppsMcp({
 });
 const ipcRegistrar = createIpcRegistrar();
 const registeredIpcChannels = new Set();
-
-function findFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address && typeof address === "object" ? address.port : 0;
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
 
 function send(channel, value) {
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
@@ -3786,6 +3774,12 @@ async function start() {
     app.quit();
     return;
   }
+  const browserDebuggingReady = prepareBrowserDebugging(app);
+  if (process.platform === "linux") {
+    app.commandLine.appendSwitch("class", IS_DEV_PROFILE ? "codex-web-gpt-dev" : "codex-web-gpt");
+  }
+  // Keep shader caches off before Chromium starts, including while runtime files are prepared.
+  app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
   app.on("second-instance", (_event, argv) => {
     const commandAction = mcpConnectorCommandAction(argv);
     if (commandAction) {
@@ -3856,18 +3850,8 @@ async function start() {
   runtimeRootResolved = true;
   runtimeRootCheck.at = Date.now();
 
-  cdpPort = await findFreePort();
-  if (process.platform === "linux") {
-    app.commandLine.appendSwitch("class", IS_DEV_PROFILE ? "codex-web-gpt-dev" : "codex-web-gpt");
-  }
-  app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
-  app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
-  // Chromium's GPU shader caches (GPUCache, DawnGraphiteCache and DawnWebGPUCache, in the app's
-  // folder and in every session partition) were rewritten every few minutes. Shaders are compiled
-  // again after a restart instead.
-  app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
-
   await app.whenReady();
+  cdpPort = await browserDebuggingReady();
   session.defaultSession.setCertificateVerifyProc(caDistrust.verifyCertificate);
   // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them.
   if (process.platform === "win32" && app.isPackaged) {
