@@ -4,6 +4,7 @@ import { Icon } from "../icons";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import { chatRelativeTime, scheduledStartLabel, type ChatStatus, type ChatSummary } from "./ao-chat";
 import { SPLIT_DRAG_TYPE } from "./chat-split";
+import { useSurfaceHidden } from "./page-visibility";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   queued: "Starting", scheduled: "Scheduled", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
@@ -270,6 +271,7 @@ type DragList = { list: string; order: string[]; save: (next: string[], moved: s
  * Only the open project's chats are loaded, so opening another project switches to it.
  */
 export function ChatThreadList(props: ThreadListProps) {
+  const surfaceHidden = useSurfaceHidden();
   const { workspaces, workspaceId, chats, archived, selectedTaskId, now, pinned, unread, actions, busyTaskIds } = props;
   const openTaskIds = new Set(props.openTaskIds ?? [selectedTaskId]);
   const chatBusy = (taskId: string) => busyTaskIds.includes(taskId);
@@ -570,6 +572,7 @@ export function ChatThreadList(props: ThreadListProps) {
   // Codex's shortcuts act on the open chat.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (surfaceHidden()) return;
       const chat = chats.find((entry) => entry.taskId === selectedTaskId);
       const target = event.target as HTMLElement | null;
       if (!chat || target?.isContentEditable || (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) && !event.altKey)) return;

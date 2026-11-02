@@ -582,18 +582,23 @@ test("declining a delayed start restores the previously valid pending configurat
   assert.equal(applied.length,1);queue.dispose();
 });
 
+const pageHelpers = {};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/chat-pages.ts"), "utf8"), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS },
+}).outputText, { exports: pageHelpers, require: name => require(require.resolve(name, { paths: [path.resolve(__dirname, "..")] })) });
+
 function loadSurface(react = {}, globals = {}, imports = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
   const surface = {};
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-    { exports: surface, require: name => name === "react" ? react : name === "react/jsx-runtime"
-      ? imports.jsx || require(require.resolve(name, { paths: [path.resolve(__dirname, "..")] })) : imports[name] || {}, ...globals });
+    { exports: surface, require: name => name === "react" ? { useContext: () => null, ...react } : name === "react/jsx-runtime"
+      ? imports.jsx || require(require.resolve(name, { paths: [path.resolve(__dirname, "..")] })) : imports[name] || (name === "./chat-pages" ? pageHelpers : {}), ...globals });
   return surface;
 }
 
 function surfaceComposer(seed = {}, globals = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8").split("export function AgentOrchestratorSurface")[1];
-  const names = [...source.matchAll(/const \[([A-Za-z_]+),[^\]]+\] = useState/g)].map(match => match[1]);
+  const names = [...source.matchAll(/const \[([A-Za-z_]+)(?:,[^\]]+)?\] = useState/g)].map(match => match[1]);
   const state = { workspaceReady: true, workspaceId: "w", chatTaskId: "", board: { revision: 1, tasks: [] }, ...seed };
   const refs = [], callbacks = [], effects = []; let cursor = 0, refCursor = 0, callbackCursor = 0;
   const react = {
@@ -1186,7 +1191,7 @@ function rendererCallback(file, name, globals) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule("exports.callback = " + body.getText(tree), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText, { exports, ...globals });
+  }).outputText, { exports, pane: undefined, paneWanted: { current: null }, pageRegistry: null, pageNumber: 1, initialPageSelection: null, ...globals });
   return exports.callback;
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
@@ -1335,6 +1340,7 @@ test("an unsent split chat can switch projects and finish choosing its new chat"
   });
   choose("new-project");
   const decide = rendererCallback("AgentOrchestratorSurface.tsx", "effect:const wanted = paneWanted.current", {
+    pane: { workspaceId: "new-project", taskId: "" },
     chatTaskId: null, workspaceId: state.workspaceId, loadedWorkspace: "new-project",
     board: { tasks: [] }, boardWorkspace: { current: "new-project" }, paneWanted, paneSelectionPending, pendingSelect,
     missions: [], taskLifecycle: [], chatSeed: { workspaceId: "new-project", text: "Keep my draft" },
@@ -1358,7 +1364,7 @@ function workspaceRecovery({ hidden = false, selected = "p3" } = {}) {
   const set = key => value => { state[key] = typeof value === "function" ? value(state[key]) : value; };
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:listAllWorkspaces", {
     Error, listAllWorkspaces: () => { const reply = delayedReply(); replies.push(reply); return reply.promise; },
-    pageHidden: () => isHidden, setWorkspaces: set("workspaces"), setWorkspaceId: set("workspaceId"),
+    surfaceHidden: () => isHidden, setWorkspaces: set("workspaces"), setWorkspaceId: set("workspaceId"),
     setWorkspaceReady: set("ready"), setSheet: set("sheet"), setError: error => state.errors.push(error),
     window: { addEventListener: (name, handler) => { assert.equal(name, "focus"); focus.add(handler); },
       removeEventListener: (name, handler) => { assert.equal(name, "focus"); focus.delete(handler); } },
@@ -2623,7 +2629,7 @@ test("the chat list's clock stops while the window is hidden and ticks as soon a
   let hidden = true, interval = null, cleared = false;
   const listeners = new Map(), ticks = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:setListNow(Date.now())", {
-    Date, pageHidden: () => hidden, setListNow: value => ticks.push(value),
+    Date, surfaceHidden: () => hidden, setListNow: value => ticks.push(value),
     window: { setInterval: (callback, ms) => { interval = { callback, ms }; return 7; }, clearInterval: id => { cleared = id === 7; } },
     document: { addEventListener: (type, callback) => listeners.set(type, callback), removeEventListener: (type, callback) => { if (listeners.get(type) === callback) listeners.delete(type); } },
   });
