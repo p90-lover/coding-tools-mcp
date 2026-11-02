@@ -7345,8 +7345,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const result=await lifecycleMutation(id,visibility === "active"
       ? {operation:"restore_task",task_id:task,expected_revision:life.revision}
       : {operation:"set_visibility",task_id:task,expected_revision:life.revision,visibility});
-    // An archived chat counts its days from now; a restored or deleted one stops counting.
-    if (visibility === "archived") archive.archived(id,task); else archive.forget(id,task);
+    // An archived chat counts its days from now; a restored or deleted one stops counting, and a
+    // restored one counts as used now, so the idle sweep does not archive it again at once.
+    if (visibility === "archived") archive.archived(id,task);
+    else if (visibility === "active") archive.restored(id,task);
+    else archive.forget(id,task);
     return result;
   }
   /**
@@ -7366,10 +7369,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       read.set(id,{ saved, deleted });
       // A chat is a task with runs; a board task that never ran is not one.
       const chatTasks=new Set(saved.runs.map(run=>run.project_id));
+      // The read holds a project's newest runs only (100): a chat archived here whose runs have left
+      // it is still one, and its days still run out. It dropped out of Archived and stayed archived.
+      const counted=new Set(archive.archivedIn(id));
       const archivedNow=await archiveIdleChats(id,saved,chatTasks);
       const lifecycles=[...(saved.task_lifecycle ?? []).filter(life=>!archivedNow.has(life.task_id)),...archivedNow.values()];
       for (const life of lifecycles) {
-        if (!chatTasks.has(life.task_id) || !["archived","deleted"].includes(life.visibility)) continue;
+        if (!(chatTasks.has(life.task_id) || counted.has(life.task_id)) || !["archived","deleted"].includes(life.visibility)) continue;
         let visibility=life.visibility;
         if (visibility === "archived" && archive.due(id,life.task_id)) {
           try {
@@ -7389,7 +7395,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Every project's chats must be known: a session is ended only when no chat still uses it.
     if (read.size === ids.length) void endOldSessions(read).catch(error =>
       logger?.warn?.("ao.old_sessions_failed",{message:publicText(error?.message||error,200)}));
+    armArchiveSweep(ids);
     return { ok:true, days:archive.days(), idleDays:archive.idleDays(), chats };
+  }
+  // This read is also the archive sweep (idle chats archived, archived ones whose days are up moved
+  // on). Only the window asked for it, and only while shown, so an app left in the tray never
+  // archived anything: after a first read, the projects it named are swept every hour from here.
+  const ARCHIVE_SWEEP_MS = 3_600_000;
+  // A real hour's timer, not the injected one: a test clock that fires at once would sweep forever.
+  const archiveSweep = { ids: [], timer: null, disposed: false };
+  function armArchiveSweep(ids) {
+    archiveSweep.ids = ids;
+    if (archiveSweep.timer || archiveSweep.disposed) return;
+    archiveSweep.timer = setTimeout(() => {
+      archiveSweep.timer = null;
+      void archivedChats({ workspaceIds: archiveSweep.ids }).catch(error =>
+        logger?.warn?.("ao.archive_sweep_failed",{message:publicText(error?.message||error,200)}));
+    }, ARCHIVE_SWEEP_MS);
+    archiveSweep.timer.unref?.();
   }
   /**
    * Open chats with no activity for archive.idleDays() (default 7; 0 never) are archived, with no
@@ -7405,11 +7428,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (life.visibility !== "active") continue;
       const followUps=goals.get(workspaceId,taskId)?.status === "active" || Boolean(wakeups.get(workspaceId,taskId))
         || Boolean(loops.get(workspaceId,taskId)) || chatQueue.list(workspaceId,taskId).length > 0;
-      if (!idleChat(saved.runs.filter(run=>run.project_id===taskId),life,followUps,cutoff)) continue;
+      const chatRuns=saved.runs.filter(run=>run.project_id===taskId);
+      if (!idleChat(chatRuns,life,followUps,cutoff,{ restoredAt:archive.restoredAt(workspaceId,taskId),
+        driven:chatRuns.some(run=>{ const state=backgroundRuns.get(runKey(workspaceId,run.id)); return Boolean(state?.starting || state?.driving || state?.status === "running"); }) })) continue;
       try {
         const result=await lifecycleMutation(workspaceId,{operation:"set_visibility",task_id:taskId,expected_revision:life.revision,visibility:"archived"});
         archive.archived(workspaceId,taskId);
-        archivedNow.set(taskId,result.lifecycle);
+        // The lifecycle a change returns has no title; without the one read here the chat showed
+        // as "Untitled chat" in Archived until the next read.
+        archivedNow.set(taskId,{ ...life, ...result.lifecycle, title:result.lifecycle?.title || life.title });
         logger?.info?.("ao.idle_chat_archived",{days:archive.idleDays()});
       } catch (error) {
         logger?.warn?.("ao.idle_chat_archive_failed",{message:publicText(error?.message||error,200)});
@@ -7422,11 +7449,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * oldest first (each card's receipt has started_at_ms / finished_at_ms, Unix ms; runSettled(run)
    * says a run is over); `life` its lifecycle (schedule, reconfigure); `followUps` whether a goal,
    * wake-up, loop or queued message will still continue it; `cutoffMs` the moment its last
-   * activity must be before.
+   * activity must be before; `restoredAt` when Restore last brought it back (that counts as
+   * activity); `driven` whether this app is driving one of its runs right now.
+   *
+   * A run that is not over but has nothing working (a card held for an answer or after a failed
+   * launch, a pause, a start that never got going) does not keep the chat open: its last activity
+   * decides. Every run had to be over, so one old stuck card kept a chat from ever being archived.
    */
-  function idleChat(chatRuns,life,followUps,cutoffMs) {
-    if (followUps || life.reconfigure?.length || ["scheduled","claimed"].includes(life.schedule?.state)) return false;
-    if (!chatRuns.length || !chatRuns.every(runSettled)) return false;
+  function idleChat(chatRuns,life,followUps,cutoffMs,{ restoredAt=0, driven=false }={}) {
+    if (followUps || driven || life.reconfigure?.length || ["scheduled","claimed"].includes(life.schedule?.state)) return false;
+    if (!chatRuns.length || chatRuns.some(run=>!runSettled(run) && run.nodes?.some(node=>["running","reserved"].includes(node.state)))) return false;
+    if (restoredAt >= cutoffMs) return false;
     let last=0;
     for (const run of chatRuns) for (const node of run.nodes ?? []) {
       for (const receipt of [node.receipt, ...(node.history ?? [])]) {
@@ -7469,6 +7502,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return ended;
   }
   function dispose() {
+    archiveSweep.disposed = true;
+    if (archiveSweep.timer) clearTimeout(archiveSweep.timer);
     for (const entry of sessionCompactions.values()) if (entry.timer) clearTimer(entry.timer);
     sessionCompactions.clear();
     for (const entry of nativePreviewLeases.values()) entry.lease.release({ ended: true });

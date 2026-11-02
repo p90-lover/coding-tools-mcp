@@ -253,6 +253,18 @@
 .cxs-root .cxs-select:hover {
   background: var(--cxs-ghost-hover);
 }
+/* A shortcut's keys in Keyboard shortcuts: read-only, in the controls' border and corners. */
+.cxs-kbd {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--cxs-border-heavy);
+  border-radius: 6px;
+  background: var(--cxs-control);
+  color: var(--cxs-text);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
 .cxs-error {
   margin: -16px 0 24px;
   color: #d4292c;

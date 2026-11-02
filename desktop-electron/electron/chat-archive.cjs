@@ -17,7 +17,8 @@ const DAY_MS = 86_400_000;
 const validDays = (days) => Number.isSafeInteger(days) && days >= 0 && days <= MAX_ARCHIVE_DAYS;
 
 function createChatArchiveStore({ file = null, now = Date.now } = {}) {
-  let state = { days: DEFAULT_ARCHIVE_DAYS, idleDays: DEFAULT_IDLE_DAYS, archived: {} };
+  let state = { days: DEFAULT_ARCHIVE_DAYS, idleDays: DEFAULT_IDLE_DAYS, archived: {}, restored: {} };
+  const record = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
   if (file) {
     try {
       const saved = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -25,7 +26,8 @@ function createChatArchiveStore({ file = null, now = Date.now } = {}) {
         state = {
           days: validDays(saved.days) ? saved.days : DEFAULT_ARCHIVE_DAYS,
           idleDays: validDays(saved.idleDays) ? saved.idleDays : DEFAULT_IDLE_DAYS,
-          archived: saved.archived && typeof saved.archived === "object" && !Array.isArray(saved.archived) ? saved.archived : {},
+          archived: record(saved.archived),
+          restored: record(saved.restored),
         };
       }
     } catch { /* Nothing archived yet. */ }
@@ -65,6 +67,19 @@ function createChatArchiveStore({ file = null, now = Date.now } = {}) {
       delete state.archived[key(workspaceId, taskId)];
       persist();
     },
+    /**
+     * A chat brought back by Restore: that counts as activity, so the idle sweep leaves it open for
+     * idleDays from now. It archived the chat again within seconds, its last turn being as old as before.
+     */
+    restored(workspaceId, taskId) {
+      delete state.archived[key(workspaceId, taskId)];
+      state.restored[key(workspaceId, taskId)] = now();
+      persist();
+    },
+    /** When the chat was last restored (Unix ms), or 0. */
+    restoredAt: (workspaceId, taskId) => (Number.isFinite(state.restored[key(workspaceId, taskId)]) ? state.restored[key(workspaceId, taskId)] : 0),
+    /** The chats of a project this store counts days for: archived ones whose runs the project read may no longer hold. */
+    archivedIn: (workspaceId) => Object.keys(state.archived).filter((id) => id.startsWith(`${workspaceId}:`)).map((id) => id.slice(workspaceId.length + 1)),
     /**
      * When the chat was archived. One archived before this was kept (an older app) is taken as
      * archived the first time it is seen, so it gets its full days rather than going at once.

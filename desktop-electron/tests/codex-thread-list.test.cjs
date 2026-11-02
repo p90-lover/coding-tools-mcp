@@ -11,12 +11,20 @@ const compile = (file, require) => {
   const exports = {};
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8");
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-    { exports, require, localStorage: storage, crypto: globalThis.crypto, window: { setTimeout: () => 0, clearTimeout() {}, addEventListener() {}, removeEventListener() {} } });
+    { exports, require, localStorage: storage, crypto: globalThis.crypto, window: testWindow });
   return exports;
 };
+// What the list adds to window, by event type (newest last), for tests that press a key.
+const windowListeners = {};
+const testWindow = { setTimeout: () => 0, clearTimeout() {},
+  addEventListener(type, listener) { (windowListeners[type] ??= []).push(listener); },
+  removeEventListener(type, listener) { windowListeners[type] = (windowListeners[type] ?? []).filter((item) => item !== listener); } };
 const stored = {};
 const storage = { getItem: (key) => stored[key] ?? null, setItem: (key, value) => { stored[key] = value; } };
 const chat = compile("ao-chat.ts", () => ({}));
+const listSettings = compile("chat-list-settings.ts", () => ({}));
+// AO change listeners the list subscribed (onAoPush), for tests that push a change.
+const pushes = [];
 
 // A tiny hook runtime: state persists across renders by call order.
 function mount(Component, props, { effects = false } = {}) {
@@ -33,7 +41,8 @@ function mount(Component, props, { effects = false } = {}) {
   };
   const jsx = (type, props) => ({ type, props: props || {} });
   const module = compile(Component, (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "./page-visibility" ? { useSurfaceHidden: () => () => false }
+    : name === "./ao-chat" ? chat : name === "./page-visibility" ? { useSurfaceHidden: () => () => false, onAoPush: (listener) => { pushes.push(listener); return () => {}; } }
+    : name === "./chat-list-settings" ? listSettings
     : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", FloatingLayer: "FloatingLayer", ChatGlyph: "ChatGlyph" } : {});
   const render = (next = {}) => { cursor = 0; refCursor = 0; return module.ChatThreadList({ ...props, ...next }); };
   return { render, states };
@@ -293,7 +302,7 @@ test("right-click menus match Codex: its order and glyphs, and every chat item d
   assert.deepEqual(plain(openIn.map((item) => item.kind === "separator" ? "—" : [item.label, item.shortcut ?? null])),
     [["Split view", "1"], ["New window", "2"], "—", ["Structure", null], ["Mission Board", null]]);
   assert.deepEqual(plain(taskMenu.filter((item) => item.shortcut).map((item) => [item.label, item.shortcut])),
-    [["Rename", "Alt+Ctrl+R"], ["Pin", "Alt+Ctrl+P"], ["Mark as unread", "Ctrl+Shift+U"], ["Archive", "Ctrl+Shift+A"]]);
+    [["Rename", "Alt+Ctrl+R"], ["Pin", "Alt+Ctrl+P"], ["Mark as unread", "Ctrl+Shift+U"], ["Archive", "Ctrl+Shift+A"], ["Delete", "Ctrl+Shift+Backspace"]]);
   for (const item of taskMenu) {
     assert.ok(item.run || item.items?.length, `${item.label} does something`);
     assert.ok(item.icon, `${item.label} has Codex's glyph`);
@@ -423,7 +432,8 @@ test("a running chat dragged below others stays there, and the running chat it p
   walk(list.render()).find((element) => element.props?.className === "cx-threads").props.onDrop(dragEvent(true));
   // Before, it jumped straight back to the top: running chats were always kept there.
   assert.deepEqual(order(), ["Beta also busy", "Beta idle", "Beta busy"]);
-  assert.deepEqual(JSON.parse(stored["coding-tools:ao:chat-placed:b"]), ["b1"]);
+  // Kept with the run it had when moved: its next run releases it.
+  assert.deepEqual(JSON.parse(stored["coding-tools:ao:chat-placed:b"]), { b1: "rb1" });
 });
 
 test("chats can be dragged into place in every list: Pinned, another open project and Archived, each within itself", async () => {
@@ -618,4 +628,117 @@ test("a project's git label: none for a repository's root, worktree said plainly
   assert.match(none.line, /Not a git repository/);
   assert.deepEqual([label({ kind: "missing", root: null, mainRepo: null, branch: null }).tag], ["missing"]);
   assert.equal(projectGitLabel(null), null, "not read yet: no label");
+});
+
+// A key pressed with the cursor in the chat box (the newest keydown listener is the list's shortcuts).
+const press = (key, extra = {}) => {
+  let prevented = false;
+  windowListeners.keydown.at(-1)({ key, ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, repeat: false, isComposing: false,
+    getModifierState: () => false, target: { tagName: "TEXTAREA", closest: () => null }, preventDefault() { prevented = true; }, ...extra });
+  return prevented;
+};
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const beta = (status = "running", run = "rb") => [{ taskId: "b1", title: "Beta chat", status, runIds: [run], latestRunId: run }];
+const pure = () => compile("ChatThreadList.tsx", (name) => name === "react" ? { useState() {}, useRef() {}, useEffect() {} }
+  : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : name === "./ao-chat" ? chat : {});
+const plainOf = (value) => JSON.parse(JSON.stringify(value));
+
+test("Ctrl+Shift+A archives and Ctrl+Shift+Backspace deletes the open chat, also while typing in the chat box", () => {
+  // The user: "quick key on archive and delete are not working". The cursor sits in the chat box,
+  // and every Ctrl+Shift key was ignored in a text field; Delete had no key at all.
+  for (const key of Object.keys(stored)) delete stored[key];
+  const { props, calls } = fixture();
+  mount("ChatThreadList.tsx", props, { effects: true }).render();
+  assert.equal(press("A"), true);
+  assert.equal(press("Backspace"), true);
+  assert.deepEqual(calls.filter((call) => call[0] === "lifecycle"), [["lifecycle", "t2", "archive"], ["lifecycle", "t2", "delete"]]);
+  // Settings, a dialog or a rename box has the keyboard.
+  press("A", { target: { tagName: "SELECT", closest: (selector) => (selector.includes(".cxs-root") ? {} : null) } });
+  assert.equal(press("A", { getModifierState: (name) => name === "AltGraph" }), false, "AltGr is typing, not a shortcut");
+  assert.equal(calls.filter((call) => call[0] === "lifecycle").length, 2);
+});
+
+test("a focused split pane showing another project's chat: its shortcuts and its row's menu act on that project", async () => {
+  for (const key of Object.keys(stored)) delete stored[key];
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  const { props, calls } = fixture();
+  const list = mount("ChatThreadList.tsx", { ...props, selectedTaskId: "b1", selectedWorkspaceId: "b", loadProjectChats: async () => beta() }, { effects: true });
+  list.render();
+  await settle();
+  list.render();
+  press("A");
+  assert.deepEqual(calls.filter((call) => /^lifecycle/.test(call[0])), [["lifecycleIn", "b", "b1", "archive"]],
+    "it was looked up among the open project's chats only, and nothing happened");
+  // Its row has a menu like the open project's rows: it had none, so it could not be archived at all.
+  rowOf(list.render(), "Beta chat").props.onContextMenu({ preventDefault() {}, clientX: 1, clientY: 2 });
+  const items = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu.items.filter((item) => item.kind !== "separator");
+  assert.deepEqual(plainOf(items.map((item) => item.label)), ["Open", "Open in split view", "Pin", "Mark as unread", "Archive", "Delete"]);
+  items.find((item) => item.label === "Delete").run();
+  assert.deepEqual(calls.filter((call) => call[0] === "lifecycleIn").at(-1), ["lifecycleIn", "b", "b1", "delete"]);
+});
+
+test("another project's pinned chat shows under Pinned", async () => {
+  for (const key of Object.keys(stored)) delete stored[key];
+  const { props } = fixture();
+  const list = mount("ChatThreadList.tsx", { ...props, pinned: ["b1"], loadProjectChats: async () => beta("done") }, { effects: true });
+  list.render();
+  await settle();
+  const pinned = walk(list.render()).find((element) => element.type === "section" && walk(element).some((child) => child.type === "h3" && text(child) === "Pinned"));
+  assert.ok(pinned && text(pinned).includes("Beta chat"), "its own project leaves it out once pinned, and Pinned showed the open project's only");
+});
+
+test("another project's chats are read again as soon as AO pushes a change to one of their runs", async () => {
+  for (const key of Object.keys(stored)) delete stored[key];
+  const timers = [];
+  const saved = testWindow.setTimeout;
+  testWindow.setTimeout = (callback) => { timers.push(callback); return timers.length; };
+  try {
+    const { props } = fixture();
+    let status = "done";
+    const loaded = [];
+    const list = mount("ChatThreadList.tsx", { ...props, loadProjectChats: async (id) => { loaded.push(id); return beta(status); } }, { effects: true });
+    list.render();
+    await settle();
+    const reads = loaded.length;
+    status = "running";
+    pushes.at(-1)({ sessions: [], runs: ["b:rb", "b:rb2", "a:r1"] });
+    pushes.at(-1)({ sessions: [], runs: ["b:rb"] });
+    assert.equal(timers.length, 1, "one read per project per burst; the open project's own runs are not read here");
+    timers[0]();
+    await settle();
+    assert.equal(loaded.length, reads + 1);
+    const badge = walk(projectButton(list.render(), "Beta")).find((element) => /cx-project-badge/.test(String(element.props?.className)));
+    assert.equal(badge?.props.className, "cx-project-badge is-running", "it waited for the minute clock before");
+  } finally { testWindow.setTimeout = saved; }
+});
+
+test("a chat you moved keeps its place until it runs again, whichever project was open when that run started", () => {
+  const list = pure();
+  const chats = [{ taskId: "x", latestRunId: "r2" }, { taskId: "y", latestRunId: "q1" }, { taskId: "old", latestRunId: "o1" }];
+  const tidy = plainOf(list.tidyOrder(["x", "y", "old", "gone"], { x: "r1", y: "q1", gone: "g1" }, { x: "r1", y: "q1", gone: "g1" }, chats));
+  assert.deepEqual(tidy.order, ["y", "old", "gone"], "x ran again: it rises with the newest chats");
+  assert.deepEqual(tidy.orderRuns, { y: "q1", old: "o1", gone: "g1" }, "a chat kept by an older version gets its run now; one not read is left alone");
+  assert.deepEqual(tidy.placed, { y: "q1", gone: "g1" }, "and x is no longer placed: running, it goes back on top");
+  assert.equal(tidy.changed, true);
+  assert.equal(list.tidyOrder(["y"], { y: "q1" }, { y: "q1" }, chats).changed, false, "nothing ran again: nothing to save");
+  assert.deepEqual(plainOf(list.stillPlaced({ x: "r1", y: "q1" }, chats)), ["y"]);
+});
+
+test("dropping a chat above running ones keeps it there: they stay below it", () => {
+  const list = pure();
+  const chats = [{ taskId: "run", status: "running" }, { taskId: "wait", status: "attention" }, { taskId: "idle", status: "done" }, { taskId: "old", status: "done" }];
+  assert.deepEqual(plainOf(list.workingBelow(["idle", "run", "wait", "old"], "idle", chats)), ["run", "wait"],
+    "kept on top, they jumped straight back above it and the drag looked like it did nothing");
+  assert.deepEqual(plainOf(list.workingBelow(["run", "idle", "wait", "old"], "idle", chats)), ["wait"]);
+  assert.deepEqual(plainOf(list.workingBelow(["run", "wait", "idle", "old"], "old", chats)), []);
+  const order = list.orderChats(chats, ["idle", "run", "wait", "old"], true, ["idle", "run", "wait"]).map((chat) => chat.taskId);
+  assert.deepEqual(plainOf(order), ["idle", "run", "wait", "old"], "with them placed, the list shows the drop as made");
+});
+
+test("sameChats: a read that changed nothing keeps the list as it was", () => {
+  const list = pure();
+  const one = beta();
+  assert.equal(list.sameChats(one, beta()), true);
+  assert.equal(list.sameChats(one, beta("done")), false);
+  assert.equal(list.sameChats(undefined, one), false);
 });

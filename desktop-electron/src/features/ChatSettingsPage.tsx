@@ -4,7 +4,21 @@ import { getCodingToolsClient } from "../api/client";
 import type { LauncherState, UpdateSettings, UpdateSettingValues, UpdateState } from "../types";
 import { ChatGlyph } from "./ChatMenu";
 import { CHAT_PAGE_LIMIT, recordPageShortcut, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
+import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
+import { SHORTCUTS } from "./ChatThreadList";
 import "./chat-settings.css";
+
+/** The chat list's keys, shown in Settings › Chat (they act on the open chat, or the focused split pane's). */
+const LIST_SHORTCUTS: { label: string; keys: string }[] = [
+  { label: "New chat", keys: "Ctrl+N" },
+  { label: "Rename chat", keys: SHORTCUTS.rename },
+  { label: "Pin or unpin chat", keys: SHORTCUTS.pin },
+  { label: "Mark as read or unread", keys: SHORTCUTS.unread },
+  { label: "Archive chat", keys: SHORTCUTS.archive },
+  { label: "Delete chat", keys: SHORTCUTS.delete },
+  { label: "Move chat up or down", keys: "Alt+Shift+↑ / ↓" },
+  { label: "Settings", keys: "Ctrl+," },
+];
 
 /**
  * Settings, laid out as Codex 26.1016's own Settings page (settings-page / app-shared settings
@@ -126,7 +140,11 @@ function PageShortcut({ label, value, disabled, onChange }: { label: string; val
     }} />;
 }
 
-export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
+/**
+ * `onArchiveChanged` tells the chat list the archive days changed, so its Archived section and
+ * popover read them again.
+ */
+export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () => void; onArchiveChanged?: () => void }) {
   const api = window.codexWebLauncher;
   const [section, setSection] = useState<Section>("general");
   const [state, setState] = useState<LauncherState | null>(null);
@@ -175,6 +193,22 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
       ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true } : {}),
     })));
   };
+  // The chat list's own settings, shared with its popover in the sidebar.
+  const [list, setList] = useState(readChatListSettings);
+  useEffect(() => onChatListSettings(setList), []);
+  // The archive days, kept by the bridge (chat-archive.cjs) like the preferences above.
+  const [archive, setArchive] = useState<{ days: number; idleDays: number } | null>(null);
+  useEffect(() => {
+    let live = true;
+    void chatCall("archive_settings").then((result) => { if (live) setArchive({ days: Number(result.days) || 0, idleDays: Number(result.idleDays) || 0 }); }, () => undefined);
+    return () => { live = false; };
+  }, []);
+  const setArchiveDays = (change: { days?: number; idleDays?: number }) => {
+    run(chatCall("archive_settings", change).then((result) => {
+      setArchive({ days: Number(result.days) || 0, idleDays: Number(result.idleDays) || 0 });
+      onArchiveChanged?.();
+    }));
+  };
   const values = updates?.values;
   const title = SECTIONS.find((item) => item.id === section)?.label ?? "Settings";
 
@@ -210,6 +244,33 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
               </Row>
             </Group>
           </div> : section === "chat" ? <div className="cxs-sections">
+            <Group title="Chat list">
+              <Row label="Chats shown per project" description="The rest stay under Show more. Chats open in split view always show">
+                <select className="cxs-select" aria-label="Chats shown per project" value={list.visible}
+                  onChange={(event) => setList(saveChatListSettings({ visible: Number(event.target.value) }))}>
+                  {(VISIBLE_CHOICES.includes(list.visible) ? VISIBLE_CHOICES : [...VISIBLE_CHOICES, list.visible].sort((a, b) => a - b))
+                    .map((count) => <option key={count} value={count}>{count} chats</option>)}
+                </select>
+              </Row>
+              <Row label="Keep running chats on top" description="Chats that are working or waiting on you rise to the top of their project. A chat you drag keeps its place until it runs again">
+                <Toggle label="Keep running chats on top" checked={list.keepActiveOnTop}
+                  onChange={(keepActiveOnTop) => setList(saveChatListSettings({ keepActiveOnTop }))} />
+              </Row>
+            </Group>
+            <Group title="Archive and delete">
+              <Row label="Archive inactive chats" description="A chat with no activity for this long leaves the project list. Working, scheduled and goal chats stay. Restore brings it back">
+                <select className="cxs-select" aria-label="Archive inactive chats after" value={archive?.idleDays ?? 7} disabled={!archive}
+                  onChange={(event) => setArchiveDays({ idleDays: Number(event.target.value) })}>
+                  {dayChoices(archive?.idleDays ?? 7).map((days) => <option key={days} value={days}>{days ? `After ${archiveDayLabel(days)}` : "Never"}</option>)}
+                </select>
+              </Row>
+              <Row label="Delete archived chats" description="An archived chat moves to Recently deleted after this long. Restore still brings it back from there">
+                <select className="cxs-select" aria-label="Delete archived chats after" value={archive?.days ?? 5} disabled={!archive}
+                  onChange={(event) => setArchiveDays({ days: Number(event.target.value) })}>
+                  {dayChoices(archive?.days ?? 5).map((days) => <option key={days} value={days}>{days ? `After ${archiveDayLabel(days)}` : "Never"}</option>)}
+                </select>
+              </Row>
+            </Group>
             <Group title="Chat pages">
               <Row label="Show page tabs" description="Keep separate sets of chat sessions on pages. Hiding the tabs keeps your current page and running chats">
                 <Toggle label="Show page tabs" checked={pages.enabled} onChange={(enabled) => setPagePreference({ enabled })} />
@@ -257,6 +318,11 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
                 <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
               </Row>
+            </Group>
+            <Group title="Keyboard shortcuts">
+              {LIST_SHORTCUTS.map((item) => <Row key={item.label} label={item.label}>
+                <kbd className="cxs-kbd">{item.keys}</kbd>
+              </Row>)}
             </Group>
           </div> : section === "computer-use" ? <div className="cxs-sections">
             <Group title="Always-allowed apps">
