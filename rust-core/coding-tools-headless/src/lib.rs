@@ -23,7 +23,7 @@ use tokio::sync::Notify;
 
 const CONTROL_PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
-const MAX_RESULT_BYTES: usize = 262_144;
+const MAX_RESULT_BYTES: usize = tools::workspace::MAX_SERIALIZED_TOOL_RESULT_BYTES;
 const MAX_OPERATION_RECORDS: usize = 128;
 
 #[cfg(test)]
@@ -3482,6 +3482,80 @@ mod session_root_tests {
             shutdown_tx,
             drain_timeout: Duration::from_secs(1),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_file_headless_returns_fitted_page_and_retains_receipt() {
+        let base =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../aiTemp/read-file-budget-tests");
+        fs::create_dir_all(&base).unwrap();
+        let tree = tempfile::Builder::new()
+            .prefix("headless-")
+            .tempdir_in(&base)
+            .unwrap();
+        let root = tree.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("AGENTS.md"), "Preserve this project rule.\n").unwrap();
+        fs::write(root.join("control.txt"), vec![1; 128 * 1024 + 64]).unwrap();
+        let state = context_lifecycle_fixture(&root);
+        let profile = state
+            .core
+            .with_data(|store| Ok(store.get("ws-1").unwrap().clone()))
+            .unwrap();
+        let mut context =
+            tools::ToolContext::for_test(root.clone(), tree.path().join("harness")).unwrap();
+        context.auth = profile.auth.clone();
+        context.policy = tools::PolicySettings::from_runtime(&profile.runtime);
+        context.tool_profile = profile.runtime.tool_profile.clone();
+        context.permission_mode = context.policy.canonical_permission_mode().into();
+        context.bind_workspace_id("ws-1");
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(&profile.path, &profile.auth)).unwrap())
+        );
+        state.contexts.lock().unwrap().insert(
+            "ws-1".into(),
+            ContextEntry {
+                fingerprint,
+                context: Arc::new(context),
+                used: std::time::Instant::now(),
+            },
+        );
+        let arguments = json!({"path":"control.txt"});
+        let (status, value) =
+            call(&state, "budget-page", "read_file", arguments.clone(), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["operation"]["state"], "completed");
+        let result = &value["operation"]["result"];
+        assert!(serde_json::to_vec(result).unwrap().len() <= MAX_RESULT_BYTES);
+        assert!(result["content"].as_str().unwrap().starts_with('\u{1}'));
+        assert!(result["next_offset"].as_u64().unwrap() > 0);
+        assert!(result["project_instructions"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve this project rule."));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", state.auth.token).parse().unwrap(),
+        );
+        let response = operation_read(
+            State(state.clone()),
+            headers,
+            AxumPath("budget-page".into()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), MAX_REQUEST_BYTES)
+            .await
+            .unwrap();
+        let retained: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(retained["operation"], value["operation"]);
+        fs::write(root.join("control.txt"), "changed after completion").unwrap();
+        let (_, duplicate) = call(&state, "budget-page", "read_file", arguments, None).await;
+        assert_eq!(duplicate["operation"], value["operation"]);
+        assert_eq!(duplicate["redispatched"], false);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

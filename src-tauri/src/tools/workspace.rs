@@ -1135,6 +1135,9 @@ pub fn relative_display(root: &Path, path: &Path) -> String {
     display
 }
 
+/// The headless transport's serialized structured-result limit, separate from MCP RPC caching.
+pub const MAX_SERIALIZED_TOOL_RESULT_BYTES: usize = 262_144;
+
 pub fn tool_ok(mut value: Value) -> Value {
     if value.get("ok").is_none() {
         value
