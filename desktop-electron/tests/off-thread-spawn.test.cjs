@@ -51,6 +51,38 @@ test("a long-lived program starts from the worker and reports its output, exit a
   } finally { restore(); }
 });
 
+test("while main is held, a program's output waits on its pipe instead of piling up; none of it is lost", async (t) => {
+  // 0.8.49's main grew to 11.3 GB in a 408 s stall: the worker kept reading the daemons' output
+  // and queued it for a main that could not take it.
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const folder = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/off-thread-window-"));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  const progress = path.join(folder, "written");
+  const MB = 1024 * 1024;
+  const { module, restore } = load();
+  try {
+    // 16 MB in 64 KB writes that block while the pipe is full; how far it got is noted every 1 MB.
+    const script = `const fs = require("fs"); const chunk = Buffer.alloc(65536, 97); let written = 0;
+      for (let i = 0; i < 256; i += 1) { fs.writeSync(1, chunk); written += chunk.length; if (written % ${MB} === 0) fs.writeFileSync(${JSON.stringify(progress)}, String(written)); }`;
+    const child = await module.spawnOffThread(process.execPath, ["-e", script], pipes);
+    let received = 0;
+    child.stdout.on("data", (chunk) => { received += chunk.length; });
+    const end = closed(child);
+    // Hold main, as a stall does: no turn of its loop until the program has written its first MB,
+    // then another second for it to write on if nothing stops it.
+    const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    const written = () => { try { return Number(fs.readFileSync(progress, "utf8")) || 0; } catch { return 0; } };
+    const deadline = Date.now() + 20_000;
+    while (written() < MB && Date.now() < deadline) sleep(50);
+    assert.ok(written() >= MB, "the program never started writing");
+    sleep(1_000);
+    assert.ok(written() <= 3 * MB, `the program wrote ${written() / MB} MB while main took none of it`);
+    assert.equal((await end).code, 0);
+    assert.equal(received, 16 * MB, "output was lost");
+  } finally { restore(); }
+});
+
 test("a program that exits at once still reaches listeners attached after the start resolves", async () => {
   const { module, restore } = load();
   try {

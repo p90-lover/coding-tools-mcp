@@ -143,11 +143,19 @@ async function warmProgram(file, args = [], timeoutMs = 30_000, run = runOffThre
  * program in a worker that keeps it, and hands back a child that looks like one started here: its
  * pid, exitCode and signalCode, stdout and stderr as streams, stdin, kill() and the error, exit and
  * close events. Where no worker can start it falls back to spawn() on this thread.
+ *
+ * Output is relayed with a window: at most OUTPUT_WINDOW_BYTES of a stream wait for this thread to
+ * take them, then the worker stops reading and the program waits on its full pipe, as it does for a
+ * parent started here that is busy. Without it the worker read on while main was held: 0.8.49's main
+ * process grew to 11.3 GB during a 408 s stall (2026-11-02 08:24, 7 s of CPU), then spent 63 s of
+ * CPU on the backlog. This thread tells the worker what it took once per turn of its loop.
  */
+const OUTPUT_WINDOW_BYTES = 1024 * 1024;
 const SPAWN_WORKER_SOURCE = `
 const { parentPort } = require("node:worker_threads");
 const { spawn } = require("node:child_process");
 const children = new Map();
+const flows = new Map();
 const post = (message) => parentPort.postMessage(message);
 const describe = (error) => ({ message: String((error && error.message) || error), code: error && error.code });
 parentPort.on("message", (message) => {
@@ -164,16 +172,33 @@ parentPort.on("message", (message) => {
     children.set(id, child);
     post({ type: "spawned", id, pid: Number.isInteger(child.pid) ? child.pid : null });
     for (const stream of ["stdout", "stderr"]) {
-      if (!child[stream]) continue;
-      child[stream].on("data", (chunk) => post({ type: "data", id, stream, chunk }));
-      child[stream].on("end", () => post({ type: "end", id, stream }));
-      child[stream].on("error", (error) => post({ type: "stream-error", id, stream, error: describe(error) }));
+      const source = child[stream];
+      if (!source) continue;
+      let untaken = 0;
+      flows.set(id + ":" + stream, (bytes) => {
+        untaken -= bytes;
+        if (untaken <= ${OUTPUT_WINDOW_BYTES / 2} && source.isPaused()) source.resume();
+      });
+      source.on("data", (chunk) => {
+        untaken += chunk.length;
+        post({ type: "data", id, stream, chunk });
+        if (untaken >= ${OUTPUT_WINDOW_BYTES}) source.pause();
+      });
+      source.on("end", () => post({ type: "end", id, stream }));
+      source.on("error", (error) => post({ type: "stream-error", id, stream, error: describe(error) }));
     }
     child.stdin?.on("error", (error) => post({ type: "stream-error", id, stream: "stdin", error: describe(error) }));
     child.on("error", (error) => post({ type: "error", id, error: describe(error) }));
     child.on("exit", (code, signal) => post({ type: "exit", id, code, signal }));
-    child.on("close", (code, signal) => { children.delete(id); post({ type: "close", id, code, signal }); });
+    child.on("close", (code, signal) => {
+      children.delete(id);
+      flows.delete(id + ":stdout");
+      flows.delete(id + ":stderr");
+      post({ type: "close", id, code, signal });
+    });
     if (message.unref) child.unref();
+  } else if (message.type === "taken") {
+    flows.get(id + ":" + message.stream)?.(message.bytes);
   } else if (message.type === "kill") {
     let sent = false;
     try { sent = children.get(id)?.kill(message.signal) ?? false; } catch {}
@@ -215,6 +240,23 @@ class OffThreadChild extends EventEmitter {
     // Events wait for the caller that awaited the start to attach its listeners, and keep their
     // order: exit before close, output before both.
     this.queue = Promise.resolve();
+    this.untold = { stdout: 0, stderr: 0 };
+    this.telling = false;
+  }
+
+  /** Counts output this thread has taken and tells the worker once per turn (OUTPUT_WINDOW_BYTES). */
+  taken(stream, bytes) {
+    this.untold[stream] += bytes;
+    if (this.telling) return;
+    this.telling = true;
+    setImmediate(() => {
+      this.telling = false;
+      for (const name of ["stdout", "stderr"]) {
+        if (!this.untold[name]) continue;
+        this.send({ type: "taken", id: this.id, stream: name, bytes: this.untold[name] });
+        this.untold[name] = 0;
+      }
+    });
   }
 
   later(action) {
@@ -223,7 +265,10 @@ class OffThreadChild extends EventEmitter {
 
   receive(message) {
     switch (message.type) {
-      case "data": this[message.stream]?.write(Buffer.from(message.chunk.buffer, message.chunk.byteOffset, message.chunk.byteLength)); break;
+      case "data":
+        this[message.stream]?.write(Buffer.from(message.chunk.buffer, message.chunk.byteOffset, message.chunk.byteLength));
+        this.taken(message.stream, message.chunk.byteLength);
+        break;
       case "end": this.later(() => this[message.stream]?.end()); break;
       case "stream-error": this.later(() => this[message.stream]?.destroy(asError(message.error))); break;
       case "written": { const done = this.writes.get(message.seq); this.writes.delete(message.seq); done?.(message.error ? asError(message.error) : null); break; }
