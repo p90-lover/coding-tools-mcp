@@ -1623,7 +1623,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
    * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
    */
-  async function stopStalledTurn(session, observed) {
+  async function stopStalledTurn(session, observed, owner) {
     if (!chatPreferences.get().autoRetry || !Number.isFinite(observed?.lastActivityAt)) return false;
     // The stop interrupts the whole session, so the whole session is judged: a turn queued behind a
     // working one shows nothing of its own (observe's sessionActivityAt and sessionTools).
@@ -1637,14 +1637,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       .filter(value => Number.isFinite(value) && value > 0);
     const limit = !tools.length ? TURN_STALL_MS
       : stated.length === tools.length ? Math.max(...stated) + TOOL_STALL_MARGIN_MS : TOOL_STALL_MS;
-    if (idle <= limit || now() - (stalledStops.get(session) ?? 0) < TURN_STALL_MS) return false;
+    const previous = stalledStops.get(session);
+    if (idle <= limit || now() - (previous ?? 0) < TURN_STALL_MS) return false;
     stalledStops.set(session, now());
     if (stalledStops.size > 200) stalledStops.delete(stalledStops.keys().next().value);
-    // An interrupt that does not settle in time is tried again after TURN_STALL_MS; it never fails
-    // the observation it was found in.
-    try { await stopExternalTurn(session); }
-    catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200) }); return false; }
-    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(idle / 1000), toolRunning: tools.length > 0 });
+    // The interrupt alone left hung turns hung (seen live 2026-11-02, two chats "may be stuck" for
+    // over an hour): one interrupt never settled, so every pass failed "stop needs attention"; the
+    // other session's controller AO had dropped, which read as stopped at once while its turn stayed
+    // "running", so the card never retried. The stall stop now escalates like "keep going": an
+    // interrupt that does not settle shuts the agent's host down, and so does a session with no
+    // controller, or one still hung a stall period after its last stop. The turn then settles as
+    // interrupted and the step is retried; AO keeps the session, so the retry resumes it.
+    // A stop that fails is tried again after TURN_STALL_MS; it never fails the observation.
+    const release = observed.agentGone === true || previous !== undefined;
+    try { await stopExternalTurn(session, { owner, escalate: true, ...(release ? { releaseAgent: true } : {}) }); }
+    catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
+    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(idle / 1000), toolRunning: tools.length > 0, released: release });
     return true;
   }
 
@@ -1679,7 +1687,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
-      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed);
+      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed, runKey(workspaceId, runId));
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
