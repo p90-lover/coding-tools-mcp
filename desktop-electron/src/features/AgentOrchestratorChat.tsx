@@ -1965,10 +1965,10 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
   // the marked image saved for the agent to open, and its pin lines kept for the message.
   const saver = useRef(saveAttachment);
   saver.current = saveAttachment;
-  const addMarkup = useCallback(async ({ bytes, preview, prompt }: MarkupResult) => {
+  const addMarkup = useCallback(async ({ bytes, preview, prompt }: MarkupResult, source?: ChatAttachment) => {
     if (!saver.current) throw new Error("Could not prepare markup. Try again");
     const { path } = await saver.current({ name: "markup.png", type: "image/png", bytes });
-    setAttachments((current) => [...current, { name: "Markup", path, image: true, preview, markup: prompt }].slice(0, 8));
+    setAttachments((current) => [...current.filter(item => item !== source), { name: "Markup", path, image: true, preview, markup: prompt }].slice(0, 8));
   }, []);
   const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile, markup: saveAttachment ? addMarkup : undefined }),
     [attachmentPreview, revealFile, Boolean(saveAttachment), addMarkup]);
@@ -2474,11 +2474,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
             {previewing !== null && attachments[previewing]?.preview ? <ImagePreviewDialog url={attachments[previewing].preview!} onClose={() => setPreviewing(null)}
               // The marked image takes the place of the one it was drawn on: only it is sent (Codex's).
-              onMarkup={saveAttachment ? async (result) => {
-                const source = attachments[previewing];
-                await addMarkup(result);
-                setAttachments((current) => current.filter((item) => item !== source));
-              } : undefined} /> : null}
+              onMarkup={saveAttachment ? (result) => addMarkup(result, attachments[previewing]) : undefined} /> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
             placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above. New messages send after it"
