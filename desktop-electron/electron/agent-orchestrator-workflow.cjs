@@ -1639,13 +1639,25 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       : stated.length === tools.length ? Math.max(...stated) + TOOL_STALL_MARGIN_MS : TOOL_STALL_MS;
     return idle > limit ? { idle, toolRunning: tools.length > 0 } : null;
   }
+  // A session waiting on a request nobody can answer: AO still reads it needs_input, but its
+  // controller is gone (AO restarted under the chat while the agent's host lived on), so observe
+  // offers no card for it and nothing ever settles the turn. Seen live 2026-11-02: two chats said
+  // "waiting for you" for over an hour on commands the reviewer had already allowed, and a typed
+  // "keep going" waited behind them for good.
+  const orphanedRequest = observed => observed?.needsInput === true && observed.agentGone === true && !observed.approvals?.length;
+  // What the stall stop may end: a turn with nothing waiting for the person, or one only an orphaned request holds.
+  const nothingToAnswer = observed => !observed?.approvals?.length && (!observed?.needsInput || orphanedRequest(observed));
   /**
    * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
    * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
    */
   async function stopStalledTurn(session, observed, ownership) {
     const { workspaceId, runId, nodeId, turnId, requestKey } = ownership;
-    if (!chatPreferences.get().autoRetry || typeof turnId !== "string" || !turnId || !requestKey
+    // An orphaned request is ended whatever "Retry automatically" says: the person has nothing to
+    // answer, and the stop only lets the turn settle (as interrupted); whether it is retried is still
+    // that setting's.
+    const orphaned = orphanedRequest(observed);
+    if ((!chatPreferences.get().autoRetry && !orphaned) || typeof turnId !== "string" || !turnId || !requestKey
       || observed?.turnId !== turnId || (expectedTurns.has(session) && expectedTurns.get(session) !== turnId)) return false;
     const stalled = stalledTurnInfo(observed);
     const previous = stalledStops.get(session);
@@ -1668,12 +1680,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // interrupted and the step is retried; AO keeps the session, so the retry resumes it.
     // A stop that fails is tried again after TURN_STALL_MS; it never fails the observation.
     const release = observed.agentGone === true || previous !== undefined;
-    const isStalled = current => !current?.needsInput && !current?.approvals?.length && Boolean(stalledTurnInfo(current));
+    const isStalled = current => nothingToAnswer(current) && Boolean(stalledTurnInfo(current));
     try {
       if (await stopExternalTurn(session, { owner: runKey(workspaceId, runId), turnId, isStalled, escalate: true, ...(release ? { releaseAgent: true } : {}) }) === false) return false;
     }
     catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
-    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(stalled.idle / 1000), toolRunning: stalled.toolRunning, released: release });
+    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(stalled.idle / 1000), toolRunning: stalled.toolRunning, released: release, orphaned });
     return true;
   }
 
@@ -1710,7 +1722,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
-      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed, ownership);
+      if (!pending.length && nothingToAnswer(observed)) await stopStalledTurn(session, observed, ownership);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
@@ -5079,6 +5091,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // steer and nothing to stop. Steering it failed with "the agent controller for this session is
     // not running"; the message goes as the chat's next turn, which starts the agent again.
     if (waiting?.agentGone === true) {
+      // Its turn may still read running, held by a request nobody can answer (orphanedRequest): then
+      // nothing settled it and the message waited behind it for good (seen live 2026-11-02, "yes keep
+      // going" queued for an hour). Asked to restart, or once it has been silent as long as a stuck
+      // turn, its host is shut down so the turn settles and the message goes in; a host still being
+      // reattached right after AO restarts is left alone.
+      const silent = Number.isFinite(waiting.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
+      if (!TERMINAL_TURNS.has(waiting.turnState) && (restart === true || silent > STEER_STALL_MS)) {
+        try {
+          await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, run.id), escalate: true, releaseAgent: true });
+          logger?.info?.("ao.steer_released_orphaned_turn", { idleSeconds: Math.round(silent / 1000), asked: restart === true });
+        } catch (error) {
+          logger?.warn?.("ao.steer_release_failed", { message: publicText(error?.message || error, 200) });
+        }
+      }
       return { ok: true, steered: false, waiting: true, restarted: true,
         reason: "The agent's process had stopped. Your message starts its next turn." };
     }

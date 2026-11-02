@@ -12,7 +12,7 @@
  */
 import { useContext, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, ToolImages } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, ToolImages, WaitingAnswer } from "./ChatToolParts";
 import {
   dshActivity, dshCommandText, dshDuration, dshExitLabel, dshGroupActivity, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
   steerReader, steerReceipts, tidyTimeline, withoutReplied, cpaRefusalNote, waitsForPerson, type ChatLiveItem, type ChatStep, type ChatTurn, type CpaRefusal,
@@ -374,6 +374,7 @@ function DshRunning({ since, divider, heardAt, retry = "", refusal = null, askin
       {/* A stuck turn has something to press here too (see TurnRunning). */}
       {quietNote.includes("may be stuck") && onRestart ? <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
         title="Check the same agent and accepted turn without sending another message">{restarting ? "Checking…" : "Recover"}</button> : null}
+      {asking && !retry ? <WaitingAnswer quietMs={heardAt ? now - heardAt : 0} /> : null}
     </span>
   </div>;
 }

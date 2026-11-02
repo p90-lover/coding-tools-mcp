@@ -21,7 +21,7 @@ import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMemb
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
 import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, type ChatStyle } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -261,6 +261,7 @@ function TurnRunning({ turn, refusal }: { turn: ChatTurn; refusal?: CpaRefusal |
       ? <> · <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
         title="Check the same agent and accepted turn without sending another message">{restarting ? "Checking…" : "Recover"}</button></>
       : " · recovery is unavailable for this turn" : ""}
+    {asking && !retry ? <WaitingAnswer quietMs={heardAt ? now - heardAt : 0} /> : null}
   </p>;
 }
 
@@ -1503,12 +1504,11 @@ export function AgentOrchestratorChat({
         // it, and anything else goes as the next turn, with this chat closed too.
         await enqueue(selectedTaskId, { ...(goal ? { what: "Goal", message, goal } : { what: "Message", message }), steer: waits });
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
-        // The queued-message bar shows a waiting steer, as Claude Code does; only a stopped turn is told.
-        if (here() && !waits) {
-          say(steered === "restart" ? "Restarting" : "Interrupting", steered === "restart"
-            ? "The agent stopped responding, so its turn was stopped. Your message goes in as the next turn."
-            : "A command was still running, so it was stopped. The same agent gets your message next.",
-            chatMessageReadable(message));
+        // The queued-message bar shows the message, as Claude Code does; only a command stopped for it
+        // is told. A stuck turn's restart also said "Restarting" in a box under the chat box, beside
+        // that same bar (the user: "remove the restarting box").
+        if (here() && steered === "interrupt") {
+          say("Interrupting", "A command was still running, so it was stopped. The same agent gets your message next.", chatMessageReadable(message));
         }
         return true;
       }
@@ -1614,6 +1614,17 @@ export function AgentOrchestratorChat({
       if (current()) setTurnRecovery({ owner, pending: false, message: error instanceof Error ? error.message : String(error) });
     }).finally(() => { window.clearTimeout(timer); owner.pending = false; owner.cancel = undefined; });
   } : undefined;
+  // The "waiting for you" line's Answer (WaitingAnswer): the request the turn waits on, brought into
+  // view with its first choice focused.
+  const approvalDock = useRef<HTMLDivElement>(null);
+  const answerRequest = approvals.length || computerRequests.length ? () => {
+    const dock = approvalDock.current;
+    if (!dock) return;
+    dock.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    dock.querySelector<HTMLElement>("button:not(:disabled), textarea, input")?.focus({ preventScroll: true });
+  } : undefined;
+  // Its Continue, when no request is shown: the agent is restarted with "Continue." (chat_steer's restart).
+  const continueTurn = selectedTaskId && steer ? () => { void deliver("Continue.", undefined, false, true); } : undefined;
 
   const submit = async () => {
     // Paste saves asynchronously. Enter in the same frame must not send only the text and leave
@@ -2251,7 +2262,7 @@ export function AgentOrchestratorChat({
     replyStyle, roundFolds, openRounds]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
-    <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>
+    <TurnRestart.Provider value={{ onRestart: restartTurn, restarting, onAnswer: answerRequest, onContinue: continueTurn }}>
     <div ref={chatRoot} className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
@@ -2390,7 +2401,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             {/* The agent's questions and requests end the conversation, right above the chat box, and
                 scroll with it. Docked under the box they took up to 420 px of the pane: in a split pane
                 the conversation had no room left at all (2026-10-31). */}
-            {approvals.length || computerRequests.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+            {approvals.length || computerRequests.length ? <div ref={approvalDock} className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
               {computerRequests.map((request) => <ComputerControlCard key={request.id} request={request} />)}
               {approvals.map(approval => {
                 // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
