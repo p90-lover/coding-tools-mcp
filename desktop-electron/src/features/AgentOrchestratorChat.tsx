@@ -2618,23 +2618,26 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
               <Icon name="plus" width="16" height="16" /></button>
             <input ref={picker} type="file" multiple hidden onChange={(event) => { if (event.target.files) void addFiles(event.target.files); event.target.value = ""; }} />
             {composer ? <AgentOrchestratorComposerControls {...composer} permissions={permissions} busy={busy || sending} /> : permissions}
-            <span className="cx-head-spacer" />
-            {selectedTaskId ? <ChatContextMeter sessionId={agentSessions[0]?.id}
-              previousSessionIds={agentSessions.slice(1).filter((session) => session.model === agentSessions[0]?.model
-                && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
-              agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
-              launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
-              canCompact={Boolean(commands && accepts && agentSessions[0]?.id)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} compacting={compacting} /> : null}
-            <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
-              <ChatGlyph name="mic" size={16} /></button>
-            {/* A run waiting out an automatic retry (or an answer) takes a message, yet it is still open: with
-                nothing typed, Stop shows instead of a disabled Send. It showed only while a card ran, so a step
-                retrying for half an hour had no Stop between its attempts (2026-10-29). */}
-            {latest && runOpen && stop && (accepts ? !canSend && !sending : !((steering || queueing) && canSend))
-              ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
-              : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : queueing ? "Queue message" : "Send message"}
-                title={steering ? "Steer now (Enter)" : queueing ? "Queue for after this turn (Enter)" : "Send (Enter)"} disabled={!canSend}>
-                  <Icon name="forward" width="18" height="18" /></button>}
+            {/* Send and what sits by it move as one: a narrow chat box folds its chips onto a second row
+                only when they don't fit, and Send keeps the right end of whichever row it ends on. */}
+            <div className="cx-composer-send">
+              {selectedTaskId ? <ChatContextMeter sessionId={agentSessions[0]?.id}
+                previousSessionIds={agentSessions.slice(1).filter((session) => session.model === agentSessions[0]?.model
+                  && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
+                agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
+                launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
+                canCompact={Boolean(commands && accepts && agentSessions[0]?.id)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} compacting={compacting} /> : null}
+              <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
+                <ChatGlyph name="mic" size={16} /></button>
+              {/* A run waiting out an automatic retry (or an answer) takes a message, yet it is still open: with
+                  nothing typed, Stop shows instead of a disabled Send. It showed only while a card ran, so a step
+                  retrying for half an hour had no Stop between its attempts (2026-10-29). */}
+              {latest && runOpen && stop && (accepts ? !canSend && !sending : !((steering || queueing) && canSend))
+                ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
+                : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : queueing ? "Queue message" : "Send message"}
+                  title={steering ? "Steer now (Enter)" : queueing ? "Queue for after this turn (Enter)" : "Send (Enter)"} disabled={!canSend}>
+                    <Icon name="forward" width="18" height="18" /></button>}
+            </div>
           </div>
         </form>
         {compacting ? <p className="cx-ctx-meta" role="status">Compacting context…</p> : null}

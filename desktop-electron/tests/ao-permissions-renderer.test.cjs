@@ -57,18 +57,25 @@ test("composer mode clicks show only the corresponding real selector without sen
   let tree = view.render("AgentOrchestratorComposerControls", props);
   for (const heading of ["Harness", "Model", "Reasoning effort", "Context window"]) assert.ok(menuNamed(tree, heading), `${heading} has its own chip`);
   assert.equal(menuNamed(tree, "Orchestrator / Team"), undefined);
-  const option = label => elements(tree, item => item.type === "button" && item.props["aria-pressed"] !== undefined && item.props["aria-label"] === label)[0];
-  assert.equal(option("Single").props["aria-pressed"], true, "the switch names both modes and marks the active one");
-  // Each mode is a logo, not a word: one person answers alone, a group is a saved team.
-  assert.deepEqual(["Single", "Team"].map(label => option(label).props.children.props.name), ["user", "team"]);
-  assert.equal(elements(tree, item => item.props?.className === "ao-mode-switch")[0].props["data-mode"], "single", "the thumb sits on the picked mode");
-  option("Single").props.onClick();
-  assert.deepEqual(changes, [], "choosing the active mode changes nothing");
-  option("Team").props.onClick();
-  assert.deepEqual(changes, ["team"]);
+  // One button, one click: a switch that is on for Team, never two buttons to aim between.
+  const toggle = () => elements(tree, item => item.type === "button" && item.props.role === "switch")[0];
+  assert.equal(elements(tree, item => item.type === "button" && item.props["aria-pressed"] !== undefined).length, 0, "no Single and Team buttons side by side");
+  assert.equal(toggle().props["aria-label"], "Team mode");
+  assert.equal(toggle().props["aria-checked"], false, "Single: the switch is off");
+  assert.equal(toggle().props["data-mode"], "single", "the logo in use is the picked mode's");
+  // Each mode is a logo, not a word: one person answers alone, a group is a saved team. Both are in the
+  // button, so a switch can roll one out as the other rolls in.
+  assert.deepEqual(elements(toggle(), item => typeof item.props?.name === "string").map(item => item.props.name), ["user", "team"]);
+  toggle().props.onClick();
+  assert.deepEqual(changes, ["team"], "one click switches to Team");
   tree = view.render("AgentOrchestratorComposerControls", { ...props, mode: "team" });
+  assert.equal(toggle().props["aria-checked"], true, "Team: the switch is on");
   assert.equal(menuNamed(tree, "Model"), undefined);
   assert.equal(menuNamed(tree, "Orchestrator / Team").props.ariaLabel, "Choose saved team");
+  toggle().props.onClick();
+  assert.deepEqual(changes, ["team", "single"], "and one click back to Single");
+  tree = view.render("AgentOrchestratorComposerControls", { ...props, busy: true });
+  assert.equal(toggle().props.disabled, true, "no switch while the chat is busy");
 });
 
 test("saved-team menu uses only supplied setups, and Escape in a chip menu restores its trigger focus", () => {
