@@ -72,7 +72,7 @@ function mount(props) {
     : name === "./ao-chat" ? chat : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
   // The reply's steps (chat-reply-plan) and their views, real too.
   const replyPlan = transpile("chat-reply-plan.ts", (name) => name === "./ao-chat" ? chat : {});
-  const replyPlanView = transpile("ChatReplyPlan.tsx", (name) => name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {});
+  const replyPlanView = transpile("ChatReplyPlan.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {});
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "./ChatReplyHead" ? replyHead : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
@@ -1102,10 +1102,11 @@ test("a tool call opens on what it ran and what came back, with a dot for how it
       { id: "c", kind: "command", status: "failed", text: "npm config list", description: "Inspect npm registry configuration", output: "User refused permission to run tool" },
       { id: "m", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_file", input: "{\"path\":\"main.py\"}", output: "from fastapi import FastAPI" },
       { id: "p", kind: "tool", status: "pending", label: "Read", text: "Read x" }] } } });
-  // Compact activity folds the run of calls into one line; opening it shows every row.
+  // Compact activity folds the run of calls into one line, named with DeepSeek's label for what is
+  // happening now (the pending Read); opening it shows every row.
   const view = mount(props);
   const group = walk(view.render()).find((element) => element.props?.className === "cx-activity-head");
-  assert.match(text(group), /Ran a command/);
+  assert.match(text(group), /Reading files/);
   group.props.onClick();
   const tools = walk(view.render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
   const [command, mcp, waiting] = tools;
