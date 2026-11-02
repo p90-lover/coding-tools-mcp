@@ -45,6 +45,7 @@ test("install refuses a download whose checksum or host does not match the pin",
   await assert.rejects(cli.install(), /pinned checksum/);
   assert.equal(hops, 2);
   assert.equal(cli.status().installed, false);
+  assert.equal(await cli.binDir(), null, "a failed install gives AO no shim folder");
   const evil = createAntigravityCli({
     toolsRoot: path.join(root, "tools2"), manifestPath, platform: "win32", arch: "x64", confirm: async () => true, getWorkspaces: async () => [],
     fetchImpl: async () => ({ status: 302, headers: new Map([["location", "https://example.com/agy.zip"]]) }),
@@ -78,7 +79,17 @@ test("a verified archive installs a shim for Agent Orchestrator and retires olde
   const status = await cli.install();
   assert.equal(status.installed, true);
   fs.writeFileSync(path.join(toolsRoot, "bin", "agy.cmd"), "outdated shim");
-  assert.equal(cli.binDir(), path.join(toolsRoot, "bin"));
+  // AO's start awaits this lookup; it must not read the disk synchronously on main.
+  const syncReads = [];
+  const saved = {};
+  for (const name of ["readdirSync", "readFileSync", "statSync", "existsSync"]) {
+    saved[name] = fs[name];
+    fs[name] = (...args) => { syncReads.push(name); return saved[name](...args); };
+  }
+  let found;
+  try { found = await cli.binDir(); } finally { Object.assign(fs, saved); }
+  assert.equal(found, path.join(toolsRoot, "bin"));
+  assert.deepEqual(syncReads, []);
   assert.match(fs.readFileSync(path.join(toolsRoot, "bin", "agy.cmd"), "utf8"), /SSH_CLIENT/, "AO lookup must refresh an older installed shim");
   const shim = fs.readFileSync(path.join(toolsRoot, "bin", "agy.cmd"), "utf8");
   assert.match(shim, /2\.0\.0.*antigravity\.exe/s);

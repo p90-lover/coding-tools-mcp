@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-full-harness-desktop",
-  "version": "0.8.58",
+  "version": "0.8.60",
   "private": true,
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
@@ -116,6 +116,10 @@
       {
         "from": "build/package-resources",
         "to": "."
+      },
+      {
+        "from": "vendor/unified-agent-tools",
+        "to": "unified-agent-tools"
       },
       {
         "from": "../app-handler",

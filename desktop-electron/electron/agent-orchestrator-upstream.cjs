@@ -253,7 +253,7 @@ function chatHostProcesses(dataRoot) {
   });
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, cpaQuota = null, cpaUsage = null, logger = console,
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, fileTools = null, cpaQuota = null, cpaUsage = null, logger = console,
   readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS }) {
   let child = null;
   let gateway = null;
@@ -1109,6 +1109,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return [];
     }
   }
+  /**
+   * The person's unified-agent-tools server for a chat session that runs a GPT model
+   * (unified-agent-tools.cjs), or null. Never fails a launch or a resume.
+   */
+  async function gptFileServer(agent, model) {
+    if (!fileTools || typeof agent !== "string") return null;
+    try { return (await fileTools.forSession(agent, typeof model === "string" ? model : "")) ?? null; } catch (cause) {
+      logger.warn?.("ao.file_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
+      return null;
+    }
+  }
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
   async function internalApi(method, endpoint, body, options) {
     // A write may change what a session read in flight is about to return (sharedObserveRead).
@@ -1206,7 +1217,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * the worktree AO creates for it), or null. Never fails a launch: without them the agent starts
    * without them.
    */
-  async function chatTools(agent, workspaceId, approvalMode, autoReview = false, subagent = false) {
+  async function chatTools(agent, workspaceId, approvalMode, autoReview = false, subagent = false, unifiedFiles = false) {
     if (!agentTools) return null;
     try {
       // The session's permission mode goes with its credential: only a session launched to
@@ -1214,7 +1225,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // one set to "Approve for me" (autoReview) its routine project commands.
       const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}), ...(autoReview ? { autoReview: true } : {}),
         // A subagent (subagents.cjs) gets the app's tools but no subagents of its own.
-        ...(subagent ? { subagent: true } : {}) });
+        ...(subagent ? { subagent: true } : {}),
+        // With unified-agent-tools beside it, the app's server leaves out its own file tools.
+        ...(unifiedFiles ? { unifiedFiles: true } : {}) });
       return Array.isArray(lease?.servers) && lease.servers.length ? lease : null;
     } catch (cause) {
       logger.warn?.("ao.agent_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
@@ -1262,10 +1275,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const launch = async (mode) => {
         // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
         // attempt gets its own credential, bound to the session it creates and to nothing else.
-        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true) : null;
+        // A GPT model, on any harness (a CPA model runs as gateway.model), gets the person's file tools.
+        const files = mode === "chat" ? await gptFileServer(agent, gateway?.provider === "cpa" && typeof gateway.model === "string" ? gateway.model : model) : null;
+        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true, Boolean(files)) : null;
         let created;
         try {
-          const servers = tools?.servers ?? [];
+          const servers = [...(tools?.servers ?? []), ...(files ? [files] : [])];
           created = await launchSession(mode, mode === "chat" ? [...servers, ...userServers(agent, servers)] : []);
         } catch (error) {
           tools?.release();
@@ -1531,9 +1546,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const restore = async () => {
           // Startup may already own restoration. A conflict is not readiness: wait for this
           // exact session's observable live state, without issuing a second resume or new launch.
-          const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key)).catch(() => null);
+          // The file tools as they are now (the model's, and whether the person still has them on);
+          // the renewed lease hides its own file tools only while these are attached.
+          const files = await gptFileServer(session.harness, session.model);
+          const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key, { unifiedFiles: Boolean(files) })).catch(() => null);
           // AO keeps a session's servers only while its daemon runs, so the person's own go in again too.
-          const servers = [...(renewed?.servers ?? [])];
+          const servers = [...(renewed?.servers ?? []), ...(files ? [files] : [])];
           servers.push(...userServers(session.harness, servers));
           let body = servers.length ? { mcpServers: servers } : {};
           // AO answers only once the agent is up. On a busy disk that took 150-180 s (seen live
@@ -2132,7 +2150,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // It may wait briefly (rtk's automatic install), so the start is checked again after it.
         Object.assign(environment, await extraEnv());
         checkStartup();
-        const toolBin = extraPath();
+        const toolBin = await extraPath();
+        checkStartup();
         if (toolBin) {
           const pathKey = Object.keys(environment).find(key => key.toUpperCase() === "PATH") || "PATH";
           environment[pathKey] = [toolBin, environment[pathKey]].filter(Boolean).join(path.delimiter);

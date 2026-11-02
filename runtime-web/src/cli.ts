@@ -636,12 +636,15 @@ async function main(): Promise<void> {
     const model = entries.find((entry) => entry.slug === "chatgpt-web/high")
       ?? entries.find((entry) => entry.slug === "chatgpt-web/luna");
     if (!model) throw new Error("Selected Codex has no AO WebGPT model template");
+    // Keep the legacy template first while carrying each model's own context and effort metadata.
+    const models = [model, ...entries.filter((entry) => entry !== model
+      && typeof entry.slug === "string" && entry.slug.startsWith("chatgpt-web/"))];
     // `available` lists the WebGPT rows Codex itself is offered, so AO can say which tiers the
     // account has; AO strips it before the catalog reaches Codex.
     const available = entries
       .map((entry) => entry.slug)
       .filter((slug): slug is string => typeof slug === "string" && slug.startsWith("chatgpt-web/"));
-    stdout.write(`${JSON.stringify({ models: [model], available })}\n`);
+    stdout.write(`${JSON.stringify({ models, available })}\n`);
   }
   else if (command === "subagents") await subagentsCommand(args);
   else if (command === "browser") {

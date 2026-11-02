@@ -56,7 +56,7 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(CHATGPT_WEB_LEGACY_MODEL_ROUTES.find(route => route.slug === "chatgpt-web/high")?.displayName).toBe("ChatGPT Web High");
   });
 
-  test("lists every Sol row and runs Pro-only tiers at the best tier the account has", () => {
+  test("lists every Sol row while only legacy identities can fall back to another tier", () => {
     expect(availableChatGptWebModelRoutes(plus)).toEqual(CHATGPT_WEB_MODEL_ROUTES);
     expect(availableChatGptWebModelRoutes({ solAvailable: true, extraHighAvailable: true, proAvailable: true }))
       .toEqual(CHATGPT_WEB_MODEL_ROUTES);
@@ -66,12 +66,10 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(requireChatGptWebModelRoute("chatgpt-web/extra-high", plus).slug).toBe("chatgpt-web/high");
     expect(requireChatGptWebModelRoute("chatgpt-web/pro", plus).slug).toBe("chatgpt-web/high");
     expect(requireChatGptWebModelRoute("chatgpt-web/medium", plus).slug).toBe("chatgpt-web/medium");
-    // Named families fall back inside their own family: Pro runs as Sol, Extra High as High.
+    // A named family is an explicit selection, so its unavailable tiers must not substitute.
     for (const family of ["5.6", "6"] as const) {
-      const pro = requireChatGptWebModelRoute(`chatgpt-web/gpt-${family}-pro`, plus, "max");
-      expect([pro.slug, pro.adapterEffort]).toEqual([`chatgpt-web/gpt-${family}-sol`, "high"]);
-      const extraHigh = requireChatGptWebModelRoute(`chatgpt-web/gpt-${family}-sol`, plus, "xhigh");
-      expect([extraHigh.slug, extraHigh.adapterEffort]).toEqual([`chatgpt-web/gpt-${family}-sol`, "high"]);
+      expect(() => requireChatGptWebModelRoute(`chatgpt-web/gpt-${family}-pro`, plus, "max")).toThrow("not enabled");
+      expect(() => requireChatGptWebModelRoute(`chatgpt-web/gpt-${family}-sol`, plus, "xhigh")).toThrow("not enabled");
     }
   });
 
@@ -110,7 +108,7 @@ describe("fixed ChatGPT Web model routes", () => {
       .toBe("chatgpt-web/high");
   });
 
-  test("maps between Sol tiers and Luna/Think by the account's selector", () => {
+  test("maps legacy Sol and Luna identities while keeping named model selections exact", () => {
     const free = { solAvailable: false, extraHighAvailable: false, proAvailable: false };
     expect(availableChatGptWebModelRoutes(free)).toEqual(CHATGPT_WEB_LUNA_MODEL_ROUTES);
     expect(availableChatGptWebModelRoutes(free, true))
@@ -122,20 +120,15 @@ describe("fixed ChatGPT Web model routes", () => {
     // A Sol tier on a Luna-only account: Instant/Medium run as Luna, anything higher as Think.
     expect(requireChatGptWebModelRoute("chatgpt-web/light", free)).toBe(CHATGPT_WEB_LEGACY_LUNA_MODEL_ROUTE);
     expect(requireChatGptWebModelRoute("chatgpt-web/pro", free)).toBe(CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE);
-    const lunaFor = (model: string, reasoning?: string) => {
-      const route = requireChatGptWebModelRoute(model, free, reasoning);
-      return [route.slug, route.adapterEffort];
-    };
-    expect(lunaFor("chatgpt-web/gpt-6-sol-instant", "low")).toEqual(["chatgpt-web/gpt-5.6-luna", "low"]);
-    expect(lunaFor("chatgpt-web/gpt-6-sol", "medium")).toEqual(["chatgpt-web/gpt-5.6-luna", "low"]);
-    expect(lunaFor("chatgpt-web/gpt-6-sol", "high")).toEqual(["chatgpt-web/gpt-5.6-luna", "medium"]);
-    expect(lunaFor("chatgpt-web/gpt-6-pro", "max")).toEqual(["chatgpt-web/gpt-5.6-luna", "medium"]);
-    // A Luna route on a Sol account runs as the matching Sol tier.
+    for (const [model, reasoning] of [["chatgpt-web/gpt-6-sol-instant", "low"],
+      ["chatgpt-web/gpt-6-sol", "medium"], ["chatgpt-web/gpt-6-sol", "high"], ["chatgpt-web/gpt-6-pro", "max"]]) {
+      expect(() => requireChatGptWebModelRoute(model!, free, reasoning)).toThrow("not enabled");
+    }
+    // Only legacy Luna aliases map to the account's matching Sol tier.
     expect(requireChatGptWebModelRoute("chatgpt-web/luna", plus).slug).toBe("chatgpt-web/light");
     expect(requireChatGptWebModelRoute("chatgpt-web/think", plus).slug).toBe("chatgpt-web/high");
-    expect(requireChatGptWebModelRoute("chatgpt-web/gpt-5.6-luna", plus, "low").slug).toBe("chatgpt-web/gpt-6-sol-instant");
-    const think = requireChatGptWebModelRoute("chatgpt-web/gpt-5.6-luna", plus, "medium");
-    expect([think.slug, think.adapterEffort]).toEqual(["chatgpt-web/gpt-6-sol", "high"]);
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/gpt-5.6-luna", plus, "low")).toThrow("not enabled");
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/gpt-5.6-luna", plus, "medium")).toThrow("not enabled");
     expect(() => requireChatGptWebModelRoute("chatgpt-web/unknown", plus)).toThrow("not enabled");
   });
 
@@ -209,8 +202,9 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, "medium", plus)).toEqual({
       browserComposerCharLimit: 500_000,
     });
-    expect(() => resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "xhigh", plus))
-      .toThrow("unavailable effort");
+    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "xhigh", plus))
+      .toEqual(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "high", plus));
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/gpt-6-sol", plus, "xhigh")).toThrow("not enabled");
   });
 
   test("compacts at 85 percent of Codex's effective window without shrinking the indicator", () => {
@@ -279,8 +273,9 @@ describe("fixed ChatGPT Web model routes", () => {
     }
     expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "low", enabled, "6"))
       .toEqual(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "low", plus, "6"));
-    expect(() => resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "xhigh", enabled, "6"))
-      .toThrow("unavailable effort");
+    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "xhigh", enabled, "6"))
+      .toMatchObject({ contextWindow: 120_000, autoCompactTokenLimit: 93_840 });
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/gpt-6-sol", enabled, "xhigh")).toThrow("not enabled");
     expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "xhigh", {
       ...enabled, extraHighAvailable: true,
     }, "6")).toMatchObject({ contextWindow: 120_000, autoCompactTokenLimit: 93_840 });
@@ -402,7 +397,7 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(proRequest.options.reasoning).toBe("low");
   });
 
-  test("new families honor effort, fall back for missing tiers, and separate pinned retained conversations", () => {
+  test("new families honor effort, reject missing tiers, and separate pinned retained conversations", () => {
     const config = { ...defaultConfig("full"), extraHighAvailable: true, proAvailable: true };
     for (const family of ["5.6", "6"] as const) {
       for (const effort of ["medium", "high", "xhigh"] as const) {
@@ -418,11 +413,12 @@ describe("fixed ChatGPT Web model routes", () => {
       for (const effort of ["low", "max", "ultra", "invented"]) {
         expect(() => routeChatGptWebRequest(parsed(`chatgpt-web/gpt-${family}-sol`, effort), config)).toThrow("does not support effort");
       }
-      // An account without Extra High runs the selected Extra High at High instead of failing.
+      // An account with neither legacy Pro proof nor Extra High cannot silently lower the effort.
       const lacking = parsed(`chatgpt-web/gpt-${family}-sol`, "xhigh");
-      routeChatGptWebRequest(lacking, { ...config, extraHighAvailable: false });
-      expect(lacking.options.reasoning).toBe("high");
-      expect(lacking._chatgptModelFamily).toBe(family);
+      expect(() => routeChatGptWebRequest(lacking, { ...config, extraHighAvailable: false, proAvailable: false }))
+        .toThrow("not enabled");
+      expect(lacking.options.reasoning).toBe("xhigh");
+      expect(lacking.modelId).toBe(`chatgpt-web/gpt-${family}-sol`);
     }
     const luna = parsed("chatgpt-web/gpt-5.6-luna", "medium");
     routeChatGptWebRequest(luna, { ...config, solAvailable: false });
@@ -437,11 +433,15 @@ describe("fixed ChatGPT Web model routes", () => {
       const key = chatGptConversationKey(request, "provider")!;
       keys.push(key);
       expect(chatGptConversationKey({ ...request, _compactionRequest: true }, "provider")).toBe(key);
-      // Without Pro the selected Pro row runs at the best tier left (Extra High here).
       const lacking = parsed(model, "max");
-      routeChatGptWebRequest(lacking, { ...config, proAvailable: false });
-      expect(lacking.options.reasoning).toBe("xhigh");
-      expect(lacking._chatgptModelFamily).toBe(family);
+      if (family) {
+        expect(() => routeChatGptWebRequest(lacking, { ...config, proAvailable: false })).toThrow("not enabled");
+        expect(lacking.options.reasoning).toBe("max");
+        expect(lacking.modelId).toBe(model);
+      } else {
+        routeChatGptWebRequest(lacking, { ...config, proAvailable: false });
+        expect(lacking.options.reasoning).toBe("xhigh");
+      }
     }
     expect(new Set(keys).size).toBe(3);
   });

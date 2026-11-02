@@ -65,6 +65,7 @@ const { SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS } = require("./subagents.cjs");
 const { CHAT_HISTORY_TOOL_DEFS, CHAT_HISTORY_TOOLS } = require("./chat-history.cjs");
 const { MAX_SECRET, MAX_SECRETS } = require("./chat-redaction.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+const { DUPLICATE_TOOLS: UNIFIED_DUPLICATE_TOOLS, FILE_TOOLS: UNIFIED_FILE_TOOLS, SERVER_NAME: UNIFIED_SERVER } = require("./unified-agent-tools.cjs");
 
 const SERVER_NAME = "coding-tools";
 const PROTOCOL_VERSIONS = Object.freeze(["2025-06-18", "2025-03-26", "2024-11-05"]);
@@ -399,7 +400,10 @@ const HARNESS_DUPLICATE_TOOLS = Object.freeze({
     "update_plan", "get_plan", "get_current_time", "server_info",
   ]),
 });
-const duplicateOfHarness = (entry, name) => HARNESS_DUPLICATE_TOOLS[entry?.agent]?.has(name) === true;
+// A GPT session also gets the person's unified-agent-tools (unified-agent-tools.cjs): its Read,
+// Grep, Glob and Edit replace these here, so the model has one tool for each job.
+const duplicateOfHarness = (entry, name) => HARNESS_DUPLICATE_TOOLS[entry?.agent]?.has(name) === true
+  || (entry?.unifiedFiles === true && UNIFIED_DUPLICATE_TOOLS.has(name));
 // How much a chat agent's call returns when it does not say: about what Claude Code returns (30,000
 // characters of command output, 250 search matches). Headless's own defaults are for any client
 // (128 KB of a file, 1,000 matches with previews, 5,000 file names, 64 KB of output), and every
@@ -1079,16 +1083,25 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false,
-  renames = false, moves = false, redacts = false, ownFileTools = false } = {}) {
+  renames = false, moves = false, redacts = false, ownFileTools = false, unifiedFiles = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
-  // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either.
-  const scriptTool = ownFileTools ? "your Write tool" : "apply_patch";
+  // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either; nor is a GPT session that
+  // has unified-agent-tools for them, which is told to use those for every file operation.
+  const scriptTool = unifiedFiles ? "Write" : ownFileTools ? "your Write tool" : "apply_patch";
   return paneRulesFor(groups)
     // Seen live: an agent whose client deferred these tools (names only, loaded through its tool
     // search) said "there is no list_dir tool" and fell back to dir, never loading it.
     + "Every Coding Tools tool named here is available: if your client lists one as deferred or you do not see it, "
-    + "load it with your tool search (for example \"" + (ownFileTools ? "exec_command" : "list_dir") + "\") before deciding it is missing. "
-    + (ownFileTools
+    + "load it with your tool search (for example \"" + (unifiedFiles ? "Grep" : ownFileTools ? "exec_command" : "list_dir") + "\") before deciding it is missing. "
+    + (unifiedFiles
+      ? `For this chat's own folder (its git worktree, or the project folder it works in) use the ${UNIFIED_SERVER} tools for `
+        + `every file operation: ${UNIFIED_FILE_TOOLS.join(", ")}. Read with Read or ReadMany, search contents with Grep or `
+        + "SearchAndRead, find files with Glob or ListDirectory, and change files with Edit, ApplyMultipleEdits or Write. Do not "
+        + "read, search, list or edit files with shell commands (rg, grep, findstr, Select-String, cat, type, Get-Content, dir, "
+        + "ls, Get-ChildItem, sed) or apply_patch: these tools honor .gitignore, stay within the context budget, and say whether "
+        + "a search was complete, where a shell search times out or floods the context. Paths are relative to the folder and "
+        + "workspaceRoot can be left out. git_* is for its history; commands are for builds, tests and running things. "
+      : ownFileTools
       ? "For this chat's own folder (its git worktree, or the project folder it works in) use your own tools: Read, "
         + "Grep, Glob, Edit, Write, and Bash for git. "
       : "Coding Tools tools for this chat's own folder (its git worktree, or the project folder it works in): read_file, "
@@ -1309,7 +1322,7 @@ function createChatAgentTools({
     }
   }
 
-  function mint({ agent, workspaceId, approvalMode, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null }) {
+  function mint({ agent, workspaceId, approvalMode, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null, unifiedFiles = false }) {
     while (sessions.size >= MAX_SESSIONS) {
       const oldest = [...sessions.values()].sort((left, right) => left.usedAt - right.usedAt)[0];
       forget(oldest.key);
@@ -1328,6 +1341,8 @@ function createChatAgentTools({
       bypass: approvalMode === "bypass-permissions",
       // Launched with "Approve for me": its routine project commands run without a dialog each.
       autoReview: autoReview === true,
+      // A GPT session with unified-agent-tools beside this server: this one leaves out its file tools.
+      unifiedFiles: unifiedFiles === true,
       aoSession: null, root: null, checkedAt: 0, createdAt: now(), usedAt: now(),
       // The commands it started (for the Terminal pane) and the preview origins it may open.
       commands: new Map(), commandState: { ended: false }, origins: new Set(), lifetime: new AbortController(),
@@ -1338,7 +1353,7 @@ function createChatAgentTools({
     save();
     // Which tool groups a chat got, so "the agent can't see the terminal" can be told from a group
     // that was off when it launched (never the credential or anything per session).
-    logger?.info?.("chat_agent_tools.leased", { agent, groups: entry.groups, autoReview: entry.autoReview, bypass: entry.bypass });
+    logger?.info?.("chat_agent_tools.leased", { agent, groups: entry.groups, autoReview: entry.autoReview, bypass: entry.bypass, unifiedFiles: entry.unifiedFiles });
     return { entry, token };
   }
 
@@ -1372,7 +1387,8 @@ function createChatAgentTools({
       version: LEASE_FILE_VERSION, port,
       sessions: [...sessions.values()].filter((entry) => entry.expected).map((entry) => ({
         key: entry.key, hash: entry.expected.toString("hex"), agent: entry.agent, workspaceId: entry.workspaceId, aoSession: entry.aoSession,
-        groups: entry.groups, bypass: entry.bypass, autoReview: entry.autoReview, subagent: entry.subagent === true, createdAt: entry.createdAt, usedAt: entry.usedAt,
+        groups: entry.groups, bypass: entry.bypass, autoReview: entry.autoReview, subagent: entry.subagent === true,
+        unifiedFiles: entry.unifiedFiles === true, createdAt: entry.createdAt, usedAt: entry.usedAt,
         ...(entry.previewOnly ? { previewOnly: true, expiresAt: entry.expiresAt, nativeScope: entry.nativeScope } : {}),
         origins: [...entry.origins].slice(0, 50),
       })),
@@ -1423,6 +1439,7 @@ function createChatAgentTools({
         key: saved.key, agent: saved.agent, workspaceId: saved.workspaceId, expected: Buffer.from(saved.hash, "hex"),
         groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group) && (saved.previewOnly !== true || group === "preview")),
         bypass: saved.bypass === true, autoReview: saved.autoReview === true, subagent: saved.subagent === true,
+        unifiedFiles: saved.unifiedFiles === true,
         previewOnly: saved.previewOnly === true, expiresAt: saved.previewOnly === true ? saved.expiresAt : null,
         nativeScope: saved.previewOnly === true ? nativePreviewScope(saved.nativeScope) : null,
         aoSession: saved.aoSession ?? null, root: null, checkedAt: 0, createdAt: Number(saved.createdAt) || now(), usedAt: saved.usedAt,
@@ -2354,7 +2371,8 @@ function createChatAgentTools({
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
-              wakeups: canWake(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
+              wakeups: canWake(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]),
+              unifiedFiles: entry.unifiedFiles === true }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -2650,14 +2668,14 @@ function createChatAgentTools({
      * is the session's AO permission mode: only "bypass-permissions" runs every command unconfirmed;
      * `autoReview` (the card is set to "Approve for me") runs its routine project commands unconfirmed.
      */
-    async lease({ agent, workspaceId, approvalMode = null, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null } = {}) {
+    async lease({ agent, workspaceId, approvalMode = null, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null, unifiedFiles = false } = {}) {
       if (!isEnabled() || !MCP_HTTP_AGENTS.has(agent) || typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
       if (previewOnly && (agent !== "codex" || !currentGroups().includes("preview"))) return null;
       if (previewOnly && (!Number.isFinite(expiresAt) || expiresAt <= now() || expiresAt > now() + 900_000)) throw new Error("Native preview lease must expire within its native connection lifetime");
       const scope = nativePreviewScope(nativeScope);
       if (previewOnly && !scope) throw new Error("Native preview lease requires its owning run and node");
       await listen();
-      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview, subagent, previewOnly, expiresAt, nativeScope: scope });
+      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview, subagent, previewOnly, expiresAt, nativeScope: scope, unifiedFiles });
       const url = `http://127.0.0.1:${port}/mcp/${encodeURIComponent(workspaceId)}/${entry.key}`;
       return Object.freeze({
         servers: [{ name: SERVER_NAME, type: "http", url, headers: { Authorization: `Bearer ${token}` } }],
@@ -2705,13 +2723,15 @@ function createChatAgentTools({
      * app's tools. The new credential carries the session's agent, workspace and permission mode,
      * is bound to the session at once (retiring the old one, whose commands and preview origins it
      * keeps), and `servers` go into the resume. Null when the session never had tools here.
+     * `unifiedFiles` says whether unified-agent-tools goes into the resume too (else as before).
      */
-    async renew(sessionId) {
+    async renew(sessionId, { unifiedFiles } = {}) {
       const previous = entryFor(sessionId);
       if (!previous || previous.previewOnly || !isEnabled() || !MCP_HTTP_AGENTS.has(previous.agent)) return null;
       await listen();
       const { entry, token } = mint({ agent: previous.agent, workspaceId: previous.workspaceId,
-        approvalMode: previous.bypass ? "bypass-permissions" : null, autoReview: previous.autoReview, subagent: previous.subagent === true });
+        approvalMode: previous.bypass ? "bypass-permissions" : null, autoReview: previous.autoReview, subagent: previous.subagent === true,
+        unifiedFiles: typeof unifiedFiles === "boolean" ? unifiedFiles : previous.unifiedFiles === true });
       // The old credential stays valid until the new one is first used: an AO that ignores the
       // resume's servers (or still holds them from before) resumes the agent with the old one.
       entry.supersedes = [];

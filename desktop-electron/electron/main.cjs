@@ -310,6 +310,17 @@ function userMcpServers(logger = null) {
     filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger });
   return chatMcpServers;
 }
+// The person's unified-agent-tools (vendor/unified-agent-tools), for every chat that runs a GPT model.
+let gptFileTools = null;
+function unifiedAgentTools(logger = null) {
+  if (!gptFileTools) {
+    const { createUnifiedAgentTools, defaultServerPath } = require("./unified-agent-tools.cjs");
+    // Not from __dirname of a backend bundle: the server ships with the app's resources.
+    gptFileTools = createUnifiedAgentTools({ serverPath: app.isPackaged ? defaultServerPath({ packaged: true })
+      : path.join(__dirname, "..", "vendor", "unified-agent-tools", "mcp", "server.mjs"), logger });
+  }
+  return gptFileTools;
+}
 // Runtime > Subagents (subagents.cjs): created once, like the chat agents' tools it serves.
 let subagentsService = null;
 let antigravityReauth = null;
@@ -4580,7 +4591,7 @@ async function start() {
         path.join(app.getPath("userData"), "integrations", "state", "cpa")),
 
       // rtk's folder too: a command RTK rewrote in an agent's own shell calls `rtk`.
-      extraPath: () => [antigravityCli.binDir(), rtk.binDir()].filter(Boolean).join(path.delimiter),
+      extraPath: async () => [await antigravityCli.binDir(), rtk.binDir()].filter(Boolean).join(path.delimiter),
       extraEnv: async () => {
         // An rtk install still running (the automatic one at startup) finishes first, up to 15 s:
         // the daemon's PATH and Claude's hook are fixed for its whole run.
@@ -4605,6 +4616,8 @@ async function start() {
       // Plugins > MCPs: an HTTP server only for agents whose AO driver takes one (the app's own rule).
       userMcpServers: { forSession: (agent, taken) => userMcpServers(logger).forSession(agent, taken,
         backendBundles.requireModule(backend, "chat-agent-tools.cjs").MCP_HTTP_AGENTS) },
+      // A GPT model's chat gets unified-agent-tools, and its coding-tools lease leaves out its own file tools.
+      fileTools: { forSession: (agent, model) => unifiedAgentTools(logger).forSession(agent, model) },
       // The context meter's plan usage limits for chats on CPA's Codex accounts (CPA Helper).
       cpaQuota,
       // Each CPA account's token use and estimated cost; Codex accounts carry those limits too.

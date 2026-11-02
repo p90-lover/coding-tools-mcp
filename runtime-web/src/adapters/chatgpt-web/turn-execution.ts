@@ -578,10 +578,10 @@ export class ChatGptTurnSession {
     chargeRecovery?: () => boolean,
   ): Promise<boolean> {
     const outcome = this.settledBrowserOutcome;
-    // Any submission phase qualifies: a stage that never acknowledged left nothing in ChatGPT to
-    // continue, and the old conversation is retired below either way. Only an answer already
-    // streamed to Codex pins the turn to the failed conversation.
+    // No answer or completed tool receipts prove that an activated prompt was never accepted.
+    // Fresh recovery is safe only before Send; accepted replies use their exact observation path.
     if (this.recoveries >= MAX_CHATGPT_BROWSER_RECOVERIES || this.cancelled || this.supersededError
+      || this.runtime.submission?.phase !== "prepared"
       || parsed._compactionRequest || this.runtime.manualControl
       || this.runtime.text.value().length > 0
       || outcome?.type !== "error"
