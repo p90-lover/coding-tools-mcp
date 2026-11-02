@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const { execFile, spawn } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
 const {
@@ -12,7 +12,7 @@ const {
   terminateOwnedProcessTreeAsync,
 } = require("./process-tree.cjs");
 const { runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
-const { runOffThread, watchOffThread } = require("./off-thread-run.cjs");
+const { runOffThread, spawnOffThread, watchOffThread } = require("./off-thread-run.cjs");
 const { ExtraTunnels } = require("./extra-tunnels.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
@@ -406,25 +406,35 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
 // Executable, command line and parent of a process, or null when unknown (resolves). Windows only:
 // elsewhere an unrecognised bridge stays an external owner, as before. PowerShell runs as a child
 // process the main thread does not wait on: through spawnSync (10 s timeout) its start on a busy
-// machine froze the app while the bridge was started or recovered.
-function windowsProcessInfo(pid) {
-  if (process.platform !== "win32" || !Number.isInteger(pid) || pid < 1) return Promise.resolve(null);
+// machine froze the app while the bridge was started or recovered. It is also started off the main
+// thread: even execFile's own process start held main 0.4-0.9 s per watchdog check on 0.8.57.
+async function windowsProcessInfo(pid, { start = spawnOffThread } = {}) {
+  if (process.platform !== "win32" || !Number.isInteger(pid) || pid < 1) return null;
   const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
   const powershell = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; `
     + "if ($p) { [pscustomobject]@{ executablePath = $p.ExecutablePath; commandLine = $p.CommandLine; parentPid = [int]$p.ParentProcessId } | ConvertTo-Json -Compress }";
-  return new Promise((resolve) => {
-    execFile(powershell, ["-NoProfile", "-NonInteractive", "-Command", script],
-      { encoding: "utf8", windowsHide: true, timeout: 10_000 }, (error, stdout) => {
-        if (error || !String(stdout).trim()) { resolve(null); return; }
-        try {
-          const info = JSON.parse(String(stdout).trim());
-          resolve({ executablePath: String(info.executablePath || ""), commandLine: String(info.commandLine || ""), parentPid: Number(info.parentPid) });
-        } catch {
-          resolve(null);
-        }
-      });
+  let child;
+  try {
+    child = await start(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
+  const stdout = await new Promise((resolve) => {
+    const chunks = [];
+    const timer = setTimeout(() => { child.kill(); resolve(null); }, 10_000);
+    const settle = (value) => { clearTimeout(timer); resolve(value); };
+    child.stdout.on("data", (chunk) => chunks.push(chunk));
+    child.on("error", () => settle(null));
+    child.on("close", (code) => settle(code === 0 ? Buffer.concat(chunks).toString("utf8") : null));
   });
+  if (!stdout?.trim()) return null;
+  try {
+    const info = JSON.parse(stdout.trim());
+    return { executablePath: String(info.executablePath || ""), commandLine: String(info.commandLine || ""), parentPid: Number(info.parentPid) };
+  } catch {
+    return null;
+  }
 }
 
 function samePath(left, right) {
@@ -2738,4 +2748,5 @@ module.exports = {
   RuntimeSupervisor,
   managedTunnelConnectArgs,
   validateConfig,
+  windowsProcessInfo,
 };
