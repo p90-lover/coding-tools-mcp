@@ -8,7 +8,9 @@ const ts = require("typescript");
 
 function fixture(createConnector = async () => ({ created: true, connected: true })) {
   const accounts = ["main", "second", "third"].map(id => ({ id, label: id, email: `${id}@example.test`,
-    proxyProfileId: null, maxTabs: 3, acceptsNewSessions: true, plan: null, connector: null, signedIn: true }));
+    proxyProfileId: null, maxTabs: 3, acceptsNewSessions: true,
+    plan: { userId: `user-${id}`, workspaceId: `workspace-${id}`, workspaceRole: "account-owner", workspaceStructure: "workspace", planCheckedAt: Date.now() },
+    connector: null, signedIn: true }));
   const status = { accounts, activeId: "main", switching: false, maxAccounts: 10, maxTabsPerAccount: 15,
     settings: { newSessions: "active", keepFinishedTabsMinutes: 5 } };
   const calls = { connector: [], switches: [], removed: [], browserOpened: 0, errors: [] };
@@ -148,4 +150,68 @@ test("MCP setup waits only for that account's in-flight removal", async () => {
   finishRemoval();
   await ui.flush();
   assert.equal(button(ui.card("second"), "Connect MCP").props.disabled, false);
+});
+
+for (const role of ["account-admin", "standard-user", "owner", undefined]) {
+  test(`MCP creation is blocked without a verified workspace owner: ${role}`, async () => {
+    const ui = fixture();
+    for (const account of ui.accounts) account.plan.workspaceRole = role;
+    const connect = button(ui.card("second"), "Connect MCP");
+    assert.equal(connect.props.disabled, true);
+    assert.match(connect.props.title, /owner|verify/i);
+    assert.match(text(ui.card("second")), /Owner required/);
+    assert.equal(button(ui.page(), "Connect all accounts").props.disabled, true);
+    // The handler also refuses a queued click whose permissions have since changed.
+    connect.props.onClick();
+    await ui.flush();
+    assert.deepEqual(ui.calls.connector, []);
+  });
+}
+
+test("unknown and stale workspace metadata cannot enable MCP creation", async () => {
+  const ui = fixture();
+  ui.accounts[0].plan = null;
+  ui.accounts[1].plan.planCheckedAt = Date.now() - 300001;
+  ui.accounts[2].plan.workspaceStructure = undefined;
+  assert.equal(button(ui.page(), "Connect all accounts").props.disabled, true);
+  for (const account of ui.accounts) assert.equal(button(ui.card(account.id), "Connect MCP").props.disabled, true);
+  button(ui.page(), "Connect all accounts").props.onClick();
+  await ui.flush();
+  assert.deepEqual(ui.calls.connector, []);
+  assert.match(text(ui.page()), /3 skipped/);
+});
+
+test("a member can connect through a signed-in owner of the exact workspace only", () => {
+  const ui = fixture();
+  const [, member, owner] = ui.accounts;
+  member.plan.workspaceRole = "standard-user";
+  assert.equal(button(ui.card(member.id), "Connect MCP").props.disabled, true, "another workspace owner is not authority");
+  owner.plan.workspaceId = member.plan.workspaceId;
+  assert.equal(button(ui.card(member.id), "Connect MCP").props.disabled, false);
+  assert.match(button(ui.card(member.id), "Connect MCP").props.title, /owner.*create and publish/i);
+  owner.signedIn = false;
+  assert.equal(button(ui.card(member.id), "Connect MCP").props.disabled, true);
+  owner.signedIn = true;
+  owner.plan.planCheckedAt = Date.now() - 300001;
+  assert.equal(button(ui.card(member.id), "Connect MCP").props.disabled, true);
+});
+
+test("losing creation authority does not relabel an already confirmed connection as failed", async () => {
+  const ui = fixture();
+  button(ui.card("second"), "Connect MCP").props.onClick();
+  await ui.flush();
+  ui.accounts[1].plan.workspaceRole = "standard-user";
+  const card = ui.card("second");
+  assert.match(text(card), /Connected/);
+  assert.equal(button(card, "Check connection").props.disabled, true, "creation/setup cannot borrow the old connection's authority");
+});
+
+test("bulk setup skips nonowners and unverified accounts without calling creation", async () => {
+  const ui = fixture();
+  ui.accounts[1].plan.workspaceRole = "account-admin";
+  ui.accounts[2].plan = null;
+  button(ui.page(), "Connect all accounts").props.onClick();
+  await ui.flush();
+  assert.deepEqual(ui.calls.connector, ["main"]);
+  assert.match(text(ui.page()), /2 skipped/);
 });
