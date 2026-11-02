@@ -164,6 +164,35 @@ test("the effort and window chips show the pick and offer exactly what the model
   assert.match(harness.props.ariaLabel, /Claude Code/);
 });
 
+test("a custom context window is set without a nested form, so it never submits the chat box", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/deepseek", permission_profile: ":ao-default" };
+  const caps = { "cpa/deepseek": { efforts: ["high"], contextLimit: 1_000_000, contextWindow: { min: 4096, max: 1_000_000, kind: "context" } } };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [{ id: "ao:claude-code", label: "Claude Code", runnable: true, installed: true }], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  let closed = 0;
+  const custom = () => {
+    const menu = menuNamed(view.render("AgentOrchestratorComposerControls", props), "Context window");
+    return elements(menu.props.children(() => closed++), item => item.props?.className === "ao-context-custom")[0];
+  };
+  // State order: search, models, caps, gaps, held, error, contextDraft.
+  view.render("AgentOrchestratorComposerControls", props, ["", ["cpa/deepseek"], caps, {}, {}, "", "300k"]);
+  const row = custom();
+  assert.notEqual(row.type, "form", "the chat box is a form; a form inside it would submit it too");
+  const set = elements(row, item => item.type === "button")[0];
+  assert.equal(set.props.type, "button");
+  set.props.onClick();
+  assert.equal(routes.at(-1).context_window, 300_000);
+  assert.equal(closed, 1);
+  let clicked = 0, stopped = 0, prevented = 0;
+  const enter = key => custom().props.onKeyDown({ key, preventDefault: () => prevented++, stopPropagation: () => stopped++,
+    currentTarget: { querySelector: () => ({ click: () => clicked++ }) } });
+  enter("a");
+  assert.deepEqual([clicked, stopped, prevented], [0, 0, 0], "typing passes through");
+  enter("Enter");
+  assert.deepEqual([clicked, stopped, prevented], [1, 1, 1], "Enter applies the size and goes no further");
+});
+
 test("the harness menu is slim: no state words on rows, missing harnesses fold under +N, the pick stays in view", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const route = { harness_id: "ao:aider", model: "", permission_profile: ":ao-default" };

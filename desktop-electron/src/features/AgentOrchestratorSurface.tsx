@@ -598,7 +598,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // opened right after picking went back to the old model. Only the person's picks are kept: the
   // composer fitting an opened chat's route to its model (`adjusted`) is that chat's, and keeping it
   // made a rewind or a new chat start on the old chat's model, effort and window.
-  const pickSingleRoute = (route: AoRoute, adjusted = false) => { setSingleRoute(route); if (!adjusted) rememberChatRoute(route); };
+  const composerIntent = useRef(0);
+  const pickComposerTeam = (id: string) => { composerIntent.current++; setComposerTeamId(id); };
+  const pickSingleRoute = (route: AoRoute, adjusted = false) => { composerIntent.current++; setSingleRoute(route); if (!adjusted) rememberChatRoute(route); };
   const hydratedComposer = useRef("");
   // The New mission sheet's team choice (#254); the composer keeps its own (composerTeamId).
   const [missionTeamId, setMissionTeamId] = useState("");
@@ -1195,6 +1197,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     return () => window.removeEventListener("coding-tools:ao:teams-changed", changed);
   }, [workspaceId, setError]);
   const selectChat = (taskId: string, next: "chat" | "overview" = "chat") => {
+    composerIntent.current++;
     // A chat chosen here wins over another project's chat still loading to open (selectChatIn).
     switchTarget.current = ""; pendingSelect.current = null;
     if (pendingChat?.taskId !== taskId) setPendingChat(null);
@@ -1231,11 +1234,15 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setInspectedId(id);
     if (selectedRun && !draftTeam) setDraftTeam(teamForMission(selectedRun, savedMissionTeam));
   };
-  const persistTeam = async (draft: AoTeam, mission?: AoMission, expectedRevision?: number, permissionScope?: { selected_role_ids: string[]; permission_selection: JsonObject }) => {
+  const persistTeam = async (draft: AoTeam, mission?: AoMission, expectedRevision?: number, permissionScope?: { selected_role_ids: string[]; permission_selection: JsonObject }, present = () => true) => {
     const { permission_selections: _missionPermissionSelections, ...reusableTeam } = draft;
     const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: draft.revision, team: reusableTeam as unknown as JsonObject } });
     if (saved.cancelled || !saved.team) throw new Error("Permission change cancelled.");
-    const next = saved.team as AoTeam; setTeam(next); setSavedTeams(current => current.some(item => item.id === next.id) ? current.map(item => item.id === next.id ? next : item) : [...current, next]); setDraftTeam(structuredClone(next));
+    const next = saved.team as AoTeam;
+    if (mounted.current && selection.current.workspaceId === workspaceId) {
+      setTeam(next); setSavedTeams(current => current.some(item => item.id === next.id) ? current.map(item => item.id === next.id ? next : item) : [...current, next]);
+      if (present()) setDraftTeam(structuredClone(next));
+    }
     if (!mission) return "Team saved. Running agents keep their current permissions.";
     try {
       const applied = await moduleCall("team_update", { workspaceId, change: { operation: "apply_team", run_id: mission.id, expected_revision: expectedRevision ?? mission.revision, team_id: next.id, team_revision: next.revision, ...permissionScope } });
@@ -1312,6 +1319,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     const key = workspaceId + ":" + chatTaskId;
     if (hydratedComposer.current === key) return;
     hydratedComposer.current = key;
+    composerIntent.current++;
     if (!chatMission) {
       setComposerMode("single");
       setSingleRoute(newChatRoute());
@@ -1354,11 +1362,16 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       ...(node && permissionMission ? { runId: permissionMission.id, nodeId: node.id } : {}) });
     return result.capability as PermissionCapability ?? { supported: false, profiles: [], reason: "This agent didn't report its permissions" };
   }, [workspaceId, permissionMission?.id, JSON.stringify(permissionTeam?.nodes.map(node => [node.id, node.route]))]);
-  const savePermissions = async (snapshot: AoTeam, revision: number | undefined, selectedRoleIds: string[], selection: PermissionSelection) => {
+  const savePermissions = async (snapshot: AoTeam, revision: number | undefined, selectedRoleIds: string[], permission: PermissionSelection) => {
+    // The backend keeps its original chat; only that owner's unchanged composer may show its result.
+    const owner = selection.current, intent = composerIntent.current;
+    const draftKey = JSON.stringify([workspaceId, chatTaskId || ""]), draft = latestDrafts.current.get(draftKey);
+    const current = () => mounted.current && composerIntent.current === intent
+      && selection.current.workspaceId === owner.workspaceId && selection.current.taskId === owner.taskId && selection.current.runId === owner.runId;
     const permissionSelection: JsonObject = {
-      ...(selection.profile !== undefined ? { permission_profile: selection.profile } : {}),
-      ...(selection.policy !== undefined ? { approval_policy: selection.policy } : {}),
-      ...(selection.reviewer !== undefined ? { approvals_reviewer: selection.reviewer } : {}),
+      ...(permission.profile !== undefined ? { permission_profile: permission.profile } : {}),
+      ...(permission.policy !== undefined ? { approval_policy: permission.policy } : {}),
+      ...(permission.reviewer !== undefined ? { approvals_reviewer: permission.reviewer } : {}),
     };
     const scope = { selected_role_ids: selectedRoleIds, permission_selection: permissionSelection };
     if (composerMode === "single") {
@@ -1370,7 +1383,10 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         if (applied.cancelled) throw new Error("Cancelled. Permissions are unchanged.");
         await loadMissions(workspaceId);
       }
-      pickSingleRoute({ ...chosen.route });
+      if (current()) {
+        const route = { ...chosen.route };
+        setSingleRoute(route); rememberChatRoute(route);
+      }
       return "Applies from the next turn. A running turn keeps its permissions.";
     }
     if (!selectedSetup) throw new Error("This team isn't available. Refresh and try again.");
@@ -1378,7 +1394,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     const saved = aoSavedTeams(latest).find(setup => setup.id === selectedSetup.id);
     if (!saved || saved.revision !== selectedSetup.revision) throw new Error("The team changed. Refresh and choose permissions again.");
     const reusableIds = selectedRoleIds.filter(id => saved.nodes.some(node => node.id === id));
-    if (reusableIds.length) return persistTeam(mergeSavedPermissions(saved, reusableIds, selection), permissionMission, revision, scope);
+    if (reusableIds.length) return persistTeam(mergeSavedPermissions(saved, reusableIds, permission), permissionMission, revision, scope,
+      () => current() && latestDrafts.current.get(draftKey) === draft);
     if (!permissionMission) throw new Error("These roles are no longer in the team.");
     const applied = await moduleCall("team_update", { workspaceId, change: { operation: "apply_team", run_id: permissionMission.id,
       expected_revision: revision ?? permissionMission.revision, team_id: saved.id, team_revision: saved.revision, ...scope } });
@@ -1593,7 +1610,8 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
 
   const createRun = () => void run("new-run", async () => {
     if (!board || !workspaceId || (!runTaskId && !missionPrompt.trim())) return;
-    const execution = aoChatExecution(composerMode, workerRouteDraft, savedTeams, composerTeamId);
+    const selectedTeamId = missionTeamId || team?.id || "";
+    const execution = aoChatExecution(savedTeams.length || selectedTeamId ? "team" : "single", workerRouteDraft, savedTeams, selectedTeamId);
     let missionBoard = board;
     let taskId = runTaskId;
     if (!taskId) {
@@ -1610,7 +1628,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     const id = crypto.randomUUID();
     const result = await moduleCall("update_run", { workspaceId, change: { operation: "create_from_team", run_id: id, task_id: taskId,
       expected_board_revision: missionBoard.revision,
-      ...(composerMode === "single" ? { execution_mode: "single", single_route: execution.singleRoute, worker_limit: 1 }
+      ...(execution.executionMode === "single" ? { execution_mode: "single", single_route: execution.singleRoute, worker_limit: 1 }
         : { execution_mode: "team", team_id: execution.teamId, team_revision: execution.teamRevision, worker_limit: missionLimit }) } });
     if (result.cancelled) return;
     setSheet("");
@@ -1864,7 +1882,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     writeList(PINNED_PROJECTS, next);
     return next;
   });
-  const startNewChat = () => { setPendingChat(null); setChatTaskId(""); setDraftTeam(null); setInspectedId(""); setView("chat"); setSheet(""); setMissionTeamId(team?.id ?? ""); };
+  const startNewChat = () => { composerIntent.current++; setPendingChat(null); setChatTaskId(""); setDraftTeam(null); setInspectedId(""); setView("chat"); setSheet(""); setMissionTeamId(team?.id ?? ""); };
   // Split view (Claude Code's): more chats beside the window's own, each in a pane of its own
   // (SplitPaneLink). "main" is the window's own chat; a sidebar click goes to the focused pane.
   const [splitPanes, setSplitPanes] = useState<SplitPane[]>([]);
@@ -2228,6 +2246,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const showingHistory = !showInactive && visibleNodes.length > 0 && visibleNodes.every(node => ["cancelled", "archived"].includes(node.state));
   const workers = selectedRun?.nodes.filter(node => node.role === "worker") ?? [];
   const switchToWorkspace = (id: string) => {
+    composerIntent.current++;
     setWorkspaceId(id);
     setChatTaskId(null);
     if (pane) return;
@@ -2249,6 +2268,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const pendingSelect = useRef<{ workspaceId: string; taskId: string } | null>(null);
   const switchTarget = useRef("");
   const selectChatIn = (id: string, taskId: string) => {
+    composerIntent.current++;
     // A cached row of the project just switched to (its runs not read yet) waits like another
     // project's: selecting it now set a chat with no run, and the load then picked another chat's run.
     if (id === workspaceId && loadedWorkspace === workspaceId) { selectChat(taskId); return; }
@@ -2773,9 +2793,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
                 busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} queue={chatQueue} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
-                headerExtra={chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
+                headerExtra={chatTaskId === "" && composerMode === "team" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
                   <span>Team</span>
-                  <select aria-label="New chat team" disabled={Boolean(busy)} value={missionTeamId || team?.id || ""} onChange={event => setMissionTeamId(event.target.value)}>
+                  <select aria-label="New chat team" disabled={Boolean(busy)} value={composerTeamId} onChange={event => pickComposerTeam(event.target.value)}>
                     {savedTeams.map(item => <option key={item.id} value={item.id}>{item.name}{item.id === team?.id ? " · Default" : ""}</option>)}
                   </select>
                 </label> : undefined}
@@ -2786,11 +2806,11 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && ["starting", "running"].includes(autoStatus))}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? shownApprovals : []}
-                composer={{ mode: composerMode, onModeChange: setComposerMode, route: singleRoute, onRouteChange: pickSingleRoute,
-                  harnesses, loadModels, teams: savedTeams, teamId: composerTeamId, onTeamChange: setComposerTeamId }}
+                composer={{ mode: composerMode, onModeChange: mode => { composerIntent.current++; setComposerMode(mode); }, route: singleRoute, onRouteChange: pickSingleRoute,
+                  harnesses, loadModels, teams: savedTeams, teamId: composerTeamId, onTeamChange: pickComposerTeam }}
                 onOpenTeam={openTeam}
                 onOpenMissionBoard={() => { setSheet(""); setView("board"); }}
-                permissions={<AgentOrchestratorPermissions key={composerMode + ":" + (permissionTeam?.id || "none")} team={permissionTeam} mission={permissionMission} busy={Boolean(busy)}
+                permissions={<AgentOrchestratorPermissions key={JSON.stringify([workspaceId, chatTaskId, permissionMission?.id, composerMode, permissionTeam?.id, composerIntent.current])} team={permissionTeam} mission={permissionMission} busy={Boolean(busy)}
                   loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies} />}
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}

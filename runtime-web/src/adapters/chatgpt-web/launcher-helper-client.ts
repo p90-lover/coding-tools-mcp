@@ -10,6 +10,7 @@ import { normalizeChatGptRichOutput, type ChatGptRichOutput } from "./rich-outpu
 import {
   parseChatGptLunaCheckpoint,
   type ChatGptLunaCheckpoint,
+  type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
 
 interface PendingTurn {
@@ -22,6 +23,61 @@ interface PendingTurn {
   localFailure?: Error;
   progressForwarding?: AbortController;
   acknowledgedMultipartStage?: number;
+  submitted?: boolean;
+  replyRecovery?: ChatGptReplyRecoveryCheckpoint;
+  emittedText?: string;
+  lunaCheckpoint?: CapturedChatGptLunaCheckpoint;
+  richOutput?: ChatGptRichOutput;
+}
+
+export interface ChatGptReplyRecoveryCheckpoint {
+  conversationUrl: string;
+  responseIdentity: string;
+  initialTurnIdentities: string[];
+  acceptedTurnIdentities: string[];
+  initialUserTurnCount: number;
+  acceptedUserTurnCount: number;
+  toolBoundary?: { revision: number; text: string; sourceGenerationStarted?: boolean };
+}
+
+export function parseChatGptReplyRecoveryCheckpoint(value: unknown): ChatGptReplyRecoveryCheckpoint {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("ChatGPT reply recovery checkpoint is invalid");
+  }
+  const checkpoint = value as Record<string, unknown>;
+  const toolBoundary = checkpoint.toolBoundary as Record<string, unknown> | undefined;
+  const identity = (item: unknown): item is string => typeof item === "string"
+    && item.trim().length > 0 && item.length <= 512;
+  const identities = (items: unknown): items is string[] => Array.isArray(items)
+    && items.length <= 10_000 && items.every(identity) && new Set(items).size === items.length;
+  if (typeof checkpoint.conversationUrl !== "string"
+    || !/^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]{8,}$/.test(checkpoint.conversationUrl)
+    || !identity(checkpoint.responseIdentity)
+    || !identities(checkpoint.initialTurnIdentities)
+    || !identities(checkpoint.acceptedTurnIdentities)
+    || !Number.isSafeInteger(checkpoint.initialUserTurnCount) || (checkpoint.initialUserTurnCount as number) < 0
+    || !Number.isSafeInteger(checkpoint.acceptedUserTurnCount)
+    || checkpoint.acceptedUserTurnCount !== (checkpoint.initialUserTurnCount as number) + 1
+    || checkpoint.initialTurnIdentities.includes(checkpoint.responseIdentity)
+    || !checkpoint.acceptedTurnIdentities.includes(checkpoint.responseIdentity)
+    || (toolBoundary !== undefined && (!toolBoundary || typeof toolBoundary !== "object" || Array.isArray(toolBoundary)
+      || !Number.isSafeInteger(toolBoundary.revision) || (toolBoundary.revision as number) <= 0
+      || typeof toolBoundary.text !== "string"
+      || (toolBoundary.sourceGenerationStarted !== undefined && typeof toolBoundary.sourceGenerationStarted !== "boolean")))) {
+    throw new Error("ChatGPT reply recovery checkpoint does not identify an accepted task reply");
+  }
+  return {
+    conversationUrl: checkpoint.conversationUrl,
+    responseIdentity: checkpoint.responseIdentity,
+    initialTurnIdentities: [...checkpoint.initialTurnIdentities],
+    acceptedTurnIdentities: [...checkpoint.acceptedTurnIdentities],
+    initialUserTurnCount: checkpoint.initialUserTurnCount as number,
+    acceptedUserTurnCount: checkpoint.acceptedUserTurnCount as number,
+    ...(toolBoundary ? { toolBoundary: {
+      revision: toolBoundary.revision as number, text: toolBoundary.text as string,
+      ...(toolBoundary.sourceGenerationStarted === true ? { sourceGenerationStarted: true } : {}),
+    } } : {}),
+  };
 }
 
 type HelperMessage =
@@ -32,6 +88,7 @@ type HelperMessage =
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
+  | { type: "event"; id: string; event: "reply_recovery"; checkpoint: ChatGptReplyRecoveryCheckpoint }
   | { type: "event"; id: string; event: "luna_checkpoint"; checkpoint: ChatGptLunaCheckpoint; answerHash: string }
   | { type: "event"; id: string; event: "rich_output"; output: ChatGptRichOutput }
   | { type: "result"; id: string; text: string }
@@ -69,6 +126,9 @@ function parseHelperMessage(line: string): HelperMessage {
       const output = normalizeChatGptRichOutput(message.output);
       if (!output) throw new Error("Launcher browser helper rich output is invalid");
       return { type: "event", id: message.id, event, output };
+    }
+    if (event === "reply_recovery") {
+      return { type: "event", id: message.id, event, checkpoint: parseChatGptReplyRecoveryCheckpoint(message.checkpoint) };
     }
     if (event === "multipart_stage_acknowledged") {
       if (!Number.isSafeInteger(message.stageIndex) || (message.stageIndex as number) <= 0) {
@@ -201,6 +261,7 @@ export function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise
 }
 
 export class LauncherBrowserHelperClient {
+  private readonly closing = new AbortController();
   private child?: ChildProcessWithoutNullStreams;
   private ready?: Promise<void>;
   // Turns that arrive while the app restarts share one wait for its new descriptor.
@@ -232,9 +293,13 @@ export class LauncherBrowserHelperClient {
   }
 
   async run(turn: BrowserTurn): Promise<string> {
-    if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    await this.ensureChild(turn.abortSignal);
-    if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    const signal = turn.abortSignal ? AbortSignal.any([turn.abortSignal, this.closing.signal]) : this.closing.signal;
+    if (signal.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    await abortable(this.ensureChild(signal), signal);
+    if (signal.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (turn.replyRecovery && !this.helperFeatures.has("reply-recovery")) {
+      throw new Error("Launcher browser helper does not support task reply recovery");
+    }
     if (turn.onMultipartStageAcknowledged && !this.helperFeatures.has("multipart-stage-ack")) {
       throw new Error(
         "Launcher browser helper does not support multipart acknowledgement forwarding; update or restart the launcher",
@@ -255,7 +320,7 @@ export class LauncherBrowserHelperClient {
           rejectResult(new Error(`Duplicate launcher browser turn: ${turn.traceId}`));
           return;
         }
-        const pending: PendingTurn = { turn, resolve: resolveResult, reject: rejectResult };
+        const pending: PendingTurn = { turn, resolve: resolveResult, reject: rejectResult, submitted: turn.replyRecovery !== undefined };
         this.pending.set(turn.traceId, pending);
         if (turn.abortSignal) {
           const abortListener = () => {
@@ -319,6 +384,8 @@ export class LauncherBrowserHelperClient {
             ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
             ...(turn.onRichOutput && this.helperFeatures.has("rich-output") ? { captureRichOutput: true } : {}),
             ...(turn.externalProgress ? { externalProgress: true } : {}),
+            ...(turn.replyRecovery ? { replyRecovery: turn.replyRecovery } : {}),
+            ...(this.helperFeatures.has("reply-recovery") ? { replyRecoveryEnabled: true } : {}),
           },
         })
           // Only mirror once the run frame is on the wire, so the helper never sees progress for a
@@ -331,13 +398,16 @@ export class LauncherBrowserHelperClient {
   }
 
   async close(): Promise<void> {
+    const error = new DOMException("Launcher browser helper is closing", "AbortError");
+    this.closing.abort(error);
+    this.readyReject?.(error);
     const child = this.child;
     this.child = undefined;
     this.ready = undefined;
     this.readyResolve = undefined;
     this.readyReject = undefined;
     for (const id of [...this.pending.keys()]) {
-      this.finishWithError(id, new DOMException("Launcher browser helper is closing", "AbortError"));
+      this.finishWithError(id, error);
     }
     if (!child) return;
     await this.sendTo(child, { type: "shutdown" }).catch(() => {});
@@ -355,10 +425,11 @@ export class LauncherBrowserHelperClient {
   private async ensureChild(signal?: AbortSignal): Promise<void> {
     if (this.childAlive()) return this.ready;
     // While the app restarts (an update installs) its descriptor is gone for a while: wait for it.
-    this.descriptorWait ??= waitForLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!)
+    this.descriptorWait ??= waitForLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!, { signal: this.closing.signal })
       .finally(() => { this.descriptorWait = undefined; });
     // A turn cancelled meanwhile leaves at once; the shared wait goes on for the others.
     const descriptor = await abortable(this.descriptorWait, signal);
+    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     // Another turn waiting on the same descriptor may have started the helper already.
     if (this.childAlive()) return this.ready;
     const child = spawn(
@@ -524,7 +595,17 @@ export class LauncherBrowserHelperClient {
           pending,
         ));
       }
-      else if (message.event === "submitted") pending.turn.onSubmitted?.();
+      else if (message.event === "submitted") {
+        pending.submitted = true;
+        pending.turn.onSubmitted?.();
+      }
+      else if (message.event === "reply_recovery") {
+        if (!pending.submitted) {
+          this.abortWithLocalFailure(message.id, new Error("ChatGPT reply recovery preceded submission evidence"), pending);
+          return;
+        }
+        pending.replyRecovery = message.checkpoint;
+      }
       else if (message.event === "multipart_stage_acknowledged") {
         const multipart = pending.prepared?.multipart;
         if (!multipart
@@ -580,16 +661,34 @@ export class LauncherBrowserHelperClient {
           this.finishWithError(message.id, new Error("Launcher browser helper emitted an unexpected Luna checkpoint"));
           return;
         }
-        pending.turn.onLunaCheckpoint({ checkpoint: message.checkpoint, answerHash: message.answerHash });
+        try {
+          const captured = { checkpoint: message.checkpoint, answerHash: message.answerHash };
+          pending.turn.onLunaCheckpoint(captured);
+          pending.lunaCheckpoint = captured;
+        } catch (error) {
+          this.abortWithLocalFailure(message.id, error instanceof Error ? error : new Error(String(error)), pending);
+        }
       }
       else if (message.event === "rich_output" && !pending.localFailure && !pending.turn.abortSignal?.aborted) {
-        pending.turn.onRichOutput?.(message.output);
+        try {
+          pending.turn.onRichOutput?.(message.output);
+          pending.richOutput = message.output;
+        } catch (error) {
+          this.abortWithLocalFailure(message.id, error instanceof Error ? error : new Error(String(error)), pending);
+        }
       }
       else if (message.event === "reasoning" && message.text) {
         pending.turn.onReasoningSummary?.(message.text, message.continuation === true);
       }
       else if (message.event === "commentary" && message.text) pending.turn.onCommentary?.(message.text, message.continuation === true);
-      else if (message.event === "text" && message.text) pending.turn.onTextDelta(message.text);
+      else if (message.event === "text" && message.text && !pending.localFailure && !pending.turn.abortSignal?.aborted) {
+        try {
+          pending.turn.onTextDelta(message.text);
+          pending.emittedText = (pending.emittedText ?? "") + message.text;
+        } catch (error) {
+          this.abortWithLocalFailure(message.id, error instanceof Error ? error : new Error(String(error)), pending);
+        }
+      }
       return;
     }
     if (message.type === "result") {
@@ -693,6 +792,63 @@ export class LauncherBrowserHelperClient {
     for (const id of [...this.pending.keys()]) {
       const pending = this.pending.get(id);
       if (!pending) continue;
+      if (pending.submitted && pending.replyRecovery && !pending.turn.replyRecovery && !pending.turn.compaction
+        && !pending.localFailure && !pending.turn.abortSignal?.aborted
+        && (typeof child.exitCode === "number" || typeof child.signalCode === "string")) {
+        const checkpoint = pending.replyRecovery;
+        const prefix = pending.emittedText ?? "";
+        let replayed = "";
+        let delivered = prefix.length;
+        this.finish(id);
+        void (async () => {
+          pending.turn.onCommentary?.("Recovering this task's interrupted WebGPT reply.");
+          const answer = await this.run({
+            ...pending.turn,
+            replyRecovery: checkpoint,
+            onReasoningSummary: undefined,
+            onCommentary: undefined,
+            ...(pending.richOutput && pending.turn.onRichOutput ? {
+              onRichOutput: (output: ChatGptRichOutput) => {
+                if (JSON.stringify(output) !== JSON.stringify(pending.richOutput)) {
+                  throw new Error("Recovered ChatGPT reply changed its rich output");
+                }
+              },
+            } : {}),
+            ...(pending.lunaCheckpoint ? {
+              onLunaCheckpoint: (captured: CapturedChatGptLunaCheckpoint) => {
+                if (JSON.stringify(captured) !== JSON.stringify(pending.lunaCheckpoint)) {
+                  throw new Error("Recovered ChatGPT reply changed its context checkpoint");
+                }
+              },
+            } : {}),
+            onTextDelta: delta => {
+              replayed += delta;
+              const shared = Math.min(prefix.length, replayed.length);
+              if (replayed.slice(0, shared) !== prefix.slice(0, shared)) {
+                throw new Error("Recovered ChatGPT reply changed text already delivered to Codex");
+              }
+              if (replayed.length > delivered) {
+                pending.turn.onTextDelta(replayed.slice(delivered));
+                delivered = replayed.length;
+              }
+            },
+          });
+          if (answer !== replayed || !answer.startsWith(prefix)) {
+            throw new Error("Recovered ChatGPT reply did not reproduce the delivered Codex response");
+          }
+          return answer;
+        })().then(pending.resolve, async recoveryError => {
+          // Startup can fail before the replacement helper claims the lease. Release only the
+          // original owner; a newer owner or user-closed tab must never be touched here.
+          await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+            phase: "end", traceId: id, helperPid: child.pid!,
+            status: this.closing.signal.aborted || pending.turn.abortSignal?.aborted ? "aborted" : "failed",
+            message: "WebGPT task reply recovery failed",
+          }).catch(() => {});
+          pending.reject(recoveryError instanceof Error ? recoveryError : new Error(String(recoveryError)));
+        });
+        continue;
+      }
       void notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
         phase: "end",
         traceId: id,

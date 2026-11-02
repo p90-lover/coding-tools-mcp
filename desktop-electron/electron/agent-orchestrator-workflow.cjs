@@ -1984,10 +1984,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // TIMELINE_TEXT_BYTES there): every item it built, and a message or thought uncut.
     return (Array.isArray(items) ? items : []).slice(-400).map(item => ({
       id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
-      // Live text keeps what the upstream read kept: a running thought's newest part, and messages
-      // and finished thoughts whole (up to 64 KB).
+      // Steers are the person's whole message too: cutting one to a label split its annotation
+      // block from its typed text, so the chat showed the raw preamble and a second pending bubble.
       text: item.kind === "reasoning" && item.status === "running" ? publicText(item.text, 4096, true)
-        : publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 64 * 1024 : 400),
+        : publicText(item.text, item.kind === "message" || item.kind === "reasoning" || item.kind === "steer" ? 64 * 1024 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
       ...(item.input ? { input: publicText(item.input, toolBytes.input) } : {}),
@@ -2016,7 +2016,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (size() <= TIMELINE_RESPONSE_BYTES) return items;
     const cut = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit).replace(/[\ud800-\udbff]$/, "")}…`;
     for (const limit of [16 * 1024, 4096, 1024]) {
-      items = items.map(item => item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
+      // A steer may contain structured annotations and attachments; keep it whole or let the
+      // oldest-item eviction below remove it whole, never leave an unparseable prompt prefix.
+      items = items.map(item => item.kind !== "steer" && item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
       if (size() <= TIMELINE_RESPONSE_BYTES) return items;
     }
     // Tool calls keep a shorter input and output before they lose them: with up to 16 KB of output
@@ -3270,14 +3272,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     reviewDenials.delete(threadId);
     return 0;
   }
+  // Where a session's agent works, for its reviews: two to four AO requests each time (the session,
+  // its workspace, the project's folder mode), seconds on a busy AO before the review even started,
+  // and once per request when an agent ran calls in parallel. One lookup is shared for a minute per
+  // session; a failed or empty one is not kept.
+  const SESSION_FOLDER_TTL_MS = 60_000;
+  const sessionFolders = new Map(); // JSON [thread, workspace] -> { at, promise }
+  function sessionFolder(threadId, workspaceId) {
+    const key = JSON.stringify([threadId ?? null, workspaceId ?? null]);
+    const hit = sessionFolders.get(key);
+    if (hit && now() - hit.at < SESSION_FOLDER_TTL_MS) return hit.promise;
+    const entry = { at: now(), promise: Promise.resolve().then(() => harnessService().sessionWorkspace?.(threadId, workspaceId)).catch(() => null) };
+    sessionFolders.delete(key);
+    sessionFolders.set(key, entry);
+    if (sessionFolders.size > 200) sessionFolders.delete(sessionFolders.keys().next().value);
+    void entry.promise.then((where) => { if (!where?.root && !where?.projectFolder && sessionFolders.get(key) === entry) sessionFolders.delete(key); });
+    return entry.promise;
+  }
   /**
    * The folder the agent of a request works in, or null. Without it the reviewer saw only the
    * workspace's id, so it had to guess whether an absolute path was "outside the workspace": the
    * same `dir` of a project subfolder was denied, then allowed when retried.
    */
   async function requestFolder(approval, mission) {
-    const where = await Promise.resolve().then(() => harnessService().sessionWorkspace?.(approval.thread_id, mission.workspace_id))
-      .catch(() => null);
+    const where = await sessionFolder(approval.thread_id, mission.workspace_id);
     return typeof where?.projectFolder === "string" ? where.projectFolder : typeof where?.root === "string" ? where.root : null;
   }
   const REVIEW_TASK_LIMIT = 2000;
@@ -3493,8 +3511,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const from = Math.max(opened, reviewStarted.get(approval?.approval_id) ?? -Infinity);
     return Number.isFinite(from) && now() - from > REVIEW_DEADLINE_MS;
   }
+  // Requests being screened now. Each new request is screened as soon as a pass sees it, a few at
+  // a time: a pass used to review requests one after another and the next pass waited for it, so
+  // three parallel tool calls took up to three review budgets and a request that arrived meanwhile
+  // sat behind all of them while the agent stood still. A screening still running after
+  // SCREEN_PASS_STALE_MS has hung: the next pass starts that request again and the hung one's end
+  // is ignored.
+  const REVIEW_CONCURRENCY = 4;
+  const screening = new Map(); // approval_id -> { at, request } of the screening running for it
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
-    let note = null;
+    for (const [id, job] of [...screening]) if (now() - job.at > SCREEN_PASS_STALE_MS) screening.delete(id);
+    const jobs = [];
     for (const [index, result] of observed.entries()) {
       // A team's Command approver screens its workers (until it approves, requests wait for the
       // person); otherwise a card set to "Approve for me" has its AO tool requests reviewed and
@@ -3506,108 +3533,130 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // So is a plan (ExitPlanMode): its "allow once" choice switches Claude to asking before every
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
         const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao");
-        if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
+        if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id) || screening.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
+        // The same request twice at once (an agent's parallel calls) is reviewed once: the second
+        // waits for a later pass, which finds the first one's verdict (reviewVerdicts).
+        const request = describeRequest(approval);
+        if (jobs.some(job => job.request === request) || [...screening.values()].some(job => job.request === request)) continue;
+        if (screening.size + jobs.length >= REVIEW_CONCURRENCY) break;
         // Only the first try counts: a review that keeps hanging was restarted every stale pass, and
         // a deadline measured from the latest try was never reached.
         if (!reviewStarted.has(approval.approval_id)) reviewStarted.set(approval.approval_id, now());
         if (reviewStarted.size > 500) reviewStarted.delete(reviewStarted.keys().next().value);
-        const request = describeRequest(approval);
-        // The command advisor must not decide from a truncated command or permission scope.
-        const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
-        const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
-          || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
-          || JSON.stringify(approval.permissions ?? {}).length > 800;
-        // An app agent tool's safety comes from its endpoint (worktree confinement, protected paths), not
-        // from reading its arguments, so a long patch is no reason to ask.
-        // "Let the model judge": what the reviewer would hand to the person (a request too long to
-        // read whole, a chat whose requests it kept denying) it decides itself, allow or deny.
-        const judges = chatPreferences.get().modelJudges;
-        let advice = routineAppTool(approval.tool)
-          ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
-          : attachedFileRead(approval)
-          ? { action: "allow", actor: "safety_rules", reason_code: "attached_file_read", reason: attachedFileRead(approval) }
-          : !incomplete && routineAppCommand(approval)
-          ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
-          : incomplete && !blocked && judges
-          ? await askApprover({ approver, mission, approval, decide: true, partial: true }).then(verdict => ({ ...verdict, reviewed: true }),
-            (error) => ({ action: "failed", error }))
-          : incomplete && !blocked
-          ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
-          : blocked
-            ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: "Blocked by the command approver's safety rules" }
-              // A shell line counts only from the agent's own shell tool; the app's exec_command
-              // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
-              : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
-                ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineCommand(approval.command) }
-                : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
-                  && readOnlyInspection(approval.command, await requestFolder(approval, mission), approval.cwd)
-                ? { action: "allow", actor: "safety_rules", reason_code: "read_only_inspection", reason: "Read-only inspection inside the workspace folder" }
-                // Unresolved, so it waits for the person: a plain "ask" is answered for them after AUTO_ANSWER_MS.
-                : !judges && denialStreak(approval.thread_id) >= REVIEW_DENIAL_STREAK
-                ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
-                // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
-                // request go to the person, and its card says why.
-                : await askApprover({ approver, mission, approval }).then(verdict => ({ ...verdict, reviewed: true }),
-                  (error) => ({ action: "failed", error }));
-        // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
-        // doubt), so a request it could read whole no longer waits for the person for want of a decision.
-        if (advice.action === "ask" && advice.reviewed) {
-          const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete }).catch(() => null);
-          if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
-        }
-        if (advice.reviewed && approval.thread_id && advice.action === "deny") {
-          reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
-          if (reviewDenials.size > 500) reviewDenials.delete(reviewDenials.keys().next().value);
-        } else if (advice.reviewed && advice.action === "allow") reviewDenials.delete(approval.thread_id);
-        if (advice.action === "failed") {
-          const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
-          const why = publicText(advice.error?.message || advice.error, 160);
-          logger?.warn?.("ao.approval_review_failed", { tries, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80), reason: why });
-          if (tries < REVIEW_TRIES) {
-            reviewFailures.set(approval.approval_id, { tries, at: now() });
-            if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
-            note = `The reviewer couldn't answer yet, trying again: ${why}`;
-            continue;
-          }
-          advice = { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
-        }
-        reviewFailures.delete(approval.approval_id);
-        const offered = approval.request?.availableDecisions;
-        if (Array.isArray(offered) && advice.action !== "ask"
-          && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
-          advice = { action: "ask", reason: "Choose one of this request's own answers" };
-        }
-        approverAdvice.set(approval.approval_id, advice);
-        if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
-        // Each answer stands alone: one the person gave first (or any failure to send it) never
-        // skips the requests after it in this pass; the request just goes to the person.
-        if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
-          const decision = aoDecision(approval, advice.action === "allow");
-          const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
-          if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
-          else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false)) {
-            approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
-            logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
-            note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
-        } else if (approver.settings?.auto_decide === true && advice.action !== "ask") {
-          const sent = await requestHeadless("/api/v1/ao/harness/approval", {
-            workspace_id: workspaceId, run_id: runId, node_id: active[index].id, approval_id: approval.approval_id,
-            allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
-          }).then(result => result?.ok === true && result.result?.ok === true, () => false);
-          if (sent) logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
-          if (sent) {
-            approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
-            note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
-        } else {
-          note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
-        }
+        jobs.push({ approver, node: active[index], approval, request });
       }
     }
+    let note = null;
+    await Promise.all(jobs.map(async (job) => {
+      const mark = { at: now(), request: job.request };
+      screening.set(job.approval.approval_id, mark);
+      try {
+        const said = await screenOne(workspaceId, runId, mission, job);
+        if (said) note = said;
+      } finally {
+        if (screening.get(job.approval.approval_id) === mark) screening.delete(job.approval.approval_id);
+      }
+    }));
     return note;
+  }
+  /** Screens and, with auto-decide, answers one request; returns the run's note about it, if any. */
+  async function screenOne(workspaceId, runId, mission, { approver, node, approval, request }) {
+    // The command advisor must not decide from a truncated command or permission scope.
+    const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
+    const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
+      || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
+      || JSON.stringify(approval.permissions ?? {}).length > 800;
+    // An app agent tool's safety comes from its endpoint (worktree confinement, protected paths), not
+    // from reading its arguments, so a long patch is no reason to ask.
+    // "Let the model judge": what the reviewer would hand to the person (a request too long to
+    // read whole, a chat whose requests it kept denying) it decides itself, allow or deny.
+    const judges = chatPreferences.get().modelJudges;
+    let advice = routineAppTool(approval.tool)
+      ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
+      : attachedFileRead(approval)
+      ? { action: "allow", actor: "safety_rules", reason_code: "attached_file_read", reason: attachedFileRead(approval) }
+      : !incomplete && routineAppCommand(approval)
+      ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
+      : incomplete && !blocked && judges
+      ? await askApprover({ approver, mission, approval, decide: true, partial: true }).then(verdict => ({ ...verdict, reviewed: true }),
+        (error) => ({ action: "failed", error }))
+      : incomplete && !blocked
+      ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
+      : blocked
+        ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: "Blocked by the command approver's safety rules" }
+          // A shell line counts only from the agent's own shell tool; the app's exec_command
+          // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
+          : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
+            ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineCommand(approval.command) }
+            : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
+              && readOnlyInspection(approval.command, await requestFolder(approval, mission), approval.cwd)
+            ? { action: "allow", actor: "safety_rules", reason_code: "read_only_inspection", reason: "Read-only inspection inside the workspace folder" }
+            // Unresolved, so it waits for the person: a plain "ask" is answered for them after AUTO_ANSWER_MS.
+            : !judges && denialStreak(approval.thread_id) >= REVIEW_DENIAL_STREAK
+            ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
+            // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
+            // request go to the person, and its card says why.
+            : await askApprover({ approver, mission, approval }).then(verdict => ({ ...verdict, reviewed: true }),
+              (error) => ({ action: "failed", error }));
+    // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
+    // doubt), so a request it could read whole no longer waits for the person for want of a decision.
+    if (advice.action === "ask" && advice.reviewed) {
+      const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete }).catch(() => null);
+      if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
+    }
+    if (advice.reviewed && approval.thread_id && advice.action === "deny") {
+      reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
+      if (reviewDenials.size > 500) reviewDenials.delete(reviewDenials.keys().next().value);
+    } else if (advice.reviewed && advice.action === "allow") reviewDenials.delete(approval.thread_id);
+    if (advice.action === "failed") {
+      const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
+      const why = publicText(advice.error?.message || advice.error, 160);
+      logger?.warn?.("ao.approval_review_failed", { tries, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80), reason: why });
+      if (tries < REVIEW_TRIES) {
+        reviewFailures.set(approval.approval_id, { tries, at: now() });
+        if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
+        return `The reviewer couldn't answer yet, trying again: ${why}`;
+      }
+      advice = { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
+    }
+    reviewFailures.delete(approval.approval_id);
+    const offered = approval.request?.availableDecisions;
+    if (Array.isArray(offered) && advice.action !== "ask"
+      && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
+      advice = { action: "ask", reason: "Choose one of this request's own answers" };
+    }
+    approverAdvice.set(approval.approval_id, advice);
+    if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
+    // Each answer stands alone: one the person gave first (or any failure to send it) never
+    // touches the other requests; this one just goes to the person.
+    if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
+      const decision = aoDecision(approval, advice.action === "allow");
+      const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
+      if (!decision) return `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
+      if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false)) {
+        approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
+        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
+        return `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+      }
+      approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
+      return null;
+    }
+    if (approver.settings?.auto_decide === true && advice.action !== "ask") {
+      const sent = await requestHeadless("/api/v1/ao/harness/approval", {
+        workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: approval.approval_id,
+        allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
+      }).then(result => result?.ok === true && result.result?.ok === true, () => false);
+      if (sent) {
+        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
+        approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
+        return `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+      }
+      approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
+      return null;
+    }
+    return `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
   }
 
   // "Approve for me" and "Full access" never leave the agent stuck on a request nobody answers: one
@@ -4152,17 +4201,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const attention = forPerson ? "pending_approval" : marks.some(mark => mark.kind === "needs_input") ? "needs_input" : null;
         if (attention) state.detail = attention === "pending_approval" ? "Waiting for your tool approval" : "An AO worker needs input on the Board";
         else if (waiting.length) state.detail = "The reviewer is checking the agent's request";
-        // Reviewing runs beside the loop, one pass at a time: the loop kept reporting and launching
-        // while a slow reviewer took up to minutes, and the chat showed nothing meanwhile.
-        // A pass that hangs (a model list or a send that never returns) no longer blocks every review
-        // after it: past SCREEN_PASS_STALE_MS the next pass starts, and the hung one's end is ignored.
-        if (waiting.length && (!state.screening || now() - state.screening.at > SCREEN_PASS_STALE_MS)) {
-          const pass = { at: now() };
-          state.screening = pass;
+        // Reviewing runs beside the loop: the loop kept reporting and launching while a slow reviewer
+        // took up to minutes, and the chat showed nothing meanwhile. Every tick may start the review
+        // of a request that just arrived; one already under review is skipped (screenApprovals), and
+        // one whose review hung past SCREEN_PASS_STALE_MS is started again.
+        if (waiting.length) {
           void screenApprovals(workspaceId, runId, mission, waiting.map(mark => mark.node), waiting.map(mark => ({ pending_approvals: mark.pending })))
-            .then(note => { if (note && state.screening === pass) state.detail = note; },
-              error => { if (state.screening === pass) state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); })
-            .finally(() => { if (state.screening === pass) state.screening = null; });
+            .then(note => { if (note) state.detail = note; },
+              error => { state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); });
         }
         if (waiting.length && !state.autoAnswering) {
           state.autoAnswering = true;

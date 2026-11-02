@@ -1,10 +1,10 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { ChatStyle, PlanStep, ReplyPlan } from "./chat-reply-plan";
 
 /**
  * A reply's steps in the chat style picked from the header menu (chat-reply-plan): Codex's plan
- * card, Copilot's step timeline, a focus line, or Windsurf's action chips. Transcript draws nothing
- * here; its work rows are the steps.
+ * card, Copilot's step timeline, a focus line, or Windsurf's action chips. The default transcript
+ * keeps the agent's real tasks visible too, open while running and folded once it ends.
  */
 
 const STATE_LABEL: Record<PlanStep["state"], string> = { done: "Done", running: "Running", pending: "To do", failed: "Failed" };
@@ -24,8 +24,11 @@ function planCount(plan: ReplyPlan): string {
 }
 
 export function ReplyPlanView({ plan, style, live }: { plan: ReplyPlan; style: ChatStyle; live: boolean }) {
-  if (style === "transcript" || !plan.steps.length) return null;
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const transcript = style === "transcript";
+  if (!plan.steps.length || (transcript && plan.source !== "agent")) return null;
   const current = plan.steps.find((step) => step.state === "running") ?? plan.steps.find((step) => step.state === "pending");
+  const open = !transcript || (chosen ?? live);
   if (style === "focus") {
     // One line: where the turn is now, or what it came to. The work stays behind Show work.
     const index = current ? plan.steps.indexOf(current) : -1;
@@ -35,16 +38,18 @@ export function ReplyPlanView({ plan, style, live }: { plan: ReplyPlan; style: C
       {live && plan.steps.length > 1 ? <span className="cx-rplan-bar" aria-hidden="true"><span style={{ width: `${Math.round(100 * plan.done / plan.steps.length)}%` }} /></span> : null}
     </p>;
   }
-  return <section className={`cx-rplan is-${style}`} aria-label="Plan">
-    <header className="cx-rplan-head">
-      <span className="cx-rplan-title">{plan.source === "agent" ? "Plan" : "Steps"}</span>
-      <span className="cx-rplan-count">{planCount(plan)}</span>
-    </header>
-    <ol className="cx-rplan-steps">
+  const heading = <><span className="cx-rplan-title">{transcript ? "Tasks" : plan.source === "agent" ? "Plan" : "Steps"}</span>
+    <span className="cx-rplan-count">{planCount(plan)}</span></>;
+  return <section className={`cx-rplan is-${style}`} aria-label={transcript ? "Tasks" : "Plan"}>
+    {transcript ? <button type="button" className="cx-rplan-head cx-rplan-toggle" aria-expanded={open} onClick={() => setChosen(!open)}>
+      <svg className="cx-rplan-chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 3 5 5-5 5" /></svg>
+      {heading}{!open && current ? <span className="cx-rplan-current" title={current.title}>{current.title}</span> : null}
+    </button> : <header className="cx-rplan-head">{heading}</header>}
+    {open ? <ol className="cx-rplan-steps">
       {plan.steps.map((step, index) => <li key={step.key} className={`cx-rplan-step is-${step.state}`} aria-current={step === current ? "step" : undefined}>
         <StepMark state={step.state} />
         <div className="cx-rplan-body">
-          <span className="cx-rplan-step-title">{style === "timeline" ? <span className="cx-rplan-num">{index + 1}.</span> : null}{step.title}</span>
+          <span className="cx-rplan-step-title" title={step.title}>{style === "timeline" ? <span className="cx-rplan-num">{index + 1}.</span> : null}{step.title}</span>
           {style === "cascade" && step.actions.length ? <span className="cx-rplan-chips">
             {step.actions.map((action) => <span key={action.activity} className={`cx-rplan-chip is-${action.activity}`}>{action.words}</span>)}
           </span> : null}
@@ -52,7 +57,7 @@ export function ReplyPlanView({ plan, style, live }: { plan: ReplyPlan; style: C
             : style === "cascade" && step.state === "failed" && step.finish ? <span className="cx-rplan-finish is-failed">{step.finish}</span> : null}
         </div>
       </li>)}
-    </ol>
+    </ol> : null}
   </section>;
 }
 

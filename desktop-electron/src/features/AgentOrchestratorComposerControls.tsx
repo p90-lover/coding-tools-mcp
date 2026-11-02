@@ -376,16 +376,21 @@ export function AgentOrchestratorComposerControls({
           {[...new Set([...presets, ...(fullLimit ? [fullLimit] : [])])].sort((a, b) => a - b).map(tokens => <Option key={tokens}
             picked={(route.context_window || startWindow) === tokens} disabled={busy}
             onPick={() => { setWindow(tokens); close(); }}>{contextText(tokens)}{tokens === fullLimit ? <small>full model limit</small> : null}</Option>)}
-          <form className="ao-context-custom" onSubmit={event => {
-            event.preventDefault();
-            const tokens = parseTokens(contextDraft);
-            if (tokens === null || !inRange(tokens)) return;
-            setWindow(tokens); setContextDraft(""); close();
+          {/* Not a <form>: this menu sits inside the chat box's form, and a nested form's submit
+              reached the chat box's onSubmit too, so Set could send the typed message. */}
+          <div className="ao-context-custom" onKeyDown={event => {
+            if (event.key !== "Enter") return;
+            event.preventDefault(); event.stopPropagation();
+            event.currentTarget.querySelector<HTMLButtonElement>("button")?.click();
           }}>
             <input type="text" inputMode="numeric" aria-label="Custom context window" placeholder="Other size, e.g. 300k" value={contextDraft}
               aria-invalid={Boolean(contextDraft.trim()) && !inRange(parseTokens(contextDraft) ?? Number.NaN)} onChange={event => setContextDraft(event.target.value)} />
-            <button type="submit" className="ao-popover-apply" disabled={busy || !inRange(parseTokens(contextDraft) ?? Number.NaN)}>Set</button>
-          </form>
+            <button type="button" className="ao-popover-apply" disabled={busy || !inRange(parseTokens(contextDraft) ?? Number.NaN)} onClick={() => {
+              const tokens = parseTokens(contextDraft);
+              if (tokens === null || !inRange(tokens)) return;
+              setWindow(tokens); setContextDraft(""); close();
+            }}>Set</button>
+          </div>
           {context ? <p className="ao-popup-muted">{contextText(context.min)}–{context.max ? contextText(context.max) : "no limit"}. Applies from the next turn.</p> : null}
         </div>}
       </ChipMenu>
