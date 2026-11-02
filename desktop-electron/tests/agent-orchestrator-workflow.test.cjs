@@ -6117,6 +6117,44 @@ test("with \"Let the model judge\" on, a request too long to review whole is jud
   } finally { mission.nodes[0].state = "finished"; }
 });
 
+test("with \"Let the model judge\" on, a reviewer that never answers denies the request instead of leaving it to the person", async () => {
+  // The user, 2026-11-02: "why is let the model judge option wont work when enabled?" A reviewer that
+  // failed its tries, or could not decide, still put the request on the card for the person.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const request = { approval_id: "poll", source: "ao", kind: "command", tool: "PowerShell", command: "python tools/poll.py", decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
+  let clock = 1_000_000;
+  const resolved = [], reasons = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    now: () => clock,
+    fetchImpl: async (url) => String(url).endsWith("/models")
+      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) } : { ok: false, status: 502, json: async () => ({}) },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (_session, id, decision, why) => { resolved.push([id, decision]); reasons.push(why); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_model_judges", { enabled: true });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 600 && !resolved.length; tries++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      clock += 1_000;
+    }
+    assert.deepEqual(resolved, [["poll", "no"]], "denied, not left waiting for the person");
+    assert.match(reasons[0], /couldn't answer after 3 tries/);
+    assert.doesNotMatch(JSON.stringify(await workflow.call("run_status", { workspaceId: "ws", runId: "run" })), /check it yourself/);
+  } finally { mission.nodes[0].state = "finished"; }
+});
+
 test("Approve for me reviews complete scripts and leaves incomplete or failed reviews pending after 20 seconds", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
@@ -10126,10 +10164,12 @@ test("a chat's screen calls are reviewed by Codex's auto-review whatever its app
     { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
   const prompts = [];
   let outcome = { risk_level: "high", user_authorization: "low", outcome: "deny", rationale: "Typing into a banking site is not part of the task" };
+  let down = false;
   const workflow = createAgentOrchestratorWorkflow({
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async (url, init) => {
       if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: ["test-model", "codex-auto-review"].map((id) => ({ id })) }) };
+      if (down) return { ok: false, status: 502, json: async () => ({}) };
       const body = JSON.parse(init.body);
       prompts.push({ model: body.model, text: body.messages[0].content });
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(outcome) } }] }) };
@@ -10146,6 +10186,17 @@ test("a chat's screen calls are reviewed by Codex's auto-review whatever its app
   assert.equal((await workflow.reviewToolCall({ workspaceId: "ws", session: "session-1", tool: "computer_snapshot", args: {} })).action, "allow");
   assert.equal((await workflow.reviewToolCall({ workspaceId: "ws", session: "elsewhere", tool: "computer_snapshot", args: {} })).action, "ask",
     "a session that is no chat of this project is left to the person");
+  // "Let the model judge": what the reviewer leaves undecided, or cannot answer at all, is denied,
+  // never left on a card for the person.
+  await workflow.call("chat_model_judges", { enabled: true });
+  outcome = { risk_level: "medium", user_authorization: "unknown", outcome: "ask", rationale: "Unclear which window this is" };
+  const undecided = await workflow.reviewToolCall({ workspaceId: "ws", session: "session-1", tool: "computer_action", args: { action: "click" } });
+  assert.equal(undecided.action, "deny");
+  assert.match(prompts.at(-1).text, /outcome must be allow or deny/, "the reviewer is told it must decide");
+  down = true;
+  const unanswered = await workflow.reviewToolCall({ workspaceId: "ws", session: "session-1", tool: "computer_action", args: { action: "click" } });
+  assert.equal(unanswered.action, "deny");
+  assert.match(unanswered.reason, /Let the model judge/);
 });
 
 test("a reviewer's deny tells the agent why, and that the user did not refuse it", async () => {
