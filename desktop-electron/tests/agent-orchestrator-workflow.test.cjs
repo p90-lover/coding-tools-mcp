@@ -7970,7 +7970,8 @@ test("deleting a chat message removes it and its steers from the task and hides 
     { id: "task-2", title: "Alone", description: "only ask", state: "in_progress", clauses: [] }],
   runs: [done("r1"), done("other", "task-2"), done("r2"), done("r3")] });
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless });
-  const remove = (index, runId, extra = {}) => workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index, runId, ...extra });
+  const remove = (index, runId, extra = {}) => workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index, runId,
+    sourceDescription: world.tasks[0].description, ...extra });
   const deleted = await remove(1, "r2");
   assert.deepEqual(JSON.parse(JSON.stringify(deleted)), { ok: true, taskId: "task-1", index: 1, runIds: ["r2"] }, "the run the chat showed under message 1");
   assert.equal(world.tasks[0].description, "first ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask", "the steer goes with its message");
@@ -7982,7 +7983,7 @@ test("deleting a chat message removes it and its steers from the task and hides 
   assert.equal(world.tasks[0].description, "third ask");
   assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["other", "r3"]);
   await assert.rejects(remove(0, "r3"), /only message; archive or delete the chat instead/);
-  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-2", index: 0, runId: "other" }), /only message/);
+  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-2", index: 0, runId: "other", sourceDescription: world.tasks[1].description }), /only message/);
   world.tasks[0].description = description;
   await assert.rejects(remove(4, "r3"), /no longer in this chat/);
   // The reply must be one this chat shows: not a deleted run, another chat's run, or none at all.
@@ -7995,6 +7996,241 @@ test("deleting a chat message removes it and its steers from the task and hides 
   const edits = world.edits.length;
   await assert.rejects(remove(1, "r3"), /Stop the chat first/);
   assert.equal(world.edits.length, edits, "nothing is changed");
+});
+
+test("delete refuses stale descriptions in either order and a reloaded snapshot deletes the intended message", async (t) => {
+  const parts = ["A", "\n\nFollow-up (2026-10-10 10:00 UTC):\nB", "\n\nFollow-up (2026-10-10 11:00 UTC):\nC", "\n\nFollow-up (2026-10-10 12:00 UTC):\nD"];
+  const description = parts.join("");
+  for (const [first, stale] of [[1, 2], [2, 1]]) {
+    await t.test(`${first} then stale ${stale}`, async () => {
+      const runs = [1, 2, 3, 4].map(index => ({ id: `r${index}`, workspace_id: "ws-1", project_id: "task-1",
+        cancelled: false, nodes: [{ id: "one", role: "planner", state: "finished" }] }));
+      const world = chatWorld({ tasks: [{ id: "task-1", title: "Snapshot", description, state: "in_progress", clauses: [] }], runs });
+      const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless });
+      const input = { workspaceId: "ws-1", taskId: "task-1", sourceDescription: description };
+      try {
+        await workflow.call("chat_delete_message", { ...input, index: first, runId: `r${first + 1}` });
+        const afterFirst = parts.filter((_part, index) => index !== first).join("");
+        assert.equal(world.tasks[0].description, afterFirst);
+        await assert.rejects(workflow.call("chat_delete_message", { ...input, index: stale, runId: `r${stale + 1}` }), /chat changed.*deletion.*reload/i);
+        assert.equal(world.edits.length, 1, "the stale index never reaches a second board write");
+        assert.equal(world.tasks[0].description, afterFirst, "the stale index cannot remove another prompt");
+        assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id),
+          runs.filter((_run, index) => index !== first).map(run => run.id), "the rejected reply stays visible");
+        await workflow.call("chat_delete_message", { ...input, sourceDescription: afterFirst, index: 1, runId: `r${stale + 1}` });
+        assert.equal(world.tasks[0].description, parts[0] + parts[3]);
+        assert.equal(world.edits.length, 2);
+        assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r4"]);
+      } finally { workflow.dispose(); }
+    });
+  }
+});
+
+test("delete requires a string snapshot before reading and rejects an empty stale snapshot without hiding replies", async () => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Snapshot", description, state: "in_progress", clauses: [] }],
+    runs: ["r1", "r2"].map(id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] })) });
+  const requests = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (...args) => { requests.push(args); return world.requestHeadless(...args); } });
+  const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2" };
+  try {
+    for (const snapshot of [undefined, null, false, 0, {}, []]) {
+      await assert.rejects(workflow.call("chat_delete_message", { ...input, ...(snapshot === undefined ? {} : { sourceDescription: snapshot }) }), /requires sourceDescription.*displayed chat.*reload/);
+    }
+    assert.equal(requests.length, 0, "legacy or malformed snapshots cannot start any read");
+    await assert.rejects(workflow.call("chat_delete_message", { ...input, sourceDescription: "" }), /chat changed.*reload/i);
+    assert.ok(requests.length > 0, "empty string is a present snapshot, compared to the saved description");
+    assert.equal(world.edits.length, 0);
+    assert.equal(world.tasks[0].description, description);
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2"]);
+  } finally { workflow.dispose(); }
+});
+
+test("an empty saved description accepts its snapshot and still refuses deleting a nonexistent message", async () => {
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Empty", description: "", state: "in_progress", clauses: [] }],
+    runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless });
+  try {
+    await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0, runId: "r1", sourceDescription: "" }), /message is no longer in this chat/i);
+    assert.equal(world.edits.length, 0);
+  } finally { workflow.dispose(); }
+});
+
+test("a failed snapshot-checked delete restores reply visibility and permits a fresh explicit retry", async () => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Snapshot", description, state: "in_progress", clauses: [] }],
+    runs: ["r1", "r2", "r3"].map(id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] })) });
+  let fail = true;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+    if (body.tool === "workflow_update" && fail) { fail = false; throw new Error("Board revision changed"); }
+    return world.requestHeadless(endpoint, body, options);
+  } });
+  const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: description };
+  try {
+    await assert.rejects(workflow.call("chat_delete_message", input), /Board revision changed/);
+    assert.equal(world.edits.length, 0);
+    assert.equal(world.tasks[0].description, description);
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3"]);
+    await workflow.call("chat_delete_message", input);
+    assert.equal(world.edits.length, 1);
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r3"]);
+  } finally { workflow.dispose(); }
+});
+
+test("delete reservation rejects same-chat overlap in either write order and releases on success or failure", async (t) => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC\n\nFollow-up (2026-10-10 12:00 UTC):\nD";
+  for (const firstIndex of [1, 2]) for (const fail of [false, true]) {
+    await t.test(`${firstIndex} first, ${fail ? "failed" : "committed"}`, async () => {
+      const runs = [1, 2, 3, 4].map(index => ({ id: `r${index}`, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }));
+      const world = chatWorld({ tasks: [{ id: "task-1", title: "Admission", description, state: "in_progress", clauses: [] }], runs });
+      let enter, releaseWrite, writes = 0, requests = 0;
+      const entered = new Promise(resolve => { enter = resolve; });
+      const held = new Promise(resolve => { releaseWrite = resolve; });
+      const failure = new Error("First write failed");
+      const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+        requests++;
+        if (body.tool === "workflow_update" && ++writes === 1) { enter(); await held; if (fail) throw failure; }
+        return world.requestHeadless(endpoint, body, options);
+      } });
+      const input = { workspaceId: "ws-1", taskId: "task-1", sourceDescription: description };
+      const first = workflow.call("chat_delete_message", { ...input, index: firstIndex, runId: `r${firstIndex + 1}` }).then(value => ({ value }), error => ({ error }));
+      try {
+        await entered;
+        const before = requests, other = firstIndex === 1 ? 2 : 1;
+        await assert.rejects(workflow.call("chat_delete_message", { ...input, workspaceId: " ws-1 ", taskId: " task-1 ", index: other, runId: `r${other + 1}` }), /operation is already in progress/);
+        assert.equal(requests, before, "the refused delete performs no read or write and is never queued");
+        assert.equal(writes, 1);
+        releaseWrite();
+        const outcome = await first;
+        if (fail) {
+          assert.equal(outcome.error, failure);
+          assert.equal(world.tasks[0].description, description);
+          assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3", "r4"]);
+        } else {
+          assert.equal(outcome.value.ok, true);
+          assert.equal(world.edits.length, 1);
+        }
+        await workflow.call("chat_delete_message", { ...input, sourceDescription: world.tasks[0].description, index: fail ? other : 1, runId: `r${other + 1}` });
+        assert.equal(world.edits.length, fail ? 1 : 2, "only the new explicit retry can delete after admission is released");
+      } finally { releaseWrite(); await first; workflow.dispose(); }
+    });
+  }
+});
+
+test("delete reservation separates chats and workspaces and rollback preserves their successful edits", async () => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC";
+  const short = "X\n\nFollow-up (2026-10-10 10:00 UTC):\nY";
+  const done = (id, task, workspace = "ws-1") => ({ id, workspace_id: workspace, project_id: task, cancelled: false, nodes: [{ state: "finished" }] });
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "First", description, state: "in_progress", clauses: [] }, { id: "task-2", title: "Other", description: short, state: "in_progress", clauses: [] }],
+    runs: [done("r1", "task-1"), done("r2", "task-1"), done("r3", "task-1"), done("other-1", "task-2"), done("other-2", "task-2")] });
+  const foreign = chatWorld({ tasks: [{ id: "task-1", title: "Other workspace", description: short, state: "in_progress", clauses: [] }], runs: [done("r1", "task-1", "ws-2"), done("r2", "task-1", "ws-2")] });
+  let enter, releaseWrite, holding = true;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const held = new Promise(resolve => { releaseWrite = resolve; });
+  const failure = new Error("Owner write failed");
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+    if (holding && body.workspace_id === "ws-1" && body.tool === "workflow_update" && body.arguments.change.id === "task-1") { holding = false; enter(); await held; throw failure; }
+    const result = await (body.workspace_id === "ws-2" ? foreign : world).requestHeadless(endpoint, body, options);
+    if (body.tool === "workflow_list") result.operation.result.workspace_id = body.workspace_id;
+    return result;
+  } });
+  const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: description };
+  const first = workflow.call("chat_delete_message", input).then(value => ({ value }), error => ({ error }));
+  try {
+    await entered;
+    await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-2", index: 1, runId: "other-2", sourceDescription: short });
+    await workflow.call("chat_delete_message", { workspaceId: "ws-2", taskId: "task-1", index: 1, runId: "r2", sourceDescription: short });
+    releaseWrite();
+    assert.equal((await first).error, failure);
+    assert.equal(world.tasks[0].description, description);
+    assert.equal(world.tasks[1].description, "X");
+    assert.equal(foreign.tasks[0].description, "X");
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3", "other-1"]);
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-2" })).runs.map(run => run.id), ["r1"]);
+    await workflow.call("chat_delete_message", input);
+    assert.equal(world.edits.length, 2);
+  } finally { releaseWrite(); await first; workflow.dispose(); }
+});
+
+test("delete admission shares the sender's per-chat gate without replaying or deadlocking", async () => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Admission", description, state: "in_progress", clauses: [] }],
+    runs: ["r1", "r2", "r3"].map(id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] })) });
+  let enterWrite, releaseWrite, enterSend, releaseSend, interceptSend = false, sendReads = 0;
+  const writing = new Promise(resolve => { enterWrite = resolve; }), writeHeld = new Promise(resolve => { releaseWrite = resolve; });
+  const sending = new Promise(resolve => { enterSend = resolve; }), sendHeld = new Promise(resolve => { releaseSend = resolve; });
+  const stopped = new Error("Send fixture stopped after admission");
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+    if (interceptSend) { if (++sendReads > 1) throw new Error("Unexpected read while the sender owns admission"); enterSend(); await sendHeld; throw stopped; }
+    if (body.tool === "workflow_update") { enterWrite(); await writeHeld; }
+    return world.requestHeadless(endpoint, body, options);
+  } });
+  const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: description };
+  const first = workflow.call("chat_delete_message", input);
+  let queued;
+  try {
+    await writing;
+    interceptSend = true;
+    queued = workflow.call("chat_send", { workspaceId: " ws-1 ", taskId: " task-1 ", message: "after the edit", deferStart: true }).then(value => ({ value }), error => ({ error }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sendReads, 0, "a queued send waits for the delete before reading");
+    releaseWrite();
+    await first;
+    await sending;
+    await assert.rejects(workflow.call("chat_delete_message", { ...input, index: 1, runId: "r3", sourceDescription: world.tasks[0].description }), /operation is already in progress/);
+    assert.equal(sendReads, 1, "the delete's finally must not remove the queued sender's ownership");
+    releaseSend();
+    assert.equal((await queued).error, stopped);
+    interceptSend = false;
+    await workflow.call("chat_delete_message", { ...input, index: 1, runId: "r3", sourceDescription: world.tasks[0].description });
+    assert.equal(world.edits.length, 2);
+  } finally { releaseWrite(); releaseSend(); await Promise.allSettled([first, queued]); workflow.dispose(); }
+});
+
+test("delete persistence failures restore message visibility and preserve the original failure", async (t) => {
+  for (const phase of ["hide", "rollback"]) await t.test(phase, async (t) => {
+    const fixtureRoot = path.resolve(__dirname, "../../aiTemp");
+    fs.mkdirSync(fixtureRoot, { recursive: true });
+    const directory = fs.mkdtempSync(path.join(fixtureRoot, "delete-persist-"));
+    const parent = path.join(directory, "blocked");
+    if (phase === "hide") fs.writeFileSync(parent, "owned persistence fixture");
+    const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC";
+    const world = chatWorld({ tasks: [{ id: "task-1", title: "Persistence", description, state: "in_progress", clauses: [] }],
+      runs: ["r1", "r2", "r3"].map(id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] })) });
+    const mkdir = fs.mkdirSync, persistenceErrors = [];
+    t.mock.method(fs, "mkdirSync", function (...args) {
+      try { return mkdir.apply(this, args); } catch (error) { if (path.resolve(String(args[0])) === parent) persistenceErrors.push(error); throw error; }
+    });
+    const original = new Error("Board write failed before rollback persistence");
+    let failWrite = phase === "rollback";
+    const workflow = createAgentOrchestratorWorkflow({ chatEditsFile: path.join(parent, "edits.json"), requestHeadless: async (endpoint, body, options) => {
+      if (failWrite && body.tool === "workflow_update") {
+        failWrite = false;
+        assert.equal(path.dirname(parent), directory);
+        fs.rmSync(parent, { recursive: true, force: true });
+        fs.writeFileSync(parent, "owned rollback fixture");
+        throw original;
+      }
+      return world.requestHeadless(endpoint, body, options);
+    } });
+    const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: description };
+    try {
+      const error = await workflow.call("chat_delete_message", input).then(() => null, failure => failure);
+      assert.equal(error, phase === "hide" ? persistenceErrors[0] : original);
+      assert.equal(persistenceErrors.length, phase === "hide" ? 2 : 1, "rollback persistence also fails with a real blocking-path EEXIST");
+      assert.ok(persistenceErrors.every(failure => failure.code === "EEXIST"));
+      assert.equal(world.edits.length, 0);
+      assert.equal(world.tasks[0].description, description);
+      assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3"]);
+      fs.rmSync(parent, { force: true });
+      await workflow.call("chat_delete_message", input);
+      assert.equal(world.edits.length, 1, "a fresh retry works after the owned persistence fixture is removed");
+    } finally {
+      workflow.dispose();
+      assert.equal(path.dirname(directory), fixtureRoot);
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 });
+    }
+  });
 });
 
 test("history deletion validates older displayed replies without crossing ownership or activity boundaries", async (t) => {
@@ -8026,7 +8262,7 @@ test("history deletion validates older displayed replies without crossing owners
         return { ok: true, runs: structuredClone(selected) };
       } });
       try {
-        const input = { workspaceId: "ws-1", taskId: "task-1", index: 0,
+        const input = { workspaceId: "ws-1", taskId: "task-1", index: 0, sourceDescription: description,
           runId: ["unknown", "wrong-id", "lookup-failure"].includes(scenario) ? "missing" : scenario === "mixed-foreign" ? "new" : "old",
           ...(scenario === "mixed-foreign" ? { runIds: ["other-0"] } : scenario === "lookup-failure" ? { runIds: ["also-missing"] } : {}) };
         if (scenario === "project-window" || scenario === "cached-over-200") {
@@ -8037,7 +8273,7 @@ test("history deletion validates older displayed replies without crossing owners
           assert.ok(!(await workflow.call("runs", { workspaceId: "ws-1", taskId: "task-1" })).runs.some(run => run.id === "old"));
           if (cached) {
             assert.equal(reads.filter(body => body.run_id === "old").length, 1, "one bounded lookup restores the cached ID outside 200");
-            await assert.rejects(workflow.call("chat_delete_message", input), /reply was not found/);
+            await assert.rejects(workflow.call("chat_delete_message", { ...input, sourceDescription: world.tasks[0].description }), /reply was not found/);
             assert.equal(world.edits.length, 1, "a previously hidden reply stays hidden even after direct lookup");
           }
         } else {
@@ -8083,11 +8319,11 @@ test("a restarted message keeps its restart: deleting the next message hides tha
   const second = aoChat.chatTurns(await shown(), world.tasks[0].description).find(turn => turn.messageIndex === 1);
   const runIds = aoChat.chatRunsOfMessage(await shown(), second.runId);
   assert.deepEqual([...runIds], ["r2"]);
-  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: second.messageIndex, runId: runIds[0], runIds: runIds.slice(1) });
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: second.messageIndex, runId: runIds[0], runIds: runIds.slice(1), sourceDescription: world.tasks[0].description });
   assert.deepEqual(JSON.parse(JSON.stringify(await turns())), [["r1", "first ask", 0], ["restart", null, null], ["r3", "third ask", 1]],
     "the second message's own run is hidden, not the first message's restart");
   // Deleting the first message takes its restart along, even if the chat named only the first run.
-  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0, runId: "r1" });
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0, runId: "r1", sourceDescription: world.tasks[0].description });
   assert.deepEqual(JSON.parse(JSON.stringify(await turns())), [["r3", "third ask", 0]], "no turn is left without its message");
 });
 
@@ -8127,7 +8363,7 @@ test("after a deleted message the next turn starts a fresh agent session (chat_s
   });
   const prewarm = () => workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId: "task-1" });
   assert.equal((await prewarm()).continues, true, "before the delete the chat's agent takes the next message");
-  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2" });
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: world.tasks[0].description });
   const warmed = await prewarm();
   assert.equal(warmed.continues, undefined, "the old agent still remembers the deleted exchange");
   assert.equal(warmed.warmed, true, "a fresh agent is made ready instead");
