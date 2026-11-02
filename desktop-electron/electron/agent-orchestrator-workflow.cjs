@@ -326,9 +326,9 @@ function delayToMilliseconds(value, unit) {
  * The chat's own preferences that outlive a restart: autoRetry (a failed single-model step is
  * retried by itself, chatAutoRetry) and modelJudges (what would wait for the person, a request the
  * reviewer would hand on or a goal round that ended needing them, is judged by the model instead,
- * chatModelJudges), and autoCompact / autoCompactPercent (a chat compacts itself once a follow-up
- * would fill that share of its size limit, as Claude Code's autoCompactEnabled and
- * CLAUDE_AUTOCOMPACT_PCT_OVERRIDE; chatAutoCompact). Kept in memory when no file is given (tests).
+ * chatModelJudges). Legacy autoCompact / autoCompactPercent values remain readable for older
+ * callers, but do not control native token compaction or bounded task-record rollover.
+ * Kept in memory when no file is given (tests).
  */
 const AUTO_COMPACT_PERCENT = 95;
 const AUTO_COMPACT_MIN_PERCENT = 20;
@@ -4005,9 +4005,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, modelJudges: chatPreferences.get().modelJudges };
   }
   /**
-   * chat_auto_compact: reads auto-compact, or sets it with `enabled` and/or `percent` (how full a
-   * chat gets, of its size limit, before its next message compacts it first). The user: "make a
-   * command to set how much to auto compact like claude code".
+   * chat_auto_compact: compatibility storage for older callers, not native model-token control.
+   * Record rollover is required only at the board's hard byte limit, regardless of these values.
    */
   function chatAutoCompact({ enabled, percent } = {}) {
     const change = {};
@@ -5311,30 +5310,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
       let description = rewoundDescription ?? extended();
       if (rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This rewind exceeds the chat size limit; shorten the conversation first");
-      const { autoCompact, autoCompactPercent: percent } = chatPreferences.get();
-      const full = utf8Bytes(description) > BOARD_TEXT_BYTES;
-      if (!rewind && (full || (autoCompact && utf8Bytes(description) > Math.floor(BOARD_TEXT_BYTES * percent / 100)))) {
-        if (!autoCompact) throw new Error("This chat is full. Use /compact, or turn auto-compact on with /autocompact on.");
-        // A long chat compacts itself, as Claude Code does, once the follow-up would fill the share
-        // of the limit set with /autocompact: the earlier conversation becomes a handoff summary
-        // (what /compact does) and the chat goes on. The summary leaves room for this follow-up: a
-        // goal round's feedback is up to 3.5 KB, and a 6,000-character summary plus that was still
-        // over the limit, so a goal stalled "full" right after compacting.
+      if (!rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) {
+        // This is bounded task-record storage, not the agent's token context. Only roll it over
+        // at the hard byte limit: obsolete /autocompact preferences must neither summarize early
+        // nor strand a chat. Native /compact and model-token auto-compaction are independent.
         const reserve = utf8Bytes(`\n\nFollow-up (${stamp} UTC):\n${text}`);
-        let compacted = { compacted: false };
+        let compacted;
         try {
           compacted = await compactChat({ workspaceId: id, taskId: task, reserve });
         } catch (error) {
-          // Below the limit the follow-up still fits: compacting waits for the next one.
-          if (full) throw new Error(`This chat is full and couldn't be compacted: ${String(error?.message || error).slice(0, 200)}`);
-          logger?.warn?.("ao.chat_auto_compact_failed", { error: String(error?.message || error).slice(0, 200) });
+          throw new Error(`This chat's task record is full and couldn't be rolled over: ${String(error?.message || error).slice(0, 200)}`);
         }
         if (compacted.compacted) {
           detail = await board({ workspaceId: id, taskId: task });
           if (!detail.task) throw new Error("This chat's task no longer exists");
           description = extended();
         }
-        if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full even after compacting. Shorten the message or start a new chat.");
+        if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat's task record is full even after rollover. Shorten the message or start a new chat.");
       }
       const saidBefore = String(detail.task.description || "");
       checkCurrent();

@@ -7194,30 +7194,39 @@ test("auto-compact leaves room for a goal round's long message, and a summary lo
   assert.ok(asked > 512 && asked < 8192 - Buffer.byteLength(message, "utf8"), "the summarizer is asked for what fits");
 });
 
-test("/autocompact: on by default at 95%; a lower share compacts sooner; off stops a full chat with what to do", async () => {
+test("legacy auto-compact preferences remain readable but cannot summarize records below their hard limit", async () => {
   const fresh = compactWorld("x".repeat(100));
   assert.deepEqual(await fresh.workflow.call("chat_auto_compact", {}), { ok: true, autoCompact: true, percent: 95, limit: 8192 });
   await assert.rejects(fresh.workflow.call("chat_auto_compact", { percent: 10 }), /20% to 100%/);
   await assert.rejects(fresh.workflow.call("chat_auto_compact", { enabled: "yes" }), /on or off/);
 
-  // At 50%, a 5,000-character chat compacts before its next message though it is not full.
-  const early = compactWorld("x".repeat(5000));
-  assert.equal((await early.workflow.call("chat_auto_compact", { percent: 50 })).percent, 50);
-  await early.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on" });
-  assert.match(early.world.tasks[0].description, /^Summary of the earlier conversation[\s\S]*\nDid the first half\.\n\nFollow-up \([^)]+ UTC\):\ngo on$/);
+  for (const percent of [20, 50, 95, 100]) {
+    const early = compactWorld("x".repeat(7800));
+    assert.equal((await early.workflow.call("chat_auto_compact", { percent })).percent, percent);
+    await early.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on" });
+    assert.match(early.world.tasks[0].description, /^x{7800}\n\nFollow-up \([^)]+ UTC\):\ngo on$/);
+    assert.equal(early.prompts.length, 0, "task-record bytes are not a model-token compaction threshold");
+  }
+});
 
-  // Below the limit, a summarizer that fails does not stop the message: it compacts next time.
-  const down = compactWorld("x".repeat(5000), { fail: true });
-  await down.workflow.call("chat_auto_compact", { percent: 50 });
-  await down.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on" });
-  assert.match(down.world.tasks[0].description, /^x{5000}\n\nFollow-up \([^)]+ UTC\):\ngo on$/);
-  assert.equal(down.prompts.length, 1, "it tried");
-
+test("a legacy auto-compact off preference cannot strand a chat whose task record needs rollover", async () => {
   const off = compactWorld("x".repeat(8180));
   assert.equal((await off.workflow.call("chat_auto_compact", { enabled: false })).autoCompact, false);
-  await assert.rejects(off.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" }), /Use \/compact, or turn auto-compact on with \/autocompact on/);
-  assert.equal(off.prompts.length, 0, "nothing was summarized");
-  assert.equal(off.world.tasks[0].description, "x".repeat(8180));
+  await off.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(off.prompts.length, 1, "only the full task record is rolled over");
+  assert.match(off.world.tasks[0].description, /^Summary of the earlier conversation[\s\S]*\nDid the first half\.\n\nFollow-up \([^)]+ UTC\):\nkeep going$/);
+  assert.ok(Buffer.byteLength(off.world.tasks[0].description, "utf8") <= 8192);
+});
+
+test("failed task-record rollover preserves the record and never suggests native /compact as a repair", async () => {
+  const down = compactWorld("x".repeat(8180), { fail: true });
+  await down.workflow.call("chat_auto_compact", { enabled: false });
+  await assert.rejects(down.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" }), error => {
+    assert.match(error.message, /task record is full and couldn't be rolled over/);
+    assert.doesNotMatch(error.message, /\/compact|\/autocompact/);
+    return true;
+  });
+  assert.equal(down.world.tasks[0].description, "x".repeat(8180));
 });
 
 test("/compact uses Codex's no-instructions contract instead of summarizing task metadata", async () => {
