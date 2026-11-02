@@ -146,7 +146,7 @@ test.each(["success", "tools-success", "luna-success", "rich-success", "changed-
     surfaceId: "launcher_surface_id_0123456789AB",
     surfaceTargets: { ["launcher_surface_id_0123456789AB"]: "native-owned-target" },
     createdAt: new Date().toISOString(),
-  }));
+  }), { mode: 0o600 });
   const client = new LauncherBrowserHelperClient({
     appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: descriptorPath,
     browserHelperScriptPath: helper, storageStatePath: join(root, "unused-state.json"),
