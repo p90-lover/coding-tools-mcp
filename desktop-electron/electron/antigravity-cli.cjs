@@ -329,7 +329,32 @@ function createAntigravityCli({
     return current.executable;
   }
 
-  return Object.freeze({ status, install, update, executable, binDir: () => { if (!installed()) return null; executable(); return binDir; }, manifest });
+  /**
+   * The shim folder for AO's PATH, or null before an install (resolves). AO's start awaits it:
+   * the same scan done synchronously held main 0.6-0.8 s per call on a cold disk after launch.
+   */
+  async function binDirAsync() {
+    let names = [];
+    try {
+      names = (await fs.promises.readdir(root, { withFileTypes: true }))
+        .filter(entry => entry.isDirectory() && VERSION.test(entry.name)).map(entry => entry.name)
+        .sort((left, right) => compareVersion(right, left));
+    } catch {}
+    let target = null;
+    for (const version of names) {
+      try {
+        const marker = JSON.parse(await fs.promises.readFile(markerPath(path.join(root, version)), "utf8"));
+        const candidate = path.join(root, version, marker.executable);
+        if (marker.version === version && (await fs.promises.stat(candidate)).isFile()) { target = candidate; break; }
+      } catch {}
+    }
+    if (!target) return null;
+    const shim = await fs.promises.readFile(shimPath, "utf8").catch(() => null);
+    if (shim !== shimBody(target, platform)) writeShim(target);
+    return binDir;
+  }
+
+  return Object.freeze({ status, install, update, executable, binDir: binDirAsync, manifest });
 }
 
 module.exports = { createAntigravityCli, loadManifest, releaseManifest, compareVersion, platformAsset, validateArchive, findExecutable, tarBinary, shimBody, shimProxyEnvironment, manualAuthEnvironment };
