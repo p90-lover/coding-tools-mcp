@@ -25,7 +25,7 @@ import { WorkspacePanel } from "./features/WorkspacePanel";
 import { WorkspaceAuthPanel } from "./features/WorkspaceAuthPanel";
 import { NativeCodexPanel } from "./features/NativeCodexPanel";
 import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOriginalSurface";
-import { AgentOrchestratorSurface } from "./features/AgentOrchestratorSurface";
+import { ChatPages } from "./features/ChatPages";
 import { AgentOrchestratorTeamsSurface } from "./features/AgentOrchestratorTeamsSurface";
 import { SubagentsSurface } from "./features/SubagentsSurface";
 import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
@@ -1028,7 +1028,7 @@ function LauncherShell({
             {keepAlive("agent-orchestrator", () => (
               <section className="gpb-chat" aria-label="Coding Tools Chat">
                 <SurfaceHiddenContext.Provider value={surface !== "agent-orchestrator"}>
-                  <AgentOrchestratorSurface language={language} setError={setError} />
+                  <ChatPages language={language} setError={setError} />
                 </SurfaceHiddenContext.Provider>
               </section>
             ))}
