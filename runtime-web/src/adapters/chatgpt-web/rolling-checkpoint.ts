@@ -321,7 +321,7 @@ export class ChatGptLunaCheckpointStore {
       throw new Error("ChatGPT Luna rolling checkpoint answer hash does not match the completed browser answer");
     }
     const answerHash = hashChatGptLunaAnswer(displayedAnswer);
-    this.load();
+    this.load(true);
     const stored: StoredChatGptLunaCheckpoint = {
       threadId: identity.threadId,
       sourceTurnId: identity.turnId,
@@ -354,10 +354,13 @@ export class ChatGptLunaCheckpointStore {
     }
   }
 
-  private load(): void {
-    if (this.loaded) return;
-    this.loaded = true;
-    if (!this.path || !existsSync(this.path)) return;
+  private load(refresh = false): void {
+    if (this.loaded && !refresh) return;
+    if (!this.path || !existsSync(this.path)) {
+      if (this.path) this.checkpoints.clear();
+      this.loaded = true;
+      return;
+    }
     const payload = JSON.parse(readFileSync(this.path, "utf8")) as Partial<StoredChatGptLunaCheckpointFile>;
     if (payload.version !== 1 || !Array.isArray(payload.checkpoints)) {
       throw new Error(`Invalid ChatGPT Luna checkpoint store: ${this.path}`);
@@ -366,10 +369,12 @@ export class ChatGptLunaCheckpointStore {
       .map(validateStoredCheckpoint)
       .sort((left, right) => left.updatedAt - right.updatedAt)
       .slice(-MAX_STORED_CHECKPOINTS);
+    this.checkpoints.clear();
     for (const checkpoint of checkpoints) {
       this.checkpoints.set(checkpointKey(checkpoint.threadId, checkpoint.answerHash), checkpoint);
     }
     this.prune();
+    this.loaded = true;
   }
 
   private persist(): void {
