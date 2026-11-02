@@ -2132,7 +2132,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // It may wait briefly (rtk's automatic install), so the start is checked again after it.
         Object.assign(environment, await extraEnv());
         checkStartup();
-        const toolBin = extraPath();
+        const toolBin = await extraPath();
+        checkStartup();
         if (toolBin) {
           const pathKey = Object.keys(environment).find(key => key.toUpperCase() === "PATH") || "PATH";
           environment[pathKey] = [toolBin, environment[pathKey]].filter(Boolean).join(path.delimiter);

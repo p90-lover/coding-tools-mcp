@@ -4580,7 +4580,7 @@ async function start() {
         path.join(app.getPath("userData"), "integrations", "state", "cpa")),
 
       // rtk's folder too: a command RTK rewrote in an agent's own shell calls `rtk`.
-      extraPath: () => [antigravityCli.binDir(), rtk.binDir()].filter(Boolean).join(path.delimiter),
+      extraPath: async () => [await antigravityCli.binDir(), rtk.binDir()].filter(Boolean).join(path.delimiter),
       extraEnv: async () => {
         // An rtk install still running (the automatic one at startup) finishes first, up to 15 s:
         // the daemon's PATH and Claude's hook are fixed for its whole run.
