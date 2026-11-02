@@ -167,3 +167,43 @@ test("a write that fails for another reason leaves no partial temp file", (t) =>
   fs.writeFileSync = original;
   assert.deepEqual(fs.readdirSync(directory), []);
 });
+
+test("a committed replacement cannot fail because cleaning its consumed temp path is refused", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-atomic-committed-"));
+  const filePath = path.join(directory, "state.json");
+  fs.writeFileSync(filePath, "old");
+  const { renameSync, rmSync } = fs;
+  let committed = false;
+  t.after(() => { fs.renameSync = renameSync; fs.rmSync = rmSync; fs.rmSync(directory, { recursive: true, force: true }); });
+  fs.renameSync = function (from, to) {
+    const result = renameSync.call(fs, from, to);
+    if (to === filePath) committed = true;
+    return result;
+  };
+  fs.rmSync = function (target, ...args) {
+    if (committed && String(target).startsWith(`${filePath}.tmp-`)) {
+      throw Object.assign(new Error("cleanup refused after commit"), { code: "EIO" });
+    }
+    return rmSync.call(fs, target, ...args);
+  };
+  assert.doesNotThrow(() => writePrivateFileAtomic(filePath, "new"));
+  assert.equal(committed, true);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "new");
+  assert.deepEqual(fs.readdirSync(directory), ["state.json"]);
+});
+
+test("a failed replacement preserves its target and removes only its own temp", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-atomic-rename-fail-"));
+  const filePath = path.join(directory, "state.json");
+  fs.writeFileSync(filePath, "old");
+  const original = fs.renameSync;
+  const failure = Object.assign(new Error("replacement failed"), { code: "EIO" });
+  t.after(() => { fs.renameSync = original; fs.rmSync(directory, { recursive: true, force: true }); });
+  fs.renameSync = (from, to) => {
+    if (to === filePath) throw failure;
+    return original.call(fs, from, to);
+  };
+  assert.throws(() => writePrivateFileAtomic(filePath, "new"), error => error === failure);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "old");
+  assert.deepEqual(fs.readdirSync(directory), ["state.json"]);
+});

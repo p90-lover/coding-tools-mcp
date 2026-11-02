@@ -16,7 +16,7 @@ const isThreadId = (value) => typeof value === "string" && THREAD_ID.test(value)
  * account (the bridge sends the whole task then); its old chats stay with the old account.
  */
 function createThreadAccounts({ filePath, io = fs, now = Date.now, logger = null }) {
-  const threads = new Map(); // threadId -> { accountId, boundAt, lastUsedAt }
+  let threads = new Map(); // threadId -> { accountId, boundAt, lastUsedAt }
   let unavailable = false;
   if (io.existsSync(filePath)) {
     try {
@@ -42,9 +42,11 @@ function createThreadAccounts({ filePath, io = fs, now = Date.now, logger = null
     }
   }
 
-  const save = () => {
-    if (unavailable) return;
-    writePrivateFileAtomic(filePath, `${JSON.stringify({ version: 1, threads: Object.fromEntries(threads) }, null, 2)}\n`);
+  const save = (next) => {
+    if (!unavailable) {
+      writePrivateFileAtomic(filePath, `${JSON.stringify({ version: 1, threads: Object.fromEntries(next) }, null, 2)}\n`);
+    }
+    threads = next;
   };
 
   return {
@@ -59,28 +61,33 @@ function createThreadAccounts({ filePath, io = fs, now = Date.now, logger = null
       const id = threadId.toLowerCase();
       const previous = threads.get(id);
       const at = now();
-      threads.set(id, {
+      if (previous?.accountId === accountId && previous.lastUsedAt === at) return accountId;
+      const next = new Map(threads);
+      next.set(id, {
         accountId,
         boundAt: previous?.accountId === accountId ? previous.boundAt : at,
         lastUsedAt: at,
       });
-      save();
+      save(next);
       return accountId;
     },
 
     unbind(threadId) {
-      if (!isThreadId(threadId) || !threads.delete(threadId.toLowerCase())) return false;
-      save();
+      if (!isThreadId(threadId) || !threads.has(threadId.toLowerCase())) return false;
+      const next = new Map(threads);
+      next.delete(threadId.toLowerCase());
+      save(next);
       return true;
     },
 
     /** Drops a removed account's bindings: those threads start fresh on the account in use. */
     removeAccount(accountId) {
+      const next = new Map(threads);
       let changed = false;
       for (const [threadId, entry] of threads) {
-        if (entry.accountId === accountId) changed = threads.delete(threadId) || changed;
+        if (entry.accountId === accountId) changed = next.delete(threadId) || changed;
       }
-      if (changed) save();
+      if (changed) save(next);
       return changed;
     },
 
