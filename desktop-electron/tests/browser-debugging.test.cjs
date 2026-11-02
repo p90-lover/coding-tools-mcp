@@ -77,10 +77,13 @@ test("browser debugging refuses invalid fresh port records", async () => {
   }
 });
 
-test("browser debugging refuses late switch configuration", () => {
+test("browser debugging refuses late switch configuration before disk IO", t => {
   const { prepareBrowserDebugging } = require("../electron/browser-debugging.cjs");
   const { app, calls } = fixture(true);
+  let diskReads = 0;
+  t.mock.method(fs, "readFileSync", () => { diskReads++; assert.fail("late disk read"); });
   assert.throws(() => prepareBrowserDebugging(app), /before Electron is ready/);
+  assert.equal(diskReads, 0);
   assert.deepEqual(calls, []);
 });
 
