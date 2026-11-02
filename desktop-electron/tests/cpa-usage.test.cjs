@@ -1,8 +1,11 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
+const ts = require("typescript");
 const {
   createCpaUsage, aggregateUsage, summarizeRecords, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
 } = require("../electron/cpa-usage.cjs");
@@ -414,4 +417,155 @@ test("a long turn's stats read every page of records instead of stopping at the 
   const unpaged = await statsFor(false);
   assert.equal(unpaged.stats.steps, 500, "a helper that ignores page is counted once, not twice");
   assert.deepEqual(unpaged.pages, [1, 2]);
+});
+
+function usagePanelFixture(t) {
+  const file = path.resolve(__dirname, "../src/features/CpaUsagePanel.tsx");
+  const source = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const nodes = {};
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && ["read", "choose"].includes(node.name.getText(source))) nodes[node.name.getText(source)] = node.initializer;
+    if (ts.isCallExpression(node) && node.expression.getText(source) === "useEffect") nodes.effect = node.arguments[0];
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  for (const name of ["read", "choose", "effect"]) assert.ok(nodes[name], `actual panel ${name}`);
+  const js = ts.transpileModule(Object.entries(nodes).map(([name, node]) => `exports.${name} = ${node.getText(source)};`).join("\n"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const state = { range: "24h", usage: null, error: "", busy: false };
+  const inFlight = { current: null }, lastRead = { current: 0 }, currentRange = { current: state.range };
+  const root = { current: { offsetParent: {} } }, timers = new Map(), listeners = new Map(), requests = [];
+  let clock = NOW, hidden = false, timerId = 0, callbacks, globals, cleanup;
+  const render = () => {
+    cleanup?.();
+    currentRange.current = state.range;
+    const exports = {};
+    globals = { exports, range: state.range, open: true, root, inFlight, lastRead, currentRange, REFRESH_MS: 60_000, RANGE_KEY: "range",
+      useCallback: callback => callback, Date: { now: () => clock }, Error, pageHidden: () => hidden,
+      localStorage: { setItem() {} }, setRange: value => { state.range = value; },
+      setUsage: value => { state.usage = value; }, setError: value => { state.error = value; }, setBusy: value => { state.busy = value; },
+      window: { setInterval: callback => { timers.set(++timerId, callback); return timerId; }, clearInterval: id => timers.delete(id) },
+      document: { addEventListener: (event, callback) => listeners.set(event, callback), removeEventListener: event => listeners.delete(event) },
+      readCpaUsage(range) {
+        let resolve, reject;
+        const request = { range, settled: false, promise: new Promise((done, fail) => { resolve = done; reject = fail; }) };
+        request.resolve = value => { request.settled = true; resolve(value); };
+        request.reject = error => { request.settled = true; reject(error); };
+        requests.push(request);
+        return request.promise;
+      },
+    };
+    vm.runInNewContext(js, globals);
+    callbacks = exports;
+    const read = exports.read;
+    globals.read = force => {
+      const before = requests.length;
+      const completion = read(force);
+      if (requests.length > before) requests.at(-1).completion = completion;
+      return completion;
+    };
+    cleanup = exports.effect();
+  };
+  t.after(async () => {
+    cleanup?.();
+    for (const request of requests) if (!request.settled) request.resolve(null);
+    await Promise.all(requests.map(request => request.completion));
+  });
+  render();
+  return { state, requests, timers, listeners,
+    choose(range) { callbacks.choose(range); render(); },
+    refresh: () => globals.read(true), pulse: () => { for (const tick of timers.values()) tick(); },
+    advance: milliseconds => { clock += milliseconds; }, hidden: value => { hidden = value; },
+    shown: value => { root.current.offsetParent = value ? {} : null; },
+    visible: () => listeners.get("visibilitychange")?.(), stop: () => cleanup?.(),
+  };
+}
+
+test("CPA 24h to 7d to 24h keeps the newest reply and refresh clock", async (t) => {
+  const panel = usagePanelFixture(t);
+  panel.choose("7d");
+  panel.choose("24h");
+  assert.deepEqual(panel.requests.map(request => request.range), ["24h", "7d", "24h"]);
+  const newest = { available: true, range: "24h", refreshedAt: NOW + 2_000 };
+  panel.advance(2_000);
+  panel.requests[2].resolve(newest);
+  await panel.requests[2].completion;
+  panel.advance(30_000);
+  panel.requests[0].resolve({ available: true, range: "24h", refreshedAt: NOW });
+  await panel.requests[0].completion;
+  assert.equal(panel.state.usage, newest, "an older request for the selected range cannot replace its newer reply");
+  panel.advance(30_000);
+  panel.pulse();
+  assert.equal(panel.requests.length, 4, "a stale reply cannot move the refresh clock forward");
+});
+
+test("a stale CPA success cannot retire a newer read or defeat same-range deduplication", async (t) => {
+  const panel = usagePanelFixture(t);
+  panel.choose("7d");
+  panel.choose("24h");
+  panel.requests[0].resolve({ available: true, range: "24h" });
+  await panel.requests[0].completion;
+  assert.equal(panel.state.usage, null);
+  assert.equal(panel.state.busy, true);
+  await panel.refresh();
+  assert.equal(panel.requests.length, 3, "the newer read still owns the selected range");
+  panel.requests[1].resolve({ available: true, range: "7d" });
+  await panel.requests[1].completion;
+  assert.equal(panel.state.busy, true, "another range's finally also cannot clear the active read");
+  panel.requests[2].resolve({ available: true, range: "24h" });
+  await panel.requests[2].completion;
+  assert.equal(panel.state.busy, false);
+});
+
+test("stale CPA errors stay silent while the current read retains error and busy ownership", async (t) => {
+  const panel = usagePanelFixture(t);
+  panel.choose("7d");
+  panel.choose("24h");
+  panel.requests[0].reject(new Error("old range read failed"));
+  await panel.requests[0].completion;
+  assert.equal(panel.state.error, "");
+  assert.equal(panel.state.busy, true);
+  panel.requests[1].reject(new Error("abandoned range failed"));
+  await panel.requests[1].completion;
+  assert.equal(panel.state.error, "");
+  assert.equal(panel.state.busy, true);
+  panel.requests[2].reject(new Error("current read failed"));
+  await panel.requests[2].completion;
+  assert.equal(panel.state.error, "current read failed");
+  assert.equal(panel.state.busy, false);
+  const retry = panel.refresh();
+  panel.requests[3].resolve({ available: false });
+  await retry;
+  assert.equal(panel.state.error, "");
+  assert.equal(panel.state.busy, false);
+});
+
+test("CPA reads retain pending deduplication, visibility gating, refresh cadence and timer cleanup", async (t) => {
+  const panel = usagePanelFixture(t);
+  await panel.refresh();
+  assert.equal(panel.requests.length, 1);
+  panel.requests[0].resolve({ available: false });
+  await panel.requests[0].completion;
+  panel.advance(58_999);
+  panel.pulse();
+  assert.equal(panel.requests.length, 1);
+  panel.advance(1);
+  panel.pulse();
+  assert.equal(panel.requests.length, 2, "keep the existing one-second refresh tolerance");
+  panel.requests[1].resolve({ available: false });
+  await panel.requests[1].completion;
+  panel.advance(60_000);
+  panel.hidden(true);
+  panel.pulse();
+  panel.hidden(false);
+  panel.shown(false);
+  panel.pulse();
+  assert.equal(panel.requests.length, 2);
+  panel.shown(true);
+  panel.visible();
+  assert.equal(panel.requests.length, 3, "returning to view refreshes a stale reading");
+  panel.stop();
+  assert.equal(panel.timers.size, 0);
+  assert.equal(panel.listeners.size, 0);
 });

@@ -80,28 +80,31 @@ export function CpaUsagePanel({ language }: { language: Language }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const root = useRef<HTMLElement>(null);
   const lastRead = useRef(0);
-  const inFlight = useRef<CpaUsageRange | null>(null);
+  const inFlight = useRef<{ range: CpaUsageRange } | null>(null);
   const currentRange = useRef(range);
   currentRange.current = range;
 
   const read = useCallback(async (force = false) => {
     // A kept-alive pane stays mounted while another surface shows: skip it then, and when hidden.
-    if (inFlight.current === range || pageHidden() || !root.current?.offsetParent) return;
+    if (inFlight.current?.range === range || pageHidden() || !root.current?.offsetParent) return;
     if (!force && Date.now() - lastRead.current < REFRESH_MS - 1_000) return;
-    inFlight.current = range;
+    const request = { range };
+    inFlight.current = request;
     setBusy(true);
     try {
       const next = await readCpaUsage(range);
-      // A reading for a period the user has since left is dropped.
-      if (currentRange.current !== range) return;
+      // Only the latest request for the selected period may publish.
+      if (inFlight.current !== request || currentRange.current !== range) return;
       lastRead.current = Date.now();
       setUsage(next);
       setError("");
     } catch (cause) {
-      if (currentRange.current === range) setError(cause instanceof Error ? cause.message : String(cause));
+      if (inFlight.current === request && currentRange.current === range) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      if (inFlight.current === range) inFlight.current = null;
-      setBusy(false);
+      if (inFlight.current === request) {
+        inFlight.current = null;
+        setBusy(false);
+      }
     }
   }, [range]);
 
