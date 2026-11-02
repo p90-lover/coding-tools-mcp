@@ -2014,15 +2014,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // the longest texts are cut first, then tool arguments, output and diffs, and only then the oldest
   // items, so the turn still opens with as many of its tool calls as fit.
   const TIMELINE_RESPONSE_BYTES = 800_000;
-  function fitTimeline(items) {
+  function fitTimeline(items, byteBudget = TIMELINE_RESPONSE_BYTES) {
     const size = () => Buffer.byteLength(JSON.stringify(items));
-    if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    if (size() <= byteBudget) return items;
     const cut = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit).replace(/[\ud800-\udbff]$/, "")}…`;
     for (const limit of [16 * 1024, 4096, 1024]) {
       // A steer may contain structured annotations and attachments; keep it whole or let the
       // oldest-item eviction below remove it whole, never leave an unparseable prompt prefix.
       items = items.map(item => item.kind !== "steer" && item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
-      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+      if (size() <= byteBudget) return items;
     }
     // Tool calls keep a shorter input and output before they lose them: with up to 16 KB of output
     // each (READ_TOOL_BYTES), a long turn would otherwise drop every call's details at once.
@@ -2030,11 +2030,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       items = items.map(item => ({ ...item,
         ...(item.input?.length > limit ? { input: cut(item.input, limit) } : {}),
         ...(item.output?.length > limit ? { output: cut(item.output, limit) } : {}) }));
-      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+      if (size() <= byteBudget) return items;
     }
     items = items.map(({ input: _input, output: _output, files, ...item }) =>
       files ? { ...item, files: files.map(({ diff: _diff, ...file }) => file) } : item);
-    while (items.length > 1 && size() > TIMELINE_RESPONSE_BYTES) items = items.slice(Math.ceil(items.length / 10));
+    // Remove a whole item that cannot fit before evicting older, fitting replies beside it.
+    items = items.filter(item => Buffer.byteLength(JSON.stringify([item])) <= byteBudget);
+    while (items.length > 0 && size() > byteBudget) items = items.slice(Math.ceil(items.length / 10));
     return items;
   }
 
@@ -2152,8 +2154,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               const session = node.receipt?.thread_id;
               if (!session) frame = { ...base, activity: launchStages.get(nodeKey(id, run, node.id))?.text ?? "launching" };
               else {
-                const observed = await harnessService().observe(session);
-                const currentTurn = !node.receipt?.turn_id || observed.turnId === node.receipt.turn_id;
+                // A queued follow-up can be the session's newest turn while this card still owns
+                // another one. Read that turn, as the run loop does, rather than dropping its reply.
+                const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session);
+                const observed = await harnessService().observe(session, expectedTurn);
+                const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
                 frame = { ...base, turn_started: Boolean(observed.turnId),
                   activity: currentTurn ? describeTurn(observed, { mission, node }) : observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
                   step: publicText(observed.activity || observed.turnState || "working", 120),
@@ -2199,7 +2204,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       nodes[node.id] = { ...(entry.frame || base), state: node.state, pending: Boolean(entry.pending) };
     }
-    return { ok: true, now_ms: Date.now(), nodes };
+    const response = { ok: true, now_ms: Date.now(), nodes };
+    if (Buffer.byteLength(JSON.stringify(response)) > TIMELINE_RESPONSE_BYTES) {
+      const frames = Object.values(nodes).filter(frame => frame.timeline?.length);
+      if (frames.length) {
+        // All nodes share one IPC response. Reserve their output and metadata before fitting
+        // response-owned timelines; trimming the cached frames would lose detail on later reads.
+        const metadata = { ...response, nodes: Object.fromEntries(Object.entries(nodes)
+          .map(([id, frame]) => [id, { ...frame, timeline: [] }])) };
+        const byteBudget = Math.max(2, Math.floor((TIMELINE_RESPONSE_BYTES
+          - Buffer.byteLength(JSON.stringify(metadata))) / frames.length));
+        for (const frame of frames) frame.timeline = fitTimeline(frame.timeline, byteBudget);
+      }
+    }
+    return response;
   }
 
   // A start blocked on the browser is reported as the operation's result: errors thrown across
