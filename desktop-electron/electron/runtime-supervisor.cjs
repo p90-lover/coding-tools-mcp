@@ -105,6 +105,28 @@ function pathIdentity(value, platform = process.platform) {
   return platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
+// A folder reached through a Windows junction has two names. On 2026-11-02 the app was started with
+// CODING_TOOLS_HOME at G:\AppData\.coding-tools while config.json, written by an earlier start, named
+// its descriptor through the C:\Users\simon\.coding-tools junction: every config read failed, the
+// bridge did not start and the watchdog could not check it. Each folder's real path is looked up
+// once (it is read on main) and kept.
+const realFolders = new Map();
+function samePhysicalPath(left, right, platform = process.platform) {
+  if (pathIdentity(left, platform) === pathIdentity(right, platform)) return true;
+  if (platform !== process.platform) return false;
+  const physical = (value) => {
+    const folder = path.dirname(value);
+    const key = pathIdentity(folder, platform);
+    if (!realFolders.has(key)) {
+      let real = folder;
+      try { real = fs.realpathSync.native(folder); } catch { /* a missing folder keeps its own name */ }
+      realFolders.set(key, real);
+    }
+    return pathIdentity(path.join(realFolders.get(key), path.basename(value)), platform);
+  };
+  return physical(left) === physical(right);
+}
+
 function windowsPipeEndpoint(value) {
   return /^\\\\\.\\pipe\\[A-Za-z0-9._-]+$/.test(value);
 }
@@ -312,7 +334,7 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
   }
   if (config.browserHost !== "launcher") throw new Error("Runtime configuration is not owned by the launcher");
   if (!absolutePath(config.browserHostDescriptorPath || "", platform)
-    || pathIdentity(config.browserHostDescriptorPath || "", platform) !== pathIdentity(descriptorPath, platform)) {
+    || !samePhysicalPath(config.browserHostDescriptorPath || "", descriptorPath, platform)) {
     throw new Error("Runtime configuration points to a different launcher browser host");
   }
   if (config.host !== "127.0.0.1"
