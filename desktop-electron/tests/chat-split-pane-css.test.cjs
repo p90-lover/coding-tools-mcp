@@ -83,6 +83,16 @@ test("a narrow goal bar always breaks before its objective, whatever the pane's 
   assert.match(tier, /\.cx-goal \.cx-goal-meta \{ order: 3; \}/, "its time beside it");
 });
 
+// Asked for 2026-11-03: the head fades into the chat, so a little more of it shows under the head.
+test("the chat's head floats over the transcript and fades out, and the transcript starts below it", () => {
+  const head = rule(".cx-thread-head");
+  assert.match(head, /position: absolute; z-index: 1; top: 0; right: 0; left: 0;/);
+  assert.match(head, /background: linear-gradient\(to bottom, var\(--color-bg-primary\) 50%, transparent\); pointer-events: none;/);
+  assert.match(css, /\.cx-thread-head > :not\(\.cx-head-spacer\) \{ pointer-events: auto; \}/, "its buttons and title still take clicks");
+  assert.match(rule(".cx-thread"), /position: relative;/, "it floats over its own pane only");
+  assert.match(rule(".cx-scroll"), /padding-top: 48px; scroll-padding-top: 48px;/, "the first line and sticky headers start below the head");
+});
+
 // Asked for the same day: the objective holds one line, fades out into its time, and shrinks with the pane.
 test("the goal's objective is one line that fades out before its time and shrinks with the pane", () => {
   const objective = rule(".cx-goal-objective");
