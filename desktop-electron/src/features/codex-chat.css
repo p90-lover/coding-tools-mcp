@@ -1383,7 +1383,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal.is-achieved .cx-goal-state { color: var(--ao-green); }
 .cx-goal.is-stalled .cx-goal-state, .cx-goal.is-limited .cx-goal-state { color: var(--ao-amber); }
 .cx-wakeup-glyph { flex: 0 0 auto; color: var(--ao-blue); font-size: 13px; line-height: 1; }
-.cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }
+/* The objective holds one line and fades out before its time, as a thread title does, and its type
+   shrinks with the pane (12 px from a 500 px chat, 10 px at 375 px and under). */
+.cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); font-size: clamp(10px, 1.6cqi + 4px, 12px); white-space: nowrap;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
 .cx-goal-meta, .cx-goal-note { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The goal check's verdict, opened from the goal bar's target: a box of its own on the row above the

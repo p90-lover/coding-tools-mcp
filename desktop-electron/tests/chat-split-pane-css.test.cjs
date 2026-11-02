@@ -66,3 +66,12 @@ test("a narrow goal bar always breaks before its objective, whatever the pane's 
   assert.match(tier, /\.cx-goal-objective \{ order: 2; flex: 1 1 0;/, "the objective starts the second row, from no width");
   assert.match(tier, /\.cx-goal \.cx-goal-meta \{ order: 3; \}/, "its time beside it");
 });
+
+// Asked for the same day: the objective holds one line, fades out into its time, and shrinks with the pane.
+test("the goal's objective is one line that fades out before its time and shrinks with the pane", () => {
+  const objective = rule(".cx-goal-objective");
+  assert.match(objective, /white-space: nowrap;/);
+  assert.doesNotMatch(objective, /text-overflow: ellipsis/, "a fade, not an ellipsis");
+  assert.match(objective, /mask-image: linear-gradient\(to right, #000 calc\(100% - 32px\), transparent\);/);
+  assert.match(objective, /font-size: clamp\(10px, 1\.6cqi \+ 4px, 12px\);/, "sized by the chat's width, not the window's");
+});
