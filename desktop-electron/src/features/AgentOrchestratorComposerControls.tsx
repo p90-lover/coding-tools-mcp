@@ -286,15 +286,16 @@ export function AgentOrchestratorComposerControls({
   };
   return <div className="ao-composer-controls">
     {permissions}
-    {/* Who answers, as two logos on a sliding thumb: one person (one model by itself) or a group (a
-        saved team). "Single | Team" in words took ~100 px of a split pane's chat box and read alike. */}
-    <div className="ao-mode-switch" role="group" aria-label="Who answers" data-mode={mode}>
-      {(["single", "team"] as const).map(option => <button key={option} type="button" aria-pressed={mode === option}
-        aria-label={option === "single" ? "Single" : "Team"} className={mode === option ? "is-active" : undefined} disabled={busy}
-        title={option === "single" ? "Single: one model answers by itself" : "Team: a saved team works on it"}
-        onClick={() => { if (mode !== option) onModeChange(option); }}>
-        <Icon name={option === "single" ? "user" : "team"} width="15" height="15" /></button>)}
-    </div>
+    {/* Who answers, one click to switch: the logo of the mode in use, a person (one model by itself) or a
+        group (a saved team). Both logos are in the button, so a switch rolls one out as the other rolls in.
+        Two buttons on a sliding thumb asked for an aimed click and ~56 px of a split pane's chat box. */}
+    <button type="button" className="ao-mode-toggle" role="switch" aria-checked={mode === "team"} aria-label="Team mode"
+      data-mode={mode} disabled={busy}
+      title={mode === "single" ? "Single: one model answers by itself · click for Team" : "Team: a saved team works on it · click for Single"}
+      onClick={() => onModeChange(mode === "single" ? "team" : "single")}>
+      <span className="ao-mode-face is-single" aria-hidden="true"><Icon name="user" width="15" height="15" /></span>
+      <span className="ao-mode-face is-team" aria-hidden="true"><Icon name="team" width="15" height="15" /></span>
+    </button>
     {mode === "single" ? <>
       {/* The harness shows only its logo; its name is in the tooltip and the accessible label. */}
       <ChipMenu heading="Harness" showHeading={false} popupClass="ao-tuning-popup ao-harness-popup" className="is-logo" ariaLabel={`Harness: ${harnessName}`} disabled={busy || isWebModel(route.model)}

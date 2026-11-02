@@ -39,7 +39,7 @@ test("a narrow chat keeps its buttons whole: they never shrink, and what the hea
   assert.match(css, /\.cx-thread-head > :is\(\.cx-icon-button, \.cx-browser-chip\), \.cx-composer-bar > :is\(\.cx-icon-button, \.cx-send\) \{ flex: none; \}/);
   assert.match(container(560), /\.cx-compact-toggle, \[aria-label="Open Mission Board"\]\) \{ display: none; \}/);
   for (const label of ['label: "Compact activity"', 'label: "Mission Board"']) assert.ok(chat.includes(label), `the More menu has ${label}`);
-  assert.match(container(300), /\.ao-composer-chip > \.ui-caret \{ display: none; \}/, "under 300 px the chips drop their carets to keep both rows whole");
+  assert.match(container(420), /\.ao-composer-chip > \.ui-caret \{ display: none; \}/, "under 420 px the chips drop their carets, so two rows hold them");
   for (const px of [560, 400, 300]) assert.doesNotMatch(container(px), /\.ao-composer-controls \{[^}]*(order|flex-basis)/, `no ${px} px tier piles the chips onto rows of their own`);
   assert.match(container(300), /\[aria-label="Preview"\], \[aria-label="Show cards"\], \[aria-label="Show side panel"\]\) \{ display: none; \}/);
   assert.match(chat, /const NARROW_HEAD_PX = 300;/, "the More menu takes them over at the same width");
@@ -48,13 +48,37 @@ test("a narrow chat keeps its buttons whole: they never shrink, and what the hea
 
 // The same day, after #914: under ~720 px the one-row chat box cut the permission and model names
 // ("Ask fo…", "Opus 4…"), and #914's folding piled the chips onto up to four rows in a 340 px pane.
-test("a narrow chat box has two rows: what runs it on top, attach, permissions, mode and Send under it", () => {
+// Then two fixed rows left both half empty in a split pane and took two rows even at 700 px (2026-11-03).
+test("a narrow chat box keeps one row while it fits and folds onto a second only what doesn't", () => {
   const tier = container(720);
-  assert.match(tier, /\.cx-composer-bar \.ao-composer-controls \{ display: contents; \}/, "its chips can sit on either row");
-  assert.match(tier, /\.cx-composer-bar > \*, \.cx-composer-bar \.ao-composer-controls > \* \{ order: 2; \}/, "the bottom row by default");
-  assert.match(tier, /\.ao-composer-controls > \.ao-composer-picker:not\(\.ao-permissions\) \{ order: 0; \}/, "the harness, model, effort and window on top");
-  assert.match(tier, /\.cx-composer-bar::before \{ flex: 0 0 100%; order: 1; content: ""; \}/, "one break between them");
-  assert.match(tier, /\[aria-label="Choose model"\], \[aria-label="Choose saved team"\]\)\) \{ flex: 1 1 0; min-width: 0; \}/,
-    "the model starts from no width, so effort and window stay on its row instead of wrapping");
+  assert.match(tier, /\.cx-composer-bar \{ flex-wrap: wrap;/, "it may fold");
+  assert.match(tier, /\.cx-composer-bar \.ao-composer-controls \{ display: contents; \}/, "chip by chip, not the controls' box as a block");
+  assert.doesNotMatch(tier, /\.cx-composer-bar::before/, "no forced break between two fixed rows");
+  assert.doesNotMatch(tier, /order: \d/, "the chips stay in reading order");
+  assert.match(tier, /\[aria-label="Choose model"\], \[aria-label="Choose saved team"\]\)\) \{\s*flex: 0 1 auto; min-width: 0; max-width: calc\(100% - 184px\); \}/,
+    "the model keeps its name, never wider than the row less the chips before it: only effort, window and Send can fold, never onto a third row");
+  // Measured in split panes of 250-700 px with GPT-6.1 Sol, Claude Opus and "DeepSeek V4.1 Flash 1017(high)":
+  // two rows at most, one from about 560 px, nothing past the box's edge.
+  const narrow = container(420);
+  assert.match(narrow, /\.cx-composer-bar:has\(\.ao-composer-chip\[aria-label\^="Reasoning effort"\]\)::after \{ flex: 0 0 100%; order: 1; content: ""; \}/,
+    "under 420 px one break, right after the model, and only when there are effort and window chips to put under it");
+  assert.match(narrow, /\[aria-label\^="Reasoning effort"\], \[aria-label\^="Context window"\]\)\),\s*\.cx-composer-bar > \.cx-composer-send \{ order: 2; \}/,
+    "effort, window and Send take the second row");
+  assert.match(narrow, /\[aria-label="Choose model"\]\) \{ flex: 1 1 0; max-width: none; \}/, "the model takes what the first row leaves");
+  assert.match(css, /\n\.cx-composer-send \{ display: flex; flex: none; align-items: center; gap: 6px; margin-left: auto; \}/,
+    "Send, the mic and the context ring move as one, at the right end of the row they end on");
+  assert.match(chat, /<div className="cx-composer-send">\s*\{selectedTaskId \? <ChatContextMeter/, "the chat box groups them");
+  const bar = chat.slice(chat.indexOf('<div className="cx-composer-bar">'), chat.indexOf('<div className="cx-composer-send">'));
+  assert.ok(bar.includes("AgentOrchestratorComposerControls") && !bar.includes("cx-head-spacer"), "no spacer splits the row");
+  assert.match(tier, /\.cx-composer-send > \.cx-mic \{ display: none; \}/, "the placeholder mic leaves a narrow chat box");
+  assert.match(tier, /\.ao-permissions > \.ao-composer-chip > span \{ display: none; \}/, "the permission chip is its level's icon, its name on hover");
   assert.match(container(560), /\.cx-goal-objective \{ order: 1; flex: 1 1 60%;/, "the goal's objective gets a line of its own");
+});
+
+test("Single or Team is one switch whose logos roll over, and stays still for reduced motion", () => {
+  assert.match(css, /\.ao-mode-toggle\[data-mode="single"\] > \.is-team \{ opacity: 0; transform: translateY\(115%\)/, "Team waits below while Single is in use");
+  assert.match(css, /\.ao-mode-toggle\[data-mode="team"\] > \.is-single \{ opacity: 0; transform: translateY\(-115%\)/, "Single leaves upward for Team");
+  assert.match(css, /\.ao-mode-face \{[^}]*transition: transform/, "the logos move, they don't blink");
+  assert.match(css, /prefers-reduced-motion: reduce\) \{ \.ao-workflow \.cx-composer :is\(\.ao-mode-toggle, \.ao-mode-face\) \{ transition: none; \}/);
+  assert.doesNotMatch(css, /\.ao-mode-switch/, "the two-button switch is gone");
 });
