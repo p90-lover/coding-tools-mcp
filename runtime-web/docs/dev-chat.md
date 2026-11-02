@@ -50,12 +50,14 @@ and automatic compaction without embedding a giant fixture in the user prompt. I
 directly rather than through deferred tool search so the test can prove the requested call happened.
 
 Reusing the same name continues its canonical Responses history. Sequential native messages in the
-same compaction epoch lease one Temporary Chat, exactly like production. Every message receives a
+same compaction epoch lease one ChatGPT conversation, exactly like production. Every message receives a
 new turn-bound MCP token, and all MCP tool rounds for that message remain inside the same ChatGPT
 response. On an exact native compaction request, the same Web agent submits the checkpoint through
 a one-shot MCP control call in that chat; only then does the surface close and the next epoch open a
-new Temporary Chat. The complete named history remains owned by the existing prompt compiler. New
-chats use the cheapest account-supported browser mode:
+new chat. The complete named history remains owned by the existing prompt compiler. New
+chats follow **Settings → Temporary Chat** (on by default). Ordinary chats remain in ChatGPT history;
+`dev setup --temporary-chats` and `--ordinary-chats` explicitly select the mode. Chats use the cheapest
+account-supported browser mode:
 Instant (`light`) when Sol is available, otherwise Luna. Override it with `--model` or `/model`.
 
 Interactive commands:
@@ -82,6 +84,22 @@ it to exercise the one-message composer budget and multi-chunk prompt insertion 
 history growth. The normal model-specific browser preflight still applies and fails closed above
 the measured transport limit.
 
+## Skills as files experiment
+
+**Settings → Skills as files (experimental)** is off by default in both launcher profiles.
+It uploads only skills explicitly selected in Codex and identified by native selected-skill
+metadata. Skill discovery and reading other skills through tools are unchanged. The CLI setup
+flags are `--skill-attachments` and `--inline-skills`; Zero Risk does not support automated uploads.
+
+Each UTF-8 `.txt` attachment contains the original skill envelope, including its path or resource
+authority. Its filename uses the skill name and a content digest to distinguish changed versions.
+Files are generated in memory, with no persistent file cache. Retained chats send only new context;
+a fresh chat reconstructs its attachments from canonical history. Files and images share the
+10-attachment limit, and skill content still counts toward context and message token budgets.
+An unsupported browser helper or rejected upload produces an error instead of silently omitting
+instructions. This remains experimental: moving instructions into attachments does not guarantee
+that ChatGPT will follow them more reliably.
+
 ## Bigger Context experiment
 
 Both launcher profiles expose **Bigger Context (experimental)** in Settings. It is disabled by
@@ -92,7 +110,7 @@ The DEV CLI reads the same setting from its isolated runtime configuration on ea
 
 When enabled, a normal turn stays on the original single-message path while its estimated input
 is below the selected mode's existing auto-compaction threshold. At the first threshold it uses two
-messages; at twice that threshold it uses three messages. The final context part also commits the
+messages; at twice that threshold it uses six messages. The final context part also commits the
 transaction and starts the task, so there is no extra request. The existing DEV compaction threshold
 remains three times the selected mode's base limit.
 
@@ -110,19 +128,23 @@ capability and no ordinary work capability. The checkpoint never rides in the ta
 huge tool result, and its wait is capped at five minutes independently of the normal turn timeout.
 After the structured handoff is accepted, the bridge explicitly ends that one-purpose browser turn
 and waits for its physical launcher settlement before closing the old surface; the next epoch then
-starts a fresh Temporary Chat. This does not depend on ChatGPT rendering assistant text or a Copy
-action after the control-only response. If the retained private chat was already closed, the bridge
+starts a fresh chat. This does not depend on ChatGPT rendering assistant text or a Copy
+action after the control-only response. If the retained task chat was already closed, the bridge
 starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
-has no retained MCP boundary and keeps the three-message compaction path so its summarizer receives
+has no retained MCP boundary and uses the six-message compaction path so its summarizer receives
 the complete expanded history.
 
 Any missing or malformed acknowledgement fails the whole transaction. No later part or final
-commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The model context
+commit is sent, and a retry starts again from part one in a fresh chat. The model context
 and auto-compaction ceilings are reported as 3× while the switch is active, but every individual
 stage must still fit the selected ChatGPT mode's measured one-message boundary.
 
-Small turns add no requests. Two-part turns add two staging requests and acknowledgements; three-part
-turns add three. Browser-only compaction also uses three stages. Large turns are therefore slower and may increase the probability of
+Small turns use one request. Two-part turns use one inert staging request and one final request;
+six-part turns use five staging requests and one final request. Browser-only compaction also uses
+six parts. Inert stages use the fastest available mode that fits their complete messages; the final
+part uses the selected execution effort. Plus Instant uploads keep the same input headroom as
+ordinary Instant turns; the selected final mode can receive a larger share of the context.
+Large turns may increase the probability of
 rate limits or a temporary account cooldown. The experiment is intentionally unavailable for Luna:
 Luna's later requests still include the accumulated transcript inside the same measured
 28,000-token browser transport budget.

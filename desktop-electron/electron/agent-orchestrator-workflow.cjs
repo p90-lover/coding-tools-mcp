@@ -561,14 +561,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       logger?.info?.("ao.effort_fitted", { model: baseModel.slice(0, 120), effort, fitted: fitted || "auto" });
       effort = fitted;
     }
-    // Claude Code and Codex send the effort in the request body (Claude Code's output_config.effort,
-    // Codex's reasoning.effort), which CPA hands to the provider's own field. A "(level)" model suffix
-    // was refused outright by every Cline Pass model for "(auto)" and for any level outside its list,
-    // while the same levels in the body went through (tried 2026-10-22 on MiMo V2.6 Pro, DeepSeek V4.1
-    // Flash, GLM 5.3 Flash and Gemini 3.8 Flash). opencode has no body transport in AO and keeps it.
+    // Keep the body setting for harnesses that can forward it, but Claude Code also needs the
+    // validated suffix: AO clears AgentConfig.Effort for gateway sessions before its ACP driver
+    // runs, so a bare model lost "max" and DeepSeek requests fell back to "low". CPA's providers
+    // and Provider Manager read the suffix before the translated body's effort. Only a fitted
+    // level goes in the name: never "auto", an unsupported level, or a verbatim plugin's model.
     const bodyEffort = Boolean(viaCpa) && !verbatim && BODY_EFFORT_AGENTS.has(agent);
     let wireModel = viaCpa ? (verbatim || bodyEffort ? baseModel : viaCpa) : viaCpa;
-    if (viaCpa && effort && !verbatim && !bodyEffort) {
+    if (viaCpa && effort && !verbatim && (!bodyEffort || agent === "claude-code")) {
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = baseModel + "(" + effort + ")";
     }
@@ -1619,12 +1619,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const TOOL_STALL_MS = 30 * 60_000;
   const TOOL_STALL_MARGIN_MS = 5 * 60_000;
   const stalledStops = new Map(); // session -> when its stalled turn was stopped
-  /**
-   * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
-   * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
-   */
-  async function stopStalledTurn(session, observed, owner) {
-    if (!chatPreferences.get().autoRetry || !Number.isFinite(observed?.lastActivityAt)) return false;
+  function stalledTurnInfo(observed) {
+    if (!Number.isFinite(observed?.lastActivityAt)) return null;
     // The stop interrupts the whole session, so the whole session is judged: a turn queued behind a
     // working one shows nothing of its own (observe's sessionActivityAt and sessionTools).
     const last = Math.max(observed.lastActivityAt, Number.isFinite(observed.sessionActivityAt) ? observed.sessionActivityAt : -Infinity);
@@ -1637,8 +1633,26 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       .filter(value => Number.isFinite(value) && value > 0);
     const limit = !tools.length ? TURN_STALL_MS
       : stated.length === tools.length ? Math.max(...stated) + TOOL_STALL_MARGIN_MS : TOOL_STALL_MS;
+    return idle > limit ? { idle, toolRunning: tools.length > 0 } : null;
+  }
+  /**
+   * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
+   * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
+   */
+  async function stopStalledTurn(session, observed, ownership) {
+    const { workspaceId, runId, nodeId, turnId, requestKey } = ownership;
+    if (!chatPreferences.get().autoRetry || typeof turnId !== "string" || !turnId || !requestKey
+      || observed?.turnId !== turnId || (expectedTurns.has(session) && expectedTurns.get(session) !== turnId)) return false;
+    const stalled = stalledTurnInfo(observed);
     const previous = stalledStops.get(session);
-    if (idle <= limit || now() - (previous ?? 0) < TURN_STALL_MS) return false;
+    if (!stalled || now() - (previous ?? 0) < TURN_STALL_MS) return false;
+    // An observation can finish after Retry has replaced this card's request in the same session.
+    // Only a stop that is due re-reads the card; healthy polling makes no additional request.
+    const latest = await savedNode(workspaceId, runId, nodeId).catch(() => null);
+    if (latest?.mission?.cancelled || latest?.node?.state !== "running"
+      || latest.node.receipt?.thread_id !== session || (latest.node.receipt?.request_key || latest.node.request_key) !== requestKey
+      || (latest.node.receipt?.turn_id && latest.node.receipt.turn_id !== turnId)
+      || (expectedTurns.has(session) && expectedTurns.get(session) !== turnId)) return false;
     stalledStops.set(session, now());
     if (stalledStops.size > 200) stalledStops.delete(stalledStops.keys().next().value);
     // The interrupt alone left hung turns hung (seen live 2026-11-02, two chats "may be stuck" for
@@ -1650,9 +1664,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // interrupted and the step is retried; AO keeps the session, so the retry resumes it.
     // A stop that fails is tried again after TURN_STALL_MS; it never fails the observation.
     const release = observed.agentGone === true || previous !== undefined;
-    try { await stopExternalTurn(session, { owner, escalate: true, ...(release ? { releaseAgent: true } : {}) }); }
+    const isStalled = current => !current?.needsInput && !current?.approvals?.length && Boolean(stalledTurnInfo(current));
+    try {
+      if (await stopExternalTurn(session, { owner: runKey(workspaceId, runId), turnId, isStalled, escalate: true, ...(release ? { releaseAgent: true } : {}) }) === false) return false;
+    }
     catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
-    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(idle / 1000), toolRunning: tools.length > 0, released: release });
+    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(stalled.idle / 1000), toolRunning: stalled.toolRunning, released: release });
     return true;
   }
 
@@ -1682,12 +1699,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return { ok: true, run: held?.run, pending_approvals: [] };
     }
     if (node.state !== "running" || !session) return { ok: true, pending_approvals: [] };
-    const observed = await harnessService().observe(session, expectedTurns.get(session));
+    const ownership = { workspaceId, runId, nodeId: node.id,
+      turnId: node.receipt?.turn_id || expectedTurns.get(session), requestKey: node.receipt?.request_key || node.request_key };
+    const observed = await harnessService().observe(session, ownership.turnId);
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
-      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed, runKey(workspaceId, runId));
+      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed, ownership);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
@@ -6894,41 +6913,57 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // and every restart of it) are hidden from the chat, so every other run keeps its own message.
   // The files the agent changed stay as they are. The agent's session still remembers the
   // exchange, so the next turn starts a fresh one (freshSessionRequired).
-  async function chatDeleteMessage({ workspaceId, taskId, index, runId, runIds = [] } = {}) {
+  async function chatDeleteMessage({ workspaceId, taskId, index, runId, runIds = [], sourceDescription } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     if (!Number.isSafeInteger(index) || index < 0) throw new Error("Choose a message to delete");
     if (typeof runId !== "string" || !runId) throw new Error("This message has no reply yet. Delete it after its turn runs.");
     if (!Array.isArray(runIds) || runIds.length > 50) throw new Error("This message's reply was not found; reload the chat");
+    if (typeof sourceDescription !== "string") throw new Error("Deleting requires sourceDescription from the displayed chat; reload it and try again");
     const own = [runId, ...runIds].map(value => clean(value, 80));
-    const saved = await runs({ workspaceId: id, taskId: task });
-    const chatRuns = saved.runs.filter(run => run.workspace_id === id && run.project_id === task);
-    const latest = chatRuns.at(-1);
-    // The open chat can still show cached replies older than its newest-200 read. Read only
-    // those requested IDs, with the same workspace/task ownership and visibility checks below.
-    for (const requested of new Set(own)) {
-      if (chatRuns.some(run => run.id === requested)) continue;
-      const older = await runs({ workspaceId: id, runId: requested });
-      const found = older.runs.find(run => run.id === requested && run.workspace_id === id && run.project_id === task);
-      if (found) chatRuns.push(found);
-    }
-    if ((latest && !runSettled(latest)) || chatWorking(id, task, chatRuns)
-      || chatRuns.some(run => own.includes(run.id) && !runSettled(run))) throw new Error("Stop the chat first to delete a message");
-    const detail = await board({ workspaceId: id, taskId: task });
-    if (!detail.task) throw new Error("This chat's task no longer exists");
-    // The chat says which of its runs answered this message; each must be one it shows.
-    const shown = new Set(chatEdits.visible(id, chatRuns).map(run => run.id));
-    if (!own.every(run => shown.has(run))) throw new Error("This message's reply was not found; reload the chat");
-    const description = chatDescriptionWithout(detail.task.description || "", index);
-    const hidden = [...new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own])];
-    const before = chatEdits.get(id, task);
-    chatEdits.deleteMessage(id, task, hidden);
+    // Share the sender's per-chat admission: another delete must retry, while an already
+    // requested send can wait for this edit and read the resulting transcript normally.
+    const key = JSON.stringify([id, task]);
+    if (chatSends.has(key)) throw new Error("A chat operation is already in progress; wait for it to finish and try again");
+    let release;
+    const mine = new Promise(resolve => { release = resolve; });
+    chatSends.set(key, mine);
     try {
-      await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
-    } catch (error) {
-      chatEdits.restore(id, task, before);
-      throw error;
+      const saved = await runs({ workspaceId: id, taskId: task });
+      const chatRuns = saved.runs.filter(run => run.workspace_id === id && run.project_id === task);
+      const latest = chatRuns.at(-1);
+      // The open chat can still show cached replies older than its newest-200 read. Read only
+      // those requested IDs, with the same workspace/task ownership and visibility checks below.
+      for (const requested of new Set(own)) {
+        if (chatRuns.some(run => run.id === requested)) continue;
+        const older = await runs({ workspaceId: id, runId: requested });
+        const found = older.runs.find(run => run.id === requested && run.workspace_id === id && run.project_id === task);
+        if (found) chatRuns.push(found);
+      }
+      if ((latest && !runSettled(latest)) || chatWorking(id, task, chatRuns)
+        || chatRuns.some(run => own.includes(run.id) && !runSettled(run))) throw new Error("Stop the chat first to delete a message");
+      const detail = await board({ workspaceId: id, taskId: task });
+      if (!detail.task) throw new Error("This chat's task no longer exists");
+      // The chat says which of its runs answered this message; each must be one it shows.
+      const shown = new Set(chatEdits.visible(id, chatRuns).map(run => run.id));
+      if (!own.every(run => shown.has(run))) throw new Error("This message's reply was not found; reload the chat");
+      if ((detail.task.description || "") !== sourceDescription) throw new Error("The chat changed before deletion; reload it and try again");
+      const description = chatDescriptionWithout(sourceDescription, index);
+      const hidden = [...new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own])];
+      const before = chatEdits.get(id, task);
+      try {
+        chatEdits.deleteMessage(id, task, hidden);
+        await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+      } catch (error) {
+        // Restore changes memory before persisting. A second persistence failure must not
+        // replace the original error or leave this failed delete hidden in memory.
+        try { chatEdits.restore(id, task, before); } catch {}
+        throw error;
+      }
+      return { ok: true, taskId: task, index, runIds: hidden };
+    } finally {
+      release();
+      if (chatSends.get(key) === mine) chatSends.delete(key);
     }
-    return { ok: true, taskId: task, index, runIds: hidden };
   }
 
   // /diff: the project's uncommitted changes (staged and unstaged), through the workspace git tool.
@@ -6992,14 +7027,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (;;) {
       const pending = sessionStops.get(session);
       if (!pending) break;
-      await pending;
-      if (!ownership?.releaseAgent || pending.releasesAgent) return;
+      const stopped = await pending;
+      if (stopped !== false && (!ownership?.releaseAgent || pending.releasesAgent)) return;
       // Another waiter may have installed the host-release upgrade while this one resumed.
     }
     const job = Promise.resolve().then(async () => {
       const service = harnessService();
       const owns = () => !ownership || !sessionOwners.has(session) || sessionOwners.get(session) === ownership.owner;
-      if (!owns()) return;
+      if (!owns()) return false;
       let alreadyExited = false;
       // Why the interrupt did not stop the turn, when the agent's shutdown had to: said again if that fails too.
       let escalated = "";
@@ -7008,7 +7043,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       let shutDown = ownership?.releaseAgent === true;
       if (ownership?.turnId || ownership?.releaseAgent) {
         const current = await service.observe(session);
-        if ((ownership?.turnId && current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
+        if ((ownership?.turnId && current?.turnId !== ownership.turnId) || !owns()
+          || (ownership?.isStalled && !ownership.isStalled(current))) return false;
         alreadyExited = current?.exited === true;
       }
       if (!ownership?.completed && !alreadyExited) {
@@ -7040,6 +7076,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const tries = signalled ? Math.ceil(settleMs / STOP_SETTLE_POLL_MS) : 0;
         for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
+          if ((ownership?.turnId && observation?.turnId !== ownership.turnId) || !owns()) return false;
           // No agent process left behind the session (it exited, or a start was cancelled): nothing
           // can still be working. Waiting the full 15 s for its turn row (which AO leaves "running"
           // until it restarts) made Stop take half a minute.
@@ -7055,6 +7092,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
       }
       if (shutDown && owns()) {
+        if (ownership?.turnId) {
+          const current = await service.observe(session);
+          if (current?.turnId !== ownership.turnId || !owns() || (ownership.isStalled && !ownership.isStalled(current))) return false;
+        }
         const outcomes = await Promise.allSettled([
           Promise.resolve().then(() => releaseAgent(session, ownership?.owner)).then(outcome => {
             if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);

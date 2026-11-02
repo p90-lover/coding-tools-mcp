@@ -43,6 +43,7 @@ import { getTunnelServiceStatus, installTunnelService, restartTunnelService, sto
 import { VERSION } from "./version";
 
 export interface SetupOptions {
+  connectorNameSuffix?: string;
   mode: RuntimeMode;
   browserInteractionMode?: BrowserInteractionMode;
   subagentProtocol?: SubagentProtocol;
@@ -53,9 +54,13 @@ export interface SetupOptions {
   forceLogin?: boolean;
   autoApproveToolCalls?: boolean;
   experimentalBiggerContext?: boolean;
+  composerPredictionsEnabled?: boolean;
+  experimentalSkillAttachments?: boolean;
+  experimentalFreshConversationPerTurn?: boolean;
   useSavedChats?: boolean;
   zeroRiskProEnabled?: boolean;
   replaceCodexRoute?: boolean;
+  preserveDisconnectedRoute?: boolean;
   /** Leave Codex's model route alone: the user turned "Use Coding Tools in Codex" off. */
   skipCodexRoute?: boolean;
   restartService?: boolean;
@@ -104,6 +109,7 @@ export function launcherCapabilityProbeRequired(
     || existing?.browserInteractionMode === "manual"
     || existing?.browserHost !== "launcher"
     || typeof existing.solAvailable !== "boolean"
+    || typeof existing.extraHighAvailable !== "boolean"
     || typeof existing.proAvailable !== "boolean";
 }
 
@@ -144,8 +150,12 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     brokerSocketPath: before.brokerSocketPath,
     headed: before.headed,
     solAvailable: before.solAvailable,
+    extraHighAvailable: before.extraHighAvailable,
     proAvailable: before.proAvailable,
     experimentalBiggerContext: before.experimentalBiggerContext,
+    composerPredictionsEnabled: before.composerPredictionsEnabled,
+    experimentalSkillAttachments: before.experimentalSkillAttachments,
+    experimentalFreshConversationPerTurn: before.experimentalFreshConversationPerTurn,
     useSavedChats: before.useSavedChats,
     zeroRiskProEnabled: before.zeroRiskProEnabled,
     autoApproveToolCalls: before.autoApproveToolCalls,
@@ -172,8 +182,12 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     brokerSocketPath: after.brokerSocketPath,
     headed: after.headed,
     solAvailable: after.solAvailable,
+    extraHighAvailable: after.extraHighAvailable,
     proAvailable: after.proAvailable,
     experimentalBiggerContext: after.experimentalBiggerContext,
+    composerPredictionsEnabled: after.composerPredictionsEnabled,
+    experimentalSkillAttachments: after.experimentalSkillAttachments,
+    experimentalFreshConversationPerTurn: after.experimentalFreshConversationPerTurn,
     useSavedChats: after.useSavedChats,
     zeroRiskProEnabled: after.zeroRiskProEnabled,
     autoApproveToolCalls: after.autoApproveToolCalls,
@@ -194,11 +208,27 @@ export function tunnelWorkerRuntimeChanged(before: AppConfig | undefined, after:
     || JSON.stringify(before.tunnel) !== JSON.stringify(after.tunnel);
 }
 
+/**
+ * On Windows, EACCES can indicate a reserved port, an exclusive binding, or a security policy.
+ * The error alone does not identify which one prevented the listener from starting.
+ */
+export function portBindFailureMessage(
+  host: string,
+  port: number,
+  error: NodeJS.ErrnoException,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const message = `Cannot bind ${host}:${port}: ${error.message}`;
+  if (platform !== "win32" || error.code !== "EACCES") return message;
+  return `${message}. Windows may have reserved this port, another service may hold it exclusively, or security software may be blocking it. `
+    + "See \"Windows: Cannot bind the local port (EACCES)\" in TROUBLESHOOTING.md";
+}
+
 async function assertPortAvailable(host: string, port: number): Promise<void> {
   await new Promise<void>((resolveAvailable, rejectAvailable) => {
     const server = createServer();
     server.unref();
-    server.once("error", error => rejectAvailable(new Error(`Cannot bind ${host}:${port}: ${error.message}`)));
+    server.once("error", error => rejectAvailable(new Error(portBindFailureMessage(host, port, error))));
     server.listen(port, host, () => server.close(error => error ? rejectAvailable(error) : resolveAvailable()));
   });
 }
@@ -252,6 +282,8 @@ export function baseConfig(
   Object.assign(config, resolveInteractionConnectorIdentities(
     config.browserInteractionMode,
     profile,
+    existing,
+    options.connectorNameSuffix,
   ));
   if (options.subagentProtocol) config.subagentProtocol = options.subagentProtocol;
   config.releaseVersion = VERSION;
@@ -270,10 +302,19 @@ export function baseConfig(
     delete config.browserHostDescriptorPath;
   }
   if (options.autoApproveToolCalls !== undefined) config.autoApproveToolCalls = options.autoApproveToolCalls;
+  if (options.composerPredictionsEnabled !== undefined) {
+    config.composerPredictionsEnabled = options.composerPredictionsEnabled;
+  }
+  if (options.experimentalSkillAttachments !== undefined) {
+    config.experimentalSkillAttachments = options.experimentalSkillAttachments;
+  }
+  if (options.useSavedChats !== undefined) config.useSavedChats = options.useSavedChats;
+  if (options.experimentalFreshConversationPerTurn !== undefined) {
+    config.experimentalFreshConversationPerTurn = options.experimentalFreshConversationPerTurn;
+  }
   if (options.experimentalBiggerContext !== undefined) {
     config.experimentalBiggerContext = options.experimentalBiggerContext;
   }
-  if (options.useSavedChats !== undefined) config.useSavedChats = options.useSavedChats;
   if (options.zeroRiskProEnabled !== undefined) {
     if (config.browserInteractionMode !== "manual") {
       throw new Error("Zero Risk Pro can be configured only with --zero-risk-browser-interaction");
@@ -281,11 +322,17 @@ export function baseConfig(
     config.zeroRiskProEnabled = options.zeroRiskProEnabled;
   }
   if (config.browserInteractionMode === "manual") {
+    if (options.experimentalFreshConversationPerTurn === true) {
+      throw new Error("Fresh browser conversations per turn is available only in automatic mode");
+    }
     if (options.refreshAccountCapabilities) {
       throw new Error("Zero Risk cannot refresh account capabilities");
     }
     if (options.forceLogin) {
       throw new Error("Zero Risk uses the launcher's existing ChatGPT session; --login is unavailable");
+    }
+    if (options.experimentalSkillAttachments === true) {
+      throw new Error("Zero Risk does not support Skills as files");
     }
     if (options.experimentalBiggerContext === true) {
       throw new Error("Zero Risk does not support Bigger Context");
@@ -297,6 +344,7 @@ export function baseConfig(
       throw new Error("Zero Risk requires the Launcher; pass --browser-host-descriptor from the running Launcher");
     }
     config.experimentalBiggerContext = false;
+    config.experimentalSkillAttachments = false;
   }
   if (options.acknowledgedUnofficial) config.acknowledgedUnofficialAt = new Date().toISOString();
   if (!config.acknowledgedUnofficialAt) {
@@ -310,19 +358,29 @@ async function inspectLauncherCapabilities(
   existing: AppConfig | undefined,
   refreshAccountCapabilities: boolean,
   expectedProfile: "production" | "development",
-): Promise<{ solAvailable: boolean; proAvailable: boolean }> {
+): Promise<{ solAvailable: boolean; extraHighAvailable: boolean; proAvailable: boolean }> {
   const detectCapabilities = launcherCapabilityProbeRequired(
     existing,
     refreshAccountCapabilities,
     config.browserInteractionMode,
   );
+  if (!detectCapabilities) {
+    // Updating the local runtime or its settings does not require a live web session.
+    // Only initial setup and an explicit model refresh inspect the account.
+    return {
+      solAvailable: existing!.solAvailable,
+      extraHighAvailable: existing!.extraHighAvailable === true,
+      proAvailable: existing!.proAvailable,
+    };
+  }
   const inspected = await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, {
-    detectCapabilities,
+    detectCapabilities: true,
     expectedProfile,
   });
   return {
-    solAvailable: detectCapabilities ? inspected.solAvailable === true : existing!.solAvailable,
-    proAvailable: detectCapabilities ? inspected.proAvailable === true : existing!.proAvailable,
+    solAvailable: inspected.solAvailable === true,
+    extraHighAvailable: inspected.extraHighAvailable === true,
+    proAvailable: inspected.proAvailable === true,
   };
 }
 
@@ -392,7 +450,7 @@ async function bootstrapTunnelProfile(config: AppConfig): Promise<void> {
   try {
     // `runtimes connect` writes the native profile and returns once its managed runtime is healthy.
     // Readiness follows after a successful control-plane poll, so setup proves it separately before
-    // stopping the validation runtime. The launcher supervisor reconnects the committed profile.
+    // stopping the validation runtime and handing the profile to the external service.
     connectTunnel(config);
     const status = await waitForTunnelReady(config);
     if (!status.ok) throw new Error(`Tunnel runtime did not become healthy and ready: ${status.detail}`);
@@ -500,6 +558,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
 
   let loginCreated = false;
   let solAvailable: boolean | undefined = config.solAvailable;
+  let extraHighAvailable: boolean | undefined = config.extraHighAvailable;
   let proAvailable: boolean | undefined = config.proAvailable;
   if (config.browserInteractionMode === "manual") {
     // The generic manual route is independent of account capabilities. The launcher may open the
@@ -513,16 +572,19 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
       "production",
     );
     solAvailable = capabilities.solAvailable;
+    extraHighAvailable = capabilities.extraHighAvailable;
     proAvailable = capabilities.proAvailable;
   } else {
     const stored = storedBrowserLoginCapabilities(config);
     solAvailable = stored.solAvailable;
+    extraHighAvailable = stored.extraHighAvailable;
     proAvailable = stored.proAvailable;
     const loginRequired = options.forceLogin || !browserLoginStateExists(config);
     const capabilityProbeRequired = !loginRequired
       && (options.refreshAccountCapabilities === true
         || existing?.browserInteractionMode === "manual"
         || solAvailable === undefined
+        || extraHighAvailable === undefined
         || proAvailable === undefined);
     if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && !options.restartService) {
       throw new Error(
@@ -534,15 +596,18 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     if (loginRequired) {
       const login = await loginToChatGpt(config);
       solAvailable = login.solAvailable;
+      extraHighAvailable = login.extraHighAvailable;
       proAvailable = login.proAvailable;
       loginCreated = true;
     } else if (capabilityProbeRequired) {
       const inspected = await inspectBrowserLoginCapabilities(config);
       solAvailable = inspected.solAvailable;
+      extraHighAvailable = inspected.extraHighAvailable;
       proAvailable = inspected.proAvailable;
     }
   }
   config.solAvailable = solAvailable === true;
+  config.extraHighAvailable = config.solAvailable && extraHighAvailable === true;
   config.proAvailable = config.solAvailable && proAvailable === true;
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
   const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
@@ -584,9 +649,8 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     const needsProfile = !existsSync(profilePath);
     if (launcherOwned) {
       if (tunnelService.installed || tunnelService.loaded) await uninstallTunnelService();
-      if (needsProfile || refreshTunnelWorker || explicitTunnelChange) {
-        await bootstrapTunnelProfile(config);
-      }
+      // Commit the inputs before acquiring a runtime. The launcher supervisor creates the
+      // profile, proves readiness/MCP health, and cleans up failed startup under one owner.
     } else {
       const needsOwnershipMigration = !tunnelService.installed || !tunnelService.loaded || !tunnelServiceDefinitionMatches(config);
       if (needsOwnershipMigration || needsProfile) {
@@ -617,6 +681,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   if (!options.skipCodexRoute) {
     installCodexIntegration(config, {
       replaceExistingRoute: options.replaceCodexRoute,
+      preserveDisconnectedRoute: options.preserveDisconnectedRoute,
     });
   }
 
@@ -657,20 +722,14 @@ export async function setupDevProfile(options: SetupOptions): Promise<DevProfile
       DEV_LAUNCHER_PROFILE,
     );
     config.solAvailable = capabilities.solAvailable;
+    config.extraHighAvailable = capabilities.solAvailable && capabilities.extraHighAvailable;
     config.proAvailable = capabilities.solAvailable && capabilities.proAvailable;
   }
 
-  const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
+
   await configureTunnel(config, existing, options);
-  let tunnelReady: boolean | null = null;
-  if (config.mode === "full") {
-    const profilePath = join(config.tunnel!.profileDir, `${config.tunnel!.profileName}.yaml`);
-    const needsProfile = !existsSync(profilePath);
-    if (needsProfile || tunnelWorkerRuntimeChanged(existing, config) || explicitTunnelChange) {
-      await bootstrapTunnelProfile(config);
-    }
-    tunnelReady = false;
-  }
+  // DEV uses the same supervisor-owned startup after this configuration is committed.
+  const tunnelReady = config.mode === "full" ? false : null;
   saveConfig(config);
   return {
     mode: config.mode,

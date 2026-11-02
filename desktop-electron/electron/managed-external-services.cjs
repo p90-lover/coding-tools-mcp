@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { watchOffThread } = require("./off-thread-run.cjs");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 const { peerEnvironmentFor } = require("./five-stack-cross-use.cjs");
@@ -123,7 +124,7 @@ function createManagedExternalServicesController({
         if (!watcher) {
           try {
             // The folders also hold busy subfolders (CPA's plugin data); only these files matter.
-            watcher = fs.watch(directory, (_event, name) => {
+            watcher = watchOffThread(directory, (_event, name) => {
               if (name && !fileNames.includes(String(name))) return;
               values = new Map();
               refreshSoon();

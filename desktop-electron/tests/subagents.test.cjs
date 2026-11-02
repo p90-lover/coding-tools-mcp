@@ -197,8 +197,8 @@ test("a subagent preserves the model's none effort when saved and launched", asy
     assert.equal(saved.settings.defaultRoute.effort, "none");
     const started = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read the source" });
     assert.equal(started.isError, false);
-    // Claude Code sends the effort in the request body (#498), not as a "(none)" model suffix.
-    assert.equal(w.spawned[0].gateway.model, "cline-pass/deepseek-v4.1-flash");
+    // Explicit none stays in the body and the session-local suffix that survives AO's gateway.
+    assert.equal(w.spawned[0].gateway.model, "cline-pass/deepseek-v4.1-flash(none)");
     assert.equal(w.spawned[0].effort, "none");
     assert.equal(w.service.config().settings.defaultRoute.effort, "none");
   } finally { w.cleanup(); }
@@ -709,7 +709,7 @@ test("a chat agent picks a subagent's model, effort and window, and it always ru
       { agent: "explorer", task: "Map the code", model: "glm-5", effort: "high", context_window: 120000 }));
     assert.equal(started.model, "glm-5");
     assert.equal(w.spawned[0].agent, "claude-code", "the saved Codex route is not used once a model is picked");
-    assert.deepEqual(w.spawned[0].gateway, { provider: "cpa", model: "glm-5" });
+    assert.deepEqual(w.spawned[0].gateway, { provider: "cpa", model: "glm-5(high)" });
     assert.equal(w.spawned[0].effort, "high");
     assert.equal(w.spawned[0].contextWindow, 120000);
     assert.match(w.spawned[0].prompt, /read-only explorer/, "the saved subagent's instructions still apply");
@@ -737,7 +737,7 @@ test("an effort or window alone keeps a saved Claude Code route's model; an unre
   const w = world({ settings: { defaultRoute: { harness_id: "ao:claude-code", model: "cpa/glm-5", effort: "low" } }, models: async () => { throw new Error("CPA down"); } });
   try {
     await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x", context_window: 64000 });
-    assert.deepEqual(w.spawned[0].gateway, { provider: "cpa", model: "glm-5" });
+    assert.deepEqual(w.spawned[0].gateway, { provider: "cpa", model: "glm-5(low)" });
     assert.equal(w.spawned[0].effort, "low", "the saved effort is kept");
     assert.equal(w.spawned[0].contextWindow, 64000);
     assert.equal((await w.service.call("chat-1", "ws-1", "subagent_models", {})).isError, true);

@@ -26,8 +26,8 @@ test('source scope accepts only the planned 0.6.0-rc.1 Electron identity', async
     },
     upstreamManifest: {
       repository: 'miuuyy/codex-chatgpt-web',
-      tag: 'v5.0.6',
-      commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+      tag: 'v6.1.17',
+      commit: '860fa576eb47d9e20d7d8289235bfea94392d2fd',
     },
   });
   assert.equal(result.ok, true, JSON.stringify(result.errors));
@@ -50,8 +50,8 @@ test('source scope rejects the retained Tauri identity as the Electron release p
     },
     upstreamManifest: {
       repository: 'miuuyy/codex-chatgpt-web',
-      tag: 'v5.0.6',
-      commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+      tag: 'v6.1.17',
+      commit: '860fa576eb47d9e20d7d8289235bfea94392d2fd',
     },
   });
   assert.equal(result.ok, false);
@@ -75,8 +75,8 @@ test('asset verifier rejects a checksum mismatch before publication', async () =
     product: { name: 'Coding Tools', app_id: 'dev.codingtools.fullharness' },
     upstream: {
       repository: 'miuuyy/codex-chatgpt-web',
-      version: 'v5.0.6',
-      commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+      version: 'v6.1.17',
+      commit: '860fa576eb47d9e20d7d8289235bfea94392d2fd',
     },
     validation_run: {
       id: 321,
@@ -199,8 +199,8 @@ test('publisher creates the exact tag before a draft, reads assets back, and re-
     product: { name: 'Coding Tools', app_id: 'dev.codingtools.fullharness' },
     upstream: {
       repository: 'miuuyy/codex-chatgpt-web',
-      version: 'v5.0.6',
-      commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+      version: 'v6.1.17',
+      commit: '860fa576eb47d9e20d7d8289235bfea94392d2fd',
     },
     validation_run: {
       id: 456,
@@ -362,8 +362,8 @@ async function writeReleaseAssetFixture({
     product: { name: 'Coding Tools', app_id: 'dev.codingtools.fullharness' },
     upstream: {
       repository: 'miuuyy/codex-chatgpt-web',
-      version: 'v5.0.6',
-      commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+      version: 'v6.1.17',
+      commit: '860fa576eb47d9e20d7d8289235bfea94392d2fd',
     },
     validation_run: {
       id: 123,

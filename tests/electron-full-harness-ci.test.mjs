@@ -80,10 +80,10 @@ test('full-harness CI is cross-platform, exact-source, and fail-closed on missin
 
 test('Windows packaging acquires the checksum-pinned official tunnel archive before build', () => {
   for (const required of [
-    'TUNNEL_ARCHIVE: tunnel-client-v0.0.12-windows-amd64.zip',
-    "TUNNEL_ARCHIVE_SHA256: '2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356'",
-    'TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12',
-    'aiTemp/input/tunnel-client/v0.0.12/windows-amd64',
+    'TUNNEL_ARCHIVE: tunnel-client-v0.0.16-windows-amd64.zip',
+    "TUNNEL_ARCHIVE_SHA256: 'edef7241b0c647fcb30f1a80ff376b6b25c51927960f257a3f01e21b17c2aba6'",
+    'TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.16',
+    'aiTemp/input/tunnel-client/v0.0.16/windows-amd64',
     'curl.exe --fail --location --proto \'=https\' --tlsv1.2',
     '--output "$partial_archive" "$asset_url"',
     'sha256sum "$partial_archive"',

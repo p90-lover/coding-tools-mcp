@@ -26,13 +26,13 @@ test('runtime retains Browser-only Full Zero Risk compaction and subagent verifi
     'smoke:subagents', 'launcher', 'app', 'app:package', 'app:smoke', 'verify',
   ];
   for (const script of required) assert.equal(typeof runtime.scripts?.[script], 'string', script);
-  assert.equal(runtime.version, '5.0.6');
+  assert.equal(runtime.version, '6.1.17');
 });
 
 test('exact source pin remains available beside adapted workspaces', () => {
   const mapping = readJson('upstream/MATERIALIZATION.json');
   const vendorManifest = JSON.parse(fs.readFileSync(
-    path.resolve(__dirname, '../../vendor/codex-chatgpt-web-v5.0.6/UPSTREAM_MANIFEST.json'),
+    path.resolve(__dirname, '../../vendor/codex-chatgpt-web-v6.1.17/UPSTREAM_MANIFEST.json'),
     'utf8',
   ));
   assert.equal(mapping.upstream.commit, vendorManifest.commit);

@@ -1171,11 +1171,11 @@ test("Delete on a message asks in the chat first, then removes it with its reply
   const deleted = [], loaded = [];
   const done = (id) => run(id, "t", [node("p", "planner", "finished", { receipt: { answer: `answer ${id}` } })], { execution_mode: "single" });
   const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): use pnpm";
-  const { props } = base({ selectedTaskId: "t", runs: [done("r1"), done("r2")], pendingMessage: description,
+  const { props } = base({ projectId: "ws", selectedTaskId: "t", runs: [done("r1"), done("r2")], pendingMessage: description,
     // This fake keeps the chat as it was, so it can be deleted from again below.
     loadDescription: async (taskId) => { loaded.push(taskId); return description; },
     thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind() {}, copyConversation() {}, togglePin() {}, pinned: false,
-      deleteMessage: async (index, runIds) => { deleted.push([index, [...runIds]]); } } });
+      deleteMessage: async (index, runIds, sourceDescription, workspaceId) => { deleted.push([index, [...runIds], sourceDescription, workspaceId]); } } });
   const view = mount(props);
   const buttons = (next) => walk(view.render(next)).filter((element) => element.props?.["aria-label"] === "Delete this message");
   const confirm = () => walk(view.render()).find((element) => element.props?.role === "alertdialog");
@@ -1198,7 +1198,7 @@ test("Delete on a message asks in the chat first, then removes it with its reply
   buttons()[1].props.onClick();
   walk(confirm()).find((element) => element.type === "button" && text(element) === "Delete").props.onClick();
   await settle(); await settle();
-  assert.deepEqual(deleted, [[1, ["r2"]]]);
+  assert.deepEqual(deleted, [[1, ["r2"], description, "ws"]]);
   assert.deepEqual(loaded, ["t"]);
   assert.equal(confirm(), undefined);
 
@@ -1207,10 +1207,10 @@ test("Delete on a message asks in the chat first, then removes it with its reply
   walk(view.render()).find((element) => element.type === "textarea").props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
   await settle(); await settle();
   assert.ok(confirm(), "/delete asks too");
-  assert.deepEqual(deleted, [[1, ["r2"]]]);
+  assert.deepEqual(deleted, [[1, ["r2"], description, "ws"]]);
   walk(confirm()).find((element) => element.type === "button" && text(element) === "Delete").props.onClick();
   await settle(); await settle();
-  assert.deepEqual(deleted, [[1, ["r2"]], [0, ["r1"]]]);
+  assert.deepEqual(deleted, [[1, ["r2"], description, "ws"], [0, ["r1"], description, "ws"]]);
   assert.deepEqual(loaded, ["t", "t"]);
 
   // While the chat works the button is disabled and says why; so is a chat's only message.
@@ -1227,14 +1227,14 @@ test("Delete names the runs its turn showed: a restarted message takes its resta
   const deleted = [], forked = [];
   const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
   const done = (id, extra = {}) => run(id, "t", [node("p", "planner", "finished", { receipt: { answer: `answer ${id}` } })], { execution_mode: "single", ...extra });
-  const { props } = base({ selectedTaskId: "t",
+  const { props } = base({ projectId: "ws", selectedTaskId: "t",
     // r1 answered the first message and was restarted (r1b); r2 answered the second; the third hasn't run.
     runs: [done("r1"), done("r1b", { restarts_run_id: "r1" }), done("r2")],
     pendingMessage: description,
     // This fake keeps the chat as it was, so each turn can be pressed in turn.
     loadDescription: async () => description,
     thread: { newChat() {}, rename: async () => {}, archive() {}, fork: (index) => forked.push(index), rewind() {}, copyConversation() {}, togglePin() {}, pinned: false,
-      deleteMessage: async (index, runIds) => { deleted.push([index, [...runIds]]); } } });
+      deleteMessage: async (index, runIds, sourceDescription, workspaceId) => { deleted.push([index, [...runIds], sourceDescription, workspaceId]); } } });
   const view = mount(props);
   const turns = () => walk(view.render()).filter((element) => element.type === "article");
   assert.deepEqual(turns().map((turn) => text(walk(turn).find((element) => element.props?.className === "cx-bubble") ?? null)),
@@ -1246,15 +1246,96 @@ test("Delete names the runs its turn showed: a restarted message takes its resta
     await settle(); await settle();
   };
   await press(2);
-  assert.deepEqual(deleted, [[1, ["r2"]]], "the second message goes with its own run, not the first message's restart");
+  assert.deepEqual(deleted, [[1, ["r2"], description, "ws"]], "the second message goes with its own run, not the first message's restart");
   await press(0);
-  assert.deepEqual(deleted.at(-1), [0, ["r1", "r1b"]], "the first message goes with its restart");
+  assert.deepEqual(deleted.at(-1), [0, ["r1", "r1b"], description, "ws"], "the first message goes with its restart");
   const pending = buttonIn(turns()[3], "Delete this message");
   assert.equal(pending.props.disabled, true);
   assert.match(pending.props.title, /hasn't run yet/);
   // Fork from here counts messages, not turns.
   buttonIn(turns()[2], "Fork from this message").props.onClick();
   assert.deepEqual(forked, [1]);
+});
+
+test("Delete keeps the source snapshot captured when its picker opens through later renders", async () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC\n\nFollow-up (2026-10-10 12:00 UTC):\nD";
+  const changed = "A\n\nFollow-up (2026-10-10 11:00 UTC):\nC\n\nFollow-up (2026-10-10 12:00 UTC):\nD";
+  const done = (id) => run(id, "t", [node("p", "planner", "finished", { receipt: { answer: `answer ${id}` } })], { execution_mode: "single" });
+  const deleted = [];
+  const { props } = base({ projectId: "ws", selectedTaskId: "t", runs: ["r1", "r2", "r3", "r4"].map(done), pendingMessage: description,
+    loadDescription: async () => changed,
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, copyConversation() {}, togglePin() {}, pinned: false,
+      deleteMessage: async (...args) => deleted.push(args) } });
+  const view = mount(props);
+  walk(view.render()).find((element) => element.type === "textarea").props.onChange({ target: { value: "/delete" } });
+  walk(view.render()).find((element) => element.type === "textarea").props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+  await settle();
+  const choice = walk(view.render()).find((element) => element.type === "button" && text(element) === "3. C");
+  assert.ok(choice, "the picker names C from the original four-message snapshot");
+  // Another writer removed B while this picker stayed open.
+  const updated = { pendingMessage: changed, runs: ["r1", "r3", "r4"].map(done) };
+  view.render(updated);
+  choice.props.onClick();
+  // A further render must not replace the intent with the message now at index 2.
+  const current = view.render({ ...updated, pendingMessage: `${changed}\n\n↳ Steer (2026-10-10 12:05 UTC): later note` });
+  assert.deepEqual(walk(current).filter((element) => element.type === "article").map((turn) => text(walk(turn).find((element) => element.props?.className === "cx-bubble") ?? null)), ["A", "C", "D"]);
+  const dialog = walk(current).find((element) => element.props?.role === "alertdialog");
+  walk(dialog).find((element) => element.type === "button" && text(element) === "Delete").props.onClick();
+  await settle(); await settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(deleted)), [[2, ["r3"], description, "ws"]], "the server receives the old snapshot and can refuse it");
+});
+
+test("Delete refuses a captured intent after switching workspace or task even when run IDs match", async () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB";
+  for (const next of [{ projectId: "copied-ws", selectedTaskId: "t" }, { projectId: "ws", selectedTaskId: "copied-task" }]) {
+    const deleted = [];
+    const done = (id, task = "t") => run(id, task, [node("p", "planner", "finished")], { execution_mode: "single" });
+    const { props } = base({ projectId: "ws", selectedTaskId: "t", runs: [done("r1"), done("r2")], pendingMessage: description,
+      thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, copyConversation() {}, togglePin() {}, pinned: false,
+        deleteMessage: async (...args) => deleted.push(args) } });
+    const view = mount(props);
+    walk(view.render()).filter((element) => element.props?.["aria-label"] === "Delete this message")[1].props.onClick();
+    const changed = view.render({ ...next, runs: [done("r1", next.selectedTaskId), done("r2", next.selectedTaskId)] });
+    const dialog = walk(changed).find((element) => element.props?.role === "alertdialog");
+    walk(dialog).find((element) => element.type === "button" && text(element) === "Delete").props.onClick();
+    await settle();
+    assert.deepEqual(deleted, [], "an old intent never reaches the new chat's handler");
+  }
+});
+
+test("delete forwarding preserves the captured snapshot through IPC and rejects a switched latest workspace", async () => {
+  const { invokeContract } = require("../electron/ipc-schema.cjs");
+  const surface = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  const start = surface.indexOf("const deleteChatMessage = ");
+  const end = surface.indexOf("/** A chat as Codex turns", start);
+  const forwarding = surface.split(/\r?\n/).find((line) => line.trim().startsWith("deleteMessage:"));
+  assert.ok(start >= 0 && end > start && forwarding);
+  const code = ts.transpileModule(`${surface.slice(start, end)}\nexports.remove = deleteChatMessage;\nexports.thread = {${forwarding}};`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const calls = [], routed = [], handlers = { current: {} };
+  const make = (workspaceId) => {
+    const exports = {};
+    vm.runInNewContext(code, { exports, workspaceId, chatTaskId: "t", chatHandlers: handlers,
+      chatRun: (task, action) => { routed.push(task); return action(); }, loadMissions: async () => {},
+      moduleCall: (operation, args) => invokeContract({ invoke: async (channel, input) => { calls.push(JSON.parse(JSON.stringify({ channel, input }))); return { ok: true }; } },
+        "apps.call", JSON.parse(JSON.stringify({ moduleId: "agent-orchestrator", operation, arguments: args }))) });
+    return exports;
+  };
+  const initial = make("ws");
+  handlers.current = { deleteChatMessage: initial.remove };
+  const sourceDescription = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB";
+  await initial.thread.deleteMessage(1, ["r2"], sourceDescription, "ws");
+  assert.deepEqual(calls[0], { channel: "coding-tools:apps:call", input: { moduleId: "agent-orchestrator", operation: "chat_delete_message",
+    arguments: { workspaceId: "ws", taskId: "t", index: 1, runId: "r2", runIds: [], sourceDescription } } });
+  await initial.thread.deleteMessage(1, ["r2"], "", "ws");
+  assert.equal(calls[1].input.arguments.sourceDescription, "", "IPC preserves an explicitly empty snapshot");
+  handlers.current = { deleteChatMessage: make("copied-ws").remove };
+  await assert.rejects(() => initial.thread.deleteMessage(1, ["r2"], sourceDescription, "ws"), /chat changed|reload/i);
+  assert.equal(calls.length, 2, "workspace mismatch is refused before any IPC");
+  assert.deepEqual(routed, ["t", "t"], "workspace mismatch is refused before chatRun too");
 });
 
 test("while the agent waits on a request, a typed message is still steered: the steer waits for the answer instead of cancelling it", async () => {

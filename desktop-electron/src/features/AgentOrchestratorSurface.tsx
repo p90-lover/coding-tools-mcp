@@ -2216,11 +2216,14 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   // names the runs its turn showed (the first is the one the message started); the bridge hides
   // exactly those, so every other answer stays with its message, and the next turn starts a fresh
   // agent session. Files on disk are not changed.
-  const deleteChatMessage = (taskId: string, index: number, runIds: string[]) => chatRun(taskId, async () => {
-    const [runId, ...more] = runIds;
-    await moduleCall("chat_delete_message", { workspaceId, taskId, index, runId, runIds: more });
-    await loadMissions(workspaceId);
-  });
+  const deleteChatMessage = async (taskId: string, index: number, runIds: string[], sourceDescription: string, sourceWorkspaceId: string) => {
+    if (sourceWorkspaceId !== workspaceId) throw new Error("The chat changed before deletion; reload it and try again");
+    return chatRun(taskId, async () => {
+      const [runId, ...more] = runIds;
+      await moduleCall("chat_delete_message", { workspaceId, taskId, index, runId, runIds: more, sourceDescription });
+      await loadMissions(workspaceId);
+    });
+  };
   /** A chat as Codex turns, read fresh (the board list omits task descriptions), with its runs the project's read no longer holds. */
   const chatTranscript = async (taskId: string) => {
     const recent = missions.filter((mission) => mission.project_id === taskId);
@@ -2691,7 +2694,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       archive: () => chatHandlers.current.missionAction(chatTaskId, "archive"),
       fork: (turnIndex?: number | "first") => chatHandlers.current.forkChat(chatTaskId, turnIndex),
       rewind: (turnIndex: number) => chatHandlers.current.rewindChat(chatTaskId, turnIndex),
-      deleteMessage: (messageIndex: number, runIds: string[]) => chatHandlers.current.deleteChatMessage(chatTaskId, messageIndex, runIds),
+      deleteMessage: (messageIndex: number, runIds: string[], sourceDescription: string, sourceWorkspaceId: string) => chatHandlers.current.deleteChatMessage(chatTaskId, messageIndex, runIds, sourceDescription, sourceWorkspaceId),
       copyConversation: () => chatHandlers.current.copyChat(chatTaskId, "conversation"),
       togglePin: () => chatHandlers.current.togglePin(chatTaskId),
       pinned: chatPinned,

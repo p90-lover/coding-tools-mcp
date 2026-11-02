@@ -58,10 +58,21 @@ interface TraceWaiter {
 export class ChatGptTraceFeed {
   private readonly queued: ChatGptTraceEvent[] = [];
   private readonly waiters = new Set<TraceWaiter>();
+  private readonly progressObservers = new Set<() => void>();
+
+  observeProgress(observer: () => void): () => void {
+    this.progressObservers.add(observer);
+    return () => { this.progressObservers.delete(observer); };
+  }
+
+  recordProgress(): void {
+    for (const observer of this.progressObservers) observer();
+  }
 
   push(event: ChatGptTraceEvent): void {
     const normalized = event.continuation ? event.text : event.text.trim();
     if (!normalized) return;
+    this.recordProgress();
     const normalizedEvent = { ...event, text: normalized };
     this.queued.push(normalizedEvent);
     const waiter = this.waiters.values().next().value as TraceWaiter | undefined;
@@ -360,7 +371,17 @@ export class ChatGptTurnSession {
       .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
       .then(outcome => {
+      // A replaced runtime's late outcome must not settle the current generation.
       if (generation === this.generation) this.settledBrowserOutcome = outcome;
+      const error = outcome.type === "error" && outcome.error instanceof ChatGptWebAdapterError
+        ? outcome.error : undefined;
+      console.info(`[chatgpt-web] browser_settled ${JSON.stringify({
+        traceId: this.traceId,
+        outcome: outcome.type,
+        compaction: runtime.usageInput?._compactionRequest === true,
+        ...(!runtime.usageInput?._compactionRequest ? { submission: runtime.submission?.phase ?? "unknown" } : {}),
+        ...(error ? { code: error.code, retryable: error.retryable } : {}),
+      })}`);
       return outcome;
     });
   }
@@ -554,6 +575,7 @@ export class ChatGptTurnSession {
     parsed: CodexParsedRequest,
     start: () => ChatGptTurnRuntime,
     signal?: AbortSignal,
+    chargeRecovery?: () => boolean,
   ): Promise<boolean> {
     const outcome = this.settledBrowserOutcome;
     // Any submission phase qualifies: a stage that never acknowledged left nothing in ChatGPT to
@@ -581,6 +603,7 @@ export class ChatGptTurnSession {
     const outstanding = this.outstanding();
     if (outstanding.some(request => !receipts.has(request.callId))) return false;
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (chargeRecovery && !chargeRecovery()) return false;
     this.recoveries += 1;
     for (const tool of parsed.context.tools ?? []) this.recoveryTools.set(namespacedToolName(tool.namespace, tool.name), tool);
     this.recovering = true;
@@ -888,11 +911,17 @@ export class ChatGptTurnSessions {
   }
 
   async cancelTrace(traceId: string, reason = chatGptBrowserTabClosedError()): Promise<number> {
+    const cancellation = this.beginCancelTrace(traceId, reason);
+    await cancellation.settlement;
+    return cancellation.cancelled;
+  }
+
+  /** Revoke execution immediately; keep physical cleanup tracked independently of the UI receipt. */
+  beginCancelTrace(traceId: string, reason: Error): { cancelled: number; settlement: Promise<void> } {
     const sessions = [...this.entries.values()]
       .filter(session => session.traceId === traceId && session.isActive());
     for (const session of sessions) session.cancel(reason);
-    await Promise.all(sessions.map(session => session.physicalSettlement));
-    return sessions.length;
+    return { cancelled: sessions.length, settlement: Promise.all(sessions.map(session => session.physicalSettlement)).then(() => undefined) };
   }
 
   /**
