@@ -266,12 +266,16 @@ impl Default for ActionsConfig {
 #[allow(dead_code)]
 impl WorkspaceProfile {
     pub fn new(path: String, name: Option<String>) -> Self {
-        let cleaned = path.trim_end_matches(['\\', '/']).to_string();
+        let cleaned = if std::path::Path::new(&path).parent().is_none() {
+            path
+        } else {
+            path.trim_end_matches(['\\', '/']).to_string()
+        };
         let label = name.unwrap_or_else(|| {
             cleaned
                 .replace('\\', "/")
                 .split('/')
-                .next_back()
+                .rfind(|part| !part.is_empty())
                 .unwrap_or("工作区")
                 .to_string()
         });
