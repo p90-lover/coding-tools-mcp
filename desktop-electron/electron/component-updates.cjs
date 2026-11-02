@@ -72,14 +72,24 @@ function createComponentUpdater({
     }
   }
 
+  let probing = false;
   async function trySwap() {
-    if (stopped || working || stagedAt === null || !enabled()) return null;
+    if (stopped || working || probing || stagedAt === null || !enabled()) return null;
     // Without a record of the component's last request (no cpa-helper on this platform, or its
     // usage folder unreadable), its clients' activity is unknown: leave the switch to the next start.
-    const last = lastActivityAt();
-    if (!Number.isFinite(last)) return null;
-    // A busy check that cannot answer counts as busy: never restart over work it could not see.
-    const busy = await Promise.resolve().then(isBusy).catch(() => true);
+    // It may be read asynchronously: main read it with readdirSync + statSync every minute, which
+    // held every window for up to 18 s on the busy hard disk (0.8.49, 2026-11-02). One read at a time.
+    probing = true;
+    let last;
+    let busy;
+    try {
+      last = await Promise.resolve().then(lastActivityAt).catch(() => null);
+      if (!Number.isFinite(last)) return null;
+      // A busy check that cannot answer counts as busy: never restart over work it could not see.
+      busy = await Promise.resolve().then(isBusy).catch(() => true);
+    } finally {
+      probing = false;
+    }
     const moment = {
       busy: Boolean(busy),
       systemIdleSeconds: Number(idleSeconds()) || 0,

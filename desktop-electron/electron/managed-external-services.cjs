@@ -18,6 +18,8 @@ const LOCAL_PROXY_BYPASS = [
   "169.254.0.0/16", "169.254.0.0-169.254.255.255",
 ].join(",");
 
+const CPA_CONFIG_RECHECK_MS = 30_000;
+
 const SERVICE_ENDPOINTS = Object.freeze({
   cpa: Object.freeze({ endpoint: "http://127.0.0.1:8317/" }),
 });
@@ -132,6 +134,61 @@ function createManagedExternalServicesController({
     return cached.route;
   }
 
+  // The proxy route CPA's config.yaml holds, for a snapshot's configMatches. Every snapshot read
+  // and parsed it synchronously on main: up to 1.1 s on the busy hard disk (0.8.49, 2026-11-02).
+  // It is read off main instead, again when CPA's state folder reports a change to it (with no
+  // watch, at most every CPA_CONFIG_RECHECK_MS); a snapshot shows the last route read (undefined
+  // before the first read, null when unreadable), and a read that changes it publishes afresh.
+  const cpaConfigPath = path.join(dataRoot, "state", "cpa", "config.yaml");
+  let cpaConfigRoute;
+  let cpaConfigStale = true;
+  let cpaConfigReading = false;
+  let cpaConfigReadAt = -Infinity;
+  let cpaConfigWatcher = null;
+  let cpaConfigWatchTriedAt = -Infinity;
+  let disposed = false;
+  function watchCpaConfig() {
+    cpaConfigWatchTriedAt = Date.now();
+    try {
+      cpaConfigWatcher = fs.watch(path.dirname(cpaConfigPath), (event, name) => {
+        if (name && name !== "config.yaml") return;
+        cpaConfigStale = true;
+        readCpaConfig();
+      });
+      cpaConfigWatcher.on("error", () => { cpaConfigWatcher?.close(); cpaConfigWatcher = null; });
+      cpaConfigWatcher.unref?.();
+    } catch { cpaConfigWatcher = null; }
+  }
+  function readCpaConfig() {
+    if (cpaConfigReading || disposed) return;
+    cpaConfigReading = true;
+    cpaConfigStale = false;
+    void fs.promises.readFile(cpaConfigPath, "utf8")
+      .then((config) => {
+        // CPA 8 saves the route grouped (requests.proxy-url); a config it hasn't rewritten yet has
+        // it at the top level. Matching only the top level read every running CPA as unrouted.
+        const parsed = require("js-yaml").load(config) ?? {};
+        return parsed.requests?.["proxy-url"] ?? parsed["proxy-url"] ?? "";
+      })
+      .catch(() => null)
+      .then((route) => {
+        cpaConfigReading = false;
+        cpaConfigReadAt = Date.now();
+        const changed = route !== cpaConfigRoute;
+        cpaConfigRoute = route;
+        if (disposed) return;
+        // A write reports several changes; one that came during the read is read again after it.
+        if (changed) publishCombined();
+        if (cpaConfigStale) readCpaConfig();
+      });
+  }
+  function writtenCpaRoute() {
+    const at = Date.now();
+    if (!cpaConfigWatcher && at - cpaConfigWatchTriedAt >= CPA_CONFIG_RECHECK_MS) watchCpaConfig();
+    if (cpaConfigStale || (!cpaConfigWatcher && at - cpaConfigReadAt >= CPA_CONFIG_RECHECK_MS)) readCpaConfig();
+    return cpaConfigRoute;
+  }
+
   const meshPath = path.join(dataRoot, "loopback-mesh.json");
 
   function persistMeshFromServices(services, targetId = null) {
@@ -198,16 +255,8 @@ function createManagedExternalServicesController({
   function cpaProxyStatus(service) {
     try {
       const route = snapshotRoute(dataRoot, options.safeStorage);
-      let configured = false;
-      try {
-        const config = fs.readFileSync(path.join(dataRoot, "state", "cpa", "config.yaml"), "utf8");
-        // CPA 8 saves the route grouped (requests.proxy-url); a config it hasn't rewritten yet has
-        // it at the top level. Matching only the top level read every running CPA as unrouted.
-        const yaml = require("js-yaml");
-        const parsed = yaml.load(config) ?? {};
-        const written = parsed.requests?.["proxy-url"] ?? parsed["proxy-url"] ?? "";
-        configured = service.status === "ready" && written === route.url;
-      } catch {}
+      const written = writtenCpaRoute();
+      const configured = service.status === "ready" && typeof written === "string" && written === route.url;
       return { profileId: route.profileId, configMatches: configured, error: null };
     } catch (error) {
       return { profileId: null, configMatches: false, error: error instanceof Error ? error.message : "CPA proxy settings unavailable" };
@@ -538,6 +587,8 @@ function createManagedExternalServicesController({
 
   function dispose({ keepPersistent = false } = {}) {
     routeWatcher?.close(); routeWatcher = null; routeCache = null;
+    disposed = true;
+    cpaConfigWatcher?.close(); cpaConfigWatcher = null;
     managedController.dispose({ keepPersistent });
     baseController.dispose();
   }

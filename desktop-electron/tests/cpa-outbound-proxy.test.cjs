@@ -184,6 +184,49 @@ test("a services snapshot reuses the proxy route until the saved settings change
   assert.equal(cpaOf(controller.snapshot()).outboundProxy.profileId, null);
 });
 
+test("a services snapshot never reads CPA's config.yaml on main; a change to it publishes afresh", async (t) => {
+  // Every snapshot read and parsed config.yaml synchronously: up to 1.1 s on the busy disk (0.8.49).
+  const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-config-watch-"));
+  const cpaState = path.join(root, "integrations", "state", "cpa");
+  fs.mkdirSync(cpaState, { recursive: true });
+  fs.mkdirSync(path.join(root, "providers"), { recursive: true });
+  fs.writeFileSync(path.join(cpaState, "config.yaml"), "requests:\n  proxy-url: \"http://127.0.0.1:17896/\"\n");
+  const safeStorage = { isEncryptionAvailable: () => false };
+  const published = [];
+  const controller = createManagedExternalServicesController({
+    dataRoot: path.join(root, "integrations"), safeStorage,
+    filePath: path.join(root, "external-services.json"),
+    keyPath: path.join(root, "external-services.key"),
+    env: {}, resolveRuntimeExecutable: () => process.execPath,
+    publish: (snapshot) => published.push(snapshot),
+  });
+  const realRead = fs.readFileSync;
+  const configReads = [];
+  fs.readFileSync = function (file, ...rest) {
+    if (String(file).endsWith("config.yaml")) configReads.push(String(file));
+    return realRead.call(this, file, ...rest);
+  };
+  t.after(() => { fs.readFileSync = realRead; controller.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
+  const until = async (condition) => {
+    const deadline = Date.now() + 5_000;
+    while (!condition() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    return condition();
+  };
+
+  for (let index = 0; index < 3; index += 1) controller.snapshot();
+  assert.ok(await until(() => published.length > 0), "the first read published a snapshot");
+  fs.writeFileSync(path.join(cpaState, "config.yaml"), "requests:\n  proxy-url: \"http://127.0.0.1:17897/\"\n");
+  const before = published.length;
+  assert.ok(await until(() => published.length > before), "the rewritten config published a snapshot");
+  // Another file in CPA's state folder is not the config.
+  const settled = published.length;
+  fs.writeFileSync(path.join(cpaState, "other.json"), "{}");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(published.length, settled);
+  controller.snapshot();
+  assert.deepEqual(configReads, [], "a snapshot read config.yaml synchronously");
+});
+
 test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets the bare route", async (t) => {
   const { createProviderNetworkController } = require("../electron/provider-network.cjs");
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/global-env-proxy-"));

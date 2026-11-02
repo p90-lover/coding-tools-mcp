@@ -4067,12 +4067,12 @@ async function start() {
     enabled: () => stateStore.read().automaticComponentUpdates !== false,
     isBusy: appBusy,
     idleSeconds: () => powerMonitor.getSystemIdleTime(),
-    // cpa-helper appends each finished request to a monthly usage file.
-    lastActivityAt: () => {
+    // cpa-helper appends each finished request to a monthly usage file. Read off main: see trySwap.
+    lastActivityAt: async () => {
       try {
-        return Math.max(0, ...fs.readdirSync(cpaUsageRoot)
-          .filter((name) => name.endsWith(".jsonl"))
-          .map((name) => fs.statSync(path.join(cpaUsageRoot, name)).mtimeMs)) || null;
+        const names = (await fs.promises.readdir(cpaUsageRoot)).filter((name) => name.endsWith(".jsonl"));
+        const times = await Promise.all(names.map(async (name) => (await fs.promises.stat(path.join(cpaUsageRoot, name))).mtimeMs));
+        return Math.max(0, ...times) || null;
       } catch {
         return null;
       }
