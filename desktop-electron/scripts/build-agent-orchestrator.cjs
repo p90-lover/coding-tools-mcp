@@ -10,7 +10,7 @@ const { assertSafeGo } = require("./go-toolchain.cjs");
 const projectRoot = path.resolve(__dirname, "../..");
 const sourceRoot = path.resolve(process.env.CODING_TOOLS_AO_SOURCE_DIR || path.join(projectRoot, "module", "agent-orchestrator"));
 // Upstream base. The superproject pins a fork commit carrying the Coding Tools integration on top.
-const upstreamCommit = "73473d45f0c18f3a81f66f150868459e3098ca35";
+const upstreamCommit = "4c7dbf0ff4d1aacc30567229dd65003a8e7e1c3b";
 const stageRoot = path.resolve(process.env.CODING_TOOLS_AO_STAGE_DIR || path.join(projectRoot, "aiTemp", "ao-source-build"));
 const frontendRoot = path.join(stageRoot, "frontend");
 const outputRoot = path.resolve(process.env.CODING_TOOLS_AO_OUTPUT_DIR || path.join(projectRoot, "desktop-electron", "build", "agent-orchestrator"));
