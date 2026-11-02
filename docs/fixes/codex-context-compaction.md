@@ -43,3 +43,9 @@ The original PR head `5bcf4affe618b450ff633f6fec7a35ea7989849e` was locally inte
 - Bounded impact queries timed out and change detection could not resolve this unindexed worktree. Graph impact remains UNKNOWN; direct caller review and the focused regressions do not establish live UI/native-compaction success.
 
 The integration work does not install, restart, change models, push, or publish. Those actions and the final release validation remain with the coordinating task.
+
+## Uncertain-start follow-up
+
+A compaction HTTP timeout can occur after native admission while the RPC continues. Starts now retain their logical operation on an uncertain response. Native starts and status observations share one client request ID in the existing owned-thread admission ledger; a missing receipt or stopped/unknown outcome does not prove failure or completion. Repeated admission of the same key reuses its receipt. AO captures the previous compaction timestamp before its POST, so losing that response cannot make an older timestamp look like completion. Confirmed API permission/non-submission refusals still release the busy latch; only bounded status/code metadata is retained through the sanitized headless transport.
+
+A real loopback HTTP fixture withholds the response after admission and times out: later completion reconciles the same operation with exactly one start. Real HTTP permission refusal and lost AO response cases also pass. The focused compaction/transport suites pass 17 checks, and the surrounding selected queue/compaction/recovery suites pass 46 checks. A Rust receipt regression covers missing/pending/settled/unknown/not-submitted receipts, duplicate-key admission and foreign-thread rejection. That native regression has not run locally because the isolated offline dependency cache is unavailable. These Rust changes invalidate the earlier PR's CI proof: exact final-head Rust CI and a new canonical native artifact are mandatory before release.

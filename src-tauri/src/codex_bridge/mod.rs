@@ -1059,6 +1059,49 @@ fn make_ledger_room(memory: &mut Memory) -> Result<()> {
     Ok(())
 }
 
+fn compaction_request(request_id: String, thread_id: String) -> Control {
+    Control {
+        operation: "compact".into(),
+        request_id,
+        thread_id: Some(thread_id),
+        text: None,
+        model: None,
+        effort: None,
+    }
+}
+
+fn compaction_receipt(memory: &Memory, request: &Control) -> Result<Value> {
+    validate_control(request)?;
+    let thread = memory
+        .threads
+        .get(request.thread_id.as_deref().unwrap_or_default())
+        .ok_or("Thread is not owned by this listener connection")?;
+    let Some(entry) = memory.ledger.get(&request.request_id) else {
+        // Absence cannot prove non-submission: an earlier HTTP handler may still be admitting it.
+        return Ok(json!({"ok":true,"status":"unknown","request_id":request.request_id}));
+    };
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(request).map_err(|_| "Invalid control request")?)
+    );
+    if entry.fingerprint != fingerprint {
+        return Err("Compaction request belongs to a different operation or thread".into());
+    }
+    let status = match entry.result.as_ref() {
+        None => "in_progress",
+        Some(value) if value["ok"] == true => match thread.status.as_str() {
+            "idle" | "completed" => "completed",
+            "failed" | "interrupted" => "failed",
+            "compacting" | "starting" | "inProgress" => "in_progress",
+            _ => "unknown",
+        },
+        Some(value) if value["outcome"] == "not_submitted" => "not_submitted",
+        Some(value) if value["outcome"] == "rejected_or_native_error" => "failed",
+        _ => "unknown",
+    };
+    Ok(json!({"ok":true,"status":status,"request_id":request.request_id}))
+}
+
 fn reserve(
     memory: &mut Memory,
     request: &Control,
@@ -1700,16 +1743,13 @@ impl Hub {
         .run()
     }
     /// Uses the same owned-thread admission and replay ledger as a normal model operation.
-    pub fn compact(&self, thread_id: String) -> Result<Value> {
-        self.admit(Control {
-            operation: "compact".into(),
-            request_id: format!("compact-{}", uuid::Uuid::new_v4()),
-            thread_id: Some(thread_id),
-            text: None,
-            model: None,
-            effort: None,
-        })?
-        .run()
+    pub fn compact(&self, request_id: String, thread_id: String) -> Result<Value> {
+        self.admit(compaction_request(request_id, thread_id))?.run()
+    }
+    pub fn compaction_status(&self, request_id: String, thread_id: String) -> Result<Value> {
+        let bridge = self.bridge()?;
+        let memory = lock(&bridge.memory)?;
+        compaction_receipt(&memory, &compaction_request(request_id, thread_id))
     }
     /// Sends `text` into the thread's running turn; `steered` is false when no turn is running.
     pub fn steer(&self, request_key: String, thread_id: String, text: String) -> Result<Value> {
@@ -3558,6 +3598,83 @@ mod tests {
         assert!(developer_instructions(":workspace")
             .contains("delete files inside the working directory"));
         assert!(developer_instructions(":read-only").contains("Never delete files"));
+    }
+
+    #[test]
+    fn compaction_receipt_requires_exact_admission_not_just_an_idle_thread() {
+        let mut memory = Memory::default();
+        memory.threads.insert(
+            "owned".into(),
+            ThreadState {
+                status: "idle".into(),
+                ..Default::default()
+            },
+        );
+        let request = compaction_request("compact-one".into(), "owned".into());
+        assert_eq!(
+            compaction_receipt(&memory, &request).unwrap()["status"],
+            "unknown"
+        );
+        let options = Connection {
+            executable: PathBuf::new(),
+            expected_sha256: String::new(),
+            codex_home: PathBuf::new(),
+            allow_model_usage: true,
+            allow_command_execution: false,
+            permission_profile: default_permission_profile(),
+            approval_policy: None,
+            approvals_reviewer: None,
+            model: "fixture".into(),
+            request_limit: 0,
+            lifetime_seconds: 0,
+            effort: None,
+            context_window: None,
+        };
+        assert!(reserve(&mut memory, &request, true, &options, true, true)
+            .unwrap()
+            .is_none());
+        assert_eq!(memory.requests_used, 1);
+        assert!(reserve(&mut memory, &request, true, &options, true, true)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            memory.requests_used, 1,
+            "the same admission key never starts another model operation"
+        );
+        assert_eq!(
+            compaction_receipt(&memory, &request).unwrap()["status"],
+            "in_progress"
+        );
+        memory.ledger.get_mut(&request.request_id).unwrap().result = Some(json!({"ok":true}));
+        assert_eq!(
+            compaction_receipt(&memory, &request).unwrap()["status"],
+            "completed"
+        );
+        memory.threads.get_mut("owned").unwrap().status = "compacting".into();
+        assert_eq!(
+            compaction_receipt(&memory, &request).unwrap()["status"],
+            "in_progress"
+        );
+        memory.ledger.get_mut(&request.request_id).unwrap().result =
+            Some(json!({"ok":false,"outcome":"unknown_or_stopped"}));
+        assert_eq!(
+            compaction_receipt(&memory, &request).unwrap()["status"],
+            "unknown"
+        );
+        memory.ledger.get_mut(&request.request_id).unwrap().result =
+            Some(json!({"ok":false,"outcome":"not_submitted"}));
+        assert_eq!(
+            compaction_receipt(&memory, &request).unwrap()["status"],
+            "not_submitted"
+        );
+        memory
+            .threads
+            .insert("foreign".into(), ThreadState::default());
+        assert!(compaction_receipt(
+            &memory,
+            &compaction_request("compact-one".into(), "foreign".into())
+        )
+        .is_err());
     }
 
     #[test]

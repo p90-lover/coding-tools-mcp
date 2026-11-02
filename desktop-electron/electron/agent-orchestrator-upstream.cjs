@@ -1802,9 +1802,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return queuedPastTurnTimeline(id, turnId);
     },
     /** Compaction belongs to the live conversation, never the workflow task description. */
-    async compact(id) {
+    async compact(id, { beforeSubmit } = {}) {
       const key = sessionId(id);
       const before = await internalApi("GET", `/api/v1/sessions/${key}/conversation?limit=1`);
+      beforeSubmit?.(before?.compactedAt ?? null);
       await internalApi("POST", `/api/v1/sessions/${key}/conversation/compact`, {});
       forgetTail(key);
       return { compactedAt: before?.compactedAt ?? null };

@@ -6728,14 +6728,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (status) {
       if (compactionId && existing?.id !== compactionId) throw new Error("The chat compaction was replaced");
       if (!same) { sessionCompactions.delete(key); throw new Error("The chat session changed while compacting"); }
-      if (existing.status !== "in_progress" || !existing.accepted) return { ok: true, status: existing.status, compactionId: existing.id };
+      if (existing.status !== "in_progress" || existing.starting) return { ok: true, status: existing.status, compactionId: existing.id };
       const progress = externalAgent(card)
         ? await harnessService().compactionStatus(existing.sessionId, existing.before)
-        : await requestHeadless("/api/v1/ao/harness/compact", { ...scope, status: true });
+        : await requestHeadless("/api/v1/ao/harness/compact", { ...scope, status: true, request_id: `compact-${existing.id}` });
       // Do not let an old response mark a replacement's compaction complete.
       if (sessionCompactions.get(key) !== existing) throw new Error("The chat session changed while compacting");
       if (progress.status === "completed") existing.status = "completed";
-      else if (["failed", "interrupted", "unknown_stopped"].includes(progress.status)) {
+      else if (["failed", "interrupted", "not_submitted"].includes(progress.status)) {
         existing.status = "failed";
         throw new Error("The agent stopped before compaction completed");
       }
@@ -6751,35 +6751,44 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       sessionCompactions.delete(key);
     }
     if (chatWorking(id, task, saved.runs)) throw new Error("Compact is disabled while a chat is in progress");
-    const entry = { id: randomUUID(), runId: latest.id, sessionId: card.receipt.thread_id, status: "in_progress", accepted: false, before: null };
+    const entry = { id: randomUUID(), runId: latest.id, sessionId: card.receipt.thread_id, status: "in_progress", accepted: false, starting: true, submitted: false, before: null };
     sessionCompactions.set(key, entry);
     try {
       if (externalAgent(card)) {
         if (typeof harnessService().compact !== "function") throw new Error("This agent cannot compact its session");
-        const accepted = await harnessService().compact(entry.sessionId);
+        const accepted = await harnessService().compact(entry.sessionId, { beforeSubmit: before => { entry.before = before; entry.submitted = true; } });
         entry.before = accepted?.compactedAt ?? null;
       } else {
-        const accepted = await requestHeadless("/api/v1/ao/harness/compact", { ...scope, status: false }, { localConfirmation: true });
+        entry.submitted = true;
+        const accepted = await requestHeadless("/api/v1/ao/harness/compact", { ...scope, status: false, request_id: `compact-${entry.id}` }, { localConfirmation: true });
         if (accepted?.ok !== true) throw new Error("The agent did not accept compaction");
       }
       entry.accepted = true;
-      let observations = 0;
-      const observeCompletion = async () => {
-        if (++observations > 120 || sessionCompactions.get(key) !== entry || entry.status !== "in_progress") return;
-        try { await compactSession({ workspaceId: id, taskId: task, status: true, compactionId: entry.id }); }
-        catch { /* An uncertain read is not completion; the next observation may recover. */ }
-        if (sessionCompactions.get(key) === entry && entry.status === "in_progress") {
-          entry.timer = setTimer(observeCompletion, 1000);
-          entry.timer?.unref?.();
-        }
-      };
-      entry.timer = setTimer(observeCompletion, 1000);
-      entry.timer?.unref?.();
-      return { ok: true, status: "in_progress", compactionId: entry.id };
     } catch (error) {
-      if (sessionCompactions.get(key) === entry) sessionCompactions.delete(key);
-      throw error;
+      const refused = [401, 403, 422].includes(error?.status)
+        || ["AO_NODE_SCOPE_FAILED", "AO_COMPACTION_BUSY", "AO_THREAD_UNKNOWN", "AO_HARNESS_NOT_CONNECTED", "AO_COMPACTION_NOT_SUBMITTED", "AO_COMPACTION_FAILED", "HEADLESS_NOT_ACCEPTING"].includes(error?.code)
+        || /^HEADLESS_(?:CAPACITY|DRAINING):/.test(String(error?.message));
+      if (!entry.submitted || refused) {
+        if (sessionCompactions.get(key) === entry) sessionCompactions.delete(key);
+        throw error;
+      }
+      // A lost HTTP response says nothing about submitted provider work. Keep this request's
+      // stable receipt and reconcile it; a retry must never manufacture a second admission key.
     }
+    entry.starting = false;
+    let observations = 0;
+    const observeCompletion = async () => {
+      if (++observations > 120 || sessionCompactions.get(key) !== entry || entry.status !== "in_progress") return;
+      try { await compactSession({ workspaceId: id, taskId: task, status: true, compactionId: entry.id }); }
+      catch { /* An uncertain read is not completion; the next observation may recover. */ }
+      if (sessionCompactions.get(key) === entry && entry.status === "in_progress") {
+        entry.timer = setTimer(observeCompletion, 1000);
+        entry.timer?.unref?.();
+      }
+    };
+    entry.timer = setTimer(observeCompletion, 1000);
+    entry.timer?.unref?.();
+    return { ok: true, status: "in_progress", compactionId: entry.id, ...(!entry.accepted ? { uncertain: true } : {}) };
   }
 
   // The board's bounded task record is separate from the agent's token context. This legacy
