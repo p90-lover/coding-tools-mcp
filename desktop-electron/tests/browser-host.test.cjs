@@ -23,6 +23,7 @@ const {
   MANUAL_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,
   navigationOriginForLog,
+  waitForConnectorVerification,
 } = require("../electron/browser-host.cjs");
 const { BrowserHost: StandaloneBrowserHost, loadCommittedBrowserSurface: loadStandaloneBrowserSurface } = require("../../runtime-web/launcher/electron/browser-host.cjs");
 const SAVED_CONVERSATION_ID = "0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c";
@@ -4032,4 +4033,64 @@ test("a Codex turn on another account is flagged, so the shown account's strip l
   });
   assert.equal(BrowserHost.prototype.tabSnapshot.call(fixture, own).otherAccount, undefined);
   assert.equal(BrowserHost.prototype.tabSnapshot.call(fixture, other).otherAccount, true);
+});
+
+test("a turn that starts during the automatic connector check waits for it instead of failing", async () => {
+  // The check now runs while Codex holds its bridge connections open, so a turn can arrive mid-check.
+  const tab = { id: "tab-check-owner", traceId: "trace_during_check", helperPid: process.pid, status: "running", interactionMode: "automatic" };
+  let settle;
+  const fixture = {
+    manualOperation: "connector verification",
+    manualOperationSettled: new Promise((resolve) => { settle = resolve; }),
+    turnTabs: new Map([[tab.id, tab]]),
+    userCancelledTurnOwners: new Map(),
+  };
+  let settled = false;
+  const pending = BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, process.pid + 1);
+  pending.catch(() => {}).finally(() => { settled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(settled, false, "still waiting for the check");
+  fixture.manualOperation = null;
+  fixture.manualOperationSettled = null;
+  settle();
+  await assert.rejects(pending, /owned by another helper process/, "then the turn goes on through the usual checks");
+});
+
+test("any other manual operation still refuses a turn at once", async () => {
+  const fixture = {
+    manualOperation: "ChatGPT login",
+    manualOperationSettled: new Promise(() => {}),
+    turnTabs: new Map(),
+    userCancelledTurnOwners: new Map(),
+  };
+  await assert.rejects(BrowserHost.prototype.beginTurn.call(fixture, "trace_during_login", false, process.pid), /busy with ChatGPT login/);
+});
+
+test("the wait for a connector check is bounded, and the caller then refuses the turn as before", async () => {
+  const host = { manualOperation: "connector verification", manualOperationSettled: new Promise(() => {}) };
+  const started = Date.now();
+  await waitForConnectorVerification(host, 30);
+  assert.ok(Date.now() - started < 1_000);
+  assert.equal(host.manualOperation, "connector verification");
+});
+
+test("a manual operation tells waiting turns when it ends, failed or not", async () => {
+  const fixture = {
+    ready: async () => {},
+    activeTraceId: null,
+    manualOperation: null,
+    manualOperationSettled: null,
+    activateHomeSurface() {},
+    setState() {},
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  let during;
+  await assert.rejects(BrowserHost.prototype.withManualOperation.call(fixture, "connector verification", async () => {
+    during = fixture.manualOperationSettled;
+    throw new Error("connector missing");
+  }), /connector missing/);
+  assert.ok(during instanceof Promise);
+  assert.equal(await Promise.race([during.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 50))]), "settled");
+  assert.equal(fixture.manualOperation, null);
+  assert.equal(fixture.manualOperationSettled, null);
 });

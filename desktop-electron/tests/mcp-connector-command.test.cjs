@@ -44,7 +44,7 @@ test("the real main action uses the current account-switch state before creating
       return { opened: true };
     },
     stateStore: { update: value => value }, publishOperation() {}, send() {}, logger: {},
-    startCatalogVerificationMonitor() {}, automaticMcpAttemptPid: 1,
+    startCatalogVerificationMonitor() {}, automaticMcpAttempt: { pid: 1, failures: 0, retryAt: null },
   };
   vm.runInNewContext(source.slice(start, end), context);
   await run();
@@ -115,7 +115,7 @@ test("the real main action selects the captured account's tunnel and waits for r
         return { created: true, href: "/plugins/account-2", binding };
       },
       stateStore: { update: value => { stateUpdates.push(value); return value; } }, publishOperation() {}, send() {}, logger: {},
-      startCatalogVerificationMonitor: () => { monitors++; }, automaticMcpAttemptPid: 1,
+      startCatalogVerificationMonitor: () => { monitors++; }, automaticMcpAttempt: { pid: 1, failures: 0, retryAt: null },
     };
     vm.runInNewContext(source.slice(start, end), context);
     if (scenario.switches || scenario.staysUnready || scenario.switchesDuringSetup || scenario.switchesDuringBinding) {
@@ -451,7 +451,7 @@ test("the real hidden tunnel-add action consumes only successful stable account 
       runtimeSupervisor: { extraTunnels }, runtimeHost: { currentOperation: () => null }, browserHost: host,
       createConfiguredConnector: async () => { creates++; return { created: true }; },
       stateStore: { update: value => { stateUpdates.push(value); return value; } }, publishOperation() {}, send() {}, logger: {},
-      startCatalogVerificationMonitor() {}, automaticMcpAttemptPid: 1,
+      startCatalogVerificationMonitor() {}, automaticMcpAttempt: { pid: 1, failures: 0, retryAt: null },
     };
     vm.runInNewContext(source.slice(start, end), context);
     const fails = scenario.mismatch || scenario.fails || scenario.switches || scenario.replaces || scenario.oversized || scenario.malformed;
