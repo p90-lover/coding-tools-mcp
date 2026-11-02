@@ -1590,6 +1590,42 @@ test("Claude Code on Approve for me: the reviewed command runs in Codex's sandbo
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("sandbox terminal follow-ups stay in their chat and stale ids never fall through to headless", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, sandbox });
+  try {
+    const one = await session(tools, { id: "ao-1", agent: "claude-code", autoReview: true });
+    const two = await session(tools, { id: "ao-2", agent: "claude-code", autoReview: true });
+    await callTool(one.url, one.auth, "exec_command", { cmd: "npm run dev" });
+    const before = calls.length;
+    const followups = [
+      ["write_stdin", { command_id: "sbx-1", chars: "y" }],
+      ["write_stdin", { session_id: "sbx-1", chars: "" }],
+      ["read_output", { output_ref: "command:sbx-1:stdout" }],
+      ["read_output", { output_ref: "session:sbx-1:stderr" }],
+      ["kill_command", { command_id: "sbx-1" }],
+      ["kill_session", { session_id: "sbx-1" }],
+    ];
+    for (const [name, args] of followups) {
+      const refused = await callTool(two.url, two.auth, name, args);
+      assert.equal(refused.isError, true, name);
+      assert.match(refused.content[0].text, /not available in this chat/);
+    }
+    assert.deepEqual(sandbox.written, []);
+    assert.deepEqual(sandbox.killed, []);
+    sandbox.owns = () => false; // the app restarted, or the runner's bounded output expired
+    for (const [name, args] of followups) {
+      const expired = await callTool(one.url, one.auth, name, args);
+      assert.equal(expired.isError, true, name);
+      assert.match(expired.content[0].text, /ended|restarted/);
+      assert.doesNotMatch(expired.content[0].text, /SESSION_NOT_FOUND/);
+    }
+    assert.equal(calls.length, before, "no stale or other-chat id reaches headless");
+    assert.equal(confirmations.length, 0, "nobody is asked to confirm typing into a command that is gone");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("in plain ask mode a sandboxed command is still confirmed here, and a declined one never starts", async () => {
   const tree = tempTree();
   const sandbox = fakeSandbox();

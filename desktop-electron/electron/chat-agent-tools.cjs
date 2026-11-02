@@ -2106,7 +2106,22 @@ function createChatAgentTools({
     // when the chat's approval reviewer has already judged this call (reviewedUpstream), the app
     // does not ask again; otherwise the user confirms it here. Being sandboxed never approves a
     // command by itself. A command the sandbox did not start (the user's own terminal) goes on below.
-    if (group === "terminal" && sandboxed() && sandboxRuns(name, args)) {
+    if (group === "terminal" && sandboxRuns(entry, name, args)) {
+      // A follow-up to a sandboxed command that is not this chat's, or that ended with an app
+      // restart, is refused here, before any confirm: it fell through to headless's terminals,
+      // asked the user to confirm typing into "a terminal the session did not start", and then
+      // failed with SESSION_NOT_FOUND.
+      if (name !== "exec_command" && name !== "check_exec_environment") {
+        const id = commandIdOf(name, args);
+        if (!entry.commands.get(id)?.sandboxed) {
+          return failedCall("That sandboxed command is not available in this chat. It may belong to another chat or have ended when the app restarted. Start a new command in this chat.");
+        }
+        let owned = false;
+        try { owned = Boolean(sandbox?.owns(id)); } catch { owned = false; }
+        if (!owned) {
+          return failedCall("That sandboxed command has ended or its output expired, possibly because the app restarted. Start a new command in this chat; its old command_id cannot be resumed.");
+        }
+      }
       if (!entry.bypass && !reviewedUpstream(entry)) {
         const answer = await confirmTerminal(entry, name, args, root, { sandboxed: true, signal });
         if (answer !== true && answer !== false) return answer;
@@ -2220,14 +2235,18 @@ function createChatAgentTools({
     ? args.output_ref.split(":")[1] : typeof args.command_id === "string" ? args.command_id : args.session_id);
 
   /**
-   * Whether the sandbox runs this terminal call: exec_command and check_exec_environment always;
-   * write_stdin, read_output and kill_command for a command it started. Anything else (the user's
-   * own terminal) is headless's.
+   * Whether the sandbox runs this terminal call: exec_command and check_exec_environment while the
+   * sandbox is installed; write_stdin, read_output and kill_command for a command it started, also
+   * one that ended with an app restart (an "sbx-" id, or one this chat tracked as sandboxed), so a
+   * stale id never reaches headless's unrelated terminals. Anything else (the user's own terminal)
+   * is headless's.
    */
-  function sandboxRuns(name, args) {
-    if (name === "exec_command" || name === "check_exec_environment") return true;
+  function sandboxRuns(entry, name, args) {
+    if (name === "exec_command" || name === "check_exec_environment") return sandboxed();
     const id = commandIdOf(name, args);
-    try { return typeof id === "string" && sandbox.owns(id); } catch { return false; }
+    if (typeof id !== "string") return false;
+    if (id.startsWith("sbx-") || entry.commands.get(id)?.sandboxed) return true;
+    try { return Boolean(sandbox?.owns(id)); } catch { return false; }
   }
 
   /** A terminal call sandboxRuns, run in the sandbox. Results are shaped like headless's, so the agent sees no difference. */
