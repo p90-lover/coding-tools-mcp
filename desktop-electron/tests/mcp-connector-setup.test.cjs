@@ -722,7 +722,8 @@ test("account IPC preserves legacy arbitration and records only the requested, s
       if (removeDuringSetup) accounts.delete("other");
       return { created: false, href: "/plugins/plugins~Plugin_managed", name: "Coding Tools", connected: true,
         binding: { userId: "user-fixture", workspaceId: "6d4774fd-0e67-4b5b-a3b7-4c0e61357122", tunnelId: tunnels[0].tunnelId } };
-    }, app: {}, BrowserWindow: {}, browserHost: { partition: "persist:main", ready: async () => {}, currentOperation: () => null }, runtimeHost: { currentOperation: () => null }, publishBrowserAccounts() { assert(records.length > 0, "account persistence resolves before its update is published"); }, publishOperation() {},
+    }, app: {}, BrowserWindow: {}, browserHost: { partition: "persist:main", ready: async () => {}, currentOperation: () => null }, runtimeHost: { currentOperation: () => null, runtimeConfigSnapshot: () => ({ configured: false }) }, publishBrowserAccounts() { assert(records.length > 0, "account persistence resolves before its update is published"); }, publishOperation() {},
+    currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
     mcpConnectorCommandFailure: error => ({ code: "fixture_failure", message: error.message }),
   };
   vm.runInNewContext(snippet, context);
@@ -739,7 +740,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   failure = "ChatGPT refused this connector";
   await assert.rejects(handler({}, "other"), /refused/);
   assert.deepEqual(records[1], { id: "other", error: failure });
-  await assert.rejects(handler({}, "main"), /account-owned MCP tunnel/);
+  await assert.rejects(handler({}, "main"), /saved automatic MCP harness/);
   failure = null; signedIn = false; calls.length = 0;
   await assert.rejects(handler({}, "other"), /Sign in to this account/);
   assert.equal(calls.some(entry => entry?.target), false);

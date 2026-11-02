@@ -99,37 +99,57 @@ function createManagedExternalServicesController({
     throw new Error("Managed component data root must be absolute");
   }
 
-  // Every services snapshot resolved the proxy route for CPA (twice) and agy, each time reading the
-  // saved proxy settings and their key synchronously on main: up to 12.8 s on the busy hard disk
-  // (0.8.48, 2026-11-01). A snapshot reuses one resolution per component until the providers
-  // folder reports a change, then publishes afresh; starts always resolve the route anew, so a
-  // process never starts on an old one. Without a watch, every snapshot reads as before.
-  const providersDirectory = path.join(path.dirname(dataRoot), "providers");
+  // Every services snapshot read files synchronously on main: the saved proxy settings and their
+  // key for CPA (twice) and agy, and CPA's config.yaml. On the busy hard disk that held main up to
+  // 12.8 s (0.8.48, 2026-11-01). A snapshot reuses what it read until fs.watch reports one of those
+  // files changed, then publishes afresh. Starts always resolve the route anew, so a process never
+  // starts on an old one. Without a watch, every snapshot reads as before.
   let snapshotting = false;
-  let routeCache = null;
-  let routeWatcher = null;
-  function watchRoutes() {
-    try {
-      routeWatcher = fs.watch(providersDirectory, () => {
-        routeCache = new Map();
-        publishCombined();
-      });
-      routeWatcher.on("error", () => { routeWatcher?.close(); routeWatcher = null; routeCache = null; });
-      routeWatcher.unref?.();
-      routeCache = new Map();
-    } catch { routeWatcher = null; routeCache = null; }
+  const watchedCaches = [];
+  // One write reports several events (truncate, then data): one publish follows the burst.
+  let refreshTimer = null;
+  const refreshSoon = () => {
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(() => { refreshTimer = null; publishCombined(); }, 50);
+    refreshTimer.unref?.();
+  };
+  function watchedCache(directory, fileNames) {
+    let values = null;
+    let watcher = null;
+    const forget = () => { watcher?.close(); watcher = null; values = null; };
+    const cache = {
+      get(key, compute) {
+        if (!snapshotting) return compute();
+        if (!watcher) {
+          try {
+            // The folders also hold busy subfolders (CPA's plugin data); only these files matter.
+            watcher = fs.watch(directory, (_event, name) => {
+              if (name && !fileNames.includes(String(name))) return;
+              values = new Map();
+              refreshSoon();
+            });
+            watcher.on("error", forget);
+            watcher.unref?.();
+            values = new Map();
+          } catch { forget(); return compute(); }
+        }
+        if (!values.has(key)) {
+          try { values.set(key, { value: compute() }); } catch (error) { values.set(key, { error }); }
+        }
+        const cached = values.get(key);
+        if (cached.error) throw cached.error;
+        return cached.value;
+      },
+      close: forget,
+    };
+    watchedCaches.push(cache);
+    return cache;
   }
+  const routes = watchedCache(path.join(path.dirname(dataRoot), "providers"), ["provider-network.json", "provider-network.key"]);
+  const cpaConfigPath = path.join(dataRoot, "state", "cpa", "config.yaml");
+  const cpaConfigs = watchedCache(path.dirname(cpaConfigPath), ["config.yaml"]);
   function snapshotRoute(root, safeStorage, componentId = "cpa") {
-    if (!snapshotting) return resolveCpaProxyRoute(root, safeStorage, componentId);
-    if (!routeWatcher) watchRoutes();
-    if (!routeCache) return resolveCpaProxyRoute(root, safeStorage, componentId);
-    if (!routeCache.has(componentId)) {
-      try { routeCache.set(componentId, { route: resolveCpaProxyRoute(root, safeStorage, componentId) }); }
-      catch (error) { routeCache.set(componentId, { error }); }
-    }
-    const cached = routeCache.get(componentId);
-    if (cached.error) throw cached.error;
-    return cached.route;
+    return routes.get(componentId, () => resolveCpaProxyRoute(root, safeStorage, componentId));
   }
 
   const meshPath = path.join(dataRoot, "loopback-mesh.json");
@@ -198,16 +218,17 @@ function createManagedExternalServicesController({
   function cpaProxyStatus(service) {
     try {
       const route = snapshotRoute(dataRoot, options.safeStorage);
-      let configured = false;
-      try {
-        const config = fs.readFileSync(path.join(dataRoot, "state", "cpa", "config.yaml"), "utf8");
-        // CPA 8 saves the route grouped (requests.proxy-url); a config it hasn't rewritten yet has
-        // it at the top level. Matching only the top level read every running CPA as unrouted.
-        const yaml = require("js-yaml");
-        const parsed = yaml.load(config) ?? {};
-        const written = parsed.requests?.["proxy-url"] ?? parsed["proxy-url"] ?? "";
-        configured = service.status === "ready" && written === route.url;
-      } catch {}
+      const written = cpaConfigs.get("proxy-url", () => {
+        try {
+          const config = fs.readFileSync(cpaConfigPath, "utf8");
+          // CPA 8 saves the route grouped (requests.proxy-url); a config it hasn't rewritten yet has
+          // it at the top level. Matching only the top level read every running CPA as unrouted.
+          const yaml = require("js-yaml");
+          const parsed = yaml.load(config) ?? {};
+          return parsed.requests?.["proxy-url"] ?? parsed["proxy-url"] ?? "";
+        } catch { return null; }
+      });
+      const configured = service.status === "ready" && written !== null && written === route.url;
       return { profileId: route.profileId, configMatches: configured, error: null };
     } catch (error) {
       return { profileId: null, configMatches: false, error: error instanceof Error ? error.message : "CPA proxy settings unavailable" };
@@ -537,7 +558,8 @@ function createManagedExternalServicesController({
   }
 
   function dispose({ keepPersistent = false } = {}) {
-    routeWatcher?.close(); routeWatcher = null; routeCache = null;
+    for (const cache of watchedCaches) cache.close();
+    clearTimeout(refreshTimer); refreshTimer = null;
     managedController.dispose({ keepPersistent });
     baseController.dispose();
   }

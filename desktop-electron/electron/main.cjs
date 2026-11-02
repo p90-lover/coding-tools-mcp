@@ -44,7 +44,7 @@ const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
-const { createConfiguredConnector, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
+const { createConfiguredConnector, currentConnectorSettings, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
 const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
@@ -60,9 +60,8 @@ const { RuntimeHost } = require("./runtime.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
 const {
   ensurePackagedRuntime,
-  ensurePackagedRuntimeAsync,
+  preparePackagedRuntime,
   pruneOldRuntimes,
-  waitForPackagedRuntimeSource,
 } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
@@ -169,6 +168,7 @@ app.setPath("userData", launcherUserData);
 app.setAppLogsPath(path.join(launcherUserData, "logs"));
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
+  persist: process.env.CODING_TOOLS_PERSIST_LOGS === "1",
 });
 
 let mainWindow = null;
@@ -3055,8 +3055,8 @@ function registerIpc({ logger, stateStore }) {
     const operationBrowser = browserHost, operationPartition = operationBrowser?.partition;
     const extraTunnels = runtimeSupervisor?.extraTunnels;
     const tunnel = extraTunnels?.status().find(entry => entry.accountId === accountId);
-    const id = tunnel?.id, tunnelId = tunnel?.tunnelId;
-    const missingTunnel = new Error("Assign an existing account-owned MCP tunnel in More tunnels, then retry this account.");
+    const id = tunnel?.id;
+    let primarySettings = null, tunnelId = tunnel?.tunnelId;
     let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
       if (runtimeHost.currentOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
@@ -3069,14 +3069,25 @@ function registerIpc({ logger, stateStore }) {
       if (!connectorConfirmed && (operationBrowser.activeTraceId || (operation && (!creating || operation !== "MCP connector creation")))) {
         throw new Error("MCP connector setup is busy");
       }
-      if (!id) throw missingTunnel;
-      if (!extraTunnels.status().some(current => current.id === id && current.accountId === accountId
-        && current.tunnelId === tunnelId && (!requireReady || current.state === "ready"))) {
+      if (tunnel ? !id || !extraTunnels.status().some(current => current.id === id && current.accountId === accountId
+        && current.tunnelId === tunnelId && (!requireReady || current.state === "ready"))
+        : extraTunnels?.status().some(current => current.accountId === accountId)) {
         throw new Error("The account's MCP tunnel changed or is not ready.");
+      }
+      if (!tunnel) {
+        const current = currentConnectorSettings(runtimeHost);
+        if (current.name !== primarySettings.name || current.tunnelId !== tunnelId) {
+          throw new Error("The MCP configuration changed during setup.");
+        }
       }
     };
     publishOperation({ name: "mcp-connector-create", status: "running", message: "Connecting this account's MCP connector" });
     try {
+      // The main tunnel is a candidate; the helper must still prove its fresh account/workspace ownership.
+      if (!tunnel) {
+        primarySettings = currentConnectorSettings(runtimeHost);
+        tunnelId = primarySettings.tunnelId;
+      }
       assertCurrent();
       await runtimeStartupInFlight;
       assertCurrent();
@@ -3089,7 +3100,7 @@ function registerIpc({ logger, stateStore }) {
       }
       await routeIdleAccountPartition(partition, logger);
       assertCurrent();
-      if (tunnel.state !== "ready") {
+      if (tunnel && tunnel.state !== "ready") {
         await extraTunnels.reconnect(id);
         assertCurrent();
       }
@@ -3115,14 +3126,14 @@ function registerIpc({ logger, stateStore }) {
           }
           return candidates;
         },
-        target: { partition, requireTunnelMatch: true, tunnelId, connectorBindings: tunnel.connectorBindings },
+        target: { partition, requireTunnelMatch: true, tunnelId, connectorBindings: tunnel?.connectorBindings },
         });
       } finally { creating = false; }
       if (result.connected !== true || result.binding?.tunnelId !== tunnelId) throw new Error("ChatGPT did not confirm the exact connector state.");
       // The helper has released browser admission; new work cannot undo its verified connection.
       connectorConfirmed = true;
       assertCurrent();
-      await extraTunnels.setConnector(id, result.href, result.binding);
+      if (tunnel) await extraTunnels.setConnector(id, result.href, result.binding);
       assertCurrent();
       const recorded = await browserAccounts.recordConnector(accountId, { bound: true });
       assertCurrent();
@@ -3130,7 +3141,7 @@ function registerIpc({ logger, stateStore }) {
       publishOperation({ name: "mcp-connector-create", status: "completed", message: "This account's MCP connector is connected" });
       return result;
     } catch (error) {
-      const failure = error === missingTunnel ? { code: "configuration_required", message: missingTunnel.message } : mcpConnectorCommandFailure(error);
+      const failure = mcpConnectorCommandFailure(error);
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
@@ -3530,12 +3541,14 @@ function registerIpc({ logger, stateStore }) {
     const copy = nativeCopyFor(stateStore.read().language);
     const result = await dialog.showSaveDialog(mainWindow, {
       title: copy.exportDiagnostics,
-      defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-diagnostics-${date}.jsonl`),
+      defaultPath: path.join(app.getPath("userData"), `codex-web-gpt-diagnostics-${date}.jsonl`),
       filters: [{ name: "JSON Lines", extensions: ["jsonl"] }],
     });
     if (result.canceled || !result.filePath) return null;
+    await logger.flush();
     const recordCount = exportSanitizedLogs({
       filePath: logger.filePath,
+      records: logger.filePath ? [] : logger.recent(300),
       destinationPath: result.filePath,
     });
     logger.info("launcher.logs_exported", { recordCount });
@@ -3764,8 +3777,6 @@ async function start() {
     }
   }
   let runtimeSourceFallback = null;
-  await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath, coreHome: CORE_HOME,
-    onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); } });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
   // Whether the runtime folder was removed is checked off the main thread, at most every 30 s:
@@ -3798,22 +3809,17 @@ async function start() {
     }
     return installedRuntimeRoot;
   };
-  // The launch checks, and on a new version's first start copies, the runtime without holding the
-  // main thread (ensurePackagedRuntimeAsync). If that fails, the synchronous call below runs the
-  // same steps again and reports the failure as before.
-  const launchRuntimeRoot = await ensurePackagedRuntimeAsync({
+  // Prepare exactly once. A whole installed copy needs no walk of the packaged source, and a
+  // failed asynchronous preparation must not repeat every disk operation on the main thread.
+  const launchRuntimeRoot = await preparePackagedRuntime({
     app,
     coreHome: CORE_HOME,
     resourcesPath: process.resourcesPath,
-  }).catch(() => null);
-  if (launchRuntimeRoot) {
-    installedRuntimeRoot = launchRuntimeRoot;
-    runtimeRootResolved = true;
-    runtimeRootCheck.at = Date.now();
-  }
-  installedRuntimeRoot = runtimeRootProvider();
-  // Older versions' runtime copies (165 MB each) are removed in the background (pruneOldRuntimes).
-  void pruneOldRuntimes({ app, coreHome: CORE_HOME }).catch(() => undefined);
+    onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); },
+  });
+  installedRuntimeRoot = launchRuntimeRoot;
+  runtimeRootResolved = true;
+  runtimeRootCheck.at = Date.now();
 
   cdpPort = await findFreePort();
   if (process.platform === "linux") {
@@ -3877,6 +3883,7 @@ async function start() {
   }
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
+    persist: process.env.CODING_TOOLS_PERSIST_LOGS === "1",
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
@@ -4056,12 +4063,12 @@ async function start() {
     enabled: () => stateStore.read().automaticComponentUpdates !== false,
     isBusy: appBusy,
     idleSeconds: () => powerMonitor.getSystemIdleTime(),
-    // cpa-helper appends each finished request to a monthly usage file.
-    lastActivityAt: () => {
+    // cpa-helper appends each finished request to a monthly usage file. Read off main: see trySwap.
+    lastActivityAt: async () => {
       try {
-        return Math.max(0, ...fs.readdirSync(cpaUsageRoot)
-          .filter((name) => name.endsWith(".jsonl"))
-          .map((name) => fs.statSync(path.join(cpaUsageRoot, name)).mtimeMs)) || null;
+        const names = (await fs.promises.readdir(cpaUsageRoot)).filter((name) => name.endsWith(".jsonl"));
+        const times = await Promise.all(names.map(async (name) => (await fs.promises.stat(path.join(cpaUsageRoot, name))).mtimeMs));
+        return Math.max(0, ...times) || null;
       } catch {
         return null;
       }
@@ -4725,6 +4732,11 @@ async function start() {
     windowStatePath: path.join(app.getPath("userData"), "window-state.json"),
     startHidden,
   });
+  // Reclaim old copies after the window paints, not while this launch is loading its files.
+  mainWindow.once("ready-to-show", () => {
+    const timer = setTimeout(() => { void pruneOldRuntimes({ app, coreHome: CORE_HOME }).catch(() => undefined); }, 30_000);
+    timer.unref?.();
+  });
   registerIpc({ logger, stateStore });
   await ensureRendererLoaded(mainWindow, logger);
   rendererLoaded = true;
@@ -5200,9 +5212,11 @@ async function start() {
 
 void start().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
-  try {
-    fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
-  } catch {}
+  if (process.env.CODING_TOOLS_PERSIST_LOGS === "1") {
+    try {
+      fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
+    } catch {}
+  }
   // A version an update just placed that cannot start is undone: the previous one starts instead.
   try {
     if (app.isPackaged && handOffUpdateRecovery(path.dirname(process.execPath), { currentVersion: app.getVersion(), startFailed: message })) {

@@ -18,6 +18,7 @@ const GROWTH_RATIO = 1.5;
 const HIGH_MB = 3_000;
 const REPEAT_MS = 2 * 60 * 60_000;
 const NOTIFY_AGAIN_MS = 12 * 60 * 60_000;
+const HIGH_LOG_MS = 30 * 60_000;
 const MB = 1024 * 1024;
 
 const median = (values) => {
@@ -46,6 +47,25 @@ function growth(samples, { windowMs = WINDOW_MS, growthMb = GROWTH_MB, growthRat
   return { fromMb: Math.round(fromMb), toMb: Math.round(toMb), minutes: Math.round((recent.at(-1).at - early.at(-1).at) / 60_000) };
 }
 
+/**
+ * Where the main process's memory is, for an entry about it: its JS heap, the buffers that heap
+ * holds (external, arrayBuffers among them), and the rest of the process (`otherMb`: worker
+ * threads, Chromium, native code). 0.8.49's 11.3 GB entry named only "Browser", with a 52 MB heap.
+ */
+function mainBreakdown(memoryUsage) {
+  try {
+    const usage = memoryUsage();
+    const mb = (bytes) => Math.round(Number(bytes) / MB) || 0;
+    const rssMb = mb(usage.rss);
+    const heapTotalMb = mb(usage.heapTotal);
+    const externalMb = mb(usage.external);
+    return { rssMb, heapUsedMb: mb(usage.heapUsed), heapTotalMb, externalMb, arrayBuffersMb: mb(usage.arrayBuffers),
+      otherMb: Math.max(0, rssMb - heapTotalMb - externalMb) };
+  } catch {
+    return null;
+  }
+}
+
 /** The app's processes as `{ pid, kind, mb }`: Electron's (getAppMetrics, working set in KB) and the main process's JS heap. */
 function readProcesses({ appMetrics, memoryUsage = () => process.memoryUsage() }) {
   const processes = [];
@@ -59,13 +79,17 @@ function readProcesses({ appMetrics, memoryUsage = () => process.memoryUsage() }
   return processes;
 }
 
-function createMemoryWatch({ appMetrics, memoryUsage, logger, notify, now = () => Date.now(),
+function createMemoryWatch({ appMetrics, memoryUsage = () => process.memoryUsage(), logger, notify, now = () => Date.now(),
   sampleMs = SAMPLE_MS, maxSamples = MAX_SAMPLES, highMb = HIGH_MB, repeatMs = REPEAT_MS, notifyAgainMs = NOTIFY_AGAIN_MS,
+  highLogMs = HIGH_LOG_MS, mainPid = process.pid,
   setRepeat = setInterval, clearRepeat = clearInterval, thresholds = {} } = {}) {
   const histories = new Map(); // `${kind}:${pid}` -> { kind, pid, samples: [{ at, mb }] }
   const logged = new Map();
   let notifiedAt = null;
+  let highLoggedAt = null;
   let timer = null;
+  // An entry about the main process says where in it the memory is.
+  const where = (pid) => (pid === mainPid ? { main: mainBreakdown(memoryUsage) } : {});
 
   const sample = () => {
     const at = now();
@@ -89,7 +113,7 @@ function createMemoryWatch({ appMetrics, memoryUsage, logger, notify, now = () =
       if (grew && (!logged.has(key) || at - logged.get(key) >= repeatMs)) {
         logged.set(key, at);
         findings.push({ kind: entry.kind, pid: entry.pid, ...grew });
-        logger?.warn?.("launcher.memory_growth", { kind: entry.kind, pid: entry.pid, ...grew });
+        logger?.warn?.("launcher.memory_growth", { kind: entry.kind, pid: entry.pid, ...grew, ...(entry.heap ? {} : where(entry.pid)) });
       }
     }
     // A process that is gone takes its history with it.
@@ -97,9 +121,13 @@ function createMemoryWatch({ appMetrics, memoryUsage, logger, notify, now = () =
     const total = processes.filter((entry) => !entry.heap).reduce((sum, entry) => sum + entry.mb, 0);
     const largest = processes.filter((entry) => !entry.heap).sort((a, b) => b.mb - a.mb)[0];
     // (null > n is `0 > n`: true for the negative times a fresh clock gives, so the first is checked apart.)
+    // Logged every highLogMs while it lasts, so the log shows how it grew; told once per notifyAgainMs.
+    if (largest && largest.mb >= highMb && (highLoggedAt === null || at - highLoggedAt >= highLogMs)) {
+      highLoggedAt = at;
+      logger?.warn?.("launcher.memory_high", { kind: largest.kind, pid: largest.pid, mb: Math.round(largest.mb), totalMb: Math.round(total), ...where(largest.pid) });
+    }
     if (largest && largest.mb >= highMb && (notifiedAt === null || at - notifiedAt >= notifyAgainMs)) {
       notifiedAt = at;
-      logger?.warn?.("launcher.memory_high", { kind: largest.kind, pid: largest.pid, mb: Math.round(largest.mb), totalMb: Math.round(total) });
       try {
         notify?.({ title: "Coding Tools is using a lot of memory",
           body: `${largest.kind} uses ${(largest.mb / 1024).toFixed(1)} GB (the app ${(total / 1024).toFixed(1)} GB). Closing finished chats or restarting the app frees it.` });

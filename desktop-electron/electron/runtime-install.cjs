@@ -342,7 +342,12 @@ async function statRuntimeFileAsync(runtimeRoot, canonicalRoot, file) {
 
 async function hashRuntimeFileAsync(runtimeRoot, file) {
   const absolutePath = path.join(runtimeRoot, ...file.path.split("/"));
-  const sha256 = createHash("sha256").update(await fs.promises.readFile(absolutePath)).digest("hex");
+  const digest = createHash("sha256");
+  // A whole Bun executable exceeds 100 MB and shares the hash pool with other payloads. Hash
+  // the same bytes with bounded buffers instead; integrity checks are unchanged.
+  const highWaterMark = Math.max(1, Math.min(file.size, 256 * 1024));
+  for await (const chunk of fs.createReadStream(absolutePath, { highWaterMark })) digest.update(chunk);
+  const sha256 = digest.digest("hex");
   if (sha256 !== file.sha256) {
     throw new Error(`Runtime bundle file checksum mismatch: ${absolutePath}`);
   }
@@ -582,7 +587,7 @@ function* promoteSideBundleSteps(side, destination, expectedIdentity, verify) {
   return yield step("validate", destination, expectedIdentity, verify);
 }
 
-function* packagedRuntimeSteps({ app, coreHome, resourcesPath }) {
+function* packagedRuntimeSteps({ app, coreHome, resourcesPath, onFallback = null }) {
   if (!app.isPackaged) return null;
   const identity = {
     version: app.getVersion(),
@@ -600,7 +605,7 @@ function* packagedRuntimeSteps({ app, coreHome, resourcesPath }) {
   function* sourceFailed(error) {
     // The installed copy of this version, when whole, runs the app (installedPackagedRuntime).
     const installed = yield step("installed", { app, coreHome });
-    if (installed) return installed;
+    if (installed) { onFallback?.(error); return installed; }
     throw error;
   }
   let sourceManifest;
@@ -648,6 +653,7 @@ function* packagedRuntimeSteps({ app, coreHome, resourcesPath }) {
   const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`;
   const previous = `${destination}.previous-${process.pid}-${Date.now()}`;
   let previousMoved = false;
+  let installedRoot;
   try {
     try {
       yield step("copy", source, temporary);
@@ -670,7 +676,7 @@ function* packagedRuntimeSteps({ app, coreHome, resourcesPath }) {
     }
     try {
       yield step("rename", temporary, destination);
-      yield step("validate", destination, expectedIdentity, verify);
+      installedRoot = yield step("validate", destination, expectedIdentity, verify);
     } catch (error) {
       try { yield step("remove", destination); } catch { /* restored over below */ }
       if (previousMoved) {
@@ -700,7 +706,8 @@ function* packagedRuntimeSteps({ app, coreHome, resourcesPath }) {
     }
   }
   try { yield step("chmod", destination, 0o700); } catch {}
-  return yield step("validate", destination, expectedIdentity, verify);
+  // It was checked after the move above. Cleanup and the directory chmod do not change its files.
+  return installedRoot;
 }
 
 function ensurePackagedRuntime(options) {
@@ -712,14 +719,38 @@ function ensurePackagedRuntimeAsync(options) {
   return runStepsAsync(packagedRuntimeSteps(options));
 }
 
+/** One launch preparation: wait for a partial update, validate what will run, and copy only if needed. */
+async function preparePackagedRuntime({
+  app, coreHome, resourcesPath, onFallback = null,
+  timeoutMs = DEFAULT_SOURCE_WAIT_TIMEOUT_MS, intervalMs = DEFAULT_SOURCE_WAIT_INTERVAL_MS,
+}) {
+  if (!app.isPackaged) return null;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error("Packaged runtime preparation requires non-negative timeoutMs and positive intervalMs");
+  }
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await ensurePackagedRuntimeAsync({ app, coreHome, resourcesPath, onFallback });
+    } catch (error) {
+      // Only an incomplete package may still materialize. A copy/rename/device error must not
+      // start another full copy, or fall back to repeating the whole check on the main thread.
+      if (!/^(?:Runtime (?:manifest|bundle)|Bundled Bun runtime)/.test(error?.message ?? "")) throw error;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error(`Packaged runtime did not fully materialize within ${timeoutMs}ms: ${error.message}`);
+      await new Promise(resolve => setTimeout(resolve, Math.min(intervalMs, remaining)));
+    }
+  }
+}
+
 const STALE_RUNTIME_TEMP_MS = 60 * 60_000;
 
 /**
  * Removes other versions' runtime copies from the core home: every update copied a whole runtime
  * (~6,000 files, 165 MB) into versions\ and none was ever removed (ten were found, 2026-10-22).
  * This version's copy and the newest other one (a rollback) stay, and so does any copy still in
- * use: each is renamed first, which Windows refuses for a folder a process runs from. The rename is
- * all the caller waits for; the delete runs on fs.promises so a slow disk never holds startup.
+ * use: each is renamed first, which Windows refuses for a folder a process runs from. Metadata,
+ * renames and serial deletes are asynchronous; the launcher schedules this after first paint.
  * Leftover .tmp-/.previous-/.retired- folders older than an hour go too.
  */
 async function pruneOldRuntimes({ app, coreHome, now = Date.now(), keepOthers = 1 }) {
@@ -727,7 +758,7 @@ async function pruneOldRuntimes({ app, coreHome, now = Date.now(), keepOthers = 
   const versionsRoot = path.join(coreHome, "versions");
   const current = `${app.getVersion()}-${process.platform}-${process.arch}`;
   let entries;
-  try { entries = fs.readdirSync(versionsRoot, { withFileTypes: true }); } catch { return []; }
+  try { entries = await fs.promises.readdir(versionsRoot, { withFileTypes: true }); } catch { return []; }
   const others = [];
   const doomed = [];
   for (const entry of entries) {
@@ -738,7 +769,7 @@ async function pruneOldRuntimes({ app, coreHome, now = Date.now(), keepOthers = 
     // a same-version side bundle stay.
     if (!leftover && (name === current || name.startsWith(`${current}-`))) continue;
     let mtimeMs;
-    try { mtimeMs = fs.statSync(path.join(versionsRoot, name)).mtimeMs; } catch { continue; }
+    try { mtimeMs = (await fs.promises.stat(path.join(versionsRoot, name))).mtimeMs; } catch { continue; }
     if (leftover) {
       if (now - mtimeMs > STALE_RUNTIME_TEMP_MS) doomed.push(name);
     } else if (/-(win32|darwin|linux)-[a-z0-9]+$/.test(name)) {
@@ -748,15 +779,15 @@ async function pruneOldRuntimes({ app, coreHome, now = Date.now(), keepOthers = 
   others.sort((a, b) => b.mtimeMs - a.mtimeMs);
   doomed.push(...others.slice(keepOthers).map((other) => other.name));
   const removed = [];
-  const deletes = [];
   for (const name of doomed) {
     const retired = path.join(versionsRoot, `${name}.retired-${process.pid}-${now}`);
     const from = /\.retired-/.test(name) ? null : path.join(versionsRoot, name);
-    try { if (from) fs.renameSync(from, retired); } catch { continue; }
+    try { if (from) await fs.promises.rename(from, retired); } catch { continue; }
     removed.push(name);
-    deletes.push(fs.promises.rm(from ? retired : path.join(versionsRoot, name), { recursive: true, force: true }).catch(() => undefined));
+    // Retire one tree at a time instead of starting parallel recursive deletes on the same
+    // disk the new runtime and its agents load from.
+    await fs.promises.rm(from ? retired : path.join(versionsRoot, name), { recursive: true, force: true }).catch(() => undefined);
   }
-  await Promise.all(deletes);
   return removed;
 }
 
@@ -765,6 +796,7 @@ module.exports = {
   pruneOldRuntimes,
   installedPackagedRuntime,
   ensurePackagedRuntimeAsync,
+  preparePackagedRuntime,
   validateRuntimeBundle,
   validateRuntimeBundleAsync,
   waitForPackagedRuntimeSource,

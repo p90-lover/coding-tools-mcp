@@ -4,7 +4,9 @@ use serde_json::{json, Value};
 
 use crate::tools::context::ToolContext;
 use crate::tools::policy::{validate_tool_arguments_for_workspace, PolicyError};
-use crate::tools::workspace::{tool_err, tool_err_code, tool_ok, WorkspaceError};
+use crate::tools::workspace::{
+    tool_err, tool_err_code, tool_ok, WorkspaceError, MAX_SERIALIZED_TOOL_RESULT_BYTES,
+};
 use crate::tools::{
     exec, file, git, history, image_tool, ocr, patch, project_context, screen_tool, session,
 };
@@ -105,7 +107,8 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
     } else {
         None
     };
-    let mut result = call_tool_snapshot(ctx, name, args);
+    let mut pending_read = None;
+    let mut result = call_tool_snapshot(ctx, name, args, &mut pending_read);
     if crate::tools::live_policy::refreshable_observation(name)
         && ctx.current_policy_revision().ok() != Some(ctx.policy_revision)
     {
@@ -176,10 +179,18 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
             }
         }
     }
-    result
+    match pending_read {
+        Some(page) => page.fit_result(result, MAX_SERIALIZED_TOOL_RESULT_BYTES),
+        None => result,
+    }
 }
 
-fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
+fn call_tool_snapshot(
+    ctx: &ToolContext,
+    name: &str,
+    args: &Value,
+    pending_read: &mut Option<file::ReadFilePage>,
+) -> Value {
     let mut effective_args = apply_default_cwd(ctx, name, args);
     // Run policy once before approval to surface only non-overridable hard
     // boundaries such as protected paths, host scope, shell escapes, and
@@ -350,7 +361,11 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "exec_health_check" => exec::exec_health_check(ctx),
         "get_default_cwd" => get_default_cwd(ctx),
         "set_default_cwd" => set_default_cwd(ctx, &effective_args),
-        "read_file" => file::read_file(ws, &effective_args),
+        "read_file" => file::read_file_page(ws, &effective_args).map(|page| {
+            let value = page.value();
+            *pending_read = Some(page);
+            value
+        }),
         "list_dir" => file::list_dir(ws, &effective_args),
         "list_files" => file::list_files(ws, &effective_args),
         "search_text" | "grep_text" | "grep" => file::search_text(ws, &effective_args),

@@ -273,8 +273,17 @@ pub fn read_index(history_dir: &Path) -> WorkspaceResult<Option<HistoryIndex>> {
     )
 }
 
-pub fn write_index(history_dir: &Path, index: &HistoryIndex) -> WorkspaceResult<()> {
-    write_json(&history_dir.join("index.json"), index, "history index")
+pub fn write_index(
+    workspace: &Workspace,
+    history_dir: &Path,
+    index: &HistoryIndex,
+) -> WorkspaceResult<()> {
+    write_json(
+        &history_dir.join("index.json"),
+        index,
+        "history index",
+        Some(workspace),
+    )
 }
 
 pub fn memory_dir(history_dir: &Path) -> PathBuf {
@@ -289,11 +298,16 @@ pub fn read_manifest(history_dir: &Path) -> WorkspaceResult<Option<MemoryManifes
     )
 }
 
-pub fn write_manifest(history_dir: &Path, manifest: &MemoryManifest) -> WorkspaceResult<()> {
+pub fn write_manifest(
+    workspace: &Workspace,
+    history_dir: &Path,
+    manifest: &MemoryManifest,
+) -> WorkspaceResult<()> {
     write_json(
         &memory_dir(history_dir).join("manifest.json"),
         manifest,
         "history manifest",
+        Some(workspace),
     )
 }
 
@@ -310,6 +324,7 @@ pub fn write_state(history_dir: &Path, state: &MemoryState) -> WorkspaceResult<(
         &memory_dir(history_dir).join("state.json"),
         state,
         "history state",
+        None,
     )
 }
 
@@ -419,14 +434,14 @@ pub fn build_state(
 }
 
 fn latest_user_focus(content: &str) -> Option<String> {
-    markdown::parse_checkpoint_records(content)
-        .into_iter()
-        .max_by_key(|record| record.revision)
+    let records = markdown::parse_checkpoint_records(content);
+    latest_revisions(&records)
+        .last()
         .and_then(|record| {
             if record.raw_user_input.trim().is_empty() {
-                (!record.user_intent.trim().is_empty()).then_some(record.user_intent)
+                (!record.user_intent.trim().is_empty()).then(|| record.user_intent.clone())
             } else {
-                Some(record.raw_user_input)
+                Some(record.raw_user_input.clone())
             }
         })
         .or_else(|| {
@@ -440,17 +455,19 @@ fn latest_user_focus(content: &str) -> Option<String> {
 fn latest_revisions(
     records: &[super::model::CheckpointRecord],
 ) -> Vec<&super::model::CheckpointRecord> {
-    let mut latest = BTreeMap::new();
-    for record in records {
+    let mut latest: BTreeMap<&str, (usize, &super::model::CheckpointRecord)> = BTreeMap::new();
+    for (position, record) in records.iter().enumerate() {
         let should_replace = latest
             .get(record.turn_id.as_str())
-            .map(|existing: &&super::model::CheckpointRecord| record.revision >= existing.revision)
+            .map(|(_, existing)| record.revision >= existing.revision)
             .unwrap_or(true);
         if should_replace {
-            latest.insert(record.turn_id.as_str(), record);
+            latest.insert(record.turn_id.as_str(), (position, record));
         }
     }
-    latest.into_values().collect()
+    let mut selected = latest.into_values().collect::<Vec<_>>();
+    selected.sort_unstable_by_key(|(position, _)| *position);
+    selected.into_iter().map(|(_, record)| record).collect()
 }
 
 fn push_bounded<'a>(target: &mut Vec<String>, values: impl Iterator<Item = &'a str>) {
@@ -530,7 +547,12 @@ where
         })
 }
 
-fn write_json<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> WorkspaceResult<()> {
+fn write_json<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+    label: &str,
+    unchanged_workspace: Option<&Workspace>,
+) -> WorkspaceResult<()> {
     let content =
         serde_json::to_vec_pretty(value).map_err(|error| WorkspaceError::ToolDetails {
             code: "HISTORY_WRITE_FAILED",
@@ -539,7 +561,36 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> Works
             retryable: true,
             details: serde_json::json!({"error": error.to_string()}),
         })?;
+    if unchanged_workspace.is_some_and(|workspace| same_file_contents(workspace, path, &content)) {
+        return Ok(());
+    }
     atomic_write(path, &content)
+}
+
+fn same_file_contents(workspace: &Workspace, path: &Path, content: &[u8]) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || metadata.len() != content.len() as u64 {
+        return false;
+    }
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    if Workspace::isolated(workspace.root().to_path_buf())
+        .and_then(|workspace| workspace.verify_opened(&file, path))
+        .is_err()
+    {
+        return false;
+    }
+    let mut buffer = [0; 8192];
+    for expected in content.chunks(buffer.len()) {
+        let actual = &mut buffer[..expected.len()];
+        if file.read_exact(actual).is_err() || actual != expected {
+            return false;
+        }
+    }
+    matches!(file.read(&mut buffer[..1]), Ok(0))
 }
 
 fn atomic_write(target: &Path, content: &[u8]) -> WorkspaceResult<()> {
@@ -608,5 +659,37 @@ fn io_error(code: &'static str, error: io::Error, retryable: bool) -> WorkspaceE
         category: "filesystem",
         retryable,
         details: serde_json::json!({"kind": format!("{:?}", error.kind())}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derived_file_comparison_keeps_primary_scope_and_complete_bytes() {
+        let project_temp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp");
+        fs::create_dir_all(&project_temp).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("history-storage-")
+            .tempdir_in(project_temp)
+            .unwrap();
+        let primary = fixture.path().join("primary");
+        fs::create_dir(&primary).unwrap();
+        let workspace = Workspace::new(primary.clone()).unwrap();
+        let content = vec![b'x'; 16_385];
+        let inside = primary.join("index.json");
+        let outside = fixture.path().join("outside.json");
+        fs::write(&inside, &content).unwrap();
+        fs::write(&outside, &content).unwrap();
+        assert!(same_file_contents(&workspace, &inside, &content));
+        assert!(!same_file_contents(&workspace, &outside, &content));
+        let mut changed = content.clone();
+        *changed.last_mut().unwrap() = b'y';
+        fs::write(&inside, changed).unwrap();
+        assert!(!same_file_contents(&workspace, &inside, &content));
     }
 }

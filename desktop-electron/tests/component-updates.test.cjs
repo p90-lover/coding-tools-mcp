@@ -301,6 +301,39 @@ test("unknown CPA activity defers the switch to the next start", async () => {
   assert.deepEqual(swaps, []);
 });
 
+test("CPA's last request is read asynchronously, one read at a time, and a failed read defers the switch", async () => {
+  // main read the usage folder with readdirSync + statSync every minute: up to 18 s per read on
+  // the busy hard disk (0.8.49). A read slower than the minute must not start a second one.
+  let reads = 0;
+  let answer;
+  const swaps = [];
+  const updater = createComponentUpdater({
+    componentId: "cpa",
+    stage: async () => ({ staged: true }),
+    swap: async (id) => { swaps.push(id); return { swapped: true }; },
+    lastActivityAt: () => { reads += 1; return new Promise((resolve) => { answer = resolve; }); },
+    now: () => 10 * 60_000,
+  });
+  await updater.check();
+  const first = updater.trySwap();
+  assert.equal(await updater.trySwap(), null, "a second switch check ran while the first still read");
+  assert.equal(reads, 1);
+  answer(0);
+  assert.deepEqual(await first, { swapped: true });
+  assert.deepEqual(swaps, ["cpa"]);
+
+  const failing = createComponentUpdater({
+    componentId: "cpa",
+    stage: async () => ({ staged: true }),
+    swap: async (id) => { swaps.push(id); return {}; },
+    lastActivityAt: async () => { throw new Error("EBUSY"); },
+    now: () => 10 * 60_000,
+  });
+  await failing.check();
+  assert.equal(await failing.trySwap(), null);
+  assert.deepEqual(swaps, ["cpa"]);
+});
+
 test("stopping the updater waits for a switch under way and blocks new ones", async () => {
   let finish;
   const order = [];

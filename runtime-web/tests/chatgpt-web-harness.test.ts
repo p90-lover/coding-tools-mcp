@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createHash } from "node:crypto";
@@ -15,7 +15,7 @@ import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGpt
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { formatChatGptRichOutput, type ChatGptRichOutput } from "../src/adapters/chatgpt-web/rich-output";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
-import { CHATGPT_LUNA_CHECKPOINT_MARKER, hashChatGptLunaAnswer } from "../src/adapters/chatgpt-web/rolling-checkpoint";
+import { CHATGPT_LUNA_CHECKPOINT_MARKER, ChatGptLunaCheckpointStore, hashChatGptLunaAnswer } from "../src/adapters/chatgpt-web/rolling-checkpoint";
 import {
   CODEX_ACTIVE_COMPACTION_REQUEST_MARKER,
 } from "../src/adapters/chatgpt-web/native-compaction-control";
@@ -26,6 +26,7 @@ import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapte
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout, execGatewayProgram } from "../src/adapters/chatgpt-web/mcp-server";
 import { defaultBrokerEndpoint } from "../src/config";
+import * as configModule from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
@@ -4297,6 +4298,52 @@ test("mirrored turn progress carries daemon MCP activity into the browser helper
   expect(chatGptExternalProgressIsLive(mirror.snapshot(), 62_000, 60_000)).toBeFalse();
 });
 
+test("mirrored turn progress survives clock rollback through active tools and final completion", async () => {
+  for (const clock of [
+    { batch: 100_000, firstResult: 101_000, finalResult: 102_000, finalProgressAt: 102_000 },
+    { batch: 100_000, firstResult: 99_000, finalResult: 98_000, finalProgressAt: 100_000 },
+  ]) {
+    const daemon = new ChatGptExternalTurnProgress();
+    const mirror = new ChatGptMirroredTurnProgress(revision => daemon.acknowledgeToolBatch(revision));
+    const revision = daemon.recordToolBatch(2, clock.batch);
+    expect(mirror.apply(daemon.snapshot())).toBeTrue();
+    const completion = new ChatGptCompletionTracker(1);
+    completion.observeToolBatch(revision, "Before the tools");
+    let observed = false;
+    const boundary = daemon.waitForToolBatchObservation(revision).then(() => { observed = true; });
+    await Promise.resolve();
+    expect(observed).toBeFalse();
+    await mirror.acknowledgeToolBatch(revision);
+    await boundary;
+    expect(observed).toBeTrue();
+
+    const finalDom = {
+      responsePresent: true,
+      running: false,
+      currentText: "Final answer after the tools",
+      completionActionVisible: true,
+    };
+    daemon.recordToolResult(clock.firstResult);
+    expect(mirror.apply(daemon.snapshot())).toBeTrue();
+    expect(mirror.snapshot().activeToolCalls).toBe(1);
+    expect(mirror.snapshot().lastProgressAt).toBeGreaterThanOrEqual(clock.batch);
+    expect(chatGptExternalProgressIsLive(mirror.snapshot(), 2_000_000, 60_000)).toBeTrue();
+    expect(completion.update({
+      ...finalDom,
+      externalToolCallsInFlight: chatGptExternalToolCallsAreInFlight(mirror.snapshot()),
+    }, 2_000_000)).toBeFalse();
+
+    daemon.recordToolResult(clock.finalResult);
+    expect(mirror.apply(daemon.snapshot())).toBeTrue();
+    expect(mirror.snapshot()).toEqual(daemon.snapshot());
+    expect(mirror.snapshot()).toMatchObject({ revision: 3, activeToolCalls: 0, lastProgressAt: clock.finalProgressAt });
+    expect(chatGptExternalToolCallsAreInFlight(mirror.snapshot())).toBeFalse();
+    expect(chatGptExternalProgressIsLive(mirror.snapshot(), 2_000_000, 60_000)).toBeFalse();
+    expect(completion.update({ ...finalDom, externalToolCallsInFlight: false }, 2_000_000)).toBeFalse();
+    expect(completion.update({ ...finalDom, externalToolCallsInFlight: false }, 2_000_001)).toBeTrue();
+  }
+});
+
 test("mirrored turn progress ignores replayed frames and rejects malformed ones", async () => {
   const mirror = new ChatGptMirroredTurnProgress();
   const first = {
@@ -4570,4 +4617,122 @@ describe("adapter liveness covers every path through a turn", () => {
     expect(heartbeats.length).toBeGreaterThanOrEqual(2);
     expect(heartbeats.at(-1)).toBeGreaterThanOrEqual(CHATGPT_WEB_ADAPTER_HEARTBEAT_MS);
   }, 40_000);
+});
+
+describe("Luna checkpoint persistence", () => {
+  const checkpoint = { version: 2 as const, summary: "Synthetic completed work." };
+  const captured = (answer: string) => ({ checkpoint, answerHash: hashChatGptLunaAnswer(answer) });
+  const request = (threadId: string, turnId: string, parent?: { answer: string; turnId: string }) => parseRequest({
+    model: "gpt-5.6-luna",
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId, turn_id: turnId }) },
+    input: [
+      ...(parent ? [{ type: "message", role: "assistant", content: [{ type: "output_text", text: parent.answer }],
+        internal_chat_message_metadata_passthrough: { turn_id: parent.turnId } }] : []),
+      { type: "message", role: "user", content: [{ type: "input_text", text: `Continue ${threadId}` }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId } },
+    ],
+  });
+
+  test("Luna checkpoint commits merge overlapping request owners without read-side writes", () => {
+    const writer = spyOn(configModule, "atomicWriteFile");
+    try {
+      for (const overlapping of [false, true]) {
+        writer.mockClear();
+        const path = join(tempRoot, `checkpoint-owners-${overlapping}.json`);
+        const a = new ChatGptLunaCheckpointStore(path);
+        const b = new ChatGptLunaCheckpointStore(path);
+        const aRequest = request("owner-a", "turn-a", { answer: "Uncached A", turnId: "parent-a" });
+        const bRequest = request("owner-b", "turn-b", { answer: "Uncached B", turnId: "parent-b" });
+        expect(a.apply(aRequest).applied).toBeFalse();
+        if (overlapping) expect(b.apply(bRequest).applied).toBeFalse();
+        a.commit(aRequest, captured("Completed A"), "Completed A");
+        if (!overlapping) expect(b.apply(bRequest).applied).toBeFalse();
+        b.commit(bRequest, captured("Completed B"), "Completed B");
+        expect(writer).toHaveBeenCalledTimes(2);
+
+        const reloaded = new ChatGptLunaCheckpointStore(path);
+        const nextA = request("owner-a", "next-a", { answer: "Completed A", turnId: "turn-a" });
+        const nextB = request("owner-b", "next-b", { answer: "Completed B", turnId: "turn-b" });
+        for (const next of [nextA, nextB]) {
+          const applied = reloaded.apply(next);
+          expect(applied.applied).toBeTrue();
+          expect(extractChatGptTurnUserRevision(applied.parsed)).toEqual(extractChatGptTurnUserRevision(next));
+        }
+        const mismatched = request("owner-a", "wrong-parent", { answer: "Completed A", turnId: "another-turn" });
+        expect(reloaded.apply(mismatched).applied).toBeFalse();
+        for (let index = 0; index < 100; index++) expect(reloaded.apply(nextA).applied).toBeTrue();
+        expect(writer).toHaveBeenCalledTimes(2);
+      }
+    } finally {
+      writer.mockRestore();
+    }
+  });
+
+  test("Luna checkpoint commits preserve RAM, missing-file and invalid-state boundaries", () => {
+    const writer = spyOn(configModule, "atomicWriteFile");
+    try {
+      const aRequest = request("boundary-a", "turn-a");
+      const bRequest = request("boundary-b", "turn-b");
+      const nextA = request("boundary-a", "next-a", { answer: "Completed A", turnId: "turn-a" });
+      const nextB = request("boundary-b", "next-b", { answer: "Completed B", turnId: "turn-b" });
+      const memory = new ChatGptLunaCheckpointStore();
+      memory.commit(aRequest, captured("Completed A"), "Completed A");
+      memory.commit(bRequest, captured("Completed B"), "Completed B");
+      expect(memory.apply(nextA).applied).toBeTrue();
+      expect(memory.apply(nextB).applied).toBeTrue();
+      expect(writer).toHaveBeenCalledTimes(0);
+
+      const path = join(tempRoot, "checkpoint-missing-invalid.json");
+      const persistent = new ChatGptLunaCheckpointStore(path);
+      persistent.commit(aRequest, captured("Completed A"), "Completed A");
+      rmSync(path);
+      persistent.commit(bRequest, captured("Completed B"), "Completed B");
+      const fresh = new ChatGptLunaCheckpointStore(path);
+      expect(fresh.apply(nextA).applied).toBeFalse();
+      expect(fresh.apply(nextB).applied).toBeTrue();
+
+      const valid = readFileSync(path, "utf8");
+      const invalid = JSON.parse(valid);
+      invalid.checkpoints.push({ threadId: "invalid" });
+      const invalidText = JSON.stringify(invalid);
+      writeFileSync(path, invalidText);
+      expect(() => persistent.commit(aRequest, captured("Completed A"), "Completed A")).toThrow();
+      expect(readFileSync(path, "utf8")).toBe(invalidText);
+      expect(persistent.apply(nextB).applied).toBeTrue();
+      expect(writer).toHaveBeenCalledTimes(2);
+      writeFileSync(path, valid);
+      persistent.commit(aRequest, captured("Completed A"), "Completed A");
+      const recovered = new ChatGptLunaCheckpointStore(path);
+      expect(recovered.apply(nextA).applied).toBeTrue();
+      expect(recovered.apply(nextB).applied).toBeTrue();
+      expect(() => persistent.commit(aRequest, captured("Another answer"), "Completed A")).toThrow("answer hash");
+      expect(() => persistent.commit(request("", "missing-thread"), captured("No identity"), "No identity")).toThrow("native thread_id");
+      expect(writer).toHaveBeenCalledTimes(3);
+    } finally {
+      writer.mockRestore();
+    }
+  });
+
+  test("Luna checkpoint commits apply TTL and capacity to the refreshed state", () => {
+    const now = 30 * 24 * 60 * 60_000 + 1_000;
+    for (const capacity of [false, true]) {
+      const path = join(tempRoot, `checkpoint-bounds-${capacity}.json`);
+      const rows = Array.from({ length: capacity ? 512 : 2 }, (_, index) => ({
+        threadId: `seed-${index}`, sourceTurnId: `seed-turn-${index}`, checkpoint,
+        answerHash: hashChatGptLunaAnswer(`Seed ${index}`),
+        updatedAt: !capacity && index === 0 ? 0 : now - 600 + index,
+      }));
+      writeFileSync(path, JSON.stringify({ version: 1, checkpoints: rows }));
+      const stale = new ChatGptLunaCheckpointStore(path, () => now);
+      expect(stale.apply(request("bounds-b", "turn-b", { answer: "Uncached", turnId: "parent" })).applied).toBeFalse();
+      new ChatGptLunaCheckpointStore(path, () => now).commit(request("bounds-a", "turn-a"), captured("A"), "A");
+      stale.commit(request("bounds-b", "turn-b"), captured("B"), "B");
+      const stored = JSON.parse(readFileSync(path, "utf8")).checkpoints as Array<{ threadId: string; updatedAt: number }>;
+      expect(stored).toHaveLength(capacity ? 512 : 3);
+      expect(stored.map(row => row.threadId)).toContain("bounds-a");
+      expect(stored.map(row => row.threadId)).toContain("bounds-b");
+      expect(stored.map(row => row.threadId)).not.toContain("seed-0");
+      expect(stored.every(row => row.updatedAt >= 1_000)).toBeTrue();
+    }
+  });
 });
