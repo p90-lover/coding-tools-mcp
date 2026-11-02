@@ -13,6 +13,17 @@ const {
   sanitize,
 } = require("../electron/logging.cjs");
 
+test("a freeze stays readable after hundreds of routine lines push it out of the activity ring", () => {
+  const logger = createLogger({ filePath: path.join(os.tmpdir(), "unused.jsonl"), persist: false });
+  logger.warn("launcher.main_stalled", { ms: 31000 });
+  for (let i = 0; i < 1000; i += 1) logger.debug("browser.native_fetch_stream_closed", { i });
+  assert.equal(logger.recent(300).some((record) => record.event === "launcher.main_stalled"), false);
+  assert.deepEqual(logger.notable().map((record) => record.event), ["launcher.main_stalled"]);
+  for (let i = 0; i < 400; i += 1) logger.error("chat.failed", { i });
+  assert.equal(logger.notable().length, 300);
+  assert.equal(logger.notable().at(-1).detail.i, 399);
+});
+
 test("launcher logs redact tunnel ids, runtime keys, and bearer credentials", () => {
   assert.deepEqual(sanitize({
     line: "tunnel_0123456789abcdef0123456789abcdef sk-exampleRuntimeSecret123",
