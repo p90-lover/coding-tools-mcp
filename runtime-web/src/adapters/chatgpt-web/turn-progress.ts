@@ -180,7 +180,7 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
     if (!Number.isFinite(now)) throw new Error("ChatGPT external progress timestamp must be finite");
     this.revision += 1;
     if (event === "tool_batch") this.lastToolBatchRevision = this.revision;
-    this.lastProgressAt = now;
+    this.lastProgressAt = Math.max(this.lastProgressAt ?? now, now);
     this.notify(this.snapshot());
   }
 
