@@ -21,6 +21,16 @@ function fakeGitHub({ releases, assets = {} }) {
     if (url.hostname === "api.github.com" && list) {
       return releases[list[1]] ? json(releases[list[1]]) : json({ message: "Not Found" }, 404);
     }
+    // GitHub's latest: the first stable, non-draft release of the list.
+    const latest = /^\/repos\/([^/]+\/[^/]+)\/releases\/latest$/.exec(url.pathname);
+    if (url.hostname === "api.github.com" && latest) {
+      const found = releases[latest[1]]?.find((item) => !item.draft && !item.prerelease);
+      return found ? json(found) : json({ message: "Not Found" }, 404);
+    }
+    // A release download (the Antigravity CLI's public archive URL), then its redirect.
+    if (url.hostname === "github.com" && /\/releases\/download\//.test(url.pathname)) {
+      return new Response(null, { status: 302, headers: { location: `https://objects.githubusercontent.com/asset/${url.pathname.split("/").pop()}` } });
+    }
     const asset = /^\/repos\/[^/]+\/[^/]+\/releases\/assets\/(\d+)$/.exec(url.pathname);
     if (url.hostname === "api.github.com" && asset) {
       return new Response(null, { status: 302, headers: { location: `https://objects.githubusercontent.com/asset/${asset[1]}?sig=1` } });
@@ -31,7 +41,7 @@ function fakeGitHub({ releases, assets = {} }) {
   return { fetchImpl, calls };
 }
 
-function setup({ releases, assets, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true } }) {
+function setup({ releases, assets, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true }, antigravityCli = () => null, rtk = null }) {
   const root = tempRoot("app-plugins");
   const stateDir = path.join(root, "cpa");
   const pluginDir = path.join(stateDir, "plugins", "windows", "amd64");
@@ -46,7 +56,7 @@ function setup({ releases, assets, files = {}, cpa = { version: "8.0.46", latest
     updateManagedComponent: async (id, options) => { updates.push([id, options]); return { swapped: true, from: cpa.version, to: cpa.latest }; },
   };
   const plugins = createAppPlugins({
-    cpaStateDir: stateDir, services: () => services, restartCpa: async () => { restarts += 1; },
+    cpaStateDir: stateDir, services: () => services, restartCpa: async () => { restarts += 1; }, antigravityCli, rtk,
     fetchImpl: github.fetchImpl, env: { GH_TOKEN: "ghp_testtoken0123456789abcdef" }, spawnImpl: () => { throw new Error("no gh"); },
     platform: "win32", arch: "x64", logger: { info() {} },
   });
@@ -134,6 +144,127 @@ test("CPA updates through its own updater, and a rebuild can't be updated from G
   await context.plugins.update("cpa");
   assert.deepEqual(context.updates, [["cpa", { swap: true }]]);
   await assert.rejects(context.plugins.update("cpa-plugin:grok-login-provider"), /can't be updated from GitHub/);
+});
+
+/** An installed Antigravity CLI (pinned 1.0.0, already unpacked) and the archive of a newer release. */
+function antigravity(root) {
+  const { createAntigravityCli, tarBinary } = require("../electron/antigravity-cli.cjs");
+  const payload = path.join(root, "agy-payload");
+  fs.mkdirSync(payload);
+  fs.writeFileSync(path.join(payload, "antigravity.exe"), "agy 1.1.0");
+  const archivePath = path.join(root, "agy.zip");
+  require("node:child_process").execFileSync(tarBinary(), ["-a", "-cf", archivePath, "-C", payload, "antigravity.exe"]);
+  const archive = fs.readFileSync(archivePath);
+  const manifestPath = path.join(root, "agy-manifest.json");
+  fs.writeFileSync(manifestPath, JSON.stringify({ id: "antigravity-cli", name: "Antigravity CLI", version: "1.0.0", command: "agy",
+    repository: "google-antigravity/antigravity-cli", platforms: { win32: { x64: {
+      fileName: "agy_cli_windows_x64.zip", size: 1, sha256: "0".repeat(64), executable: "antigravity.exe" } } } }));
+  const toolsRoot = path.join(root, "tools");
+  const home = path.join(toolsRoot, "antigravity-cli", "1.0.0");
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "antigravity.exe"), "agy 1.0.0");
+  fs.writeFileSync(path.join(home, "CODING_TOOLS_TOOL.json"), JSON.stringify({ id: "antigravity-cli", version: "1.0.0", executable: "antigravity.exe" }));
+  const make = (fetchImpl) => createAntigravityCli({ toolsRoot, manifestPath, platform: "win32", arch: "x64",
+    confirm: async () => { throw new Error("an update is the person's click: no second prompt"); }, getWorkspaces: async () => [], fetchImpl, logger: {} });
+  return { archive, toolsRoot, make };
+}
+
+const agyRelease = (tag, archive, digest = `sha256:${sha(archive)}`) => release(tag,
+  [{ id: 31, name: "agy_cli_windows_x64.zip", size: archive.length, digest }, { id: 32, name: "agy_cli_linux_x64.tar.gz", size: 10, digest: `sha256:${sha("l")}` }]);
+
+test("the Antigravity CLI updates to GitHub's latest release, checked against its SHA-256, and then runs that version",
+  { skip: process.platform !== "win32" }, async () => {
+    const root = tempRoot("app-plugins-agy");
+    const { archive, toolsRoot, make } = antigravity(root);
+    let cli;
+    const context = setup({
+      // A newer prerelease isn't offered; GitHub's latest is the stable 1.1.0 (tags have no "v").
+      releases: { "google-antigravity/antigravity-cli": [release("1.2.0", [], { prerelease: true }), agyRelease("1.1.0", archive)] },
+      assets: { "agy_cli_windows_x64.zip": archive },
+      antigravityCli: () => cli,
+    });
+    cli = make(context.github.fetchImpl);
+    const before = (await context.plugins.list()).items.find((item) => item.id === "antigravity-cli");
+    assert.deepEqual([before.kind, before.installed, before.latest, before.updateAvailable, before.canUpdate], ["tool", "1.0.0", "1.1.0", true, true]);
+    const { items } = await context.plugins.update("antigravity-cli");
+    assert.equal(items.find((item) => item.id === "antigravity-cli").installed, "1.1.0");
+    assert.deepEqual([cli.status().version, cli.status().pinned], ["1.1.0", "1.0.0"]);
+    const executable = path.join(toolsRoot, "antigravity-cli", "1.1.0", "antigravity.exe");
+    assert.equal(cli.executable(), executable);
+    assert.match(fs.readFileSync(path.join(toolsRoot, "bin", "agy.cmd"), "utf8"), /1\.1\.0.*antigravity\.exe/s);
+    assert.equal(fs.existsSync(path.join(toolsRoot, "antigravity-cli", "1.0.0")), false, "the old build went to Trash");
+    // The pinned install doesn't take the CLI back to 1.0.0.
+    assert.equal((await cli.install()).version, "1.1.0");
+    // The token went to api.github.com only: the archive came from GitHub's public download.
+    assert.ok(context.github.calls.every((call) => call.auth === null || new URL(call.url).hostname === "api.github.com"));
+    assert.ok(context.github.calls.some((call) => call.url === "https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.0/agy_cli_windows_x64.zip"));
+  });
+
+test("an Antigravity CLI release that doesn't match GitHub's SHA-256, or has no build here, changes nothing",
+  { skip: process.platform !== "win32" }, async () => {
+    const root = tempRoot("app-plugins-agy-bad");
+    const { archive, toolsRoot, make } = antigravity(root);
+    let cli;
+    const context = setup({
+      releases: { "google-antigravity/antigravity-cli": [agyRelease("1.1.0", archive, `sha256:${sha("something else")}`)] },
+      assets: { "agy_cli_windows_x64.zip": archive },
+      antigravityCli: () => cli,
+    });
+    cli = make(context.github.fetchImpl);
+    await assert.rejects(context.plugins.update("antigravity-cli"), /pinned checksum/);
+    assert.equal(cli.status().version, "1.0.0");
+    assert.deepEqual(fs.readdirSync(path.join(toolsRoot, "antigravity-cli")).filter((name) => !name.startsWith(".")), ["1.0.0"]);
+    // A release without this platform's archive is shown, but there's nothing to install.
+    const bare = setup({ releases: { "google-antigravity/antigravity-cli": [release("1.1.0", [])] }, antigravityCli: () => cli });
+    const item = (await bare.plugins.list()).items.find((entry) => entry.id === "antigravity-cli");
+    assert.deepEqual([item.updateAvailable, item.canUpdate], [true, false]);
+    await assert.rejects(bare.plugins.update("antigravity-cli"), /no build to install here/);
+  });
+
+/** RTK's service as App plugins sees it: `winget upgrade` moves it to `upgradeTo`. */
+function fakeRtk({ version = "1.0.1", file = "C:\\Users\\me\\AppData\\Local\\Microsoft\\WinGet\\Packages\\rtk-ai.rtk_Microsoft.Winget.Source_8wekyb3d8bbwe\\rtk.exe", upgradeTo = "1.1.0", code = 0 } = {}) {
+  const upgrades = [];
+  const state = { version };
+  return {
+    upgrades,
+    rtk: {
+      status: async () => ({ installed: true, installing: false, path: file, version: state.version }),
+      upgrade: async () => {
+        upgrades.push(state.version);
+        if (upgradeTo) state.version = upgradeTo;
+        return { code, output: code ? "No available upgrade found." : "Successfully installed", status: { version: state.version } };
+      },
+    },
+  };
+}
+
+test("RTK shows GitHub's newest stable release past its dev prereleases and updates with winget", async () => {
+  const { rtk, upgrades } = fakeRtk();
+  const context = setup({
+    releases: { "rtk-ai/rtk": [release("dev-1.2.0-rc.607", [], { prerelease: true }), release("dev-1.2.0-rc.606", [], { prerelease: true }), release("v1.1.0")] },
+    rtk,
+  });
+  const before = (await context.plugins.list()).items.find((item) => item.id === "rtk");
+  assert.deepEqual([before.kind, before.installed, before.latest, before.canUpdate], ["tool", "1.0.1", "1.1.0", true]);
+  assert.match(before.note, /winget/);
+  const { items } = await context.plugins.update("rtk");
+  assert.deepEqual(upgrades, ["1.0.1"]);
+  const after = items.find((item) => item.id === "rtk");
+  assert.deepEqual([after.installed, after.updateAvailable], ["1.1.0", false]);
+});
+
+test("RTK installed without winget isn't upgraded with it, and a winget with nothing newer says so", async () => {
+  const releases = { "rtk-ai/rtk": [release("v1.1.0")] };
+  const cargo = fakeRtk({ file: "C:\\Users\\me\\.cargo\\bin\\rtk.exe" });
+  const manual = setup({ releases, rtk: cargo.rtk });
+  const item = (await manual.plugins.list()).items.find((entry) => entry.id === "rtk");
+  assert.deepEqual([item.updateAvailable, item.canUpdate], [true, false]);
+  assert.match(item.note, /without winget/);
+  await assert.rejects(manual.plugins.update("rtk"), /wasn't installed with winget/);
+  assert.deepEqual(cargo.upgrades, []);
+  // winget's catalog can trail GitHub: no newer rtk there is an error, not "updated".
+  const stale = fakeRtk({ upgradeTo: null, code: 0x8A15002B });
+  await assert.rejects(setup({ releases, rtk: stale.rtk }).plugins.update("rtk"), /winget didn't update rtk 1\.0\.1 .*No available upgrade found/);
 });
 
 test("CPA's start keeps a plugin updated from GitHub while it is newer than the bundled copy",

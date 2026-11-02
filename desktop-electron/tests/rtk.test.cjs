@@ -251,6 +251,19 @@ test("missing rtk is installed at startup without a click, once, and every harne
   assert.equal(rtk.claudeHook(), `"${PACKAGED}" hook claude`);
 });
 
+test("App plugins' update runs winget upgrade for rtk-ai.rtk, one winget at a time", async () => {
+  const { rtk, winget } = machine({ installed: true });
+  const upgraded = rtk.upgrade();
+  assert.deepEqual(winget[0].args.slice(0, 4), ["upgrade", "--id", "rtk-ai.rtk", "--exact"]);
+  assert.ok(winget[0].args.includes("--silent") && winget[0].args.includes("--accept-source-agreements"), "no prompt to answer");
+  assert.equal(rtk.install(), upgraded, "an install meanwhile joins the upgrade");
+  winget[0].finish();
+  const result = await upgraded;
+  assert.deepEqual([result.code, result.status.version], [0, "0.50.0"]);
+  assert.equal(winget.length, 1);
+  await assert.rejects(createRtk({ platform: "linux" }).upgrade(), /brew upgrade rtk/);
+});
+
 test("an automatic install is skipped when rtk is there or off, and a failed one waits a day", async () => {
   for (const options of [{ installed: true }, { enabled: false }]) {
     const { rtk, winget } = machine(options);

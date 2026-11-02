@@ -236,13 +236,12 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
       minimum: MIN_VERSION.join("."), installCommand: platform === "win32" ? "winget install rtk-ai.rtk" : "brew install rtk" };
   }
 
-  /** Installs rtk with winget (Windows); resolves with its exit code and output tail. One at a time. */
-  function install() {
-    if (platform !== "win32") return Promise.reject(new Error("Install rtk with your package manager: brew install rtk"));
+  /** winget `verb` for rtk (Windows); resolves with its exit code and output tail. One at a time. */
+  function winget(verb, args) {
     if (installing) return installing;
     installing = new Promise((resolve, reject) => {
       let output = "";
-      const child = spawnProcess("winget", ["install", "--id", "rtk-ai.rtk", "-e", "--accept-source-agreements", "--accept-package-agreements", "--silent"],
+      const child = spawnProcess("winget", [verb, ...args, "--accept-source-agreements", "--accept-package-agreements", "--silent"],
         { windowsHide: true, env });
       child.stdout?.on("data", (chunk) => { output = (output + chunk).slice(-4_000); });
       child.stderr?.on("data", (chunk) => { output = (output + chunk).slice(-4_000); });
@@ -250,11 +249,23 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
       child.on("close", (code) => {
         installing = null;
         checkedAt = -Infinity;
-        logger?.info?.("rtk.install_finished", { code });
+        logger?.info?.(`rtk.${verb}_finished`, { code });
         status().then((current) => resolve({ code, output: output.trim().slice(-2_000), status: current }), reject);
       });
     });
     return installing;
+  }
+
+  /** Installs rtk with winget (Windows); resolves with its exit code and output tail. One at a time. */
+  function install() {
+    if (platform !== "win32") return Promise.reject(new Error("Install rtk with your package manager: brew install rtk"));
+    return winget("install", ["--id", "rtk-ai.rtk", "-e"]);
+  }
+
+  /** Upgrades the winget-installed rtk to winget's newest (App plugins' Update button). */
+  function upgrade() {
+    if (platform !== "win32") return Promise.reject(new Error("Update rtk with your package manager: brew upgrade rtk"));
+    return winget("upgrade", ["--id", "rtk-ai.rtk", "--exact"]);
   }
 
   /**
@@ -304,7 +315,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     });
   }
 
-  return { locate, active, rewrite, unwrap, claudeHook, binDir, commandEnvironment, daemonEnvironment, gain, status, install, autoInstall, ready };
+  return { locate, active, rewrite, unwrap, claudeHook, binDir, commandEnvironment, daemonEnvironment, gain, status, install, upgrade, autoInstall, ready };
 }
 
 module.exports = { createRtk };
