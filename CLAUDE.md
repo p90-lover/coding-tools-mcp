@@ -9,6 +9,10 @@
 - For all other work, read the `mcp-probe:context` block in `AGENTS.md` or Skill `.agents/skills/mcp-probe-kit/SKILL.md` before coding.
 <!-- mcp-probe:harness end -->
 
+## Delivery
+
+Follow the **Delivery** section of `AGENTS.md` for every change in this repository. Read it before you finish a task. In short: every change goes in a PR against `main` (never push to `main`); merge it once checks pass; plugin repositories do the same in their own repository; then release a new version (a `release: 0.8.x` bump PR, then `gh workflow run electron-windows-release.yml --ref main -f publish=true`, unless a release is already under way).
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
