@@ -1464,6 +1464,34 @@ test("failed output reads retain live ownership unless headless confirms SESSION
   });
 });
 
+test("pending UTF-8 output remains a typed tool error and an empty pane observation at the same raw cursor", async (t) => {
+  for (const sandboxed of [true, false]) await t.test(sandboxed ? "sandbox" : "headless", async () => {
+    const tree = tempTree();
+    const sandbox = sandboxed ? fakeSandbox() : null;
+    const id = sandboxed ? "sbx-1" : "pending-output";
+    const pending = { ok: false, error: { code: "OUTPUT_PENDING", category: "runtime", retryable: true,
+      message: "Read the same output reference and offset again; do not rerun the command.",
+      details: { offset: 17, next_read_offset: 17, retained_start_offset: 17, output_gap: true, status: "exited", exit_code: 0 } } };
+    if (sandbox) sandbox.read = () => pending;
+    const { tools, calls } = fixture({ root: tree.root, terminal: () => true, sandbox, results: {
+      exec_command: { state: "completed", result: { ok: true, command_id: id, status: "running" } },
+      read_output: { state: "completed", result: pending },
+    } });
+    try {
+      const client = await session(tools, { approvalMode: "bypass-permissions" });
+      await callTool(client.url, client.auth, "exec_command", { cmd: "echo pending", yield_time_ms: 0 });
+      const result = await callTool(client.url, client.auth, "read_output", { output_ref: `command:${id}:stdout`, offset: 17, limit: 1 });
+      assert.equal(result.isError, true);
+      assert.equal(result.structuredContent.error.code, "OUTPUT_PENDING");
+      assert.equal(result.structuredContent.error.details.next_read_offset, 17);
+      const pane = await tools.processOutput({ sessionId: "ao-1", workspaceId: "ws1", commandId: id, stream: "stdout", offset: 17 });
+      assert.deepEqual(pane, { content: "", nextOffset: 17, gap: true, status: "exited", exitCode: 0 });
+      assert.equal(sandboxed ? sandbox.started.length : calls.filter(call => call.body?.tool === "exec_command").length, 1,
+        "observation never starts another command");
+    } finally { await tools.close(); tree.cleanup(); }
+  });
+});
+
 
 test("restored credential aliases share late command ownership before and after another renewal", async (t) => {
   for (const end of [false, true]) await t.test(end ? "renew then semantic end" : "ordinary renewal", async () => {

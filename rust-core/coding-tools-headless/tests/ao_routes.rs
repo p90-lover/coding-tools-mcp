@@ -154,6 +154,31 @@ async fn ao_routes_require_auth_workspace_scope_and_local_update_consent() {
         execute.status() == reqwest::StatusCode::FORBIDDEN
             || execute.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY
     );
+    let compact_url = format!("{}/api/v1/ao/harness/compact", service.endpoint());
+    let compact_body = json!({"workspace_id":"qa","run_id":"run-1","node_id":"planner","request_id":"compact-fixture"});
+    let compact = client
+        .post(&compact_url)
+        .json(&compact_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compact.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let compact = client
+        .post(&compact_url)
+        .bearer_auth(token.trim())
+        .json(&compact_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compact.status(), reqwest::StatusCode::FORBIDDEN);
+    let compact = client.post(&compact_url).bearer_auth(token.trim())
+        .json(&json!({"workspace_id":"other","run_id":"run-1","node_id":"planner","status":true,"request_id":"compact-fixture"}))
+        .send().await.unwrap();
+    assert_eq!(compact.status(), reqwest::StatusCode::BAD_REQUEST);
+    let compact = client.post(&compact_url).bearer_auth(token.trim())
+        .json(&json!({"workspace_id":"qa","run_id":"run-1","node_id":"planner","thread_id":"foreign","request_id":"compact-fixture"}))
+        .send().await.unwrap();
+    assert_eq!(compact.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
     service
         .shutdown("ao-route-contract-complete")
         .await

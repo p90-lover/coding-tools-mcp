@@ -23,7 +23,7 @@ import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error";
 import { ChatGptBrowserDiagnostics, ChatGptBrowserWorker, chatGptSuspensionClock, remainingStageBudgetMs } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
-import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
+import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, resolveChatGptWebTurnCapabilities, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
@@ -907,9 +907,10 @@ export function createChatGptWebAdapter(
           });
           return;
         }
+        const accountCapabilities = resolveChatGptWebTurnCapabilities(parsed, configuredCapabilities, provider.chatgptWeb);
         const turnCapabilities = parsed._compactionRequest && !manualRequest
-          ? { ...configuredCapabilities, localToolsEnabled: false }
-          : configuredCapabilities;
+          ? { ...accountCapabilities, localToolsEnabled: false }
+          : accountCapabilities;
         const mode = manualRequest
           ? { localTools: true }
           : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
@@ -1150,7 +1151,7 @@ export function createChatGptWebAdapter(
                         parsed,
                         source,
                         structuredBroker!,
-                        configuredCapabilities,
+                        turnCapabilities,
                         handoffTraceId,
                         operationSignal,
                         handoffTimeoutMs,
@@ -1170,7 +1171,7 @@ export function createChatGptWebAdapter(
                         parsed,
                         source,
                         structuredBroker!,
-                        configuredCapabilities,
+                        turnCapabilities,
                         handoffTraceId,
                         operationSignal,
                         handoffTimeoutMs,

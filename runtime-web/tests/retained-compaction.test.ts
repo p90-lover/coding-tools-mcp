@@ -46,6 +46,7 @@ import {
   type BrokerToolResult,
 } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint } from "../src/config";
+import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import {
   CODEX_ACTIVE_COMPACTION_REQUEST_MARKER,
   structuredCompactionHandoffInstruction,
@@ -507,6 +508,7 @@ test.each(["5.6", "6"] as const)("a retained %s checkpoint preserves model selec
   )).resolves.toBe("Retained agent checkpoint");
   expect(captured?.modelFamily).toBe(family);
   expect(captured?.conversationKey).toBe(conversationKey);
+  expect(captured?.nativeThreadId).toBe("thread_retained_compaction");
   expect(captured?.requireRetainedConversation).toBeTrue();
   expect(captured?.compaction).toBeTrue();
   expect(captured?.nativeConnector).toBeTrue();
@@ -1301,7 +1303,7 @@ test("retained compaction can close its browser epoch while preserving an ordina
   sessions.clear();
 });
 
-test("adapter compact returns one same-agent handoff and preserves a pre-existing ordinary final", async () => {
+test.each(["xhigh", "max"] as const)("adapter compact keeps native thread effort %s when the current account lacks it", async effort => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-adapter-retained-compact-"));
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
@@ -1313,13 +1315,21 @@ test("adapter compact returns one same-agent handoff and preserves a pre-existin
       appName: "Codex Native DEV",
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
+      extraHighAvailable: false, proAvailable: false,
     },
   };
   const broker = TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!);
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const originalRun = worker.run.bind(worker);
   const sourceRequest = request(false);
+  sourceRequest.options.reasoning = effort;
+  const threadId = "01a06c66-0000-7ae1-9108-69b5f70e0671";
+  const sourceTurnId = "01a06c66-0000-7ae1-9108-69b5f70e0672";
+  const sourceBody = sourceRequest._rawBody as { client_metadata: Record<string, unknown>; input: Array<{
+    internal_chat_message_metadata_passthrough: { turn_id: string };
+  }> };
+  sourceBody.client_metadata["x-codex-turn-metadata"] = JSON.stringify({ thread_id: threadId, turn_id: sourceTurnId });
+  sourceBody.input[0]!.internal_chat_message_metadata_passthrough.turn_id = sourceTurnId;
   const namespace = chatGptWebExecutionNamespace(provider);
   const sourceKey = `${namespace}:${chatGptTurnExecutionKey(sourceRequest)}`;
   const conversationKey = chatGptConversationKey(sourceRequest, namespace)!;
@@ -1342,6 +1352,8 @@ test("adapter compact returns one same-agent handoff and preserves a pre-existin
     const binding = controlBinding(prepared.text);
     expect(turn.nativeConnector).toBeTrue();
     expect(turn.capabilities.localToolsEnabled).toBeFalse();
+    expect(turn.nativeThreadId).toBe(threadId);
+    expect(resolveChatGptWebModelMode(turn.modelId, turn.reasoning, turn.capabilities).effort).toBe(effort);
     prepared.release();
     await callTurnBroker(provider.chatgptWeb!.brokerSocketPath!, {
       method: "submit_compaction_handoff",
@@ -1362,8 +1374,8 @@ test("adapter compact returns one same-agent handoff and preserves a pre-existin
   }];
   (compact._rawBody as { client_metadata: Record<string, unknown> }).client_metadata = {
     "x-codex-turn-metadata": JSON.stringify({
-      thread_id: "thread_retained_compaction",
-      turn_id: "turn_compact",
+      thread_id: threadId,
+      turn_id: "01a06c66-0000-7ae1-9108-69b5f70e0673",
     }),
   };
   expect(chatGptConversationKey(compact, namespace)).toBe(conversationKey);

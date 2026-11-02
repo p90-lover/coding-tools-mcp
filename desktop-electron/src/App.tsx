@@ -25,7 +25,7 @@ import { WorkspacePanel } from "./features/WorkspacePanel";
 import { WorkspaceAuthPanel } from "./features/WorkspaceAuthPanel";
 import { NativeCodexPanel } from "./features/NativeCodexPanel";
 import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOriginalSurface";
-import { AgentOrchestratorSurface } from "./features/AgentOrchestratorSurface";
+import { ChatPages } from "./features/ChatPages";
 import { AgentOrchestratorTeamsSurface } from "./features/AgentOrchestratorTeamsSurface";
 import { SubagentsSurface } from "./features/SubagentsSurface";
 import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
@@ -36,8 +36,11 @@ import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
 import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
 import { RegisterSurface } from "./features/RegisterSurface";
+import { MCP_CATALOG, catalogServer, isWindows, parseMcpPaste, placeholdersIn, type McpCatalogEntry } from "./features/mcp-catalog";
 
 import type {
+  AppPlugin,
+  AppPluginsSnapshot,
   BrowserInteractionMode,
   BrowserState,
   DoctorReport,
@@ -56,6 +59,8 @@ import type {
 
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
 const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
+/** The hidden docked sidebar's rail of icons (also --sidebar-rail-width). */
+const SIDEBAR_RAIL_WIDTH = 52;
 const IPC_API_RETRY_DELAYS_MS = [0, 50, 200, 500, 1_500, 3_000] as const;
 const MCP_GUIDE_MEDIA = [
   new URL("./assets/mcp-create-tunnel.mp4", import.meta.url).href,
@@ -475,6 +480,8 @@ function LauncherShell({
   // over the page until the pointer leaves, and the toggle pins it open again.
   const sidebarPinned = useRef(snapshot.state.sidebarOpen !== false);
   const [sidebarPeek, setSidebarPeek] = useState(false);
+  // The panel keeps its full layout while it slides shut, so its labels don't vanish mid-way.
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const sidebarPeekTimer = useRef(0);
   // Rarely used surfaces, folded under "More" so the everyday ones stay in view.
   const moreSurfaces = [
@@ -482,7 +489,6 @@ function LauncherShell({
     { surface: "rtk", icon: "gauge", label: "RTK" },
     { surface: "agent-orchestrator-original", icon: "orchestrator", label: "Agent Orchestrator" },
     { surface: "antigravity-cli", icon: "terminal", label: "Antigravity CLI" },
-    { surface: "integrations", icon: "link", label: copy.integrations },
     { surface: "cpa", icon: "providers", label: "CPA" },
     { surface: "network", icon: "globe", label: copy.networkProxy },
   ] as const;
@@ -499,7 +505,7 @@ function LauncherShell({
   const sidebarRail = !compactSidebar && !sidebarOpen;
   // Native views (browser, ChatGPT, Register) are drawn above the page, so they step aside while
   // a sidebar is laid over them.
-  const sidebarCovers = (compactSidebar && sidebarOpen) || (sidebarRail && sidebarPeek);
+  const sidebarCovers = (compactSidebar && sidebarOpen) || (sidebarRail && sidebarExpanded);
   const browserSurfaceActive = surface === "browser"
     && !sidebarCovers
     && !biggerContextRecommendationOpen;
@@ -617,16 +623,56 @@ function LauncherShell({
       .catch((cause) => setError(messageOf(cause)));
   };
 
-  // A short delay either way: passing the window's edge doesn't throw the panel open, and the
-  // pointer can cross the gap between the rail and its panel.
-  const peekSidebar = (show: boolean) => {
-    window.clearTimeout(sidebarPeekTimer.current);
-    if (!show) {
-      sidebarPeekTimer.current = window.setTimeout(() => setSidebarPeek(false), 220);
-      return;
+  // The hover panel follows where the pointer is, not which element it is over: the title bar's
+  // buttons sit on the rail's top, and entering and leaving them threw the panel open and shut.
+  // It opens over the rail and stays open until the pointer is clearly past the panel (or leaves
+  // the window). A short delay each way: passing the window's edge doesn't throw it open.
+  const sidebarPeekState = useRef(false);
+  sidebarPeekState.current = sidebarPeek;
+  useEffect(() => {
+    if (!sidebarRail) return undefined;
+    let pending: boolean | null = null;
+    const settle = (want: boolean) => {
+      if (want === sidebarPeekState.current) {
+        window.clearTimeout(sidebarPeekTimer.current);
+        pending = null;
+        return;
+      }
+      if (pending === want) return;
+      pending = want;
+      window.clearTimeout(sidebarPeekTimer.current);
+      sidebarPeekTimer.current = window.setTimeout(() => {
+        pending = null;
+        setSidebarPeek(want);
+      }, want ? 120 : 200);
+    };
+    const move = (event: PointerEvent) => {
+      if (event.clientX <= SIDEBAR_RAIL_WIDTH) settle(true);
+      else if (event.clientX > sidebarWidth + 16) settle(false);
+      else settle(sidebarPeekState.current);
+    };
+    const leave = () => settle(false);
+    window.addEventListener("pointermove", move, { passive: true });
+    document.documentElement.addEventListener("pointerleave", leave);
+    window.addEventListener("blur", leave);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      document.documentElement.removeEventListener("pointerleave", leave);
+      window.removeEventListener("blur", leave);
+      window.clearTimeout(sidebarPeekTimer.current);
+      setSidebarPeek(false);
+    };
+  }, [sidebarRail, sidebarWidth]);
+
+  useEffect(() => {
+    if (sidebarPeek) {
+      setSidebarExpanded(true);
+      return undefined;
     }
-    if (sidebarRail) sidebarPeekTimer.current = window.setTimeout(() => setSidebarPeek(true), 140);
-  };
+    // Matches the panel's 180 ms slide in styles.css.
+    const timer = window.setTimeout(() => setSidebarExpanded(false), 190);
+    return () => window.clearTimeout(timer);
+  }, [sidebarPeek]);
 
   const closeSidebarPeek = () => {
     window.clearTimeout(sidebarPeekTimer.current);
@@ -745,7 +791,7 @@ function LauncherShell({
       animate={{ opacity: 1 }}
       className={`app-shell${compactSidebar ? " is-compact" : ""}${sidebarOpen ? " is-sidebar-open" : ""}${sidebarRail ? " is-sidebar-rail" : ""}`}
       initial={{ opacity: 0 }}
-      style={{ "--sidebar-width": `${sidebarWidth}px` } as Record<string, string>}
+      style={{ "--sidebar-width": `${sidebarWidth}px`, "--sidebar-rail-width": `${SIDEBAR_RAIL_WIDTH}px` } as Record<string, string>}
     >
       <TitleBar
         copy={copy}
@@ -768,10 +814,8 @@ function LauncherShell({
 
       <motion.aside
         animate={{ width: sidebarOpen ? "var(--sidebar-width)" : compactSidebar ? 0 : "var(--sidebar-rail-width)" }}
-        className={`app-sidebar${sidebarRail && sidebarPeek ? " is-peek" : ""}`}
+        className={`app-sidebar${sidebarRail && sidebarPeek ? " is-peek" : ""}${sidebarRail && sidebarExpanded ? " is-expanded" : ""}`}
         initial={false}
-        onPointerEnter={() => peekSidebar(true)}
-        onPointerLeave={() => peekSidebar(false)}
         transition={{ type: "spring", duration: 0.5, bounce: 0.08 }}
       >
         <div className="sidebar-clip">
@@ -870,8 +914,7 @@ function LauncherShell({
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.connections}>
-                {/* ProviderHubIntegration portals its Providers row into this slot. */}
-                <div className="sidebar-provider-slot" />
+                <SidebarItem active={surface === "app-plugins"} icon="update" label={copy.appPlugins} onClick={() => navigateSurface("app-plugins")} />
                 <SidebarItem active={surface === "oauth"} icon="key" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
                 <SidebarItem active={surface === "register"} icon="userPlus" label={copy.register} onClick={() => navigateSurface("register")} />
                 <SidebarItem active={surface === "workspace-auth"} icon="shield" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
@@ -1028,7 +1071,7 @@ function LauncherShell({
             {keepAlive("agent-orchestrator", () => (
               <section className="gpb-chat" aria-label="Coding Tools Chat">
                 <SurfaceHiddenContext.Provider value={surface !== "agent-orchestrator"}>
-                  <AgentOrchestratorSurface language={language} setError={setError} />
+                  <ChatPages language={language} setError={setError} />
                 </SurfaceHiddenContext.Provider>
               </section>
             ))}
@@ -1040,6 +1083,9 @@ function LauncherShell({
             ))}
             {keepAlive("plugins", () => (
               <PluginsSurface active={surface === "plugins"} copy={copy} setError={setError} snapshot={snapshot} updateState={updateState} />
+            ))}
+            {keepAlive("app-plugins", () => (
+              <AppPluginsSurface active={surface === "app-plugins"} setError={setError} />
             ))}
             {keepAlive("rtk", () => (
               <RtkSurface active={surface === "rtk"} enabled={snapshot.state.rtkEnabled !== false} setError={setError} updateState={updateState} />
@@ -2585,6 +2631,80 @@ function RtkSurface({ active, enabled, setError, updateState }: {
 }
 
 /**
+ * Connections > App plugins (app-plugins.cjs): CPA and its plugins, the version installed and the
+ * newest release on GitHub, and Update where the app can install it (CPA's own updater, or a
+ * plugin's Windows build checked against GitHub's SHA-256).
+ */
+function AppPluginsSurface({ active, setError }: { active: boolean; setError: (error: string | null) => void }) {
+  const [snapshot, setSnapshot] = useState<AppPluginsSnapshot | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [updating, setUpdating] = useState<string | null>(null);
+  const [done, setDone] = useState<Record<string, string>>({});
+  const load = useCallback(async (refresh: boolean) => {
+    setChecking(true);
+    try {
+      setSnapshot(await api!.appPlugins(refresh));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setChecking(false);
+    }
+  }, [setError]);
+  useEffect(() => { if (active) void load(false); }, [active, load]);
+  const update = async (item: AppPlugin) => {
+    setUpdating(item.id);
+    try {
+      setSnapshot(await api!.updateAppPlugin(item.id));
+      setDone((current) => ({ ...current, [item.id]: `Updated from ${item.installed ?? "an unknown version"} to ${item.latest}.` }));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setUpdating(null);
+    }
+  };
+  const row = (item: AppPlugin, last: boolean) => {
+    const github = item.latest ? `latest on GitHub ${item.latest}` : item.error ? `GitHub: ${item.error}` : "GitHub not checked yet";
+    const body = [`Installed ${item.installed ?? "(version unknown)"} · ${github}`, item.repository, done[item.id] ?? item.note]
+      .filter(Boolean).join(". ");
+    const busy = updating === item.id || item.updating;
+    return (
+      <SettingRow body={body} flushAfter={last} key={item.id} label={item.name}>
+        <div className="inline-actions">
+          {item.updateAvailable && item.canUpdate
+            ? <PrimaryButton disabled={busy || updating !== null} onClick={() => void update(item)}>{busy ? "Updating…" : `Update to ${item.latest}`}</PrimaryButton>
+            : <span className={`rtk-chip${item.updateAvailable ? " is-attention" : ""}`}>
+              {item.updateAvailable ? "Comes with the app" : item.latest ? "Up to date" : item.error ? "Not checked" : "…"}
+            </span>}
+          {item.releaseUrl ? <IconButton icon="external" label="Open the release on GitHub"
+            onClick={() => void api!.openExternal(item.releaseUrl!).catch((cause) => setError(messageOf(cause)))} /> : null}
+        </div>
+      </SettingRow>
+    );
+  };
+  const services = snapshot?.items.filter((item) => item.kind === "service") ?? [];
+  const plugins = snapshot?.items.filter((item) => item.kind === "cpa-plugin") ?? [];
+  return (
+    <ContentSurface narrow title="App plugins" subtitle="What Coding Tools runs from other projects: the version installed and the newest release on GitHub. Private repositories are read with your GitHub CLI sign-in (gh auth login).">
+      <div className="inline-actions app-plugins-bar">
+        <SecondaryButton disabled={checking || updating !== null} icon="reload" onClick={() => void load(true)}>{checking ? "Checking GitHub…" : "Check GitHub now"}</SecondaryButton>
+        {snapshot ? <small>Checked {new Date(snapshot.checkedAt).toLocaleString()}</small> : null}
+      </div>
+      <SectionHeading label="Services" />
+      <div className="settings-list">
+        {services.length ? services.map((item, index) => row(item, index === services.length - 1))
+          : <p className="surface-empty-note">{snapshot ? "No services." : "Checking…"}</p>}
+      </div>
+      <SectionHeading label="CPA plugins" />
+      <div className="settings-list">
+        {plugins.length ? plugins.map((item, index) => row(item, index === plugins.length - 1))
+          : <p className="surface-empty-note">{snapshot ? "No CPA plugins are installed (they run on Windows x64)." : "Checking…"}</p>}
+      </div>
+      <p className="surface-empty-note">Updating a plugin restarts CPA so it loads the new one; chats using CPA reconnect.</p>
+    </ContentSurface>
+  );
+}
+
+/**
  * One line per entry, "KEY=value" (env) or "Name: value" (headers); blank lines are skipped. An env
  * value is kept exactly as typed after "=" (" secret " stays padded); a header value is trimmed.
  */
@@ -2604,7 +2724,7 @@ const pairsText = (pairs: Record<string, string> | undefined, separator: "=" | "
 
 type McpDraft = { id?: string; enabled: boolean; name: string; type: "stdio" | "http"; command: string; args: string; env: string; url: string; headers: string };
 const emptyMcpDraft = (): McpDraft => ({ enabled: true, name: "", type: "stdio", command: "", args: "", env: "", url: "", headers: "" });
-const mcpDraftOf = (server: McpServerEntry): McpDraft => ({ id: server.id, enabled: server.enabled, name: server.name, type: server.type,
+const mcpDraftOf = (server: McpServerInput): McpDraft => ({ id: server.id, enabled: server.enabled, name: server.name, type: server.type,
   command: server.command ?? "", args: (server.args ?? []).join("\n"), env: pairsText(server.env, "="), url: server.url ?? "", headers: pairsText(server.headers, ": ") });
 type AppToolKey = "chatAgentTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "chatAgentDesktopTools";
 
@@ -2626,6 +2746,12 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  // A ready-to-add server waiting for its token (the connect panel), and the paste panel.
+  const [connect, setConnect] = useState<McpCatalogEntry | null>(null);
+  const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [readOnly, setReadOnly] = useState(false);
+  const [pasting, setPasting] = useState<string | null>(null);
+  const [draftNote, setDraftNote] = useState("");
   useEffect(() => {
     if (!active || !api?.mcpServers) return;
     void api.mcpServers().then(setServers, (cause) => setError(messageOf(cause)));
@@ -2648,6 +2774,9 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
     setSaving(true);
     setFormError("");
     try {
+      // A pasted README's ${input:token} or YOUR_API_KEY would be sent as it is, and the server refuse every call.
+      const left = draftNote ? placeholdersIn([draft.command, draft.args, draft.env, draft.url, draft.headers].join("\n")) : [];
+      if (left.length) throw new Error(`Replace ${left.join(", ")} with your own value first`);
       const base = { ...(draft.id ? { id: draft.id } : {}), enabled: draft.enabled, name: draft.name.trim(), type: draft.type };
       const input: McpServerInput = draft.type === "stdio"
         ? { ...base, command: draft.command.trim(), args: draft.args.split(/\r?\n/).filter((line) => line.trim()), env: parsePairs(draft.env, "=", "Environment variable") }
@@ -2655,8 +2784,7 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
       setServers(await api!.saveMcpServer(input));
       setDraft(null);
     } catch (cause) {
-      // Electron prefixes a main-process error with the IPC channel; the form shows the reason only.
-      setFormError(messageOf(cause).replace(/^Error invoking remote method '[^']+': (Error: )?/, ""));
+      setFormError(reason(cause));
     } finally {
       setSaving(false);
     }
@@ -2665,7 +2793,59 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
     value: draft?.[key] ?? "",
     onChange: (event: { target: { value: string } }) => setDraft((current) => current && { ...current, [key]: event.target.value }),
   });
-  const startDraft = (next: McpDraft) => { setAddOpen(false); setTab("mcps"); setFormError(""); setDraft(next); };
+  const closePanels = () => { setAddOpen(false); setTab("mcps"); setFormError(""); setDraft(null); setConnect(null); setPasting(null); setDraftNote(""); };
+  const startDraft = (next: McpDraft, note = "") => { closePanels(); setDraft(next); setDraftNote(note); };
+  // Main-process errors arrive prefixed with the IPC channel; the panels show the reason only.
+  const reason = (cause: unknown) => messageOf(cause).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
+  const added = (entry: McpCatalogEntry) => (servers ?? []).some((server) => server.name.toLowerCase() === entry.name);
+  /** A ready-to-add server: in one click when it needs nothing, else through its connect panel. */
+  const addFromCatalog = async (entry: McpCatalogEntry, githubCli = false) => {
+    setSaving(true);
+    setFormError("");
+    try {
+      const input = catalogServer(entry, secrets, { windows: isWindows(), readOnly, githubCli });
+      setServers(await api!.saveMcpServer(input, githubCli ? { githubCliToken: true } : undefined));
+      setConnect(null);
+      setSecrets({});
+    } catch (cause) {
+      // A one-click add has no panel to show its error in.
+      (entry.secrets?.length ? setFormError : setError)(reason(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const openCatalog = (entry: McpCatalogEntry) => {
+    if (!entry.secrets?.length) { void addFromCatalog(entry); return; }
+    closePanels();
+    setSecrets({});
+    setReadOnly(false);
+    setConnect(entry);
+  };
+  /** A pasted README snippet or install command: one server opens in the form to check, several are added as they are. */
+  const readPaste = async () => {
+    if (pasting === null) return;
+    setFormError("");
+    try {
+      const { servers: found, placeholders } = parseMcpPaste(pasting, { windows: isWindows() });
+      const fill = placeholders.length ? `Replace ${placeholders.join(", ")} with your own value before saving.` : "";
+      if (found.length === 1) { startDraft(mcpDraftOf(found[0]), fill); return; }
+      if (fill) throw new Error(`${fill} Or paste one server at a time to fill it in here.`);
+      setSaving(true);
+      let next = servers;
+      for (const server of found) next = await api!.saveMcpServer(server);
+      setServers(next);
+      setPasting(null);
+    } catch (cause) {
+      setFormError(reason(cause));
+      // Some of several may have been added before one was refused: the list shows what was.
+      void api!.mcpServers().then(setServers, () => undefined);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const openLink = (url: string) => void api!.openExternal(url).catch((cause) => setError(messageOf(cause)));
+  // A panel opens at the top of the tab, often from an Add far below it: it is brought into view.
+  const revealPanel = useCallback((node: HTMLDivElement | null) => node?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }), []);
   return (
     <ContentSurface narrow title="Plugins" subtitle="Tools chat agents can use: the app's own, and MCP servers you add.">
       <div className="plugins-bar">
@@ -2678,7 +2858,8 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
             <Icon name="plus" /><span>Add</span>
           </button>
           {addOpen ? <div className="refresh-menu-list" role="menu">
-            <button type="button" role="menuitem" onClick={() => startDraft(emptyMcpDraft())}>Add MCP server</button>
+            <button type="button" role="menuitem" onClick={() => { closePanels(); setPasting(""); }}>Paste config or command</button>
+            <button type="button" role="menuitem" onClick={() => startDraft(emptyMcpDraft())}>Add MCP server by hand</button>
           </div> : null}
         </div>
       </div>
@@ -2688,8 +2869,42 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
         </SettingRow>)}
       </div> : null}
       {tab === "mcps" ? <>
-        {draft ? <div className="mcp-server-form mcp-live-fields">
+        {connect ? <div ref={revealPanel} className="mcp-server-form mcp-live-fields" aria-label={`Add ${connect.title}`}>
+          <h2>Add {connect.title}</h2>
+          <p className="mcp-catalog-blurb">{connect.blurb}</p>
+          {connect.githubCli ? <div className="mcp-connect-cli">
+            <PrimaryButton disabled={saving} onClick={() => void addFromCatalog(connect, true)}>{saving ? "Adding…" : "Use my GitHub CLI sign-in"}</PrimaryButton>
+            <span>Signed in with <code>gh auth login</code>? The app reads its token itself; nothing to copy.</span>
+          </div> : null}
+          {(connect.secrets ?? []).map((secret) => <label key={secret.key} className="field-row">
+            <span>{connect.githubCli ? "Or paste a token" : secret.label}
+              {secret.createUrl ? <> · <button type="button" className="button-link" onClick={() => openLink(secret.createUrl!)}>Create one</button></> : null}</span>
+            <input type="password" autoComplete="off" spellCheck={false} placeholder={secret.placeholder} value={secrets[secret.key] ?? ""}
+              onChange={(event) => setSecrets((current) => ({ ...current, [secret.key]: event.target.value }))} />
+          </label>)}
+          {connect.readOnlyUrl ? <SettingRow label="Read-only" body="Only tools that read: agents can't open issues, push or merge.">
+            <Switch checked={readOnly} onChange={setReadOnly} />
+          </SettingRow> : null}
+          {formError ? <p className="mcp-server-error" role="alert">{formError}</p> : null}
+          <div className="inline-actions">
+            <PrimaryButton disabled={saving} onClick={() => void addFromCatalog(connect)}>{saving ? "Adding…" : connect.githubCli ? "Add with this token" : "Add"}</PrimaryButton>
+            <SecondaryButton disabled={saving} onClick={() => setConnect(null)}>Cancel</SecondaryButton>
+          </div>
+        </div> : null}
+        {pasting !== null ? <div ref={revealPanel} className="mcp-server-form mcp-live-fields" aria-label="Paste config or command">
+          <h2>Paste config or command</h2>
+          <label className="field-row is-stacked"><span>The JSON from a server's README (Claude, Cursor or VS Code), or its <code>claude mcp add</code> / <code>codex mcp add</code> line</span>
+            <textarea value={pasting} onChange={(event) => setPasting(event.target.value)} rows={7} spellCheck={false} autoFocus
+              placeholder={'{\n  "mcpServers": {\n    "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] }\n  }\n}'} /></label>
+          {formError ? <p className="mcp-server-error" role="alert">{formError}</p> : null}
+          <div className="inline-actions">
+            <PrimaryButton disabled={saving || !pasting.trim()} onClick={() => void readPaste()}>{saving ? "Adding…" : "Continue"}</PrimaryButton>
+            <SecondaryButton disabled={saving} onClick={() => setPasting(null)}>Cancel</SecondaryButton>
+          </div>
+        </div> : null}
+        {draft ? <div ref={revealPanel} className="mcp-server-form mcp-live-fields">
           <h2>{draft.id ? `Edit ${draft.name}` : "Add MCP server"}</h2>
+          {draftNote ? <p className="mcp-catalog-blurb is-warn" role="note">{draftNote}</p> : null}
           <label className="field-row"><span>Name</span><input {...field("name")} maxLength={64} placeholder="my-server" autoFocus /></label>
           <div className="field-row"><span>Type</span>
             <div className="plugins-tabs is-compact" role="radiogroup" aria-label="Transport">
@@ -2724,8 +2939,23 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
             </div>
           </SettingRow>)}
         </div>
-        <p className="surface-empty-note">{servers && !servers.length ? "No MCP servers of your own yet. Choose Add, then Add MCP server. " : ""}
+        <p className="surface-empty-note">{servers && !servers.length ? "No MCP servers of your own yet. Add one below, or choose Add to paste any server's config. " : ""}
           New chats get every server that is on; a chat already open gets it when its agent restarts. Streamable HTTP servers go to Claude Code, Codex and opencode chats, STDIO servers to every chat agent.</p>
+        <SectionHeading label="Ready to add" />
+        <div className="mcp-catalog" aria-label="Ready to add">
+          {MCP_CATALOG.map((entry) => <div key={entry.id} className="mcp-catalog-card">
+            <div className="mcp-catalog-text">
+              <strong>{entry.title}</strong>
+              <span className="mcp-catalog-kind">{entry.server.type === "http" ? "Hosted" : "Runs locally"}{entry.secrets?.some((secret) => !secret.optional) ? " · needs a token" : ""}</span>
+              <p>{entry.blurb}</p>
+            </div>
+            <div className="mcp-catalog-actions">
+              <button type="button" className="button-link" onClick={() => openLink(entry.homepage)}>Docs</button>
+              {added(entry) ? <span className="rtk-chip">Added</span>
+                : <SecondaryButton disabled={saving} onClick={() => openCatalog(entry)}>Add</SecondaryButton>}
+            </div>
+          </div>)}
+        </div>
       </> : null}
     </ContentSurface>
   );

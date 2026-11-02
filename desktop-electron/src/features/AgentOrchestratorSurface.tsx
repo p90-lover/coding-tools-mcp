@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from "react";
 import { getCodingToolsClient } from "../api/client";
 import type { JsonObject, WorkspaceSummary } from "../api/contracts";
@@ -19,6 +19,7 @@ import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam
 import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
+import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection } from "./chat-pages";
 import { createLatestConfigQueue } from "./ao-config";
 import {
   AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings, starterSettings,
@@ -27,7 +28,7 @@ import {
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
 import "./claude-theme.css";
-import { onAoPush, pageHidden, useSurfaceHidden } from "./page-visibility";
+import { onAoPush, useSurfaceHidden } from "./page-visibility";
 
 type Clause = { id: string; title: string; detail?: string; state: string };
 type PlanTask = {
@@ -503,13 +504,16 @@ export type SplitPaneLink = {
   onClose: () => void;
 };
 
-export function AgentOrchestratorSurface({ language, setError, pane }: {
+export function AgentOrchestratorSurface({ language, setError, pane, pageNumber = 1 }: {
   language: Language;
   setError: (error: string | null) => void;
   pane?: SplitPaneLink;
+  pageNumber?: number;
 }) {
   const copy = words[language];
   const surfaceHidden = useSurfaceHidden();
+  const pageRegistry = useContext(ChatPagesContext);
+  const [initialPageSelection] = useState(() => !pane && pageRegistry ? readPageSelection(pageNumber) : null);
   const attachmentPreview = useCallback((file: string) => window.codexWebLauncher?.attachmentPreview?.(file)
     ?? Promise.reject(new Error("Previews show in the desktop app")), []);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
@@ -521,9 +525,15 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [projectLoadRevision, setProjectLoadRevision] = useState(0);
   const autoRetriedProjects = useRef(new Set<string>());
   // A split pane opens its own project, and never changes the one the window opens next time.
-  const [workspaceId, setWorkspaceId] = useState(() => { if (pane) return pane.workspaceId; try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
+  const [workspaceId, setWorkspaceId] = useState(() => {
+    if (pane) return pane.workspaceId;
+    if (initialPageSelection) return initialPageSelection.workspaceId;
+    try { return localStorage.getItem(chatPageKey("coding-tools:ao:workspace", pageNumber)) || localStorage.getItem("coding-tools:ao:workspace") || ""; }
+    catch { return ""; }
+  });
   // The chat a split pane is to show once its project has loaded (null: not a pane).
-  const paneWanted = useRef(pane ? { workspaceId: pane.workspaceId, taskId: pane.taskId } : null);
+  const paneWanted = useRef(pane ? { workspaceId: pane.workspaceId, taskId: pane.taskId }
+    : initialPageSelection ?? (pageRegistry && pageNumber > 1 ? { workspaceId, taskId: "" } : null));
   const paneSelectionPending = useRef(false);
   // One project tree switches between the conversation and the selected graph above its workspace board.
   const [view, setView] = useState<"chat" | "overview" | "board">("chat");
@@ -533,6 +543,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   useEffect(() => {
     if (pane) return undefined;
     const onKey = (event: KeyboardEvent) => {
+      if (surfaceHidden()) return;
       if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key === ",") {
         event.preventDefault();
         setSettingsOpen((open) => !open);
@@ -909,7 +920,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     let live = true, reading = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const refresh = async (retried = false) => {
-      if (!live || reading || pageHidden()) return;
+      if (!live || reading || surfaceHidden()) return;
       if (retryTimer !== undefined) { clearTimeout(retryTimer); retryTimer = undefined; }
       reading = true;
       try {
@@ -923,7 +934,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       } catch (cause) {
         if (live) {
           setError(cause instanceof Error ? cause.message : String(cause));
-          if (!retried && !pageHidden()) {
+          if (!retried && !surfaceHidden()) {
             retryTimer = setTimeout(() => { retryTimer = undefined; void refresh(true); }, 750);
           }
         }
@@ -1133,13 +1144,17 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     // still loaded; picking its "latest chat" re-selected the old project's task under the new
     // project, so a send went to a task the new workspace refuses. Wait for this project's board.
     if (chatTaskId !== null || !board || boardWorkspace.current !== workspaceId) return;
+    // A removed saved project, or a newer project choice, retires this page's initial restore.
+    if (!pane && paneWanted.current?.workspaceId && paneWanted.current.workspaceId !== workspaceId) paneWanted.current = null;
     // A split pane opens the chat it was given (a new one for ""), never the project's latest.
     const wanted = paneWanted.current;
     if (wanted) {
-      if (wanted.workspaceId !== workspaceId || loadedWorkspace !== workspaceId) return;
+      if ((wanted.workspaceId && wanted.workspaceId !== workspaceId) || loadedWorkspace !== workspaceId) return;
       const found = wanted.taskId ? chatList(missions, board.tasks, taskLifecycle).find((entry) => entry.taskId === wanted.taskId) : undefined;
       // Project loading resolved the request, including a chat removed since it was chosen.
       paneSelectionPending.current = false;
+      if (!pane) paneWanted.current = null;
+      if (found && pageRegistry?.has(pageNumber, workspaceId, found.taskId)) { setChatTaskId(""); return; }
       setChatTaskId(found?.taskId ?? "");
       if (found) setSelectedRunId(found.latestRunId);
       return;
@@ -1152,6 +1167,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     // no chats, opened the new chat page, and stayed there although the project had chats.
     if (loadedWorkspace !== workspaceId) return;
     const latest = chatList(missions.filter((mission) => mission.workspace_id === workspaceId), board.tasks, taskLifecycle)[0];
+    if (latest && pageRegistry?.has(pageNumber, workspaceId, latest.taskId)) { setChatTaskId(""); return; }
     setChatTaskId(latest?.taskId ?? "");
     if (latest) setSelectedRunId(latest.latestRunId);
   }, [chatTaskId, missions, board, loadedWorkspace]);
@@ -1197,6 +1213,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     return () => window.removeEventListener("coding-tools:ao:teams-changed", changed);
   }, [workspaceId, setError]);
   const selectChat = (taskId: string, next: "chat" | "overview" = "chat") => {
+    if (pageRegistry?.reveal(pageNumber, workspaceId, taskId)) return;
     composerIntent.current++;
     // A chat chosen here wins over another project's chat still loading to open (selectChatIn).
     switchTarget.current = ""; pendingSelect.current = null;
@@ -1891,6 +1908,19 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const [splitMaxCols, setSplitMaxCols] = useState(2);
   const [splitWeightsSaved, setSplitWeightsSaved] = useState<number[] | undefined>(undefined);
   const [splitRow, setSplitRow] = useState(SPLIT_ROW.DEFAULT);
+  const splitStore = chatPageKey(SPLIT_STORE, pageNumber);
+  useLayoutEffect(() => {
+    if (pane || !pageRegistry) return;
+    return pageRegistry.register(pageNumber, [
+      { workspaceId, taskId: chatTaskId ?? "", paneId: "main" },
+      ...splitPanes.map((item) => ({ workspaceId: item.workspaceId, taskId: item.taskId, paneId: item.id })),
+    ], (id) => { setFocusedPane(id); setView("chat"); setSettingsOpen(false); });
+  }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, splitPanes]);
+  useEffect(() => {
+    if (pane || !pageRegistry || chatTaskId === null || loadedWorkspace !== workspaceId) return;
+    try { localStorage.setItem(chatPageKey(`${CHAT_PAGES_STORE}:selection`, pageNumber), JSON.stringify({ workspaceId, taskId: chatTaskId })); }
+    catch { /* Keep the selected chat for this session. */ }
+  }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, loadedWorkspace]);
   /** The pane already showing a chat, so a chat is never open twice (both would send its queue). */
   const paneShowing = (id: string, taskId: string) => !taskId ? undefined : workspaceId === id && chatTaskId === taskId ? "main"
     : splitPanes.find((item) => item.workspaceId === id && item.taskId === taskId)?.id;
@@ -1905,6 +1935,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
    * (a new column while one fits, then a free bottom row, else in place of the last chat).
    */
   const openInSplit = (id: string, taskId: string, at?: SplitDropTarget | PanePos | null) => {
+    if (pageRegistry?.reveal(pageNumber, id, taskId)) return;
     const open = paneShowing(id, taskId);
     setView("chat"); setSheet("");
     // An open chat dragged from the sidebar to another place moves there and its old pane closes;
@@ -2011,7 +2042,9 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     if (pane || splitRestored.current || !workspaceReady) return;
     splitRestored.current = true;
     let saved: SplitSaved = { panes: [] };
-    try { saved = readSplit(localStorage.getItem(SPLIT_STORE)); } catch { /* Nothing kept. */ }
+    try { saved = readSplit(localStorage.getItem(splitStore)); } catch { /* Nothing kept. */ }
+    saved.panes = saved.panes.filter((item) => !pageRegistry?.has(pageNumber, item.workspaceId, item.taskId)
+      && !(initialPageSelection?.workspaceId === item.workspaceId && initialPageSelection.taskId === item.taskId));
     if (saved.panes.length) setSplitPanes(normalizeSplit(saved.panes.map((item) => ({ ...item, id: crypto.randomUUID() }))));
     if (saved.weights) setSplitWeightsSaved(saved.weights);
     if (saved.rowSplit) setSplitRow(saved.rowSplit);
@@ -2020,7 +2053,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     if (pane || !splitRestored.current) return;
     const kept: SplitSaved = { panes: splitPanes.filter((item) => item.taskId).map(({ workspaceId: id, taskId, col, row }) => ({ workspaceId: id, taskId, col, row })),
       weights: splitWeightsSaved, rowSplit: splitRow };
-    try { localStorage.setItem(SPLIT_STORE, JSON.stringify(kept)); } catch { /* Kept for this session only. */ }
+    try { localStorage.setItem(splitStore, JSON.stringify(kept)); } catch { /* Kept for this session only. */ }
   }, [splitPanes, splitWeightsSaved, splitRow]);
   // Claude Code's split view keys (Windows): Ctrl+Alt+\ a new chat on the right, Ctrl+Alt+- one below,
   // Ctrl+] / Ctrl+[ the next or previous pane, Ctrl+Alt+Arrow the pane that way, Ctrl+Alt+W close it.
@@ -2028,7 +2061,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     if (pane) return;
     const onKey = (event: KeyboardEvent) => {
       // AltGr arrives as Ctrl+Alt: on many layouts it types \ or - and must not open a pane.
-      if (view !== "chat" || event.getModifierState?.("AltGraph")) return;
+      if (surfaceHidden() || settingsOpen || view !== "chat" || event.getModifierState?.("AltGraph")) return;
       const key = event.key;
       if (event.ctrlKey && event.altKey && !event.shiftKey && (key === "\\" || event.code === "Backslash")) {
         event.preventDefault();
@@ -2073,6 +2106,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   }, [focusedPane]);
   /** A chat chosen in the sidebar: its pane if it is open, else the focused pane shows it. */
   const showChat = (id: string, taskId: string) => {
+    if (pageRegistry?.reveal(pageNumber, id, taskId)) return;
     const open = paneShowing(id, taskId);
     if (open) { setFocusedPane(open); if (open === "main") selectChat(taskId); else setView("chat"); return; }
     if (focusedSplit) {
@@ -2250,7 +2284,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     setWorkspaceId(id);
     setChatTaskId(null);
     if (pane) return;
-    try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
+    try { localStorage.setItem(chatPageKey("coding-tools:ao:workspace", pageNumber), id); } catch { /* Selection still works for this session. */ }
   };
   const chooseWorkspace = (id: string) => {
     // A chat clicked in a project still loading gives way to whatever is chosen now: a project, a
@@ -2258,7 +2292,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     switchTarget.current = ""; pendingSelect.current = null;
     // A project chosen inside a split pane opens a new chat there. Keeping the old pane target
     // left selection waiting for that project's load while the parent waited for selection.
-    if (pane) paneWanted.current = { workspaceId: id, taskId: "" };
+    paneWanted.current = pane ? { workspaceId: id, taskId: "" } : null;
     switchToWorkspace(id);
   };
   // A chat opened from another project's rows in the list. As in Codex the open chat stays until the
@@ -2268,6 +2302,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const pendingSelect = useRef<{ workspaceId: string; taskId: string } | null>(null);
   const switchTarget = useRef("");
   const selectChatIn = (id: string, taskId: string) => {
+    if (pageRegistry?.reveal(pageNumber, id, taskId)) return;
     composerIntent.current++;
     // A cached row of the project just switched to (its runs not read yet) waits like another
     // project's: selecting it now set a chat with no run, and the load then picked another chat's run.
@@ -2351,7 +2386,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   // were refused ("Open the Coding Tools window (not minimized)": 9 board + runs pairs a minute
   // apart in the launcher log).
   useEffect(() => {
-    const tick = () => { if (!pageHidden()) setListNow(Date.now()); };
+    const tick = () => { if (!surfaceHidden()) setListNow(Date.now()); };
     const timer = window.setInterval(tick, 60_000);
     document.addEventListener("visibilitychange", tick);
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
@@ -2452,29 +2487,35 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     compact: async (instructions = "") => {
       if (!chatTaskId) throw new Error("Open a chat first");
       const result = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId, ...(instructions ? { instructions } : {}) });
-      await loadBoard(workspaceId);
-      const full = (size: number) => Math.round(size / CHAT_CONTEXT_LIMIT * 100);
-      return result.compacted
-        ? `Context compacted from ${Number(result.before).toLocaleString("en-US")} to ${Number(result.after).toLocaleString("en-US")} characters, now ${full(Number(result.after))}% full.`
-        : `Nothing to compact yet. The context is ${Number(result.before).toLocaleString("en-US")} characters, ${full(Number(result.before))}% full.`;
+      let progress = result;
+      const deadline = Date.now() + 120_000;
+      while (progress.status === "in_progress") {
+        if (Date.now() >= deadline) throw new Error("Compaction is not confirmed complete yet. Check the agent before retrying.");
+        await new Promise(resolve => window.setTimeout(resolve, 1000));
+        progress = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId, status: true, compactionId: String(result.compactionId) });
+      }
+      if (progress.status !== "completed") throw new Error("The agent did not confirm compaction completed");
+      return "Context compacted";
     },
     autoCompact: async (change = {}) => {
       const result = await moduleCall("chat_auto_compact", change);
       return { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || 95, limit: Number(result.limit) || CHAT_CONTEXT_LIMIT };
     },
     context: async () => {
-      const description = board?.tasks.find(task => task.id === chatTaskId)?.description ?? "";
-      const setting = await moduleCall("chat_auto_compact", {});
-      const percent = Number(setting.percent) || 95;
-      const used = Math.round(description.length / CHAT_CONTEXT_LIMIT * 100);
-      // A compacted chat starts with its summary's heading (compactChat), which says when.
-      const compacted = /^Summary of the earlier conversation \(compacted ([^)]+) UTC\)/.exec(description)?.[1];
-      const rows: [string, string][] = [
-        ["Context", `${description.length.toLocaleString("en-US")} of ${CHAT_CONTEXT_LIMIT.toLocaleString("en-US")} characters (${used}% full)`],
-        ["Auto-compact", setting.autoCompact === false ? "Off: a full chat stops until you /compact" : `On: compacts before a message that would fill ${percent}%`],
-        ["Last compacted", compacted ? `${compacted} UTC` : "Never"],
-      ];
-      return { title: "Context", rows, text: "The chat's context is its messages, sent to every new agent session. Each agent also compacts its own session by itself." };
+      const node = chatRunsHere.at(-1)?.nodes?.[0];
+      const sessionId = node?.receipt?.thread_id;
+      if (!sessionId) return { title: "Context", text: "No agent session yet." };
+      if (node?.route.harness_id === NATIVE_HARNESS) return { title: "Context",
+        text: "Token usage for this native Codex session is not available in the app yet. The native agent manages its context and automatic compaction." };
+      const result = await moduleCall("chat_context", { sessionIds: [sessionId] });
+      const snapshot = (result.sessions as Record<string, { usage?: { contextUsed: number | null; contextWindow: number | null }; compactedAt?: string }> | undefined)?.[sessionId];
+      const used = snapshot?.usage?.contextUsed, limit = snapshot?.usage?.contextWindow;
+      const number = (value: number) => value.toLocaleString("en-US");
+      const context = used == null ? "Not reported yet" : limit && limit > 0
+        ? `${number(used)} / ${number(limit)} tokens (${Math.round(used / limit * 100)}% full)` : `${number(used)} tokens`;
+      return { title: "Context", rows: [["Context window", context],
+        ["Auto-compact", "Managed by the agent using its model's token limit"],
+        ["Last compacted", snapshot?.compactedAt ? new Date(snapshot.compactedAt).toLocaleString() : "Not reported"]] };
     },
     diff: async () => {
       const result = await moduleCall("chat_diff", { workspaceId });
@@ -2520,7 +2561,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
   const workspaceIds = workspaces.map((item) => item.id).join("\n");
   const archivedKey = taskLifecycle.map((item) => `${item.task_id}:${item.visibility}`).join(",");
   const loadArchived = useCallback(async () => {
-    if (!workspaceIds) return;
+    if (!workspaceIds || surfaceHidden()) return;
     const result = await moduleCall("archived_chats", { workspaceIds: workspaceIds.split("\n") }).catch(() => null);
     if (result && Array.isArray(result.chats)) setArchivedAll({ days: Number(result.days) || 0, idleDays: Number(result.idleDays) || 0, chats: result.chats as ArchivedChat[] });
   }, [workspaceIds]);
@@ -2751,7 +2792,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
           maxColumns={splitMaxCols} onMaxColumns={setSplitMaxCols}
           onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
           onMovePane={pane ? undefined : moveSplitPane}
-          panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError}
+          panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError} pageNumber={pageNumber}
             pane={{ id: item.id, workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
               onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
         {view === "chat" ? (
@@ -2761,7 +2802,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                 onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
                 runs={chatRuns}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
-                draftScope={pane?.id ?? "main"}
+                draftScope={pane?.id ?? (pageNumber === 1 ? "main" : `page-${pageNumber}`)}
                 projectLoadError={projectLoadError} onRetryProject={() => setProjectLoadRevision((value) => value + 1)} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}

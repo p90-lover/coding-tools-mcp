@@ -74,6 +74,7 @@ const {
 } = require("./app-update.cjs");
 const { createUpdateHealthGate } = require("./update-health-gate.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
+const { createAppPlugins } = require("./app-plugins.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
@@ -148,7 +149,14 @@ const X_URL = "https://x.com/GIBUSHAT";
 const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
-const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
+// Plugins > MCPs' ready-to-add servers (src/features/mcp-catalog.ts): their pages and where to make their tokens.
+const MCP_CATALOG_URLS = [
+  "https://github.com/github/github-mcp-server", "https://github.com/settings/personal-access-tokens/new",
+  "https://github.com/microsoft/playwright-mcp", "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+  "https://github.com/upstash/context7", "https://context7.com/dashboard",
+  "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
+];
+const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL, ...MCP_CATALOG_URLS]);
 const PACKAGED_RENDERER_PATH = path.join(__dirname, "..", "dist", "index.html");
 const PACKAGED_RENDERER_URL = pathToFileURL(PACKAGED_RENDERER_PATH).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
@@ -270,6 +278,8 @@ let autoInstaller = null;
 // Set once the main window's renderer has loaded (the update health gate's window check).
 let rendererLoaded = false;
 let cpaUpdater = null;
+// Connections > App plugins (app-plugins.cjs): CPA and its plugins, their versions and updates.
+let appPluginsService = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
@@ -1010,13 +1020,24 @@ function lifecycleSyncFor(accountId, logger) {
 
 // The account a Codex thread's turn runs on: the one it is bound to, or (first turn, or its account
 // was removed) the one new sessions start on, which it is then bound to.
-async function resolveThreadAccount(threadId, logger) {
+async function resolveThreadAccount(threadId, logger, { requireRetainedConversation = false } = {}) {
+  const bound = threadAccounts && isThreadId(threadId) ? threadAccounts.accountFor(threadId) : null;
+  if (requireRetainedConversation && (!bound || !browserAccountExists(bound))) {
+    const error = new Error("The retained ChatGPT conversation's original account binding is no longer available");
+    error.code = "retained_conversation_unavailable";
+    throw error;
+  }
   if (!threadAccounts || !isThreadId(threadId)) return null;
-  const bound = threadAccounts.accountFor(threadId);
   const accountId = bound && browserAccountExists(bound) ? bound : newSessionAccount();
   threadAccounts.bind(threadId, accountId);
   const partition = browserAccounts.partitionOf(accountId);
   await routeIdleAccountPartition(partition, logger);
+  // Routing can yield before a running tab prevents the thread from being moved or forgotten.
+  if (requireRetainedConversation && (!browserAccountExists(accountId) || threadAccounts?.accountFor(threadId) !== accountId)) {
+    const error = new Error("The retained ChatGPT conversation's account binding changed while routing");
+    error.code = "retained_conversation_unavailable";
+    throw error;
+  }
   return { accountId, partition, chatLifecycleSync: lifecycleSyncFor(accountId, logger) };
 }
 
@@ -3489,13 +3510,27 @@ function registerIpc({ logger, stateStore }) {
     if (!rtkService) throw new Error("RTK is unavailable in this build");
     return rtk.install();
   });
+  // Connections > App plugins: versions installed and on GitHub; an update is the person's own click.
+  handle("launcher:app-plugins", async (event, refresh) => {
+    assertFocusedMainWindow(event, false);
+    if (!appPluginsService) throw new Error("App plugins are still starting");
+    return appPluginsService.list({ refresh: refresh === true });
+  });
+  handle("launcher:app-plugin-update", async (event, id) => {
+    assertFocusedMainWindow(event, true);
+    if (!appPluginsService) throw new Error("App plugins are still starting");
+    return appPluginsService.update(String(id || ""));
+  });
   // Plugins > MCPs: the person's own MCP servers for chat agents. Adding, changing or turning one on
   // runs its command (or reaches its address) in every new chat, so it is their own click in the
   // visible app; errors name the field, never a value (env and headers carry tokens).
   handle("mcp-servers:list", () => userMcpServers(logger).list());
-  handle("mcp-servers:save", (event, server) => {
+  handle("mcp-servers:save", async (event, server, options) => {
     assertFocusedMainWindow(event, true);
-    return userMcpServers(logger).save(server);
+    // "Use my GitHub CLI sign-in": the token is read here and never passes through the page.
+    const input = options?.githubCliToken === true
+      ? await require("./chat-mcp-servers.cjs").withGithubCliToken(server) : server;
+    return userMcpServers(logger).save(input);
   });
   handle("mcp-servers:remove", (event, id) => {
     assertFocusedMainWindow(event, true);
@@ -4075,6 +4110,13 @@ async function start() {
     },
     logger,
   });
+  appPluginsService = createAppPlugins({
+    cpaStateDir: path.join(app.getPath("userData"), "integrations", "state", "cpa"),
+    services: () => externalServicesController,
+    // A plugin DLL loads when CPA starts.
+    restartCpa: () => externalServicesController.restart("cpa"),
+    logger,
+  });
   managedBootstrapController = createManagedBootstrap({
     snapshot: () => externalServicesController.snapshot(),
     install: (serviceId) => externalServicesController.installManagedComponent(serviceId),
@@ -4288,7 +4330,8 @@ async function start() {
       // the worktree and package caches writable, the network on), as Codex runs its own.
       const { createSandboxRunner } = backendBundles.requireModule(backend, "chat-sandbox.cjs");
       // An agent's `ao` commands work in the app's terminal too, as in its own shell.
-      const chatSandbox = createSandboxRunner({ logger, scriptDir: path.join(launcherUserData, "sandbox-scripts"), extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.(), rtk.binDir()].filter(Boolean) });
+      const chatSandbox = createSandboxRunner({ logger, scriptDir: path.join(launcherUserData, "sandbox-scripts"), extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.(), rtk.binDir()].filter(Boolean),
+        extraEnv: () => rtk.commandEnvironment() });
       app.on("will-quit", () => chatSandbox.killAll());
       // A chat's computer control: the request card in the asking chat (no window of its own, which
       // took the focus), and the control bar whose heartbeat keeps input on.
@@ -4901,7 +4944,7 @@ async function start() {
       getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
       getUseSavedChats: () => savedChatsInUse(),
       // Each Codex thread runs on the ChatGPT account it is bound to, whichever one this host shows.
-      resolveTurnAccount: (threadId) => resolveThreadAccount(threadId, logger),
+      resolveTurnAccount: (threadId, options) => resolveThreadAccount(threadId, logger, options),
       tabLimitFor: (partition) => browserAccounts.tabLimitForPartition(partition),
       retainedTabTtlMs: () => browserAccounts.settings().keepFinishedTabsMinutes * 60_000,
       // What turns and inspections show about each account, for ChatGPT browser management.

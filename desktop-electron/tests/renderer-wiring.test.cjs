@@ -27,7 +27,9 @@ test("a new chat's Team picker sits in the chat header, with no setting bar abov
 // Since the Chat redesign (2574a6bd) the "Chat" entry mounts the Coding Tools AO surface; the
 // original upstream AO UI keeps its own destination and links back to Chat.
 test("Chat mounts the AO chat surface and the original AO UI links back to it", () => {
-  assert.match(appSource, /keepAlive\("agent-orchestrator", \(\) => \(\s*<section className="gpb-chat"[\s\S]*?<AgentOrchestratorSurface language=\{language\} setError=\{setError\} \/>/);
+  assert.match(appSource, /keepAlive\("agent-orchestrator", \(\) => \(\s*<section className="gpb-chat"[\s\S]*?<ChatPages language=\{language\} setError=\{setError\} \/>/);
+  const pages = fs.readFileSync(path.join(launcherRoot, "src/features/ChatPages.tsx"), "utf8");
+  assert.match(pages, /<AgentOrchestratorSurface language=\{language\} setError=\{setError\} pageNumber=\{page\} \/>/);
   assert.match(appSource, /keepAlive\("agent-orchestrator-original", \(\) => \(\s*<AgentOrchestratorOriginalSurface openMissions=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
   assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
 });
@@ -44,9 +46,16 @@ test("Register keeps its Connections destination and native overlay visibility g
 
 test("a hidden docked sidebar folds to an icon rail that shows the whole panel on hover", () => {
   assert.match(appSource, /animate=\{\{ width: sidebarOpen \? "var\(--sidebar-width\)" : compactSidebar \? 0 : "var\(--sidebar-rail-width\)" \}\}/);
-  assert.match(appSource, /onPointerEnter=\{\(\) => peekSidebar\(true\)\}\s*onPointerLeave=\{\(\) => peekSidebar\(false\)\}/);
-  // Every native view steps aside while the hover panel or the compact drawer covers it.
-  assert.match(appSource, /const sidebarCovers = \(compactSidebar && sidebarOpen\) \|\| \(sidebarRail && sidebarPeek\);/);
+  // The hover panel follows the pointer's position, not enter/leave on the aside: the title bar's
+  // buttons sit over the rail's top and flipped it open and shut (2026-11-02).
+  assert.doesNotMatch(appSource, /onPointerEnter=\{\(\) => peekSidebar|onPointerLeave=\{\(\) => peekSidebar/);
+  assert.match(appSource, /if \(event\.clientX <= SIDEBAR_RAIL_WIDTH\) settle\(true\);\s*else if \(event\.clientX > sidebarWidth \+ 16\) settle\(false\);\s*else settle\(sidebarPeekState\.current\);/);
+  assert.match(appSource, /"--sidebar-rail-width": `\$\{SIDEBAR_RAIL_WIDTH\}px`/);
+  // Every native view steps aside while the hover panel or the compact drawer covers it, and stays
+  // aside until the panel has slid shut.
+  assert.match(appSource, /const sidebarCovers = \(compactSidebar && sidebarOpen\) \|\| \(sidebarRail && sidebarExpanded\);/);
+  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.sidebar-clip \{[^}]*transition:\s*width 180ms/);
+  assert.match(appSource, /setTimeout\(\(\) => setSidebarExpanded\(false\), 190\)/);
   assert.doesNotMatch(appSource, /!\(compactSidebar && sidebarOpen\)/);
   assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 4);
   // AO's view (its own UI, the project board, the Antigravity terminal) steps aside the same way:
@@ -63,7 +72,7 @@ test("a hidden docked sidebar folds to an icon rail that shows the whole panel o
   // A saved hidden sidebar stays hidden on the next start; only crossing the compact width changes it.
   assert.match(appSource, /setSidebarOpen\(!media\.matches && sidebarPinned\.current\);\s*\};\s*media\.addEventListener/);
   assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.app-sidebar\.is-peek \.sidebar-clip \{[^}]*width: var\(--sidebar-width\)/);
-  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.app-sidebar:not\(\.is-peek\) \.sidebar-content \{[^}]*width: var\(--sidebar-rail-width\)/);
+  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.app-sidebar:not\(\.is-expanded\) \.sidebar-content \{[^}]*width: var\(--sidebar-rail-width\)/);
 });
 
 test("Refresh menu reports every open and close path to the Register native gate", async () => {

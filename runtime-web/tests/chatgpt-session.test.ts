@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_COMPOSER_SELECTOR } from "../src/chatgpt-ui/composer";
+import { resolveChatGptWebModelMode, resolveChatGptWebTurnCapabilities } from "../src/adapters/chatgpt-web/model";
+import { availableChatGptWebModelRoutes, requireChatGptWebModelRoute } from "../src/chatgpt-web-models";
+import { chatGptEffortTierAvailability, type ChatGptEffortSnapshot } from "../src/chatgpt-account-capabilities";
 import {
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
@@ -516,7 +519,7 @@ const TEAM_STOPS: Record<string, string[]> = {
  * model. Clicks act as ChatGPT does: the header opens the list; a row (only in the list) chooses
  * that model and returns to the slider. On Team "6" is the default, so it never reads as explicit.
  */
-function modelListPicker(options: { plan?: "plus" | "team"; models?: string[]; defaultModel?: string; stops?: string[]; locked?: string; clickIgnored?: boolean; jumpy?: boolean } = {}) {
+function modelListPicker(options: { plan?: "plus" | "team"; models?: string[]; defaultModel?: string; stops?: string[]; locked?: string; disabled?: string; lockedStops?: string[]; statusOffset?: number; afterKey?: () => void; clickIgnored?: boolean; jumpy?: boolean } = {}) {
   const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
   const team = options.plan === "team";
   const stopsByModel = team ? TEAM_STOPS : PLUS_STOPS;
@@ -527,14 +530,16 @@ function modelListPicker(options: { plan?: "plus" | "team"; models?: string[]; d
   const state = { view: "simple", chosen: defaultModel, value: team ? 3 : 1, keys: [] as string[], clicks: [] as string[] };
   const stops = () => options.stops ?? stopsByModel[state.chosen] ?? ["Other Light", "Other High"];
   const row = (name: string) => `<div role="menuitemradio" aria-checked="${name === state.chosen}"`
+    + `${name === options.disabled ? ' aria-disabled="true"' : ""}`
     + `${name === options.locked ? ' aria-describedby="locked-note"' : ""}><div data-menu-row-content="true">`
     + (name === "Default" ? "<div><span>Default</span><span><span>Recommended set of models</span></span></div>" : `<span>${name}</span>`)
     + "</div></div>";
   const render = () => createDocument(`<body><div role="menu" id="menu"><div data-model-picker-view="${state.view}">`
     + `<div data-explicit-model="${state.chosen !== defaultModel}"><div role="menuitem" aria-label="Select model" data-model-picker-view-toggle="true">`
     + `<div data-menu-row-content="true"><span>${stops()[state.value]}</span></div></div></div>`
-    + `<div data-model-picker-power-slider=""><span role="slider" aria-valuemin="0" aria-valuemax="${stops().length - 1}" aria-valuenow="${state.value}"></span></div>`
-    + `<div role="status">${stops()[state.value]}, ${state.value + 1} of ${stops().length}.</div>`
+    + `<div data-model-picker-power-slider=""><span role="slider" aria-valuemin="0" aria-valuemax="${stops().length - 1}" aria-valuenow="${state.value}"></span>`
+    + stops().map((label, index) => `<span data-locked="${options.lockedStops?.includes(label) ?? false}" data-selected="${index === state.value}"></span>`).join("") + "</div>"
+    + `<div role="status">${stops()[state.value]}, ${state.value + 1 + (options.statusOffset ?? 0)} of ${stops().length}.</div>`
     + `<div><div data-menu-section-label="true">Select model</div><span id="locked-note">Locked, opens access options</span>${models.map(row).join("")}</div>`
     + "</div></div></body>").getElementById("menu")!;
   const locator = (selector: string, index?: number): Record<string, unknown> => {
@@ -570,6 +575,7 @@ function modelListPicker(options: { plan?: "plus" | "team"; models?: string[]; d
       state.keys.push(key);
       const next = state.value + (key === "ArrowRight" ? 1 : -1) * (options.jumpy ? 2 : 1);
       state.value = Math.max(0, Math.min(stops().length - 1, next));
+      options.afterKey?.();
     },
   };
   const slider = {
@@ -628,8 +634,10 @@ test("a stop is found by its label, whatever its position, and only moves one st
   expect(team.state.keys.slice(-1)).toEqual(["ArrowRight"]);
 
   const already = modelListPicker({ plan: "team" });
-  await selectChatGptPickerStop(already.menu as never, already.slider as never, "6 Extra High");
-  expect(already.state.keys).toEqual([]);
+  const observed = await selectChatGptPickerStop(already.menu as never, already.slider as never, "6 Extra High");
+  expect(already.label()).toBe("6 Extra High");
+  expect(observed.effortSnapshot).toBeDefined();
+  expect(already.state.keys.length).toBeLessThanOrEqual(12);
 
   // Plus GPT-6 Sol stops at 6 High: asking for Pro fails on its last stop, never past it.
   const plus = modelListPicker();
@@ -659,13 +667,270 @@ const selectModelAndEffort = (ChatGptBrowserWorker.prototype as unknown as {
   selectModelAndEffort(...args: unknown[]): Promise<unknown>;
 }).selectModelAndEffort;
 
+const PLAIN_STOPS = ["Instant", "Medium", "High", "Extra High", "Pro"];
+const PLAIN_EFFORTS = [["low", "Instant"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra High"], ["max", "Pro"]] as const;
+
+test.each([["xhigh", "Extra High", "missing"], ["max", "Pro", "missing"],
+  ["xhigh", "Extra High", "locked"], ["max", "Pro", "locked"]] as const)(
+  "native account deferral still rejects %s (%s) when that stop is %s", async (effort, label, state) => {
+    const fixture = reasoningPicker();
+    const picker = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6",
+      stops: state === "missing" ? PLAIN_STOPS.filter(name => name !== label) : PLAIN_STOPS,
+      lockedStops: state === "locked" ? [label] : [] });
+    const capabilities = resolveChatGptWebTurnCapabilities({
+      modelId: "gpt-5.6-sol", stream: false, context: { messages: [] }, options: { reasoning: effort },
+      _rawBody: { client_metadata: { "x-codex-turn-metadata": { thread_id: "01a06c66-0000-7ae1-9108-69b5f70e0671" } } },
+    }, { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
+    { browserHost: "launcher", browserHostDescriptorPath: "G:/fixture/launcher.json" });
+    const operation = selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+      "gpt-5.6-sol", effort, capabilities);
+    await expect(operation).rejects.toMatchObject({ code: "chatgpt_model_pick_failed", retryable: false });
+    await expect(operation).rejects.toThrow(state === "missing" ? `no "6 ${label}" stop` : `"6 ${label}" stop is locked`);
+  },
+);
+
+test.each(PLAIN_EFFORTS)("plain GPT-6 %s selects exactly %s", async (effort, label) => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6", stops: PLAIN_STOPS });
+  const mode = await selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", effort, { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true });
+  expect(mode).toMatchObject({ effort, displayLabel: label });
+  expect(picker.state.clicks).toEqual(["header", "GPT-6"]);
+  expect(picker.state.chosen).toBe("GPT-6");
+  expect(picker.label()).toBe(label);
+});
+
+test.each(PLAIN_EFFORTS)("plain GPT-6 missing %s never substitutes another choice", async (effort, label) => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: PLAIN_STOPS.filter(stop => stop !== label) });
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", effort, { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true }))
+    .rejects.toMatchObject({ code: "chatgpt_model_pick_failed", retryable: false });
+  expect(picker.state.chosen).toBe("GPT-6");
+  expect(picker.label()).not.toBe(label);
+});
+
+test.each([["high", "High"], ["max", "Pro"]] as const)("plain GPT-6 locked %s is not a selected choice", async (effort, label) => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: PLAIN_STOPS, lockedStops: [label] });
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", effort, { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true }))
+    .rejects.toThrow(`"6 ${label}" stop is locked`);
+});
+
+test.each(["plain", "legacy"])("plain GPT-6 labels never authorize the wrong model family (%s)", async kind => {
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-5.6 Sol",
+    stops: kind === "plain" ? PLAIN_STOPS : PLAIN_STOPS.map(label => `6 ${label}`) });
+  await expect(selectChatGptPickerStop(picker.menu as never, picker.slider as never, "6 High", 50))
+    .rejects.toThrow("GPT-6 model selection");
+  expect(picker.state.keys).toEqual([]);
+});
+
+test("plain GPT-6 disabled model rows cannot fall back to GPT-5.6", async () => {
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: PLAIN_STOPS, disabled: "GPT-6" });
+  await expect(selectChatGptModelFromList(picker.menu as never, undefined, 50)).rejects.toThrow("locked or out of usage");
+  expect(picker.state.clicks).toEqual(["header"]);
+});
+
+test.each(["model", "effort"])("plain GPT-6 final verification rejects %s drift after diagnostics", async drift => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: PLAIN_STOPS.map(label => `6 ${label}`) });
+  let changed = false;
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true }, async (checkpoint: string) => {
+      if (checkpoint === "effort-selected") {
+        changed = true;
+        if (drift === "model") picker.state.chosen = "GPT-5.6 Sol";
+        else picker.state.value = 3; // Extra High must never count as High.
+      }
+    })).rejects.toMatchObject({ code: "chatgpt_model_pick_failed", retryable: false });
+  expect(changed).toBe(true);
+});
+
+test("plain GPT-6 model drift after a slider key stops before another choice", async () => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: PLAIN_STOPS, afterKey: () => { picker.state.chosen = "GPT-5.6 Sol"; } });
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true }))
+    .rejects.toThrow("GPT-6 model selection");
+  expect(picker.state.keys).toHaveLength(1);
+});
+
+test("plain GPT-6 status disagreement and multi-step jumps fail closed", async () => {
+  const inconsistent = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6", stops: PLAIN_STOPS, statusOffset: 1 });
+  await expect(selectChatGptPickerStop(inconsistent.menu as never, inconsistent.slider as never, "6 High", 50))
+    .rejects.toThrow("did not settle");
+  expect(inconsistent.state.keys).toEqual([]);
+  const jumpy = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6", stops: PLAIN_STOPS, jumpy: true });
+  await expect(selectChatGptPickerStop(jumpy.menu as never, jumpy.slider as never, "6 Pro", 50)).rejects.toThrow("moved from stop");
+});
+
+test.each(["available", "locked", "locked both", "missing"])("plain GPT-6 capability probe admits Extra High and Pro by their own stops and caches them (%s)", async state => {
+  const stops = state === "missing" ? ["Instant", "Medium", "High", "Extra High", "Extra High"] : PLAIN_STOPS;
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6", stops,
+    lockedStops: state === "locked both" ? ["Extra High", "Pro"] : state === "locked" ? ["Pro"] : [] });
+  const snapshots: unknown[] = [];
+  await expect(detectChatGptAccountCapabilities(picker.pageOver(reasoningPicker()) as never,
+    { onEffortSnapshot: snapshot => { snapshots.push(snapshot); } }))
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: state === "available" || state === "locked",
+      proAvailable: state === "available" });
+  expect(snapshots).toHaveLength(state === "missing" ? 0 : 1);
+  if (state !== "missing") expect(snapshots[0]).toMatchObject({ ticks: [{ locked: false }, { locked: false }, { locked: false }, { locked: state === "locked both" }, { locked: state !== "available" }] });
+});
+
+test.each(["plain", "legacy", "reordered", "missing Pro"])("probe admission preserves actual Extra High while Pro is unavailable (%s)", async scenario => {
+  const names = scenario === "reordered" ? ["Instant", "Medium", "High", "Pro", "Extra High"]
+    : scenario === "missing Pro" ? PLAIN_STOPS.slice(0, 4) : PLAIN_STOPS;
+  const stops = scenario === "legacy" ? names.map(name => `6 ${name}`) : names;
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6", stops,
+    lockedStops: [scenario === "legacy" ? "6 Pro" : "Pro"] });
+  const fixture = reasoningPicker();
+  const snapshots: ChatGptEffortSnapshot[] = [];
+  const capabilities = await detectChatGptAccountCapabilities(picker.pageOver(fixture) as never,
+    { onEffortSnapshot: snapshot => { snapshots.push(snapshot); } });
+  const route = requireChatGptWebModelRoute("chatgpt-web/extra-high", capabilities);
+  expect(route.slug).toBe("chatgpt-web/extra-high");
+  const workerCapabilities = { ...capabilities, localToolsEnabled: false };
+  expect(resolveChatGptWebModelMode(route.backendModel, route.adapterEffort, workerCapabilities))
+    .toMatchObject({ effort: "xhigh", displayLabel: "Extra High" });
+  expect(snapshots).toHaveLength(1);
+  expect(chatGptEffortTierAvailability(snapshots[0]!)).toEqual([true, true, true, true, false]);
+  // v6 lists named rows: GPT-6 Sol offers Extra High, and no Pro row is listed.
+  expect(availableChatGptWebModelRoutes(capabilities, false, chatGptEffortTierAvailability(snapshots[0]!))
+    .map(model => [model.slug, model.supportedCodexEfforts ?? model.codexEffort])).toEqual([
+    ["chatgpt-web/gpt-6-sol-instant", ["low"]], ["chatgpt-web/gpt-6-sol", ["medium", "high", "xhigh"]],
+    ["chatgpt-web/gpt-5.6-sol-instant", ["low"]], ["chatgpt-web/gpt-5.6-sol", ["medium", "high", "xhigh"]],
+  ]);
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    route.backendModel, route.adapterEffort, workerCapabilities)).resolves.toMatchObject({ effort: "xhigh", displayLabel: "Extra High" });
+  expect(picker.label()).toBe(scenario === "legacy" ? "6 Extra High" : "Extra High");
+  // The account gate refuses Pro first; a native thread's deferred grant still meets the page's own check.
+  expect(() => resolveChatGptWebModelMode(route.backendModel, "max", workerCapabilities)).toThrow("Pro effort is not available");
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    route.backendModel, "max", { ...workerCapabilities, proAvailable: true }))
+    .rejects.toThrow(scenario === "missing Pro" ? 'no "6 Pro" stop' : '"6 Pro" stop is locked');
+});
+
+test.each(["missing", "locked"])("an available Pro never substitutes for unavailable Extra High, which runs as High (%s)", async state => {
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6",
+    stops: state === "missing" ? PLAIN_STOPS.filter(name => name !== "Extra High") : PLAIN_STOPS,
+    lockedStops: state === "locked" ? ["Extra High"] : [] });
+  const fixture = reasoningPicker();
+  const snapshots: ChatGptEffortSnapshot[] = [];
+  const capabilities = await detectChatGptAccountCapabilities(picker.pageOver(fixture) as never,
+    { onEffortSnapshot: snapshot => { snapshots.push(snapshot); } });
+  expect(capabilities).toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: true });
+  // v6 runs Extra High as High on such an account; Pro is never the substitute.
+  const route = requireChatGptWebModelRoute("chatgpt-web/extra-high", capabilities);
+  expect(route.slug).toBe("chatgpt-web/high");
+  const workerCapabilities = { ...capabilities, localToolsEnabled: false };
+  expect(resolveChatGptWebModelMode(route.backendModel, route.adapterEffort, workerCapabilities).effort).toBe("high");
+  expect(() => resolveChatGptWebModelMode(route.backendModel, "xhigh", workerCapabilities)).toThrow("Extra High effort is not available");
+  expect(chatGptEffortTierAvailability(snapshots[0]!)).toEqual([true, true, true, false, true]);
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    route.backendModel, route.adapterEffort, workerCapabilities)).resolves.toMatchObject({ effort: "high", displayLabel: "High" });
+  expect(picker.label()).toBe("High");
+});
+
+test.each(["locked Instant", "missing Instant", "already Pro"])("Pro capability does not require an unrelated effort (%s)", async scenario => {
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: scenario === "missing Instant" ? PLAIN_STOPS.filter(label => label !== "Instant") : PLAIN_STOPS,
+    lockedStops: scenario === "locked Instant" ? ["Instant"] : [] });
+  if (scenario === "already Pro") picker.state.value = 4;
+  const snapshots: unknown[] = [];
+  await expect(detectChatGptAccountCapabilities(picker.pageOver(reasoningPicker()) as never,
+    { onEffortSnapshot: snapshot => { snapshots.push(snapshot); } }))
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+  expect(picker.state.chosen).toBe("GPT-6");
+  expect(picker.label()).toBe("Pro");
+  expect(snapshots).toHaveLength(1);
+  expect(snapshots[0]).toMatchObject({ ticks: [{ locked: scenario !== "already Pro" }, { locked: false }, { locked: false }, { locked: false }, { locked: false }] });
+});
+
+test.each([
+  ["plain", "high", "High", "already"], ["plain", "high", "High", "after step"],
+  ["plain", "max", "Pro", "already"], ["plain", "max", "Pro", "after step"],
+  ["legacy", "high", "High", "already"], ["legacy", "high", "High", "after step"],
+  ["legacy", "max", "Pro", "already"], ["legacy", "max", "Pro", "after step"],
+] as const)("duplicate requested effort rejects a %s %s turn (%s, %s)", async (style, effort, label, start) => {
+  const fixture = reasoningPicker();
+  const labels = label === "High" ? ["Instant", "Medium", "High", "High", "Pro"] : ["Instant", "Medium", "High", "Pro", "Pro"];
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: style === "legacy" ? labels.map(name => `6 ${name}`) : labels });
+  picker.state.value = start === "after step" ? 0 : label === "High" ? 3 : 4;
+  const operation = selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", effort, { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true });
+  await expect(operation).rejects.toMatchObject({ code: "chatgpt_model_pick_failed", retryable: false });
+  await expect(operation).rejects.toThrow(`has 2 "6 ${label}" stops`);
+});
+
+test.each(["plain", "legacy"])("duplicate requested Pro cannot advertise capability or cache (%s)", async style => {
+  const labels = ["Instant", "Medium", "High", "Pro", "Pro"];
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6",
+    stops: style === "legacy" ? labels.map(name => `6 ${name}`) : labels });
+  picker.state.value = 4;
+  const snapshots: unknown[] = [];
+  await expect(detectChatGptAccountCapabilities(picker.pageOver(reasoningPicker()) as never,
+    { onEffortSnapshot: snapshot => { snapshots.push(snapshot); } })).rejects.toThrow('has 2 "6 Pro" stops');
+  expect(snapshots).toEqual([]);
+});
+
+test("a unique High tolerates unrelated duplicate Pro but suppresses ambiguous semantic cache", async () => {
+  const fixture = reasoningPicker();
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6",
+    stops: ["Instant", "Medium", "High", "Pro", "Pro"] });
+  picker.state.value = 4;
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true }))
+    .resolves.toMatchObject({ effort: "high", displayLabel: "High" });
+  expect(picker.state.keys.length).toBeLessThanOrEqual(24);
+  picker.state.keys.length = 0;
+  picker.state.value = 4;
+  const selected = await selectChatGptPickerStop(picker.menu as never, picker.slider as never, "6 High", 50);
+  expect(selected.effortSnapshot).toBeUndefined();
+  expect(picker.label()).toBe("High");
+  expect(picker.state.keys.length).toBeLessThanOrEqual(12);
+});
+
+test("a range beyond five positions is never scanned for an effort", async () => {
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6", stops: [...PLAIN_STOPS, "Pro"] });
+  await expect(selectChatGptPickerStop(picker.menu as never, picker.slider as never, "6 High", 50)).rejects.toThrow("did not settle");
+  expect(picker.state.keys).toEqual([]);
+});
+
+test("a semantic stop changing on revisit fails instead of overwriting its observation", async () => {
+  const fixture = reasoningPicker();
+  const labels = [...PLAIN_STOPS];
+  let changed = false;
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6", stops: labels,
+    afterKey: () => { if (!changed) { labels[3] = "Medium"; changed = true; } } });
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true }))
+    .rejects.toThrow("changed a stop's meaning");
+});
+
+test("a duplicate High introduced during diagnostics is rejected before submission", async () => {
+  const fixture = reasoningPicker();
+  const labels = [...PLAIN_STOPS];
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6"], defaultModel: "GPT-6", stops: labels });
+  await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
+    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true }, async (checkpoint: string) => {
+      if (checkpoint === "effort-selected") labels[3] = "High";
+    })).rejects.toThrow('has 2 "6 High" stops');
+});
+
 test('the current "GPT-6" row is selected exactly and a High turn verifies "6 High"', async () => {
   const fixture = reasoningPicker();
   const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
     stops: ["6 Instant", "6 Medium", "6 High", "6 Extra High", "6 Pro"] });
   const pressed: string[] = [];
   await selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture, pressed),
-    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, proAvailable: true });
+    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true });
   expect(picker.state.clicks).toEqual(["header", "GPT-6"]);
   expect(picker.state.chosen).toBe("GPT-6");
   expect(picker.label()).toBe("6 High");
@@ -678,7 +943,7 @@ test('the current "GPT-6" row cannot substitute another effort for a missing "6 
   const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
     stops: ["6 Instant", "6 Medium", "6 Extra High", "6 Pro"] });
   await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
-    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, proAvailable: true }))
+    "gpt-5.6-sol", "high", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true }))
     .rejects.toMatchObject({ code: "chatgpt_model_pick_failed", retryable: false });
   expect(picker.state.chosen).toBe("GPT-6");
   expect(picker.state.clicks).toEqual(["header", "GPT-6"]);
@@ -688,6 +953,9 @@ test('the current "GPT-6" row cannot substitute another effort for a missing "6 
 test.each([
   ["team", "max", "6", "6 Pro"],
   ["team", "xhigh", "6", "6 Extra High"],
+  ["team", "low", "6", "6 Instant"],
+  ["team", "medium", "6", "6 Medium"],
+  ["team", "high", "6", "6 High"],
   ["plus", "high", "GPT-6 Sol", "6 High"],
   ["plus", "low", "GPT-6 Sol", "6 Instant"],
 ] as const)("a %s turn at %s picks %s and lands on %s", async (plan, effort, model, label) => {
@@ -706,7 +974,7 @@ test("a Plus turn asked for Pro stops with a model-pick error and never leaves G
   const fixture = reasoningPicker();
   const picker = modelListPicker();
   await expect(selectModelAndEffort.call({ activeComposer: async () => fixture.composer }, picker.pageOver(fixture),
-    "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, proAvailable: true }))
+    "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true }))
     .rejects.toMatchObject({ code: "chatgpt_model_pick_failed", retryable: false });
   expect(picker.state.chosen).toBe("GPT-6 Sol");
   expect(picker.label()).toBe("6 High");

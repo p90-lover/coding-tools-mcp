@@ -1,4 +1,6 @@
-import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { ImagePreviewDialog, type MarkupResult } from "./ImagePreview";
+import { markupReadable } from "./image-markup";
 import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
 import { ModelJudgesToggle } from "./ModelJudgesToggle";
@@ -30,7 +32,7 @@ import {
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
-  autoCompactArg, chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
+  chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -650,7 +652,7 @@ function SentMessage({ text }: { text: string }) {
         </button>)}
     </div> : null}
     {parts.annotations?.length ? <SentAnnotations annotations={parts.annotations} /> : null}
-    {parts.text ? <div className="cx-bubble"><p>{hasHiddenSecret(parts.text) ? <SecretText text={parts.text} /> : parts.text}</p></div> : null}
+    {parts.text ? <div className="cx-bubble"><p>{hasHiddenSecret(parts.text) ? <SecretText text={markupReadable(parts.text)} /> : markupReadable(parts.text)}</p></div> : null}
     {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
   </>;
 }
@@ -935,6 +937,8 @@ export function AgentOrchestratorChat({
   // `turnKey`/`messageIndex`: the turn it was sent in, where it stays shown (steerTurnIndex).
   const [pendingSteers, setPendingSteers] = useState<PendingSteer[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>(() => CHAT_ATTACHMENTS.get(draftKey) ?? []);
+  // The chat box image open in the preview, by its place among the attachments.
+  const [previewing, setPreviewing] = useState<number | null>(null);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
   // Ones kept when this chat was last left (another view, another chat) come back with it.
@@ -1322,7 +1326,10 @@ export function AgentOrchestratorChat({
   // it here on every key forced a layout of the whole chat each time, which typing felt.
 
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
-  const accepts = chatAcceptsMessage(chat?.status, working);
+  const [compactingTasks, setCompactingTasks] = useState<string[]>([]);
+  const compactionStarts = useRef(new Set<string>());
+  const compacting = Boolean(selectedTaskId && compactingTasks.includes(selectedTaskId));
+  const accepts = !compacting && chatAcceptsMessage(chat?.status, working);
   // Starting to type gets the agent the message needs ready (the surface throttles it); a run that
   // is open already has its agent.
   const hasDraft = Boolean(draft.trim());
@@ -1346,7 +1353,7 @@ export function AgentOrchestratorChat({
   // A request waiting on an answer does not turn steering into queueing: with "Approve for me" each
   // tool call shows as one for a moment, and every message typed then waited for the whole turn.
   // The steer waits for the request to be answered, then reaches the agent.
-  const steering = !accepts && steerOn && steerable && Boolean(steer && selectedTaskId);
+  const steering = !compacting && !accepts && steerOn && steerable && Boolean(steer && selectedTaskId);
   // Otherwise a message typed while the chat runs waits and is sent when the turn finishes, as in Codex.
   const queueing = !accepts && !steering && runOpen && Boolean(selectedTaskId);
   // While a project opens the chat to send into is not chosen yet: sending then started a new chat
@@ -1365,7 +1372,8 @@ export function AgentOrchestratorChat({
   const queueWhileSending = Boolean(selectedTaskId) && (sending || (busy && !steering));
   const canSend = !(deciding && !selectedTaskId) && (!sending || queueWhileSending)
     && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing || queueWhileSending);
-  const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
+  const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen })
+    .filter(command => command.name !== "autocompact");
 
   // What a command shows above the composer (its result, or why it couldn't run).
   const [card, setCard] = useState<ChatCommandCard | null>(null);
@@ -1548,7 +1556,9 @@ export function AgentOrchestratorChat({
     if (!canSend) return;
     // The annotation block goes outermost (after plan mode's wrapper), where the chat reads it back
     // as a chip; inside the wrapper the sent bubble showed its JSON.
-    const body = chatMessageWithAttachments(draft, attachments);
+    // A marked-up image's pin lines go first, then what was typed (Codex's order).
+    const marked = attachments.map((item) => item.markup ?? "").filter(Boolean);
+    const body = chatMessageWithAttachments([...marked, draft.trim()].filter(Boolean).join("\n\n"), attachments);
     const text = chatMessageWithAnnotations(commands?.planMode ? planMessage(body) : body, annotations);
     // The chat sends at most 8,192 characters; long selections could pass that and the send failed.
     if (text.length > CHAT_MESSAGE_LIMIT) {
@@ -1784,24 +1794,29 @@ export function AgentOrchestratorChat({
           commands?.setPlanMode(!commands.planMode);
           say("Plan mode", commands?.planMode ? "Plan mode is off." : "Plan mode is on. Messages ask for a plan, not changes. Send /plan to turn it off.");
           break;
-        case "compact":
+        case "compact": {
           if (!commands || !selectedTaskId) break;
-          if (!accepts) { say("Compact", "Can't compact while the chat is running."); break; }
-          say("Compact", arg ? `Compacting this chat's context, focused on: ${arg}` : "Compacting this chat's context…");
-          say("Compact", await commands.compact(arg));
-          break;
-        case "autocompact": {
-          if (!commands?.autoCompact) break;
-          const change = autoCompactArg(arg);
-          if (change && "error" in change) { say("Auto-compact", change.error); setDraft(`/autocompact ${arg}`); break; }
-          const setting = await commands.autoCompact(change ?? {});
-          const now = setting.autoCompact
-            ? `Auto-compact is on: before a message that would fill ${setting.percent}% of the chat's ${setting.limit.toLocaleString("en-US")}-byte limit, the earlier conversation becomes a summary.`
-            : "Auto-compact is off: a full chat stops until you /compact it.";
-          say("Auto-compact", change ? now : `${now}
-Change it with /autocompact on, off, or a share like /autocompact 80.`);
+          if (!accepts || compactionStarts.current.has(selectedTaskId)) { say("Compact", "Compact is disabled while a chat is in progress"); break; }
+          if (arg) { say("Compact", "Codex /compact does not accept focus instructions"); break; }
+          const owner = composing.current;
+          const here = () => alive.current && composing.current.taskId === owner.taskId && composing.current.cacheKey === owner.cacheKey;
+          compactionStarts.current.add(selectedTaskId);
+          setCompactingTasks(tasks => [...tasks, selectedTaskId]);
+          setCard(null);
+          try {
+            const result = await commands.compact();
+            if (here()) say("Compact", result);
+          } catch (error) {
+            if (here()) say("Compact", error instanceof Error ? error.message : String(error));
+          } finally {
+            compactionStarts.current.delete(selectedTaskId);
+            setCompactingTasks(tasks => tasks.filter(task => task !== selectedTaskId));
+          }
           break;
         }
+        case "autocompact":
+          say("Auto-compact", "Auto-compaction is managed by the agent using its model's token limit, as in local Codex. Task-record length is not the context window.");
+          break;
         case "context": if (commands?.context) setCard(await commands.context()); break;
         case "review":
           if (await dispatch("Review", reviewPrompt(arg), undefined, arg ? `/review ${arg}` : "/review") === "sent" && !accepts) say("Review", "Sent to the working agent.");
@@ -1955,7 +1970,17 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
 
   // The conversation, kept while only the composer changes: each keystroke re-rendered every turn,
   // and a long running turn's hundreds of rows with it, which made typing lag.
-  const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile }), [attachmentPreview, revealFile]);
+  // Markup from an image's preview lands in this chat box as a "Markup" card (Codex's composer row):
+  // the marked image saved for the agent to open, and its pin lines kept for the message.
+  const saver = useRef(saveAttachment);
+  saver.current = saveAttachment;
+  const addMarkup = useCallback(async ({ bytes, preview, prompt }: MarkupResult, source?: ChatAttachment) => {
+    if (!saver.current) throw new Error("Could not prepare markup. Try again");
+    const { path } = await saver.current({ name: "markup.png", type: "image/png", bytes });
+    setAttachments((current) => [...current.filter(item => item !== source), { name: "Markup", path, image: true, preview, markup: prompt }].slice(0, 8));
+  }, []);
+  const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile, markup: saveAttachment ? addMarkup : undefined }),
+    [attachmentPreview, revealFile, Boolean(saveAttachment), addMarkup]);
   // One work reader per run for DeepSeek turns, kept across renders so a finished turn stays memoized.
   const dshReaders = useMemo(() => new Map<string, UseStepWork>(), [loadWork]);
   // A failed step waiting for the person: the card shows its error, so its turn does not repeat it.
@@ -2424,7 +2449,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
           {slash.length ? <ul className="cx-slash" role="listbox" aria-label="Commands">
             {slash.map((command, index) => <li key={command.name} role="option" aria-selected={index === slashIndex % slash.length}>
               <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => pick(command.name)}>
-                <span>/{command.name}{command.args ? <em> {command.args}</em> : null}</span><small>{command.hint}</small></button>
+                <span>/{command.name}{command.args ? <em> {command.args}</em> : null}</span><small>{command.name === "compact" && contextShare !== null ? `Compact this chat's context (${Math.round(contextShare * 100)}% full)` : command.hint}</small></button>
             </li>)}
           </ul> : null}
           {typing && !slash.length ? <p className="cx-slash-usage" role="status">/{typing.name} {typing.args} — {typing.hint}. Press Enter to run.</p> : null}
@@ -2438,24 +2463,31 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             onRemove={(id) => setAnnotations((current) => current.filter((item) => item.id !== id))} onClear={() => setAnnotations([])} />
           {attachments.length || attachNote ? <div className="cx-attachments">
             {/* As Claude Code shows them: an image as its thumbnail, a file as its name; where it lives
-                is on hover, and a click shows it in its folder. */}
-            {attachments.map((item, index) => <span key={`${item.name}:${index}`} className={`cx-attachment${item.preview ? " is-image" : ""}`}>
-              <button type="button" className="cx-attachment-open" disabled={!item.path || !revealFile}
-                title={item.path ? `${item.path}${revealFile ? "\nClick to show in folder" : ""}` : `${item.name} · sent inline`}
-                onClick={() => { if (item.path) revealFile?.(item.path); }}>
+                is on hover. A click opens an image in the preview (Codex's, with Markup) and shows a
+                file in its folder. */}
+            {attachments.map((item, index) => <span key={`${item.name}:${index}`}
+              className={`cx-attachment${item.preview ? " is-image" : ""}${item.markup !== undefined ? " is-markup" : ""}`}>
+              <button type="button" className="cx-attachment-open" disabled={item.preview ? false : !item.path || !revealFile}
+                title={item.preview ? `${item.path ?? item.name}\nClick to preview${saveAttachment ? " or mark up" : ""}`
+                  : item.path ? `${item.path}${revealFile ? "\nClick to show in folder" : ""}` : `${item.name} · sent inline`}
+                onClick={() => { if (item.preview) setPreviewing(index); else if (item.path) revealFile?.(item.path); }}>
                 {item.preview ? <img src={item.preview} alt={item.name} /> : <span aria-hidden="true">{item.image ? "🖼" : "📄"}</span>}
                 <span className="cx-attachment-name">{item.name}</span>
               </button>
-              <button type="button" className="cx-attachment-remove" aria-label={`Remove ${item.name}`} data-tip={`Remove ${item.name}`}
+              <button type="button" className="cx-attachment-remove" aria-label={item.markup !== undefined ? "Remove markup" : `Remove ${item.name}`}
+                data-tip={item.markup !== undefined ? "Remove markup" : `Remove ${item.name}`}
                 onClick={() => setAttachments((current) => current.filter((_, at) => at !== index))}>
                 <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
               </button>
             </span>)}
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
+            {previewing !== null && attachments[previewing]?.preview ? <ImagePreviewDialog url={attachments[previewing].preview!} onClose={() => setPreviewing(null)}
+              // The marked image takes the place of the one it was drawn on: only it is sent (Codex's).
+              onMarkup={saveAttachment ? (result) => addMarkup(result, attachments[previewing]) : undefined} /> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
             placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above. New messages send after it"
-              : queueing ? "Running. New messages send when it finishes" : !accepts ? "Running. Send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
+              : attachments.some((item) => item.markup !== undefined) && !queueing ? "Add instructions…" : queueing ? "Running. New messages send when it finishes" : !accepts ? "Running. Send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
@@ -2485,7 +2517,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                 && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
               agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
               launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
-              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} /> : null}
+              canCompact={Boolean(commands && accepts && agentSessions[0]?.id)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} compacting={compacting} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
             {/* A run waiting out an automatic retry (or an answer) takes a message, yet it is still open: with
@@ -2498,6 +2530,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                   <Icon name="forward" width="18" height="18" /></button>}
           </div>
         </form>
+        {compacting ? <p className="cx-ctx-meta" role="status">Compacting context…</p> : null}
         {selectedTaskId ? <ChatTurnStats model={agentSessions[0]?.model} rounds={turns.filter((turn) => turn.runId).length}
           from={statsSpan.from} models={statsSpan.models} running={runOpen} onRefusal={setCpaRefusal} /> : null}
         {/* A command's card (its choices) and the delete confirmation sit below the chat box, as wide

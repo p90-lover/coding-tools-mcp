@@ -204,7 +204,7 @@ function ContextRows({ segments, scale, used, estimated }: { segments: Segment[]
 }
 
 
-export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, model, launchedWindow, nextWindow, canCompact, onCompact, onFraction }: {
+export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, model, launchedWindow, nextWindow, canCompact, compacting = false, onCompact, onFraction }: {
   sessionId?: string;
   /** The chat's earlier sessions, newest first: their last reading stands in until this one reports. */
   previousSessionIds?: string[];
@@ -216,6 +216,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
   /** The window the composer will launch the next run with, when one is set. */
   nextWindow?: number;
   canCompact: boolean;
+  compacting?: boolean;
   onCompact: () => void;
   /** The share of the window in use as the ring shows it, for the chat's pet (null when unknown). */
   onFraction?: (fraction: number | null) => void;
@@ -344,7 +345,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
   useEffect(() => { onFraction?.(fraction); }, [fraction, onFraction]);
   const radius = (RING - 4) / 2;
   const circumference = 2 * Math.PI * radius;
-  const label = !sessionId ? "No agent yet"
+  const label = compacting ? "Compacting context…" : !sessionId ? "No agent yet"
     : !usage ? "Context not reported yet"
       : fraction === null ? `${tokensShort(usage.contextUsed)} tokens in context`
         : `Context ${tokensShort(usage.contextUsed)} / ${tokensShort(usage.contextWindow)} · ${Math.round(fraction * 100)}%`;
@@ -378,7 +379,7 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
 
   return <>
     <button ref={button} type="button" className={`cx-icon-button cx-context-meter is-${tone(fraction)}`} aria-label={label} title={label}
-      aria-haspopup="dialog" aria-expanded={Boolean(open)}
+      aria-haspopup="dialog" aria-expanded={Boolean(open)} aria-busy={compacting}
       onClick={() => {
         const box = button.current?.getBoundingClientRect();
         if (!box) return;
@@ -485,8 +486,8 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
         <footer className="cx-ctx-foot">
           <span title={compactedAt ? new Date(compactedAt).toLocaleString() : undefined}>{compactedAt ? `Compacted ${agoLabel(Date.parse(compactedAt), false)}` : "Never compacted"}
             {overridden ? <span title={`The agent's own report says ${tokensShort(reported?.contextWindow ?? null)}`}> · launched at {tokensShort(launched!)}</span> : null}</span>
-          <button type="button" disabled={!canCompact} title={canCompact ? "Summarize history to free context" : "Available when the chat isn't running"}
-            onClick={() => { setOpen(null); onCompact(); }}>Compact session</button>
+          <button type="button" disabled={!canCompact || compacting} title={canCompact && !compacting ? "Compact this chat's context" : "Compact is disabled while a chat is in progress"}
+            onClick={() => { setOpen(null); onCompact(); }}>{compacting ? "Compacting…" : "Compact session"}</button>
         </footer>
       </div>
     </FloatingLayer> : null}

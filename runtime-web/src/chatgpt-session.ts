@@ -32,8 +32,9 @@ export const CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR = "[data-model-picker-view-toggl
  * GPT-6's own effort: 3 stops on Plus (up to 6 High), 5 on Team (6 Instant, Medium, High, Extra High, Pro).
  */
 export const CHATGPT_TURN_MODEL_NAMES: readonly string[] = ["GPT-6 Sol", "6", "GPT-6"];
-/** Every stop of GPT-6's own slider is labelled "6 <effort>" ("6 Extra High, 4 of 5."). */
+/** Canonical effort requests use "6 <effort>"; the checked GPT-6 picker may show plain labels. */
 export const CHATGPT_TURN_STOP_PREFIX = "6";
+const CHATGPT_TURN_EFFORT_NAMES = ["Instant", "Medium", "High", "Extra High", "Pro"];
 const MODEL_PICK_STEP_TIMEOUT_MS = 10_000;
 const LOCKED_ACCESS_TEXT = "Locked, opens access options";
 
@@ -118,23 +119,48 @@ export async function selectChatGptModelFromList(
 
 interface ChatGptPickerStop extends ChatGptEffortSliderState {
   label: string;
+  modelName: string;
+  locked: boolean;
+  snapshot: ChatGptEffortSnapshot;
+  /** Present only after every position was observed by its exact effort name. */
+  effortSnapshot?: ChatGptEffortSnapshot;
 }
 
-/** The slider's ARIA position and ChatGPT's status line for it ("6 High, 3 of 5."), when they agree. */
-async function readChatGptPickerStop(menu: Locator): Promise<ChatGptPickerStop | undefined> {
+/** One atomic reading of the checked model, slider, status label and existing lock ticks. */
+export async function readChatGptPickerStop(menu: Locator, expectedModelName?: string): Promise<ChatGptPickerStop | undefined> {
   const raw = await menu.evaluate(root => ({
+    view: root.querySelector("[data-model-picker-view]")?.getAttribute("data-model-picker-view"),
+    models: Array.from(root.querySelectorAll('[role="menuitemradio"][aria-checked="true"]'), row => ({
+      name: row.querySelector("[data-menu-row-content]")?.textContent?.trim() ?? "",
+      blocked: row.getAttribute("aria-disabled") === "true" || row.hasAttribute("aria-describedby"),
+    })),
     min: root.querySelector('[data-model-picker-power-slider] [role="slider"]')?.getAttribute("aria-valuemin") ?? null,
     max: root.querySelector('[data-model-picker-power-slider] [role="slider"]')?.getAttribute("aria-valuemax") ?? null,
     value: root.querySelector('[data-model-picker-power-slider] [role="slider"]')?.getAttribute("aria-valuenow") ?? null,
     status: root.querySelector('[role="status"]')?.textContent?.trim() ?? "",
+    ticks: Array.from(root.querySelectorAll('[data-model-picker-power-slider] [data-locked][data-selected]'), tick => ({
+      locked: tick.getAttribute("data-locked"), selected: tick.getAttribute("data-selected"),
+    })),
   })).catch(() => undefined);
   if (!raw) return undefined;
+  const model = raw.models[0];
+  if (raw.view !== "simple" || raw.models.length !== 1 || !model || model.blocked
+    || !CHATGPT_TURN_MODEL_NAMES.includes(model.name) || (expectedModelName !== undefined && model.name !== expectedModelName)) {
+    throw new Error("the GPT-6 model selection changed before effort verification");
+  }
   const state = parseChatGptEffortSliderState(raw.min, raw.max, raw.value);
   const status = /^(.+), (\d+) of (\d+)\.?$/.exec(raw.status);
   if (!state || !status) return undefined;
   // The status line trails the thumb for a frame; a reading counts once both name the same stop.
   if (Number(status[2]) !== state.value - state.min + 1 || Number(status[3]) !== state.max - state.min + 1) return undefined;
-  return { ...state, label: status[1]! };
+  const snapshot = parseChatGptEffortTicks(raw.ticks.map(tick => tick.locked), state.max - state.min + 1);
+  const selected = raw.ticks.flatMap((tick, index) => tick.selected === "true" ? [index] : []);
+  if (!snapshot || selected.length !== 1 || selected[0] !== state.value - state.min) return undefined;
+  // Plain labels identify an effort only after the exact checked GPT-6 row has been proved.
+  const effort = /^(?:6 )?(Instant|Medium|High|Extra High|Pro)$/.exec(status[1]!)?.[1];
+  if (!effort) throw new Error("the GPT-6 effort slider shows an unrecognized stop");
+  return { ...state, label: `${CHATGPT_TURN_STOP_PREFIX} ${effort}`, modelName: model.name,
+    locked: snapshot.ticks[state.value - state.min]!.locked, snapshot };
 }
 
 /**
@@ -148,18 +174,43 @@ export async function selectChatGptPickerStop(
   slider: Locator,
   label: string,
   timeoutMs: number = MODEL_PICK_STEP_TIMEOUT_MS,
-): Promise<void> {
+  expectedModelName?: string,
+): Promise<ChatGptPickerStop> {
+  let modelName = expectedModelName;
+  let range: { min: number; max: number } | undefined;
+  const observed = new Map<number, string>();
   const settled = async (accept: (stop: ChatGptPickerStop) => boolean): Promise<ChatGptPickerStop> => {
     const deadline = Date.now() + timeoutMs;
     while (true) {
-      const stop = await readChatGptPickerStop(menu);
-      if (stop && accept(stop)) return stop;
+      const stop = await readChatGptPickerStop(menu, modelName);
+      if (stop && range && (stop.min !== range.min || stop.max !== range.max)) throw new Error("the GPT-6 effort slider range changed during selection");
+      if (stop && observed.has(stop.value) && observed.get(stop.value) !== stop.label) {
+        throw new Error("the GPT-6 effort slider changed a stop's meaning during selection");
+      }
+      if (stop && accept(stop)) { observed.set(stop.value, stop.label); return stop; }
       if (Date.now() >= deadline) throw new Error("the effort slider and its status line did not settle on one stop");
       await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
     }
   };
   const control = slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
   let stop = await settled(() => true);
+  modelName ??= stop.modelName;
+  range = { min: stop.min, max: stop.max };
+  const inspected = (): ChatGptPickerStop => {
+    if (observed.size !== stop.max - stop.min + 1 || new Set(observed.values()).size !== observed.size) return stop;
+    // Cache tiers by their proved semantic names, not by an assumed five-position range.
+    const ticks = CHATGPT_TURN_EFFORT_NAMES.map(() => ({ locked: true }));
+    for (const [position, name] of observed) {
+      const index = CHATGPT_TURN_EFFORT_NAMES.findIndex(effort => name === `${CHATGPT_TURN_STOP_PREFIX} ${effort}`);
+      ticks[index]!.locked = stop.snapshot.ticks[position - stop.min]!.locked;
+    }
+    return { ...stop, effortSnapshot: { ticks } };
+  };
+  const finish = (): ChatGptPickerStop => {
+    const current = inspected();
+    if (current.locked) throw Object.assign(new Error(`the effort slider's "${label}" stop is locked`), { pickerStop: current });
+    return current;
+  };
   const step = async (key: "ArrowLeft" | "ArrowRight") => {
     const before = stop.value;
     await control.press(key, { timeout: timeoutMs });
@@ -167,14 +218,15 @@ export async function selectChatGptPickerStop(
     const expected = before + (key === "ArrowRight" ? 1 : -1);
     if (stop.value !== expected) throw new Error(`the effort slider moved from stop ${before} to ${stop.value} on one ${key}`);
   };
-  if (stop.label === label) return;
   while (stop.value > stop.min) await step("ArrowLeft");
   const seen = [stop.label];
-  while (stop.label !== label) {
-    if (stop.value >= stop.max) throw new Error(`the effort slider has no "${label}" stop (stops: ${seen.join(", ")})`);
-    await step("ArrowRight");
-    seen.push(stop.label);
-  }
+  // Every request proves the entire bounded range, including when its current label already matches.
+  while (stop.value < stop.max) { await step("ArrowRight"); seen.push(stop.label); }
+  const matches = [...observed].filter(([, name]) => name === label);
+  if (matches.length === 0) throw Object.assign(new Error(`the effort slider has no "${label}" stop (stops: ${seen.join(", ")})`), { pickerStop: inspected() });
+  if (matches.length !== 1) throw new Error(`the effort slider has ${matches.length} "${label}" stops`);
+  while (stop.value > matches[0]![0]) await step("ArrowLeft");
+  return finish();
 }
 
 /**
@@ -370,31 +422,6 @@ async function lockedAccessOffered(menu: Locator): Promise<boolean> {
   }
 }
 
-/**
- * GPT-6's own slider after the model-list pick. Its ticks are read like any other slider; when
- * they cannot be read, GPT-6's ARIA range alone decides (3 stops on Plus, 5 on Team and Pro).
- */
-async function readGpt6EffortCapabilities(
-  activation: Omit<ChatGptEffortActivation, "method">,
-  options: ChatGptCapabilityProbeOptions,
-): Promise<ChatGptWebAccountCapabilities & { extraHighAvailable: boolean }> {
-  try {
-    return await readChatGptEffortCapabilities(activation, options);
-  } catch (error) {
-    options.signal?.throwIfAborted();
-    const { slider } = activation;
-    const gpt6 = parseChatGptEffortSliderState(
-      await slider.getAttribute("aria-valuemin"),
-      await slider.getAttribute("aria-valuemax"),
-      await slider.getAttribute("aria-valuenow"),
-    );
-    if (!gpt6) throw error;
-    const stops = gpt6.max - gpt6.min + 1;
-    const locked = await lockedAccessOffered(activation.menu);
-    return { solAvailable: true, extraHighAvailable: stops >= 4 && !locked, proAvailable: stops >= 5 && !locked };
-  }
-}
-
 export async function detectChatGptAccountCapabilities(
   page: Page,
   options: ChatGptCapabilityProbeOptions = {},
@@ -408,12 +435,35 @@ export async function detectChatGptAccountCapabilities(
     // on Plus (up to 6 High) and 5 on Team and Pro (up to 6 Pro); a turn still checks each stop's label.
     // On Plus "Default" the slider spans models (6 stops), so it is only read after the pick.
     if (await chatGptPickerHasModelList(menu)) {
+      let modelName: string;
       try {
-        await selectChatGptModelFromList(menu);
+        modelName = await selectChatGptModelFromList(menu);
       } catch {
         return { solAvailable: true, extraHighAvailable: false, proAvailable: false };
       }
-      return await readGpt6EffortCapabilities({ menu, sliderContainer, slider }, options);
+      const timeout = options.selectorTimeoutMs ?? MODEL_PICK_STEP_TIMEOUT_MS;
+      // Inspect the range for exact Pro, without requiring another effort to be available.
+      let proAvailable = false, selected: ChatGptPickerStop | undefined;
+      try {
+        selected = await selectChatGptPickerStop(menu, slider, "6 Pro", timeout, modelName);
+        proAvailable = true;
+      } catch (error) {
+        if (!(error instanceof Error) || (!error.message.startsWith('the effort slider has no "6 Pro" stop (stops: ')
+          && error.message !== 'the effort slider\'s "6 Pro" stop is locked')) throw error;
+        selected = (error as Error & { pickerStop?: ChatGptPickerStop }).pickerStop;
+      }
+      const verified = await readChatGptPickerStop(menu, modelName);
+      if (!verified || (proAvailable && (verified.label !== "6 Pro" || verified.locked))) {
+        throw new Error("the GPT-6 effort selection changed during capability verification");
+      }
+      // Extra High is its own tier: only a snapshot proved by every stop's exact name may admit it.
+      const semantic = selected?.effortSnapshot
+        && JSON.stringify(selected.snapshot.ticks) === JSON.stringify(verified.snapshot.ticks)
+        ? selected.effortSnapshot : undefined;
+      if (semantic) {
+        try { options.onEffortSnapshot?.(semantic); } catch { /* A cache write never fails the probe. */ }
+      }
+      return { solAvailable: true, extraHighAvailable: semantic?.ticks[3]?.locked === false, proAvailable };
     }
     const capabilities = await readChatGptEffortCapabilities({ sliderContainer, slider }, options);
     // An access upsell in the menu means a top tier is not the account's to choose.

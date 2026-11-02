@@ -127,8 +127,9 @@ test("slash commands offer only what applies, and attachments become paths or in
   ]), "look\n\nAttached image: C:\\shots\\a.png\n\nAttached file `notes.txt`:\n```\nx ``\u200b` y\n```");
 });
 
-test("Claude Code's /autocompact, /compact [focus], /context, /effort and /clear are chat commands", () => {
-  assert.deepEqual(plain(chat.chatSlashParse("/compact focus on the API changes")), { name: "compact", arg: "focus on the API changes" });
+test("/compact takes no focus argument; /context, /effort and /clear remain chat commands", () => {
+  assert.deepEqual(plain(chat.chatSlashParse("/compact")), { name: "compact", arg: "" });
+  assert.equal(chat.chatSlashParse("/compact focus on the API changes"), null, "/compact targets the owned session without focus instructions");
   assert.deepEqual(plain(chat.chatSlashParse("/autocompact 80")), { name: "autocompact", arg: "80" });
   for (const name of ["context", "effort", "clear"]) assert.deepEqual(plain(chat.chatSlashParse(`/${name}`)), { name, arg: "" });
   assert.equal(chat.chatSlashParse("/context please"), null, "/context takes no argument");

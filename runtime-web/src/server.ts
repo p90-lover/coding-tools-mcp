@@ -1,5 +1,6 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
+import { resolveChatGptWebTurnCapabilities } from "./adapters/chatgpt-web/model";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
@@ -425,7 +426,11 @@ function logChatGptWebModelFallback(requested: string, route: ChatGptWebModelRou
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
-  const route = requireChatGptWebModelRoute(parsed.modelId, config, parsed.options.reasoning);
+  const capabilities = resolveChatGptWebTurnCapabilities(parsed, {
+    localToolsEnabled: config.mode === "full", solAvailable: config.solAvailable,
+    extraHighAvailable: config.extraHighAvailable === true, proAvailable: config.proAvailable,
+  }, config);
+  const route = requireChatGptWebModelRoute(parsed.modelId, { ...config, ...capabilities }, parsed.options.reasoning);
   logChatGptWebModelFallback(parsed.modelId, route, parsed.options.reasoning);
   if (route.interactionMode === "automatic" && route.modelFamily) parsed._chatgptModelFamily = route.modelFamily;
   else delete parsed._chatgptModelFamily;

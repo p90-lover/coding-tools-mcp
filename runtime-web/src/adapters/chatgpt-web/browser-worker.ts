@@ -65,6 +65,7 @@ import {
   chatGptPickerHasModelList,
   selectChatGptModelFromList,
   selectChatGptPickerStop,
+  readChatGptPickerStop,
   CHATGPT_TURN_STOP_PREFIX,
 } from "../../chatgpt-session";
 import {
@@ -3375,22 +3376,30 @@ export class ChatGptBrowserWorker {
     } finally {
       waitAbort.abort();
     }
-    // The current picker: GPT-6 is picked from its model list ("GPT-6 Sol" on Plus, "6" on Team
-    // and Pro), then its own slider is moved to the stop labelled "6 <effort>". Stops are matched by
-    // label, never position: on "Default" the upper positions are other models, billed on top.
+    // The current picker: select the exact GPT-6 row, then verify its plain or legacy-prefixed effort.
+    // Stops are matched by label, never position: on "Default" the upper positions are other models, billed on top.
     // A failed step stops the turn; it is not retried.
     if (pickGpt6FromList) {
       const stopLabel = `${CHATGPT_TURN_STOP_PREFIX} ${mode.displayLabel}`;
       try {
-        await selectChatGptModelFromList(activation.menu);
+        const modelName = await selectChatGptModelFromList(activation.menu);
         await captureDiagnostic?.("model-picked");
-        await selectChatGptPickerStop(activation.menu, effortSlider, stopLabel);
+        await selectChatGptPickerStop(activation.menu, effortSlider, stopLabel, undefined, modelName);
+        await captureDiagnostic?.("effort-selected");
+        const verified = await readChatGptPickerStop(activation.menu, modelName);
+        if (!verified || verified.label !== stopLabel || verified.locked) {
+          throw new Error("the GPT-6 effort selection changed before submission");
+        }
+        // Diagnostics yield to the page: reprove uniqueness after checking that the user's choice did not drift.
+        const selected = await selectChatGptPickerStop(activation.menu, effortSlider, stopLabel, undefined, modelName);
+        if (selected.effortSnapshot && JSON.stringify(selected.snapshot.ticks) === JSON.stringify(verified.snapshot.ticks)) {
+          try { recordChatGptEffortSnapshot(selected.effortSnapshot); } catch { /* Availability is a hint, not selection proof. */ }
+        }
       } catch (error) {
         await captureDiagnostic?.("model-pick-failed");
         await page.keyboard.press("Escape").catch(() => {});
         throw chatGptModelPickError(stopLabel, error instanceof Error ? error.message : String(error));
       }
-      await captureDiagnostic?.("effort-selected");
       await page.keyboard.press("Escape");
       return modelFamily ? { ...mode, modelFamily } : mode;
     }

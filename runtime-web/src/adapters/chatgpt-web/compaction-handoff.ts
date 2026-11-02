@@ -2,7 +2,7 @@ import type {
   CodexParsedRequest,
   CodexToolResultMessage,
 } from "../../types";
-import { extractChatGptCompactionSourceRevision } from "./environment";
+import { extractChatGptCompactionSourceRevision, extractChatGptTurnIdentity } from "./environment";
 import type { ChatGptBrowserWorker } from "./browser-worker";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
 import type { CompactionTransactionHandle } from "./compaction-transaction";
@@ -255,6 +255,7 @@ export async function requestRetainedCompactionHandoff(
   timeoutMs = MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
 ): Promise<string> {
   const conversationKey = source.conversationKey();
+  const identity = extractChatGptTurnIdentity(parsed);
   if (!conversationKey) throw new Error("The completed ChatGPT source has no retained conversation identity");
   const operationTimeoutMs = boundedCompactionTimeout(timeoutMs);
   const deadline = new AbortController();
@@ -284,6 +285,7 @@ export async function requestRetainedCompactionHandoff(
     const prepare = async () => ({ text: instruction, images: [], release: () => {} });
     browser = worker.run({
       traceId,
+      ...(identity.threadId ? { nativeThreadId: identity.threadId } : {}),
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
       ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),

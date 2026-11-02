@@ -44,6 +44,7 @@ const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-p
 const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
+  "./image-markup": load("image-markup.ts"),
   "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client, "./page-visibility": visibility }),
   "./codex-prompts": load("codex-prompts.ts"),

@@ -166,7 +166,7 @@ test("renderer and Electron IPC expose the Provider Hub and global proxy control
   const packageJson = JSON.parse(read("package.json"));
 
   assert.match(types, /Surface[^;]+"providers"/s);
-  assert.match(main, /ProviderHubIntegration/);
+  assert.match(main, /provider-manager\.css/);
   assert.match(integration, /ProviderManagerSurface/);
   assert.match(integration, /archiveProviderAccount/);
   assert.match(integration, /archiveProxyProfile/);

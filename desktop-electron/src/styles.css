@@ -265,8 +265,9 @@ code {
   overflow: hidden;
 }
 
-/* Hidden docked sidebar: a rail of the rows' icons. Hovering it lays the whole panel over the
-   page (.is-peek); the rail keeps its width so the page doesn't move. */
+/* Hidden docked sidebar: a rail of the rows' icons. Hovering it slides the whole panel out over
+   the page (.is-peek); the rail keeps its width so the page doesn't move. The panel keeps its full
+   layout (.is-expanded) until it has slid shut. */
 .app-shell {
   --sidebar-rail-width: 52px;
 }
@@ -275,23 +276,39 @@ code {
   border-right: 1px solid var(--color-border-light);
 }
 
-.app-shell.is-sidebar-rail .app-sidebar.is-peek .sidebar-clip {
-  z-index: 40;
+.app-shell.is-sidebar-rail .sidebar-clip {
   right: auto;
-  width: var(--sidebar-width);
+  width: var(--sidebar-rail-width);
+  transition:
+    width 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 180ms ease;
+}
+
+.app-shell.is-sidebar-rail .app-sidebar.is-expanded .sidebar-clip {
+  z-index: 40;
   border-right: 1px solid var(--color-border);
   background: rgb(33 33 33 / 97%);
+}
+
+.app-shell.is-sidebar-rail .app-sidebar.is-peek .sidebar-clip {
+  width: var(--sidebar-width);
   box-shadow: 8px 0 24px rgb(0 0 0 / 35%);
 }
 
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-content {
+@media (prefers-reduced-motion: reduce) {
+  .app-shell.is-sidebar-rail .sidebar-clip {
+    transition: none;
+  }
+}
+
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) .sidebar-content {
   width: var(--sidebar-rail-width);
   min-width: var(--sidebar-rail-width);
   padding-right: 6px;
   padding-left: 6px;
 }
 
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) :is(
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) :is(
   .sidebar-brand-identity strong,
   .sidebar-brand-identity .dev-profile-badge,
   .sidebar-brand-actions,
@@ -304,21 +321,21 @@ code {
 }
 
 /* A scrollbar would push the icons off the rail's centre; the wheel still scrolls it. */
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-nav {
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) .sidebar-nav {
   scrollbar-width: none;
 }
 
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-nav::-webkit-scrollbar {
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) .sidebar-nav::-webkit-scrollbar {
   display: none;
 }
 
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-brand-row {
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) .sidebar-brand-row {
   justify-content: center;
   padding: 6px 0;
 }
 
 /* Group titles give way to a thin divider so the groups still read apart. */
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-group h2 {
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) .sidebar-group h2 {
   height: 0;
   margin: 0 8px 6px;
   padding: 0;
@@ -326,17 +343,17 @@ code {
   border-top: 1px solid var(--color-border-light);
 }
 
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-group:first-child h2 {
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) .sidebar-group:first-child h2 {
   border-top: 0;
 }
 
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) :is(.sidebar-item, .sidebar-more summary) {
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) :is(.sidebar-item, .sidebar-more summary) {
   position: relative;
   justify-content: center;
   padding: 0;
 }
 
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-peek) .sidebar-item-badge {
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) .sidebar-item-badge {
   position: absolute;
   top: 3px;
   right: 6px;
@@ -463,11 +480,6 @@ code {
   color: var(--color-text-tertiary);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
-}
-
-/* The Connections group's first row is portalled in by ProviderHubIntegration. */
-.sidebar-provider-slot:empty {
-  display: none;
 }
 
 .sidebar-resize {
@@ -3156,6 +3168,11 @@ code {
 .rtk-gain { margin: 0; padding: 14px 16px; overflow: auto; max-height: 420px; border: 1px solid var(--line, rgba(31, 30, 29, .15)); border-radius: 10px;
   background: var(--surface-2, rgba(31, 30, 29, .03)); font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre; }
 .surface-empty-note { color: var(--muted, #6b6a66); font-size: 13px; }
+.rtk-chip.is-attention { border-color: rgb(51 156 255 / 45%); color: var(--blue-200); }
+
+/* App plugins (App.tsx AppPluginsSurface): "Check GitHub now" and when it last looked. */
+.app-plugins-bar { align-items: center; margin: 0 0 6px; }
+.app-plugins-bar small { color: var(--muted, #6b6a66); font-size: 12px; }
 
 /* Plugins (App.tsx PluginsSurface): Codex's tab row with counts, and "Add" at its end. */
 .plugins-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 14px; }
@@ -3176,6 +3193,22 @@ code {
 .mcp-server-error { margin: 10px 0 0; color: var(--color-text-error); font-size: 13px; }
 .mcp-server-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .mcp-server-actions .button-secondary { height: 26px; }
+.plugins-add .refresh-menu-list { min-width: 220px; }
+/* Ready to add (src/features/mcp-catalog.ts): one card per server, its Docs link and Add on the right. */
+.mcp-catalog { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; margin: 0 0 18px; }
+.mcp-catalog-card { display: flex; align-items: flex-start; gap: 12px; min-width: 0; padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 10px; }
+.mcp-catalog-text { display: grid; flex: 1 1 auto; gap: 2px; min-width: 0; }
+.mcp-catalog-text strong { font-size: var(--text-sm); font-weight: 600; }
+.mcp-catalog-text p { margin: 4px 0 0; color: var(--color-text-secondary); font-size: 12.5px; line-height: 1.45; }
+.mcp-catalog-kind { color: var(--color-text-disabled); font-size: 11.5px; }
+.mcp-catalog-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.mcp-catalog-actions .button-secondary { height: 26px; }
+.mcp-catalog-blurb { margin: 0 0 6px; color: var(--color-text-secondary); font-size: 13px; }
+.mcp-catalog-blurb.is-warn { color: var(--color-text-warning, #a86b12); }
+.mcp-connect-cli { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0 6px; color: var(--color-text-secondary); font-size: 12.5px; }
+.mcp-server-form code { padding: 0 4px; border-radius: 4px; background: var(--color-background-control); font-size: 12px; }
+.button-link { flex: none; padding: 0; border: 0; background: none; color: var(--color-text-secondary); font: inherit; font-size: 12.5px; cursor: pointer; }
+.button-link:hover { color: var(--color-text-primary); text-decoration: underline; text-underline-offset: 2px; }
 
 /* PartErrorBoundary: one tab or chat message that failed to render, in its own place. */
 .part-error {

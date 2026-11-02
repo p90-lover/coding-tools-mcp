@@ -79,6 +79,28 @@ function observeHarness(context) {
   });
 }
 
+test("live-session compaction is accepted before completion and invalidates the conversation cache", async () => {
+  let compactedAt = "before", stopped = false;
+  const requests = [];
+  const upstream = observeHarness({
+    internalApi: async (method, endpoint, body) => {
+      requests.push({ method, endpoint, body });
+      return { compactedAt, controller: stopped ? "stopped" : "idle" };
+    },
+  });
+  const accepted = await upstream.compact("session");
+  assert.equal(accepted.compactedAt, "before");
+  assert.equal(requests[1].endpoint, "/api/v1/sessions/session/conversation/compact");
+  assert.equal(requests[1].method, "POST");
+  assert.equal(JSON.stringify(requests[1].body), "{}");
+  assert.equal((await upstream.compactionStatus("session", "before")).status, "in_progress");
+  compactedAt = "after";
+  assert.equal((await upstream.compactionStatus("session", "before")).status, "completed");
+  compactedAt = "before"; stopped = true;
+  assert.equal((await upstream.compactionStatus("session", "before")).status, "failed");
+  await assert.rejects(upstream.compact("../../foreign"), /session/i);
+});
+
 test("callers reading one session's conversation at once share one read, and a read serves for a moment", async () => {
   // Seen live: a busy chat's tail (~500-700 KB) was read twice a second by the chat, the mission
   // controller and the approval screen each: 58 MB a minute through the main process.

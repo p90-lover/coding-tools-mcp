@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { MAX_SESSION_SERVERS, createChatMcpServers } = require("../electron/chat-mcp-servers.cjs");
+const { MAX_SESSION_SERVERS, createChatMcpServers, readGithubCliToken, withGithubCliToken } = require("../electron/chat-mcp-servers.cjs");
 
 const HTTP_AGENTS = new Set(["claude-code", "codex", "opencode"]);
 function store() {
@@ -86,4 +86,23 @@ test("a malformed file is logged by reason only, never with the text around the 
   assert.deepEqual(servers.list(), []);
   assert.deepEqual(warnings, [["chat_mcp_servers.unreadable", { reason: "invalid_json" }]]);
   assert.ok(!JSON.stringify(warnings).includes("hunter2"));
+});
+
+test("the GitHub CLI's sign-in goes only to GitHub's MCP server, as its Bearer header", async () => {
+  const github = { name: "github", type: "http", url: "https://api.githubcopilot.com/mcp/readonly", headers: {} };
+  const token = "gho_0123456789abcdefghijABCDEFGHIJ";
+  assert.deepEqual((await withGithubCliToken(github, async () => token)).headers, { Authorization: `Bearer ${token}` });
+  let read = 0;
+  for (const other of [{ ...github, url: "https://evil.example/mcp" }, { ...github, url: "https://api.githubcopilot.com.evil.example/mcp" },
+    { name: "x", type: "stdio", command: "gh" }]) {
+    await assert.rejects(withGithubCliToken(other, async () => { read += 1; return token; }), /only for GitHub's MCP server/);
+  }
+  assert.equal(read, 0, "the token is never read for another host");
+});
+
+test("a GitHub CLI that is missing or signed out says what to do, never what it printed", async () => {
+  const run = (error, stdout) => readGithubCliToken({ execFile: (_file, _args, _options, done) => done(error, stdout) });
+  assert.equal(await run(null, "gho_0123456789abcdefghijABCDEFGHIJ\n"), "gho_0123456789abcdefghijABCDEFGHIJ");
+  await assert.rejects(run(Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" }), ""), /isn't installed/);
+  await assert.rejects(run(new Error("exit 1"), "partial gho_secret"), (error) => /gh auth login/.test(error.message) && !error.message.includes("gho_secret"));
 });

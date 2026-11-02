@@ -485,7 +485,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   const component = {};
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   const jsx = (type, props) => ({ type, props: props || {} });
-  const react = { useMemo: calculate => calculate(), useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
+  const react = { useMemo: calculate => calculate(), useCallback: callback => callback, useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
     createContext: value => ({ Provider: ({ children }) => children, value }), useContext: context => context.value,
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
   const replyHead = {};
@@ -504,6 +504,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
       : name === "./ChatReplyHead" ? replyHead
       : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView
       : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
+      : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: text => text }
       : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
         TurnRestart: react.createContext({ restarting: false }) } : {},
@@ -581,18 +582,23 @@ test("declining a delayed start restores the previously valid pending configurat
   assert.equal(applied.length,1);queue.dispose();
 });
 
+const pageHelpers = {};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/chat-pages.ts"), "utf8"), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS },
+}).outputText, { exports: pageHelpers, require: name => require(require.resolve(name, { paths: [path.resolve(__dirname, "..")] })) });
+
 function loadSurface(react = {}, globals = {}, imports = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
   const surface = {};
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-    { exports: surface, require: name => name === "react" ? react : name === "react/jsx-runtime"
-      ? imports.jsx || require(require.resolve(name, { paths: [path.resolve(__dirname, "..")] })) : imports[name] || {}, ...globals });
+    { exports: surface, require: name => name === "react" ? { useContext: () => null, ...react } : name === "react/jsx-runtime"
+      ? imports.jsx || require(require.resolve(name, { paths: [path.resolve(__dirname, "..")] })) : imports[name] || (name === "./chat-pages" ? pageHelpers : {}), ...globals });
   return surface;
 }
 
 function surfaceComposer(seed = {}, globals = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8").split("export function AgentOrchestratorSurface")[1];
-  const names = [...source.matchAll(/const \[([A-Za-z_]+),[^\]]+\] = useState/g)].map(match => match[1]);
+  const names = [...source.matchAll(/const \[([A-Za-z_]+)(?:,[^\]]+)?\] = useState/g)].map(match => match[1]);
   const state = { workspaceReady: true, workspaceId: "w", chatTaskId: "", board: { revision: 1, tasks: [] }, ...seed };
   const refs = [], callbacks = [], effects = []; let cursor = 0, refCursor = 0, callbackCursor = 0;
   const react = {
@@ -1171,8 +1177,11 @@ function rendererCallback(file, name, globals) {
   const text = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8");
   const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let body;
+  const jsx = /^jsx:([^.]+)\.(.+)$/.exec(name);
   const visit = node => {
     if (ts.isVariableDeclaration(node) && node.name.getText(tree) === name) body ??= node.initializer;
+    if (jsx && ts.isJsxAttribute(node) && node.name.getText(tree) === jsx[2]
+      && node.parent.parent.tagName?.getText(tree) === jsx[1]) body ??= node.initializer?.expression;
     const hook = name.startsWith("layout:") ? "useLayoutEffect" : "useEffect";
     if ((name.startsWith("effect:") || name.startsWith("layout:")) && ts.isCallExpression(node) && node.expression.getText(tree) === hook
       && node.arguments[0]?.getText(tree).includes(name.slice(7))) body ??= node.arguments[0];
@@ -1182,10 +1191,40 @@ function rendererCallback(file, name, globals) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule("exports.callback = " + body.getText(tree), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText, { exports, ...globals });
+  }).outputText, { exports, pane: undefined, paneWanted: { current: null }, pageRegistry: null, pageNumber: 1, initialPageSelection: null, ...globals });
   return exports.callback;
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
+
+for (const changedWhileSaving of [false, true]) test(`markup replacement preserves eight attachments${changedWhileSaving ? " after another attachment changes during saving" : ""}`, async () => {
+  const initial = Array.from({ length: 8 }, (_, index) => ({ name: `image-${index}.png`, path: `G:/fixtures/image-${index}.png`, image: true, preview: `blob:image-${index}` }));
+  const source = initial[3], saved = delayedReply(), updates = [], saves = [];
+  const result = { bytes: new Uint8Array([1]), preview: "blob:marked-image", prompt: "Marked instructions" };
+  const setAttachments = update => updates.push(update);
+  const addMarkup = rendererCallback("AgentOrchestratorChat.tsx", "addMarkup", {
+    useCallback: callback => callback, setAttachments, saver: { current: input => { saves.push(input); return saved.promise; } },
+  });
+  const onMarkup = rendererCallback("AgentOrchestratorChat.tsx", "jsx:ImagePreviewDialog.onMarkup", {
+    saveAttachment: true, attachments: initial, previewing: 3, addMarkup, setAttachments,
+  });
+  let current = initial;
+  const submitting = onMarkup(result);
+  try {
+    assert.equal(saves.length, 1);
+    assert.equal(saves[0].bytes, result.bytes);
+    assert.equal(updates.length, 0, "saving must succeed before changing the attachment list");
+    if (changedWhileSaving) current = [...initial.slice(1), { name: "new-file.txt", path: "G:/fixtures/new-file.txt" }];
+    const others = current.filter(item => item !== source);
+    saved.resolve({ path: "G:/fixtures/markup.png" });
+    await submitting;
+    for (const update of updates) current = update(current);
+    assert.equal(current.length, 8, "replace the original before applying the eight-attachment limit");
+    assert.equal(updates.length, 1, "replacement is one atomic functional state update");
+    assert.equal(current.includes(source), false);
+    for (const item of others) assert.equal(current.filter(value => value === item).length, 1, "every other attachment stays exactly once");
+    assert.deepEqual(plain(current.filter(item => item.name === "Markup")), [{ name: "Markup", path: "G:/fixtures/markup.png", image: true, preview: result.preview, markup: result.prompt }]);
+  } finally { saved.resolve({ path: "G:/fixtures/markup.png" }); await Promise.allSettled([submitting]); }
+});
 
 test("a split pane acknowledges parent selection before reporting its own chat, then reports its first send", () => {
   for (const requested of [{ workspaceId: "ws", taskId: "" }, { workspaceId: "ws", taskId: "task-b" }, { workspaceId: "other", taskId: "task-b" }]) {
@@ -1301,6 +1340,7 @@ test("an unsent split chat can switch projects and finish choosing its new chat"
   });
   choose("new-project");
   const decide = rendererCallback("AgentOrchestratorSurface.tsx", "effect:const wanted = paneWanted.current", {
+    pane: { workspaceId: "new-project", taskId: "" },
     chatTaskId: null, workspaceId: state.workspaceId, loadedWorkspace: "new-project",
     board: { tasks: [] }, boardWorkspace: { current: "new-project" }, paneWanted, paneSelectionPending, pendingSelect,
     missions: [], taskLifecycle: [], chatSeed: { workspaceId: "new-project", text: "Keep my draft" },
@@ -1324,7 +1364,7 @@ function workspaceRecovery({ hidden = false, selected = "p3" } = {}) {
   const set = key => value => { state[key] = typeof value === "function" ? value(state[key]) : value; };
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:listAllWorkspaces", {
     Error, listAllWorkspaces: () => { const reply = delayedReply(); replies.push(reply); return reply.promise; },
-    pageHidden: () => isHidden, setWorkspaces: set("workspaces"), setWorkspaceId: set("workspaceId"),
+    surfaceHidden: () => isHidden, setWorkspaces: set("workspaces"), setWorkspaceId: set("workspaceId"),
     setWorkspaceReady: set("ready"), setSheet: set("sheet"), setError: error => state.errors.push(error),
     window: { addEventListener: (name, handler) => { assert.equal(name, "focus"); focus.add(handler); },
       removeEventListener: (name, handler) => { assert.equal(name, "focus"); focus.delete(handler); } },
@@ -2589,7 +2629,7 @@ test("the chat list's clock stops while the window is hidden and ticks as soon a
   let hidden = true, interval = null, cleared = false;
   const listeners = new Map(), ticks = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:setListNow(Date.now())", {
-    Date, pageHidden: () => hidden, setListNow: value => ticks.push(value),
+    Date, surfaceHidden: () => hidden, setListNow: value => ticks.push(value),
     window: { setInterval: (callback, ms) => { interval = { callback, ms }; return 7; }, clearInterval: id => { cleared = id === 7; } },
     document: { addEventListener: (type, callback) => listeners.set(type, callback), removeEventListener: (type, callback) => { if (listeners.get(type) === callback) listeners.delete(type); } },
   });

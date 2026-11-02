@@ -658,6 +658,18 @@ function requestedRouteEffort(
   return effort as ChatGptWebCodexEffort;
 }
 
+/** The Sol tier (0 Instant … 4 Pro) a request asks for before any account gate; undefined off Sol. */
+export function requestedChatGptWebSolTier(modelId: string, reasoning?: string): number | undefined {
+  const route = routesBySlug.get(modelId);
+  if (!route || route.interactionMode !== "automatic" || route.backendModel !== CHATGPT_WEB_BACKEND_MODEL) return undefined;
+  const automatic = route as ChatGptWebAutomaticModelRoute;
+  try {
+    return solTierIndex(automatic.supportedCodexEfforts ? requestedRouteEffort(automatic, reasoning) : automatic.adapterEffort);
+  } catch {
+    return undefined; // The route gate reports an unsupported effort itself.
+  }
+}
+
 /** The route serving Sol tier `index` in the requested route's own family (legacy or named). */
 function solRouteForTier(
   requested: ChatGptWebAutomaticModelRoute,

@@ -123,7 +123,7 @@ test("Surface caches model capability catalogs for AO harnesses and Native Codex
     exports: surface,
     require: name => name === "react" ? { useState: value => [typeof value === "function" ? value() : value, () => {}],
       useRef: value => ({ current: value }), useCallback: callback => { callbacks.push(callback); return callback; }, useEffect() {}, useLayoutEffect() {},
-      useMemo: build => build() }
+      useMemo: build => build(), useContext: () => null }
       : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
       : name === "./page-visibility" ? { pageHidden: () => false, useSurfaceHidden: () => () => false, onAoPush: () => () => {} }
       : name === "../api/client" ? { getCodingToolsClient: () => ({ apps: { call: async request => {
@@ -132,6 +132,7 @@ test("Surface caches model capability catalogs for AO harnesses and Native Codex
       } } }) }
       : name === "./ao-chat" ? { chatList: () => [], chatArchived: () => [] }
       : name === "./chat-split" ? splitRules()
+      : name === "./chat-pages" ? { ChatPagesContext: null, chatPageKey: key => key }
       : name === "../i18n" ? { copyFor: () => ({}) }
       : name === "./AgentOrchestratorRoleEditor" ? { workerRoute: () => ({}), emptyRoleSettings: () => ({}), NATIVE_HARNESS: "codex-native" } : {},
   });

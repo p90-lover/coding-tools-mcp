@@ -33,7 +33,8 @@ function mount(Component, props, { effects = false } = {}) {
   };
   const jsx = (type, props) => ({ type, props: props || {} });
   const module = compile(Component, (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", FloatingLayer: "FloatingLayer", ChatGlyph: "ChatGlyph" } : {});
+    : name === "./ao-chat" ? chat : name === "./page-visibility" ? { useSurfaceHidden: () => () => false }
+    : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", FloatingLayer: "FloatingLayer", ChatGlyph: "ChatGlyph" } : {});
   const render = (next = {}) => { cursor = 0; refCursor = 0; return module.ChatThreadList({ ...props, ...next }); };
   return { render, states };
 }

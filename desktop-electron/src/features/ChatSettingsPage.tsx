@@ -3,6 +3,7 @@ import type { ComputerAllowedApp, JsonObject } from "../api/contracts";
 import { getCodingToolsClient } from "../api/client";
 import type { LauncherState, UpdateSettings, UpdateSettingValues, UpdateState } from "../types";
 import { ChatGlyph } from "./ChatMenu";
+import { CHAT_PAGE_LIMIT, recordPageShortcut, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
 import "./chat-settings.css";
 
 /**
@@ -112,6 +113,19 @@ function MinutesSelect({ value, choices, label, onChange }: { value: number; cho
   </select>;
 }
 
+function PageShortcut({ label, value, disabled, onChange }: { label: string; value: string; disabled: boolean; onChange: (value: string) => void }) {
+  return <input className="cxs-shortcut" aria-label={label} value={value} readOnly disabled={disabled}
+    title="Focus here and press a modified letter, number, arrow or function key. Escape cancels."
+    onKeyDown={(event) => {
+      if (event.key === "Tab") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") { event.currentTarget.blur(); return; }
+      const shortcut = recordPageShortcut(event.nativeEvent);
+      if (shortcut) onChange(shortcut);
+    }} />;
+}
+
 export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
   const api = window.codexWebLauncher;
   const [section, setSection] = useState<Section>("general");
@@ -120,6 +134,11 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
   const [update, setUpdate] = useState<UpdateState | null>(null);
   const [error, setError] = useState("");
   const [chat, setChat] = useState<ChatPreferences | null>(null);
+  const pages = useChatPagePreferences();
+  const setPagePreference = (patch: Partial<ChatPagePreferences>) => {
+    try { saveChatPagePreferences(patch); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  };
 
   useEffect(() => {
     let live = true;
@@ -191,6 +210,31 @@ export function ChatSettingsPage({ onClose }: { onClose: () => void }) {
               </Row>
             </Group>
           </div> : section === "chat" ? <div className="cxs-sections">
+            <Group title="Chat pages">
+              <Row label="Show page tabs" description="Keep separate sets of chat sessions on pages. Hiding the tabs keeps your current page and running chats">
+                <Toggle label="Show page tabs" checked={pages.enabled} onChange={(enabled) => setPagePreference({ enabled })} />
+              </Row>
+              <Row label="Open pages" description={`${pages.pageCount} of ${CHAT_PAGE_LIMIT} pages. Each new page starts with a new chat and keeps its own split layout`}>
+                <button type="button" className="cxs-button" disabled={!pages.enabled || pages.pageCount >= CHAT_PAGE_LIMIT}
+                  onClick={() => setPagePreference({ pageCount: pages.pageCount + 1 })}>Add page</button>
+              </Row>
+              <Row label="Scroll over page tabs to switch" description="The mouse wheel changes pages only over the tabs. Scrolling messages stays unchanged">
+                <Toggle label="Scroll over page tabs to switch" checked={pages.wheel} disabled={!pages.enabled}
+                  onChange={(wheel) => setPagePreference({ wheel })} />
+              </Row>
+              <Row label="Page keyboard shortcuts" description="Switch pages without clicking. Shortcuts pause while typing or using a dialog">
+                <Toggle label="Page keyboard shortcuts" checked={pages.keyboard} disabled={!pages.enabled}
+                  onChange={(keyboard) => setPagePreference({ keyboard })} />
+              </Row>
+              <Row label="Previous page shortcut" description="Focus the shortcut, then press the key combination you want">
+                <PageShortcut label="Previous page shortcut" value={pages.previous} disabled={!pages.enabled || !pages.keyboard}
+                  onChange={(previous) => setPagePreference({ previous })} />
+              </Row>
+              <Row label="Next page shortcut" description="Use a different key combination from Previous page">
+                <PageShortcut label="Next page shortcut" value={pages.next} disabled={!pages.enabled || !pages.keyboard}
+                  onChange={(next) => setPagePreference({ next })} />
+              </Row>
+            </Group>
             <Group title="Context">
               <Row label="Auto-compact" description="When a chat gets long, its earlier conversation becomes a summary before the next message, so it never stops full. Also /autocompact">
                 <Toggle label="Auto-compact" checked={chat?.autoCompact ?? true} disabled={!chat}

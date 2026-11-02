@@ -206,6 +206,150 @@ fn output_cursor_survives_rollover_and_kill_retains_evidence() {
 }
 
 #[test]
+fn audit_output_paging_public_contract_covers_aliases_gaps_and_pending_reads() {
+    let (ctx, base) = fixture();
+    let prefix = 1024 * 1024;
+    fs::write(
+        ctx.workspace.root().join("aiTemp/output-paging.py"),
+        "import sys\nsys.stderr.buffer.write(b'\\xe4\\xb8\\xadz')\nsys.stderr.flush()\nsys.stdout.buffer.write(b'x'*1048576+b'\\xc3\\xa9z\\xf0\\x9f')\nsys.stdout.flush()\nsys.stdin.buffer.read(1)\nsys.stdout.buffer.write(b'\\x92\\xa1')\nsys.stdout.flush()\n",
+    ).unwrap();
+    let launched = call_tool(
+        &ctx,
+        "exec_command",
+        &json!({"cmd":py("-B -X utf8 aiTemp/output-paging.py"), "tty":true, "yield_time_ms":0,
+            "timeout_ms":30_000, "max_output_bytes":1}),
+    );
+    assert_eq!(launched["ok"], true, "{launched}");
+    let id = launched["command_id"].as_str().unwrap();
+    let stdout_ref = format!("command:{id}:stdout");
+    let legacy_ref = format!("session:{id}:stdout");
+    let full_ref = format!("session:{id}:full");
+    let until = Instant::now() + Duration::from_secs(10);
+    let (pending, stderr) = loop {
+        let output = call_tool(
+            &ctx,
+            "read_output",
+            &json!({"output_ref":stdout_ref, "offset":prefix+3, "limit":4}),
+        );
+        let stderr = call_tool(
+            &ctx,
+            "read_output",
+            &json!({"output_ref":full_ref, "stream":"stderr", "limit":4}),
+        );
+        if output["error"]["code"] == "OUTPUT_PENDING" && stderr["content"] == "中z" {
+            break (output, stderr);
+        }
+        assert!(
+            output["ok"] == true || output["error"]["code"] == "OUTPUT_PENDING",
+            "{output}"
+        );
+        assert!(
+            Instant::now() < until,
+            "producer did not reach its stdin gate: {output} {stderr}"
+        );
+        thread::yield_now();
+    };
+    let details = &pending["error"]["details"];
+    assert_eq!(pending["ok"], false);
+    assert_eq!(pending["error"]["category"], "runtime");
+    assert_eq!(pending["error"]["retryable"], true);
+    assert_eq!(details["command_id"], id);
+    assert_eq!(details["session_id"], id);
+    assert_eq!(details["offset"], prefix + 3);
+    assert_eq!(details["next_read_offset"], prefix + 3);
+    assert_eq!(details["requested_offset"], prefix + 3);
+    assert_eq!(details["limit"], 4);
+    assert_eq!(details["total_stream_bytes"], prefix + 5);
+    assert_eq!(details["status"], "running");
+    assert_eq!(details["output_gap"], false);
+    assert!(details.get("required_min_limit").is_none());
+    assert_eq!(stderr["stream"], "stderr");
+    assert_eq!(stderr["content"], "中z");
+    assert_eq!(stderr["next_read_offset"], 4);
+    assert!(stderr["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning.as_str().unwrap().contains("Legacy session")));
+    assert!(stderr["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning.as_str().unwrap().contains("Legacy full")));
+
+    let gap = call_tool(
+        &ctx,
+        "read_output",
+        &json!({"output_ref":full_ref, "offset":0, "limit":1}),
+    );
+    let retained = gap["retained_start_offset"].as_u64().unwrap();
+    assert!(retained > 0);
+    assert_eq!(gap["ok"], true, "{gap}");
+    assert_eq!(
+        gap["stream"], "stdout",
+        "full without an explicit stream defaults to stdout"
+    );
+    assert_eq!(gap["requested_offset"], 0);
+    assert_eq!(gap["offset"], retained);
+    assert_eq!(gap["next_read_offset"], retained + 1);
+    assert_eq!(gap["next_offset"], retained + 1);
+    assert_eq!(gap["dropped_before_offset"], retained);
+    assert_eq!(gap["output_gap"], true);
+    assert_eq!(gap["content"], "x");
+
+    let small = call_tool(
+        &ctx,
+        "read_output",
+        &json!({"output_ref":legacy_ref, "stream":"stderr", "offset":prefix, "limit":1}),
+    );
+    assert_eq!(small["ok"], false, "{small}");
+    assert_eq!(small["error"]["code"], "OUTPUT_LIMIT_TOO_SMALL");
+    assert_eq!(small["error"]["category"], "validation");
+    assert_eq!(small["error"]["retryable"], false);
+    assert_eq!(small["error"]["details"]["output_ref"], legacy_ref);
+    assert_eq!(
+        small["error"]["details"]["stream"], "stdout",
+        "a per-stream reference takes precedence over stream"
+    );
+    assert_eq!(small["error"]["details"]["offset"], prefix);
+    assert_eq!(small["error"]["details"]["next_read_offset"], prefix);
+    assert_eq!(small["error"]["details"]["required_min_limit"], 2);
+    let retry = call_tool(
+        &ctx,
+        "read_output",
+        &json!({"output_ref":legacy_ref, "stream":"stderr", "offset":prefix, "limit":2}),
+    );
+    assert_eq!(retry["content"], "é", "{retry}");
+    assert_eq!(retry["stream_output_ref"], stdout_ref);
+    assert_eq!(retry["legacy_stream_output_ref"], legacy_ref);
+    assert_eq!(retry["next_read_offset"], prefix + 2);
+    assert_eq!(retry["next_offset"], prefix + 2);
+    assert_eq!(retry["truncated"], true);
+
+    let continued = call_tool(
+        &ctx,
+        "write_stdin",
+        &json!({"session_id":id, "chars":"x", "yield_time_ms":100, "max_output_bytes":1}),
+    );
+    assert_eq!(continued["ok"], true, "{continued}");
+    assert_eq!(wait(&ctx, id)["command_ok"], true);
+    let completed = call_tool(
+        &ctx,
+        "read_output",
+        &json!({"output_ref":stdout_ref, "offset":prefix+3, "limit":4}),
+    );
+    assert_eq!(completed["ok"], true, "{completed}");
+    assert_eq!(completed["content"], "💡");
+    assert_eq!(completed["next_read_offset"], prefix + 7);
+    assert_eq!(completed["next_offset"], Value::Null);
+    assert_eq!(completed["truncated"], false);
+    assert_eq!(completed["status"], "exited");
+    assert_eq!(completed["exit_code"], 0);
+    drop(ctx);
+    fs::remove_dir_all(base).expect("remove this completed output-paging fixture only");
+}
+
+#[test]
 fn explicit_linked_project_tasks_do_not_share_baselines() {
     let (ctx, base) = fixture();
     let linked = base.join("other-project");

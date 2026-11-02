@@ -98,6 +98,22 @@ test("AO's `ao` folder goes first on a command's PATH, and a broken provider cha
   } finally { cleanup(); broken.cleanup(); }
 });
 
+test("rtk's quiet flag reaches every command; PATH, private names and odd values never come in that way", async () => {
+  const { sandbox, spawned, cleanup } = runner({ extraEnv: () => ({ RTK_SUPPRESS_HOOK_WARNING: "1", PATH: "C:/evil", GITHUB_TOKEN: "x", lower: "1", COUNT: 2 }) });
+  const broken = runner({ extraEnv: () => { throw new Error("rtk not ready"); } });
+  try {
+    await sandbox.start({ cmd: "git status", cwd: "G:/work", writable: "G:/work" });
+    const env = spawned[0].options.env;
+    assert.equal(env.RTK_SUPPRESS_HOOK_WARNING, "1");
+    assert.equal(env.PATH, "C:/bin");
+    assert.equal(env.GITHUB_TOKEN, undefined);
+    assert.equal(env.lower, undefined);
+    assert.equal(env.COUNT, undefined);
+    await broken.sandbox.start({ cmd: "echo ok", cwd: "G:/work", writable: "G:/work" });
+    assert.equal(broken.spawned[0].options.env.RTK_SUPPRESS_HOOK_WARNING, undefined);
+  } finally { cleanup(); broken.cleanup(); }
+});
+
 test("a command in the worktree itself starts there without a folder change, and % in a folder survives cmd", async () => {
   const { sandbox, spawned, cleanup } = runner();
   try {
@@ -149,6 +165,96 @@ test("kill ends a running command; ids it never started are not its own", async 
     assert.equal(result.status, "exited");
     assert.equal(result.termination_reason, "killed");
     assert.throws(() => sandbox.snapshot("c1"), /No such sandboxed command/);
+  } finally { cleanup(); }
+});
+
+test("read_output keeps UTF-8 scalars within strict raw limits and preserves absolute gap cursors", async () => {
+  const { sandbox, spawned, cleanup } = runner();
+  try {
+    const id = await sandbox.start({ cmd: "echo unicode", cwd: "G:/work", writable: "G:/work" });
+    const text = "a".repeat(4095) + "éz";
+    spawned[0].child.stdout.write(Buffer.from(text));
+    let offset = 0, rebuilt = "";
+    while (offset < Buffer.byteLength(text)) {
+      const page = sandbox.read(id, "stdout", offset, 4096);
+      assert.equal(page.ok, true);
+      assert.ok(page.next_read_offset > offset && page.next_read_offset - offset <= 4096);
+      if (offset === 0) assert.equal(page.next_read_offset, 4095);
+      rebuilt += page.content;
+      offset = page.next_read_offset;
+    }
+    assert.equal(rebuilt, text);
+    const fractional = sandbox.read(id, "stdout", 4091.75, 5.5);
+    assert.deepEqual([fractional.content, fractional.offset, fractional.next_read_offset], ["aaaa", 4091, 4095]);
+    const fractionalSmall = sandbox.read(id, "stdout", 4095.75, 1.5);
+    assert.deepEqual([fractionalSmall.error.code, fractionalSmall.error.details.offset,
+      fractionalSmall.error.details.next_read_offset, fractionalSmall.error.details.limit,
+      fractionalSmall.error.details.required_min_limit], ["OUTPUT_LIMIT_TOO_SMALL", 4095, 4095, 1, 2]);
+    for (const scalar of ["é", "中", "💡"]) {
+      const unicode = await sandbox.start({ cmd: "echo scalar", cwd: "G:/work", writable: "G:/work" });
+      spawned.at(-1).child.stdout.write(Buffer.from(scalar));
+      for (let limit = 1; limit <= 4; limit += 1) {
+        const page = sandbox.read(unicode, "stdout", 0, limit);
+        if (limit < Buffer.byteLength(scalar)) {
+          assert.equal(page.ok, false);
+          assert.equal(page.error.code, "OUTPUT_LIMIT_TOO_SMALL");
+          assert.deepEqual([page.error.details.offset, page.error.details.next_read_offset, page.error.details.limit,
+            page.error.details.required_min_limit], [0, 0, limit, Buffer.byteLength(scalar)]);
+        } else assert.deepEqual([page.content, page.next_read_offset], [scalar, Buffer.byteLength(scalar)]);
+      }
+      spawned.at(-1).child.finish(0);
+    }
+    // Retention drops the first raw chunk without changing byte ownership or absolute cursors.
+    const gapId = await sandbox.start({ cmd: "echo retained", cwd: "G:/work", writable: "G:/work" });
+    const gapChild = spawned.at(-1).child;
+    const retainedStart = 4 * 1024 * 1024;
+    gapChild.stdout.write(Buffer.alloc(retainedStart, 0x61));
+    gapChild.stdout.write(Buffer.from("éz"));
+    const tooSmall = sandbox.read(gapId, "stdout", 0, 1);
+    assert.deepEqual([tooSmall.error.details.offset, tooSmall.error.details.next_read_offset, tooSmall.error.details.output_gap],
+      [retainedStart, retainedStart, true]);
+    const retained = sandbox.read(gapId, "stdout", 0, 2);
+    assert.deepEqual([retained.content, retained.offset, retained.next_read_offset, retained.output_gap, retained.truncated],
+      ["é", retainedStart, retainedStart + 2, true, true]);
+    const inside = sandbox.read(gapId, "stdout", retainedStart + 1, 1);
+    assert.deepEqual([inside.content, inside.offset, inside.next_read_offset], ["�", retainedStart + 1, retainedStart + 2]);
+    gapChild.finish(0);
+    spawned[0].child.finish(0);
+  } finally { cleanup(); }
+});
+
+test("read_output waits for incomplete live scalars through split writes and process status until child close", async () => {
+  const { sandbox, spawned, cleanup } = runner();
+  try {
+    const id = await sandbox.start({ cmd: "echo split", cwd: "G:/work", writable: "G:/work" });
+    const child = spawned[0].child;
+    child.stdout.write(Buffer.from([0x61, 0xc3]));
+    const prefix = sandbox.read(id, "stdout", 0, 4096);
+    assert.deepEqual([prefix.content, prefix.next_read_offset, prefix.truncated], ["a", 1, true]);
+    let pending = sandbox.read(id, "stdout", 1, 4096);
+    assert.equal(pending.error.code, "OUTPUT_PENDING");
+    assert.deepEqual([pending.error.details.offset, pending.error.details.next_read_offset, pending.error.retryable], [1, 1, true]);
+    child.stdout.write(Buffer.from([0xa9, 0x7a]));
+    assert.deepEqual([sandbox.read(id, "stdout", 1, 4096).content, sandbox.read(id, "stdout", 1, 4096).next_read_offset], ["éz", 4]);
+    child.finish(0);
+
+    const terminal = await sandbox.start({ cmd: "echo terminal", cwd: "G:/work", writable: "G:/work" });
+    const terminalChild = spawned[1].child;
+    terminalChild.stdout.write(Buffer.from([0xf0, 0x9f]));
+    terminalChild.emit("error", new Error("spawn failed before stdio closed"));
+    pending = sandbox.read(terminal, "stdout", 0, 4096);
+    assert.equal(pending.error.code, "OUTPUT_PENDING");
+    assert.equal(pending.error.details.status, "exited", "process status is separate from output completion");
+    assert.equal(pending.error.details.next_read_offset, 0);
+    terminalChild.finish(1);
+    assert.deepEqual([sandbox.read(terminal, "stdout").content, sandbox.read(terminal, "stdout").next_read_offset], ["�", 2]);
+
+    const invalid = await sandbox.start({ cmd: "echo invalid", cwd: "G:/work", writable: "G:/work" });
+    spawned[2].child.stdout.write(Buffer.from([0x80, 0xbf, 0xff, 0xe0, 0x80]));
+    const bytes = sandbox.read(invalid, "stdout", 0, 4096);
+    assert.equal(bytes.ok, true);
+    assert.equal(bytes.next_read_offset, 5, "genuinely invalid bytes retain lossy decoding and raw accounting");
+    spawned[2].child.finish(0);
   } finally { cleanup(); }
 });
 
