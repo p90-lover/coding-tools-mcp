@@ -155,6 +155,8 @@ let annotationIds = 0;
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 /** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
 const PET_KEY = "coding-tools:ao:pet";
+/** A chat this narrow (a squeezed split pane) moves Preview, Show cards and Side panel from its head to the More menu; codex-chat.css's last @container. */
+const NARROW_HEAD_PX = 300;
 /** Sent to every chat in the window when the pet is shown or hidden (its detail: shown). */
 const PET_EVENT = "coding-tools:ao:pet-shown";
 /** What an AO agent is started with; a follow-up with any of them changed gets a new agent (continuationCard). */
@@ -1935,7 +1937,15 @@ export function AgentOrchestratorChat({
   }, [attachments]);
 
   const chatRoot = useRef<HTMLDivElement>(null);
-  const headerMenu = (): ChatMenuItem[] => [
+  /** `narrow`: the head is too narrow for Preview, Show cards and Side panel (codex-chat.css hides them), so the menu has them. */
+  const headerMenu = (narrow = false): ChatMenuItem[] => [
+    ...(narrow && selectedTaskId ? [
+      { label: "Preview", checked: workbench === "preview", run: () => setWorkbench((open) => (open === "preview" ? null : "preview")) },
+      ...(structure || latest ? [{ label: "Show cards", checked: showStructure,
+        ...(latest ? { run: () => structure ? setShowStructure((value) => !value) : openStructure(latest.id) } : { reason: "This chat has no mission yet" }) }] : []),
+      { label: "Side panel", checked: workbench !== null, run: () => setWorkbench((open) => (open ? null : "overview")) },
+      { kind: "separator" },
+    ] as ChatMenuItem[] : []),
     ...(thread && chat ? [
       { label: "Rename", shortcut: "Alt+Ctrl+R", run: () => setRenaming(chat.title) },
       { label: thread.pinned ? "Unpin" : "Pin", shortcut: "Alt+Ctrl+P", run: thread.togglePin },
@@ -2184,7 +2194,10 @@ export function AgentOrchestratorChat({
             title={detailsOpen ? "Hide chat details" : "Chat details: changes, agents, setup, outputs and sources"} aria-label="Chat details"
             aria-pressed={detailsOpen} onClick={toggleDetails}><ChatGlyph name="section" size={16} /></button> : null}
           <button type="button" className="cx-icon-button" title="More" aria-label="More chat actions" aria-haspopup="menu"
-            onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }))}>⋯</button>
+            onClick={(event) => {
+              const narrow = (event.currentTarget.closest(".cx-thread")?.clientWidth ?? Infinity) <= NARROW_HEAD_PX;
+              toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(narrow), label: "Chat actions" }));
+            }}>⋯</button>
           {/* Claude Code's pane close: on every split view pane, the window's own chat included. */}
           {onClosePane ? <button type="button" className="cx-icon-button cx-pane-close" aria-label="Close split view" title="Close split view (Ctrl+Alt+W)"
             onMouseDown={(event) => event.preventDefault()} onClick={onClosePane}><Icon name="close" width="14" height="14" /></button> : null}

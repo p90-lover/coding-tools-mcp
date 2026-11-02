@@ -50,6 +50,7 @@ function requestJson(origin, {
     throw new Error("Module request body is too large");
   }
   return new Promise((resolve, reject) => {
+    const fail = (error) => reject(new Error(errorMessage(error)));
     const request = transport.request(target, {
       method,
       headers: {
@@ -61,6 +62,11 @@ function requestJson(origin, {
     }, (response) => {
       const chunks = [];
       let size = 0;
+      response.on("error", fail);
+      response.once("aborted", () => fail(new Error("Module response was aborted")));
+      response.once("close", () => {
+        if (!response.complete) fail(new Error("Module response closed before completion"));
+      });
       response.on("data", (chunk) => {
         size += chunk.length;
         if (size > MAX_BODY_BYTES) {
@@ -82,7 +88,7 @@ function requestJson(origin, {
       });
     });
     request.on("timeout", () => request.destroy(new Error("Module request timed out")));
-    request.on("error", (error) => reject(new Error(errorMessage(error))));
+    request.on("error", fail);
     if (payload) request.write(payload);
     request.end();
   });

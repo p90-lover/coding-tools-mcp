@@ -783,6 +783,9 @@ struct IntegrationReadRequest {
 struct AoReadRequest {
     workspace_id: String,
     run_id: Option<String>,
+    /// One chat's runs (ao_lifecycle::read_chat_runs) in place of the project's newest 100.
+    #[serde(default)]
+    task_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -6457,6 +6460,13 @@ async fn ao_read(
             "Select a workspace",
         );
     }
+    if body
+        .task_id
+        .as_ref()
+        .is_some_and(|task| task.is_empty() || task.len() > 128)
+    {
+        return json_error(StatusCode::BAD_REQUEST, "AO_TASK_INVALID", "Choose a chat");
+    }
     if let Err(error) = state.context(&body.workspace_id) {
         return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error);
     }
@@ -6476,6 +6486,8 @@ async fn ao_read(
                     )
                 })?;
                 vec![run.clone()]
+            } else if let Some(task_id) = body.task_id.as_deref() {
+                integrations::ao_lifecycle::read_chat_runs(data, &body.workspace_id, task_id)
             } else {
                 integrations::ao_lifecycle::read_runs(data, &body.workspace_id, None)?
             };

@@ -292,6 +292,25 @@ pub fn read_runs(data: &AppData, workspace_id: &str, run_id: Option<&str>) -> Ap
     Ok(newest)
 }
 
+/// The most runs one chat's read returns (its newest), about 1.3 MB of replies.
+pub const CHAT_RUNS_LIMIT: usize = 200;
+
+/// One chat's runs, oldest first. The workspace read keeps the project's newest 100 runs, shared
+/// by all of its chats: seen live (2026-11-02), four goal chats filled it, a 63-run chat showed
+/// only its newest 26 replies and the project's 38 other chats opened with none.
+pub fn read_chat_runs(data: &AppData, workspace_id: &str, task_id: &str) -> Vec<Run> {
+    let mut newest: Vec<_> = data
+        .ao_runs
+        .iter()
+        .rev()
+        .filter(|run| run.workspace_id == workspace_id && run.project_id == task_id)
+        .take(CHAT_RUNS_LIMIT)
+        .cloned()
+        .collect();
+    newest.reverse();
+    newest
+}
+
 pub fn handoff_for<'a>(data: &'a AppData, run: &Run) -> Option<&'a str> {
     data.ao_task_lifecycle
         .iter()
@@ -1016,6 +1035,41 @@ mod tests {
         assert_eq!(listed.last().unwrap().id, "replacement-105");
         assert_eq!(read_runs(&data, "qa", Some("old")).unwrap()[0].id, "old");
         assert!(read_runs(&data, "foreign", Some("old")).is_err());
+    }
+
+    #[test]
+    fn a_chat_reads_its_own_runs_after_other_chats_fill_the_workspace_window() {
+        let mut data = fixture();
+        let original = data.ao_runs[0].clone();
+        let other = |index: usize| {
+            let mut run = original.clone();
+            run.id = format!("other-{index}");
+            run.project_id = "other".into();
+            run
+        };
+        let added: Vec<_> = (1..=105).map(other).collect();
+        data.ao_runs.extend(added);
+        assert!(read_runs(&data, "qa", None)
+            .unwrap()
+            .iter()
+            .all(|run| run.id != "old"));
+        let chat = read_chat_runs(&data, "qa", "goal");
+        assert_eq!(
+            chat.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(),
+            ["old"]
+        );
+        assert!(read_chat_runs(&data, "foreign", "goal").is_empty());
+        assert_eq!(read_chat_runs(&data, "qa", "other").len(), 105);
+        // A chat's history is capped at its newest runs, oldest first.
+        let added: Vec<_> = (106..=CHAT_RUNS_LIMIT + 10).map(other).collect();
+        data.ao_runs.extend(added);
+        let capped = read_chat_runs(&data, "qa", "other");
+        assert_eq!(capped.len(), CHAT_RUNS_LIMIT);
+        assert_eq!(capped[0].id, "other-11");
+        assert_eq!(
+            capped.last().unwrap().id,
+            format!("other-{}", CHAT_RUNS_LIMIT + 10)
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
 import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection } from "./chat-pages";
@@ -573,6 +573,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const [workspaceName, setWorkspaceName] = useState("");
   const [board, setBoard] = useState<Board | null>(null);
   const [missions, setMissions] = useState<AoMission[]>([]);
+  // The open chat's own runs (chatRunsWithHistory): the replies `missions`, the project's newest 100
+  // runs, no longer holds. Read again after a change that can hide some (loadMissions).
+  const [chatHistory, setChatHistory] = useState<{ workspaceId: string; taskId: string; runs: AoMission[] } | null>(null);
+  const [chatHistoryRead, setChatHistoryRead] = useState(0);
   // Runs whose Stop is still going through; the chat shows them stopped already (stopChatRun).
   const [stoppingRuns, setStoppingRuns] = useState<string[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
@@ -792,6 +796,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     if (selection.current.workspaceId !== id) return;
     setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
     setMissions(runs);
+    setChatHistoryRead((count) => count + 1);
     setGoals(chatGoals(current));
     setWakeups(chatWakeups(current));
     setLoops(chatLoops(current));
@@ -2162,9 +2167,13 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     await moduleCall("chat_delete_message", { workspaceId, taskId, index, runId, runIds: more });
     await loadMissions(workspaceId);
   });
-  /** A chat as Codex turns, read fresh (the board list omits task descriptions). */
-  const chatTranscript = async (taskId: string) => chatTurns(missions.filter((mission) => mission.project_id === taskId) as unknown as ChatRun[],
-    await loadDescription(taskId), { describe: describeChatNode, activity: chatActivity, now: Date.now() });
+  /** A chat as Codex turns, read fresh (the board list omits task descriptions), with its runs the project's read no longer holds. */
+  const chatTranscript = async (taskId: string) => {
+    const recent = missions.filter((mission) => mission.project_id === taskId);
+    const own = await moduleCall("runs", { workspaceId, taskId }).catch(() => null);
+    const runs = Array.isArray(own?.runs) ? chatRunsWithHistory(recent, own.runs as AoMission[]) : recent;
+    return chatTurns(runs as unknown as ChatRun[], await loadDescription(taskId), { describe: describeChatNode, activity: chatActivity, now: Date.now() });
+  };
   const copyChat = (taskId: string, what: "title" | "conversation" | "answer" | "id") => void (async () => {
     let text = what === "title" ? taskName(taskId) : what === "id" ? taskId : "";
     if (what === "conversation" || what === "answer") {
@@ -2584,8 +2593,23 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   // What the chat list and the open chat are given stays the same object until it changes. Built
   // inline it was new on every render (each second's activity read, each poll), and the open chat
   // rebuilds its whole transcript from it, so a project switch rebuilt the conversation many times.
-  const shownMissions = useMemo(() => stoppingRuns.length
-    ? missions.map((mission) => stoppingRuns.includes(mission.id) ? chatRunStopping(mission) : mission) : missions, [missions, stoppingRuns]);
+  // The open chat's runs the project's read no longer holds are read with the chat's own read: again
+  // once its oldest run there changes (one dropped out, or its first arrived).
+  const oldestShownRun = useMemo(() => missions.find((mission) => mission.workspace_id === workspaceId && mission.project_id === chatTaskId)?.id ?? "",
+    [missions, workspaceId, chatTaskId]);
+  useEffect(() => {
+    if (!workspaceId || !chatTaskId) return;
+    let live = true;
+    void moduleCall("runs", { workspaceId, taskId: chatTaskId }).then((current) => {
+      if (live && Array.isArray(current.runs)) setChatHistory({ workspaceId, taskId: chatTaskId, runs: current.runs as AoMission[] });
+    }).catch(() => { /* The project's read still shows the chat's newest runs. */ });
+    return () => { live = false; };
+  }, [workspaceId, chatTaskId, oldestShownRun, chatHistoryRead]);
+  const shownMissions = useMemo(() => {
+    const all = chatHistory && chatHistory.workspaceId === workspaceId && chatHistory.taskId === chatTaskId
+      ? chatRunsWithHistory(missions, chatHistory.runs) : missions;
+    return stoppingRuns.length ? all.map((mission) => stoppingRuns.includes(mission.id) ? chatRunStopping(mission) : mission) : all;
+  }, [missions, stoppingRuns, chatHistory, workspaceId, chatTaskId]);
   const threadChats = useMemo(() => chatList(shownMissions, allTasks, taskLifecycle), [shownMissions, allTasks, taskLifecycle]);
   const threadArchived = useMemo(() => chatArchived(shownMissions, allTasks, taskLifecycle), [shownMissions, allTasks, taskLifecycle]);
   const chatRuns = useMemo(() => {
