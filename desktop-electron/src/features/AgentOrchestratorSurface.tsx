@@ -6,7 +6,7 @@ import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat, syncChatQueues, type ChatQueueActions } from "./AgentOrchestratorChat";
-import { ChatThreadList, type ArchivedChat, type ThreadWorkspace } from "./ChatThreadList";
+import { ChatThreadList, type ArchivedChat, type ThreadActions, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
   SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, movePane, normalizeSplit, paneOrder, readSplit, relocatePane, spatialNeighbour, splitColumns,
@@ -16,7 +16,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
 import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection } from "./chat-pages";
@@ -292,7 +292,34 @@ function rememberChatRoute(route: AoRoute) {
   try { localStorage.setItem(LAST_CHAT_ROUTE, JSON.stringify(kept)); } catch { /* New chats keep the default model. */ }
 }
 
-export async function moduleCall(operation: string, args: JsonObject = {}) {
+/**
+ * Callbacks that keep their identity for the component's life and call the latest render's
+ * functions (React's useEffectEvent), for a memoized child. The keys never change. The functions
+ * are taken at render, not in an effect: a call made before that render commits (a click handled
+ * between the two) would reach the render before it.
+ */
+function useStableCalls<T extends Record<string, ((...args: any[]) => any) | undefined>>(calls: T): T {
+  const latest = useRef(calls);
+  latest.current = calls;
+  return useMemo(() => Object.fromEntries(Object.keys(calls).map((key) => [key,
+    (...args: any[]) => latest.current[key]?.(...args)])) as T, []);
+}
+
+// The same read asked again while it is still on its way shares that call. Every split pane polls
+// its project's runs and board, and an AO push makes each pane of a project read at the same
+// moment: ten panes read the same runs ten times over IPC, each copy cloned on the renderer thread.
+const SHARED_READS = new Set(["runs", "board"]);
+const readsInFlight = new Map<string, Promise<Record<string, unknown>>>();
+export function moduleCall(operation: string, args: JsonObject = {}): Promise<Record<string, unknown>> {
+  if (!SHARED_READS.has(operation)) return callModule(operation, args);
+  const key = `${operation}\n${JSON.stringify(args)}`;
+  const pending = readsInFlight.get(key);
+  if (pending) return pending;
+  const read = callModule(operation, args).finally(() => readsInFlight.delete(key));
+  readsInFlight.set(key, read);
+  return read;
+}
+async function callModule(operation: string, args: JsonObject) {
   const outer = await getCodingToolsClient().apps.call({
     moduleId: "agent-orchestrator", operation, arguments: args,
   });
@@ -573,6 +600,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const [workspaceName, setWorkspaceName] = useState("");
   const [board, setBoard] = useState<Board | null>(null);
   const [missions, setMissions] = useState<AoMission[]>([]);
+  // The open chat's own runs (chatRunsWithHistory): the replies `missions`, the project's newest 100
+  // runs, no longer holds. Read again after a change that can hide some (loadMissions).
+  const [chatHistory, setChatHistory] = useState<{ workspaceId: string; taskId: string; runs: AoMission[] } | null>(null);
+  const [chatHistoryRead, setChatHistoryRead] = useState(0);
   // Runs whose Stop is still going through; the chat shows them stopped already (stopChatRun).
   const [stoppingRuns, setStoppingRuns] = useState<string[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
@@ -792,6 +823,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     if (selection.current.workspaceId !== id) return;
     setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
     setMissions(runs);
+    setChatHistoryRead((count) => count + 1);
     setGoals(chatGoals(current));
     setWakeups(chatWakeups(current));
     setLoops(chatLoops(current));
@@ -1301,13 +1333,30 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     if (pending) configuration.current?.cancel(pending);
     void chatRun(taskId, async () => {
       const operation = action === "cancel_schedule" ? action : `${action}_task`;
-      await moduleCall(operation,{workspaceId:scope.workspaceId,taskId:scope.taskId});
-      if (selection.current.workspaceId !== scope.workspaceId) return;
-      await Promise.all([loadBoard(scope.workspaceId),loadMissions(scope.workspaceId)]);
-      if (selection.current.taskId === taskId && ["archive","delete"].includes(action)) {
-        setChatTaskId("");setDraftTeam(null);setInspectedId("");
+      const result = await moduleCall(operation,{workspaceId:scope.workspaceId,taskId:scope.taskId});
+      if (result.cancelled === true || selection.current.workspaceId !== scope.workspaceId) return;
+      // The chat leaves (or returns to) the list as soon as the change is saved, from the lifecycle it
+      // returns: it waited for the project's board and runs to be read again, seconds on a busy app.
+      const life = result.lifecycle as TaskLifecycleView | undefined;
+      if (life?.task_id === taskId) setTaskLifecycle(current => [...current.filter(item => item.task_id !== taskId),
+        { ...current.find(item => item.task_id === taskId), ...life }]);
+      if (["archive","delete"].includes(action)) {
+        if (selection.current.taskId === taskId) { setChatTaskId("");setDraftTeam(null);setInspectedId(""); }
+        // A split pane showing it closes, as the open chat does.
+        for (const item of splitPanes) if (item.taskId === taskId && item.workspaceId === scope.workspaceId) closeSplitPane(item.id);
       }
+      await Promise.all([loadBoard(scope.workspaceId),loadMissions(scope.workspaceId)]);
     }).catch(() => {});
+  };
+  /** Archives or deletes a chat of another project the list shows (its own row, a split pane's chat). */
+  const chatLifecycleIn = (id: string, taskId: string, action: "archive" | "delete") => {
+    if (id === workspaceId) { missionAction(taskId, action); return Promise.resolve(); }
+    return chatRun(taskId, async () => {
+      const result = await moduleCall(`${action}_task`, { workspaceId: id, taskId });
+      if (result.cancelled === true) return;
+      for (const item of splitPanes) if (item.taskId === taskId && item.workspaceId === id) closeSplitPane(item.id);
+      void loadArchived();
+    });
   };
   const submitSchedule = () => void run("schedule",async()=>{
     const target=scheduleTarget;
@@ -2133,12 +2182,22 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   });
   // "Archive chats" on a project: each chat goes through the lifecycle's own archive (which asks
   // before stopping a chat's running work), one after another.
-  const archiveAllChats = () => void run("archive-all", async () => {
-    const chats = chatList(missions, allTasks, taskLifecycle);
-    for (const entry of chats) await moduleCall("archive_task", { workspaceId, taskId: entry.taskId });
+  // Each chat goes through chatRun like its own Archive: run() skipped the whole action while anything
+  // else was in flight (a team save, a start awaiting consent), so "Archive chats" could do nothing.
+  // Declining one chat's confirmation stops the rest instead of asking for every chat.
+  const archiveAllChats = () => void (async () => {
+    const id = workspaceId;
+    for (const entry of chatList(missions, allTasks, taskLifecycle)) {
+      let declined = false;
+      await chatRun(entry.taskId, async () => {
+        declined = (await moduleCall("archive_task", { workspaceId: id, taskId: entry.taskId })).cancelled === true;
+      }).catch(() => undefined);
+      if (declined || selection.current.workspaceId !== id) break;
+    }
+    if (selection.current.workspaceId !== id) return;
     setChatTaskId("");
-    await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
-  });
+    await Promise.all([loadBoard(id), loadMissions(id)]);
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Rewind the conversation and run the selected message again; workspace files stay unchanged.
   const rewindChat = (taskId: string, upTo: number) => (async () => {
     const description = await loadDescription(taskId);
@@ -2162,9 +2221,13 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     await moduleCall("chat_delete_message", { workspaceId, taskId, index, runId, runIds: more });
     await loadMissions(workspaceId);
   });
-  /** A chat as Codex turns, read fresh (the board list omits task descriptions). */
-  const chatTranscript = async (taskId: string) => chatTurns(missions.filter((mission) => mission.project_id === taskId) as unknown as ChatRun[],
-    await loadDescription(taskId), { describe: describeChatNode, activity: chatActivity, now: Date.now() });
+  /** A chat as Codex turns, read fresh (the board list omits task descriptions), with its runs the project's read no longer holds. */
+  const chatTranscript = async (taskId: string) => {
+    const recent = missions.filter((mission) => mission.project_id === taskId);
+    const own = await moduleCall("runs", { workspaceId, taskId }).catch(() => null);
+    const runs = Array.isArray(own?.runs) ? chatRunsWithHistory(recent, own.runs as AoMission[]) : recent;
+    return chatTurns(runs as unknown as ChatRun[], await loadDescription(taskId), { describe: describeChatNode, activity: chatActivity, now: Date.now() });
+  };
   const copyChat = (taskId: string, what: "title" | "conversation" | "answer" | "id") => void (async () => {
     let text = what === "title" ? taskName(taskId) : what === "id" ? taskId : "";
     if (what === "conversation" || what === "answer") {
@@ -2584,8 +2647,23 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   // What the chat list and the open chat are given stays the same object until it changes. Built
   // inline it was new on every render (each second's activity read, each poll), and the open chat
   // rebuilds its whole transcript from it, so a project switch rebuilt the conversation many times.
-  const shownMissions = useMemo(() => stoppingRuns.length
-    ? missions.map((mission) => stoppingRuns.includes(mission.id) ? chatRunStopping(mission) : mission) : missions, [missions, stoppingRuns]);
+  // The open chat's runs the project's read no longer holds are read with the chat's own read: again
+  // once its oldest run there changes (one dropped out, or its first arrived).
+  const oldestShownRun = useMemo(() => missions.find((mission) => mission.workspace_id === workspaceId && mission.project_id === chatTaskId)?.id ?? "",
+    [missions, workspaceId, chatTaskId]);
+  useEffect(() => {
+    if (!workspaceId || !chatTaskId) return;
+    let live = true;
+    void moduleCall("runs", { workspaceId, taskId: chatTaskId }).then((current) => {
+      if (live && Array.isArray(current.runs)) setChatHistory({ workspaceId, taskId: chatTaskId, runs: current.runs as AoMission[] });
+    }).catch(() => { /* The project's read still shows the chat's newest runs. */ });
+    return () => { live = false; };
+  }, [workspaceId, chatTaskId, oldestShownRun, chatHistoryRead]);
+  const shownMissions = useMemo(() => {
+    const all = chatHistory && chatHistory.workspaceId === workspaceId && chatHistory.taskId === chatTaskId
+      ? chatRunsWithHistory(missions, chatHistory.runs) : missions;
+    return stoppingRuns.length ? all.map((mission) => stoppingRuns.includes(mission.id) ? chatRunStopping(mission) : mission) : all;
+  }, [missions, stoppingRuns, chatHistory, workspaceId, chatTaskId]);
   const threadChats = useMemo(() => chatList(shownMissions, allTasks, taskLifecycle), [shownMissions, allTasks, taskLifecycle]);
   const threadArchived = useMemo(() => chatArchived(shownMissions, allTasks, taskLifecycle), [shownMissions, allTasks, taskLifecycle]);
   const chatRuns = useMemo(() => {
@@ -2622,29 +2700,49 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const restartChat = useCallback((runId: string) => chatHandlers.current.restartChatRun(runId), []);
   const stopChat = useCallback((runId: string) => chatHandlers.current.stopChatRun(runId), []);
 
+  // The chat list is memoized: what it is given keeps its identity until it changes, and its
+  // callbacks call this render's handlers. It was redrawn (and re-read its saved orders) on every
+  // render here, each second's activity read included.
+  const listCalls = useStableCalls({
+    chooseWorkspace, restoreArchived, setArchiveDays, togglePin, markUnread, toggleProjectPin, readProjectGit,
+    projectRemote: (folder: string) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null),
+  });
+  const listActions = useStableCalls<ThreadActions>({ select: (taskId) => showChat(workspaceId, taskId), newChat: () => openNewChat(), rename: renameChat,
+    lifecycle: missionAction, archiveAll: archiveAllChats,
+    fork: (taskId, from) => forkChat(taskId, from === "first" ? "first" : undefined), copy: copyChat,
+    openStructure: (taskId) => selectChat(taskId, "overview"), openBoard: () => { setSheet(""); setView("board"); }, openFolder,
+    openSettings: () => setSettingsOpen(true),
+    continueIn: continueInProject, share: shareChat, openWindow: openChatWindow,
+    openSplit: (id, taskId) => openInSplit(id || workspaceId, taskId),
+    // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
+    newChatIn: (id) => openNewChat(id),
+    editProject: (id) => setProjectEdit({ id, step: "edit" }),
+    removeProject: (id) => setProjectEdit({ id, step: "remove" }),
+    selectIn: (id, taskId) => showChat(id, taskId),
+    lifecycleIn: chatLifecycleIn });
+  const workspaceRows = workspaces.map((item) => `${item.id}\n${item.name}\n${item.path ?? ""}`).join("\n\n");
+  const threadWorkspaces = useMemo(() => workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path })), [workspaceRows]);
+  const openIds = [chatTaskId ?? "", ...splitPanes.map((item) => item.taskId)].filter(Boolean).join("\n");
+  const threadOpenIds = useMemo(() => openIds ? openIds.split("\n") : [], [openIds]);
+  // The same element while its inputs are the same: React then skips drawing the list again.
+  const listSelected = focusedSplit ? focusedSplit.taskId : chatTaskId ?? "";
+  const listSelectedWorkspace = focusedSplit ? focusedSplit.workspaceId : workspaceId;
+  const listPending = pendingChat && !pendingChat.taskId ? pendingChat.title : undefined;
+  const listLoading = loadedWorkspace !== workspaceId;
+  const threadList = useMemo(() => pane ? null : <ChatThreadList workspaces={threadWorkspaces} workspaceId={workspaceId} onWorkspace={listCalls.chooseWorkspace}
+    chats={threadChats} archived={threadArchived} selectedTaskId={listSelected} selectedWorkspaceId={listSelectedWorkspace} now={listNow}
+    archivedAll={archivedAll ?? undefined} restoreArchived={listCalls.restoreArchived} setArchiveDays={listCalls.setArchiveDays}
+    pinned={chatPins} togglePin={listCalls.togglePin} unread={chatUnread} setUnread={listCalls.markUnread}
+    pinnedProjects={projectPins} toggleProjectPin={listCalls.toggleProjectPin}
+    busyTaskIds={chatBusy} openTaskIds={threadOpenIds} pendingTitle={listPending}
+    actions={listActions} loadProjectChats={loadProjectChats} chatsLoading={listLoading}
+    projectRemote={listCalls.projectRemote} projectGit={listCalls.readProjectGit} />,
+  [pane, threadWorkspaces, workspaceId, threadChats, threadArchived, listSelected, listSelectedWorkspace, listNow, archivedAll, chatPins, chatUnread,
+    projectPins, chatBusy, threadOpenIds, listPending, listLoading, loadProjectChats, listCalls, listActions]);
+
   return (
     <section className={pane ? "ao-workflow cx-pane-surface" : "ao-workflow"} aria-label={copy.title} lang={language}>
-      {pane ? null : <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
-        chats={threadChats} archived={threadArchived} selectedTaskId={focusedSplit ? focusedSplit.taskId : chatTaskId ?? ""} now={listNow}
-        archivedAll={archivedAll ?? undefined} restoreArchived={restoreArchived} setArchiveDays={setArchiveDays}
-        pinned={chatPins} togglePin={togglePin} unread={chatUnread} setUnread={markUnread}
-        pinnedProjects={projectPins} toggleProjectPin={toggleProjectPin}
-        busyTaskIds={chatBusy} openTaskIds={[chatTaskId ?? "", ...splitPanes.map((item) => item.taskId)].filter(Boolean)} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined}
-        actions={{ select: (taskId) => showChat(workspaceId, taskId), newChat: () => openNewChat(), rename: renameChat,
-          lifecycle: missionAction, archiveAll: archiveAllChats,
-          fork: (taskId, from) => forkChat(taskId, from === "first" ? "first" : undefined), copy: copyChat,
-          openStructure: (taskId) => selectChat(taskId, "overview"), openBoard: () => { setSheet(""); setView("board"); }, openFolder,
-          openSettings: () => setSettingsOpen(true),
-          continueIn: continueInProject, share: shareChat, openWindow: openChatWindow,
-          openSplit: (id, taskId) => openInSplit(id || workspaceId, taskId),
-          // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
-          newChatIn: (id) => openNewChat(id),
-          editProject: (id) => setProjectEdit({ id, step: "edit" }),
-          removeProject: (id) => setProjectEdit({ id, step: "remove" }),
-          selectIn: (id, taskId) => showChat(id, taskId) }}
-        loadProjectChats={loadProjectChats} chatsLoading={loadedWorkspace !== workspaceId}
-        projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)}
-        projectGit={readProjectGit} />}
+      {threadList}
       <div className="ao-main">
       {/* A pane sits inside the window's own chat area: only that one holds the window's drag strip. */}
       {pane ? null : <div className="ao-dragstrip" aria-hidden="true" />}
@@ -2920,7 +3018,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
             if (!saved.available || saved.mode !== mode) throw new Error(saved.reason || "Couldn't save where chats work. Try again.");
           }} />;
       })()}
-      {settingsOpen && !pane ? <ChatSettingsPage onClose={() => setSettingsOpen(false)} /> : null}
+      {settingsOpen && !pane ? <ChatSettingsPage onClose={() => setSettingsOpen(false)} onArchiveChanged={() => void loadArchived()} /> : null}
     </section>
   );
 }

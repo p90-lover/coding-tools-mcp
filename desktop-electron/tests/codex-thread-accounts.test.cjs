@@ -217,7 +217,9 @@ function accountHost({ retained = [], account }) {
     resolveTurnAccount: async () => (account ? { ...account, chatLifecycleSync: registry(account.accountId) } : null),
     async createTurnTab(...args) {
       created.push(args);
-      return { id: "new-tab", surfaceId: "surface-new", view: { webContents: {} } };
+      const tab = { id: "new-tab", surfaceId: "surface-new", view: { webContents: {} }, startRequest: args[6] };
+      this.turnTabs.set(tab.id, tab);
+      return tab;
     },
     syncViewVisibility() {}, publishState() {}, writeDescriptor() {}, snapshot: () => ({}),
     logger: { info() {}, warn() {} },
@@ -236,7 +238,8 @@ test("a thread's turn opens its tab on the account it is bound to and reads that
   const lease = await BrowserHost.prototype.beginTurn.call(host, "trace", false, 42, KEY, undefined, false, null, THREAD);
   assert.equal(lease.reused, false);
   assert.equal(created.length, 1);
-  assert.deepEqual(created[0].at(-1).partition, account.partition, "the new tab gets the thread's account");
+  assert.deepEqual(created[0][5].partition, account.partition, "the new tab gets the thread's account");
+  assert.equal(created[0][6], null, "the request marker reaches tab registration");
   assert.deepEqual(lookups.map(([name]) => name), [SECOND], "the saved chat is looked up on that account");
 
   await assert.rejects(

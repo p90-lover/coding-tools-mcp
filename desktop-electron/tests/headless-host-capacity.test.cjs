@@ -69,7 +69,7 @@ function slottedService(slots) {
 test("a startup burst larger than the service's slots waits its turn instead of being refused", async (t) => {
   const service = slottedService(16);
   const host = await hostAgainst(service.handler, t);
-  const burst = Array.from({ length: 35 }, () => host.request("/api/v1/ao/read", {}));
+  const burst = Array.from({ length: 35 }, (_, i) => host.request("/api/v1/ao/read", { run_id: `run-${i}` }));
   // Each slot is held for far longer than every capacity retry (a slow read on the HDD).
   while (service.served < 35) {
     await new Promise((resolve) => setTimeout(resolve, 1100));
@@ -78,7 +78,7 @@ test("a startup burst larger than the service's slots waits its turn instead of 
   const results = await Promise.all(burst);
   assert.equal(results.every((result) => result.ok), true, "every request succeeded");
   assert.equal(service.refused, 0, "the service never turned one away");
-  assert.equal(service.peak, 12, "the launcher keeps its own requests below the service's 16 slots");
+  assert.equal(service.peak, 10, "ordinary reads leave two of the launcher's twelve slots for controls");
   assert.deepEqual(host.turns, { active: 0, waiting: [] });
 });
 
@@ -88,7 +88,7 @@ test("a request whose turn does not come in time fails as the service would, and
   host.maxInFlight = 1;
   host.queueWaitMs = 50;
   const first = host.request("/api/v1/ao/read", {});
-  await assert.rejects(host.request("/api/v1/ao/read", {}), /HEADLESS_CAPACITY: .*queue did not clear/);
+  await assert.rejects(host.request("/api/v1/ao/read", { run_id: "other" }), /HEADLESS_CAPACITY: .*queue did not clear/);
   assert.equal(host.turns.waiting.length, 0);
   const answer = async (pending) => {
     while (!service.held.length) await new Promise((resolve) => setImmediate(resolve));
@@ -107,7 +107,7 @@ test("a failed request still passes its turn on", async (t) => {
     response.end(JSON.stringify({ error: { message: "AO run not found in this workspace" } }));
   }, t);
   host.maxInFlight = 1;
-  const results = await Promise.allSettled([1, 2, 3].map(() => host.request("/api/v1/ao/read", {})));
+  const results = await Promise.allSettled([1, 2, 3].map(i => host.request("/api/v1/ao/read", { run_id: `run-${i}` })));
   assert.deepEqual(results.map((result) => result.status), ["rejected", "rejected", "rejected"]);
   assert.equal(calls, 3);
   assert.deepEqual(host.turns, { active: 0, waiting: [] });

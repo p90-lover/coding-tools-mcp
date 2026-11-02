@@ -20,7 +20,7 @@ const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const PRODUCT = Object.freeze({
   name: "Coding Tools",
   packageName: "coding-tools-full-harness-desktop",
-  version: "0.8.52",
+  version: "0.8.56",
   appId: "dev.codingtools.fullharness",
   platform: "win32",
   arch: "x64",
@@ -48,8 +48,8 @@ const OFFICIAL_TUNNEL_RELEASE = Object.freeze({
   spdxName: "tunnel-client-v0.0.16-windows-amd64.spdx.json",
   spdxSha256: "4a4852a97ee25d7f72b6ffc54378e57b72b4047959c1d9eede6606efece10bd5",
   cloudflaredBinaryName: "cloudflared.exe",
-  cloudflaredVersion: "2026.7.2",
-  cloudflaredReleaseCommit: "8679787525edc8575b2948a7c4a50b6292c6d426",
+  cloudflaredVersion: "2026.8.2",
+  cloudflaredReleaseCommit: "733bfb939963e150dcf5c4faddb1603f744fbc98",
 });
 const REQUIRED_TUNNEL_MEMBERS = Object.freeze([
   "LICENSE",
@@ -280,8 +280,8 @@ function validateExpectedTunnelRelease(release) {
     || release.spdxName !== "tunnel-client-v0.0.16-windows-amd64.spdx.json"
     || !SHA256.test(release.spdxSha256)
     || release.cloudflaredBinaryName !== "cloudflared.exe"
-    || release.cloudflaredVersion !== "2026.7.2"
-    || release.cloudflaredReleaseCommit !== "8679787525edc8575b2948a7c4a50b6292c6d426") {
+    || release.cloudflaredVersion !== "2026.8.2"
+    || release.cloudflaredReleaseCommit !== "733bfb939963e150dcf5c4faddb1603f744fbc98") {
     fail("PACKAGE_TUNNEL_EXPECTED_RELEASE_INVALID", JSON.stringify(release));
   }
   return release;

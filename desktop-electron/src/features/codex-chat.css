@@ -100,14 +100,18 @@
   border: 2px solid color-mix(in srgb, var(--cc-muted) 22%, transparent); border-top-color: var(--cc-text-2); border-right-color: var(--cc-text-2);
   animation: cx-spin .8s linear infinite; }
 .cx-thread-dot.status-attention { background: var(--cc-warning); }
+/* A paused chat still has work to resume: a muted dot, so it does not look finished. */
+.cx-thread-dot.status-paused { background: var(--cc-muted); box-shadow: 0 0 0 .5px var(--cc-side-bg); }
 .cx-thread-row.is-unread .cx-thread-dot:not(.status-running):not(.status-queued):not(.status-attention) { background: var(--cc-accent); box-shadow: 0 0 0 .5px var(--cc-side-bg); }
 @keyframes cx-spin { to { transform: rotate(360deg); } }
 /* On hover the dot gives way to "More options" (24 px). */
 .cx-thread-more { position: absolute; top: 50%; right: 0; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
   padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; opacity: 0; transform: translateY(-50%);
   transition: opacity .15s ease; }
-.cx-thread-row:hover .cx-thread-more, .cx-thread-row:focus-within .cx-thread-more { opacity: 1; }
-.cx-thread-row:hover .cx-thread-dot, .cx-thread-row:focus-within .cx-thread-dot { opacity: 0; }
+/* Keyboard focus only: a clicked row keeps focus on its button, and with :focus-within the open
+   chat's spinner stayed hidden after the click, so a running chat showed as idle. */
+.cx-thread-row:hover .cx-thread-more, .cx-thread-row:has(:focus-visible) .cx-thread-more { opacity: 1; }
+.cx-thread-row:hover .cx-thread-dot, .cx-thread-row:has(:focus-visible) .cx-thread-dot { opacity: 0; }
 .cx-thread-more:hover { background: var(--cc-hover-selected); color: var(--cc-text); }
 .cx-thread-row.is-renaming input { width: 100%; height: 28px; padding: 0 10px; border: 1px solid var(--cc-accent); border-radius: 6px; background: var(--color-bg-primary); color: inherit; font: inherit; font-size: 13px; }
 .cx-thread-empty { padding: 4px 10px; color: var(--cc-muted); font-size: 12px; }
@@ -1113,11 +1117,16 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   .ao-workflow .cx-branch-option { transition: none; }
   .ao-workflow .cx-branch-option:hover:not(:disabled) { transform: none; }
 }
-.ao-workflow .cx-composer .ao-mode-switch { gap: 0; padding: 0; border: 0; background: transparent; }
-.ao-workflow .cx-composer .ao-mode-switch button { height: 30px; padding: 0 6px; border-radius: 8px; color: var(--ao-muted); font-size: 13px; }
-.ao-workflow .cx-composer .ao-mode-switch button.is-active { background: transparent; box-shadow: none; color: var(--color-text-primary); }
-.ao-workflow .cx-composer .ao-mode-switch button:hover:not(:disabled) { background: var(--cx-hover); }
-.ao-workflow .cx-composer .ao-mode-switch button + button::before { content: "|"; margin-right: 6px; color: var(--ao-line); }
+/* Single | Team: a person and a group on a track, the picked one on a tinted thumb that slides over. */
+.ao-workflow .cx-composer .ao-mode-switch { position: relative; flex: none; gap: 0; margin: 0 2px; padding: 2px; border: 1px solid var(--ao-line); border-radius: 9px; background: transparent; }
+.ao-workflow .cx-composer .ao-mode-switch::before { position: absolute; top: 2px; left: 2px; width: 26px; height: 24px; border-radius: 7px;
+  background: color-mix(in srgb, var(--ao-blue) 14%, transparent); content: ""; transition: transform .18s cubic-bezier(.2, 0, 0, 1); }
+.ao-workflow .cx-composer .ao-mode-switch[data-mode="team"]::before { transform: translateX(26px); }
+.ao-workflow .cx-composer .ao-mode-switch button { position: relative; display: grid; place-items: center; width: 26px; height: 24px; padding: 0; border-radius: 7px; color: var(--ao-muted); }
+.ao-workflow .cx-composer .ao-mode-switch button.is-active { background: transparent; box-shadow: none; color: var(--ao-blue); }
+.ao-workflow .cx-composer .ao-mode-switch button:hover:not(:disabled, .is-active) { background: transparent; color: var(--color-text-primary); }
+.ao-workflow .cx-composer .ao-mode-switch button:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) { .ao-workflow .cx-composer .ao-mode-switch::before { transition: none; } }
 .cx-send { display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%;
   background: var(--ao-blue); color: #fff; cursor: pointer; }
 .cx-send svg { transform: rotate(-90deg); }
@@ -1377,10 +1386,19 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }
 .cx-goal-meta, .cx-goal-note { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The goal check's verdict: a box of its own on the last row, under the goal bar and anything beside it. */
-.cx-goal-verdict { flex: 1 0 100%; order: 1; box-sizing: border-box; min-width: 0; padding: 5px 10px; border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-primary); color: var(--ao-muted); font-size: 12px; line-height: 1.45; }
-/* Three lines at most (the whole verdict is its tooltip); clamped inside the padding, not through it. */
-.cx-goal-verdict > span { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+/* The goal check's verdict, opened from the goal bar's target: a box of its own on the row above the
+   bar (GoalBar renders it first). Asked for, it shows whole; a long one scrolls after eight lines. */
+.cx-goal-verdict { flex: 1 0 100%; box-sizing: border-box; min-width: 0; max-height: calc(8 * 1.45em + 10px); padding: 5px 10px; overflow-y: auto;
+  border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-primary); color: var(--ao-muted); font-size: 12px; line-height: 1.45;
+  animation: cx-goal-verdict-in .14s ease-out; }
+.cx-goal-verdict > span { display: block; overflow-wrap: anywhere; white-space: pre-wrap; }
+@keyframes cx-goal-verdict-in { from { opacity: 0; transform: translateY(3px); } }
+@media (prefers-reduced-motion: reduce) { .cx-goal-verdict { animation: none; } }
+/* The target folds and opens it; a dot on it says there is a check to read (amber: the goal waits). */
+.cx-goal .cx-goal-target { position: relative; margin-left: -6px; }
+.cx-goal .cx-goal-target[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-goal-dot { position: absolute; top: 4px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: var(--ao-blue); box-shadow: 0 0 0 1.5px var(--color-bg-primary); }
+.cx-goal:is(.is-stalled, .is-limited) .cx-goal-dot { background: var(--ao-amber); }
 /* A goal's later round, as Claude Code shows a Stop hook's feedback: a dim "⎿" line, not a message bubble. */
 .cx-goal button, .cx-plan-chip button { display: inline-flex; align-items: center; padding: 2px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font-size: 12px; cursor: pointer; }
 .cx-goal button:hover, .cx-plan-chip button:hover { background: var(--cx-hover); color: var(--color-text-primary); }
@@ -1821,3 +1839,68 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-archived-count { margin-left: auto; padding-left: 6px; color: var(--ao-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .cx-thread-badge.is-quiet { color: var(--ao-muted); }
 .cx-deleted-head .cx-thread-title { color: var(--ao-muted); }
+
+/* ---------- A narrow chat (a split pane, a small window) ----------
+   The head's buttons and the chat box's chips kept one row however narrow the chat got: flex shrank
+   every button with the title, to its 16 px icon (17 px even in a 640 px pane), the permission, model
+   and effort chips shrank to nothing, and under ~480 px the head ran over into the next pane, where
+   clicks landed on the other chat (2026-11-02). Buttons keep their size now. A narrow chat drops what
+   its More menu repeats, shows chips as icons, and lays the chat box out on two rows.
+   Measured on the thread, not the window: split panes share one window width. */
+.cx-thread { container: cx-thread / inline-size; }
+.cx-thread-head > :is(.cx-icon-button, .cx-browser-chip), .cx-composer-bar > :is(.cx-icon-button, .cx-send) { flex: none; }
+@container cx-thread (max-width: 720px) {
+  /* Two rows, each with a fixed job. On top, what runs the chat: the harness and model, then effort
+     and window at the right end (the model name gives up the room). Under it, attach, permissions
+     and Single | Team, then the context ring and Send at the right end, where Send always is. The
+     controls' box steps aside (display: contents), so its chips can sit on either row. Folded onto
+     as many rows as they needed, the chips read as a pile (four rows at 340 px); kept on one row
+     under ~720 px, the permission and model names were cut to "Ask fo…" and "Opus 4…". */
+  .cx-composer-bar { flex-wrap: wrap; gap: 2px 4px; }
+  .cx-composer-bar .ao-composer-controls { display: contents; }
+  .cx-composer-bar > *, .cx-composer-bar .ao-composer-controls > * { order: 2; }
+  .cx-composer-bar .ao-composer-controls > .ao-composer-picker:not(.ao-permissions) { order: 0; }
+  .cx-composer-bar::before { flex: 0 0 100%; order: 1; content: ""; }
+  .cx-composer-bar .ao-composer-controls + .cx-head-spacer { display: block; flex: 1 1 0; }
+  /* A wrapping row breaks at its items' own widths before it shrinks any, so the model (or saved team)
+     starts from no width and takes what the row leaves: effort and window stay on its row, at its end. */
+  .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child { margin-left: 0; }
+  .ao-workflow .cx-composer .ao-composer-picker:has(> .ao-composer-chip:is([aria-label="Choose model"], [aria-label="Choose saved team"])) { flex: 1 1 0; min-width: 0; }
+  /* The goal bar: the round is in its tooltip, and Model judges is its switch alone. */
+  .cx-goal-round, .cx-model-judges.is-compact > span:last-child { display: none; }
+}
+@container cx-thread (max-width: 560px) {
+  .cx-thread-head { gap: 4px; padding: 0 10px 0 14px; }
+  /* Both are in the More menu: "Compact activity" and "Mission Board". */
+  .cx-thread-head > :is(.cx-compact-toggle, [aria-label="Open Mission Board"]) { display: none; }
+  .cx-browser-chip { padding: 0 8px; }
+  .cx-browser-chip > span:last-child { display: none; }
+  .cx-head-team { min-width: 0; }
+  .cx-head-team select { min-width: 0; max-width: 120px; }
+  /* The bars above and below the chat box keep its width, so the goal and queued bars line up with it. */
+  :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 24px); }
+  /* The mic is a placeholder ("isn't available yet"); the permission chip keeps its icon, its name on hover. */
+  .cx-composer-bar > .cx-mic { display: none; }
+  .ao-workflow .cx-composer .ao-permissions > .ao-composer-chip > span { display: none; }
+  /* The goal bar's objective takes a line of its own under its state and buttons, beside its time:
+     on one line it got a few letters, and in a 350 px pane none at all. */
+  .cx-goal { flex-wrap: wrap; row-gap: 0; }
+  .cx-goal-state { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cx-goal-objective { order: 1; flex: 1 1 60%; padding-left: 20px; }
+  .cx-goal .cx-goal-meta { order: 2; }
+}
+@container cx-thread (max-width: 400px) {
+  .cx-thread-head > :is(.cx-head-folder, .cx-status) { display: none; }
+  :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 16px); }
+}
+/* A window narrowed under split panes squeezes them below the 320 px a dragged divider keeps. Preview
+   (or the browser chip), Show cards and Side panel move to the More menu (NARROW_HEAD_PX in
+   AgentOrchestratorChat.tsx); Chat details stays, its panel opens under its button. */
+@container cx-thread (max-width: 300px) {
+  .cx-thread-head { padding: 0 6px 0 10px; }
+  .cx-thread-head > :is(.cx-browser-chip, [aria-label="Preview"], [aria-label="Show cards"], [aria-label="Show side panel"]) { display: none; }
+  /* The chat box's chips drop their carets (each is still a menu, named on hover) to keep both rows whole. */
+  .cx-composer-bar { column-gap: 2px; }
+  .ao-workflow .cx-composer .ao-composer-chip > .ui-caret { display: none; }
+  .cx-goal { gap: 4px; }
+}

@@ -4,46 +4,56 @@
 // every IPC call waits, and nothing else can say so: the renderer watchdog's events come from
 // this same loop. A short timer that fires late measures the block after the fact.
 //
-// cpuMs is the main process's own CPU time during the late gap. About as much CPU as the gap
-// means our own JavaScript ran the whole time (a big parse, a sync loop); little CPU means it was
-// waiting (synchronous disk I/O on the overloaded drive, or a machine-wide stall).
+// cpuMs is the main process's CPU time during the late gap, over all its threads (workers and
+// Chromium's included); mainCpuMs is the main thread's own. mainCpuMs about as long as the gap
+// means our own JavaScript ran the whole time (a big parse, a sync loop); little of it means main
+// was waiting (synchronous disk I/O on the overloaded drive, or a machine-wide stall), even when
+// cpuMs is high: on 2026-11-02 cpuMs ran past the gap (4.6 s in 4.1 s), so other threads were busy.
 
 const TICK_MS = 500;
 // A UI that is frozen for 2 s is noticeable; shorter late ticks are ordinary scheduling noise.
 const STALL_MS = 2_000;
 
 function createMainStallMonitor({ logger, tickMs = TICK_MS, stallMs = STALL_MS, now = () => performance.now(),
-  cpuUsage = () => process.cpuUsage(), memoryUsage = () => process.memoryUsage(),
+  cpuUsage = () => process.cpuUsage(), threadCpuUsage = () => process.threadCpuUsage?.() ?? null,
+  memoryUsage = () => process.memoryUsage(),
   setRepeat = setInterval, clearRepeat = clearInterval, blockingCalls = null, clock = () => Date.now(),
   probe = null } = {}) {
   let timer = null;
   let last = 0;
   let lastCpu = null;
+  let lastThreadCpu = null;
+  const spentMs = (cpu, before) => Math.round(((cpu.user - before.user) + (cpu.system - before.system)) / 1000);
   const tick = () => {
     probe?.beat();
     const at = now();
     const cpu = cpuUsage();
+    const threadCpu = threadCpuUsage();
     const lateMs = at - last - tickMs;
     if (lateMs >= stallMs) {
-      const cpuMs = Math.round(((cpu.user - lastCpu.user) + (cpu.system - lastCpu.system)) / 1000);
+      const cpuMs = spentMs(cpu, lastCpu);
+      const mainCpuMs = threadCpu && lastThreadCpu ? spentMs(threadCpu, lastThreadCpu) : null;
       // The synchronous call that held main during the gap, when one did (main-blocking-calls.cjs);
       // none with little CPU means main waited elsewhere, or the whole machine stalled.
       const blockedBy = blockingCalls?.latestSince(clock() - lateMs - tickMs) ?? null;
       logger?.warn?.("launcher.main_stalled", {
         ms: Math.round(lateMs),
         cpuMs,
+        ...(mainCpuMs !== null ? { mainCpuMs } : {}),
         heapMb: Math.round(memoryUsage().heapUsed / 1_048_576),
         ...(blockedBy ? { blockedBy } : {}),
       });
     }
     last = at;
     lastCpu = cpu;
+    lastThreadCpu = threadCpu;
   };
   return {
     start() {
       if (timer) return;
       last = now();
       lastCpu = cpuUsage();
+      lastThreadCpu = threadCpuUsage();
       timer = setRepeat(tick, tickMs);
       timer?.unref?.();
     },
@@ -76,6 +86,10 @@ let seen = Atomics.load(counter, 0);
 let changedAt = Date.now();
 let probing = false;
 let probedThisHold = false;
+// When the hold being probed began. The pause handler below is registered once, on the first
+// probe: as that probe's argument it kept the first hold's start, and every later report gave the
+// time since then (6.4 M ms, 2026-11-02) instead of how long that stall held main.
+let heldSince = 0;
 let session = null;
 const timer = setInterval(() => {
   const value = Atomics.load(counter, 0);
@@ -92,7 +106,8 @@ function shortFrame(frame) {
   const file = frameUrl(frame).split(/[\\\\/]/).pop() || "(script)";
   return (frame.functionName || "(anonymous)") + " " + file + ":" + (frame.location.lineNumber + 1);
 }
-function probe(heldSince) {
+function probe(since) {
+  heldSince = since;
   if (!session) {
     try {
       session = new inspector.Session();

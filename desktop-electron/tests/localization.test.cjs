@@ -147,10 +147,8 @@ test("runtime message localization preserves other languages and unknown backend
 
 test("launcher UI localizes MCP verification progress and doctor check messages", () => {
   assert.match(appSource, /localizeRuntimeMessage\(copy, operation\.message, undefined, language\)/);
-  assert.match(
-    appSource,
-    /check\.status === "ok"\s*\?\s*localizeRuntimeMessage\(copy, check\.message, check\.id, language\)\s*:\s*check\.message/,
-  );
+  // v6 localizes every check; localizeRuntimeMessage leaves a failing check's message untranslated (next test).
+  assert.match(appSource, /localizeRuntimeMessage\(copy, check\.message, check\.id, language\)/);
 });
 
 test("Chinese diagnostics cover the same progress and successful checks as Japanese", () => {

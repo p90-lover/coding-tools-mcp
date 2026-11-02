@@ -137,21 +137,25 @@ async function swapIn(job, stamp) {
   }
 }
 
-/** Removes what was set aside; files still running stay listed for the app's next start. */
-function sweep(job, journal) {
+/**
+ * Removes what was set aside; files still running stay listed for the app's next start. Async: the
+ * app's main thread runs it (commitAppliedUpdate), and 58 sync deletes on a busy disk held every
+ * window for 4.7 s after the 0.8.51 update.
+ */
+async function sweep(job, journal) {
   const updateRoot = path.join(job.installRoot, "_update");
   const listPath = path.join(updateRoot, "set-aside.json");
   let remaining = [];
-  try { remaining = JSON.parse(fs.readFileSync(listPath, "utf8")); } catch {}
+  try { remaining = JSON.parse(await fs.promises.readFile(listPath, "utf8")); } catch {}
   if (!Array.isArray(remaining)) remaining = [];
   for (const entry of journal) {
     if (!entry.aside) continue;
-    try { fs.rmSync(entry.aside, { force: true }); }
+    try { await fs.promises.rm(entry.aside, { force: true }); }
     catch { remaining.push(path.relative(job.installRoot, entry.aside).split(path.sep).join("/")); }
   }
   try {
-    if (remaining.length) fs.writeFileSync(listPath, `${JSON.stringify(remaining)}\n`);
-    else fs.rmSync(listPath, { force: true });
+    if (remaining.length) await fs.promises.writeFile(listPath, `${JSON.stringify(remaining)}\n`);
+    else await fs.promises.rm(listPath, { force: true });
   } catch {}
   return remaining.length;
 }

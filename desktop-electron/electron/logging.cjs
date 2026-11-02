@@ -154,6 +154,10 @@ const LOG_FLUSH_MS = 250;
 
 function createLogger({ filePath, publish, persist = true }) {
   const records = [];
+  // Warnings and errors (freezes, memory, failures) also go here. With several chats working,
+  // routine lines filled the 300-record ring in 16 minutes, so a freeze rolled off before anyone
+  // outside the app could read it.
+  const notable = [];
   // Routine app activity stays in memory. Persistent diagnostics are an explicit opt-in; the
   // default app launch must neither replay old logs nor append a file every few hundred ms.
   const restored = (persist ? readRecent(filePath) : Promise.resolve([])).then((previous) => {
@@ -216,6 +220,10 @@ function createLogger({ filePath, publish, persist = true }) {
     };
     records.push(record);
     if (records.length > MAX_MEMORY_RECORDS) records.splice(0, records.length - MAX_MEMORY_RECORDS);
+    if (level === "warning" || level === "error") {
+      notable.push(record);
+      if (notable.length > MAX_MEMORY_RECORDS) notable.splice(0, notable.length - MAX_MEMORY_RECORDS);
+    }
     if (persist) {
       pending.push(`${JSON.stringify(record)}\n`);
       if (!timer && !flushing) schedule();
@@ -230,6 +238,8 @@ function createLogger({ filePath, publish, persist = true }) {
     warn: (event, detail) => append("warning", event, detail),
     error: (event, detail) => append("error", event, detail),
     recent: (limit = 150) => records.slice(-Math.max(1, Math.min(300, limit))),
+    /** This process's last warnings and errors, kept apart from routine lines. */
+    notable: () => notable.slice(),
     /** Settles once the previous process's records are in `recent()`. */
     restored,
     /** Writes every queued line now (tests, and before a deliberate quit). */

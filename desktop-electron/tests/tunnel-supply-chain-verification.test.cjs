@@ -12,8 +12,8 @@ const { validateTunnelSupplyChain } = require("../scripts/verify-package.cjs");
 const ARCHIVE_NAME = "tunnel-client-v0.0.16-windows-amd64.zip";
 const LICENSE_NAME = "tunnel-client-v0.0.16-windows-amd64-licenses.txt";
 const SPDX_NAME = "tunnel-client-v0.0.16-windows-amd64.spdx.json";
-const CLOUDFLARED_VERSION = "2026.7.2";
-const CLOUDFLARED_RELEASE_COMMIT = "8679787525edc8575b2948a7c4a50b6292c6d426";
+const CLOUDFLARED_VERSION = "2026.8.2";
+const CLOUDFLARED_RELEASE_COMMIT = "733bfb939963e150dcf5c4faddb1603f744fbc98";
 
 function sha256(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
