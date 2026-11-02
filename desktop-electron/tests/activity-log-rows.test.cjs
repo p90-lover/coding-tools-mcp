@@ -39,3 +39,112 @@ test("each activity row renders once per record, not once per new log line", () 
   assert.match(app, /const ActivityRow = memo\(function ActivityRow\(\{ record, language \}/);
   assert.match(app, /\.map\(\(record\) => <ActivityRow key=\{logKey\(record\)\} record=\{record\} language=\{language\} \/>\)/);
 });
+
+function loadLogStore() {
+  const visibilityListeners = new Set();
+  let away = false, notifications = 0, snapshot, cleanup, subscribed, memoized, dependencies;
+  const document = {
+    visibilityState: "visible",
+    documentElement: { hasAttribute: (name) => name === "data-window-away" && away },
+    addEventListener: (name, listener) => { assert.equal(name, "visibilitychange"); visibilityListeners.add(listener); },
+    removeEventListener: (name, listener) => { assert.equal(name, "visibilitychange"); visibilityListeners.delete(listener); },
+  };
+  const react = {
+    createContext: (value) => ({ value }),
+    useContext: (context) => context.value,
+    useCallback: (callback, next) => {
+      if (!dependencies || next.some((value, index) => value !== dependencies[index])) {
+        memoized = callback; dependencies = next;
+      }
+      return memoized;
+    },
+    useSyncExternalStore: (subscribe, read) => {
+      if (subscribed !== subscribe) {
+        cleanup?.(); subscribed = subscribe;
+        cleanup = subscribe(() => { notifications++; snapshot = read(); });
+      }
+      snapshot = read();
+      return snapshot;
+    },
+  };
+  function load(relative, imports) {
+    const exports = {};
+    vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, relative), "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText, { exports, document, require: (name) => {
+      assert.ok(Object.hasOwn(imports, name), name);
+      return imports[name];
+    } });
+    return exports;
+  }
+  const visibility = load("../src/features/page-visibility.ts", { react });
+  const store = load("../src/log-store.ts", { react, "./features/page-visibility": visibility });
+  return {
+    store, notifications: () => notifications, snapshot: () => snapshot,
+    listeners: () => visibilityListeners.size,
+    render: (hidden = false) => { visibility.SurfaceHiddenContext.value = hidden; return store.useLogs(); },
+    show: (state, windowAway = false) => {
+      document.visibilityState = state; away = windowAway;
+      for (const listener of visibilityListeners) listener();
+    },
+    stop: () => { cleanup?.(); },
+  };
+}
+
+test("Activity stops log callbacks behind another surface and catches up on return", () => {
+  const view = loadLogStore();
+  view.render(); view.store.appendLog({ event: "visible" });
+  assert.equal(view.notifications(), 1, "the visible subscriber is actually connected");
+  view.render(true);
+  for (let index = 0; index < 20; index++) view.store.appendLog({ event: `hidden-${index}` });
+  assert.equal(view.notifications(), 1, "20 hidden appends must deliver zero callbacks");
+  assert.equal(view.listeners(), 0, "another surface needs no visibility listener");
+  const current = view.render();
+  assert.equal(current.length, 21);
+  assert.equal(current.at(-1).event, "hidden-19", "return reads the retained newest history immediately");
+  view.store.appendLog({ event: "visible-again" });
+  assert.equal(view.notifications(), 2);
+  view.stop();
+  view.store.appendLog({ event: "after-cleanup" });
+  assert.equal(view.notifications(), 2);
+  assert.equal(view.listeners(), 0);
+});
+
+for (const hiddenBy of ["page", "minimized-window"]) {
+  test(`Activity detaches for a ${hiddenBy} and catches up without another log`, () => {
+    const view = loadLogStore();
+    view.render(); view.store.appendLog({ event: "before-hide" });
+    assert.equal(view.notifications(), 1);
+    view.show(hiddenBy === "page" ? "hidden" : "visible", hiddenBy === "minimized-window");
+    for (let index = 0; index < 20; index++) view.store.appendLog({ event: `away-${index}` });
+    assert.equal(view.notifications(), 1, "20 away appends must deliver zero callbacks");
+    assert.equal(view.snapshot().at(-1).event, "before-hide");
+    view.show("visible");
+    assert.equal(view.notifications(), 2, "being shown itself notifies once, without waiting for a new log");
+    assert.equal(view.snapshot().at(-1).event, "away-19");
+    view.store.appendLog({ event: "after-show" });
+    assert.equal(view.notifications(), 3, "one record listener resumes, without duplicates");
+    view.stop();
+    assert.equal(view.listeners(), 0);
+    view.show("hidden"); view.show("visible"); view.store.appendLog({ event: "after-cleanup" });
+    assert.equal(view.notifications(), 3);
+  });
+}
+
+test("hidden Activity still retains only the newest 300 records and stable row keys", () => {
+  const view = loadLogStore();
+  view.render(true);
+  const records = Array.from({ length: 310 }, (_, index) => ({ event: `record-${index}` }));
+  view.store.replaceLogs(records);
+  assert.equal(view.notifications(), 0);
+  const current = view.render();
+  assert.equal(current.length, 300);
+  assert.equal(current[0], records[10]);
+  const key = view.store.logKey(records[20]);
+  view.store.appendLog({ event: "newest" });
+  assert.equal(view.snapshot().length, 300);
+  assert.equal(view.snapshot()[0], records[11]);
+  assert.equal(view.snapshot().at(-1).event, "newest");
+  assert.equal(view.store.logKey(records[20]), key);
+  view.stop();
+});
