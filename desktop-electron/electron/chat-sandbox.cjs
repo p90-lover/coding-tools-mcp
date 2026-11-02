@@ -140,6 +140,8 @@ function createSandboxRunner({
   env = process.env, spawnProcess = spawn, logger = console, now = Date.now, platform = process.platform,
   // Folders put first on a command's PATH, e.g. the one AO keeps `ao` in for its own sessions.
   extraPath = () => [],
+  // Plain variables every command gets (rtk.cjs commandEnvironment); never a private name or PATH.
+  extraEnv = () => ({}),
 } = {}) {
   if (typeof scriptDir !== "string" || !path.isAbsolute(scriptDir)) throw new Error("The chat sandbox needs an absolute scriptDir");
   const processes = new Map(); // id -> record
@@ -155,6 +157,11 @@ function createSandboxRunner({
 
   function childEnv() {
     const kept = Object.fromEntries(Object.entries(env).filter(([key]) => !PRIVATE_ENV.test(key)));
+    let added = {};
+    try { added = extraEnv() ?? {}; } catch {}
+    for (const [key, value] of Object.entries(added)) {
+      if (/^[A-Z][A-Z0-9_]*$/.test(key) && key !== "PATH" && !PRIVATE_ENV.test(key) && typeof value === "string") kept[key] = value;
+    }
     let extra = [];
     try { extra = (extraPath() ?? []).filter((folder) => typeof folder === "string" && path.isAbsolute(folder)); } catch {}
     if (extra.length) {

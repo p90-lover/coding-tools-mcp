@@ -98,6 +98,22 @@ test("AO's `ao` folder goes first on a command's PATH, and a broken provider cha
   } finally { cleanup(); broken.cleanup(); }
 });
 
+test("rtk's quiet flag reaches every command; PATH, private names and odd values never come in that way", async () => {
+  const { sandbox, spawned, cleanup } = runner({ extraEnv: () => ({ RTK_SUPPRESS_HOOK_WARNING: "1", PATH: "C:/evil", GITHUB_TOKEN: "x", lower: "1", COUNT: 2 }) });
+  const broken = runner({ extraEnv: () => { throw new Error("rtk not ready"); } });
+  try {
+    await sandbox.start({ cmd: "git status", cwd: "G:/work", writable: "G:/work" });
+    const env = spawned[0].options.env;
+    assert.equal(env.RTK_SUPPRESS_HOOK_WARNING, "1");
+    assert.equal(env.PATH, "C:/bin");
+    assert.equal(env.GITHUB_TOKEN, undefined);
+    assert.equal(env.lower, undefined);
+    assert.equal(env.COUNT, undefined);
+    await broken.sandbox.start({ cmd: "echo ok", cwd: "G:/work", writable: "G:/work" });
+    assert.equal(broken.spawned[0].options.env.RTK_SUPPRESS_HOOK_WARNING, undefined);
+  } finally { cleanup(); broken.cleanup(); }
+});
+
 test("a command in the worktree itself starts there without a folder change, and % in a folder survives cmd", async () => {
   const { sandbox, spawned, cleanup } = runner();
   try {

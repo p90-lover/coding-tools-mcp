@@ -98,8 +98,29 @@ test("turned off while rtk is rewriting, the command runs as written", async () 
 
 test("on, Claude Code's hook and the agents' PATH point at the installed rtk", () => {
   const { rtk } = world();
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${RTK}" hook claude` });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${RTK}" hook claude`, RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(RTK));
+});
+
+test("rtk never tells an agent or the RTK page \"No hook installed\" while the app hooks each session", async () => {
+  // Claude Code's Bash tool showed rtk's "No hook installed — run `rtk init -g`" atop 952 agent
+  // outputs in two days: the app adds the hook per session and never edits the global settings.
+  const { rtk } = world();
+  const seen = [];
+  const quietRtk = createRtk({ getEnabled: () => true, platform: "win32", now: () => 0, exists: (file) => file === RTK,
+    env: { PATH: "", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+    run: (_file, args, options) => {
+      seen.push([args[0], options?.env?.RTK_SUPPRESS_HOOK_WARNING]);
+      if (args[0] === "--version") return { status: 0, stdout: "rtk 1.0.1\n" };
+      if (args[0] === "rewrite") return { status: 3, stdout: "rtk git status" };
+      return { status: 0, stdout: "{}" };
+    } });
+  assert.deepEqual(rtk.commandEnvironment(), { RTK_SUPPRESS_HOOK_WARNING: "1" }, "the terminal tool's commands");
+  assert.equal(await quietRtk.rewrite("git status"), `"${RTK}" git status`);
+  await quietRtk.gain();
+  assert.deepEqual(seen.filter(([command]) => command !== "--version"), [["rewrite", "1"], ["gain", "1"], ["gain", "1"]]);
+  const off = world({ enabled: false });
+  assert.deepEqual(off.rtk.commandEnvironment(), {}, "off, commands run exactly as written");
 });
 
 test("AO's hook and PATH use the rtk at hand once looked up, refreshing a stale answer without blocking", async () => {
@@ -161,7 +182,7 @@ test("AO's timed-out first RTK lookup stays asynchronous for its hook and PATH",
     release({ code: 0, stdout: "rtk 1.0.1\n" });
     await checking;
   }
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: '"' + RTK + '" hook claude' });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: '"' + RTK + '" hook claude', RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(RTK));
   assert.equal(syncLookups, 0);
   assert.equal(installs, 0);
@@ -204,7 +225,7 @@ function machine({ installed = false, enabled = true, code = 0, now = () => 0 } 
 test("rtk winget unpacked into its Packages folder is found: no Links shim, its PATH entry not seen yet", async () => {
   const { rtk } = machine({ installed: true });
   assert.equal((await rtk.status()).path, PACKAGED);
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${PACKAGED}" hook claude` });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${PACKAGED}" hook claude`, RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(PACKAGED), "AO's agents get its folder on PATH");
 });
 
