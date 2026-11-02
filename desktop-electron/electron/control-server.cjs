@@ -105,7 +105,7 @@ function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, g
 }
 
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, fetchNative, getCodingToolsWorkspaces, callReadOnlyAppTool, callNativeCodexTool, callAgentOrchestrator, requestKeepBridgeQuit, onTurnEvent, modelsCacheDir = null, modelsCacheWaitMs = MODELS_CACHE_WAIT_MS }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, fetchNative, getCodingToolsWorkspaces, callReadOnlyAppTool, callNativeCodexTool, callAgentOrchestrator, requestKeepBridgeQuit, readActivity, onTurnEvent, modelsCacheDir = null, modelsCacheWaitMs = MODELS_CACHE_WAIT_MS }) {
     this.logger = logger;
     this.modelsCacheDir = modelsCacheDir;
     this.modelsCacheWaitMs = modelsCacheWaitMs;
@@ -123,6 +123,7 @@ class BrowserControlServer {
     // "Restart app (keep Codex bridge, MCP, CPA)" does, instead of killing it. It cannot stop the
     // bridge: the only quit it can request keeps the bridge, MCP tunnel and CPA running.
     this.requestKeepBridgeQuit = requestKeepBridgeQuit;
+    this.readActivity = readActivity;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
     this.server = createServer((request, response) => {
@@ -196,6 +197,7 @@ class BrowserControlServer {
     const isNativeCodex = request.url === "/v1/coding-tools/native-codex";
     const isAgentOrchestrator = request.url === "/v1/coding-tools/agent-orchestrator";
     const isLauncherQuit = request.url === "/v1/launcher/quit-keep-bridge";
+    const isActivityRead = request.url === "/v1/launcher/activity";
     const manualAction = new Map([
       ["/v1/manual/start", "start"],
       ["/v1/manual/wait-sent", "wait-sent"],
@@ -204,7 +206,7 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !isNativeFetch && !isWorkspaceCatalog && !isAppRead && !isNativeCodex && !isAgentOrchestrator && !isLauncherQuit && !manualAction)) {
+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !isNativeFetch && !isWorkspaceCatalog && !isAppRead && !isNativeCodex && !isAgentOrchestrator && !isLauncherQuit && !isActivityRead && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -241,6 +243,16 @@ class BrowserControlServer {
         }
         if (!this.requestKeepBridgeQuit) throw new Error("Launcher quit is unavailable");
         writeJson(response, 202, await this.requestKeepBridgeQuit({ relaunch: body.relaunch }));
+        return;
+      }
+      // Freeze and memory events live only in memory since #885; this is how a check outside the
+      // app reads them without turning file logs back on.
+      if (isActivityRead) {
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) {
+          throw new Error("Activity read takes no arguments");
+        }
+        if (!this.readActivity) throw new Error("Activity read is unavailable");
+        writeJson(response, 200, { records: this.readActivity() });
         return;
       }
       if (isAgentOrchestrator) {
