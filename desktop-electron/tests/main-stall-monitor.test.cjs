@@ -4,12 +4,13 @@ const test = require("node:test");
 const { createMainStallMonitor, createMainStallProbe } = require("../electron/main-stall-monitor.cjs");
 
 function fixture() {
-  const clock = { ms: 1_000, cpuUs: 0 };
+  const clock = { ms: 1_000, cpuUs: 0, mainCpuUs: 0 };
   const logged = [];
   const monitor = createMainStallMonitor({
     logger: { warn: (event, detail) => logged.push([event, detail]) },
     now: () => clock.ms,
     cpuUsage: () => ({ user: clock.cpuUs, system: 0 }),
+    threadCpuUsage: () => ({ user: clock.mainCpuUs, system: 0 }),
     memoryUsage: () => ({ heapUsed: 300 * 1_048_576 }),
     setRepeat: () => ({ unref() {} }),
     clearRepeat() {},
@@ -29,15 +30,36 @@ test("a main event loop blocked for seconds is logged with its length and the CP
   // Blocked waiting (sync disk I/O on the hard disk): 9 s late, 40 ms of CPU.
   clock.ms += 9_500;
   clock.cpuUs += 40_000;
+  clock.mainCpuUs += 30_000;
   monitor.tick();
-  // Blocked running our own code: 3 s late, 3 s of CPU.
+  // Blocked running our own code: 3 s late, 3 s of CPU, all of it on main's thread.
   clock.ms += 3_500;
   clock.cpuUs += 3_000_000;
+  clock.mainCpuUs += 2_900_000;
+  monitor.tick();
+  // Seen live 2026-11-02: the process spent more CPU than the gap (other threads busy) while main
+  // itself waited. Only mainCpuMs tells the two apart.
+  clock.ms += 4_500;
+  clock.cpuUs += 4_600_000;
+  clock.mainCpuUs += 200_000;
   monitor.tick();
   assert.deepEqual(logged, [
-    ["launcher.main_stalled", { ms: 9_000, cpuMs: 40, heapMb: 300 }],
-    ["launcher.main_stalled", { ms: 3_000, cpuMs: 3_000, heapMb: 300 }],
+    ["launcher.main_stalled", { ms: 9_000, cpuMs: 40, mainCpuMs: 30, heapMb: 300 }],
+    ["launcher.main_stalled", { ms: 3_000, cpuMs: 3_000, mainCpuMs: 2_900, heapMb: 300 }],
+    ["launcher.main_stalled", { ms: 4_000, cpuMs: 4_600, mainCpuMs: 200, heapMb: 300 }],
   ]);
+});
+
+test("without the thread CPU counter (an older runtime) a stall is logged with the process's CPU only", () => {
+  const logged = [];
+  let ms = 0;
+  const monitor = createMainStallMonitor({ logger: { warn: (event, detail) => logged.push([event, detail]) },
+    now: () => ms, cpuUsage: () => ({ user: 0, system: 0 }), threadCpuUsage: () => null,
+    memoryUsage: () => ({ heapUsed: 0 }), setRepeat: () => ({ unref() {} }), clearRepeat() {} });
+  monitor.start();
+  ms += 3_000;
+  monitor.tick();
+  assert.deepEqual(logged, [["launcher.main_stalled", { ms: 2_500, cpuMs: 0, heapMb: 0 }]]);
 });
 
 test("the monitor's timer never keeps the app from quitting", () => {
@@ -67,7 +89,7 @@ test("each monitor tick beats the stall probe, so a probe sees main is alive", (
 
 // Runs a real probe in a child process whose main thread either stays healthy or is held by a
 // native call (spawnSync of a sleeping child), and returns what the probe logged.
-function probeChild(holdMs) {
+function probeChild(holdMs, { holds = holdMs > 0 ? 1 : 0, gapMs = 1_500 } = {}) {
   const { spawnSync } = require("node:child_process");
   const modulePath = require.resolve("../electron/main-stall-monitor.cjs");
   const script = `
@@ -84,8 +106,9 @@ function probeChild(holdMs) {
       const result = spawnSync(process.execPath, ["-e", "setTimeout(() => {}, ${holdMs})"]);
       return describe(result);
     }
-    setTimeout(() => { if (${holdMs} > 0) heldByTestCall(); }, 200);
-    setTimeout(() => { clearInterval(beat); probe.stop(); process.stdout.write(JSON.stringify(logged)); }, ${holdMs} + 2000);
+    for (let i = 0; i < ${holds}; i++) setTimeout(() => heldByTestCall(), 200 + i * (${holdMs} + ${gapMs}));
+    setTimeout(() => { clearInterval(beat); probe.stop(); process.stdout.write(JSON.stringify(logged)); },
+      ${holds} * (${holdMs} + ${gapMs}) + 2000);
   `;
   const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 30_000 });
   assert.equal(result.status, 0, result.stderr);
@@ -103,6 +126,14 @@ test("a stall no wrapped call explains is logged with the function that was wait
   // frames (the timer that called it) are left out.
   assert.ok(detail.frames.some(frame => frame.startsWith("heldByTestCall [eval]:")), JSON.stringify(detail));
   assert.ok(detail.frames.every(frame => !frame.includes("timers")), JSON.stringify(detail));
+});
+
+test("each probed hold reports its own length, not the time since the first probe", () => {
+  // Seen live 2026-11-02: every main_stall_caller after the first said heldMs 7.8-8.0 million (2+ hours).
+  const logged = probeChild(1_000, { holds: 2, gapMs: 2_000 });
+  const callers = logged.filter(([event]) => event === "launcher.main_stall_caller");
+  assert.equal(callers.length, 2, JSON.stringify(logged));
+  for (const [, detail] of callers) assert.ok(detail.heldMs >= 300 && detail.heldMs < 2_500, `held ${detail.heldMs} ms`);
 });
 
 test("a healthy main is never paused by the probe", () => {
