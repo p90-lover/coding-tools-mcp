@@ -60,7 +60,7 @@ import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../s
  * short so the socket is bindable.
  */
 function shortSocketTempRoot(): string {
-  return process.platform === "win32" ? tmpdir() : "/tmp";
+  return tmpdir();
 }
 
 function request(compaction = false): CodexParsedRequest {

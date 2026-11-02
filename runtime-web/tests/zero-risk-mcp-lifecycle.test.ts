@@ -14,7 +14,7 @@ import {
 import { defaultBrokerEndpoint } from "../src/config";
 import type { ChatGptTurnEnvironment } from "../src/adapters/chatgpt-web/environment";
 
-const testTempRoot = process.platform === "win32" ? tmpdir() : "/tmp";
+const testTempRoot = tmpdir();
 const root = mkdtempSync(join(testTempRoot, "cgw-zero-risk-mcp-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 

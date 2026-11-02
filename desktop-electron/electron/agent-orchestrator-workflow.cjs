@@ -161,6 +161,9 @@ function agentChatTitle(current, proposed) {
 // The WebGPT tiers the bridge serves; it runs a tier the account lacks at the nearest lower one.
 const WEB_TIERS = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro"];
 const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
+const NAMED_WEB_MODELS = ["chatgpt-web/gpt-6-sol-instant", "chatgpt-web/gpt-6-sol",
+  "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol", "chatgpt-web/gpt-5.6-pro",
+  "chatgpt-web/gpt-6-pro", "chatgpt-web/gpt-5.6-luna"];
 // AO harness models shown as "cpa/<model>" run that CPA pool model through the local gateway.
 const CPA_MODEL_PREFIX = "cpa/";
 // Agents AO's daemon can point at the CPA gateway, each through its own launch variables
@@ -184,7 +187,7 @@ const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const ANTIGRAVITY_REFUSES_CLAUDE_CODE = "Antigravity refuses Claude Code's requests (it answers \"quota exhausted\", but it is not quota); "
   + "run this model on Native Codex or another agent, or give Claude Code a model from another provider";
 const antigravityRefuses = (agent, capability) => agent === "claude-code" && /antigravity/i.test(String(capability?.provider ?? ""));
-const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
+const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model) || NAMED_WEB_MODELS.includes(model);
 const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /**
  * The effort a CPA model with none picked starts on when it lists efforts but no "auto" (the
@@ -206,15 +209,17 @@ const webTierName = (model) => {
   return slug === "light" ? "Instant" : slug.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
 };
 
-// The runtime's `catalog ao-web` returns one WebGPT row: High, or Luna on a Luna-only (Free/Go)
-// account that has no Sol tiers. Any tier reuses that row under its own slug; the bridge picks
-// the ChatGPT mode from the slug, not from this entry. Its `available` list holds the WebGPT rows
-// the account's effort picker last offered; a tier outside it still runs (at the nearest lower
-// tier, in the bridge), and its name says so. `available` never reaches Codex.
+// Named models need their exact runtime row: their windows, compaction limits and efforts differ.
+// Older runtimes return only the first High/Luna template; saved legacy tiers retain that fallback.
+// `available` names account tiers for that fallback and never reaches Codex.
 function aoWebCatalogForModel(catalog, model) {
-  if (!/^chatgpt-web\/[a-z-]{1,32}$/.test(model)) throw new Error("AO WebGPT model is invalid");
-  const template = Array.isArray(catalog?.models) && catalog.models.length === 1 ? catalog.models[0] : null;
-  if (typeof template?.slug !== "string" || !/^chatgpt-web\/[a-z-]{1,32}$/.test(template.slug)) {
+  if (!webModel(model)) throw new Error("AO WebGPT model is invalid");
+  const entries = Array.isArray(catalog?.models) ? catalog.models : [];
+  const selected = entries.filter((entry) => entry?.slug === model);
+  if (selected.length === 1) return { models: selected };
+  const template = entries[0];
+  if (selected.length > 1 || NAMED_WEB_MODELS.includes(model)
+    || !["chatgpt-web/high", "chatgpt-web/luna"].includes(template?.slug)) {
     throw new Error("AO WebGPT catalog is unavailable");
   }
   const available = Array.isArray(catalog.available) ? catalog.available.filter((slug) => typeof slug === "string") : null;
@@ -222,7 +227,6 @@ function aoWebCatalogForModel(catalog, model) {
   const runsAs = available && tierIndex > 0 && !available.includes(model)
     ? WEB_TIERS.slice(0, tierIndex).reverse().find((tier) => available.includes(tier))
     : undefined;
-  if (template.slug === model && !runsAs) return { models: catalog.models };
   const tier = webTierName(model);
   const display_name = runsAs
     ? `ChatGPT Web — ${tier} (not offered by this account; runs as ${webTierName(runsAs)})`

@@ -337,7 +337,10 @@ function unansweredBrokerEndpoint(name: string, onConnection: (socket: Socket) =
   const server = createServer(onConnection);
   return {
     socketPath,
-    listen: () => new Promise<void>(ready => server.listen(socketPath, ready)),
+    listen: async () => {
+      await new Promise<void>(ready => server.listen(socketPath, ready));
+      if (!isWindowsPipeEndpoint(socketPath)) chmodSync(socketPath, 0o600);
+    },
     close: async () => {
       await new Promise<void>(done => server.close(() => done()));
       rmSync(root, { recursive: true, force: true });

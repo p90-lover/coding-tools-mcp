@@ -6,6 +6,8 @@ import {
   CHATGPT_WEB_MODEL_PREFIX,
   resolveChatGptWebContextLimits,
   servedChatGptWebModelRoute,
+  type ChatGptWebAdapterEffort,
+  type ChatGptWebCodexEffort,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
 
@@ -106,14 +108,19 @@ export function buildChatGptWebModel(
   if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
-  // A tier the account lacks runs as a lower one; advertise the window that tier really gets.
-  const servedLimits = (effort?: string) => {
-    const served = route.interactionMode === "automatic"
+  // The launcher's current account is not proof of a native chat's bound account budget.
+  const budgetConfig = config.browserHost === "launcher" && config.browserInteractionMode !== "manual"
+    ? { ...config, proAvailable: false }
+    : config;
+  const servedLimits = (effort?: ChatGptWebCodexEffort) => {
+    const served = route.interactionMode === "automatic" && route.legacy
       ? servedChatGptWebModelRoute(route, config, effort)
-      : route;
+      : route.interactionMode === "automatic" && route.supportedCodexEfforts && effort
+        ? { ...route, adapterEffort: effort as ChatGptWebAdapterEffort }
+        : route;
     if ((served.adapterEffort as string) === "ultra") throw new Error("Ultra is not a browser effort");
     const modelFamily = served.interactionMode === "automatic" ? served.modelFamily : undefined;
-    return resolveChatGptWebContextLimits(served.backendModel, served.adapterEffort, config, modelFamily);
+    return resolveChatGptWebContextLimits(served.backendModel, served.adapterEffort, budgetConfig, modelFamily);
   };
   const limits = servedLimits();
   const efforts = chatGptWebRouteEfforts(route, config, detectedTiers);

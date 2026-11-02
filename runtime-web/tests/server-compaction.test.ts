@@ -7,9 +7,83 @@ import type { CodexProviderConfig, CodexParsedRequest } from "../src/types";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "../src/adapters/chatgpt-web/environment";
 import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 import { parseRequest } from "../src/responses/parser";
+import { resolveChatGptWebTurnCapabilities } from "../src/adapters/chatgpt-web/model";
+import { resolveChatGptWebContextLimits } from "../src/chatgpt-web-models";
 
 const model = "chatgpt-web/high";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
+
+test.each([
+  ["chatgpt-web/gpt-6-pro", "max", false, "header"],
+  ["chatgpt-web/gpt-6-pro", "max", true, "body"],
+  ["chatgpt-web/gpt-6-sol", "xhigh", false, "body"],
+] as const)("native upper-tier %s uses the same admission and conservative budget for response and compact (%s, %s, %s)", async (model, effort, globalPro, metadataLocation) => {
+  const config = { ...defaultConfig("browser-only"), browserHost: "launcher" as const,
+    browserHostDescriptorPath: "G:/fixture/owned-launcher.json", extraHighAvailable: false, proAvailable: globalPro };
+  const metadata = { thread_id: crypto.randomUUID(), turn_id: crypto.randomUUID() };
+  const headers = new Headers({ "content-type": "application/json" });
+  if (metadataLocation === "header") headers.set("x-codex-turn-metadata", JSON.stringify(metadata));
+  const raw = { model, reasoning: { effort }, stream: false,
+    ...(metadataLocation === "body" ? { client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) } } : {}),
+    input: [{ type: "message", id: `msg_${metadata.turn_id}`, role: "user",
+      content: [{ type: "input_text", text: "Continue the same native task." }],
+      internal_chat_message_metadata_passthrough: { turn_id: metadata.turn_id, content_item_kinds: ["user.text"] } }] };
+  const seen: boolean[] = [];
+  const adapter = (provider: CodexProviderConfig): ProviderAdapter => ({
+    name: "native-compaction-admission-check",
+    async runTurn(parsed, _incoming, emit) {
+      seen.push(parsed._compactionRequest === true);
+      expect(parsed.modelId).toBe("gpt-5.6-sol");
+      expect(parsed.options.reasoning).toBe(effort);
+      expect(parsed._chatgptModelFamily).toBe("6");
+      const capabilities = resolveChatGptWebTurnCapabilities(parsed, {
+        localToolsEnabled: false, solAvailable: provider.chatgptWeb?.solAvailable === true,
+        extraHighAvailable: provider.chatgptWeb?.extraHighAvailable === true, proAvailable: provider.chatgptWeb?.proAvailable === true,
+      }, provider.chatgptWeb);
+      expect(capabilities.proAvailable).toBeFalse();
+      expect(resolveChatGptWebContextLimits(parsed.modelId as "gpt-5.6-sol", effort, capabilities, parsed._chatgptModelFamily))
+        .toMatchObject({ contextWindow: 90_000, autoCompactTokenLimit: 68_085 });
+      emit({ type: "text_delta", text: summary, phase: "final_answer" });
+      emit({ type: "done", stopReason: "stop", endTurn: true });
+    },
+  });
+  const normal = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST", headers, body: JSON.stringify(raw),
+  }), config, adapter);
+  expect(normal.status).toBe(200);
+  expect((await normal.json()).status).toBe("completed");
+  const compact = await compactRequest(new Request("http://127.0.0.1/v1/responses/compact", {
+    method: "POST", headers, body: JSON.stringify(raw),
+  }), config, adapter);
+  expect(compact.status).toBe(200);
+  expect((await compact.json()).output.at(-1).content[0].text).toBe(`${SUMMARY_PREFIX}\n${summary}`);
+  expect(seen).toEqual([false, true]);
+});
+
+test.each(["managed-chrome", "manual", "missing-descriptor", "unowned", "unknown-model", "raw-admission-flag"] as const)(
+  "compact native admission does not bypass the %s request boundary", async mode => {
+  const config = { ...defaultConfig("browser-only"), browserHost: mode === "managed-chrome" ? "managed-chrome" as const : "launcher" as const,
+    browserInteractionMode: mode === "manual" ? "manual" as const : "automatic" as const,
+    browserHostDescriptorPath: mode === "missing-descriptor" ? undefined : "G:/fixture/owned-launcher.json",
+    extraHighAvailable: false, proAvailable: false, deferUpperTierAdmission: true };
+  const metadata = { thread_id: mode === "unowned" ? "dev_thread_not_native" : crypto.randomUUID(), turn_id: crypto.randomUUID() };
+  const raw = { model: mode === "unknown-model" ? "chatgpt-web/unknown" : "chatgpt-web/gpt-6-pro",
+    reasoning: { effort: "max" }, stream: false,
+    ...(mode === "raw-admission-flag" ? {} : { client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) } }),
+    input: [{ type: "message", id: `msg_${metadata.turn_id}`, role: "user",
+      content: [{ type: "input_text", text: "No account admission is implied." }],
+      internal_chat_message_metadata_passthrough: { turn_id: metadata.turn_id, content_item_kinds: ["user.text"] } }] };
+  let adapters = 0;
+  const adapter = (): ProviderAdapter => { adapters += 1; throw new Error("Unadmitted request reached the adapter"); };
+  for (const handler of [responseRequest, compactRequest]) {
+    const response = await handler(new Request("http://127.0.0.1/v1/responses/compact", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(raw),
+    }), config, adapter);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("invalid_request_error");
+  }
+  expect(adapters).toBe(0);
+});
 
 for (const format of ["memento", "v2"] as const) {
   for (const nativeContext of [false, true]) {
