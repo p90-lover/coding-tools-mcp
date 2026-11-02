@@ -1113,9 +1113,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * The person's unified-agent-tools server for a chat session that runs a GPT model
    * (unified-agent-tools.cjs), or null. Never fails a launch or a resume.
    */
-  function gptFileServer(agent, model) {
+  async function gptFileServer(agent, model) {
     if (!fileTools || typeof agent !== "string") return null;
-    try { return fileTools.forSession(agent, typeof model === "string" ? model : "") ?? null; } catch (cause) {
+    try { return (await fileTools.forSession(agent, typeof model === "string" ? model : "")) ?? null; } catch (cause) {
       logger.warn?.("ao.file_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
       return null;
     }
@@ -1276,7 +1276,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
         // attempt gets its own credential, bound to the session it creates and to nothing else.
         // A GPT model, on any harness (a CPA model runs as gateway.model), gets the person's file tools.
-        const files = mode === "chat" ? gptFileServer(agent, gateway?.provider === "cpa" && typeof gateway.model === "string" ? gateway.model : model) : null;
+        const files = mode === "chat" ? await gptFileServer(agent, gateway?.provider === "cpa" && typeof gateway.model === "string" ? gateway.model : model) : null;
         const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true, Boolean(files)) : null;
         let created;
         try {
@@ -1548,7 +1548,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // exact session's observable live state, without issuing a second resume or new launch.
           // The file tools as they are now (the model's, and whether the person still has them on);
           // the renewed lease hides its own file tools only while these are attached.
-          const files = gptFileServer(session.harness, session.model);
+          const files = await gptFileServer(session.harness, session.model);
           const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key, { unifiedFiles: Boolean(files) })).catch(() => null);
           // AO keeps a session's servers only while its daemon runs, so the person's own go in again too.
           const servers = [...(renewed?.servers ?? []), ...(files ? [files] : [])];

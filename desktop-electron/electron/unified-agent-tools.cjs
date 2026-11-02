@@ -59,19 +59,27 @@ function defaultServerPath({ packaged = false, resourcesPath = process.resources
  * on PATH, else the copy Codex installs with itself. Codex may start MCP servers with a trimmed
  * environment, so the path is handed to the server rather than left to its own PATH lookup.
  */
-function findRipgrep(env = process.env, platform = process.platform) {
+async function findRipgrep(env = process.env, platform = process.platform) {
   const name = platform === "win32" ? "rg.exe" : "rg";
   const candidates = String(env.PATH ?? "").split(path.delimiter).filter((entry) => entry && path.isAbsolute(entry)).map((entry) => path.join(entry, name));
   if (platform === "win32" && env.APPDATA) {
     candidates.push(path.join(env.APPDATA, "npm", "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64",
       "vendor", "x86_64-pc-windows-msvc", "codex-path", name));
   }
-  return candidates.find((candidate) => { try { return fs.statSync(candidate).isFile(); } catch { return false; } }) ?? null;
+  for (const candidate of candidates) {
+    if (await isFile(candidate)) return candidate;
+  }
+  return null;
 }
+
+// Asynchronous on purpose: these run on Electron main at every chat launch, where a synchronous
+// stat holds every window for as long as the hard disk takes (main-sync-calls.test.cjs).
+const isFile = (filePath) => fs.promises.stat(filePath).then((stat) => stat.isFile(), () => false);
 
 function createUnifiedAgentTools({ serverPath = defaultServerPath(), nodePath = process.execPath, enabled = () => true, ripgrep = findRipgrep, logger = null } = {}) {
   let missingLogged = false;
-  let ripgrepPath;
+  // Looked up once, by the first GPT chat; launches at the same time share the lookup.
+  let ripgrepLookup = null;
   return Object.freeze({
     SERVER_NAME,
     /**
@@ -79,10 +87,10 @@ function createUnifiedAgentTools({ serverPath = defaultServerPath(), nodePath = 
      * /resume-agent mcpServers), or null when the session does not run a GPT model, the user
      * turned the tools off, or the server is not installed. Never fails a launch.
      */
-    forSession(agent, model) {
+    async forSession(agent, model) {
       try {
         if (!enabled() || !isGptModel(agent, model)) return null;
-        if (!fs.existsSync(serverPath)) {
+        if (!await isFile(serverPath)) {
           if (!missingLogged) logger?.warn?.("unified_agent_tools.missing", { serverPath });
           missingLogged = true;
           return null;
@@ -91,9 +99,8 @@ function createUnifiedAgentTools({ serverPath = defaultServerPath(), nodePath = 
         logger?.warn?.("unified_agent_tools.unavailable", { message: String(cause?.message || cause).slice(0, 200) });
         return null;
       }
-      if (ripgrepPath === undefined) {
-        try { ripgrepPath = ripgrep() ?? null; } catch { ripgrepPath = null; }
-      }
+      ripgrepLookup ??= Promise.resolve().then(() => ripgrep()).then((found) => found ?? null, () => null);
+      const ripgrepPath = await ripgrepLookup;
       return {
         name: SERVER_NAME, type: "stdio", command: nodePath, args: [serverPath, "--stdio"],
         env: { ELECTRON_RUN_AS_NODE: "1", UNIFIED_AGENT_TOOLS_ROOT: "cwd", UNIFIED_AGENT_TOOLS_PROFILE: "files",

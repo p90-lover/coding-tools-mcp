@@ -316,6 +316,7 @@ test("upstream spawn preserves context and the effort on Chat/TUI fallback, the 
     // The person's own MCP servers (Plugins > MCPs): none here.
 
     userServers: () => [],
+    gptFileServer: async () => null,
     internalApi: async (verb, endpoint, body) => {
       if (verb === "GET") return { chatHarnesses: ["codex"] };
       bodies.push(body);
@@ -409,6 +410,7 @@ test("a chat host that was only slow to start is retried as chat, not turned int
       // The person's own MCP servers (Plugins > MCPs): none here.
 
       userServers: () => [],
+      gptFileServer: async () => null,
       internalApi: async (verb, _endpoint, body) => {
         if (verb === "GET") return { chatHarnesses: ["claude-code"] };
         modes.push(body.mode);
