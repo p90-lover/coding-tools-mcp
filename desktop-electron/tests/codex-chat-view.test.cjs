@@ -16,6 +16,32 @@ const transpile = (file, require, globals = {}) => {
 };
 const chat = transpile("ao-chat.ts", () => ({}));
 const prompts = transpile("codex-prompts.ts", () => ({}));
+
+test("the context command keeps native thread IDs out of the AO session lookup", async () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8").replace(/\r\n/g, "\n");
+  const body = source.match(/context: async \(\) => \{([\s\S]*?)\n    \},\n    diff:/)?.[1];
+  assert.ok(body, "the real context command is exercised");
+  const code = ts.transpileModule(`exports.context = async () => {${body}\n};`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText;
+  for (const harness of ["codex-native", "ao:codex"]) {
+    const calls = [], exports = {};
+    vm.runInNewContext(code, { exports, NATIVE_HARNESS: "codex-native",
+      chatRunsHere: [{ nodes: [{ route: { harness_id: harness }, receipt: { thread_id: "owned-thread" } }] }],
+      moduleCall: async (operation, args) => { calls.push({ operation, args }); return { sessions: { "owned-thread": { usage: { contextUsed: 12, contextWindow: 100 } } } }; },
+    });
+    const result = await exports.context();
+    if (harness === "codex-native") {
+      assert.equal(calls.length, 0, "a native Codex thread is never queried as an AO session");
+      assert.match(result.text, /not available|not reported|unsupported/i, "unavailable native token usage is stated accurately");
+      assert.equal(result.rows, undefined, "no zero usage or inferred capacity is invented");
+    } else {
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].operation, "chat_context");
+      assert.equal(result.rows[0][1], "12 / 100 tokens (12% full)");
+    }
+  }
+});
 const walk = (item) => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
 const text = (item) => item === null || item === undefined || typeof item === "boolean" ? "" : typeof item !== "object" ? String(item)
   : Array.isArray(item) ? item.map(text).join("") : text(item.props?.children);
@@ -332,6 +358,26 @@ test("IME candidate keys leave slash commands alone and normal command navigatio
   });
 });
 
+test("manual compaction stays pending until the provider finishes and never posts into another chat", async () => {
+  let complete;
+  const commands = { compact: () => new Promise(resolve => { complete = resolve; }) };
+  const props = base({ projectId: "ws", selectedTaskId: "t", working: false,
+    tasks: [{ id: "t", title: "Chat", description: "Keep this history" }],
+    runs: [run("r", "t", [node("lead", "planner", "finished", { route: { harness_id: "ao:codex" }, receipt: { thread_id: "session" } })], { execution_mode: "single" })], commands }).props;
+  const view = mount(props);
+  const input = () => walk(view.render()).find(element => element.type === "textarea");
+  input().props.onChange({ target: { value: "/compact" } });
+  input().props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(text(view.render()), /Compacting context…/);
+  assert.doesNotMatch(text(view.render()), /Context compacted/);
+  const other = { ...props, selectedTaskId: "other", runs: [], tasks: [{ id: "other", title: "Other", description: "Another chat" }] };
+  assert.doesNotMatch(text(view.render(other)), /Compacting context…/);
+  complete("Context compacted");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.doesNotMatch(text(view.render(other)), /Context compacted/);
+});
+
 test("Codex slash commands run from the composer in a Single chat or a team, with their real actions", async () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const actions = [];
@@ -391,7 +437,7 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   type(teamChat, "/goal pause"); await enter(teamChat);
   assert.deepEqual(actions.at(-1), ["goal", "pause"]);
   type(teamChat, "/compact"); await enter(teamChat);
-  assert.match(text(cardOf(teamChat)), /Can't compact while the chat is running/);
+  assert.match(text(cardOf(teamChat)), /Compact is disabled while a chat is in progress/);
   type(teamChat, "/review"); await enter(teamChat);
   // Claude Code queues a command as it queues a message: in its queued-message bar, as typed. The
   // user: "remake the steer message panel exact the same as claude code" (the "Queued: it's sent

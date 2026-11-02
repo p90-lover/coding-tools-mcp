@@ -143,7 +143,11 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
             || (typeof value?.error === "string" && value.error)
             || (typeof value?.message === "string" && value.message)
             || `Headless service rejected the request (HTTP ${response.statusCode || 500})`;
-          reject(new Error(safeErrorMessage(message)));
+          const error = new Error(safeErrorMessage(message));
+          error.status = response.statusCode;
+          const code = value?.error?.code;
+          if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,99}$/.test(code)) error.code = code;
+          reject(error);
           return;
         }
         resolve(value);
@@ -446,7 +450,12 @@ class HeadlessHost {
           });
         } catch (error) {
           const message = safeErrorMessage(error);
-          if (wait === null || !message.includes("HEADLESS_CAPACITY")) throw new Error(message);
+          if (wait === null || !message.includes("HEADLESS_CAPACITY")) {
+            const failure = new Error(message);
+            if (Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599) failure.status = error.status;
+            if (typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{0,99}$/.test(error.code)) failure.code = error.code;
+            throw failure;
+          }
           await sleep(wait);
         }
       }

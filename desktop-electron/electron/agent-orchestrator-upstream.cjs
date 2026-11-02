@@ -1801,6 +1801,25 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (typeof turnId !== "string" || !turnId) return [];
       return queuedPastTurnTimeline(id, turnId);
     },
+    /** Compaction belongs to the live conversation, never the workflow task description. */
+    async compact(id, { beforeSubmit } = {}) {
+      const key = sessionId(id);
+      const before = await internalApi("GET", `/api/v1/sessions/${key}/conversation?limit=1`);
+      beforeSubmit?.(before?.compactedAt ?? null);
+      await internalApi("POST", `/api/v1/sessions/${key}/conversation/compact`, {});
+      forgetTail(key);
+      return { compactedAt: before?.compactedAt ?? null };
+    },
+    async compactionStatus(id, before) {
+      const key = sessionId(id);
+      const conversation = await internalApi("GET", `/api/v1/sessions/${key}/conversation?limit=1`);
+      if (conversation?.compactedAt && conversation.compactedAt !== before) {
+        forgetTail(key);
+        return { status: "completed", compactedAt: conversation.compactedAt };
+      }
+      if (conversation?.controller === "stopped") return { status: "failed" };
+      return { status: "in_progress" };
+    },
     async interrupt(id) {
       agentTools?.cancelSessionCalls?.(id);
       forgetTail(id);

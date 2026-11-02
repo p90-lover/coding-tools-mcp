@@ -854,6 +854,17 @@ struct AoHarnessSteerRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AoHarnessCompactRequest {
+    workspace_id: String,
+    run_id: String,
+    node_id: String,
+    request_id: String,
+    #[serde(default)]
+    status: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AoHarnessConnectRequest {
     workspace_id: String,
     run_id: String,
@@ -5399,6 +5410,106 @@ async fn ao_harness_execute(
     }
 }
 
+/// A manual compaction is scoped to an existing card's owned thread, not a supplied thread id.
+async fn ao_harness_compact(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessCompactRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_harness_compact") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.status && !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_LOCAL_CONFIRMATION_REQUIRED",
+            "Compact the selected chat from the local app",
+        );
+    }
+    let (_, node, cancelled) =
+        match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+            Ok(target) => target,
+            Err(_) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "AO_NODE_SCOPE_FAILED",
+                    "AO node unavailable",
+                )
+            }
+        };
+    if cancelled
+        || node.route.harness_id != "codex-native"
+        || node.state != integrations::ao::State::Finished
+    {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_COMPACTION_BUSY",
+            "Compact is disabled while a chat is in progress",
+        );
+    }
+    let Some(thread_id) = node
+        .receipt
+        .as_ref()
+        .and_then(|receipt| receipt.thread_id.clone())
+    else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_THREAD_UNKNOWN",
+            "The chat has no live agent session",
+        );
+    };
+    let key = (body.workspace_id, body.run_id, body.node_id);
+    let Some(hub) = state
+        .ao_hubs
+        .lock()
+        .ok()
+        .and_then(|hubs| hubs.get(&key).cloned())
+    else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_HARNESS_NOT_CONNECTED",
+            "The chat's native agent is not connected",
+        );
+    };
+    if body.status {
+        return match hub.compaction_status(body.request_id, thread_id) {
+            Ok(value) => Json(value).into_response(),
+            Err(error) => json_error(StatusCode::CONFLICT, "AO_COMPACTION_UNAVAILABLE", &error),
+        };
+    }
+    match tokio::task::spawn_blocking(move || hub.compact(body.request_id, thread_id)).await {
+        Ok(Ok(value)) if value["ok"] == true || value["state"] == "pending" => (
+            StatusCode::ACCEPTED,
+            Json(json!({"ok":true,"status":"in_progress"})),
+        )
+            .into_response(),
+        Ok(Ok(value)) if value["outcome"] == "not_submitted" => json_error(
+            StatusCode::CONFLICT,
+            "AO_COMPACTION_NOT_SUBMITTED",
+            "Native compaction was not submitted",
+        ),
+        Ok(Ok(value)) if value["outcome"] == "rejected_or_native_error" => json_error(
+            StatusCode::CONFLICT,
+            "AO_COMPACTION_FAILED",
+            "Native compaction was rejected",
+        ),
+        Ok(Ok(_)) | Ok(Err(_)) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AO_COMPACTION_UNKNOWN",
+            "Native compaction outcome is unknown; inspect its receipt before retrying",
+        ),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AO_COMPACTION_UNKNOWN",
+            "Native compaction outcome is unknown; inspect the chat before retrying",
+        ),
+    }
+}
+
 /// A chat message steered into a Native Codex card's running turn (Codex's turn/steer), as an AO
 /// card's steer reaches its ACP session. `steered` is false when its turn already ended.
 async fn ao_harness_steer(
@@ -7162,6 +7273,7 @@ fn router(state: ServiceState) -> Router {
         .route("/api/v1/ao/harness/observe", post(ao_harness_observe))
         .route("/api/v1/ao/harness/approval", post(ao_harness_approval))
         .route("/api/v1/ao/harness/steer", post(ao_harness_steer))
+        .route("/api/v1/ao/harness/compact", post(ao_harness_compact))
         .route("/api/v1/ao/harness/permission-profiles", post(ao_harness_permission_profiles))
         .route("/api/v1/ao/harness/disconnect", post(ao_harness_disconnect))
         .route("/api/v1/ao/external/reserve", post(ao_external_reserve))

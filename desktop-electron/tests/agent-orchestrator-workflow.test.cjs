@@ -5470,7 +5470,7 @@ test("wake-ups are kept per chat in a file, and a due one sends, waits or drops"
   assert.match(wakePrompt(wakeup, 6 * 60_000), /^Wake-up: 6 minutes ago[\s\S]*Your note: CI/);
 });
 
-test("/compact replaces a long chat's context with Codex's handoff summary; /diff reads the git tool", async () => {
+test("/compact without a session leaves task history intact; /diff reads the git tool", async () => {
   const long = "Fix the login flow.\n\n" + "Follow-up: more detail. ".repeat(120);
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Login", description: long, state: "in_progress", clauses: [] }], runs: [] });
   const requests = [];
@@ -5481,21 +5481,9 @@ test("/compact replaces a long chat's context with Codex's handoff summary; /dif
   };
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, fetchImpl, findCodexExecutable: () => "C:/codex.exe",
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }) });
-  const compacted = await workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" });
-  assert.equal(compacted.compacted, true);
-  assert.ok(compacted.after < compacted.before);
-  assert.match(world.tasks[0].description, /^Summary of the earlier conversation \(compacted [0-9-]+ [0-9:]+ UTC\):\nProgress: login fixed\. Next: add tests\.$/);
-  const completion = requests.find(entry => entry.url.endsWith("/v1/chat/completions"));
-  // The summary reads the whole chat: never on the person's Codex quota (gpt-5.5, listed first), a
-  // quick model instead. The user: "avoid using my codex quota".
-  assert.equal(completion.body.model, "gemini-3-flash");
-  assert.match(completion.body.messages[0].content, /^You are performing a CONTEXT CHECKPOINT COMPACTION/);
-  assert.equal(completion.body.messages[1].content, long);
-  // A short chat has nothing to compact.
-  assert.equal((await workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" })).compacted, false);
-  // A working chat refuses, as Codex does.
-  world.runs.push({ id: "busy", workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ id: "a", state: "running" }] });
-  await assert.rejects(workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" }), /disabled while a chat is in progress/);
+  await assert.rejects(workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" }), /live agent session/);
+  assert.equal(world.tasks[0].description, long);
+  assert.deepEqual(requests, [], "native compaction never invokes a separate summarizer");
 
   const diffWorld = async (endpoint, body) => {
     if (endpoint === "/api/v1/tools/call" && body.tool === "git_diff") {
@@ -7050,12 +7038,11 @@ test("/autocompact: on by default at 95%; a lower share compacts sooner; off sto
   assert.equal(off.world.tasks[0].description, "x".repeat(8180));
 });
 
-test("/compact takes instructions for the summary, as Claude Code's does", async () => {
+test("/compact uses Codex's no-instructions contract instead of summarizing task metadata", async () => {
   const { world, workflow, prompts } = compactWorld("x".repeat(2000), { summary: "API changes: none yet." });
-  const result = await workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1", instructions: "focus on the API changes" });
-  assert.equal(result.compacted, true);
-  assert.match(prompts[0], /CONTEXT CHECKPOINT COMPACTION[\s\S]*Additional instructions from the user:\nfocus on the API changes$/);
-  assert.match(world.tasks[0].description, /\nAPI changes: none yet\.$/);
+  await assert.rejects(workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1", instructions: "focus on the API changes" }), /does not accept focus instructions/);
+  assert.deepEqual(prompts, []);
+  assert.equal(world.tasks[0].description, "x".repeat(2000));
 });
 
 test("a card stopped while its agent launched also stops that agent once its session arrives", async () => {
@@ -9688,6 +9675,25 @@ function queueChat({ aoHarness = undefined, state = "running" } = {}) {
   const queue = async () => (await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "list" })).queue;
   return { world, workflow, route, advance, queue, fail };
 }
+
+test("queued input reconciles compaction after its bounded watcher has stopped", async () => {
+  let completed = false, observations = 0;
+  const { world, workflow, advance, queue } = queueChat({ state: "finished", aoHarness: {
+    compact: async () => ({ compactedAt: "earlier" }),
+    compactionStatus: async () => { observations += 1; return { status: completed ? "completed" : "in_progress" }; },
+  } });
+  try {
+    await workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" });
+    await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "continue after compaction" } });
+    for (let count = 0; count < 122; count += 1) await advance(1000);
+    assert.ok(observations >= 120, "the initial bounded watcher has run to its limit");
+    assert.equal((await queue()).length, 1, "pending compaction never dispatches queued input");
+    completed = true;
+    await advance(60_000);
+    assert.equal(world.updates.length, 1, "the ordinary queue retry notices provider completion and starts one turn");
+    assert.deepEqual(await queue(), []);
+  } finally { workflow.dispose(); }
+});
 
 test("a queued message whose send fails is never lost: it stays at the front, saying why, and is tried again", async () => {
   const { world, workflow, advance, queue, fail } = queueChat({ state: "finished" });
