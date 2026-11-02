@@ -625,6 +625,39 @@ test("Claude Code is not offered the file, git and plan tools its own harness ha
   }
 });
 
+test("a GPT session with unified-agent-tools is not offered read_file or apply_patch, is told to use those tools, and keeps that across a restart", async () => {
+  // With both servers' file tools listed, GPT agents searched with shell rg and read with Get-Content.
+  const tree = tempTree();
+  const statePath = path.join(tree.base, "chat-agent-tools.json");
+  const first = fixture({ root: tree.root, statePath });
+  let restored;
+  try {
+    const lease = await first.tools.lease({ agent: "codex", workspaceId: "ws1", unifiedFiles: true });
+    assert.equal(lease.bind("ao-1"), true);
+    const [{ url, headers }] = lease.servers;
+    const auth = { authorization: headers.Authorization };
+    assert.deepEqual(await listed(url, auth), ["git_status", "view_image", "update_plan", "show_in_chat"],
+      "read_file and apply_patch are unified-agent-tools' Read and Edit");
+    const init = await post(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, auth);
+    assert.match(init.body.result.instructions, /use the unified-agent-tools tools for every file operation: Read, ReadMany, Grep/);
+    assert.match(init.body.result.instructions, /Do not read, search, list or edit files with shell commands/);
+    assert.doesNotMatch(init.body.result.instructions, /read_file|list_dir|search_text/, "it is not told about tools it is not shown");
+    assert.equal((await callTool(url, auth, "read_file", { path: "src/a.txt" })).isError, false, "a call naming one still works");
+    assert.equal(first.calls.at(-1).body.tool, "read_file");
+
+    await first.tools.close();
+    assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).sessions[0].unifiedFiles, true);
+    restored = fixture({ root: tree.root, statePath });
+    await restored.tools.listen();
+    const kept = (await restored.tools.renew("ao-1")).servers[0];
+    assert.deepEqual(await listed(kept.url, { authorization: kept.headers.Authorization }), ["git_status", "view_image", "update_plan", "show_in_chat"],
+      "a resume after a restart keeps it");
+    const switched = (await restored.tools.renew("ao-1", { unifiedFiles: false })).servers[0];
+    assert.deepEqual(await listed(switched.url, { authorization: switched.headers.Authorization }),
+      ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"], "a resume without them gets the file tools back");
+  } finally { await restored?.tools.close(); await first.tools.close(); tree.cleanup(); }
+});
+
 test("the MCP endpoint answers initialize, lists the agent tools and calls them in the session's worktree", async () => {
   const tree = tempTree();
   const { tools, calls } = fixture({ root: tree.root });

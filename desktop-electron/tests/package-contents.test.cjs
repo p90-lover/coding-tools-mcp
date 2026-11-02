@@ -119,6 +119,11 @@ function createPackageFixture(label, mutate) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(pluginSource, ...asset.path.split("/")), target);
   }
+  const fileToolsSource = path.join(repositoryRoot, "desktop-electron", "vendor", "unified-agent-tools");
+  for (const relative of ["BUNDLE.json", "mcp/server.mjs"]) {
+    writeFile(path.join(resourcesRoot, "unified-agent-tools", ...relative.split("/")),
+      fs.readFileSync(path.join(fileToolsSource, ...relative.split("/"))));
+  }
 
   const componentBytes = new Map([
     ["coding-tools/coding-tools-headless.exe", Buffer.from("MZfixture-rust-headless")],

@@ -556,6 +556,11 @@ test("package and runtime preparation use repository aiTemp retention without de
       to: ".",
     },
     {
+      // The file tools GPT chats run (BUNDLE.json and mcp/server.mjs), checked by verify-package.
+      from: "vendor/unified-agent-tools",
+      to: "unified-agent-tools",
+    },
+    {
       from: "../app-handler",
       to: "app-handler",
       filter: [
