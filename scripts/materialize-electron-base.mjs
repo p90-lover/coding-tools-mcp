@@ -4,9 +4,9 @@ import { inventory, verifyTree } from './lib/upstream-manifest.mjs';
 
 const PIN = Object.freeze({
   repository: 'miuuyy/codex-chatgpt-web',
-  tag: 'v5.0.6',
-  commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
-  tunnelClientVersion: '0.0.12',
+  tag: 'v6.1.17',
+  commit: '860fa576eb47d9e20d7d8289235bfea94392d2fd',
+  tunnelClientVersion: '0.0.16',
 });
 const TARGET_VERSION = '0.6.0-rc.1';
 
@@ -58,7 +58,7 @@ async function updateJson(filePath, update) {
 
 async function main() {
   const root = process.cwd();
-  const vendor = path.join(root, 'vendor', 'codex-chatgpt-web-v5.0.6');
+  const vendor = path.join(root, 'vendor', 'codex-chatgpt-web-v6.1.17');
   await verifyTree(vendor, path.join(vendor, 'UPSTREAM_MANIFEST.json'), PIN);
 
   const desktop = path.join(root, 'desktop-electron');

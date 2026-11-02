@@ -128,7 +128,7 @@ function createPackageFixture(label, mutate) {
       sourceVersion: "0.4.10",
       targetVersion: PRODUCT_VERSION,
     }, null, 2)}\n`)],
-    ["native/tunnel-client.exe", Buffer.from("MZfixture-tunnel-client-0.0.12")],
+    ["native/tunnel-client.exe", Buffer.from("MZfixture-tunnel-client-0.0.16")],
     ["rollback/manifest.json", Buffer.from(`${JSON.stringify({
       schema: 1,
       stableVersion: "0.4.10",
@@ -156,7 +156,7 @@ function createPackageFixture(label, mutate) {
   const componentVersions = new Map([
     ["runtime-manifest", PRODUCT_VERSION],
     ["rust-headless", PRODUCT_VERSION],
-    ["tunnel-client", "0.0.12"],
+    ["tunnel-client", "0.0.16"],
     ["third-party-notices", PRODUCT_VERSION],
     ["migration-manifest", PRODUCT_VERSION],
     ["rollback-manifest", "0.4.10"],
@@ -195,8 +195,8 @@ function createPackageFixture(label, mutate) {
     },
     upstream: {
       repository: "miuuyy/codex-chatgpt-web",
-      version: "v5.0.6",
-      commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
+      version: "v6.1.17",
+      commit: "860fa576eb47d9e20d7d8289235bfea94392d2fd",
     },
     components,
   }, null, 2)}\n`);

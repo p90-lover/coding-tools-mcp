@@ -28,8 +28,8 @@ const PRODUCT = Object.freeze({
 const SOURCE_REPOSITORY = "p90-lover/coding-tools-mcp";
 const UPSTREAM = Object.freeze({
   repository: "miuuyy/codex-chatgpt-web",
-  version: "v5.0.6",
-  commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
+  version: "v6.1.17",
+  commit: "860fa576eb47d9e20d7d8289235bfea94392d2fd",
 });
 const STABLE_ROLLBACK = Object.freeze({
   releaseTag: "v0.4.10",
@@ -39,25 +39,25 @@ const STABLE_ROLLBACK = Object.freeze({
 });
 const OFFICIAL_TUNNEL_RELEASE = Object.freeze({
   repository: "openai/tunnel-client",
-  version: "v0.0.12",
+  version: "v0.0.16",
   platform: "windows/amd64",
-  archiveName: "tunnel-client-v0.0.12-windows-amd64.zip",
-  archiveSha256: "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356",
-  licenseName: "tunnel-client-v0.0.12-windows-amd64-licenses.txt",
-  licenseSha256: "7d85227df86c38a689fca913d6f4a0b49ad030d6e056155a6832312cf7fb4bad",
-  spdxName: "tunnel-client-v0.0.12-windows-amd64.spdx.json",
-  spdxSha256: "4c6b46a645b71853d55f50cfb4b2c51324422a57f007984ba113d3edcfeb4f2c",
+  archiveName: "tunnel-client-v0.0.16-windows-amd64.zip",
+  archiveSha256: "edef7241b0c647fcb30f1a80ff376b6b25c51927960f257a3f01e21b17c2aba6",
+  licenseName: "tunnel-client-v0.0.16-windows-amd64-licenses.txt",
+  licenseSha256: "9399ced2b36f82fa18e5fe1e6df5712015680c48b8de51a4bd983e9a58de6b4c",
+  spdxName: "tunnel-client-v0.0.16-windows-amd64.spdx.json",
+  spdxSha256: "4a4852a97ee25d7f72b6ffc54378e57b72b4047959c1d9eede6606efece10bd5",
   cloudflaredBinaryName: "cloudflared.exe",
-  cloudflaredVersion: "2026.7.2",
-  cloudflaredReleaseCommit: "8679787525edc8575b2948a7c4a50b6292c6d426",
+  cloudflaredVersion: "2026.8.2",
+  cloudflaredReleaseCommit: "733bfb939963e150dcf5c4faddb1603f744fbc98",
 });
 const REQUIRED_TUNNEL_MEMBERS = Object.freeze([
   "LICENSE",
   "NOTICE",
   "cloudflared-manifest.json",
   "cloudflared.exe",
-  "tunnel-client-v0.0.12-windows-amd64-licenses.txt",
-  "tunnel-client-v0.0.12-windows-amd64.spdx.json",
+  "tunnel-client-v0.0.16-windows-amd64-licenses.txt",
+  "tunnel-client-v0.0.16-windows-amd64.spdx.json",
   "tunnel-client.exe",
 ]);
 const REQUIRED_COMPONENTS = Object.freeze({
@@ -96,7 +96,7 @@ const COMPONENT_VERSIONS = Object.freeze({
   "runtime-manifest": PRODUCT.version,
   "rust-headless": PRODUCT.version,
   "third-party-notices": PRODUCT.version,
-  "tunnel-client": "0.0.12",
+  "tunnel-client": "0.0.16",
 });
 const TEXT_EXTENSIONS = new Set([
   ".bat", ".cjs", ".cmd", ".conf", ".cfg", ".crt", ".env", ".ini", ".js",
@@ -271,17 +271,17 @@ function validateComponentRecords(resourcesRoot, manifest) {
 function validateExpectedTunnelRelease(release) {
   if (!plain(release)
     || release.repository !== "openai/tunnel-client"
-    || release.version !== "v0.0.12"
+    || release.version !== "v0.0.16"
     || release.platform !== "windows/amd64"
-    || release.archiveName !== "tunnel-client-v0.0.12-windows-amd64.zip"
+    || release.archiveName !== "tunnel-client-v0.0.16-windows-amd64.zip"
     || !SHA256.test(release.archiveSha256)
-    || release.licenseName !== "tunnel-client-v0.0.12-windows-amd64-licenses.txt"
+    || release.licenseName !== "tunnel-client-v0.0.16-windows-amd64-licenses.txt"
     || !SHA256.test(release.licenseSha256)
-    || release.spdxName !== "tunnel-client-v0.0.12-windows-amd64.spdx.json"
+    || release.spdxName !== "tunnel-client-v0.0.16-windows-amd64.spdx.json"
     || !SHA256.test(release.spdxSha256)
     || release.cloudflaredBinaryName !== "cloudflared.exe"
-    || release.cloudflaredVersion !== "2026.7.2"
-    || release.cloudflaredReleaseCommit !== "8679787525edc8575b2948a7c4a50b6292c6d426") {
+    || release.cloudflaredVersion !== "2026.8.2"
+    || release.cloudflaredReleaseCommit !== "733bfb939963e150dcf5c4faddb1603f744fbc98") {
     fail("PACKAGE_TUNNEL_EXPECTED_RELEASE_INVALID", JSON.stringify(release));
   }
   return release;

@@ -53,6 +53,18 @@ export class ChatGptWebTurnRetryPolicy {
     return entry.retries > MAX_CHATGPT_WEB_TURN_RETRIES ? exhaustedError(entry) : error;
   }
 
+  /**
+   * Charge one in-turn browser recovery against the same budget as native retries, so a fresh
+   * ChatGPT conversation never adds sends beyond the cap. Refuses (charging nothing) when the
+   * recovery would exhaust the budget; the caller then reports the failure as an ordinary attempt.
+   */
+  chargeRecovery(key: string, error: ChatGptWebAdapterError, now = Date.now()): boolean {
+    this.prune(now);
+    if ((this.entries.get(key)?.retries ?? 0) + 1 > MAX_CHATGPT_WEB_TURN_RETRIES) return false;
+    this.recordRetryableFailure(key, error, now);
+    return true;
+  }
+
   exhaustedError(key: string, now = Date.now()): ChatGptWebAdapterError | undefined {
     this.prune(now);
     const entry = this.entries.get(key);

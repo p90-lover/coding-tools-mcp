@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, posix, resolve, win32 } from "node:path";
+import { getStaticTOMLValue, parseTOML, type AST } from "toml-eslint-parser";
 import type { AppConfig } from "./config";
 import { getConfigDir } from "./config";
 import type { InstalledCodexInterruptHook } from "./codex-integration-shared";
@@ -11,6 +12,7 @@ export const MANAGED_INTERRUPT_HOOK_END =
   "# End codex-chatgpt-web interrupt lifecycle hook.";
 
 function canonicalJson(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map(canonicalJson);
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
@@ -61,10 +63,6 @@ function lineEnding(text: string): "\n" | "\r\n" | "\r" {
   return text.includes("\r\n") ? "\r\n" : text.includes("\n") ? "\n" : text.includes("\r") ? "\r" : "\n";
 }
 
-function interruptGroupCount(text: string): number {
-  return text.split(/\r\n|\n|\r/).filter(line => /^\s*\[\[hooks\.Interrupt\]\]\s*(?:#.*)?$/.test(line)).length;
-}
-
 function managedMarkerCount(text: string): number {
   return text.split(MANAGED_INTERRUPT_HOOK_START).length - 1;
 }
@@ -98,10 +96,17 @@ export function installCodexInterruptHookCommand(
   if (managedMarkerCount(text) !== 0 || text.includes(MANAGED_INTERRUPT_HOOK_END)) {
     throw new Error("Codex config already contains a codex-chatgpt-web interrupt hook marker");
   }
-  const groupIndex = interruptGroupCount(text);
+  const groups = parseHookDocument(text).hooks?.Interrupt;
+  if (groups !== undefined && !Array.isArray(groups)) throw new Error("Codex Interrupt hooks must be an array");
+  const groupIndex = groups?.length ?? 0;
   const stateKey = `${canonicalConfigPath(configPath)}:interrupt:${groupIndex}:0`;
   const trustedHash = codexInterruptHookHash(command);
   const ending = lineEnding(text);
+  const trustSection = [
+    `[hooks.state.${JSON.stringify(stateKey)}]`,
+    `trusted_hash = ${JSON.stringify(trustedHash)}`,
+    MANAGED_INTERRUPT_HOOK_END,
+  ].join(ending);
   const core = [
     MANAGED_INTERRUPT_HOOK_START,
     "[[hooks.Interrupt]]",
@@ -111,9 +116,7 @@ export function installCodexInterruptHookCommand(
     `command = ${JSON.stringify(command)}`,
     "timeout = 3",
     "",
-    `[hooks.state.${JSON.stringify(stateKey)}]`,
-    `trusted_hash = ${JSON.stringify(trustedHash)}`,
-    MANAGED_INTERRUPT_HOOK_END,
+    trustSection,
   ].join(ending);
   const leading = text.length === 0
     ? ""
@@ -124,88 +127,245 @@ export function installCodexInterruptHookCommand(
         : `${ending}${ending}`;
   const trailing = text.length > 0 && text.endsWith(ending) ? ending : "";
   const fragment = `${leading}${core}${trailing}`;
+  const ast = parseTOML(text.replace(/\r(?!\n)/g, "\n"), { tomlVersion: "1.0" });
+  const inline = inlineInterruptArray(ast);
+  let installedText = `${text}${fragment}`;
+  if (inline) {
+    const end = inline.range[1] - 1;
+    const last = inline.elements.at(-1);
+    const comma = last && !ast.tokens.some(token => token.value === "," && token.range[0] >= last.range[1] && token.range[1] <= end)
+      ? "," : "";
+    const item = `${comma} { hooks = [{ type = "command", command = ${JSON.stringify(command)}, timeout = 3 }] } `;
+    installedText = text.slice(0, end) + item + text.slice(end) + leading + trustSection + trailing;
+  }
   return {
-    text: `${text}${fragment}`,
+    text: installedText,
     installed: { command, groupIndex, stateKey, trustedHash, fragment },
   };
 }
 
-function hookTextPattern(text: string): string {
-  return text.split(/\r\n|\n|\r/)
-    .map(line => line.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"))
-    .join("(?:\\r\\n|\\n|\\r)");
+type SourceRange = { start: number; end: number };
+type HookDocument = { hooks?: { Interrupt?: unknown[]; state?: Record<string, unknown> } };
+
+function inlineInterruptArray(ast: AST.TOMLProgram): AST.TOMLArray | undefined {
+  const visit = (value: AST.TOMLContentNode, path: string[]): AST.TOMLArray | undefined => {
+    if (path.length === 2 && path[0] === "hooks" && path[1] === "Interrupt" && value.type === "TOMLArray") return value;
+    if (value.type === "TOMLInlineTable") {
+      for (const entry of value.body) {
+        const found = visit(entry.value, [...path, ...getStaticTOMLValue(entry.key)]);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  for (const node of ast.body[0].body) {
+    if (node.type === "TOMLTable") {
+      if (node.resolvedKey.some(part => typeof part !== "string")) continue;
+      for (const entry of node.body) {
+        const found = visit(entry.value, [...node.resolvedKey as string[], ...getStaticTOMLValue(entry.key)]);
+        if (found) return found;
+      }
+    } else {
+      const found = visit(node.value, getStaticTOMLValue(node.key));
+      if (found) return found;
+    }
+  }
+  return undefined;
 }
 
-function locateCodexInterruptHook(text: string, installed: InstalledCodexInterruptHook): Array<{
-  start: number; end: number;
-}> {
-  const marker = installed.fragment.indexOf(MANAGED_INTERRUPT_HOOK_END);
-  if (marker < 0) throw new Error("Codex interrupt lifecycle hook journal fragment is invalid");
-  const ownedPrefix = installed.fragment.slice(0, marker);
-  // Native config writes normalize CRLF to LF; commands and owned fields must still match exactly.
-  const pattern = new RegExp(hookTextPattern(ownedPrefix), "g");
-  const match = pattern.exec(text);
-  if (!match || pattern.exec(text)) {
-    throw new Error("Codex interrupt lifecycle hook changed after setup; refusing to overwrite it");
+function parseHookDocument(text: string): HookDocument {
+  try {
+    return Bun.TOML.parse(text.replace(/\r\n?/g, "\n")) as HookDocument;
+  } catch {
+    // Parser errors can quote config values, including credentials.
+    throw invalidConfig();
   }
-  const first = match.index;
-  const ownedEnd = first + match[0].length;
-  if (interruptGroupCount(text.slice(0, first)) !== installed.groupIndex) {
-    throw new Error("Codex interrupt lifecycle hook order changed after setup; refusing to overwrite it");
+}
+
+function invalidConfig(): Error {
+  return new Error("Codex config.toml could not be parsed as TOML. Back up the file, repair its syntax "
+    + "or restore a known-good backup, then retry Setup > Install into Codex > Reinstall. "
+    + "The launcher has not overwritten the file.");
+}
+
+const HOOK_RECOVERY = " Back up Codex config.toml, restore only the launcher's hook sections from a known-good "
+  + "backup made after successful setup, then retry Setup > Install into Codex > Reinstall. "
+  + "Keep unrelated settings and hooks. If no suitable backup exists, export Activity > Export safe log and ask for help.";
+
+function withoutEmptyHookContainers(document: HookDocument): unknown {
+  const result = structuredClone(document);
+  const hooks = result.hooks;
+  if (hooks) {
+    if (hooks.Interrupt?.length === 0) delete hooks.Interrupt;
+    if (hooks.state && Object.keys(hooks.state).length === 0) delete hooks.state;
+    if (Object.keys(hooks).length === 0) delete result.hooks;
   }
-  const endMarker = text.indexOf(MANAGED_INTERRUPT_HOOK_END);
-  if (managedMarkerCount(text) !== 1 || endMarker < 0
-    || (endMarker >= first && endMarker < ownedEnd)
-    || text.split(MANAGED_INTERRUPT_HOOK_END).length !== 2) {
-    throw new Error("Codex interrupt lifecycle hook markers changed after setup; refusing to overwrite them");
+  return canonicalJson(result);
+}
+
+function removeRanges(text: string, ranges: SourceRange[]): string {
+  for (const { start, end } of [...ranges].sort((left, right) => right.start - left.start)) {
+    text = text.slice(0, start) + text.slice(end);
   }
-  if (endMarker < first) {
-    // A moved comment is independent of the owned definitions. Prove it is still a comment,
-    // rather than matching text inside an unrelated TOML value, before removing it separately.
-    const precedingConfig = text.slice(0, first);
-    const withoutMarker = precedingConfig.slice(0, endMarker)
-      + precedingConfig.slice(endMarker + MANAGED_INTERRUPT_HOOK_END.length);
-    try {
-      if (JSON.stringify(canonicalJson(Bun.TOML.parse(precedingConfig)))
-        !== JSON.stringify(canonicalJson(Bun.TOML.parse(withoutMarker)))) {
-        throw new Error("Marker removal changes TOML values");
-      }
-    } catch {
-      throw new Error("Codex interrupt lifecycle hook markers changed after setup; refusing to overwrite them");
-    }
-  }
+  return text;
+}
+
+function locateCodexInterruptHook(text: string, installed: InstalledCodexInterruptHook): SourceRange[] {
+  const changed = (detail = "The launcher's entries in hooks.Interrupt and hooks.state cannot be safely identified.") =>
+    new Error("Codex interrupt lifecycle hook changed after setup; refusing to overwrite it. " + detail + HOOK_RECOVERY);
+  const invalidJournal = () => new Error("Codex interrupt lifecycle hook journal is invalid. "
+    + "The launcher's saved setup record is inconsistent; this does not establish that config.toml is damaged. "
+    + "Export Activity > Export safe log and ask for help. Do not delete or edit the integration journal.");
   if (codexInterruptHookHash(installed.command) !== installed.trustedHash) {
-    throw new Error("Codex interrupt lifecycle hook journal hash is invalid");
+    throw invalidJournal();
   }
-  // Codex's TOML editor inserts new tables before trailing comments. The end marker can therefore
-  // move past unrelated config even though the owned hook fields remain unchanged.
-  const appendedConfig = text.slice(ownedEnd, endMarker < first ? undefined : endMarker);
-  const firstAssignment = appendedConfig.split(/\r\n|\n|\r/)
-    .map(line => line.trim()).find(line => line && !line.startsWith("#"));
-  if (firstAssignment && !/^\[\[?.+\]\]?(?:\s*#.*)?$/.test(firstAssignment)) {
-    throw new Error("Codex interrupt lifecycle hook changed after setup; refusing to overwrite it");
+  let document: HookDocument;
+  let ast: AST.TOMLProgram;
+  let journalAst: AST.TOMLProgram;
+  const expectedGroup = { hooks: [{ type: "command", command: installed.command, timeout: 3 }] };
+  const expectedState = { trusted_hash: installed.trustedHash };
+  const equal = (left: unknown, right: unknown) => JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
+  // Codex defaults command hooks to synchronous and trusted hook state to enabled.
+  // Its settings UI may persist those defaults explicitly. They do not change
+  // ownership; different values and every other added field still fail closed.
+  const sameGroup = (value: unknown) => equal(value, expectedGroup)
+    || equal(value, { hooks: [{ ...expectedGroup.hooks[0], async: false }] });
+  const sameState = (value: unknown) => equal(value, expectedState)
+    || equal(value, { ...expectedState, enabled: true });
+  try {
+    const journal = parseHookDocument(installed.fragment);
+    if (!equal(journal.hooks?.Interrupt, [expectedGroup])
+      || !equal(journal.hooks?.state, { [installed.stateKey]: expectedState })) throw invalidJournal();
+    journalAst = parseTOML(installed.fragment.replace(/\r(?!\n)/g, "\n"), { tomlVersion: "1.0" });
+  } catch {
+    throw invalidJournal();
   }
-  if (firstAssignment) {
-    // A later table can also extend the owned hook or trust state. Compare those exact
-    // definitions with Bun's TOML parser before treating the inserted tables as unrelated.
-    const ownedDefinitions = (fragment: string): string => {
-      const { hooks } = Bun.TOML.parse(fragment) as {
-        hooks: { Interrupt: unknown[]; state: Record<string, unknown> };
-      };
-      return JSON.stringify(canonicalJson([hooks.Interrupt[0], hooks.state[installed.stateKey]]));
-    };
-    try {
-      if (ownedDefinitions(ownedPrefix) !== ownedDefinitions(ownedPrefix + appendedConfig)) {
-        throw new Error("Modified owned definitions");
+  try {
+    document = parseHookDocument(text);
+    // Normalize bare CR without moving offsets; the parser retains every source range and comment.
+    ast = parseTOML(text.replace(/\r(?!\n)/g, "\n"), { tomlVersion: "1.0" });
+  } catch {
+    throw invalidConfig();
+  }
+  const groups = document.hooks?.Interrupt;
+  if (!Array.isArray(groups) || !sameGroup(groups[installed.groupIndex])) {
+    if (Array.isArray(groups) && groups.some(sameGroup)) {
+      throw new Error("Codex interrupt lifecycle hook order changed after setup; refusing to overwrite it. "
+        + "The launcher's entry moved within hooks.Interrupt." + HOOK_RECOVERY);
+    }
+    throw changed(groups === undefined || (Array.isArray(groups) && groups[installed.groupIndex] === undefined)
+      ? "The launcher's entry is missing from hooks.Interrupt in Codex config.toml."
+      : "The launcher's command or settings in hooks.Interrupt no longer match setup in Codex config.toml.");
+  }
+  const state = document.hooks?.state?.[installed.stateKey];
+  if (!sameState(state)) throw changed(state === undefined
+    ? "The launcher's trust entry is missing from hooks.state in Codex config.toml."
+    : "The launcher's trust settings in hooks.state no longer match setup in Codex config.toml.");
+
+  const ranges: SourceRange[] = [];
+  // A native config edit may discard comments. Authority comes from the exact journal, command,
+  // group index and trust hash; a marker inside a value or duplicate marker is never authority.
+  for (const marker of [MANAGED_INTERRUPT_HOOK_START, MANAGED_INTERRUPT_HOOK_END]) {
+    const comments = ast.comments.filter(comment => text.slice(...comment.range) === marker);
+    if (comments.length > 1 || text.split(marker).length - 1 !== comments.length) {
+      throw new Error("Codex interrupt lifecycle hook markers changed after setup; refusing to overwrite them. "
+        + "The launcher's identifying comments in Codex config.toml are duplicated or embedded in a value." + HOOK_RECOVERY);
+    }
+    for (const comment of comments) {
+      let start = comment.range[0];
+      if (marker === MANAGED_INTERRUPT_HOOK_START) {
+        const separatorCount = installed.fragment.match(/^(?:\r\n|\n|\r)*/)?.[0].match(/\r\n|\n|\r/g)?.length ?? 0;
+        const prefix = new RegExp(`(?:\\r\\n|\\n|\\r){0,${separatorCount}}$`).exec(text.slice(0, start));
+        start -= prefix?.[0].length ?? 0;
       }
-    } catch {
-      throw new Error("Codex interrupt lifecycle hook changed after setup; refusing to overwrite it");
+      ranges.push({ start, end: comment.range[1] });
     }
   }
-  const end = endMarker + MANAGED_INTERRUPT_HOOK_END.length;
-  const trailing = installed.fragment.slice(marker + MANAGED_INTERRUPT_HOOK_END.length);
-  const trailingLength = new RegExp("^" + hookTextPattern(trailing)).exec(text.slice(end))?.[0].length ?? 0;
-  return [{ start: first, end: ownedEnd }, { start: endMarker, end: end + trailingLength }];
+  const groupPath = ["hooks", "Interrupt", installed.groupIndex];
+  const statePath = ["hooks", "state", installed.stateKey];
+  const startsWith = (path: (string | number)[], prefix: (string | number)[]) =>
+    prefix.every((part, index) => path[index] === part);
+  let groupLocated = false;
+  let stateLocated = false;
+  const owned = (path: (string | number)[]) => {
+    if (startsWith(path, groupPath)) { groupLocated = true; return true; }
+    if (startsWith(path, statePath)) { stateLocated = true; return true; }
+    return false;
+  };
+  const removeNode = (node: AST.TOMLNode, siblings?: AST.TOMLNode[]) => {
+    let end = node.range[1];
+    if (node.type === "TOMLTable") {
+      const path = [...node.resolvedKey];
+      if (startsWith(path, groupPath)) path[2] = 0;
+      const original = journalAst.body[0].body.find(item => item.type === "TOMLTable" && equal(item.resolvedKey, path));
+      if (original) {
+        const count = installed.fragment.slice(original.range[1]).match(/^(?:\r\n|\n|\r)*/)?.[0].match(/\r\n|\n|\r/g)?.length ?? 0;
+        end += new RegExp(`^(?:\\r\\n|\\n|\\r){0,${count}}`).exec(text.slice(end))?.[0].length ?? 0;
+      }
+    }
+    ranges.push({ start: node.range[0], end });
+    if (!siblings || siblings.length < 2) return;
+    const index = siblings.indexOf(node);
+    const left = index > 0 ? siblings[index - 1]!.range[1] : node.range[1];
+    const right = index > 0 ? node.range[0] : siblings[index + 1]!.range[0];
+    const comma = ast.tokens.find(token => token.value === "," && token.range[0] >= left && token.range[1] <= right);
+    if (!comma) throw changed();
+    ranges.push({ start: comma.range[0], end: comma.range[1] });
+  };
+  const visitValue = (value: AST.TOMLContentNode, path: (string | number)[]) => {
+    if (value.type === "TOMLInlineTable") {
+      for (const entry of value.body) visitEntry(entry, path, value.body);
+    } else if (value.type === "TOMLArray") {
+      value.elements.forEach((element, index) => {
+        const elementPath = [...path, index];
+        if (owned(elementPath)) removeNode(element, value.elements);
+        else visitValue(element, elementPath);
+      });
+    }
+  };
+  const visitEntry = (entry: AST.TOMLKeyValue, prefix: (string | number)[], siblings?: AST.TOMLNode[]) => {
+    const path = [...prefix, ...getStaticTOMLValue(entry.key)];
+    if (owned(path)) removeNode(entry, siblings);
+    else if (equal(path, ["hooks", "Interrupt"]) && entry.value.type === "TOMLArray" && entry.value.elements.length === 1) {
+      if (!owned([...path, 0])) throw changed();
+      removeNode(entry, siblings);
+    } else visitValue(entry.value, path);
+  };
+  for (const node of ast.body[0].body) {
+    if (node.type === "TOMLTable") {
+      if (owned(node.resolvedKey)) removeNode(node);
+      else for (const entry of node.body) visitEntry(entry, node.resolvedKey);
+    } else visitEntry(node, []);
+  }
+  if (!groupLocated || !stateLocated) throw changed();
+  // Keep byte-exact restoration when the owned fragment has not been reformatted.
+  const exact = text.indexOf(installed.fragment);
+  if (exact >= 0 && text.indexOf(installed.fragment, exact + 1) < 0) {
+    ranges.splice(0, ranges.length, { start: exact, end: exact + installed.fragment.length });
+  } else {
+    for (const range of ranges) {
+      const lineStart = Math.max(text.lastIndexOf("\n", range.start - 1), text.lastIndexOf("\r", range.start - 1)) + 1;
+      if (/^[ \t]*$/.test(text.slice(lineStart, range.start))) range.start = lineStart;
+      const tail = /[\r\n]/.test(text[range.end - 1] ?? "")
+        ? null : /^[ \t]*(?:\r\n|\n|\r|$)/.exec(text.slice(range.end));
+      if (tail) range.end += tail[0].length;
+    }
+  }
+  const merged: SourceRange[] = [];
+  for (const range of ranges.sort((left, right) => left.start - right.start)) {
+    const previous = merged.at(-1);
+    if (previous && (range.start <= previous.end || /^\s*$/.test(text.slice(previous.end, range.start)))) {
+      previous.end = Math.max(previous.end, range.end);
+    } else merged.push({ ...range });
+  }
+  const expectedRestored = structuredClone(document);
+  expectedRestored.hooks!.Interrupt!.splice(installed.groupIndex, 1);
+  delete expectedRestored.hooks!.state![installed.stateKey];
+  try {
+    if (!equal(withoutEmptyHookContainers(parseHookDocument(removeRanges(text, merged))),
+      withoutEmptyHookContainers(expectedRestored))) throw changed();
+  } catch { throw changed(); }
+  return merged;
 }
 
 export function verifyCodexInterruptHook(text: string, installed: InstalledCodexInterruptHook): void {
@@ -220,7 +380,7 @@ export function restoreCodexInterruptHook(
   // Explicit Setup can reinstall a fully removed hook. A stale journal alone does not mean
   // there is still a definition to remove; partial edits must retain the strict checks below.
   if (options.allowAbsent && managedMarkerCount(text) === 0 && !text.includes(MANAGED_INTERRUPT_HOOK_END)) {
-    const { hooks } = Bun.TOML.parse(text) as { hooks?: unknown };
+    const { hooks } = parseHookDocument(text);
     if (hooks === undefined) return text;
     if (hooks && typeof hooks === "object" && !Array.isArray(hooks) && !Object.hasOwn(hooks, "Interrupt")) {
       const state = (hooks as Record<string, unknown>).state;

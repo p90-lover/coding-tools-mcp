@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -46,6 +46,8 @@ describe("Zero Risk turn broker lifecycle", () => {
   test("requires both Launcher Sent and connector start before tools can run", async () => {
     const socketPath = endpoint("strict-lifecycle");
     const broker = TurnBroker.forSocket(socketPath);
+    const logs: string[] = [];
+    const logger = spyOn(console, "info").mockImplementation((...args) => { logs.push(args.join(" ")); });
     try {
       // The TTL bounds human setup, not local named-pipe scheduling. Keep enough margin for loaded
       // Windows CI, then cross that exact boundary after activation to prove the turn remains live.
@@ -104,6 +106,7 @@ describe("Zero Risk turn broker lifecycle", () => {
       expect(await invocation).toMatchObject({ structuredContent: { output: root } });
       expect(() => broker.completeSafeTurn(requestId, "activity still settling"))
         .toThrow("1 active Codex MCP request");
+      expect(logs.filter(line => line.includes("accepted safe completion"))).toEqual([]);
       await callTurnBroker(socketPath, {
         method: "activity_complete",
         token: requestId,
@@ -125,7 +128,17 @@ describe("Zero Risk turn broker lifecycle", () => {
       expect(() => broker.completeSafeTurn(requestId, "   ")).toThrow("must not be empty");
       await expect(callTurnBroker(socketPath, { method: "claim", token: requestId, contract: "safe" }))
         .rejects.toThrow("already terminal");
+      expect(logs.filter(line => line.includes(" delivered "))).toEqual([
+        `[chatgpt-web] broker trace=safe-lifecycle delivered call=${request!.callId.slice(0, 17)} path=waiter replay=false`,
+      ]);
+      expect(logs.filter(line => line.includes("accepted safe completion"))).toEqual([
+        "[chatgpt-web] broker trace=safe-lifecycle accepted safe completion",
+      ]);
+      for (const privateValue of [requestId, claimed.bindingId, request!.callId, nonceA, nonceB, "final answer", "conflicting answer"]) {
+        expect(logs.join("\n")).not.toContain(privateValue);
+      }
     } finally {
+      logger.mockRestore();
       await broker.close();
     }
   }, 15_000);
@@ -337,9 +350,12 @@ describe("Zero Risk public MCP ABI", () => {
       expect(inventoryRequest).toMatchObject({ wireName: "exec", freeform: true });
       expect(inventoryRequest?.input).toContain("ALL_TOOLS");
       expect(inventoryRequest?.input).toContain("codex_turn_complete");
-      broker.completeTool(requestId, inventoryRequest!.callId, {
-        content: [{ type: "text", text: JSON.stringify({ tools: [], total: 0 }) }],
+      const content: Array<{ type: "text"; text: string }> = [];
+      const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+      await new AsyncFunction("ALL_TOOLS", "text", inventoryRequest!.input!)([], (value: string) => {
+        content.push({ type: "text", text: `Script completed\nOutput:\n${value}` });
       });
+      broker.completeTool(requestId, inventoryRequest!.callId, { content });
       const inventory = await inventoryAfterStart;
       expect(inventory.structuredContent).toMatchObject({
         total: 2,

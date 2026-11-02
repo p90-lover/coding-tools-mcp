@@ -3052,6 +3052,8 @@ test("a later browser load restores descriptor and readiness in both launcher bu
       interactionModeOverride: null,
       getBrowserInteractionMode: () => "automatic",
       clearHomeNavigationTimeout() {},
+      // v6's standalone host re-syncs view visibility on every load; this fixture has no window.
+      syncViewVisibility() {},
       setState() {},
       applyViewportCss: async () => {},
       markOwnedSurface: async () => { events.push("owned"); },

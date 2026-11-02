@@ -141,16 +141,18 @@ function nativeCatalog(): Record<string, unknown> {
     }],
   };
 }
-const webSlugs = (catalog: Record<string, unknown>) => (catalog.models as Array<{ slug: string }>)
-  .map(model => model.slug)
-  .filter(slug => slug.startsWith("chatgpt-web/"));
+// Listed rows only: hidden pre-6.0 rows stay in the catalog for old tasks and cached selections.
+const webSlugs = (catalog: Record<string, unknown>) => (catalog.models as Array<{ slug: string; visibility?: string }>)
+  .filter(model => model.slug.startsWith("chatgpt-web/") && model.visibility !== "hide")
+  .map(model => model.slug);
+const PLUS_SLUGS = ["chatgpt-web/gpt-6-sol-instant", "chatgpt-web/gpt-6-sol", "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol"];
 
 test("the model list follows a fresh reading and otherwise keeps the static list", () => {
   const config = defaultConfig("full");
   const all = CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug);
   expect(webSlugs(augmentNativeModelCatalog(nativeCatalog(), config))).toEqual(all);
   expect(webSlugs(augmentNativeModelCatalog(nativeCatalog(), config, undefined, chatGptEffortTierAvailability(PLUS))))
-    .toEqual(["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high"]);
+    .toEqual(PLUS_SLUGS);
   expect(webSlugs(augmentNativeModelCatalog(nativeCatalog(), config, undefined, chatGptEffortTierAvailability(PRO))))
     .toEqual(all);
   // A reading that hides Instant is not plausible and leaves the static list.
@@ -163,6 +165,6 @@ test("the model list follows a fresh reading and otherwise keeps the static list
 
   const router = defaultConfig("full");
   expect(routerWebModelCatalog(router, chatGptEffortTierAvailability(PLUS)).data.map(entry => entry.id))
-    .toEqual(["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high"]);
+    .toEqual(PLUS_SLUGS);
   expect(routerWebModelCatalog(router).data.map(entry => entry.id)).toEqual(all);
 });

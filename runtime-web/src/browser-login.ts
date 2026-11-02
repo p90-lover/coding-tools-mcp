@@ -6,10 +6,11 @@ import type { AppConfig } from "./config";
 import { atomicWriteFile } from "./config";
 import {
   assertAuthenticatedChatGptPage,
-  assertTemporaryChatPage,
-  CHATGPT_TEMPORARY_CHAT_URL,
+  assertNewChatPage,
+  CHATGPT_NEW_CHAT_URL,
   detectChatGptAccountCapabilities,
 } from "./chatgpt-session";
+import { CHATGPT_COMPOSER_SELECTOR } from "./chatgpt-ui/composer";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 import { recordChatGptEffortSnapshot } from "./chatgpt-account-capabilities";
 
@@ -17,6 +18,7 @@ export interface BrowserLoginResult {
   storageStatePath: string;
   accountSurfaceUrl: string;
   solAvailable: boolean;
+  extraHighAvailable: boolean;
   proAvailable: boolean;
 }
 
@@ -37,6 +39,7 @@ export interface SystemBrowserLoginCapture {
 interface SystemBrowserLoginOptions {
   continuation: Promise<void>;
   timeoutMs?: number;
+  onBrowserReady?: () => void;
 }
 
 interface LoginVerificationMarker {
@@ -44,13 +47,14 @@ interface LoginVerificationMarker {
   authenticated: true;
   verifiedAt: string;
   solAvailable?: boolean;
+  extraHighAvailable?: boolean;
   proAvailable?: boolean;
 }
 
 const SYSTEM_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const SYSTEM_LOGIN_STOP_TIMEOUT_MS = 5_000;
 const LOGIN_STORAGE_ROOT_DOMAINS = ["chatgpt.com", "openai.com"] as const;
-const CHATGPT_ORIGIN = new URL(CHATGPT_TEMPORARY_CHAT_URL).origin;
+const CHATGPT_ORIGIN = new URL(CHATGPT_NEW_CHAT_URL).origin;
 
 function browserProcessExited(browser: ChildProcess): boolean {
   return browser.exitCode !== null || browser.signalCode !== null;
@@ -165,10 +169,11 @@ async function inspectStoredState(
     const verifierContext = await verifierBrowser.newContext({ storageState });
     try {
       const verifierPage = await verifierContext.newPage();
-      await verifierPage.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
-      await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 60_000 });
+      await verifierPage.goto(CHATGPT_NEW_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await verifierPage.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true }).first().waitFor({ state: "visible", timeout: 60_000 });
       await assertAuthenticatedChatGptPage(verifierPage);
-      await assertTemporaryChatPage(verifierPage);
+      // The verifier opens an ordinary (saved) new chat, not Temporary Chat.
+      await assertNewChatPage(verifierPage, true);
       // Sign-in refreshes the model-list hint as well as the setup booleans.
       const capabilities = await detectChatGptAccountCapabilities(verifierPage, {
         onEffortSnapshot: snapshot => { recordChatGptEffortSnapshot(snapshot); },
@@ -186,7 +191,7 @@ export async function inspectBrowserLoginCapabilities(config: AppConfig): Promis
   if (!browserLoginStateExists(config)) throw new Error("ChatGPT login state is missing or unverified");
   const inspected = await inspectStoredState(config, config.storageStatePath);
   writeVerificationMarker(config.storageStatePath, inspected);
-  return { solAvailable: inspected.solAvailable, proAvailable: inspected.proAvailable };
+  return { solAvailable: inspected.solAvailable, extraHighAvailable: inspected.extraHighAvailable, proAvailable: inspected.proAvailable };
 }
 
 export function storedBrowserLoginCapabilities(
@@ -197,6 +202,7 @@ export function storedBrowserLoginCapabilities(
     const marker = JSON.parse(readFileSync(loginVerificationMarkerPath(config.storageStatePath), "utf8")) as Partial<LoginVerificationMarker>;
     return {
       ...(typeof marker.solAvailable === "boolean" ? { solAvailable: marker.solAvailable } : {}),
+      ...(typeof marker.extraHighAvailable === "boolean" ? { extraHighAvailable: marker.extraHighAvailable } : {}),
       ...(typeof marker.proAvailable === "boolean" ? { proAvailable: marker.proAvailable } : {}),
     };
   } catch {
@@ -231,7 +237,7 @@ export async function captureSystemBrowserLogin(
   const profileDir = mkdtempSync(join(profileParent, "login-profile-"));
   try { chmodSync(profileDir, 0o700); } catch {}
   process.stdout.write(
-    "Sign in with your passkey in the dedicated Chrome window. When Temporary Chat is ready, return to Codex Web GPT and choose Continue.\n",
+    "Sign in with your passkey in the dedicated Chrome window. When ChatGPT is ready, return to Codex Web GPT and choose Continue.\n",
   );
 
   let capture: SystemBrowserLoginCapture | undefined;
@@ -244,13 +250,16 @@ export async function captureSystemBrowserLogin(
       "--disable-background-mode",
       "--no-first-run",
       "--no-default-browser-check",
-      CHATGPT_TEMPORARY_CHAT_URL,
+      CHATGPT_NEW_CHAT_URL,
     ], { env: process.env, stdio: "ignore" });
     let continuationRequested = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await new Promise<void>((resolve, reject) => {
         timeout = setTimeout(() => reject(new Error("Timed out waiting for passkey sign-in")), remainingTime());
+        loginBrowser.once("spawn", () => {
+          try { options.onBrowserReady?.(); } catch (error) { reject(error); }
+        });
         void options.continuation.then(() => {
           continuationRequested = true;
           if (!loginBrowser.kill() && !browserProcessExited(loginBrowser)) {
@@ -311,7 +320,7 @@ export async function captureSystemBrowserLogin(
       body: "<!doctype html><meta charset=\"utf-8\"><title>Private login-state capture</title>",
     }));
     const page = context.pages()[0] ?? await context.newPage();
-    await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+    await page.goto(CHATGPT_NEW_CHAT_URL, {
       waitUntil: "domcontentloaded",
       timeout: Math.min(60_000, remainingTime()),
     });
@@ -389,7 +398,7 @@ export async function loginToChatGpt(
     "--disable-background-mode",
     "--no-first-run",
     "--no-default-browser-check",
-    CHATGPT_TEMPORARY_CHAT_URL,
+    CHATGPT_NEW_CHAT_URL,
   ], { env: process.env, stdio: "ignore" });
   const loginExit = await new Promise<number>((resolveExit, rejectExit) => {
     loginBrowser.once("error", rejectExit);
@@ -408,20 +417,18 @@ export async function loginToChatGpt(
   });
   try {
     const page = context.pages()[0] ?? await context.newPage();
-    await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+    await page.goto(CHATGPT_NEW_CHAT_URL, {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
     });
-    const composer = page.getByRole("textbox", { name: "Chat with ChatGPT" }).or(
-      page.locator('[data-testid="prompt-textarea"], [contenteditable="true"][data-lexical-editor="true"]'),
-    ).first();
+    const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true }).first();
     try {
       await composer.waitFor({ state: "visible", timeout: options.timeoutMs ?? 60_000 });
     } catch {
       throw new Error("The authenticated ChatGPT page did not produce a visible composer");
     }
     await assertAuthenticatedChatGptPage(page);
-    await assertTemporaryChatPage(page);
+    await assertNewChatPage(page, true);
     const state = await context.storageState();
 
     const inspected = await inspectStoredState(config, state);
@@ -431,6 +438,7 @@ export async function loginToChatGpt(
       storageStatePath: config.storageStatePath,
       accountSurfaceUrl: page.url(),
       solAvailable: inspected.solAvailable,
+      extraHighAvailable: inspected.extraHighAvailable === true,
       proAvailable: inspected.proAvailable,
     };
   } finally {

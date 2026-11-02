@@ -1,7 +1,10 @@
-export type Language = "en" | "zh-CN" | "ja";
+import languages from "../electron/languages.json";
+import type { LimitsSnapshot } from "./limits-types";
+
+export type Language = keyof typeof languages;
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "activity" | "limits" | "settings";
 
 export interface LauncherState {
   version: 1;
@@ -12,8 +15,14 @@ export interface LauncherState {
   autoStart: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
+  autoApproveToolCalls: boolean;
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
+  biggerContextAvailable?: boolean;
+  composerPredictionsEnabled: boolean;
+  experimentalSkillAttachments: boolean;
+  experimentalFreshConversationPerTurn: boolean;
+  useTemporaryChats: boolean;
   zeroRiskProEnabled: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
@@ -34,6 +43,7 @@ export interface BrowserState {
   url: string;
   title: string;
   authenticated: boolean;
+  passkeyPhase?: "opening" | "waiting" | "importing" | null;
   visible: boolean;
   surfaceActive: boolean;
   loading: boolean;
@@ -54,6 +64,14 @@ export interface BrowserTabState {
   active: boolean;
   closable: boolean;
   interactionMode?: BrowserInteractionMode;
+  approvalPending?: boolean;
+  authenticationRequired?: boolean;
+  activity?: {
+    state: "preparing" | "sending" | "chatgpt" | "tools" | "approval" | "unknown";
+    since: number;
+    updatedAt: number;
+    activeToolCalls: number;
+  };
   manualState?: "awaiting-user" | "sent" | "running" | "completed" | "timed-out" | "cancelled" | "failed";
   manualDeadlineAt?: string;
   canCopyPrompt?: boolean;
@@ -121,6 +139,8 @@ export interface LauncherSnapshot {
 
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
+  getLimits(): Promise<LimitsSnapshot>;
+  setupLimits(): Promise<LimitsSnapshot>;
   setLanguage(language: Language): Promise<LauncherState>;
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
@@ -140,6 +160,8 @@ export interface LauncherApi {
   continuePasskeyLogin(): Promise<boolean>;
   logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
   dismissSessionReminder(): Promise<LauncherState>;
+  setSessionReminderVisible(visible: boolean): Promise<void>;
+  onSessionReminderLogout(listener: () => void): () => void;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
@@ -152,9 +174,15 @@ export interface LauncherApi {
     replace?: boolean;
     interactionMode?: BrowserInteractionMode;
   }): Promise<{ ok: boolean; stdout: string }>;
+  setConnectorNameSuffix(suffix: string): Promise<LauncherState>;
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
+  setComposerPredictions(enabled: boolean): Promise<LauncherState>;
+  setSkillAttachments(enabled: boolean): Promise<LauncherState>;
+  setAutoApproveToolCalls(enabled: boolean): Promise<LauncherState>;
+  setFreshConversationPerTurn(enabled: boolean): Promise<LauncherState>;
+  setTemporaryChats(enabled: boolean): Promise<LauncherState>;
   setZeroRiskPro(enabled: boolean): Promise<LauncherState>;
   setBrowserInteractionMode(mode: BrowserInteractionMode): Promise<{
     state: LauncherState;
@@ -172,6 +200,7 @@ export interface LauncherApi {
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
+  onConnectorNamesChanged(listener: (names: Pick<LauncherSnapshot, "connectorName" | "connectorNames">) => void): () => void;
   onStateChanged(listener: (state: LauncherState) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
@@ -182,5 +211,11 @@ export interface LauncherApi {
 declare global {
   interface Window {
     codexWebLauncher?: LauncherApi;
+    codexSessionReminder?: {
+      language(): Promise<Language>;
+      resize(height: number): Promise<void>;
+      action(action: "dismiss" | "logout"): Promise<void>;
+      onLanguage(listener: (language: Language) => void): () => void;
+    };
   }
 }

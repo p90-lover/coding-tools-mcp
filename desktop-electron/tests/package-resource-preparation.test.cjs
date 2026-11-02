@@ -77,9 +77,9 @@ function storedZip(entries) {
 
 function cloudflaredManifest(platform = "windows/amd64") {
   return `${JSON.stringify({
-    version: "2026.7.2",
-    release_url: "https://github.com/cloudflare/cloudflared/releases/tag/2026.7.2",
-    release_commit: "8679787525edc8575b2948a7c4a50b6292c6d426",
+    version: "2026.8.2",
+    release_url: "https://github.com/cloudflare/cloudflared/releases/tag/2026.8.2",
+    release_commit: "733bfb939963e150dcf5c4faddb1603f744fbc98",
     platforms: [platform],
   })}\n`;
 }
@@ -106,11 +106,11 @@ function createFixture(label, overrides = {}) {
   const outputRoot = path.join(desktopRoot, "build", "package-resources");
   const inputs = path.join(root, "aiTemp", "input");
   const headlessBinary = path.join(inputs, "coding-tools-headless.exe");
-  const tunnelArchive = path.join(inputs, "tunnel-client-v0.0.12-windows-amd64.zip");
+  const tunnelArchive = path.join(inputs, "tunnel-client-v0.0.16-windows-amd64.zip");
   const noticesPath = path.join(root, "third_party", "THIRD_PARTY_NOTICES.md");
-  const licenseName = "tunnel-client-v0.0.12-windows-amd64-licenses.txt";
-  const spdxName = "tunnel-client-v0.0.12-windows-amd64.spdx.json";
-  const tunnelBytes = Buffer.from("MZfixture-tunnel-client-0.0.12");
+  const licenseName = "tunnel-client-v0.0.16-windows-amd64-licenses.txt";
+  const spdxName = "tunnel-client-v0.0.16-windows-amd64.spdx.json";
+  const tunnelBytes = Buffer.from("MZfixture-tunnel-client-0.0.16");
   const archiveBytes = storedZip([
     ["tunnel-client.exe", tunnelBytes],
     ["cloudflared.exe", "MZfixture-cloudflared"],
@@ -141,7 +141,7 @@ function createFixture(label, overrides = {}) {
     "",
     "## codex-chatgpt-web",
     "",
-    "Pinned at v5.0.6 under the MIT license.",
+    "Pinned at v6.1.17 under the MIT license.",
     "",
   ].join("\n"));
 
@@ -154,7 +154,7 @@ function createFixture(label, overrides = {}) {
     tunnelArchive,
     tunnelRelease: {
       repository: "openai/tunnel-client",
-      version: "v0.0.12",
+      version: "v0.0.16",
       platform: "windows",
       arch: "amd64",
       archiveName: path.basename(tunnelArchive),
@@ -226,8 +226,8 @@ test("composes the exact Windows payload from the official seven-member client a
   });
   assert.deepEqual(manifest.upstream, {
     repository: "miuuyy/codex-chatgpt-web",
-    version: "v5.0.6",
-    commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
+    version: "v6.1.17",
+    commit: "860fa576eb47d9e20d7d8289235bfea94392d2fd",
   });
   const expectedNativeMembers = new Map([
     ["LICENSE", Buffer.from("Apache License\nVersion 2.0, January 2004\n")],
@@ -236,7 +236,7 @@ test("composes the exact Windows payload from the official seven-member client a
     ["cloudflared.exe", Buffer.from("MZfixture-cloudflared")],
     [options.tunnelRelease.licenseName, Buffer.from("tunnel-client dependency licenses include Apache-2.0 components.\n")],
     [options.tunnelRelease.spdxName, Buffer.from("{\"spdxVersion\":\"SPDX-2.3\"}\n")],
-    ["tunnel-client.exe", Buffer.from("MZfixture-tunnel-client-0.0.12")],
+    ["tunnel-client.exe", Buffer.from("MZfixture-tunnel-client-0.0.16")],
   ]);
   assert.deepEqual(
     manifest.supply_chain.tunnel_client.archive.members,
@@ -251,8 +251,8 @@ test("composes the exact Windows payload from the official seven-member client a
     binaryName: "cloudflared.exe",
     binarySha256: sha256(Buffer.from("MZfixture-cloudflared")),
     manifestSha256: sha256(Buffer.from(cloudflaredManifest())),
-    version: "2026.7.2",
-    releaseCommit: "8679787525edc8575b2948a7c4a50b6292c6d426",
+    version: "2026.8.2",
+    releaseCommit: "733bfb939963e150dcf5c4faddb1603f744fbc98",
   });
   assert.deepEqual(
     manifest.components.map((component) => component.id),
@@ -400,7 +400,7 @@ test("rejects any unexpected member in the tunnel archive before replacing prior
   const options = createFixture("tunnel-inventory");
   writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
   const archiveBytes = storedZip([
-    ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.12"],
+    ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.16"],
     ["cloudflared.exe", "MZfixture-cloudflared"],
     ["cloudflared-manifest.json", cloudflaredManifest()],
     ["LICENSE", "Apache License\nVersion 2.0, January 2004\n"],
@@ -423,7 +423,7 @@ test("rejects a client archive missing the pinned cloudflared manifest before re
   const options = createFixture("tunnel-missing-cloudflared-manifest");
   writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
   const archiveBytes = storedZip([
-    ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.12"],
+    ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.16"],
     ["cloudflared.exe", "MZfixture-cloudflared"],
     ["LICENSE", "Apache License\nVersion 2.0, January 2004\n"],
     ["NOTICE", "OpenAI tunnel-client\n"],
@@ -450,7 +450,7 @@ test("rejects a client archive with a forged cloudflared identity before replaci
     platforms: ["windows/amd64"],
   }, null, 2) + "\n";
   const archiveBytes = storedZip([
-    ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.12"],
+    ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.16"],
     ["cloudflared.exe", "MZfixture-cloudflared"],
     ["cloudflared-manifest.json", forgedManifest],
     ["LICENSE", "Apache License\nVersion 2.0, January 2004\n"],
@@ -518,8 +518,8 @@ test("package and runtime preparation use repository aiTemp retention without de
   assert.match(fiveStackPreparation, /prepare-only Windows shims must not ship CI node\.exe paths/);
   assert.match(composer, /aiTemp/);
   assert.match(composer, /Trash/);
-  assert.match(composer, /2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356/);
-  assert.match(composer, /7d85227df86c38a689fca913d6f4a0b49ad030d6e056155a6832312cf7fb4bad/);
+  assert.match(composer, /edef7241b0c647fcb30f1a80ff376b6b25c51927960f257a3f01e21b17c2aba6/);
+  assert.match(composer, /9399ced2b36f82fa18e5fe1e6df5712015680c48b8de51a4bd983e9a58de6b4c/);
   assert.match(composer, /cloudflared-manifest\.json/);
   assert.match(runtimePreparation, /aiTemp/);
   assert.match(runtimePreparation, /Trash/);

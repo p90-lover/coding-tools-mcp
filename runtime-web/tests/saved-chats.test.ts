@@ -11,11 +11,11 @@ import {
 import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import {
   assertNewChatPage,
-  CHATGPT_COMPOSER_SELECTOR,
   chatGptNewChatUrl,
   chatGptRetainedConversationPage,
   chatGptSavedConversationPath,
 } from "../src/chatgpt-session";
+import { CHATGPT_COMPOSER_SELECTOR } from "../src/chatgpt-ui/composer";
 
 const SAVED_CONVERSATION = "https://chatgpt.com/c/0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c";
 
@@ -178,7 +178,7 @@ test("a refused mention fails at once instead of waiting out every trigger attem
 function retainedTurnWorker(useSavedChats: boolean, diagnostics: string) {
   const actions: string[] = [];
   const reached = new Error("fixture reached effort selection");
-  const capabilities = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
+  const capabilities = { localToolsEnabled: false, solAvailable: true, proAvailable: false, extraHighAvailable: false };
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { appName: "Coding Tools Native2", browserDiagnosticsPath: diagnostics, useSavedChats },
     runStage: async (_trace: string, _name: string, _timeout: number, action: (signal: AbortSignal) => Promise<unknown>) => (
@@ -193,7 +193,7 @@ function retainedTurnWorker(useSavedChats: boolean, diagnostics: string) {
       throw reached;
     },
     attachPrompt: async () => { actions.push("type"); },
-    attachPromptWithCompactionRetry: async () => { actions.push("type"); },
+    attachPromptWithIntegrityRetry: async () => { actions.push("type"); },
   });
   const turn = {
     traceId: "retained_conversation_fixture",
@@ -216,7 +216,9 @@ for (const [useSavedChats, url, reusable] of [
 ] as const) test(`a retained ${useSavedChats ? "saved" : "temporary"} turn checks its page before typing (${url})`, async () => {
   const diagnostics = mkdtempSync(join(tmpdir(), "retained-conversation-"));
   const { worker, turn, actions, reached } = retainedTurnWorker(useSavedChats, diagnostics);
-  const page = { url: () => url, evaluate: async () => ({}), isClosed: () => false };
+  // No response is still generating, so the steered-stop check finds nothing to press.
+  const hidden = { last: () => hidden, first: () => hidden, isVisible: async () => false };
+  const page = { url: () => url, evaluate: async () => ({}), isClosed: () => false, locator: () => hidden };
   try {
     const result = worker.runBrowserTurn(turn, undefined, page, true);
     if (reusable) {

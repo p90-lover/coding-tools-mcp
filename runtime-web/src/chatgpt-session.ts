@@ -1,39 +1,28 @@
+import { CHATGPT_COMPOSER_SELECTOR, chatGptThinkButtons } from "./chatgpt-ui/composer";
+import {
+  CHATGPT_EFFORT_CONTROL_SELECTOR,
+  activateChatGptEffortMenu,
+  parseChatGptEffortSliderState,
+  readChatGptEffortSnapshot as readChatGptEffortSliderSnapshot,
+  type ChatGptEffortActivation,
+  type ChatGptEffortSliderState,
+} from "./chatgpt-ui/model-picker";
 import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 import { parseChatGptEffortTicks, type ChatGptEffortSnapshot } from "./chatgpt-account-capabilities";
 
-export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
-export const CHATGPT_SAVED_CHAT_URL = "https://chatgpt.com/";
+/** The saved new-chat home. Coding Tools runs task turns here: ChatGPT refuses connectors in Temporary Chat. */
+export const CHATGPT_NEW_CHAT_URL = "https://chatgpt.com/";
+export const CHATGPT_SAVED_CHAT_URL = CHATGPT_NEW_CHAT_URL;
+export const CHATGPT_TEMPORARY_CHAT_URL = `${CHATGPT_NEW_CHAT_URL}?temporary-chat=true`;
 /** A saved conversation's own page; only these may be continued by a retained turn. */
 export const CHATGPT_SAVED_CONVERSATION_PATH = /^\/c\/[0-9a-f-]{36}$/;
 
 /** ChatGPT refuses connectors in Temporary Chat, so task turns default to a saved new chat. */
-export function chatGptNewChatUrl(useSavedChats: boolean): string {
+export function chatGptNewChatUrl(useSavedChats = true): string {
   return useSavedChats ? CHATGPT_SAVED_CHAT_URL : CHATGPT_TEMPORARY_CHAT_URL;
 }
-export const CHATGPT_COMPOSER_SELECTOR = [
-  '[data-testid="prompt-textarea"]',
-  "#prompt-textarea",
-  '[contenteditable="true"][data-lexical-editor="true"]',
-  '[contenteditable="true"][role="textbox"]',
-  'textarea[name="prompt-textarea"]',
-].join(", ");
-export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
-  // The current picker's trigger; unlike its aria-label, this attribute is not translated.
-  'button[data-codex-intelligence-trigger="true"][aria-haspopup="menu"]',
-  'button[aria-haspopup="menu"][data-tone="neutral"]',
-  'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
-  'button[aria-label="Select ChatGPT model"][aria-haspopup="menu"]',
-].join(", ");
-export const CHATGPT_EFFORT_MENU_SELECTOR = [
-  '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
-  '[role="menu"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
-  '[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
-].join(", ");
-export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
-export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider], [data-model-picker-power-slider]';
-export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"], [data-model-picker-power-slider] [role="slider"]';
-export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
+
 /** The picker's header row ("6 Sol · 6 High ›"): it swaps the Power slider for the model list. */
 export const CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR = "[data-model-picker-view-toggle]";
 /**
@@ -47,121 +36,7 @@ export const CHATGPT_TURN_MODEL_NAMES: readonly string[] = ["GPT-6 Sol", "6", "G
 export const CHATGPT_TURN_STOP_PREFIX = "6";
 const CHATGPT_TURN_EFFORT_NAMES = ["Instant", "Medium", "High", "Extra High", "Pro"];
 const MODEL_PICK_STEP_TIMEOUT_MS = 10_000;
-export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], form button[aria-label="Stop"]';
-export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"], .turn-action-controls button[aria-label="Copy"]';
-export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
-  '[data-testid^="conversation-turn-"][data-turn="assistant"]',
-  '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
-  '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
-  // The exchange exists when the user's prompt mounts; require its assistant subtree,
-  // including an empty reasoning shell or a rich-only reply.
-  '[data-turn-key]:has([data-conversation-role="assistant"])',
-  '[data-turn-key]:has([data-message-author-role="assistant"])',
-  '[data-turn-key]:has([data-markdown-text-style="assistant-message"])',
-].join(", ");
-export const CHATGPT_USER_TURN_SELECTOR = [
-  '[data-testid^="conversation-turn-"][data-turn="user"]',
-  '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
-  '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
-  '[data-turn-key]:has([data-user-message-bubble])',
-].join(", ");
-
-export interface ChatGptEffortSliderState {
-  min: number;
-  max: number;
-  value: number;
-}
-
-export interface ChatGptEffortActivation {
-  method: "already-open" | "click" | "pointerdown";
-  menu: Locator;
-  sliderContainer: Locator;
-  slider: Locator;
-}
-
-export function chatGptEffortSlider(page: Page): { sliderContainer: Locator; slider: Locator } {
-  const sliderContainer = page.locator(CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR).filter({ visible: true }).last();
-  // The current picker keeps ARIA values on a zero-width, aria-hidden semantic input.
-  // Its visible container proves the active surface; the input proves the effort range.
-  return { sliderContainer, slider: sliderContainer.locator('[role="slider"]') };
-}
-
-function effortMenuSelectorForId(menuId: string): string {
-  return `[id=${JSON.stringify(menuId)}]`;
-}
-
-export async function chatGptEffortMenuForControl(page: Page, control: Locator): Promise<Locator> {
-  const menuId = await control.getAttribute("aria-controls").catch(() => null);
-  if (menuId) return page.locator(effortMenuSelectorForId(menuId));
-  return page.locator(CHATGPT_EFFORT_MENU_SELECTOR).filter({ visible: true }).last();
-}
-
-async function visibleEffortSurface(
-  page: Page,
-  control: Locator,
-): Promise<Omit<ChatGptEffortActivation, "method"> | undefined> {
-  // The exit animation keeps a closed menu's slider visible after Escape. Read the
-  // owner state first: selecting that outgoing range races its removal from the DOM.
-  const expanded = await control.getAttribute("aria-expanded").catch(() => null);
-  const state = await control.getAttribute("data-state").catch(() => null);
-  if (expanded === "false" || state === "closed") return undefined;
-  const menu = await chatGptEffortMenuForControl(page, control);
-  const surface = chatGptEffortSlider(page);
-  if (await menu.isVisible().catch(() => false) || await surface.sliderContainer.isVisible().catch(() => false)) {
-    return { menu, ...surface };
-  }
-  return undefined;
-}
-
-async function waitForEffortSurface(
-  page: Page,
-  control: Locator,
-  timeoutMs: number,
-): Promise<Omit<ChatGptEffortActivation, "method"> | undefined> {
-  const deadline = Date.now() + timeoutMs;
-  do {
-    const surface = await visibleEffortSurface(page, control);
-    if (surface) return surface;
-    if (Date.now() >= deadline) return undefined;
-    await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
-  } while (true);
-}
-
-async function clearGhostEffortState(page: Page, control: Locator): Promise<void> {
-  const expanded = await control.getAttribute("aria-expanded").catch(() => null);
-  const state = await control.getAttribute("data-state").catch(() => null);
-  if (expanded === "true" || state === "open") {
-    await page.keyboard.press("Escape").catch(() => {});
-  }
-}
-
-export async function activateChatGptEffortMenu(
-  page: Page,
-  control: Locator,
-  options: { settleMs?: number } = {},
-): Promise<ChatGptEffortActivation> {
-  const openSurface = await visibleEffortSurface(page, control);
-  if (openSurface) return { method: "already-open", ...openSurface };
-
-  const settleMs = options.settleMs ?? 3_000;
-  await clearGhostEffortState(page, control);
-  await control.click({ force: true, timeout: Math.max(1, settleMs) });
-  const clickedSurface = await waitForEffortSurface(page, control, settleMs);
-  if (clickedSurface) return { method: "click", ...clickedSurface };
-
-  await clearGhostEffortState(page, control);
-  await control.dispatchEvent("pointerdown", {
-    button: 0,
-    buttons: 1,
-    pointerType: "mouse",
-    isPrimary: true,
-  });
-  const pointerSurface = await waitForEffortSurface(page, control, settleMs);
-  if (pointerSurface) return { method: "pointerdown", ...pointerSurface };
-  throw new Error(
-    "ChatGPT effort control did not expose its owned menu or structural slider after click and primary pointerdown",
-  );
-}
+const LOCKED_ACCESS_TEXT = "Locked, opens access options";
 
 /** Whether this open picker has a model list (its header row swaps to it). */
 export async function chatGptPickerHasModelList(menu: Locator): Promise<boolean> {
@@ -242,10 +117,7 @@ export async function selectChatGptModelFromList(
   return modelName;
 }
 
-interface ChatGptPickerStop {
-  min: number;
-  max: number;
-  value: number;
+interface ChatGptPickerStop extends ChatGptEffortSliderState {
   label: string;
   modelName: string;
   locked: boolean;
@@ -357,41 +229,29 @@ export async function selectChatGptPickerStop(
   return finish();
 }
 
-function safeIntegerAttribute(value: string | null): number | undefined {
-  if (value === null || !/^-?\d+$/.test(value)) return undefined;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-
-export function parseChatGptEffortSliderState(
-  rawMin: string | null,
-  rawMax: string | null,
-  rawValue: string | null,
-): ChatGptEffortSliderState | undefined {
-  const min = safeIntegerAttribute(rawMin);
-  const max = safeIntegerAttribute(rawMax);
-  const value = safeIntegerAttribute(rawValue);
-  if (min === undefined || max === undefined || value === undefined) return undefined;
-  const optionCount = max - min + 1;
-  if (optionCount < 1 || optionCount > CHATGPT_EFFORT_SLIDER_MAX_OPTIONS) return undefined;
-  if (value < min || value > max) return undefined;
-  return { min, max, value };
-}
-
 /**
- * Which slider positions the account may choose, read without moving the slider. Only the ticks
- * carry both data-locked and data-selected (the slider root has data-locked too); a locked tick
- * is an upsell, not a choice. Undefined when the ticks do not match the ARIA range exactly.
+ * Which slider positions the account may choose, read without moving the slider, as the
+ * capability cache stores them. Only the ticks carry data-selected (the slider root has
+ * data-locked too); a locked tick is an upsell, not a choice. An enabled power slider omits
+ * data-locked on its unlocked ticks. Undefined when the ticks do not match the ARIA range exactly.
  */
 export async function readChatGptEffortSnapshot(
   sliderContainer: Locator,
   state: ChatGptEffortSliderState,
 ): Promise<ChatGptEffortSnapshot | undefined> {
-  const locks = await sliderContainer.evaluate(container => Array.from(
-    container.querySelectorAll("[data-locked][data-selected]"),
-    tick => tick.getAttribute("data-locked"),
-  ));
+  const locks = await sliderContainer.evaluate(container => {
+    const power = container.hasAttribute("data-model-picker-power-slider")
+      && Boolean(container.querySelector('[data-orientation="horizontal"][aria-disabled="false"]'));
+    return Array.from(container.querySelectorAll("[data-selected]"),
+      tick => tick.getAttribute("data-locked") ?? (power ? "false" : null));
+  });
   return parseChatGptEffortTicks(locks, state.max - state.min + 1);
+}
+/** Unambiguous name for readChatGptEffortSnapshot beside chatgpt-ui/model-picker's range reader. */
+export const readChatGptEffortTickSnapshot = readChatGptEffortSnapshot;
+
+function effortSnapshotFromAvailability(available: readonly boolean[]): ChatGptEffortSnapshot | undefined {
+  return parseChatGptEffortTicks(available.map(open => (open ? "false" : "true")), available.length);
 }
 
 async function anyVisible(locator: Locator): Promise<boolean> {
@@ -411,25 +271,25 @@ export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> 
   }
 }
 
-export async function assertTemporaryChatPage(page: Page): Promise<void> {
-  const url = new URL(page.url());
-  const expected = new URL(CHATGPT_TEMPORARY_CHAT_URL);
-  if (url.origin !== expected.origin || url.pathname !== expected.pathname || url.searchParams.get("temporary-chat") !== "true") {
-    throw new Error(`ChatGPT left the isolated Temporary Chat surface (${page.url()})`);
-  }
-}
-
 /**
  * A turn must start on an empty new chat of the configured kind. The saved-chat home has no
  * temporary-chat parameter at all; any /c/ path is an existing (possibly the user's) conversation.
  */
-export async function assertNewChatPage(page: Page, useSavedChats: boolean): Promise<void> {
+export async function assertNewChatPage(page: Page, useSavedChats = true): Promise<void> {
   const url = new URL(page.url());
   const temporaryParam = url.searchParams.get("temporary-chat");
-  if (url.origin !== new URL(CHATGPT_SAVED_CHAT_URL).origin || url.pathname !== "/"
+  if (url.origin !== new URL(CHATGPT_NEW_CHAT_URL).origin || url.pathname !== "/"
     || (useSavedChats ? temporaryParam !== null : temporaryParam !== "true")) {
-    throw new Error(`ChatGPT left the new ${useSavedChats ? "saved" : "Temporary"} Chat surface (${page.url()})`);
+    throw new Error(
+      `ChatGPT left the new ${useSavedChats ? "saved" : "Temporary"} Chat surface: `
+      + `the requested new chat is ${chatGptNewChatUrl(useSavedChats)}, the page is ${page.url()}`,
+    );
   }
+}
+
+/** The Temporary Chat form of assertNewChatPage, for callers that pin that surface. */
+export async function assertTemporaryChatPage(page: Page): Promise<void> {
+  await assertNewChatPage(page, false);
 }
 
 /** The /c/<uuid> path of a saved conversation page, or undefined for any other page. */
@@ -458,29 +318,35 @@ export function chatGptRetainedConversationPage(pageUrl: string, useSavedChats: 
     : temporary;
 }
 
-export async function detectChatGptAccountCapabilities(
+type ChatGptCapabilityProbeOptions = {
+  selectorTimeoutMs?: number;
+  stableAbsenceMs?: number;
+  signal?: AbortSignal;
+  /** Receives the slider's tick reading; a failed reading never fails the probe. */
+  onEffortSnapshot?: (snapshot: ChatGptEffortSnapshot) => void;
+};
+
+/** Undefined means the known Luna/Think control was verified, not merely a missing picker. */
+export async function waitForChatGptEffortControl(
   page: Page,
-  options: {
-    selectorTimeoutMs?: number;
-    stableAbsenceMs?: number;
-    /** Receives the slider's tick reading; a failed reading never fails the probe. */
-    onEffortSnapshot?: (snapshot: ChatGptEffortSnapshot) => void;
-  } = {},
-): Promise<ChatGptWebAccountCapabilities> {
+  options: ChatGptCapabilityProbeOptions = {},
+): Promise<Locator | undefined> {
   const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
-  const composer = composers.last();
+  const composer = composers;
   const composerForm = composer.locator("xpath=ancestor::form[1]");
-  const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
+  const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
   const deadline = Date.now() + (options.selectorTimeoutMs ?? 30_000);
   const stableAbsenceMs = options.stableAbsenceMs ?? 3_000;
   let absenceSince: number | undefined;
   let presenceObservations = 0;
   while (true) {
-    const effortVisible = await effortButton.isVisible().catch(() => false);
+    options.signal?.throwIfAborted();
+    const effortVisible = await effortButton.isVisible();
+    options.signal?.throwIfAborted();
     if (effortVisible) {
       presenceObservations += 1;
       absenceSince = undefined;
-      if (presenceObservations >= 2) break;
+      if (presenceObservations >= 2) return effortButton;
       await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
       continue;
     }
@@ -490,19 +356,81 @@ export async function detectChatGptAccountCapabilities(
     const documentReady = await page.evaluate(() => document.readyState === "complete").catch(() => false);
     if (composerReady && formReady && documentReady) {
       absenceSince ??= Date.now();
-      if (Date.now() - absenceSince >= stableAbsenceMs) {
-        return { solAvailable: false, proAvailable: false };
-      }
     } else {
       absenceSince = undefined;
     }
     if (Date.now() >= deadline) {
+      // ChatGPT can mount a usable composer before the account's model list arrives.
+      // A short absence is not a capability result; use the complete inspection budget.
+      if (absenceSince !== undefined && Date.now() - absenceSince >= stableAbsenceMs) {
+        options.signal?.throwIfAborted();
+        // #932: UI drift on paid accounts must not overwrite the catalog with Luna-only.
+        const think = chatGptThinkButtons(composer);
+        const pressed = await think.count() === 1
+          ? await think.first().getAttribute("aria-pressed", { timeout: 5_000, signal: options.signal })
+          : null;
+        options.signal?.throwIfAborted();
+        if (pressed !== "true" && pressed !== "false") {
+          throw new Error("Could not identify ChatGPT's model controls. Reload ChatGPT in the launcher and retry setup.");
+        }
+        return undefined;
+      }
       throw new Error("ChatGPT account capability probe did not reach a stable composer state");
     }
     await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
   }
+}
+
+/** Read only the selected model's rendered range; callers own selection and menu cleanup. */
+export async function readChatGptEffortCapabilities(
+  { sliderContainer, slider }: Pick<ChatGptEffortActivation, "sliderContainer" | "slider">,
+  options: Pick<ChatGptCapabilityProbeOptions, "selectorTimeoutMs" | "signal" | "onEffortSnapshot"> = {},
+): Promise<ChatGptWebAccountCapabilities & { extraHighAvailable: boolean }> {
+  options.signal?.throwIfAborted();
+  const timeout = options.selectorTimeoutMs ?? 70_000;
+  // Model radio rows can hydrate before the effort control. They carry no evidence
+  // of the account's reasoning range, so an absent slider must fail, not cache false.
+  await sliderContainer.waitFor({ state: "visible", timeout, signal: options.signal });
+  await slider.waitFor({ state: "attached", timeout, signal: options.signal });
+  let available: boolean[];
+  try {
+    ({ available } = await readChatGptEffortSliderSnapshot(sliderContainer));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `ChatGPT model controls are unavailable (${detail}). Reload ChatGPT and run Repair again.`,
+      { cause: error },
+    );
+  }
+  options.signal?.throwIfAborted();
+  if (options.onEffortSnapshot) {
+    try {
+      const snapshot = effortSnapshotFromAvailability(available);
+      if (snapshot) options.onEffortSnapshot(snapshot);
+    } catch {
+      // The tick reading only refreshes the model-list hint; the probe's own answer stands.
+    }
+  }
+  return { solAvailable: true, extraHighAvailable: available[3] === true, proAvailable: available[4] === true };
+}
+
+async function lockedAccessOffered(menu: Locator): Promise<boolean> {
+  try {
+    return await menu.getByText(LOCKED_ACCESS_TEXT, { exact: true }).count() > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function detectChatGptAccountCapabilities(
+  page: Page,
+  options: ChatGptCapabilityProbeOptions = {},
+): Promise<ChatGptWebAccountCapabilities & { extraHighAvailable: boolean }> {
+  const effortButton = await waitForChatGptEffortControl(page, options);
+  if (!effortButton) return { solAvailable: false, extraHighAvailable: false, proAvailable: false };
   try {
     const { menu, sliderContainer, slider } = await activateChatGptEffortMenu(page, effortButton);
+    options.signal?.throwIfAborted();
     // The current picker: turns run on GPT-6, picked from its list as here. Its own slider has 3 stops
     // on Plus (up to 6 High) and 5 on Team and Pro (up to 6 Pro); a turn still checks each stop's label.
     // On Plus "Default" the slider spans models (6 stops), so it is only read after the pick.
@@ -511,7 +439,7 @@ export async function detectChatGptAccountCapabilities(
       try {
         modelName = await selectChatGptModelFromList(menu);
       } catch {
-        return { solAvailable: true, proAvailable: false };
+        return { solAvailable: true, extraHighAvailable: false, proAvailable: false };
       }
       const timeout = options.selectorTimeoutMs ?? MODEL_PICK_STEP_TIMEOUT_MS;
       // Inspect the range for exact Pro, without requiring another effort to be available.
@@ -528,39 +456,19 @@ export async function detectChatGptAccountCapabilities(
       if (!verified || (proAvailable && (verified.label !== "6 Pro" || verified.locked))) {
         throw new Error("the GPT-6 effort selection changed during capability verification");
       }
-      if (selected?.effortSnapshot && JSON.stringify(selected.snapshot.ticks) === JSON.stringify(verified.snapshot.ticks)) {
-        // Legacy admission covers both upper tiers; the semantic snapshot keeps their locks separate.
-        proAvailable ||= selected.effortSnapshot.ticks[3]?.locked === false;
-        try { options.onEffortSnapshot?.(selected.effortSnapshot); } catch { /* A cache write never fails the probe. */ }
+      // Extra High is its own tier: only a snapshot proved by every stop's exact name may admit it.
+      const semantic = selected?.effortSnapshot
+        && JSON.stringify(selected.snapshot.ticks) === JSON.stringify(verified.snapshot.ticks)
+        ? selected.effortSnapshot : undefined;
+      if (semantic) {
+        try { options.onEffortSnapshot?.(semantic); } catch { /* A cache write never fails the probe. */ }
       }
-      return { solAvailable: true, proAvailable };
+      return { solAvailable: true, extraHighAvailable: semantic?.ticks[3]?.locked === false, proAvailable };
     }
-    const timeout = options.selectorTimeoutMs ?? 70_000;
-    // Model radio rows can hydrate before the effort control. They carry no evidence
-    // of the account's reasoning range, so an absent slider must fail, not cache false.
-    await sliderContainer.waitFor({ state: "visible", timeout });
-    await slider.waitFor({ state: "attached", timeout });
-    const state = parseChatGptEffortSliderState(
-      await slider.getAttribute("aria-valuemin"),
-      await slider.getAttribute("aria-valuemax"),
-      await slider.getAttribute("aria-valuenow"),
-    );
-    if (!state) {
-      throw new Error(
-        "ChatGPT model controls are unavailable. Reload ChatGPT and run Repair again.",
-        { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
-      );
-    }
-    if (options.onEffortSnapshot) {
-      try {
-        const snapshot = await readChatGptEffortSnapshot(sliderContainer, state);
-        if (snapshot) options.onEffortSnapshot(snapshot);
-      } catch {
-        // The tick reading only refreshes the model-list hint; the probe's own answer stands.
-      }
-    }
-    const lockedAccess = await menu.getByText("Locked, opens access options", { exact: true }).count();
-    return { solAvailable: true, proAvailable: state.max - state.min + 1 >= 5 && lockedAccess === 0 };
+    const capabilities = await readChatGptEffortCapabilities({ sliderContainer, slider }, options);
+    // An access upsell in the menu means a top tier is not the account's to choose.
+    if (await lockedAccessOffered(menu)) return { ...capabilities, extraHighAvailable: false, proAvailable: false };
+    return capabilities;
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }
