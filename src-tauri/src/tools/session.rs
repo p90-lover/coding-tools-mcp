@@ -1049,7 +1049,7 @@ mod tests {
             if offset == 0 {
                 assert_eq!(len, 4095);
             }
-            rebuilt.push_str(std::str::from_utf8(&text.as_bytes()[offset..offset + len]).unwrap());
+            rebuilt.push_str(&text[offset..offset + len]);
             offset += len;
         }
         assert_eq!(rebuilt, text);
