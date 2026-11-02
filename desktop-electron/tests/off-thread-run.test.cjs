@@ -79,3 +79,71 @@ test("a program that outlives its timeout is ended and reported, and output is c
     assert.ok(missing.error, JSON.stringify(missing));
   } finally { restore(); }
 });
+
+// 2026-11-02: three of six stall probes found main resuming in a folder watch's callback after
+// seconds held with almost no CPU (5.2 s, 16 ms): libuv looks up each changed file's long name on
+// the thread that owns the watch.
+test("a folder is watched from a worker thread, and says once it is watching that something may have changed", async () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const { module, restore } = load();
+  const realWatch = fs.watch;
+  const here = [];
+  fs.watch = (...args) => { here.push(args[0]); return realWatch(...args); };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-watch-off-thread-"));
+  const seen = [];
+  const watch = module.watchOffThread(root, (event, name) => seen.push(name));
+  try {
+    await watch.ready;
+    assert.deepEqual(seen, [null], "once in place, it reports a change it cannot name");
+    fs.writeFileSync(path.join(root, "config.json"), "{}");
+    for (let tries = 0; tries < 200 && !seen.includes("config.json"); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(seen.includes("config.json"), JSON.stringify(seen));
+    assert.deepEqual(here, [], "nothing is watched on the calling thread");
+    watch.close();
+    const after = seen.length;
+    fs.writeFileSync(path.join(root, "other.json"), "{}");
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(seen.length, after, "a closed watch reports nothing more");
+  } finally {
+    fs.watch = realWatch;
+    watch.close();
+    module.resetWatchWorker();
+    restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a folder that cannot be watched reports an error instead of throwing", async () => {
+  const { module, restore } = load();
+  try {
+    const watch = module.watchOffThread("Z:\\no\\such\\folder", () => {});
+    const error = await new Promise((resolve) => watch.on("error", resolve));
+    assert.equal(error.code, "ENOENT");
+    await watch.ready;
+  } finally {
+    module.resetWatchWorker();
+    restore();
+  }
+});
+
+test("without a worker thread a folder is still watched, here", async () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const { module, restore } = load({ Worker: function Unavailable() { throw new Error("no workers here"); } });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-watch-here-"));
+  const seen = [];
+  const watch = module.watchOffThread(root, (event, name) => seen.push(name));
+  try {
+    await watch.ready;
+    fs.writeFileSync(path.join(root, "config.json"), "{}");
+    for (let tries = 0; tries < 200 && !seen.includes("config.json"); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(seen.includes("config.json"), JSON.stringify(seen));
+  } finally {
+    watch.close();
+    restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

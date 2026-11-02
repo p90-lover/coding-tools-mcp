@@ -12,7 +12,7 @@ const {
   terminateOwnedProcessTreeAsync,
 } = require("./process-tree.cjs");
 const { runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
-const { runOffThread } = require("./off-thread-run.cjs");
+const { runOffThread, watchOffThread } = require("./off-thread-run.cjs");
 const { ExtraTunnels } = require("./extra-tunnels.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
@@ -604,7 +604,10 @@ class RuntimeSupervisor {
     if (this.configWatcher) return true;
     const name = path.basename(this.configPath).toLowerCase();
     try {
-      this.configWatcher = fs.watch(path.dirname(this.configPath), { persistent: false }, (_event, file) => {
+      // In a worker: a change reported here held main while libuv looked up the file's long name on
+      // the busy disk. The watch says "something changed" once it is in place, so a write before then
+      // is not missed either.
+      this.configWatcher = watchOffThread(path.dirname(this.configPath), (_event, file) => {
         if (!file || String(file).toLowerCase() === name) this.forgetConfig();
       });
     } catch {
