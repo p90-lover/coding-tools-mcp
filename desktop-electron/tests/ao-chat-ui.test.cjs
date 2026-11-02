@@ -63,7 +63,7 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] },
   "./ComputerControlCard": { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] },
-  "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
+  "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu, "./chat-list-settings": load("chat-list-settings.ts") }) });
 
 test("visualize controls appear only in successful native WebGPT final answers", () => {
   const answer = 'visualize{"path":"G:/task/counter.html","title":"Counter"}';
@@ -893,7 +893,7 @@ test("an answer citing an annotation (Codex's :codex-annotation directive) shows
   assert.doesNotMatch(html, /codex-annotation\{/);
 });
 test("archived chats sit in a folder per project, in the list's order, and chats with no project folder under Chats", () => {
-  const list = load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu });
+  const list = load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu, "./chat-list-settings": load("chat-list-settings.ts") });
   const workspaces = [{ id: "macro", name: "clash of clan macro", path: "F:\\clash of clan macro" }, { id: "scratch", name: "Scratch" },
     { id: "tools", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" }];
   const chats = [

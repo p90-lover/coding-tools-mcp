@@ -18,7 +18,7 @@ test("the chat sidebar's footer opens Settings, and Ctrl+, toggles it, as in Cod
   const surface = read("src/features/AgentOrchestratorSurface.tsx");
   assert.match(surface, /openSettings: \(\) => setSettingsOpen\(true\)/);
   assert.match(surface, /event\.key === ","[\s\S]{0,80}setSettingsOpen\(\(open\) => !open\)/);
-  assert.match(surface, /\{settingsOpen && !pane \? <ChatSettingsPage onClose=\{\(\) => setSettingsOpen\(false\)\} \/> : null\}/);
+  assert.match(surface, /\{settingsOpen && !pane \? <ChatSettingsPage onClose=\{\(\) => setSettingsOpen\(false\)\} onArchiveChanged=\{\(\) => void loadArchived\(\)\} \/> : null\}/);
 });
 
 test("the gear and the back arrow are Codex's own icons", () => {
