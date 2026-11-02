@@ -27,25 +27,31 @@ function writeStateFile(filePath, content, options = {}) {
  * writeStateFile for a file saved as the app is used (a chat queue change, a scored round): the
  * flush waits on a pool thread, not the main one. Synchronously it held every window 0.5-2.4 s on
  * the hard disk (2026-10-31). A burst of saves is one write plus at most one more with the latest
- * content; `saved()` resolves once everything asked for so far is on disk. A failed write leaves
- * the old file and calls `onError`.
+ * content; `saved()` resolves once everything asked for so far is on disk. Identical strings are
+ * skipped only after both copies succeeded. A failed write leaves the old file and calls `onError`.
  */
 function createStateFileWriter(filePath, { onError = null, ...options } = {}) {
   let saving = null;
   let next = null;
+  let written = null;
+  const unchanged = (content) => typeof content === "string" && content === written;
   const write = (content) => writePrivateFileAtomicAsync(filePath, content, { ...options, durable: true })
-    .then(() => writePrivateFileAtomicAsync(`${filePath}${BACKUP_SUFFIX}`, content, options).catch(() => { /* the main copy is in place */ }))
+    .then(() => writePrivateFileAtomicAsync(`${filePath}${BACKUP_SUFFIX}`, content, options)
+      .then(() => { if (typeof content === "string") written = content; })
+      .catch(() => { /* the main copy is in place; an identical save retries its missing backup */ }))
     .catch((error) => { onError?.(error); /* the old file stays; the next change saves everything again */ });
   const run = (content) => {
+    // A failed primary or backup write must not leave an older value remembered as current.
+    written = null;
     saving = write(content).finally(() => {
       saving = null;
-      if (next !== null) { const latest = next; next = null; run(latest); }
+      if (next !== null) { const latest = next; next = null; if (!unchanged(latest)) run(latest); }
     });
   };
   return {
     save(content) {
       if (saving) next = content;
-      else run(content);
+      else if (!unchanged(content)) run(content);
     },
     async saved() { while (saving) await saving; },
   };

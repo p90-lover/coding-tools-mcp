@@ -423,7 +423,7 @@ test("a foreground launch request survives hidden startup until the launcher win
 
   const secondInstance = electronMain.indexOf('app.on("second-instance",');
   const secondInstanceEnd = electronMain.indexOf("\n  });", secondInstance);
-  const runtimeMaterialization = electronMain.indexOf("await waitForPackagedRuntimeSource", secondInstance);
+  const runtimeMaterialization = electronMain.indexOf("await preparePackagedRuntime", secondInstance);
   assert.ok(secondInstance >= 0, "the second-instance foreground request must be registered");
   assert.ok(secondInstanceEnd > secondInstance, "the second-instance handler must be complete");
   assert.match(electronMain.slice(secondInstance, secondInstanceEnd), /showMainWindow\(\);/);
@@ -448,7 +448,7 @@ test("normal shutdown persists the ChatGPT session before closing browser views"
 
 test("packaged runtime is verified before launcher browser surfaces can bind ports", () => {
   const start = electronMain.indexOf("async function start()");
-  const runtimeValidation = electronMain.indexOf("installedRuntimeRoot = runtimeRootProvider();", start);
+  const runtimeValidation = electronMain.indexOf("await preparePackagedRuntime({", start);
   const cdpPortAllocation = electronMain.indexOf("cdpPort = await findFreePort();", start);
   const windowCreation = electronMain.indexOf("mainWindow = createWindow({", start);
   const controlServerStart = electronMain.indexOf("browserControl = await new BrowserControlServer({", start);

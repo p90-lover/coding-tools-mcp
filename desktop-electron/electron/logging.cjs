@@ -55,13 +55,19 @@ function sanitizeForExport(value, seen = new WeakSet()) {
   );
 }
 
-function exportSanitizedLogs({ filePath, destinationPath }) {
-  const sourcePaths = [`${filePath}.1`, filePath];
+function exportSanitizedLogs({ filePath = null, destinationPath, records: memoryRecords = [] }) {
+  const sourcePaths = filePath ? [`${filePath}.1`, filePath] : [];
   const destination = path.resolve(destinationPath);
   if (sourcePaths.some(sourcePath => path.resolve(sourcePath) === destination)) {
     throw new Error("Refusing to overwrite a launcher source log with an exported diagnostic");
   }
   const records = [];
+  const append = (record) => {
+    if (!record || typeof record.at !== "string" || !["debug", "info", "warning", "error"].includes(record.level)
+      || typeof record.event !== "string") return;
+    records.push({ at: record.at, level: record.level, event: record.event,
+      detail: record.detail && typeof record.detail === "object" ? sanitizeForExport(record.detail) : {} });
+  };
   for (const sourcePath of sourcePaths) {
     let lines;
     try {
@@ -70,24 +76,9 @@ function exportSanitizedLogs({ filePath, destinationPath }) {
       if (error && error.code === "ENOENT") continue;
       throw error;
     }
-    for (const line of lines) {
-      try {
-        const record = JSON.parse(line);
-        if (!record
-          || typeof record.at !== "string"
-          || !["debug", "info", "warning", "error"].includes(record.level)
-          || typeof record.event !== "string") continue;
-        records.push({
-          at: record.at,
-          level: record.level,
-          event: record.event,
-          detail: record.detail && typeof record.detail === "object"
-            ? sanitizeForExport(record.detail)
-            : {},
-        });
-      } catch {}
-    }
+    for (const line of lines) { try { append(JSON.parse(line)); } catch {} }
   }
+  for (const record of memoryRecords) append(record);
   fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
   fs.writeFileSync(
     destination,
@@ -161,10 +152,11 @@ async function readRecent(filePath) {
 // Log lines are written in batches this often, off the main thread.
 const LOG_FLUSH_MS = 250;
 
-function createLogger({ filePath, publish }) {
+function createLogger({ filePath, publish, persist = true }) {
   const records = [];
-  // The previous process's records go in front of whatever this one logged meanwhile.
-  const restored = readRecent(filePath).then((previous) => {
+  // Routine app activity stays in memory. Persistent diagnostics are an explicit opt-in; the
+  // default app launch must neither replay old logs nor append a file every few hundred ms.
+  const restored = (persist ? readRecent(filePath) : Promise.resolve([])).then((previous) => {
     records.unshift(...previous);
     if (records.length > MAX_MEMORY_RECORDS) records.splice(0, records.length - MAX_MEMORY_RECORDS);
   });
@@ -206,7 +198,7 @@ function createLogger({ filePath, publish }) {
     timer = setTimeout(() => { void flush(); }, LOG_FLUSH_MS);
     timer.unref?.();
   }
-  process.once("exit", () => {
+  if (persist) process.once("exit", () => {
     if (!pending.length) return;
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
@@ -224,8 +216,10 @@ function createLogger({ filePath, publish }) {
     };
     records.push(record);
     if (records.length > MAX_MEMORY_RECORDS) records.splice(0, records.length - MAX_MEMORY_RECORDS);
-    pending.push(`${JSON.stringify(record)}\n`);
-    if (!timer && !flushing) schedule();
+    if (persist) {
+      pending.push(`${JSON.stringify(record)}\n`);
+      if (!timer && !flushing) schedule();
+    }
     publish?.(record);
     return record;
   };
@@ -240,16 +234,17 @@ function createLogger({ filePath, publish }) {
     restored,
     /** Writes every queued line now (tests, and before a deliberate quit). */
     flush: async () => { if (timer) { clearTimeout(timer); timer = null; } while (flushing || pending.length) { if (flushing) await flushing; else await flush(); } },
-    filePath,
+    filePath: persist ? filePath : null,
   };
 }
 
-function installProcessDiagnosticGuards({ filePath, streams = [process.stdout, process.stderr] }) {
+function installProcessDiagnosticGuards({ filePath, streams = [process.stdout, process.stderr], persist = true }) {
   const guarded = new Set();
   for (const stream of streams) {
     if (!stream || typeof stream.on !== "function" || guarded.has(stream)) continue;
     guarded.add(stream);
     stream.on("error", (error) => {
+      if (!persist) return;
       try {
         fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
         fs.appendFileSync(
