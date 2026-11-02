@@ -2041,35 +2041,39 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
     const plan = replyStyle === "transcript" ? null : replyPlan(items, live, failing?.error);
     // Focus keeps the work behind Show work whatever the chat's setting: its progress line says where the turn is.
     const turnWork = replyStyle === "focus" ? false : showWork;
-    const hasReply = Boolean(cards.length || live);
+    const hasReply = Boolean(turn.runId && (cards.length || live));
+    // The request belongs to its agent's card, like a steer. Before a run exists it stays visible
+    // on its own; constructing it once keeps the attachments and message actions identical.
+    const userMessage = !feedback && turn.user ? <div className="cx-user">
+      <SentMessage text={turn.user.text} />
+      <MessageActions text={chatMessageReadable(turn.user.text)}>
+        {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
+        {thread?.rewind ? <button type="button" title="Rewind and resend this message (files are unchanged)" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
+        {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
+          disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}><ChatGlyph name="delete" /></button> : null}
+      </MessageActions>
+      {turn.user.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
+    </div> : null;
+    // Live steers already appear in the timeline. Saved ones stay with the initial message,
+    // even if a cancelled run has no card work to show.
+    const savedSteers = turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
+      ? <SteerReader.Provider value={steerReader(turn.steps[0])}>{turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
+        <SentMessage text={steer.text} />
+        {/* Saved only once the agent took it; a turn that finished read it, one that stopped may not have. */}
+        <div className="cx-msg-foot"><SteerReceiptMark receipt={turn.status === "done" ? "read" : liveTurn(turn) ? "unread" : undefined} />
+          <MessageActions text={chatMessageReadable(steer.text)} /></div>
+        <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
+      </div>)}</SteerReader.Provider> : null;
     // A goal's later round opens on a divider: its number and why the last round fell short.
     const round = feedback ? goalRound(turns, turnIndex) : null;
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
     const view = <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
               {feedback ? <RoundDivider round={round?.round ?? 2} reason={feedback.reason}
-                stamp={turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null} />
-              : turn.user ? <div className="cx-user">
-                <SentMessage text={turn.user.text} />
-                <MessageActions text={chatMessageReadable(turn.user.text)}>
-                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
-                  {thread?.rewind ? <button type="button" title="Rewind and resend this message (files are unchanged)" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
-                  {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
-                    disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}><ChatGlyph name="delete" /></button> : null}
-                </MessageActions>
-                {turn.user.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
-              </div> : null}
-              {/* Messages steered into this turn. While it works they show in its live timeline, where
-                  they were sent; once it is done, here under the turn's message. */}
-              {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
-                ? <SteerReader.Provider value={steerReader(turn.steps[0])}>{turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
-                  <SentMessage text={steer.text} />
-                  {/* Saved only once the agent took it; a turn that finished read it, one that stopped may not have. */}
-                  <div className="cx-msg-foot"><SteerReceiptMark receipt={turn.status === "done" ? "read" : liveTurn(turn) ? "unread" : undefined} />
-                    <MessageActions text={chatMessageReadable(steer.text)} /></div>
-                  <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
-                </div>)}</SteerReader.Provider> : null}
+                stamp={turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null} /> : null}
+              {!hasReply ? <>{userMessage}{savedSteers}</> : null}
               {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} aria-label="Reply">
+              {userMessage}{savedSteers}
               {headError ? <ReplyError team={teamAnswer} error={headError} /> : null}
               {plan ? <ReplyPlanView plan={plan} style={replyStyle} live={live} /> : null}
               {/* The reply's top says the error, so the DeepSeek turn leaves its own copy out. */}
