@@ -1321,9 +1321,10 @@ test("a chat switch preserves its restored draft if unmount wins the queued stat
 });
 
 test("chat attachment previews stay alive while another draft keeps them", () => {
-  const freed = [], shownPreviews = { current: new Set(["blob:kept", "blob:removed"]) };
-  rendererCallback("AgentOrchestratorChat.tsx", "effect:const now = new Set(attachments", {
-    attachments: [], shownPreviews, CHAT_ATTACHMENTS: new Map([["other-chat", [{ preview: "blob:kept" }]]]), freePreview: value => freed.push(value),
+  const freed = [], shownPreviews = { current: new Set(["blob:kept", "blob:pending", "blob:removed"]) };
+  rendererCallback("AgentOrchestratorChat.tsx", "effect:const now = new Set([...attachments", {
+    attachments: [], preparing: [], shownPreviews, CHAT_DRAFTS: new Map([["saving-chat", { preparing: [{ preview: "blob:pending" }] }]]),
+    CHAT_ATTACHMENTS: new Map([["other-chat", [{ preview: "blob:kept" }]]]), freePreview: value => freed.push(value),
   })();
   assert.deepEqual(freed, ["blob:removed"]);
 });
@@ -1616,7 +1617,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
   const set = key => next => { if (!alive.current) lateSetters++; const apply = () => { if (replayUpdaters && typeof next === "function") next(state[key]); state[key] = typeof next === "function" ? next(state[key]) : next; }; if (defer || (deferDraft && key !== "taskId")) waiting.push(apply); else apply(); };
   const helpers = { draftEntry: rendererCallback("AgentOrchestratorChat.tsx", "draftEntry", maps), trimDraftEntry: rendererCallback("AgentOrchestratorChat.tsx", "trimDraftEntry", maps) };
   const globals = () => ({ ...maps, ...helpers, releaseDraft, composing, draftOwner, draftRegistration, alive, queueRecoveries: composing.current.queuedRecovery ?? [], selectedTaskId: state.taskId, draftKey: key(), draft: state.draft, attachments: state.attachments, annotations: state.annotations,
-    setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setAttachNote() {}, setCard: set("card") });
+    setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setAttachmentWork() {}, setAttachNote() {}, setCard: set("card") });
   releaseDraft = rendererCallback("AgentOrchestratorChat.tsx", "releaseDraft", globals());
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8"), tree = ts.createSourceFile("Chat.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let assignment; const find = node => { if (ts.isExpressionStatement(node) && node.getText(tree).startsWith("composing.current =") && node.getText(tree).includes("draftOwner.current")) assignment ??= node; ts.forEachChild(node, find); }; find(tree);
