@@ -1619,12 +1619,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const TOOL_STALL_MS = 30 * 60_000;
   const TOOL_STALL_MARGIN_MS = 5 * 60_000;
   const stalledStops = new Map(); // session -> when its stalled turn was stopped
-  /**
-   * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
-   * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
-   */
-  async function stopStalledTurn(session, observed, owner) {
-    if (!chatPreferences.get().autoRetry || !Number.isFinite(observed?.lastActivityAt)) return false;
+  function stalledTurnInfo(observed) {
+    if (!Number.isFinite(observed?.lastActivityAt)) return null;
     // The stop interrupts the whole session, so the whole session is judged: a turn queued behind a
     // working one shows nothing of its own (observe's sessionActivityAt and sessionTools).
     const last = Math.max(observed.lastActivityAt, Number.isFinite(observed.sessionActivityAt) ? observed.sessionActivityAt : -Infinity);
@@ -1637,8 +1633,26 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       .filter(value => Number.isFinite(value) && value > 0);
     const limit = !tools.length ? TURN_STALL_MS
       : stated.length === tools.length ? Math.max(...stated) + TOOL_STALL_MARGIN_MS : TOOL_STALL_MS;
+    return idle > limit ? { idle, toolRunning: tools.length > 0 } : null;
+  }
+  /**
+   * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
+   * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
+   */
+  async function stopStalledTurn(session, observed, ownership) {
+    const { workspaceId, runId, nodeId, turnId, requestKey } = ownership;
+    if (!chatPreferences.get().autoRetry || typeof turnId !== "string" || !turnId || !requestKey
+      || observed?.turnId !== turnId || (expectedTurns.has(session) && expectedTurns.get(session) !== turnId)) return false;
+    const stalled = stalledTurnInfo(observed);
     const previous = stalledStops.get(session);
-    if (idle <= limit || now() - (previous ?? 0) < TURN_STALL_MS) return false;
+    if (!stalled || now() - (previous ?? 0) < TURN_STALL_MS) return false;
+    // An observation can finish after Retry has replaced this card's request in the same session.
+    // Only a stop that is due re-reads the card; healthy polling makes no additional request.
+    const latest = await savedNode(workspaceId, runId, nodeId).catch(() => null);
+    if (latest?.mission?.cancelled || latest?.node?.state !== "running"
+      || latest.node.receipt?.thread_id !== session || (latest.node.receipt?.request_key || latest.node.request_key) !== requestKey
+      || (latest.node.receipt?.turn_id && latest.node.receipt.turn_id !== turnId)
+      || (expectedTurns.has(session) && expectedTurns.get(session) !== turnId)) return false;
     stalledStops.set(session, now());
     if (stalledStops.size > 200) stalledStops.delete(stalledStops.keys().next().value);
     // The interrupt alone left hung turns hung (seen live 2026-11-02, two chats "may be stuck" for
@@ -1650,9 +1664,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // interrupted and the step is retried; AO keeps the session, so the retry resumes it.
     // A stop that fails is tried again after TURN_STALL_MS; it never fails the observation.
     const release = observed.agentGone === true || previous !== undefined;
-    try { await stopExternalTurn(session, { owner, escalate: true, ...(release ? { releaseAgent: true } : {}) }); }
+    const isStalled = current => !current?.needsInput && !current?.approvals?.length && Boolean(stalledTurnInfo(current));
+    try {
+      if (await stopExternalTurn(session, { owner: runKey(workspaceId, runId), turnId, isStalled, escalate: true, ...(release ? { releaseAgent: true } : {}) }) === false) return false;
+    }
     catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
-    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(idle / 1000), toolRunning: tools.length > 0, released: release });
+    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(stalled.idle / 1000), toolRunning: stalled.toolRunning, released: release });
     return true;
   }
 
@@ -1682,12 +1699,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return { ok: true, run: held?.run, pending_approvals: [] };
     }
     if (node.state !== "running" || !session) return { ok: true, pending_approvals: [] };
-    const observed = await harnessService().observe(session, expectedTurns.get(session));
+    const ownership = { workspaceId, runId, nodeId: node.id,
+      turnId: node.receipt?.turn_id || expectedTurns.get(session), requestKey: node.receipt?.request_key || node.request_key };
+    const observed = await harnessService().observe(session, ownership.turnId);
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
-      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed, runKey(workspaceId, runId));
+      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed, ownership);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
@@ -6992,14 +7011,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (;;) {
       const pending = sessionStops.get(session);
       if (!pending) break;
-      await pending;
-      if (!ownership?.releaseAgent || pending.releasesAgent) return;
+      const stopped = await pending;
+      if (stopped !== false && (!ownership?.releaseAgent || pending.releasesAgent)) return;
       // Another waiter may have installed the host-release upgrade while this one resumed.
     }
     const job = Promise.resolve().then(async () => {
       const service = harnessService();
       const owns = () => !ownership || !sessionOwners.has(session) || sessionOwners.get(session) === ownership.owner;
-      if (!owns()) return;
+      if (!owns()) return false;
       let alreadyExited = false;
       // Why the interrupt did not stop the turn, when the agent's shutdown had to: said again if that fails too.
       let escalated = "";
@@ -7008,7 +7027,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       let shutDown = ownership?.releaseAgent === true;
       if (ownership?.turnId || ownership?.releaseAgent) {
         const current = await service.observe(session);
-        if ((ownership?.turnId && current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
+        if ((ownership?.turnId && current?.turnId !== ownership.turnId) || !owns()
+          || (ownership?.isStalled && !ownership.isStalled(current))) return false;
         alreadyExited = current?.exited === true;
       }
       if (!ownership?.completed && !alreadyExited) {
@@ -7040,6 +7060,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const tries = signalled ? Math.ceil(settleMs / STOP_SETTLE_POLL_MS) : 0;
         for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
+          if ((ownership?.turnId && observation?.turnId !== ownership.turnId) || !owns()) return false;
           // No agent process left behind the session (it exited, or a start was cancelled): nothing
           // can still be working. Waiting the full 15 s for its turn row (which AO leaves "running"
           // until it restarts) made Stop take half a minute.
@@ -7055,6 +7076,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
       }
       if (shutDown && owns()) {
+        if (ownership?.turnId) {
+          const current = await service.observe(session);
+          if (current?.turnId !== ownership.turnId || !owns() || (ownership.isStalled && !ownership.isStalled(current))) return false;
+        }
         const outcomes = await Promise.allSettled([
           Promise.resolve().then(() => releaseAgent(session, ownership?.owner)).then(outcome => {
             if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);
