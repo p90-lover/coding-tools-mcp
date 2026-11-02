@@ -7,6 +7,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
+const { requestJson } = require("../../app-handler/lib/loopback.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 const { createAppsProviderServices } = require("../electron/apps-provider-services.cjs");
 const { createProviderNetworkStore } = require("../electron/provider-network.cjs");
@@ -55,6 +56,67 @@ function temporaryDirectory(prefix) {
   fs.mkdirSync(scratch, { recursive: true });
   return fs.mkdtempSync(path.join(scratch, `${prefix}-`));
 }
+
+test("CPA models settles an interrupted response without replaying the request", { timeout: 2_000 }, async () => {
+  let requests = 0;
+  const mock = await listenMock((_request, response) => {
+    requests += 1;
+    response.writeHead(200, { "content-type": "application/json", "content-length": "100" });
+    response.write('{"data":[');
+    const interrupted = setTimeout(() => response.destroy(), 20);
+    response.once("close", () => clearTimeout(interrupted));
+  });
+  let guard;
+  try {
+    const host = createCodingToolsAppsHost({
+      services: { loopbackRequest: () => ({ origin: mock.origin }) },
+    });
+    const result = await Promise.race([
+      host.call("cpa", "models", {}),
+      new Promise((_resolve, reject) => {
+        guard = setTimeout(() => reject(new Error("Interrupted CPA response did not settle")), 1_000);
+      }),
+    ]);
+    assert.equal(result.ok, false);
+    assert.equal(result.result.ok, false);
+    assert.equal(result.result.reachable, false);
+    assert.match(result.result.error, /aborted|closed before completion/i);
+    assert.equal(requests, 1);
+  } finally {
+    clearTimeout(guard);
+    mock.server.closeAllConnections();
+    await mock.close();
+  }
+});
+
+test("loopback transport preserves complete, malformed JSON, request-error and timeout results", { timeout: 2_000 }, async () => {
+  const seen = [];
+  const mock = await listenMock((request, response) => {
+    seen.push(request.url);
+    if (request.url === "/complete") return json(response, 200, { ok: true });
+    if (request.url === "/malformed") return text(response, 200, "{", "application/json");
+    if (request.url === "/request-error") request.socket.destroy();
+  });
+  try {
+    const complete = await requestJson(mock.origin, { pathname: "/complete" });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.status, 200);
+    assert.deepEqual(complete.json, { ok: true });
+    const malformed = await requestJson(mock.origin, { pathname: "/malformed" });
+    assert.equal(malformed.ok, true);
+    assert.equal(malformed.status, 200);
+    assert.equal(malformed.json, null);
+    assert.equal(malformed.text, "{");
+    await assert.rejects(requestJson(mock.origin, { pathname: "/request-error" }), /socket hang up|ECONNRESET/i);
+    await assert.rejects(requestJson(mock.origin, { pathname: "/timeout", timeoutMs: 25 }), /Module request timed out/);
+    assert.deepEqual(seen.filter((pathname) => pathname !== "/timeout"), ["/complete", "/malformed", "/request-error"]);
+    // A socket can time out before the server receives the request.
+    assert.ok(seen.filter((pathname) => pathname === "/timeout").length <= 1);
+  } finally {
+    mock.server.closeAllConnections();
+    await mock.close();
+  }
+});
 
 test("CPA exposes the full in-process ops table without an apps listen port", () => {
   const host = createCodingToolsAppsHost();

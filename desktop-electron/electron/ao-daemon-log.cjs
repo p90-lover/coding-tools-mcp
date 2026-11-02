@@ -1,5 +1,7 @@
 "use strict";
 
+const { TextDecoder } = require("node:util");
+
 /**
  * Which AO daemon output lines the launcher keeps (in memory; AO's output is never written to disk).
  * AO logs at debug level and writes an access line for every request, and the chat polls a working
@@ -42,6 +44,7 @@ function keepsDaemonLogLine(line) {
  * line boundaries, so each stream needs its own filter.
  */
 function createDaemonLogFilter(write) {
+  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   let partial = "";
   const emit = (lines) => {
     const kept = lines.filter(keepsDaemonLogLine);
@@ -49,12 +52,15 @@ function createDaemonLogFilter(write) {
   };
   return {
     push(chunk) {
-      const lines = (partial + chunk.toString()).split("\n");
+      if (chunk === "") return;
+      const text = typeof chunk === "string" ? decoder.decode() + chunk : decoder.decode(chunk, { stream: true });
+      const lines = (partial + text).split("\n");
       partial = lines.pop();
       if (partial.length > MAX_PARTIAL_LINE) { lines.push(partial); partial = ""; }
       emit(lines);
     },
     flush() {
+      partial += decoder.decode();
       if (partial) emit([partial]);
       partial = "";
     },

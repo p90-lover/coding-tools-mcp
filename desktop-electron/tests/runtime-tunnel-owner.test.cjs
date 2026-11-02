@@ -7,7 +7,7 @@ const path = require("node:path");
 const { RuntimeSupervisor } = require("../electron/runtime-supervisor.cjs");
 
 /** A supervisor whose tunnel status and start/stop commands are fakes; it records what it did. */
-function harness({ reuse, ready = true }) {
+function harness({ reuse, ready = true, onTunnelReady }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-tunnel-owner-"));
   const binaryPath = path.join(root, "tunnel-client.exe");
   fs.writeFileSync(binaryPath, "tunnel program v1");
@@ -20,6 +20,7 @@ function harness({ reuse, ready = true }) {
     browserDescriptorPath: path.join(root, "launcher-browser.json"),
     launcherProfile: "development",
     reuseTunnelOnlyWhenMatching: () => reuse,
+    onTunnelReady,
   });
   const did = [];
   supervisor.assertTunnelClientReady = () => {};
@@ -90,6 +91,35 @@ test("with the setting off, any ready tunnel is adopted, as before", async () =>
   try {
     await supervisor.startTunnel(config);
     assert.deepEqual(did, ["monitor"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the main tunnel reports each time it is ready, so the app checks the ChatGPT connector again", async () => {
+  const ready = [];
+  const { root, binaryPath, supervisor, config } = harness({ reuse: true, onTunnelReady: (event) => ready.push(event) });
+  try {
+    await supervisor.recordTunnelOwner(config, 4321);
+    await supervisor.startTunnel(config);
+    assert.deepEqual(ready, [{ pid: 4321, adopted: true }], "adopted");
+    fs.writeFileSync(binaryPath, "tunnel program v2, a different size");
+    await supervisor.startTunnel(config);
+    assert.deepEqual(ready.at(-1), { pid: 9876, adopted: false }, "started");
+    supervisor.waitForTunnelMcpTransport = async () => { throw new Error("MCP transport returned internal HTTP 502 for initialize"); };
+    await assert.rejects(supervisor.startTunnel(config), /HTTP 502/);
+    assert.equal(ready.length, 2, "a tunnel that failed to start is not reported");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a listener that throws never fails the tunnel start", async () => {
+  const { root, supervisor, config, logs } = harness({ reuse: false, onTunnelReady: () => { throw new Error("listener broke"); } });
+  try {
+    await supervisor.startTunnel(config);
+    assert.equal(supervisor.tunnel?.pid, 4321);
+    assert.ok(logs.includes("runtime.tunnel_ready_listener_failed"));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

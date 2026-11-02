@@ -54,19 +54,39 @@ let workbenchStorage = null;
 // A stuck turn's recovery: its Provider stays in the tree (so a test can read the value the chat
 // gives it), and its value is what TurnRunning reads.
 const turnRestart = { Provider: "TurnRestartProvider", value: { restarting: false } };
-function mount(props) {
+function mount(props, { effects = false, objectUrls } = {}) {
   // Hook state per component, as React keeps it: by the component's name and its place among
   // components of that name. One shared list shifted every later component's state whenever a
   // component appeared earlier in the tree (a steer's bubble turned the stuck footer's clock back).
-  const frames = new Map(); let frame = "root", cursor = 0, seen = {};
+  const frames = new Map(), pendingEffects = new Map(), cleanups = new Set();
+  let frame = "root", cursor = 0, seen = {}, dirty = false;
   const react = {
     useState(initial) {
       const states = frames.get(frame) ?? frames.set(frame, []).get(frame);
       const at = cursor++;
       if (!(at in states)) states[at] = typeof initial === "function" ? initial() : initial;
-      return [states[at], (value) => { states[at] = typeof value === "function" ? value(states[at]) : value; }];
+      return [states[at], (value) => {
+        const next = typeof value === "function" ? value(states[at]) : value;
+        if (!Object.is(states[at], next)) { states[at] = next; dirty = true; }
+      }];
     },
-    useMemo: (calculate) => calculate(), useCallback: (callback) => callback, useEffect() {},
+    useMemo: (calculate) => calculate(),
+    // Paste ownership is registered in effects. Opt in for those tests; the older view-only
+    // tests keep their timer-free renders. Commit effects, then settle synchronous state updates.
+    useEffect(work, deps) {
+      if (!effects) return;
+      const states = frames.get(frame) ?? frames.set(frame, []).get(frame), at = cursor++;
+      const previous = states[at], key = `${frame}:${at}`;
+      if (!previous || !deps || previous.deps?.length !== deps.length || deps.some((value, index) => !Object.is(value, previous.deps?.[index]))) {
+        pendingEffects.set(key, () => {
+          previous?.cleanup?.(); cleanups.delete(previous?.cleanup);
+          const cleanup = work();
+          states[at] = { deps, cleanup };
+          if (typeof cleanup === "function") cleanups.add(cleanup);
+        });
+      } else pendingEffects.delete(key);
+    },
+    useCallback: (callback) => callback,
     useRef(initial) {
       const states = frames.get(frame) ?? frames.set(frame, []).get(frame);
       const at = cursor++;
@@ -88,6 +108,7 @@ function mount(props) {
     try { return type(props || {}); } finally { [frame, cursor] = outer; }
   };
   const timers = { setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, confirm: () => true,
+    addEventListener() {}, removeEventListener() {},
     localStorage: {
       getItem: (key) => workbenchStorage?.get(key) ?? null,
       setItem: (key, value) => workbenchStorage?.set(key, value),
@@ -112,10 +133,23 @@ function mount(props) {
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
               SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox", SecretText: "SecretText",
               SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
-  { window: timers, document: { querySelector: () => null }, navigator: {} });
+  { window: timers, document: { querySelector: () => null, addEventListener() {}, removeEventListener() {} }, navigator: {}, URL: objectUrls });
   props.queue?.attach?.(module.syncChatQueues);
   return {
-    render: (next = {}) => { frame = "root"; cursor = 0; seen = {}; return module.AgentOrchestratorChat({ ...props, ...next }); },
+    render: (next = {}, commitEffects = true) => {
+      for (let pass = 0; pass < 10; pass++) {
+        frame = "root"; cursor = 0; seen = {}; dirty = false;
+        const tree = module.AgentOrchestratorChat({ ...props, ...next });
+        if (commitEffects) {
+          const queued = [...pendingEffects.values()]; pendingEffects.clear();
+          for (const effect of queued) effect();
+        }
+        if (!effects || !dirty) return tree;
+      }
+      throw new Error("chat hooks did not settle");
+    },
+    needsRender: () => dirty,
+    unmount: () => { for (const cleanup of cleanups) cleanup(); cleanups.clear(); },
     // The queued-message bar alone, for a queue the chat itself rarely builds (two separate messages).
     bar: (barProps) => { frame = "bar"; cursor = 0; seen = {}; return module.QueuedMessageBar(barProps); },
   };
@@ -294,7 +328,7 @@ test("the agent whose reply closes the turn keeps its row under Worked, without 
   assert.ok(!walk(work).some((element) => element.type === "Markdown" && /shipped/.test(element.props.text)), "the answer shows once, below");
 });
 
-test("slash commands open a menu and run on Enter; attachments are sent with the message", async () => {
+test("slash commands open a menu and run on Enter; attachments are sent with the message", async t => {
   const { props, calls } = base({ selectedTaskId: "t", runs: [run("r1", "t", [node("p", "planner", "running")])], working: false,
     filePath: (file) => file.path ?? "" });
   const chatView = mount(props);
@@ -309,7 +343,8 @@ test("slash commands open a menu and run on Enter; attachments are sent with the
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, [["stop", "r1"]]);
 
-  const sending = mount({ ...props, runs: [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "ok" } })])] });
+  const sending = mount({ ...props, runs: [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "ok" } })])] }, { effects: true });
+  t.after(() => sending.unmount());
   view = sending.render();
   await walk(view).find((element) => element.type === "input" && element.props.type === "file").props.onChange({
     target: { files: [{ name: "shot.png", type: "image/png", path: "C:\\shots\\shot.png", size: 10 }], value: "x" },
@@ -319,6 +354,158 @@ test("slash commands open a menu and run on Enter; attachments are sent with the
   view = sending.render();
   await walk(view).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ["send", { taskId: "t", message: "look at this\n\nAttached image: C:\\shots\\shot.png" }]);
+});
+
+const delayedReply = () => {
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+};
+
+test("pasted images hold Enter until every concurrent save finishes, while text paste stays editable", async t => {
+  const bytes = delayedReply(), first = delayedReply(), second = delayedReply(), saves = [];
+  const { props, calls } = base({ saveAttachment: input => {
+    saves.push(input);
+    return input.name === "first.png" ? first.promise : second.promise;
+  } });
+  const page = mount(props, { effects: true,
+    objectUrls: { createObjectURL: file => `blob:clipboard/${file.name}`, revokeObjectURL() {} } });
+  t.after(() => page.unmount());
+  const field = () => walk(page.render()).find(element => element.props?.["aria-label"] === "Message");
+  field().props.onChange({ target: { value: "Inspect these screenshots" } });
+  const beforePaste = field();
+  let prevented = 0;
+  beforePaste.props.onPaste({ clipboardData: { files: [{ name: "first.png", type: "image/png", size: 4, arrayBuffer: () => bytes.promise }] }, preventDefault() { prevented++; } });
+  beforePaste.props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+  const immediate = page.render();
+  assert.deepEqual(walk(immediate).filter(element => element.type === "img").map(element => [element.props.alt, element.props.src]),
+    [["first.png", "blob:clipboard/first.png"]], "the thumbnail appears before even the image bytes are read");
+  assert.equal(walk(immediate).find(element => element.props?.["aria-label"] === "Remove first.png")?.props.disabled, true);
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [], "Enter in the paste frame must wait, before a disabled button can render");
+  assert.equal(prevented, 1);
+  assert.equal(walk(page.render()).find(element => element.props?.["aria-label"] === "Send message").props.disabled, true);
+  assert.match(text(page.render()), /Attaching files…/);
+  field().props.onPaste({ clipboardData: { files: [] }, preventDefault() { prevented++; } });
+  assert.equal(prevented, 1, "ordinary text paste keeps the browser's editing behavior");
+  field().props.onChange({ target: { value: "Inspect these screenshots and the typed details" } });
+  field().props.onPaste({ clipboardData: { files: [{ name: "second.png", type: "image/png", size: 4, arrayBuffer: async () => new Uint8Array([137, 80, 78, 71]).buffer }] }, preventDefault() {} });
+  assert.deepEqual(walk(page.render()).filter(element => element.type === "img").map(element => element.props.alt).sort(), ["first.png", "second.png"]);
+  await new Promise(setImmediate);
+  second.resolve({ path: "G:/fixtures/second.png" });
+  await new Promise(setImmediate);
+  assert.equal(walk(page.render()).find(element => element.props?.["aria-label"] === "Send message").props.disabled, true, "one completed save cannot release another pending paste");
+  field().props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+  assert.deepEqual(calls, []);
+  bytes.resolve(new Uint8Array([137, 80, 78, 71]).buffer);
+  await new Promise(setImmediate);
+  assert.equal(saves.length, 2);
+  assert.ok(saves.every(input => input.type === "image/png" && Array.from(input.bytes).join() === "137,80,78,71"));
+  assert.equal(walk(page.render()).find(element => element.props?.["aria-label"] === "Send message").props.disabled, true, "reading the bytes is not yet a saved attachment");
+  first.resolve({ path: "G:/fixtures/first.png" });
+  await new Promise(setImmediate);
+  assert.deepEqual(walk(page.render()).filter(element => element.type === "img").map(element => [element.props.alt, element.props.src]).sort(),
+    [["first.png", "blob:clipboard/first.png"], ["second.png", "blob:clipboard/second.png"]], "saved images replace their pending cards without duplicate previews");
+  assert.equal(walk(page.render()).find(element => element.props?.["aria-label"] === "Send message").props.disabled, false);
+  assert.doesNotMatch(text(page.render()), /Attaching files…/);
+  field().props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "send");
+  assert.match(calls[0][1].message, /^Inspect these screenshots and the typed details/);
+  for (const name of ["first", "second"]) assert.ok(calls[0][1].message.includes(`Attached image: G:/fixtures/${name}.png`));
+
+  const commandSave = delayedReply();
+  const command = base({ selectedTaskId: "command-chat", runs: [run("command-run", "command-chat", [node("p", "planner", "running")])], saveAttachment: () => commandSave.promise });
+  const commandPage = mount(command.props, { effects: true });
+  t.after(() => commandPage.unmount());
+  const commandField = () => walk(commandPage.render()).find(element => element.props?.["aria-label"] === "Message");
+  commandField().props.onChange({ target: { value: "/stop" } });
+  commandField().props.onPaste({ clipboardData: { files: [{ name: "command.png", type: "image/png", size: 4, arrayBuffer: async () => new ArrayBuffer(4) }] }, preventDefault() {} });
+  for (const key of ["Enter", "Tab"]) commandField().props.onKeyDown({ key, shiftKey: false, preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.deepEqual(command.calls, [], "slash suggestions cannot run a command while its pasted image is saving");
+  commandSave.resolve({ path: "G:/fixtures/command.png" });
+  await new Promise(setImmediate);
+});
+
+test("a pasted image finishing after a draft switch attaches only to its originating chat", async t => {
+  const saved = delayedReply();
+  const { props, calls } = base({ selectedTaskId: "original", saveAttachment: () => saved.promise });
+  const page = mount(props, { effects: true,
+    objectUrls: { createObjectURL: file => `blob:clipboard/${file.name}`, revokeObjectURL() {} } });
+  t.after(() => page.unmount());
+  const render = selectedTaskId => page.render({ selectedTaskId });
+  const field = selectedTaskId => walk(render(selectedTaskId)).find(element => element.props?.["aria-label"] === "Message");
+  field("original").props.onChange({ target: { value: "Original draft" } });
+  field("original").props.onPaste({ clipboardData: { files: [{ name: "original.png", type: "image/png", size: 4, arrayBuffer: async () => new Uint8Array([137, 80, 78, 71]).buffer }] }, preventDefault() {} });
+  assert.deepEqual(walk(render("original")).filter(element => element.type === "img").map(element => element.props.alt), ["original.png"]);
+  await new Promise(setImmediate);
+  field("other").props.onChange({ target: { value: "Other draft" } });
+  assert.equal(field("other").props.value, "Other draft");
+  assert.equal(walk(render("other")).filter(element => element.type === "img").length, 0, "a pending thumbnail cannot leak to the new draft");
+  const pendingOriginal = render("original");
+  assert.deepEqual(walk(pendingOriginal).filter(element => element.type === "img").map(element => element.props.alt), ["original.png"],
+    "returning to the original draft keeps its preview while saving");
+  assert.equal(walk(pendingOriginal).find(element => element.props?.["aria-label"] === "Send message").props.disabled, true);
+  render("other");
+  saved.resolve({ path: "G:/fixtures/original.png" });
+  await new Promise(setImmediate);
+  const other = render("other");
+  assert.equal(walk(other).filter(element => element.props?.className === "cx-attachment-name").length, 0);
+  assert.equal(field("other").props.value, "Other draft");
+  assert.equal(walk(other).find(element => element.props?.["aria-label"] === "Send message").props.disabled, false);
+  const original = render("original");
+  assert.equal(field("original").props.value, "Original draft");
+  assert.deepEqual(walk(original).filter(element => element.props?.className === "cx-attachment-name").map(text), ["original.png"]);
+  assert.deepEqual(walk(original).filter(element => element.type === "img").map(element => element.props.alt), ["original.png"]);
+  await walk(render("original")).find(element => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["send", { taskId: "original", message: "Original draft\n\nAttached image: G:/fixtures/original.png" }]]);
+});
+
+test("a pasted image finishing between draft render and passive effects survives the switch", async t => {
+  const saved = delayedReply();
+  const { props, calls } = base({ selectedTaskId: "original", saveAttachment: () => saved.promise });
+  const page = mount(props, { effects: true });
+  t.after(() => page.unmount());
+  const render = (selectedTaskId, commitEffects = true) => page.render({ selectedTaskId }, commitEffects);
+  const field = tree => walk(tree).find(element => element.props?.["aria-label"] === "Message");
+  field(render("original")).props.onChange({ target: { value: "Original draft" } });
+  field(render("original")).props.onPaste({ clipboardData: { files: [{ name: "between.png", type: "image/png", size: 4, arrayBuffer: async () => new ArrayBuffer(4) }] }, preventDefault() {} });
+  await new Promise(setImmediate);
+  render("other", false);
+  saved.resolve({ path: "G:/fixtures/between.png" });
+  await new Promise(setImmediate);
+  const other = render("other");
+  assert.equal(field(other).props.value, "");
+  assert.equal(walk(other).filter(element => element.props?.className === "cx-attachment-name").length, 0);
+  const original = render("original");
+  assert.equal(field(original).props.value, "Original draft");
+  assert.deepEqual(walk(original).filter(element => element.props?.className === "cx-attachment-name").map(text), ["between.png"],
+    "passive cleanup must preserve a completion rejected by the old owner after render");
+  assert.deepEqual(calls, []);
+});
+
+test("a failed pasted image save releases Send and preserves the typed draft", async t => {
+  const saved = delayedReply();
+  const { props, calls } = base({ saveAttachment: () => saved.promise });
+  const page = mount(props, { effects: true });
+  t.after(() => page.unmount());
+  const field = () => walk(page.render()).find(element => element.props?.["aria-label"] === "Message");
+  field().props.onChange({ target: { value: "Keep these details" } });
+  field().props.onPaste({ clipboardData: { files: [{ name: "failed.png", type: "image/png", size: 4, arrayBuffer: async () => new ArrayBuffer(4) }] }, preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(walk(page.render()).find(element => element.props?.["aria-label"] === "Send message").props.disabled, true);
+  saved.reject(new Error("fixture save refused"));
+  await new Promise(setImmediate);
+  const ready = page.render();
+  assert.equal(field().props.value, "Keep these details");
+  assert.match(text(ready), /fixture save refused/);
+  assert.doesNotMatch(text(ready), /Attaching files…/);
+  assert.equal(walk(ready).filter(element => element.props?.className === "cx-attachment-name").length, 0);
+  assert.equal(walk(ready).find(element => element.props?.["aria-label"] === "Send message").props.disabled, false);
+  await walk(ready).find(element => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["send", { message: "Keep these details" }]]);
 });
 
 test("IME confirmation leaves the message unsent until an ordinary Enter", async t => {
@@ -449,18 +636,30 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the releaseRound \d+( of \d+)? · 5m \d+s$/, "Codex's goal bar: state, objective, round, running time");
-  // While pursued, why the last check found the goal not met yet shows in a box of its own under
-  // the bar (user: "separate ... as 2 box ... the model not yet box should always below goal box").
-  const toldModes = walk(teamChat.render({ commands: { ...commands(), goal: { ...commands().goal, feedback: "Two tests still fail." } } }))
+  // While pursued, why the last check found the goal not met yet stays folded behind the bar's
+  // target, a dot saying it is there; a click opens it in a box of its own above the bar (user: "the
+  // goal met transcript should toggle when click on the goal box logo and it shows on goal above,
+  // but default is off").
+  const told = () => walk(teamChat.render({ commands: { ...commands(), goal: { ...commands().goal, feedback: "Two tests still fail." } } }))
     .find((element) => element.props?.className === "cx-composer-modes");
+  const verdictOf = (modes) => walk(modes).find((element) => element.props?.className === "cx-goal-verdict");
+  const targetOf = (modes) => walk(modes).find((element) => String(element.props?.className).includes("cx-goal-target"));
+  assert.equal(verdictOf(told()), undefined, "folded by default");
+  assert.equal(targetOf(told()).props["aria-expanded"], false);
+  assert.ok(walk(targetOf(told())).some((element) => element.props?.className === "cx-goal-dot"), "a dot on the target says there is a check to read");
+  targetOf(told()).props.onClick();
+  const toldModes = told();
   const toldBar = walk(toldModes).find((element) => String(element.props?.className).startsWith("cx-goal "));
-  const verdict = walk(toldModes).find((element) => element.props?.className === "cx-goal-verdict");
+  const verdict = verdictOf(toldModes);
   assert.equal(text(verdict), "Not met yet: Two tests still fail.");
+  assert.equal(targetOf(toldModes).props["aria-expanded"], true);
   assert.doesNotMatch(text(toldBar), /Not met yet/, "the goal bar keeps only the goal");
-  const modeKids = [toldModes.props.children].flat(Infinity).filter(Boolean);
-  assert.ok(modeKids.indexOf(verdict) > modeKids.indexOf(toldBar), "the verdict comes after the goal bar");
-  assert.match(fs.readFileSync(path.join(__dirname, "../src/features/codex-chat.css"), "utf8"), /\.cx-goal-verdict \{[^}]*flex: 1 0 100%; order: 1;/,
-    "and wraps to the last row, under the bar and the plan chip");
+  const modeKids = walk(toldModes);
+  assert.ok(modeKids.indexOf(verdict) < modeKids.indexOf(toldBar), "the verdict opens above the goal bar");
+  assert.match(fs.readFileSync(path.join(__dirname, "../src/features/codex-chat.css"), "utf8"), /\.cx-goal-verdict \{ flex: 1 0 100%; box-sizing/,
+    "on a row of its own, with no order that would move it below the bar");
+  targetOf(told()).props.onClick();
+  assert.equal(verdictOf(told()), undefined, "a second click folds it again");
   assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
   // The bar's icons are buttons, not typed commands: what is typed in the box stays.
   type(teamChat, "half a message");
@@ -1079,10 +1278,12 @@ test("while the agent waits on a request, a typed message is still steered: the 
 test("a single-model chat shows its finished work unfolded; a Team chat folds the workers but always shows the answer", () => {
   const cards = () => [node("p", "planner", "finished", { receipt: { answer: "plan" } }),
     node("rev", "reviewer", "finished", { receipt: { answer: "All done", verdict: "APPROVED" } })];
-  const steps = (view) => walk(view).some((element) => element.type === "ol" && element.props?.className === "cx-steps");
+  const steps = (view) => walk(view).some((element) => element.props?.className === "cx-step-head");
   const answer = (view) => walk(view).some((element) => String(element.props?.className || "").startsWith("cx-answer"));
   const team = mount(base({ selectedTaskId: "t", runs: [run("r1", "t", cards())] }).props).render();
   assert.equal(steps(team), false, "a Team chat folds the workers' activity");
+  assert.equal(walk(team).find(element => element.props?.className === "cx-work-head").props["aria-expanded"], false);
+  assert.ok(walk(team).some(element => element.type === "Markdown" && element.props.text === "plan"), "folding work keeps the worker's reply visible");
   assert.ok(answer(team), "the Team chat's answer still shows");
   const single = mount(base({ selectedTaskId: "t", runs: [run("r1", "t", cards(), { execution_mode: "single" })] }).props).render();
   assert.equal(steps(single), true, "a single-model chat shows its work");
@@ -1189,6 +1390,123 @@ test("a single model's thinking and tool calls stay folded under its answer once
     runs: [run("r0", "t", [node("w", "planner", "finished", { route, receipt: { thread_id: "s0", answer: "Done before." } })], { execution_mode: "single" })] }).props).render();
   assert.match(text(walk(older).find((element) => element.props?.className === "cx-work-head")), /^Worked/, "a card from before this session can still show its work");
 });
+
+test("folding a live work row keeps native assistant messages visible and expanded work interleaved", () => {
+  const route = { harness_id: "codex-native", model: "gpt-6.1-sol" };
+  const timeline = [
+    { id: "speech-before", kind: "message", status: "completed", text: "I found the response path." },
+    { id: "speech-tool", kind: "command", status: "completed", text: "Inspect response rendering", output: "fixture output" },
+    { id: "speech-after", kind: "message", status: "running", text: "The reply is arriving now." },
+  ];
+  const { props } = base({ selectedTaskId: "t", working: true,
+    runs: [run("speech-live", "t", [node("one", "planner", "running", { route, receipt: { started_at_ms: 1000 } })], { execution_mode: "single" })],
+    activity: { "speech-live:one": { activity: "writing", turn_started: true, timeline } } });
+  const page = mount(props);
+  const shown = marker => walk(page.render()).filter(element => element.props?.text === marker);
+  const initial = page.render();
+  const rows = walk(initial).filter(element => element.type === "li" && /\bcx-live-item\b/.test(element.props?.className || ""));
+  assert.deepEqual(rows.map(element => /kind-(\w+)/.exec(element.props.className)?.[1]), ["message", "group", "message"],
+    "expanded work preserves assistant/tool/assistant order");
+  assert.equal(shown(timeline[0].text).length, 1);
+  assert.equal(shown(timeline[2].text).length, 1);
+  walk(initial).find(element => element.props?.className === "cx-step-head").props.onClick();
+  assert.equal(shown(timeline[0].text).length, 1, "folding work cannot hide earlier assistant speech");
+  assert.equal(shown(timeline[2].text).length, 1, "folding work cannot hide the streaming assistant response");
+});
+
+test("folding team work keeps a finished assistant receipt visible before the reviewer answers", () => {
+  const answer = "The planner found the issue; the worker is next.";
+  const mission = run("speech-team", "t", [
+    node("p", "planner", "finished", { receipt: { answer } }),
+    node("w", "worker", "pending", { parents: ["p"] }),
+    node("rev", "reviewer", "pending", { parents: ["w"] }),
+  ], { execution_mode: "team" });
+  assert.equal(chat.chatTurns([mission], undefined)[0].steps[0].text, answer, "the receipt reached the turn model");
+  const page = mount(base({ selectedTaskId: "t", runs: [mission] }).props);
+  const shown = () => walk(page.render()).filter(element => element.props?.text === answer);
+  assert.equal(shown().length, 1, "the default folded group must not hide a completed model response");
+  walk(page.render()).find(element => element.props?.className === "cx-work-head").props.onClick();
+  assert.equal(shown().length, 1, "a folded finished step must keep its receipt visible too");
+  const review = "The reviewer confirms the result.";
+  const started = { thread_id: "synthetic-review-thread", started_at_ms: 2000 };
+  const reviewing = run("speech-team", "t", [mission.nodes[0], node("w", "worker", "finished"),
+    node("rev", "reviewer", "running", { receipt: started })], { execution_mode: "team" });
+  page.render({ working: true, runs: [reviewing], activity: { "speech-team:rev": {
+    activity: "writing", turn_started: true, timeline: [{ id: "review-final", kind: "message", status: "completed", text: review }],
+  } } });
+  const reviewed = run("speech-team", "t", [mission.nodes[0], node("w", "worker", "finished"),
+    node("rev", "reviewer", "finished", { receipt: { ...started, answer: review } })], { execution_mode: "team" });
+  const settled = page.render({ working: false, activity: {}, runs: [reviewed] });
+  assert.equal(walk(settled).filter(element => element.props?.text === review).length, 1,
+    "the reviewer's folded work cannot duplicate the final answer rendered outside it");
+});
+
+test("folding answer work keeps assistant commentary visible without duplicating the final answer", () => {
+  const saved = workbenchStorage;
+  try {
+    workbenchStorage = new Map([["coding-tools:ao:work-details:single", "on"]]);
+    const route = { harness_id: "codex-native", model: "gpt-6.1-sol" };
+    const receipt = { thread_id: "synthetic-response-thread", started_at_ms: 1000 };
+    const commentary = "I checked the response boundary.";
+    const answer = "The response is complete.";
+    const { props } = base({ selectedTaskId: "t", working: true,
+      runs: [run("speech-finished", "t", [node("one", "planner", "running", { route, receipt })], { execution_mode: "single" })],
+      activity: { "speech-finished:one": { activity: "writing", turn_started: true, timeline: [
+        { id: "commentary", kind: "message", status: "completed", text: commentary },
+        { id: "finished-tool", kind: "command", status: "completed", text: "Check response state" },
+        { id: "final-speech", kind: "message", status: "completed", text: answer },
+      ] } } });
+    const page = mount(props);
+    page.render();
+    const finished = { working: false, activity: {},
+      runs: [run("speech-finished", "t", [node("one", "planner", "finished", { route, receipt: { ...receipt, answer } })], { execution_mode: "single" })] };
+    const shown = marker => walk(page.render(finished)).filter(element => element.props?.text === marker);
+    assert.equal(shown(answer).length, 1, "the final receipt always appears once outside work");
+    assert.equal(shown(commentary).length, 1, "expanded work exposes the earlier assistant message");
+    walk(page.render(finished)).find(element => element.props?.className === "cx-work-head").props.onClick();
+    assert.equal(shown(commentary).length, 1, "collapsed answer work must retain earlier assistant messages");
+    assert.equal(shown(answer).length, 1);
+    walk(page.render(finished)).find(element => element.props?.className === "cx-work-head").props.onClick();
+    assert.equal(shown(commentary).length, 1);
+    assert.equal(shown(answer).length, 1, "opening work cannot duplicate its final answer");
+  } finally { workbenchStorage = saved; }
+});
+
+test("a finished work read completing after its row folds still notifies the mounted answer", async t => {
+  const saved = delayedReply(), reads = [];
+  const route = { harness_id: "ao:codex", model: "gpt-6.1-sol" };
+  const runs = Array.from({ length: 4 }, (_, index) => run(`history-${index}`, "t", [node("p", "planner", "finished", {
+    route, receipt: { thread_id: `history-thread-${index}`, started_at_ms: 1000 + index, answer: `Final answer ${index}.` },
+  })], { execution_mode: "single" }));
+  const { props } = base({ selectedTaskId: "t", runs, loadWork: (runId, nodeId) => {
+    reads.push([runId, nodeId]);
+    return runId === "history-0" ? saved.promise : Promise.resolve([]);
+  } });
+  const page = mount(props, { effects: true });
+  t.after(() => page.unmount());
+  page.render();
+  await new Promise(setImmediate);
+  const opened = page.render();
+  const head = walk(opened).filter(element => element.props?.className === "cx-work-head")[0];
+  assert.equal(head.props["aria-expanded"], true);
+  assert.equal(reads.filter(([runId]) => runId === "history-0").length, 1,
+    "the oldest turn is outside the latest-three details preload");
+  head.props.onClick();
+  page.render();
+  assert.equal(page.needsRender(), false);
+  saved.resolve([
+    { id: "old-commentary", kind: "message", status: "completed", text: "Earlier assistant commentary." },
+    { id: "old-tool", kind: "command", status: "completed", text: "Inspect historical work" },
+  ]);
+  await new Promise(setImmediate);
+  assert.equal(page.needsRender(), true, "cache completion must schedule a render even after the read effect's wanted flag changed");
+  const folded = page.render();
+  assert.equal(walk(folded).filter(element => element.props?.className === "cx-work-head")[0].props["aria-expanded"], false);
+  assert.equal(walk(folded).filter(element => element.props?.text === "Earlier assistant commentary.").length, 1);
+  assert.equal(walk(folded).filter(element => element.props?.text === "Final answer 0.").length, 1);
+  assert.doesNotMatch(text(folded), /Inspect historical work/);
+});
+
 test("approval cards from different team members retain separate React identities", () => {
   const { props } = base({ selectedTaskId: "t", approvals: [
     { nodeId: "planner", approval_id: "request-1" },

@@ -23,6 +23,27 @@ const CAPACITY_RETRY_MS = [100, 250, 600];
 const MAX_IN_FLIGHT = 12;
 // How long a request may wait for one of those turns before it fails as the service would have.
 const QUEUE_WAIT_MS = 15_000;
+const CONTROL_SLOTS = 2;
+const MAX_QUEUED = 128;
+const MAX_CONTROL_QUEUED = 16;
+const READ_PATHS = new Set(["/api/v1/ao/read", "/api/v1/ao/harness/status", "/api/v1/ao/harness/permission-profiles"]);
+const CONTROL_PATHS = new Set(["/api/v1/ao/control", "/api/v1/ao/harness/approval", "/api/v1/ao/harness/disconnect", "/api/v1/native-codex/approval"]);
+
+function admissionError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+function abortedRequest() {
+  return Object.assign(new Error("Headless request cancelled"), { name: "AbortError", code: "ABORT_ERR" });
+}
+
+function requestScope(pathname, body, options) {
+  const id = value => typeof value === "string" && /^[\w-]{1,128}$/.test(value) ? value : "";
+  const owner = JSON.stringify([id(body?.workspace_id), id(body?.run_id)]);
+  const control = CONTROL_PATHS.has(pathname) || (pathname === "/api/v1/ao/read" && options.admissionControl === true);
+  return { owner, category: control ? "control" : READ_PATHS.has(pathname) ? "read" : "other" };
+}
+
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_STARTUP_STDERR_BYTES = 4096;
 
@@ -85,7 +106,7 @@ function safeErrorMessage(error) {
   return message.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").slice(0, 500);
 }
 
-function requestJson({ endpoint, token, localUiToken = null, pathname, method = "POST", body = null, timeout = REQUEST_TIMEOUT_MS }) {
+function requestJson({ endpoint, token, localUiToken = null, pathname, method = "POST", body = null, timeout = REQUEST_TIMEOUT_MS, signal }) {
   return new Promise((resolve, reject) => {
     const url = new URL(pathname, endpoint);
     if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password) {
@@ -109,6 +130,7 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
         } : {}),
       },
       timeout,
+      ...(signal ? { signal } : {}),
     });
     const chunks = [];
     let size = 0;
@@ -154,7 +176,7 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
       });
     });
     request.on("timeout", () => request.destroy(new Error("Headless request timed out")));
-    request.on("error", (error) => reject(new Error(safeErrorMessage(error))));
+    request.on("error", (error) => reject(signal?.aborted ? abortedRequest() : new Error(safeErrorMessage(error))));
     if (payload) request.write(payload);
     request.end();
   });
@@ -400,55 +422,136 @@ class HeadlessHost {
     return token;
   }
 
-  /** Resolves once this request may be sent: at once below MAX_IN_FLIGHT, else in arrival order. */
-  takeTurn() {
+  /** Bounded admission: ordinary work cannot borrow the slots reserved for controls. */
+  takeTurn({ owner = "", category = "other", signal } = {}) {
     this.turns ??= { active: 0, waiting: [] };
-    const turns = this.turns;
-    if (turns.active < (this.maxInFlight ?? MAX_IN_FLIGHT)) {
-      turns.active += 1;
-      return Promise.resolve();
+    this.activeTurns ??= new Set();
+    this.lastOwner ??= {};
+    this.recentTurns ??= [];
+    if (signal?.aborted) return Promise.reject(abortedRequest());
+    if (this.stopping) return Promise.reject(new Error("Local execution service is stopping"));
+    const lane = category === "control" ? "control" : "ordinary";
+    const queued = this.turns.waiting.filter(entry => entry.lane === lane).length;
+    if (queued >= (lane === "control" ? MAX_CONTROL_QUEUED : this.maxQueued ?? MAX_QUEUED)) {
+      return Promise.reject(admissionError("HEADLESS_QUEUE_FULL", "Headless launcher queue is full; wait for pending work to finish"));
     }
     return new Promise((resolve, reject) => {
-      const entry = { resolve, timer: null };
-      entry.timer = setTimeout(() => {
-        turns.waiting.splice(turns.waiting.indexOf(entry), 1);
-        reject(new Error("HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)"));
-      }, this.queueWaitMs ?? QUEUE_WAIT_MS);
-      turns.waiting.push(entry);
+      const entry = { owner, category, lane, queuedAt: performance.now(), startedAt: null, outcome: "completed", resolve, reject };
+      const remove = error => {
+        const index = this.turns.waiting.indexOf(entry);
+        if (index < 0) return;
+        this.turns.waiting.splice(index, 1);
+        entry.cleanup();
+        this.recordTurn(entry, error.code === "ABORT_ERR" ? "cancelled" : "queue-timeout");
+        reject(error);
+      };
+      const abort = () => remove(abortedRequest());
+      const timer = setTimeout(() => remove(admissionError("HEADLESS_QUEUE_TIMEOUT", "HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)")), this.queueWaitMs ?? QUEUE_WAIT_MS);
+      entry.cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); };
+      signal?.addEventListener("abort", abort, { once: true });
+      this.turns.waiting.push(entry);
+      this.drainTurns();
     });
   }
 
-  /** A finished request's turn passes straight to the oldest one waiting. */
-  releaseTurn() {
-    const next = this.turns.waiting.shift();
-    if (!next) {
-      this.turns.active -= 1;
-      return;
+  drainTurns() {
+    if (this.stopping) return;
+    const maximum = this.maxInFlight ?? MAX_IN_FLIGHT;
+    const ordinaryLimit = maximum - Math.min(CONTROL_SLOTS, maximum - 1);
+    while (this.turns.active < maximum) {
+      const ordinaryActive = [...this.activeTurns].filter(entry => entry.lane === "ordinary").length;
+      const lane = this.turns.waiting.some(entry => entry.lane === "control") ? "control" : "ordinary";
+      if (lane === "ordinary" && ordinaryActive >= ordinaryLimit) break;
+      // Preserve each chat's order, but give a different owner the next turn when one is waiting.
+      let index = this.turns.waiting.findIndex(entry => entry.lane === lane && entry.owner !== this.lastOwner[lane]);
+      if (index < 0) index = this.turns.waiting.findIndex(entry => entry.lane === lane);
+      if (index < 0) break;
+      const [entry] = this.turns.waiting.splice(index, 1);
+      const sameOwner = this.turns.waiting.filter(next => next.lane === lane && next.owner === entry.owner);
+      this.turns.waiting = this.turns.waiting.filter(next => next.lane !== lane || next.owner !== entry.owner).concat(sameOwner);
+      entry.cleanup();
+      entry.startedAt = performance.now();
+      this.lastOwner[lane] = entry.owner;
+      this.activeTurns.add(entry);
+      this.turns.active += 1;
+      entry.resolve(entry);
     }
-    clearTimeout(next.timer);
-    next.resolve();
+  }
+
+  recordTurn(entry, outcome) {
+    const now = performance.now();
+    this.recentTurns.push({ category: entry.category, owner: entry.owner,
+      queueWaitMs: (entry.startedAt ?? now) - entry.queuedAt,
+      executionMs: entry.startedAt === null ? 0 : now - entry.startedAt, outcome });
+    if (this.recentTurns.length > 64) this.recentTurns.shift();
+  }
+
+  releaseTurn(entry) {
+    if (!this.activeTurns.delete(entry)) return;
+    this.turns.active -= 1;
+    this.recordTurn(entry, entry.outcome);
+    this.drainTurns();
+  }
+
+  /** Memory only: no payloads, arbitrary URLs, credentials, or error text. */
+  admissionStatus() {
+    const now = performance.now();
+    const describe = entry => ({ category: entry.category, owner: entry.owner,
+      queueWaitMs: (entry.startedAt ?? now) - entry.queuedAt,
+      executionMs: entry.startedAt === null ? 0 : now - entry.startedAt });
+    return { active: this.turns?.active ?? 0, queued: this.turns?.waiting.length ?? 0,
+      coalesced: this.coalescedReads ?? 0,
+      running: [...(this.activeTurns ?? [])].map(describe),
+      waiting: (this.turns?.waiting ?? []).map(describe),
+      recent: (this.recentTurns ?? []).map(entry => ({ ...entry })) };
   }
 
   async request(pathname, body = null, options = {}) {
-    const control = await this.ensureStarted();
     const method = options.method || (body == null ? "GET" : "POST");
-    await this.takeTurn();
+    const scope = requestScope(pathname, body, options);
+    const readOnly = READ_PATHS.has(pathname) && ["GET", "POST"].includes(method);
+    this.pendingReads ??= new Map();
+    // Only known pure reads share in-flight work. A write invalidates sharing both before and
+    // after it settles, so a post-write refresh cannot inherit an older read's snapshot.
+    if (!readOnly) this.pendingReads.clear();
+    const key = readOnly && !options.signal ? crypto.createHash("sha256")
+      .update(JSON.stringify([pathname, method, body, options.timeout ?? REQUEST_TIMEOUT_MS, options.localConfirmation === true, scope.category])).digest("hex") : null;
+    if (key && this.pendingReads.has(key)) {
+      this.coalescedReads = (this.coalescedReads ?? 0) + 1;
+      return structuredClone(await this.pendingReads.get(key));
+    }
+    const pending = this.sendRequest(pathname, body, { ...options, method }, scope);
+    if (key) this.pendingReads.set(key, pending);
     try {
-      // Admission is refused before any work runs ("HEADLESS_CAPACITY: request admission is full",
-      // seen on Activity in a burst of chat polls after a project switch), so the same request is
-      // safe to send again after a short wait, POST included.
+      return await pending;
+    } finally {
+      if (!readOnly) this.pendingReads.clear();
+      else if (key && this.pendingReads.get(key) === pending) this.pendingReads.delete(key);
+    }
+  }
+
+  async sendRequest(pathname, body, options, scope) {
+    if (options.signal?.aborted) throw abortedRequest();
+    const control = await this.ensureStarted();
+    const turn = await this.takeTurn({ ...scope, signal: options.signal });
+    try {
+      // Only explicit pre-execution service capacity refusals may be retried, never timeouts or
+      // transport failures after a mutation may already have been accepted.
       for (const wait of [...CAPACITY_RETRY_MS, null]) {
+        if (options.signal?.aborted) throw abortedRequest();
         try {
           return await requestJson({
             endpoint: control.endpoint,
             token: control.token,
             localUiToken: options.localConfirmation === true ? control.uiToken : null,
             pathname,
-            method,
+            method: options.method,
             body,
             timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
+            signal: options.signal,
           });
         } catch (error) {
+          if (options.signal?.aborted) throw abortedRequest();
           const message = safeErrorMessage(error);
           if (wait === null || !message.includes("HEADLESS_CAPACITY")) {
             const failure = new Error(message);
@@ -459,8 +562,12 @@ class HeadlessHost {
           await sleep(wait);
         }
       }
+    } catch (error) {
+      turn.outcome = error.code === "ABORT_ERR" ? "cancelled" : /HEADLESS_CAPACITY/.test(error.message) ? "service-capacity"
+        : /timed out/.test(error.message) ? "request-timeout" : "request-error";
+      throw error;
     } finally {
-      this.releaseTurn();
+      this.releaseTurn(turn);
     }
   }
 

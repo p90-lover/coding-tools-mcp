@@ -455,17 +455,20 @@ test("normal shutdown persists the ChatGPT session before closing browser views"
   assert.ok(destroy > persist, "browser views must close only after session persistence completes");
 });
 
-test("packaged runtime is verified before launcher browser surfaces can bind ports", () => {
+test("packaged runtime is verified before launcher browser surfaces are created", () => {
   const start = electronMain.indexOf("async function start()");
   const runtimeValidation = electronMain.indexOf("await preparePackagedRuntime({", start);
-  const cdpPortAllocation = electronMain.indexOf("cdpPort = await findFreePort();", start);
+  const cdpPreparation = electronMain.indexOf("prepareBrowserDebugging(app)", start);
+  const cdpPortResolution = electronMain.indexOf("cdpPort = await browserDebuggingReady();", start);
   const windowCreation = electronMain.indexOf("mainWindow = createWindow({", start);
   const controlServerStart = electronMain.indexOf("browserControl = await new BrowserControlServer({", start);
   const browserReady = electronMain.indexOf("await browserHost.ready();", start);
 
   assert.ok(runtimeValidation > start, "startup must eagerly verify the packaged runtime");
+  assert.ok(cdpPreparation > start && cdpPreparation < runtimeValidation,
+    "Chromium switches must be configured before asynchronous runtime preparation");
   for (const [surface, position] of [
-    ["CDP port allocation", cdpPortAllocation],
+    ["browser debugging port resolution", cdpPortResolution],
     ["launcher window", windowCreation],
     ["browser control server", controlServerStart],
     ["embedded browser", browserReady],

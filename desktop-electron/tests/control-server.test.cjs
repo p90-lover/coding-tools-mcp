@@ -33,6 +33,29 @@ test("native proxy resolution requires owner auth, restricts targets, and works 
   } finally { await server.close(); }
 });
 
+test("the activity route returns the in-memory freeze records only to the owner and takes no arguments", async () => {
+  const records = [{ at: "2026-11-02T06:00:00.000Z", level: "warning", event: "launcher.main_stalled", detail: { ms: 31000 } }];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => { throw new Error("an activity read must not touch the browser"); },
+    getPreferences: () => ({}),
+    readActivity: () => records,
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const send = (body, authorization = `Bearer ${token}`) => fetch(`${endpoint}/v1/launcher/activity`, {
+    method: "POST", headers: { authorization, "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  try {
+    assert.equal((await send({}, "Bearer wrong")).status, 401);
+    assert.equal((await send({ limit: 5 })).status, 400);
+    const response = await send({});
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { records });
+    server.readActivity = undefined;
+    assert.equal((await send({})).status, 400);
+  } finally { await server.close(); }
+});
+
 test("native relay restricts the backend and streams without cookies", async () => {
   const calls = [];
   const server = await new BrowserControlServer({

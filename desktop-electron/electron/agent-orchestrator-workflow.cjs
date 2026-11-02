@@ -326,9 +326,9 @@ function delayToMilliseconds(value, unit) {
  * The chat's own preferences that outlive a restart: autoRetry (a failed single-model step is
  * retried by itself, chatAutoRetry) and modelJudges (what would wait for the person, a request the
  * reviewer would hand on or a goal round that ended needing them, is judged by the model instead,
- * chatModelJudges), and autoCompact / autoCompactPercent (a chat compacts itself once a follow-up
- * would fill that share of its size limit, as Claude Code's autoCompactEnabled and
- * CLAUDE_AUTOCOMPACT_PCT_OVERRIDE; chatAutoCompact). Kept in memory when no file is given (tests).
+ * chatModelJudges). Legacy autoCompact / autoCompactPercent values remain readable for older
+ * callers, but do not control native token compaction or bounded task-record rollover.
+ * Kept in memory when no file is given (tests).
  */
 const AUTO_COMPACT_PERCENT = 95;
 const AUTO_COMPACT_MIN_PERCENT = 20;
@@ -1496,7 +1496,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         });
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
-          const stopped = await harnessService().exitAgent?.(continued.session);
+          // One AO is already stopping is left to the exit worker: the fresh agent need not wait for it.
+          const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId));
           if (stopped?.ok !== true) throw unconfirmed;
         }
         if (usable) {
@@ -1622,7 +1623,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
    * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
    */
-  async function stopStalledTurn(session, observed) {
+  async function stopStalledTurn(session, observed, owner) {
     if (!chatPreferences.get().autoRetry || !Number.isFinite(observed?.lastActivityAt)) return false;
     // The stop interrupts the whole session, so the whole session is judged: a turn queued behind a
     // working one shows nothing of its own (observe's sessionActivityAt and sessionTools).
@@ -1636,14 +1637,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       .filter(value => Number.isFinite(value) && value > 0);
     const limit = !tools.length ? TURN_STALL_MS
       : stated.length === tools.length ? Math.max(...stated) + TOOL_STALL_MARGIN_MS : TOOL_STALL_MS;
-    if (idle <= limit || now() - (stalledStops.get(session) ?? 0) < TURN_STALL_MS) return false;
+    const previous = stalledStops.get(session);
+    if (idle <= limit || now() - (previous ?? 0) < TURN_STALL_MS) return false;
     stalledStops.set(session, now());
     if (stalledStops.size > 200) stalledStops.delete(stalledStops.keys().next().value);
-    // An interrupt that does not settle in time is tried again after TURN_STALL_MS; it never fails
-    // the observation it was found in.
-    try { await stopExternalTurn(session); }
-    catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200) }); return false; }
-    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(idle / 1000), toolRunning: tools.length > 0 });
+    // The interrupt alone left hung turns hung (seen live 2026-11-02, two chats "may be stuck" for
+    // over an hour): one interrupt never settled, so every pass failed "stop needs attention"; the
+    // other session's controller AO had dropped, which read as stopped at once while its turn stayed
+    // "running", so the card never retried. The stall stop now escalates like "keep going": an
+    // interrupt that does not settle shuts the agent's host down, and so does a session with no
+    // controller, or one still hung a stall period after its last stop. The turn then settles as
+    // interrupted and the step is retried; AO keeps the session, so the retry resumes it.
+    // A stop that fails is tried again after TURN_STALL_MS; it never fails the observation.
+    const release = observed.agentGone === true || previous !== undefined;
+    try { await stopExternalTurn(session, { owner, escalate: true, ...(release ? { releaseAgent: true } : {}) }); }
+    catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
+    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(idle / 1000), toolRunning: tools.length > 0, released: release });
     return true;
   }
 
@@ -1678,7 +1687,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
-      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed);
+      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed, runKey(workspaceId, runId));
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
@@ -1702,11 +1711,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   // Callers only read what comes back (none changes a run in place), so one response is shared.
-  function runs({ workspaceId, runId } = {}) {
-    const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "";
-    const key = JSON.stringify([id, run]);
+  // `taskId` reads one chat's runs: the project's read holds only its newest 100, shared by all of
+  // its chats, so a busy project's other chats opened with few or none of their replies.
+  function runs({ workspaceId, runId, taskId } = {}) {
+    const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "", task = !run && taskId ? clean(taskId, 128) : "";
+    const key = JSON.stringify(task ? [id, run, task] : [id, run]);
     return sharedWorkflowRead(key, async () => {
-      const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}) });
+      const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}), ...(task ? { task_id: task } : {}) });
       if (response?.ok !== true || !Array.isArray(response.runs)) {
         throw new Error("AO run read failed");
       }
@@ -2012,15 +2023,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // the longest texts are cut first, then tool arguments, output and diffs, and only then the oldest
   // items, so the turn still opens with as many of its tool calls as fit.
   const TIMELINE_RESPONSE_BYTES = 800_000;
-  function fitTimeline(items) {
+  function fitTimeline(items, byteBudget = TIMELINE_RESPONSE_BYTES) {
     const size = () => Buffer.byteLength(JSON.stringify(items));
-    if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    if (size() <= byteBudget) return items;
     const cut = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit).replace(/[\ud800-\udbff]$/, "")}…`;
     for (const limit of [16 * 1024, 4096, 1024]) {
       // A steer may contain structured annotations and attachments; keep it whole or let the
       // oldest-item eviction below remove it whole, never leave an unparseable prompt prefix.
       items = items.map(item => item.kind !== "steer" && item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
-      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+      if (size() <= byteBudget) return items;
     }
     // Tool calls keep a shorter input and output before they lose them: with up to 16 KB of output
     // each (READ_TOOL_BYTES), a long turn would otherwise drop every call's details at once.
@@ -2028,11 +2039,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       items = items.map(item => ({ ...item,
         ...(item.input?.length > limit ? { input: cut(item.input, limit) } : {}),
         ...(item.output?.length > limit ? { output: cut(item.output, limit) } : {}) }));
-      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+      if (size() <= byteBudget) return items;
     }
     items = items.map(({ input: _input, output: _output, files, ...item }) =>
       files ? { ...item, files: files.map(({ diff: _diff, ...file }) => file) } : item);
-    while (items.length > 1 && size() > TIMELINE_RESPONSE_BYTES) items = items.slice(Math.ceil(items.length / 10));
+    // Remove a whole item that cannot fit before evicting older, fitting replies beside it.
+    items = items.filter(item => Buffer.byteLength(JSON.stringify([item])) <= byteBudget);
+    while (items.length > 0 && size() > byteBudget) items = items.slice(Math.ceil(items.length / 10));
     return items;
   }
 
@@ -2109,6 +2122,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }
     if (live.some(item => item.kind === "reasoning" || item.kind === "thinking")) return "thinking";
     if (live.some(item => item.kind === "message")) return "writing the reply";
+    // AO opens a turn when it takes the message and starts it once an agent has it. A queued turn
+    // waits for its agent, not the model: seen live 2026-11-02, two fresh agents took 7 minutes to
+    // come up while the chat said "waiting for the model", and the model then answered in 7 s.
+    if (observed.turnId && observed.turnState === "queued") return "waiting for the agent to take the message";
     return observed.turnId ? "waiting for the model" : "waiting for the turn to start";
   }
 
@@ -2150,9 +2167,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               const session = node.receipt?.thread_id;
               if (!session) frame = { ...base, activity: launchStages.get(nodeKey(id, run, node.id))?.text ?? "launching" };
               else {
-                const observed = await harnessService().observe(session);
-                const currentTurn = !node.receipt?.turn_id || observed.turnId === node.receipt.turn_id;
-                frame = { ...base, turn_started: Boolean(observed.turnId),
+                // A queued follow-up can be the session's newest turn while this card still owns
+                // another one. Read that turn, as the run loop does, rather than dropping its reply.
+                const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session);
+                const observed = await harnessService().observe(session, expectedTurn);
+                const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
+                // Started: an agent took the message (AO starts the turn only then; see describeTurn).
+                frame = { ...base, turn_started: Boolean(observed.turnId) && observed.turnState !== "queued",
                   activity: currentTurn ? describeTurn(observed, { mission, node }) : observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
                   step: publicText(observed.activity || observed.turnState || "working", 120),
                   output: currentTurn ? publicText(observed.liveOutput ?? observed.answer) : "",
@@ -2197,7 +2218,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       nodes[node.id] = { ...(entry.frame || base), state: node.state, pending: Boolean(entry.pending) };
     }
-    return { ok: true, now_ms: Date.now(), nodes };
+    const response = { ok: true, now_ms: Date.now(), nodes };
+    if (Buffer.byteLength(JSON.stringify(response)) > TIMELINE_RESPONSE_BYTES) {
+      const frames = Object.values(nodes).filter(frame => frame.timeline?.length);
+      if (frames.length) {
+        // All nodes share one IPC response. Reserve their output and metadata before fitting
+        // response-owned timelines; trimming the cached frames would lose detail on later reads.
+        const metadata = { ...response, nodes: Object.fromEntries(Object.entries(nodes)
+          .map(([id, frame]) => [id, { ...frame, timeline: [] }])) };
+        const byteBudget = Math.max(2, Math.floor((TIMELINE_RESPONSE_BYTES
+          - Buffer.byteLength(JSON.stringify(metadata))) / frames.length));
+        for (const frame of frames) frame.timeline = fitTimeline(frame.timeline, byteBudget);
+      }
+    }
+    return response;
   }
 
   // A start blocked on the browser is reported as the operation's result: errors thrown across
@@ -2632,7 +2666,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       stopping.detail = "Stopping owned agents";
       reportRun(id, run, stopping, null);
     }
-    const beforeStop = action === "stop" ? await runs({ workspaceId: id, runId: run }).catch(() => null) : null;
+    // Stop must not inherit a background poll's occupied admission slot or shared read promise.
+    const readForStop = async (allRuns = false) => {
+      const saved = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(!allRuns ? { run_id: run } : {}) }, { admissionControl: true });
+      if (saved?.ok !== true || !Array.isArray(saved.runs)) throw new Error("AO run read failed");
+      return saved;
+    };
+    const beforeStop = action === "stop" ? await readForStop().catch(() => null) : null;
     const stopTargets = (beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
       .filter(node => externalAgent(node) && node.receipt?.thread_id)
       .map(node => ({ nodeId: node.id, sessionId: node.receipt.thread_id,
@@ -2648,7 +2688,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Stop the local loop and known owned agents even when saved mission cancellation
       // cannot be confirmed; report that uncertainty instead of claiming the saved state changed.
       if (action !== "stop") throw error;
-      const saved = await runs({ workspaceId: id, runId: run }).catch(() => null);
+      const saved = await readForStop().catch(() => null);
       const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
       if (!mission && !backgroundRuns.has(runKey(id, run))) throw error;
       logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
@@ -2676,7 +2716,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     }
     if (action === "stop") {
-      const saved = await runs({workspaceId:id}).catch(() => null);
+      const saved = await readForStop(true).catch(() => null);
       const life = saved ? taskLifecycle(saved,result.run.project_id) : {};
       if (life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)) {
         await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
@@ -3460,9 +3500,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * use, chat-agent-tools.cjs). Every such call is reviewed, whatever the chat's approval mode: by
    * the chat's own approver when it has one, else by Codex's auto-review on the card's route.
    * Resolves { action: "allow"|"deny"|"ask", reason }; a reviewer that cannot answer is "ask", and
-   * the call then waits for the person.
+   * the call then waits for the person, unless "Let the model judge" is on: then it must choose
+   * allow or deny, and one that cannot answer denies.
    */
   async function reviewToolCall({ workspaceId, session, tool, args, reason = "" } = {}) {
+    const judges = chatPreferences.get().modelJudges;
     const id = clean(workspaceId, 128), thread = clean(session, 256);
     let run;
     try { ({ run } = await sessionChat(id, thread, "have its screen actions reviewed")); } catch (error) {
@@ -3474,10 +3516,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const approval = { kind: "tool", tool: `${APP_TOOL_PREFIX}${clean(tool, 80)}`, thread_id: thread,
       toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
     try {
-      return await askApprover({ approver, mission: run, approval, partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT });
+      const verdict = await askApprover({ approver, mission: run, approval, decide: judges, partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT });
+      return judges && verdict.action === "ask" ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
     } catch (error) {
       logger?.warn?.("ao.tool_review_failed", { tool: approval.tool, message: publicText(error?.message || error, 200) });
-      return { action: "ask", reason: "The reviewer could not answer" };
+      return judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" };
     }
   }
   /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
@@ -3613,6 +3656,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (advice.action === "ask" && advice.reviewed) {
       const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete }).catch(() => null);
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
+      // "Let the model judge": a decide pass that failed or still said "ask" is a deny, never the
+      // person's: the request sat on the card though the switch was on.
+      else if (judges) advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
     }
     if (advice.reviewed && approval.thread_id && advice.action === "deny") {
       reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
@@ -3627,7 +3673,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
         return `The reviewer couldn't answer yet, trying again: ${why}`;
       }
-      advice = { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
+      // "Let the model judge" leaves nothing to the person: a reviewer that never answered denies,
+      // in doubt, and the agent hears why and goes another way.
+      advice = judges
+        ? { action: "deny", reason: `The command reviewer couldn't answer after ${tries} tries, so it was denied (Let the model judge is on): ${why}` }
+        : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
     }
     reviewFailures.delete(approval.approval_id);
     const offered = approval.request?.availableDecisions;
@@ -3960,9 +4010,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, modelJudges: chatPreferences.get().modelJudges };
   }
   /**
-   * chat_auto_compact: reads auto-compact, or sets it with `enabled` and/or `percent` (how full a
-   * chat gets, of its size limit, before its next message compacts it first). The user: "make a
-   * command to set how much to auto compact like claude code".
+   * chat_auto_compact: compatibility storage for older callers, not native model-token control.
+   * Record rollover is required only at the board's hard byte limit, regardless of these values.
    */
   function chatAutoCompact({ enabled, percent } = {}) {
     const change = {};
@@ -5266,30 +5315,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
       let description = rewoundDescription ?? extended();
       if (rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This rewind exceeds the chat size limit; shorten the conversation first");
-      const { autoCompact, autoCompactPercent: percent } = chatPreferences.get();
-      const full = utf8Bytes(description) > BOARD_TEXT_BYTES;
-      if (!rewind && (full || (autoCompact && utf8Bytes(description) > Math.floor(BOARD_TEXT_BYTES * percent / 100)))) {
-        if (!autoCompact) throw new Error("This chat is full. Use /compact, or turn auto-compact on with /autocompact on.");
-        // A long chat compacts itself, as Claude Code does, once the follow-up would fill the share
-        // of the limit set with /autocompact: the earlier conversation becomes a handoff summary
-        // (what /compact does) and the chat goes on. The summary leaves room for this follow-up: a
-        // goal round's feedback is up to 3.5 KB, and a 6,000-character summary plus that was still
-        // over the limit, so a goal stalled "full" right after compacting.
+      if (!rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) {
+        // This is bounded task-record storage, not the agent's token context. Only roll it over
+        // at the hard byte limit: obsolete /autocompact preferences must neither summarize early
+        // nor strand a chat. Native /compact and model-token auto-compaction are independent.
         const reserve = utf8Bytes(`\n\nFollow-up (${stamp} UTC):\n${text}`);
-        let compacted = { compacted: false };
+        let compacted;
         try {
           compacted = await compactChat({ workspaceId: id, taskId: task, reserve });
         } catch (error) {
-          // Below the limit the follow-up still fits: compacting waits for the next one.
-          if (full) throw new Error(`This chat is full and couldn't be compacted: ${String(error?.message || error).slice(0, 200)}`);
-          logger?.warn?.("ao.chat_auto_compact_failed", { error: String(error?.message || error).slice(0, 200) });
+          throw new Error(`This chat's task record is full and couldn't be rolled over: ${String(error?.message || error).slice(0, 200)}`);
         }
         if (compacted.compacted) {
           detail = await board({ workspaceId: id, taskId: task });
           if (!detail.task) throw new Error("This chat's task no longer exists");
           description = extended();
         }
-        if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full even after compacting. Shorten the message or start a new chat.");
+        if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat's task record is full even after rollover. Shorten the message or start a new chat.");
       }
       const saidBefore = String(detail.task.description || "");
       checkCurrent();
@@ -6858,10 +6900,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (typeof runId !== "string" || !runId) throw new Error("This message has no reply yet. Delete it after its turn runs.");
     if (!Array.isArray(runIds) || runIds.length > 50) throw new Error("This message's reply was not found; reload the chat");
     const own = [runId, ...runIds].map(value => clean(value, 80));
-    const saved = await runs({ workspaceId: id });
-    const chatRuns = saved.runs.filter(run => run.project_id === task);
+    const saved = await runs({ workspaceId: id, taskId: task });
+    const chatRuns = saved.runs.filter(run => run.workspace_id === id && run.project_id === task);
     const latest = chatRuns.at(-1);
-    if ((latest && !runSettled(latest)) || chatWorking(id, task, saved.runs)) throw new Error("Stop the chat first to delete a message");
+    // The open chat can still show cached replies older than its newest-200 read. Read only
+    // those requested IDs, with the same workspace/task ownership and visibility checks below.
+    for (const requested of new Set(own)) {
+      if (chatRuns.some(run => run.id === requested)) continue;
+      const older = await runs({ workspaceId: id, runId: requested });
+      const found = older.runs.find(run => run.id === requested && run.workspace_id === id && run.project_id === task);
+      if (found) chatRuns.push(found);
+    }
+    if ((latest && !runSettled(latest)) || chatWorking(id, task, chatRuns)
+      || chatRuns.some(run => own.includes(run.id) && !runSettled(run))) throw new Error("Stop the chat first to delete a message");
     const detail = await board({ workspaceId: id, taskId: task });
     if (!detail.task) throw new Error("This chat's task no longer exists");
     // The chat says which of its runs answered this message; each must be one it shows.
@@ -6919,6 +6970,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const STOP_SETTLE_POLL_MS = 250;
   /** How long a Stop that ends the agent waits for its interrupt before shutting the agent down. */
   const STOP_RELEASE_SETTLE_MS = 3_000;
+  // Stops an agent without waiting on a stop or start AO is already carrying out for it: that agent
+  // goes to the service's exit worker (releaseAgent), which leaves its card once AO reports it gone.
+  // Waiting failed Stop ("Agent stop could not be confirmed: The agent is already exiting") and the
+  // card's retry, seen live 2026-11-02.
+  async function releaseAgent(session, owner = null) {
+    const service = harnessService();
+    if (typeof service.releaseAgent !== "function") return service.exitAgent?.(session);
+    const outcome = await service.releaseAgent(session);
+    if (outcome?.exiting) {
+      logger?.info?.("ao.agent_exit_handed_off", { session });
+      void Promise.resolve(outcome.exited).then(exited => {
+        if (exited === true && owner && sessionOwners.get(session) === owner) sessionOwners.delete(session);
+      }, () => undefined);
+    }
+    return outcome;
+  }
+
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
     for (;;) {
@@ -6988,7 +7056,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       if (shutDown && owns()) {
         const outcomes = await Promise.allSettled([
-          Promise.resolve().then(() => service.exitAgent(session)).then(outcome => {
+          Promise.resolve().then(() => releaseAgent(session, ownership?.owner)).then(outcome => {
             if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);
           }),
           Promise.resolve().then(() => subagents?.stopParent(session)),
@@ -7277,8 +7345,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const result=await lifecycleMutation(id,visibility === "active"
       ? {operation:"restore_task",task_id:task,expected_revision:life.revision}
       : {operation:"set_visibility",task_id:task,expected_revision:life.revision,visibility});
-    // An archived chat counts its days from now; a restored or deleted one stops counting.
-    if (visibility === "archived") archive.archived(id,task); else archive.forget(id,task);
+    // An archived chat counts its days from now; a restored or deleted one stops counting, and a
+    // restored one counts as used now, so the idle sweep does not archive it again at once.
+    if (visibility === "archived") archive.archived(id,task);
+    else if (visibility === "active") archive.restored(id,task);
+    else archive.forget(id,task);
     return result;
   }
   /**
@@ -7298,10 +7369,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       read.set(id,{ saved, deleted });
       // A chat is a task with runs; a board task that never ran is not one.
       const chatTasks=new Set(saved.runs.map(run=>run.project_id));
+      // The read holds a project's newest runs only (100): a chat archived here whose runs have left
+      // it is still one, and its days still run out. It dropped out of Archived and stayed archived.
+      const counted=new Set(archive.archivedIn(id));
       const archivedNow=await archiveIdleChats(id,saved,chatTasks);
       const lifecycles=[...(saved.task_lifecycle ?? []).filter(life=>!archivedNow.has(life.task_id)),...archivedNow.values()];
       for (const life of lifecycles) {
-        if (!chatTasks.has(life.task_id) || !["archived","deleted"].includes(life.visibility)) continue;
+        if (!(chatTasks.has(life.task_id) || counted.has(life.task_id)) || !["archived","deleted"].includes(life.visibility)) continue;
         let visibility=life.visibility;
         if (visibility === "archived" && archive.due(id,life.task_id)) {
           try {
@@ -7321,7 +7395,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Every project's chats must be known: a session is ended only when no chat still uses it.
     if (read.size === ids.length) void endOldSessions(read).catch(error =>
       logger?.warn?.("ao.old_sessions_failed",{message:publicText(error?.message||error,200)}));
+    armArchiveSweep(ids);
     return { ok:true, days:archive.days(), idleDays:archive.idleDays(), chats };
+  }
+  // This read is also the archive sweep (idle chats archived, archived ones whose days are up moved
+  // on). Only the window asked for it, and only while shown, so an app left in the tray never
+  // archived anything: after a first read, the projects it named are swept every hour from here.
+  const ARCHIVE_SWEEP_MS = 3_600_000;
+  // A real hour's timer, not the injected one: a test clock that fires at once would sweep forever.
+  const archiveSweep = { ids: [], timer: null, disposed: false };
+  function armArchiveSweep(ids) {
+    archiveSweep.ids = ids;
+    if (archiveSweep.timer || archiveSweep.disposed) return;
+    archiveSweep.timer = setTimeout(() => {
+      archiveSweep.timer = null;
+      void archivedChats({ workspaceIds: archiveSweep.ids }).catch(error =>
+        logger?.warn?.("ao.archive_sweep_failed",{message:publicText(error?.message||error,200)}));
+    }, ARCHIVE_SWEEP_MS);
+    archiveSweep.timer.unref?.();
   }
   /**
    * Open chats with no activity for archive.idleDays() (default 7; 0 never) are archived, with no
@@ -7337,11 +7428,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (life.visibility !== "active") continue;
       const followUps=goals.get(workspaceId,taskId)?.status === "active" || Boolean(wakeups.get(workspaceId,taskId))
         || Boolean(loops.get(workspaceId,taskId)) || chatQueue.list(workspaceId,taskId).length > 0;
-      if (!idleChat(saved.runs.filter(run=>run.project_id===taskId),life,followUps,cutoff)) continue;
+      const chatRuns=saved.runs.filter(run=>run.project_id===taskId);
+      if (!idleChat(chatRuns,life,followUps,cutoff,{ restoredAt:archive.restoredAt(workspaceId,taskId),
+        driven:chatRuns.some(run=>{ const state=backgroundRuns.get(runKey(workspaceId,run.id)); return Boolean(state?.starting || state?.driving || state?.status === "running"); }) })) continue;
       try {
         const result=await lifecycleMutation(workspaceId,{operation:"set_visibility",task_id:taskId,expected_revision:life.revision,visibility:"archived"});
         archive.archived(workspaceId,taskId);
-        archivedNow.set(taskId,result.lifecycle);
+        // The lifecycle a change returns has no title; without the one read here the chat showed
+        // as "Untitled chat" in Archived until the next read.
+        archivedNow.set(taskId,{ ...life, ...result.lifecycle, title:result.lifecycle?.title || life.title });
         logger?.info?.("ao.idle_chat_archived",{days:archive.idleDays()});
       } catch (error) {
         logger?.warn?.("ao.idle_chat_archive_failed",{message:publicText(error?.message||error,200)});
@@ -7354,11 +7449,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * oldest first (each card's receipt has started_at_ms / finished_at_ms, Unix ms; runSettled(run)
    * says a run is over); `life` its lifecycle (schedule, reconfigure); `followUps` whether a goal,
    * wake-up, loop or queued message will still continue it; `cutoffMs` the moment its last
-   * activity must be before.
+   * activity must be before; `restoredAt` when Restore last brought it back (that counts as
+   * activity); `driven` whether this app is driving one of its runs right now.
+   *
+   * A run that is not over but has nothing working (a card held for an answer or after a failed
+   * launch, a pause, a start that never got going) does not keep the chat open: its last activity
+   * decides. Every run had to be over, so one old stuck card kept a chat from ever being archived.
    */
-  function idleChat(chatRuns,life,followUps,cutoffMs) {
-    if (followUps || life.reconfigure?.length || ["scheduled","claimed"].includes(life.schedule?.state)) return false;
-    if (!chatRuns.length || !chatRuns.every(runSettled)) return false;
+  function idleChat(chatRuns,life,followUps,cutoffMs,{ restoredAt=0, driven=false }={}) {
+    if (followUps || driven || life.reconfigure?.length || ["scheduled","claimed"].includes(life.schedule?.state)) return false;
+    if (!chatRuns.length || chatRuns.some(run=>!runSettled(run) && run.nodes?.some(node=>["running","reserved"].includes(node.state)))) return false;
+    if (restoredAt >= cutoffMs) return false;
     let last=0;
     for (const run of chatRuns) for (const node of run.nodes ?? []) {
       for (const receipt of [node.receipt, ...(node.history ?? [])]) {
@@ -7401,6 +7502,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return ended;
   }
   function dispose() {
+    archiveSweep.disposed = true;
+    if (archiveSweep.timer) clearTimeout(archiveSweep.timer);
     for (const entry of sessionCompactions.values()) if (entry.timer) clearTimer(entry.timer);
     sessionCompactions.clear();
     for (const entry of nativePreviewLeases.values()) entry.lease.release({ ended: true });
@@ -7478,7 +7581,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const saved = await runs(args);
         // A goal whose round settled unwatched (the app was closed meanwhile) is judged now, and a
         // queued message whose chat's settle was missed goes on.
-        if (!args.runId) sweepWorkspace(clean(args.workspaceId, 128), saved);
+        if (!args.runId && !args.taskId) sweepWorkspace(clean(args.workspaceId, 128), saved);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)),

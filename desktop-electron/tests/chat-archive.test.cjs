@@ -173,3 +173,87 @@ test("open chats with no activity for the idle days are archived when the list i
   assert.deepEqual(listed.chats.map((chat) => [chat.taskId, chat.visibility, chat.title]), [["stale", "archived", "Stale chat"]]);
   assert.equal(listed.chats[0].archivedAt, now, "its archive days count from now");
 });
+
+test("a restored chat counts as used now, and the chats this store counts days for are listed per project", () => {
+  let now = 50 * DAY;
+  const store = createChatArchiveStore({ now: () => now });
+  store.archived("ws", "a");
+  store.archived("ws", "b");
+  store.archived("other", "c");
+  assert.deepEqual(store.archivedIn("ws").sort(), ["a", "b"]);
+  now += DAY;
+  store.restored("ws", "a");
+  assert.equal(store.restoredAt("ws", "a"), now);
+  assert.equal(store.restoredAt("ws", "b"), 0);
+  assert.deepEqual(store.archivedIn("ws"), ["b"], "it no longer counts down");
+});
+
+test("the idle sweep: a restored chat stays open, a chat stuck on a held card is archived, and Archived keeps its title", async () => {
+  // The audit: Restore was undone within seconds (its last turn was as old as before), one old held
+  // card kept a chat open for good, and the lifecycle a change returns has no title ("Untitled chat").
+  let now = 100 * DAY;
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "chat-archive-"));
+  const archiveFile = path.join(folder, "chat-archive.json");
+  fs.writeFileSync(archiveFile, JSON.stringify({ days: 5, idleDays: 7, archived: {}, restored: { "ws:restored": now - DAY } }));
+  const card = (state, finishedAgo) => ({ id: "n", role: "planner", state,
+    receipt: { thread_id: "t", started_at_ms: now - finishedAgo - 1000, finished_at_ms: now - finishedAgo } });
+  const runs = [
+    { id: "r1", workspace_id: "ws", project_id: "restored", revision: 1, cancelled: false, execution_mode: "single", nodes: [card("finished", 30 * DAY)] },
+    { id: "r2", workspace_id: "ws", project_id: "held", revision: 1, cancelled: false, execution_mode: "single", nodes: [card("held", 20 * DAY)] },
+    { id: "r3", workspace_id: "ws", project_id: "running", revision: 1, cancelled: false, execution_mode: "single", nodes: [card("running", 20 * DAY)] },
+  ];
+  const lives = Object.fromEntries(["restored", "held", "running"].map((id) => [id,
+    { workspace_id: "ws", task_id: id, revision: 1, visibility: "active", title: `${id} chat` }]));
+  const updates = [];
+  const workflow = createAgentOrchestratorWorkflow({ now: () => now, archiveFile, requestHeadless: async (endpoint, body) => {
+    if (endpoint === "/api/v1/ao/read") return { ok: true, runs: structuredClone(runs), task_lifecycle: Object.values(lives).map((life) => structuredClone(life)) };
+    if (endpoint === "/api/v1/ao/update") {
+      const change = body.change.change;
+      updates.push([change.task_id, change.visibility]);
+      const life = lives[change.task_id];
+      life.visibility = change.visibility;
+      life.revision += 1;
+      // As the backend's public lifecycle: no title.
+      const { title: _title, ...rest } = life;
+      return { ok: true, lifecycle: structuredClone(rest) };
+    }
+    throw new Error(`Unexpected ${endpoint}`);
+  } });
+  try {
+    const listed = await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+    assert.deepEqual(updates, [["held", "archived"]], "the restored chat and the working one stay open");
+    assert.deepEqual(listed.chats.map((chat) => [chat.taskId, chat.title]), [["held", "held chat"]]);
+  } finally {
+    workflow.dispose();
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("an archived chat whose runs left the project's read still counts down and moves to Recently deleted", async () => {
+  // The read holds a project's newest runs only: such a chat dropped out of Archived and stayed archived.
+  let now = 100 * DAY;
+  const store = { days: 5, idleDays: 0, archived: { "ws:gone": now - 6 * DAY } };
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "chat-archive-"));
+  const archiveFile = path.join(folder, "chat-archive.json");
+  fs.writeFileSync(archiveFile, JSON.stringify(store));
+  const life = { workspace_id: "ws", task_id: "gone", revision: 3, visibility: "archived", title: "Old chat" };
+  const updates = [];
+  const workflow = createAgentOrchestratorWorkflow({ now: () => now, archiveFile, requestHeadless: async (endpoint, body) => {
+    if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [], task_lifecycle: [structuredClone(life)] };
+    if (endpoint === "/api/v1/ao/update") {
+      updates.push([body.change.change.task_id, body.change.change.visibility]);
+      life.visibility = body.change.change.visibility;
+      life.revision += 1;
+      return { ok: true, lifecycle: structuredClone(life) };
+    }
+    throw new Error(`Unexpected ${endpoint}`);
+  } });
+  try {
+    const listed = await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+    assert.deepEqual(updates, [["gone", "deleted"]]);
+    assert.deepEqual(listed.chats.map((chat) => [chat.taskId, chat.visibility, chat.title]), [["gone", "deleted", "Old chat"]]);
+  } finally {
+    workflow.dispose();
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});

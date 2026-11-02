@@ -66,9 +66,10 @@ function observeHarness(context) {
   const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
-  // These fixtures change AO's state and read it back at once: no shared read unless a test asks
-  // for the app's real window (tailFreshMs).
-  const shared = helpers.replace(/const TAIL_FRESH_MS = \d+;/, `const TAIL_FRESH_MS = ${Number(context.tailFreshMs ?? 0)};`);
+  // These fixtures change AO's state and read it back at once: no shared read and no reused chat
+  // host answer unless a test asks for the app's real window (tailFreshMs, hostAliveReuseMs).
+  const shared = helpers.replace(/const TAIL_FRESH_MS = \d+;/, `const TAIL_FRESH_MS = ${Number(context.tailFreshMs ?? 0)};`)
+    .replace(/const CHAT_HOST_ALIVE_REUSE_MS = \d+;/, `const CHAT_HOST_ALIVE_REUSE_MS = ${Number(context.hostAliveReuseMs ?? 0)};`);
   return vm.runInNewContext(states + timelineBounds(source) + shared + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null,
     agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); },
@@ -480,6 +481,41 @@ test("a running turn whose chat host is gone is interrupted, even when its PID w
     // A turn the user stopped keeps its live host: a plain interruption.
     fs.writeFileSync(hostFile, JSON.stringify({ pid: process.pid, address: `127.0.0.1:${live.address().port}` }));
     assert.equal((await upstream.observe("s")).error, undefined);
+  } finally {
+    live.close();
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("reads of a running card reuse a recent live answer from its chat host instead of connecting on every poll", async () => {
+  // Seen live 2026-11-02: four working chats, each card read twice a second, had main open 7
+  // loopback connects a second to their hosts; on a CPU-saturated machine they held main for seconds.
+  const net = require("node:net");
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-ao-host-"));
+  let accepted = 0;
+  const live = net.createServer(socket => { accepted++; socket.destroy(); }).listen(0, "127.0.0.1");
+  await new Promise(resolve => live.once("listening", resolve));
+  const hostFile = path.join(dataRoot, "chat-hosts", "s", "host.json");
+  fs.mkdirSync(path.dirname(hostFile), { recursive: true });
+  fs.writeFileSync(hostFile, JSON.stringify({ address: `127.0.0.1:${live.address().port}` }));
+  const reuseMs = 1500;
+  const upstream = observeHarness({ dataRoot, hostAliveReuseMs: reuseMs,
+    internalApi: async (_method, endpoint) => {
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1")) return { turns: [{ id: "t", state: "running" }], messages: [] };
+      if (endpoint.endsWith("/interrupt")) return {};
+      return { session: { id: "s", mode: "chat", status: "working" } };
+    },
+  });
+  try {
+    for (let read = 0; read < 5; read++) assert.equal((await upstream.observe("s")).turnState, "running");
+    const answeredAt = Date.now();
+    assert.equal(accepted, 1, "five reads, one connection");
+    // The host dies and leaves its record: a read inside the window still trusts the live answer…
+    await new Promise(resolve => live.close(resolve));
+    assert.equal((await upstream.observe("s")).turnState, "running");
+    // …and the first read after it connects again and finds the host gone.
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, answeredAt + reuseMs + 100 - Date.now())));
+    assert.equal((await upstream.observe("s")).turnState, "interrupted");
   } finally {
     live.close();
     fs.rmSync(dataRoot, { recursive: true, force: true });
@@ -1059,6 +1095,23 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   assert.equal(calls.filter(([, endpoint]) => endpoint.endsWith("/exit-agent")).length, 4);
   exitBusy = 99;
   await assert.rejects(upstream.exitAgent("old"), error => error.code === "AGENT_EXIT_IN_PROGRESS", "the wait is bounded");
+  // Seen live 2026-11-02: a Stop and the card's retry each waited 10 s on that lock and failed.
+  exitBusy = 3; calls.length = 0;
+  let handed = await upstream.releaseAgent("old");
+  assert.equal(handed.ok, true);
+  assert.equal(handed.exiting, true, "a stop AO is already carrying out is handed to the exit worker at once");
+  assert.equal(await upstream.continuable("old"), false, "an agent on its way out is not continued: the retry starts a fresh one");
+  assert.equal(calls.filter(([, endpoint]) => endpoint.endsWith("/resume-agent")).length, 0);
+  assert.equal(await handed.exited, true, "the worker keeps asking until AO reports the agent exited");
+  assert.equal(calls.filter(([, endpoint]) => endpoint.endsWith("/exit-agent")).length, 4);
+  exitBusy = 0;
+  assert.equal((await upstream.releaseAgent("old")).exiting, false, "a free agent is stopped there and then");
+  exitBusy = 100_000;
+  handed = await upstream.releaseAgent("old");
+  assert.equal(await handed.exited, false, "the worker gives up after its limit");
+  assert.equal((await upstream.releaseAgent("old")).exiting, true, "and a later stop starts a new one");
+  exitBusy = 0;
+  assert.equal(await (await upstream.releaseAgent("old")).exited, true, "a stop already handed over shares that worker");
   exitBusy = 0;
   assert.equal(await upstream.continuable("old"), true, "a released agent is resumed for the next message");
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
@@ -1961,8 +2014,9 @@ test("resume waits distinguish terminal failure from timeout and transport uncer
         return { session: { id: "owned", mode: "chat", status: reads > 1 && scenario === "terminal" ? "terminated" : "exited", provisionState: "ready" } };
       },
     });
-    if (scenario === "terminal") assert.equal(await upstream.continuable("owned"), false);
-    else await assert.rejects(upstream.continuable("owned"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED");
+    // One whose stop AO cannot take now (startup still owns the resume) goes to the exit worker, which
+    // stops it once it is back, so the message starts a fresh agent instead of failing.
+    assert.equal(await upstream.continuable("owned"), false);
     assert.equal(resumes, 1);
     assert.ok(reads <= 152, "readiness polling is bounded");
   }
@@ -2180,8 +2234,10 @@ test("chats AO still calls working with no agent activity for long are listed, s
     { id: "ended", mode: "chat", status: "working", isTerminated: true, activity: { lastActivityAt: ago(24 * 60) } },
     { id: "worker", mode: "worker", status: "working", activity: { lastActivityAt: ago(24 * 60) } },
     { id: "unknown", mode: "chat", status: "working", activity: {} },
+    // The exit worker already waits on this one (releaseAgent).
+    { id: "handed", mode: "chat", status: "working", activity: { state: "active", lastActivityAt: ago(24 * 60) } },
   ];
-  const upstream = vm.runInNewContext("({" + method + "})", { Date, Number, Array, String,
+  const upstream = vm.runInNewContext("({" + method + "})", { Date, Number, Array, String, exitingAgents: new Map([["handed", Promise.resolve(true)]]),
     internalApi: async (method, endpoint) => { assert.equal(endpoint, "/api/v1/sessions"); return { sessions }; } });
   assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now)], ["stranded"],
     "only a live chat quiet past the limit: not a busy one, an idle or ended one, a non-chat, or one with no activity time");

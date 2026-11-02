@@ -2315,6 +2315,86 @@ test("final review independently returns healthy activity and coalesces a slow o
   } finally { release(); await first; }
 });
 
+for (const count of [1, 3, 24]) {
+  test(`live activity fits the IPC response budget across ${count} node timelines`, async () => {
+    const nodes = Array.from({ length: count }, (_, index) => ({
+      id: `node-${index}`, state: "running", route: { harness_id: "ao:claude-code" },
+      receipt: { request_key: `request-${index}`, thread_id: `session-${index}`, turn_id: "owned" },
+    }));
+    const run = { id: "budget", workspace_id: "ws-1", nodes };
+    const messages = Array.from({ length: 24 }, (_, index) => ({
+      id: `message-${index}`, kind: "message", status: "completed",
+      text: `Visible reply ${index}: ${"中文字🙂".repeat(7000)}`,
+    }));
+    let hold = false, release;
+    const stalled = new Promise(resolve => { release = resolve; });
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async () => ({ ok: true, runs: [run] }),
+      aoHarness: { observe: async () => {
+        if (hold) await stalled;
+        return { turnId: "owned", turnState: "running", liveOutput: "Current reply 中文🙂".repeat(240), timeline: messages };
+      } },
+    });
+    try {
+      const input = { workspaceId: "ws-1", runId: "budget" };
+      await workflow.call("activity", input);
+      await new Promise(resolve => setImmediate(resolve));
+      hold = true;
+      const frame = await workflow.call("activity", input);
+      const wrapped = { moduleId: "agent-orchestrator", operation: "activity", result: frame };
+      const received = await invokeContract({ invoke: async () => wrapped }, "apps.call", {
+        moduleId: "agent-orchestrator", operation: "activity", arguments: input,
+      });
+      assert.equal(Object.keys(received.result.nodes).length, count);
+      assert.ok(Buffer.byteLength(JSON.stringify(wrapped)) < 1024 * 1024);
+      for (const node of nodes) {
+        const current = received.result.nodes[node.id];
+        assert.match(current.output, /^Current reply 中文🙂/);
+        assert.match(current.timeline.at(-1).text, /^Visible reply 23: 中文字🙂/);
+      }
+      if (count === 24) {
+        const sharedLength = frame.nodes["node-0"].timeline.at(-1).text.length;
+        run.nodes = [nodes[0]];
+        const single = await workflow.call("activity", input);
+        assert.ok(single.nodes["node-0"].timeline.at(-1).text.length > sharedLength,
+          "a shared response budget must not permanently trim the cached frame");
+      }
+      assert.equal(messages[0].text, `Visible reply 0: ${"中文字🙂".repeat(7000)}`);
+    } finally { release(); workflow.dispose(); }
+  });
+}
+
+test("live activity drops an oversized structured steer whole while keeping fitting replies", async () => {
+  const run = { id: "steer-budget", workspace_id: "ws-1", nodes: Array.from({ length: 24 }, (_, index) => ({
+    id: `node-${index}`, state: "running", route: { harness_id: "ao:claude-code" },
+    receipt: { thread_id: `session-${index}`, turn_id: "owned" },
+  })) };
+  const steer = JSON.stringify({ message: "中文字".repeat(7000), annotations: [] });
+  const timeline = [
+    { id: "reply", kind: "message", status: "running", text: "A fitting visible reply" },
+    { id: "steer", kind: "steer", status: "completed", text: steer },
+  ];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => ({ ok: true, runs: [run] }),
+    aoHarness: { observe: async () => ({ turnId: "owned", turnState: "running", timeline }) },
+  });
+  try {
+    const input = { workspaceId: "ws-1", runId: run.id };
+    await workflow.call("activity", input);
+    await new Promise(resolve => setImmediate(resolve));
+    const frame = await workflow.call("activity", input);
+    const received = await invokeContract({ invoke: async () => ({ moduleId: "agent-orchestrator", operation: "activity", result: frame }) },
+      "apps.call", { moduleId: "agent-orchestrator", operation: "activity", arguments: input });
+    for (const current of Object.values(received.result.nodes)) {
+      assert.deepEqual(current.timeline, [timeline[0]]);
+    }
+    assert.equal(JSON.parse(timeline[1].text).message.length, 21000);
+    run.nodes = [run.nodes[0]];
+    const single = await workflow.call("activity", input);
+    assert.deepEqual(single.nodes["node-0"].timeline, timeline, "a small response keeps full structured content");
+  } finally { workflow.dispose(); }
+});
+
 test("final review refreshes an old planner-only APPROVED review for newly failed evidence", async () => {
   const world = failedWorkerReviewWorld();
   world.reviewer.parents = ["planner"];
@@ -2487,6 +2567,31 @@ test("shared workflow reads keep 13 pending callers together and start freshness
   } finally { release(); await Promise.allSettled(pending); workflow.dispose(); }
 });
 
+test("a chat reads its own runs, apart from the project's newest 100 and without sweeping the project", async () => {
+  // Seen live (2026-11-02): four goal chats filled the project's 100-run read, so a 63-run chat
+  // showed its newest 26 replies and the project's other chats opened with none.
+  const reads = [];
+  const chatRun = { id: "old", workspace_id: "ws-1", project_id: "task-1", revision: 1, cancelled: false, nodes: [] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      assert.equal(endpoint, "/api/v1/ao/read");
+      reads.push(structuredClone(body));
+      return { ok: true, runs: body.task_id ? [structuredClone(chatRun)] : [] };
+    },
+  });
+  try {
+    const own = await workflow.call("runs", { workspaceId: "ws-1", taskId: "task-1" });
+    assert.deepEqual(own.runs.map(run => run.id), ["old"]);
+    await workflow.call("runs", { workspaceId: "ws-1" });
+    await workflow.call("runs", { workspaceId: "ws-1", runId: "run-1", taskId: "task-1" });
+    assert.deepEqual(reads, [
+      { workspace_id: "ws-1", task_id: "task-1" },
+      { workspace_id: "ws-1" },
+      { workspace_id: "ws-1", run_id: "run-1" },
+    ], "a chat's read and the project's are read apart; a run's read stays a run's");
+  } finally { workflow.dispose(); }
+});
+
 test("shared workflow reads coalesce boards without invalidating runs and isolate workspace/task keys", async (t) => {
   t.mock.method(Date, "now", () => 1_000);
   const boards = [], pending = [];
@@ -2584,10 +2689,11 @@ test("activity reports each working card's runtime and current step without adva
   // "Approve for me": the reviewer answers this card's requests, so it is not waiting on the person.
   const reviewed = { ...agent, id: "w6", route: { ...agent.route, approval_policy: "on-request", approvals_reviewer: "auto_review" },
     receipt: { status: "submitted", thread_id: "sess-6" } };
+  const queued = { ...agent, id: "w7", receipt: { status: "submitted", thread_id: "sess-7" } };
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async (endpoint, body) => {
       calls.push(endpoint);
-      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking, reviewed] }] };
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking, reviewed, queued] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
         return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN npm run task-runner sk-abcdefghijklmnopqrst1234" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
@@ -2600,13 +2706,15 @@ test("activity reports each working card's runtime and current step without adva
       // AO marks the session needs_input while a permission request waits: the card names the command.
       : session === "sess-5" ? { turnState: "running", turnId: "t-5", needsInput: true, approvals: [{ approval_id: "r1", kind: "command", command: "npm run build", tool: "Bash" }] }
       : session === "sess-6" ? { turnState: "running", turnId: "t-6", needsInput: true, approvals: [{ approval_id: "r2", kind: "command", command: "Get-CimInstance Win32_Process", tool: "PowerShell" }] }
+      // AO took the message but no agent has it yet (a fresh one still coming up).
+      : session === "sess-7" ? { turnState: "queued", turnId: "t-7" }
       : { turnState: "running", turnId: "t-3" } },
     confirm: async () => true,
   });
   await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   await new Promise(resolve => setImmediate(resolve));
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
-  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5", "w6"], "only working cards");
+  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5", "w6", "w7"], "only working cards");
   assert.equal(result.nodes.w5.activity, "waiting for approval: npm run build");
   // Seen live: "waiting for approval" for the two minutes a review took, with nothing to answer.
   assert.equal(result.nodes.w6.activity, "the reviewer is checking: Get-CimInstance Win32_Process");
@@ -2621,6 +2729,10 @@ test("activity reports each working card's runtime and current step without adva
   // An AO card says what its turn is doing, not just "running": waiting on the model, or the command
   // it runs with that command's own timeout.
   assert.equal(result.nodes.w3.activity, "waiting for the model");
+  assert.equal(result.nodes.w3.turn_started, true);
+  // Seen live 2026-11-02: 7 minutes of "waiting for the model" while AO's turn sat queued.
+  assert.equal(result.nodes.w7.activity, "waiting for the agent to take the message");
+  assert.equal(result.nodes.w7.turn_started, false, "a queued turn has not started: it can read as stuck");
   assert.equal(result.nodes.w4.activity, "running python -m pytest tests -q (timeout 5m)");
   assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });
@@ -6012,6 +6124,44 @@ test("with \"Let the model judge\" on, a request too long to review whole is jud
   } finally { mission.nodes[0].state = "finished"; }
 });
 
+test("with \"Let the model judge\" on, a reviewer that never answers denies the request instead of leaving it to the person", async () => {
+  // The user, 2026-11-02: "why is let the model judge option wont work when enabled?" A reviewer that
+  // failed its tries, or could not decide, still put the request on the card for the person.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const request = { approval_id: "poll", source: "ao", kind: "command", tool: "PowerShell", command: "python tools/poll.py", decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
+  let clock = 1_000_000;
+  const resolved = [], reasons = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    now: () => clock,
+    fetchImpl: async (url) => String(url).endsWith("/models")
+      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) } : { ok: false, status: 502, json: async () => ({}) },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (_session, id, decision, why) => { resolved.push([id, decision]); reasons.push(why); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_model_judges", { enabled: true });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 600 && !resolved.length; tries++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      clock += 1_000;
+    }
+    assert.deepEqual(resolved, [["poll", "no"]], "denied, not left waiting for the person");
+    assert.match(reasons[0], /couldn't answer after 3 tries/);
+    assert.doesNotMatch(JSON.stringify(await workflow.call("run_status", { workspaceId: "ws", runId: "run" })), /check it yourself/);
+  } finally { mission.nodes[0].state = "finished"; }
+});
+
 test("Approve for me reviews complete scripts and leaves incomplete or failed reviews pending after 20 seconds", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
@@ -6388,6 +6538,45 @@ test("a follow-up that cannot continue its agent says which session and why befo
 
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
 test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
+
+test("activity follows a continued chat's in-memory turn binding before its receipt has a turn ID", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Task", description: "first ask", state: "in_progress", clauses: [] }], runs: [previous] });
+  let current;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/read" && body.run_id) {
+        current ??= { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+          grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+        return { ok: true, runs: [current], worker_capacity: { [body.run_id]: 1 } };
+      }
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: current, grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/external/reserve") { current.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "follow-up" }; }
+      if (endpoint === "/api/v1/ao/external/submitted") { current.nodes[0].state = "running"; current.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: current }; }
+      return world.requestHeadless(endpoint, body, options);
+    },
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      continuable: async () => true,
+      send: async () => ({ turnId: "turn-2", state: "running" }),
+      observe: async (_id, expected) => ({ turnId: expected || "turn-1", turnState: "running",
+        liveOutput: expected === "turn-2" ? "The follow-up response" : "The previous response", timeline: [] }),
+    },
+  });
+  try {
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "follow-up", executionMode: "single", singleRoute: route });
+    await until(() => current?.nodes[0].state === "running");
+    assert.equal(current.nodes[0].receipt.turn_id, undefined);
+    const args = { workspaceId: "ws-1", runId: current.id };
+    await workflow.call("activity", args);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await workflow.call("activity", args)).nodes.one.output, "The follow-up response");
+  } finally { workflow.dispose(); }
+});
 
 test("steering hands the message to the running AO agent and notes it in the chat", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
@@ -7012,30 +7201,39 @@ test("auto-compact leaves room for a goal round's long message, and a summary lo
   assert.ok(asked > 512 && asked < 8192 - Buffer.byteLength(message, "utf8"), "the summarizer is asked for what fits");
 });
 
-test("/autocompact: on by default at 95%; a lower share compacts sooner; off stops a full chat with what to do", async () => {
+test("legacy auto-compact preferences remain readable but cannot summarize records below their hard limit", async () => {
   const fresh = compactWorld("x".repeat(100));
   assert.deepEqual(await fresh.workflow.call("chat_auto_compact", {}), { ok: true, autoCompact: true, percent: 95, limit: 8192 });
   await assert.rejects(fresh.workflow.call("chat_auto_compact", { percent: 10 }), /20% to 100%/);
   await assert.rejects(fresh.workflow.call("chat_auto_compact", { enabled: "yes" }), /on or off/);
 
-  // At 50%, a 5,000-character chat compacts before its next message though it is not full.
-  const early = compactWorld("x".repeat(5000));
-  assert.equal((await early.workflow.call("chat_auto_compact", { percent: 50 })).percent, 50);
-  await early.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on" });
-  assert.match(early.world.tasks[0].description, /^Summary of the earlier conversation[\s\S]*\nDid the first half\.\n\nFollow-up \([^)]+ UTC\):\ngo on$/);
+  for (const percent of [20, 50, 95, 100]) {
+    const early = compactWorld("x".repeat(7800));
+    assert.equal((await early.workflow.call("chat_auto_compact", { percent })).percent, percent);
+    await early.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on" });
+    assert.match(early.world.tasks[0].description, /^x{7800}\n\nFollow-up \([^)]+ UTC\):\ngo on$/);
+    assert.equal(early.prompts.length, 0, "task-record bytes are not a model-token compaction threshold");
+  }
+});
 
-  // Below the limit, a summarizer that fails does not stop the message: it compacts next time.
-  const down = compactWorld("x".repeat(5000), { fail: true });
-  await down.workflow.call("chat_auto_compact", { percent: 50 });
-  await down.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on" });
-  assert.match(down.world.tasks[0].description, /^x{5000}\n\nFollow-up \([^)]+ UTC\):\ngo on$/);
-  assert.equal(down.prompts.length, 1, "it tried");
-
+test("a legacy auto-compact off preference cannot strand a chat whose task record needs rollover", async () => {
   const off = compactWorld("x".repeat(8180));
   assert.equal((await off.workflow.call("chat_auto_compact", { enabled: false })).autoCompact, false);
-  await assert.rejects(off.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" }), /Use \/compact, or turn auto-compact on with \/autocompact on/);
-  assert.equal(off.prompts.length, 0, "nothing was summarized");
-  assert.equal(off.world.tasks[0].description, "x".repeat(8180));
+  await off.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(off.prompts.length, 1, "only the full task record is rolled over");
+  assert.match(off.world.tasks[0].description, /^Summary of the earlier conversation[\s\S]*\nDid the first half\.\n\nFollow-up \([^)]+ UTC\):\nkeep going$/);
+  assert.ok(Buffer.byteLength(off.world.tasks[0].description, "utf8") <= 8192);
+});
+
+test("failed task-record rollover preserves the record and never suggests native /compact as a repair", async () => {
+  const down = compactWorld("x".repeat(8180), { fail: true });
+  await down.workflow.call("chat_auto_compact", { enabled: false });
+  await assert.rejects(down.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" }), error => {
+    assert.match(error.message, /task record is full and couldn't be rolled over/);
+    assert.doesNotMatch(error.message, /\/compact|\/autocompact/);
+    return true;
+  });
+  assert.equal(down.world.tasks[0].description, "x".repeat(8180));
 });
 
 test("/compact uses Codex's no-instructions contract instead of summarizing task metadata", async () => {
@@ -7806,6 +8004,61 @@ test("deleting a chat message removes it and its steers from the task and hides 
   assert.equal(world.edits.length, edits, "nothing is changed");
 });
 
+test("history deletion validates older displayed replies without crossing ownership or activity boundaries", async (t) => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
+  const done = (id, task = "task-1") => ({ id, workspace_id: "ws-1", project_id: task, revision: 1,
+    cancelled: false, nodes: [{ id: "one", role: "planner", state: "finished" }] });
+  for (const scenario of ["project-window", "cached-over-200", "wrong-task", "wrong-workspace", "unknown", "wrong-id", "latest-working", "older-unsettled", "mixed-foreign", "lookup-failure"]) {
+    await t.test(scenario, async () => {
+      const old = done("old"), latest = done("new");
+      if (scenario === "wrong-task") old.project_id = "other";
+      if (scenario === "wrong-workspace") old.workspace_id = "ws-other";
+      if (scenario === "latest-working") latest.nodes[0].state = "running";
+      if (scenario === "older-unsettled") old.nodes[0].state = "pending";
+      const cached = scenario === "cached-over-200" || scenario === "older-unsettled";
+      const world = chatWorld({ tasks: [{ id: "task-1", title: "History", description, state: "in_progress", clauses: [] }],
+        runs: [old, ...Array.from({ length: cached ? 205 : 0 }, (_, i) => done(`mine-${i}`)),
+          ...Array.from({ length: 105 }, (_, i) => done(`other-${i}`, "other")), latest] });
+      const reads = [];
+      const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+        if (endpoint !== "/api/v1/ao/read") return world.requestHeadless(endpoint, body, options);
+        reads.push(structuredClone(body));
+        if (scenario === "lookup-failure" && body.run_id) throw new Error("Older read unavailable");
+        const scoped = world.runs.filter(run => run.workspace_id === body.workspace_id);
+        // Model the actual API's project/chat windows. Direct reads deliberately return a
+        // foreign/mismatched row too, to prove the caller still checks all three identities.
+        const selected = body.run_id
+          ? scenario === "wrong-id" ? [old] : world.runs.filter(run => run.id === body.run_id)
+          : body.task_id ? scoped.filter(run => run.project_id === body.task_id).slice(-200) : scoped.slice(-100);
+        return { ok: true, runs: structuredClone(selected) };
+      } });
+      try {
+        const input = { workspaceId: "ws-1", taskId: "task-1", index: 0,
+          runId: ["unknown", "wrong-id", "lookup-failure"].includes(scenario) ? "missing" : scenario === "mixed-foreign" ? "new" : "old",
+          ...(scenario === "mixed-foreign" ? { runIds: ["other-0"] } : scenario === "lookup-failure" ? { runIds: ["also-missing"] } : {}) };
+        if (scenario === "project-window" || scenario === "cached-over-200") {
+          const removed = await workflow.call("chat_delete_message", input);
+          assert.deepEqual([...removed.runIds], ["old"]);
+          assert.equal(world.edits.length, 1);
+          assert.equal(world.tasks[0].description, description.slice(description.indexOf("second ask")));
+          assert.ok(!(await workflow.call("runs", { workspaceId: "ws-1", taskId: "task-1" })).runs.some(run => run.id === "old"));
+          if (cached) {
+            assert.equal(reads.filter(body => body.run_id === "old").length, 1, "one bounded lookup restores the cached ID outside 200");
+            await assert.rejects(workflow.call("chat_delete_message", input), /reply was not found/);
+            assert.equal(world.edits.length, 1, "a previously hidden reply stays hidden even after direct lookup");
+          }
+        } else {
+          await assert.rejects(workflow.call("chat_delete_message", input),
+            scenario === "lookup-failure" ? /Older read unavailable/ : scenario === "latest-working" || scenario === "older-unsettled" ? /Stop the chat first/ : /reply was not found/);
+          if (scenario === "lookup-failure") assert.deepEqual(reads.filter(body => body.run_id).map(body => body.run_id), ["missing"], "a failed read stops before requesting the remaining IDs");
+          assert.equal(world.edits.length, 0, "validation fails before editing the task");
+          assert.equal(world.tasks[0].description, description);
+        }
+      } finally { workflow.dispose(); }
+    });
+  }
+});
+
 // The chat's own pairing (ao-chat.ts), to check what a deletion leaves on screen.
 const aoChat = (() => {
   const vm = require("node:vm");
@@ -8385,6 +8638,33 @@ test("Stop attempts every owned agent and reports an unconfirmed interrupt", asy
       assert.deepEqual(exited.sort(), ["s1", "s2"], "every owned agent is shut down");
     } finally { workflow.dispose(); }
   }
+});
+
+test("Stop hands an agent AO is already stopping to the exit worker and drops it from the card once gone", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [{ id: "one", state: "running", route, receipt: { thread_id: "s1" } }] };
+  let gone;
+  const exited = new Promise(resolve => { gone = resolve; });
+  const released = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/control")) return { ok: true, run: { ...structuredClone(mission), cancelled: true, nodes: [{ ...mission.nodes[0], state: "held" }] } };
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      throw new Error("unexpected " + endpoint);
+    },
+    // Seen live 2026-11-02: Stop waited on the same lock and failed "Agent stop could not be confirmed:
+    // The agent is already exiting". The exit worker waits for it instead.
+    aoHarness: { releaseAgent: async id => { released.push(id); return { ok: true, exiting: true, exited }; },
+      exitAgent: async () => { throw new Error("Stop must not wait on the exit lock"); },
+      interrupt: async () => undefined, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+  });
+  try {
+    assert.equal((await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })).ok, true,
+      "Stop is confirmed while the agent finishes exiting in the background");
+    assert.deepEqual(released, ["s1"]);
+    gone(true);
+    await exited;
+  } finally { workflow.dispose(); }
 });
 
 test("a working external card is not rewired when its interrupt fails", async () => {
@@ -9560,6 +9840,72 @@ test("a message queued behind a working turn is not stopped as hung: the whole s
   workflow.dispose();
 });
 
+// Seen live 2026-11-02: two chats "may be stuck" for over an hour with Retry automatically on. Every
+// 10 minutes one stall stop failed "Owned turn is still working; stop needs attention", and the other
+// logged "stopped" while its turn stayed running (idle 4914 s, then 5514 s). Neither card retried.
+test("a hung turn the stall stop cannot interrupt has its agent shut down, so the step is retried", async () => {
+  const stallWorld = (harness) => {
+    let clock = 2_000_000_000_000;
+    const calls = [];
+    const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
+      route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
+      receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+    const workflow = createAgentOrchestratorWorkflow({
+      now: () => clock,
+      // The 15 s settle window's 250 ms polls run at once; other timers keep their length.
+      setTimer: (resolve, ms) => setTimeout(resolve, ms === 250 ? 0 : ms),
+      requestHeadless: async (endpoint) => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single", nodes: [node] }] };
+        throw new Error(`Unexpected AO endpoint ${endpoint}`);
+      },
+      aoHarness: {
+        observe: async (_session, expected) => harness.observe(expected, clock),
+        interrupt: async (session) => { calls.push(["interrupt", session]); return harness.interrupt?.(); },
+        exitAgent: async (session) => { calls.push(["exit", session]); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    return { workflow, calls, look: () => workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "w" }),
+      advance: (ms) => { clock += ms; } };
+  };
+  const hung = (clock, extra = {}) => ({ turnId: "turn-1", turnState: "running", status: "working",
+    lastActivityAt: clock - 15 * 60_000, timeline: [], approvals: [], ...extra });
+
+  // The interrupt is accepted but never settles.
+  const unsettled = stallWorld({ observe: (_expected, clock) => hung(clock) });
+  await unsettled.workflow.call("chat_auto_retry", { enabled: true });
+  await unsettled.look();
+  assert.deepEqual(unsettled.calls, [["interrupt", "sess-1"], ["exit", "sess-1"]], "no 'stop needs attention': the agent is shut down");
+  unsettled.workflow.dispose();
+
+  // AO dropped the session's controller: the interrupt is refused and the turn row stays running.
+  const orphaned = stallWorld({ observe: (_expected, clock) => hung(clock, { agentGone: true }),
+    interrupt: () => { throw new Error("CHAT_CONTROLLER_NOT_READY: the agent controller for this session is not running"); } });
+  await orphaned.workflow.call("chat_auto_retry", { enabled: true });
+  await orphaned.look();
+  assert.deepEqual(orphaned.calls, [["interrupt", "sess-1"], ["exit", "sess-1"]], "a session with no controller is shut down at once");
+  orphaned.workflow.dispose();
+
+  // The interrupt reads as settled once (the session's newest turn), yet the card's own turn stays hung.
+  let settled = false;
+  const stale = stallWorld({
+    observe: (_expected, clock) => {
+      if (!settled) return hung(clock);
+      settled = false;
+      return { turnId: "turn-2", turnState: "interrupted", status: "idle" };
+    },
+    interrupt: () => { settled = true; },
+  });
+  await stale.workflow.call("chat_auto_retry", { enabled: true });
+  await stale.look();
+  assert.deepEqual(stale.calls, [["interrupt", "sess-1"]], "the first stop is the interrupt alone");
+  stale.advance(11 * 60_000);
+  await stale.look();
+  assert.deepEqual(stale.calls, [["interrupt", "sess-1"], ["interrupt", "sess-1"], ["exit", "sess-1"]],
+    "still hung a stall period later: the agent is shut down");
+  stale.workflow.dispose();
+});
+
 test("a held worker whose unspent grant names another build of the agent's program is started on a fresh grant", async () => {
   // Activity log 2026-10-24 08:31: start_run refused "AO running turn has no matching background
   // grant": Claude Code (or the app) had updated since the grant, so nothing could start on it.
@@ -9834,10 +10180,12 @@ test("a chat's screen calls are reviewed by Codex's auto-review whatever its app
     { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
   const prompts = [];
   let outcome = { risk_level: "high", user_authorization: "low", outcome: "deny", rationale: "Typing into a banking site is not part of the task" };
+  let down = false;
   const workflow = createAgentOrchestratorWorkflow({
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async (url, init) => {
       if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: ["test-model", "codex-auto-review"].map((id) => ({ id })) }) };
+      if (down) return { ok: false, status: 502, json: async () => ({}) };
       const body = JSON.parse(init.body);
       prompts.push({ model: body.model, text: body.messages[0].content });
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(outcome) } }] }) };
@@ -9854,6 +10202,17 @@ test("a chat's screen calls are reviewed by Codex's auto-review whatever its app
   assert.equal((await workflow.reviewToolCall({ workspaceId: "ws", session: "session-1", tool: "computer_snapshot", args: {} })).action, "allow");
   assert.equal((await workflow.reviewToolCall({ workspaceId: "ws", session: "elsewhere", tool: "computer_snapshot", args: {} })).action, "ask",
     "a session that is no chat of this project is left to the person");
+  // "Let the model judge": what the reviewer leaves undecided, or cannot answer at all, is denied,
+  // never left on a card for the person.
+  await workflow.call("chat_model_judges", { enabled: true });
+  outcome = { risk_level: "medium", user_authorization: "unknown", outcome: "ask", rationale: "Unclear which window this is" };
+  const undecided = await workflow.reviewToolCall({ workspaceId: "ws", session: "session-1", tool: "computer_action", args: { action: "click" } });
+  assert.equal(undecided.action, "deny");
+  assert.match(prompts.at(-1).text, /outcome must be allow or deny/, "the reviewer is told it must decide");
+  down = true;
+  const unanswered = await workflow.reviewToolCall({ workspaceId: "ws", session: "session-1", tool: "computer_action", args: { action: "click" } });
+  assert.equal(unanswered.action, "deny");
+  assert.match(unanswered.reason, /Let the model judge/);
 });
 
 test("a reviewer's deny tells the agent why, and that the user did not refuse it", async () => {
