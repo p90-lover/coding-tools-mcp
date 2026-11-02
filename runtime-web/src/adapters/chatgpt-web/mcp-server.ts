@@ -833,7 +833,7 @@ export async function runChatGptMcpServer(options: {
         }
         if (!(error instanceof TurnBrokerTimeoutError)) throw error;
         return result({ code: "codex_tool_submission_unknown", invocation_id: invocationId, retryable: false,
-          message: "Submission acknowledgement was lost. Do not use a new invocation_id. Only an identical call with this invocation_id can recover its receipt in this live turn." }, true);
+          message: "Submission acknowledgement was lost. Poll codex_tool_status with this invocation_id as call_id in this live turn. Do not resubmit the action or use a new invocation_id." }, true);
       }
     }
     try {
