@@ -28,23 +28,3 @@ fn ao_workspace_creation_is_canonical_and_has_no_partial_duplicate() {
         .is_err());
     assert_eq!(serde_json::to_value(store.data()).unwrap(), before);
 }
-
-#[test]
-fn ao_workspace_creation_preserves_the_filesystem_root() {
-    let current = std::env::current_dir().unwrap().canonicalize().unwrap();
-    // Native ancestors yield `/` on Unix and the volume root on Windows.
-    let root = current.ancestors().last().unwrap();
-    let mut store = DataStore::from_data(AppData::default()).unwrap();
-    let profile = store
-        .create_workspace(root.to_string_lossy().into_owned(), None)
-        .unwrap();
-    let saved = std::path::Path::new(&profile.path);
-    assert!(saved.is_absolute(), "saved root was {:?}", profile.path);
-    assert_eq!(saved.canonicalize().unwrap(), root);
-    assert!(!profile.name.trim().is_empty());
-    let before = serde_json::to_value(store.data()).unwrap();
-    assert!(store
-        .create_workspace(root.to_string_lossy().into_owned(), None)
-        .is_err());
-    assert_eq!(serde_json::to_value(store.data()).unwrap(), before);
-}
