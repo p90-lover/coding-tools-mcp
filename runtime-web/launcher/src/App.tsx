@@ -1,3 +1,4 @@
+import languages from "../electron/languages.json";
 import { AnimatePresence, motion } from "motion/react";
 import {
   useCallback,
@@ -6,11 +7,16 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { LimitsSurface } from "./LimitsSurface";
+import { limitsCopyFor } from "./limits-copy";
+import { useLimits } from "./useLimits";
+import { describeTurnActivity } from "./turn-activity";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -38,6 +44,7 @@ export function App() {
   const [operation, setOperation] = useState<OperationState | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const catalogError = useRef<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
 
   useEffect(() => {
@@ -54,6 +61,7 @@ export function App() {
       setLogs(next.logs);
       setOperation(next.operation);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
+        if (next.operation.name === "catalog-verification") catalogError.current = next.operation.message;
         setError(next.operation.message);
       }
     }).catch((cause) => setError(messageOf(cause)));
@@ -67,9 +75,20 @@ export function App() {
           }
         : current);
     });
+    const unsubscribeConnectorNames = api.onConnectorNamesChanged(names => {
+      setSnapshot(current => current ? { ...current, ...names } : current);
+    });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
+      if (next.name === "catalog-verification") {
+        if (next.status === "failed") catalogError.current = next.message;
+        if (next.status === "completed") {
+          const resolved = catalogError.current;
+          setError(current => current === resolved ? null : current);
+          catalogError.current = null;
+        }
+      }
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
     });
     const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
@@ -79,6 +98,7 @@ export function App() {
     return () => {
       cancelled = true;
       unsubscribeState();
+      unsubscribeConnectorNames();
       unsubscribeBrowser();
       unsubscribeOperation();
       unsubscribeLog();
@@ -101,7 +121,7 @@ export function App() {
   if (!snapshot) return <LaunchLoading />;
 
   const language = snapshot.state.language ?? "en";
-  const copy = copyFor(language);
+  const copy = copyFor(language, snapshot.connectorNames);
 
   return (
     <div
@@ -238,27 +258,16 @@ function Onboarding({
 
           {isLanguage ? (
             <div className="welcome-options" role="radiogroup" aria-label={localized.chooseLanguage}>
-              <WelcomeOption
-                active={selectedLanguage === "en"}
-                detail={localized.english}
-                label={localized.english}
-                marker="EN"
-                onClick={() => setSelectedLanguage("en")}
-              />
-              <WelcomeOption
-                active={selectedLanguage === "zh-CN"}
-                detail={localized.chinese}
-                label={localized.chinese}
-                marker="简"
-                onClick={() => setSelectedLanguage("zh-CN")}
-              />
-              <WelcomeOption
-                active={selectedLanguage === "ja"}
-                detail={localized.japanese}
-                label={localized.japanese}
-                marker="日"
-                onClick={() => setSelectedLanguage("ja")}
-              />
+              {languageOptions.map(option => (
+                <WelcomeOption
+                  key={option.value}
+                  active={selectedLanguage === option.value}
+                  detail={option.label}
+                  label={option.label}
+                  marker={option.marker}
+                  onClick={() => setSelectedLanguage(option.value)}
+                />
+              ))}
             </div>
           ) : isInteraction ? (
             <InteractionModePicker
@@ -341,9 +350,7 @@ function LauncherShell({
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
-  const interactionSetupComplete = snapshot.state.coreSetupComplete === true
-    && (snapshot.state.browserInteractionMode === "manual"
-      || snapshot.state.codexCatalogVerified === true);
+  const interactionSetupComplete = snapshot.state.coreSetupComplete === true;
   const firstRunZeroRiskSetup = snapshot.state.browserInteractionMode === "manual"
     && snapshot.state.coreSetupComplete !== true;
   const [surface, setSurface] = useState<Surface>(
@@ -354,12 +361,12 @@ function LauncherShell({
   const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
-  const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
     snapshot.state.browserInteractionMode === "automatic"
       && snapshot.state.coreSetupComplete === true
+      && snapshot.state.biggerContextAvailable === true
       && !snapshot.state.experimentalBiggerContext,
   );
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
@@ -371,18 +378,21 @@ function LauncherShell({
     && browser?.authenticated !== true;
   const needsSetup = !needsBrowser && !interactionSetupComplete;
   const mcpOptional = snapshot.state.browserInteractionMode === "automatic"
-    && snapshot.state.codexCatalogVerified === true
+    && snapshot.state.coreSetupComplete === true
     && snapshot.state.mcpSetupComplete !== true;
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
+  const approvalTabs = browser?.tabs.filter(tab => tab.status === "running" && tab.approvalPending) ?? [];
+  const limits = useLimits(api!, snapshot.state.browserInteractionMode === "manual");
+  const limitsCopy = limitsCopyFor(language);
 
   useEffect(() => {
-    if (snapshot.state.browserInteractionMode === "manual") {
+    if (snapshot.state.browserInteractionMode === "manual" || snapshot.state.biggerContextAvailable !== true) {
       setBiggerContextRecommendationOpen(false);
     }
-  }, [snapshot.state.browserInteractionMode]);
+  }, [snapshot.state.browserInteractionMode, snapshot.state.biggerContextAvailable]);
 
   useEffect(() => {
     if (!selectedManualTab) return;
@@ -455,6 +465,18 @@ function LauncherShell({
     return () => window.clearTimeout(timer);
   }, [browser?.authenticated, snapshot.state.sessionRefreshReminderAt]);
 
+  useEffect(() => {
+    void api!.setSessionReminderVisible(sessionReminderDue && !biggerContextRecommendationOpen)
+      .catch(cause => setError(messageOf(cause)));
+    return () => { void api!.setSessionReminderVisible(false).catch(cause => setError(messageOf(cause))); };
+  }, [sessionReminderDue, biggerContextRecommendationOpen, language, setError]);
+
+  useEffect(() => api!.onSessionReminderLogout(() => {
+    setSurface("browser");
+    if (compactSidebar) setSidebarOpen(false);
+    void api!.setBrowserSurfaceActive(true).catch(cause => setError(messageOf(cause)));
+  }), [compactSidebar, setError]);
+
   const activateBrowser = useCallback(async (show = false) => {
     setSurface("browser");
     await api!.setBrowserSurfaceActive(true);
@@ -483,35 +505,6 @@ function LauncherShell({
       await api!.installUpdate();
     } catch (cause) {
       setError(messageOf(cause));
-    }
-  };
-
-  const dismissSessionReminder = async () => {
-    if (sessionReminderBusy) return;
-    setSessionReminderBusy(true);
-    setError(null);
-    try {
-      updateState(await api!.dismissSessionReminder());
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setSessionReminderBusy(false);
-    }
-  };
-
-  const logoutChatGpt = async () => {
-    if (sessionReminderBusy) return;
-    setSessionReminderBusy(true);
-    setError(null);
-    try {
-      const result = await api!.logoutChatGpt();
-      updateState(result.state);
-      navigateSurface("browser");
-      await api!.setBrowserSurfaceActive(true);
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setSessionReminderBusy(false);
     }
   };
 
@@ -614,6 +607,17 @@ function LauncherShell({
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
+                <SidebarItem
+                  active={surface === "limits"}
+                  badge={limits.needsAttention ? (
+                    <span role="img" aria-label={limitsCopy.nearLimit} title={limitsCopy.nearLimit}>
+                      <ActionDot tone="optional" />
+                    </span>
+                  ) : null}
+                  icon="logs"
+                  label={limitsCopy.title}
+                  onClick={() => navigateSurface("limits")}
+                />
               </SidebarGroup>
             </nav>
 
@@ -640,6 +644,21 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
+        {approvalTabs.map(tab => (
+          <div className="tool-approval-notice" key={tab.id} role="status">
+            <Icon name="alert" />
+            <div>
+              <strong>{copy.toolApprovalNeeded} · {browserTabTitleFromTitle(tab.title, copy)}</strong>
+              <p>{copy.toolApprovalPendingBody}</p>
+            </div>
+            <SecondaryButton onClick={() => {
+              navigateSurface("browser");
+              setBiggerContextRecommendationOpen(false);
+              void api!.selectBrowserTab(tab.id).then(() => activateBrowser(true))
+                .catch(cause => setError(messageOf(cause)));
+            }}>{copy.openChatgpt}</SecondaryButton>
+          </div>
+        ))}
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
             animate={{ opacity: 1 }}
@@ -693,7 +712,26 @@ function LauncherShell({
               />
             ) : null}
             {surface === "activity" ? (
-              <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+              <ActivitySurface copy={copy} language={language} logs={logs} browser={browser} setError={setError}
+                openTab={async id => {
+                  await api!.selectBrowserTab(id);
+                  navigateSurface("browser");
+                  setBiggerContextRecommendationOpen(false);
+                  await activateBrowser(true);
+                }} />
+            ) : null}
+            {surface === "limits" ? (
+              <LimitsSurface
+                api={api!}
+                tracker={limits}
+                language={language}
+                manualMode={snapshot.state.browserInteractionMode === "manual"}
+                runtimeBusy={operation?.status === "running"
+                  || browser?.status === "running" || browser?.status === "testing" || browser?.status === "loading"
+                  || browser?.loading === true
+                  || browser?.tabs.some((tab) => tab.status === "running" || tab.status === "testing" || tab.loading) === true}
+                setError={setError}
+              />
             ) : null}
             {surface === "settings" ? (
               <SettingsSurface
@@ -721,17 +759,6 @@ function LauncherShell({
             copy={copy}
             onChange={(enabled) => void setRecommendedBiggerContext(enabled)}
             onClose={() => setBiggerContextRecommendationOpen(false)}
-          />
-        ) : null}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {sessionReminderDue && !biggerContextRecommendationOpen ? (
-          <SessionRefreshReminder
-            busy={sessionReminderBusy}
-            copy={copy}
-            onDismiss={() => void dismissSessionReminder()}
-            onLogout={() => void logoutChatGpt()}
           />
         ) : null}
       </AnimatePresence>
@@ -824,18 +851,27 @@ function BrowserSurface({
   platform: string;
   setError: (error: string | null) => void;
 }) {
+  const [passkeyStarting, setPasskeyStarting] = useState(false);
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
+  const passkeyPhase = browser?.passkeyPhase;
+  const passkeyActive = passkeyStarting || Boolean(passkeyPhase);
   const visible = browser?.visible === true;
   const manualInteraction = interactionMode === "manual";
   const passkeyAvailable = !manualInteraction
     && platform === "darwin"
-    && browser?.authenticated !== true;
+    && (browser?.authenticated !== true || passkeyActive);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
-  const navigationLocked = browser?.status === "running" || browser?.status === "testing";
-  const passkeyWaiting = passkeyAvailable
-    && operation?.name === "passkey-login"
-    && operation.status === "running"
-    && browser?.authenticated !== true;
+  const navigationLocked = passkeyActive || browser?.status === "running" || browser?.status === "testing";
+  const passkeyWaiting = passkeyAvailable && passkeyPhase === "waiting";
+  const passkeyImporting = passkeyPhase === "importing" || passkeyContinuationRequested;
+  const passkeyBlocked = !passkeyActive && operation?.status === "running";
+  const passkeyDisabled = passkeyBlocked || (passkeyActive && (!passkeyWaiting || passkeyImporting));
+  const passkeyLabel = passkeyImporting ? copy.passkeyImporting
+    : passkeyWaiting ? copy.passkeyContinue : passkeyActive ? copy.passkeyOpening : copy.passkeySignIn;
+  const passkeyTitle = passkeyImporting ? copy.passkeyImporting
+    : passkeyWaiting ? copy.passkeyWaitingTitle : copy.passkeyOpening;
+  const passkeyBody = passkeyImporting ? copy.passkeyImportingBody
+    : passkeyWaiting ? copy.passkeyContinueBody : copy.passkeyOpeningBody;
   useEffect(() => {
     if (!passkeyWaiting) setPasskeyContinuationRequested(false);
   }, [passkeyWaiting]);
@@ -875,10 +911,17 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
-  const openPasskeyLogin = () => {
-    if (operation?.status === "running") return;
+  const openPasskeyLogin = async () => {
+    if (passkeyActive || passkeyBlocked) return;
+    setPasskeyStarting(true);
     setError(null);
-    void api!.openPasskeyLogin().catch(cause => setError(messageOf(cause)));
+    try {
+      await api!.openPasskeyLogin();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setPasskeyStarting(false);
+    }
   };
   const continuePasskeyLogin = async () => {
     if (!passkeyWaiting || passkeyContinuationRequested) return;
@@ -975,20 +1018,25 @@ function BrowserSurface({
         {passkeyAvailable ? (
           <button
             className="toolbar-text-button"
-            disabled={passkeyWaiting && passkeyContinuationRequested}
+            disabled={passkeyDisabled}
+            title={passkeyBlocked ? operation?.message : copy.passkeyOpeningBody}
             onClick={() => void (passkeyWaiting ? continuePasskeyLogin() : openPasskeyLogin())}
             type="button"
           >
-            {passkeyWaiting
-              ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
-              : copy.passkeySignIn}
+            {passkeyLabel}
           </button>
         ) : null}
-        <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
+        <button className="toolbar-text-button" disabled={passkeyActive} onClick={() => void toggle()} type="button">
           {visible ? copy.hideBrowser : copy.openChatgpt}
         </button>
         {browser?.loading ? <i className="browser-loading-line" /> : null}
       </div>
+      {passkeyActive && visible ? (
+        <div className="passkey-login-guide" role="status">
+          <strong>{passkeyTitle}</strong>
+          <p>{passkeyBody}</p>
+        </div>
+      ) : null}
       {selectedManualTab
         && ["awaiting-user", "sent"].includes(selectedManualTab.manualState ?? "") ? (
         <ManualTurnGuide
@@ -1003,26 +1051,24 @@ function BrowserSurface({
         {!visible ? (
           <div className="browser-empty">
             <BrandMark />
-            <h1>{manualInteraction
+            <h1>{passkeyActive ? passkeyTitle : manualInteraction
               ? copy.browserReady
               : browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
-            <p>{manualInteraction
+            <p>{passkeyActive ? passkeyBody : manualInteraction
               ? copy.stepAccountBody
               : browser?.authenticated
               ? copy.noActiveTaskBody
-              : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
+              : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
-              <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
+              <PrimaryButton disabled={passkeyActive} onClick={() => void toggle()}>
                 {manualInteraction || browser?.authenticated ? copy.openChatgpt : copy.signIn}
               </PrimaryButton>
               {passkeyAvailable ? (
                 <SecondaryButton
-                  disabled={passkeyWaiting && passkeyContinuationRequested}
+                  disabled={passkeyDisabled}
                   onClick={passkeyWaiting ? continuePasskeyLogin : openPasskeyLogin}
                 >
-                  {passkeyWaiting
-                    ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
-                    : copy.passkeySignIn}
+                  {passkeyLabel}
                 </SecondaryButton>
               ) : null}
             </div>
@@ -1181,7 +1227,7 @@ function SetupSurface({
           action={snapshot.state.coreSetupComplete
             ? devProfile ? copy.devReinstall : copy.reinstall
             : devProfile ? copy.devInstall : copy.install}
-          complete={snapshot.state.codexCatalogVerified === true}
+          complete={snapshot.state.coreSetupComplete === true}
           description={devProfile ? copy.devStepInstallBody : copy.stepInstallBody}
           disabled={busy || (!snapshot.smokePassed && snapshot.state.coreSetupComplete !== true)}
           index={manualInteraction ? 1 : 3}
@@ -1208,7 +1254,7 @@ function SetupSurface({
       <SectionHeading label="MCP" meta={manualInteraction ? copy.required : copy.optional} spaced />
       <button
         className="next-surface-row"
-        disabled={!manualInteraction && !snapshot.state.codexCatalogVerified}
+        disabled={!manualInteraction && !snapshot.state.coreSetupComplete}
         onClick={showMcp}
         type="button"
       >
@@ -1337,8 +1383,8 @@ function McpSurface({
       subtitle={devProfile ? copy.devMcpSubtitle : copy.mcpSubtitle}
       title={devProfile ? copy.devMcpTitle : "MCP"}
     >
-      {!manualInteraction && !configuringInactiveMode && !snapshot.state.codexCatalogVerified ? (
-        <NoticeRow icon="setup" tone="warning">{copy.mcpCatalogRequired}</NoticeRow>
+      {!manualInteraction && !configuringInactiveMode && !snapshot.state.coreSetupComplete ? (
+        <NoticeRow icon="setup" tone="warning">{copy.mcpSetupRequired}</NoticeRow>
       ) : null}
 
       <div className="wizard-stepper" aria-label={`${step + 1} / 3`}>
@@ -1452,9 +1498,9 @@ function McpSurface({
             ) : null}
             {step === 1 ? (
               <p className="mcp-step-two-hint">
-                {manualInteraction || configuringInactiveMode || snapshot.state.codexCatalogVerified
+                {manualInteraction || configuringInactiveMode || snapshot.state.coreSetupComplete
                   ? copy.mcpStepTwoHint
-                  : copy.mcpCatalogRequired}
+                  : copy.mcpSetupRequired}
               </p>
             ) : null}
             {step === 2 ? (
@@ -1499,7 +1545,7 @@ function McpSurface({
           <PrimaryButton
             disabled={
               busy
-              || (!manualInteraction && !configuringInactiveMode && !snapshot.state.codexCatalogVerified)
+              || (!manualInteraction && !configuringInactiveMode && !snapshot.state.coreSetupComplete)
               || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
             }
             onClick={() => void install()}
@@ -1535,15 +1581,59 @@ function ActivitySurface({
   copy,
   language,
   logs,
+  browser,
+  openTab,
   setError,
 }: {
   copy: Copy;
   language: Language;
   logs: LogRecord[];
+  browser: BrowserState | null;
+  openTab: (id: string) => Promise<void>;
   setError: (error: string | null) => void;
 }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+  const states = {
+    preparing: copy.activityPreparing, sending: copy.activitySending, chatgpt: copy.activityChatgpt,
+    tools: copy.activityTools, approval: copy.activityApproval, unknown: copy.activityUnknown,
+    stale: copy.activityStale, "sign-in": copy.stepAccount,
+  };
+  const tasks = (browser?.tabs ?? []).flatMap(tab => {
+    const activity = describeTurnActivity(tab, now);
+    return activity ? [{ tab, activity }] : [];
+  });
+  const duration = (ms: number) => {
+    const seconds = Math.floor(ms / 1_000);
+    return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  };
   return (
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
+      {tasks.length > 0 ? (
+        <section className="activity-tasks" aria-label={copy.activityTasks}>
+          <div className="section-heading"><span>{copy.activityTasks}</span></div>
+          {tasks.map(({ tab, activity }) => (
+            <article className="activity-task" key={tab.id}>
+              <StateDot state={activity.state === "sign-in" ? "error" : ["unknown", "stale"].includes(activity.state) ? "idle" : "busy"} />
+              <div className="activity-task-detail">
+                <span className="activity-task-title">{browserTabTitleFromTitle(tab.title, copy)}</span>
+                <strong>{states[activity.state]}</strong>
+                <span className="activity-task-time">
+                  {activity.elapsedMs !== null && activity.state !== "unknown"
+                    ? copy.activityElapsed.replace("{time}", duration(activity.elapsedMs))
+                    : activity.ageMs !== null ? copy.activityObserved.replace("{time}", duration(activity.ageMs)) : null}
+                </span>
+              </div>
+              <SecondaryButton onClick={() => void openTab(tab.id).catch(cause => setError(messageOf(cause)))}>
+                {copy.openChatgpt}
+              </SecondaryButton>
+            </article>
+          ))}
+        </section>
+      ) : null}
       <div className="section-heading activity-heading">
         <span>{copy.recentActivity}</span>
         <SecondaryButton
@@ -1596,6 +1686,27 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const currentPluginName = snapshot.connectorNames[snapshot.state.browserInteractionMode];
+  const [nameSuffix, setNameSuffix] = useState(currentPluginName.slice(6));
+  const [confirmNameChange, setConfirmNameChange] = useState(false);
+  const proposedName = `Codex ${nameSuffix.trim()}`;
+  useEffect(() => {
+    setNameSuffix(currentPluginName.slice(6));
+    setConfirmNameChange(false);
+  }, [currentPluginName]);
+  const changePluginName = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setConnectorNameSuffix(nameSuffix.trim()));
+      setConfirmNameChange(false);
+      configureInteractionMode(snapshot.state.browserInteractionMode);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1631,6 +1742,61 @@ function SettingsSurface({
     setError(null);
     try {
       updateState(await api!.setBiggerContext(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const setComposerPredictions = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setComposerPredictions(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const setSkillAttachments = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setSkillAttachments(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const setAutoApproveToolCalls = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setAutoApproveToolCalls(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const setFreshConversationPerTurn = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setFreshConversationPerTurn(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const setTemporaryChats = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setTemporaryChats(enabled));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -1684,6 +1850,31 @@ function SettingsSurface({
           mode={snapshot.state.browserInteractionMode}
           onChange={(mode) => void setInteractionMode(mode)}
         />
+        <div className="plugin-name-setting">
+          <SettingRow body={copy.pluginNameBody} label={copy.pluginName}>
+            <div className="plugin-name-input">
+              <span aria-hidden="true">Codex</span>
+              <input
+                aria-label={copy.pluginName}
+                disabled={busy || !snapshot.state.coreSetupComplete}
+                maxLength={74}
+                onChange={event => { setNameSuffix(event.target.value); setConfirmNameChange(false); }}
+                value={nameSuffix}
+              />
+            </div>
+          </SettingRow>
+          <code>{proposedName}</code>
+          {confirmNameChange ? <>
+            <p>{copy.pluginNameWarning}</p>
+            <div className="manual-turn-actions">
+              <SecondaryButton disabled={busy} onClick={() => setConfirmNameChange(false)}>{copy.previous}</SecondaryButton>
+              <PrimaryButton disabled={busy} onClick={() => void changePluginName()}>{copy.pluginNameConfirm}</PrimaryButton>
+            </div>
+          </> : <SecondaryButton
+            disabled={busy || !snapshot.state.coreSetupComplete || !nameSuffix.trim() || proposedName === currentPluginName}
+            onClick={() => setConfirmNameChange(true)}
+          >{copy.pluginNameChange}</SecondaryButton>}
+        </div>
         <SettingRow body={devProfile ? copy.devKeepRunningBody : copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
           <Switch
             checked={snapshot.state.keepRunningOnClose}
@@ -1711,8 +1902,47 @@ function SettingsSurface({
             checked={snapshot.state.experimentalBiggerContext}
             disabled={busy
               || snapshot.state.browserInteractionMode === "manual"
+              || (snapshot.state.biggerContextAvailable !== true && !snapshot.state.experimentalBiggerContext)
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setBiggerContext(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={copy.composerPredictionsBody} label={copy.composerPredictions}>
+          <Switch
+            checked={snapshot.state.composerPredictionsEnabled}
+            disabled={busy || !snapshot.state.coreSetupComplete}
+            onChange={(checked) => void setComposerPredictions(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={snapshot.state.browserInteractionMode === "manual"
+          ? copy.manualSkillAttachmentsUnavailable : copy.skillAttachmentsBody} label={copy.skillAttachments}>
+          <Switch
+            checked={snapshot.state.experimentalSkillAttachments}
+            disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
+            onChange={(checked) => void setSkillAttachments(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={snapshot.state.browserInteractionMode === "manual"
+          ? copy.manualFreshConversationUnavailable : copy.freshConversationBody} label={copy.freshConversation}>
+          <Switch
+            checked={snapshot.state.experimentalFreshConversationPerTurn}
+            disabled={busy || snapshot.state.browserInteractionMode === "manual" || snapshot.state.coreSetupComplete !== true}
+            onChange={(checked) => void setFreshConversationPerTurn(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={snapshot.state.browserInteractionMode === "manual"
+          ? copy.manualAutoApproveUnavailable : copy.autoApproveToolsBody} label={copy.autoApproveTools}>
+          <Switch
+            checked={snapshot.state.browserInteractionMode !== "manual" && snapshot.state.autoApproveToolCalls}
+            disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
+            onChange={(checked) => void setAutoApproveToolCalls(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={copy.temporaryChatsBody} label={copy.temporaryChats}>
+          <Switch
+            checked={snapshot.state.useTemporaryChats}
+            disabled={busy || snapshot.state.coreSetupComplete !== true}
+            onChange={(checked) => void setTemporaryChats(checked)}
           />
         </SettingRow>
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
@@ -1947,9 +2177,31 @@ function ZeroRiskModelMenu({
 
 function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: string }) {
   const [expanded, setExpanded] = useState(false);
+  const [paused, setPaused] = useState(false);
   const inlineVideo = useRef<HTMLVideoElement>(null);
   const expandedVideo = useRef<HTMLVideoElement>(null);
   const expandedAt = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const active = expanded ? expandedVideo.current : inlineVideo.current;
+    if (expanded) inlineVideo.current?.pause();
+    if (paused) active?.pause();
+    else if (active) void active.play().catch(() => { if (!cancelled) setPaused(true); });
+    return () => { cancelled = true; };
+  }, [expanded, paused]);
+
+  const playbackControl = {
+    "aria-label": `${label}: ${paused ? copy.playGuideVideo : copy.pauseGuideVideo}`,
+    role: "button",
+    tabIndex: 0,
+    onClick: () => setPaused(value => !value),
+    onKeyDown: (event: ReactKeyboardEvent<HTMLVideoElement>) => {
+      if (event.repeat || (event.key !== " " && event.key !== "Enter")) return;
+      event.preventDefault();
+      setPaused(value => !value);
+    },
+  };
 
   const closeExpanded = () => {
     const currentTime = expandedVideo.current?.currentTime;
@@ -1971,7 +2223,10 @@ function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: s
   return (
     <>
       <div className="guide-media">
-        <video aria-label={label} autoPlay loop muted playsInline ref={inlineVideo} src={src} />
+        <video {...playbackControl} autoPlay={!paused && !expanded} loop muted playsInline ref={inlineVideo} src={src} />
+        <span aria-hidden="true" className={`guide-media-pause${paused ? " is-visible" : ""}`}>
+          <Icon name="pause" />
+        </span>
         <button
           aria-label={copy.expandGuideVideo}
           className="guide-media-expand"
@@ -1992,8 +2247,8 @@ function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: s
           role="dialog"
         >
           <video
-            aria-label={label}
-            autoPlay
+            {...playbackControl}
+            autoPlay={!paused}
             loop
             muted
             onLoadedMetadata={(event) => {
@@ -2003,6 +2258,9 @@ function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: s
             ref={expandedVideo}
             src={src}
           />
+          <span aria-hidden="true" className={`guide-media-pause${paused ? " is-visible" : ""}`}>
+            <Icon name="pause" />
+          </span>
           <button
             aria-label={copy.closeGuideVideo}
             autoFocus
@@ -2145,9 +2403,7 @@ function DoctorSummary({ copy, language, report }: { copy: Copy; language: Langu
         {visibleChecks.map((check) => (
           <p key={check.id}>
             <StateDot state={check.status === "ok" ? "ready" : check.status === "warning" ? "busy" : "error"} />
-            <span>{check.status === "ok"
-              ? localizeRuntimeMessage(copy, check.message, check.id, language)
-              : check.message}</span>
+            <span>{localizeRuntimeMessage(copy, check.message, check.id, language)}</span>
           </p>
         ))}
       </div>
@@ -2294,13 +2550,11 @@ function Switch({
   );
 }
 
+const languageOptions = (Object.keys(languages) as Language[]).map(value => ({ value, ...languages[value] }));
+
 function LanguageMenu({ copy, language, onChange }: { copy: Copy; language: Language; onChange: (language: Language) => void }) {
   const [open, setOpen] = useState(false);
-  const options: Array<{ label: string; value: Language }> = [
-    { label: copy.english, value: "en" },
-    { label: copy.chinese, value: "zh-CN" },
-    { label: copy.japanese, value: "ja" },
-  ];
+  const options = languageOptions;
   const selected = options.find((option) => option.value === language) ?? options[0];
 
   return (
@@ -2392,7 +2646,7 @@ function ErrorToast({ copy, message, onDismiss }: { copy: Copy; message: string;
   );
 }
 
-function SessionRefreshReminder({
+export function SessionRefreshReminder({
   busy,
   copy,
   onDismiss,
@@ -2507,8 +2761,8 @@ function FatalMessage({ message }: { message: string }) {
 
 function browserTabTitleFromTitle(value: string | undefined, copy: Copy): string {
   const title = value?.trim();
-  if (!title || title === "about:blank" || title.includes("codex-web-gpt-browser-host")) return copy.temporaryChat;
-  return title.replace(/\s*[|–-]\s*ChatGPT\s*$/i, "") || copy.temporaryChat;
+  if (!title || title === "about:blank" || title.includes("codex-web-gpt-browser-host")) return copy.newChat;
+  return title.replace(/\s*[|–-]\s*ChatGPT\s*$/i, "") || copy.newChat;
 }
 
 function browserTabTone(status: BrowserState["tabs"][number]["status"]): "idle" | "ready" | "busy" | "error" {
@@ -2522,9 +2776,6 @@ function formatBrowserAddress(url: string | undefined, copy: Copy): string {
   if (!url || url.startsWith("about:blank")) return copy.browserAddress;
   try {
     const parsed = new URL(url);
-    if (parsed.hostname === "chatgpt.com" && parsed.searchParams.get("temporary-chat") === "true") {
-      return `chatgpt.com  /  ${copy.temporaryChat}`;
-    }
     return `${parsed.hostname}${parsed.pathname === "/" ? "" : parsed.pathname}`;
   } catch {
     return copy.browserAddress;
@@ -2556,7 +2807,7 @@ function formatTime(value: string, language: Language): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? value
-    : date.toLocaleTimeString(language === "ja" ? "ja-JP" : language === "zh-CN" ? "zh-CN" : "en", {
+    : date.toLocaleTimeString(languages[language].locale, {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",

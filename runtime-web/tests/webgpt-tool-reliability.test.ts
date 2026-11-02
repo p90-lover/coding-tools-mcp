@@ -76,9 +76,9 @@ function receiptMcpHandlers(environment: Record<string, unknown>, bindingId: str
   const variable = (name: string) => (find(node => ts.isVariableDeclaration(node) && node.name.getText(tree) === name) as ts.VariableDeclaration).initializer!.getText(tree);
   const registration = (name: string) => find(node => ts.isCallExpression(node) && node.expression.getText(tree) === "server.registerTool"
     && ts.isStringLiteral(node.arguments[0]!) && node.arguments[0]!.text === name).getText(tree);
-  const helpers = ["wireName", "exactTool", "execGateway", "gatewayToolNameIsValid", "gatewayNestedToolName", "execGatewayResultProgram", "execGatewayProgram", "chatGptMcpInvocationTimeout", "asMcpResult", "result",
+  const helpers = ["wireName", "exactTool", "execGateway", "gatewayToolNameIsValid", "gatewayNestedToolName", "execGatewayResultProgram", "execGatewayProgram", "framedGatewayCatalog", "chatGptMcpInvocationTimeout", "asMcpResult", "result",
     "safeVisibleTools", "inventoryMatches", "isAgentWaitTool", "isGatewayAgentWaitTool", "browserToolDescription", "browserToolParameters", "gatewayToolDescription", "gatewayToolCatalogProgram", "gatewayToolCatalogPage"].map(definition).join("\n");
-  const constants = ["BRIDGE_TOOL_NAMES", "GATEWAY_AGENT_WAIT_TOOL_NAMES", "CHATGPT_WEB_AGENT_WAIT_POLL_MS", "AGENT_WAIT_TRANSPORT_RULE", "GATEWAY_CATALOG_BEGIN", "GATEWAY_CATALOG_END", "MAX_GATEWAY_CATALOG_BYTES"]
+  const constants = ["nativeTurnTokenSchema", "CHATGPT_WEB_COMMAND_POLL_MAX_MS", "COMMAND_POLL_TRANSPORT_RULE", "BRIDGE_TOOL_NAMES", "GATEWAY_AGENT_WAIT_TOOL_NAMES", "CHATGPT_WEB_AGENT_WAIT_POLL_MS", "AGENT_WAIT_TRANSPORT_RULE", "GATEWAY_CATALOG_BEGIN", "GATEWAY_CATALOG_END", "MAX_GATEWAY_CATALOG_BYTES"]
     .map(name => `const ${name}=${variable(name)};`).join("\n");
   const handlers = new Map<string, { schema: z.ZodType; handler: (input: any, extra: any) => Promise<any> }>();
   runInNewContext(ts.transpileModule(constants + "\n" + helpers + "\nconst pollInvocation=" + variable("pollInvocation") + ";const invoke=async(...args)=>{const response=await (" + variable("invoke") + ")(...args);onInvokeResult?.(response);return response;};\n"
@@ -195,7 +195,8 @@ test("nested inventory accepts native exec framing and structured catalogs witho
       annotations: { readOnlyHint: true }, _meta: { "openai/outputTemplate": "ui://browser/first" } },
     { name: "mcp__browser__second", description: "Browser screenshot second" },
   ];
-  for (const format of ["framed", "structured", "metadata", "plain"] as const) {
+  // An unmarked plain-JSON catalog is rejected: only this request's marker or frame proves the catalog.
+  for (const format of ["framed", "structured", "metadata"] as const) {
     await withMcp([gateway, direct], async ({ client, broker, token }) => {
       for (const offset of [0, 2]) {
         const pending = client.callTool({ name: "codex_tool_inventory",
@@ -210,7 +211,7 @@ test("nested inventory accepts native exec framing and structured catalogs witho
         const catalog = { tools: [registry[offset === 0 ? 2 : 3]], total: 2 };
         const framed = `Script completed\nWall time: 0.13 seconds\nOutput:\n${emitted[0]}\n`;
         broker.completeTool(token, request!.callId, {
-          content: [{ type: "text", text: format === "plain" ? JSON.stringify(catalog) : framed }],
+          content: [{ type: "text", text: framed }],
           ...(format === "structured" ? { structuredContent: catalog } : {}),
           ...(format === "metadata" ? { structuredContent: { execution: "completed" } } : {}),
         });

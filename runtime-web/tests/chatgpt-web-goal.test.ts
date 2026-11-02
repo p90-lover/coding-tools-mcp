@@ -79,7 +79,7 @@ describe("native Codex /goal over ChatGPT Web", () => {
       input: [goal("First objective"), goal("Revised objective")],
     });
     parsed.modelId = CHATGPT_WEB_MODEL_ID;
-    const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
+    const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true, extraHighAvailable: true };
     const token = "turn_12345678901234567890123456789012";
     const prompt = compileChatGptWebPrompt(parsed, capabilities, token);
     expect(prompt.text).toContain("Revised objective");

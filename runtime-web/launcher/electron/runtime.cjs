@@ -12,10 +12,13 @@ const {
   isLegacyConnectorName,
   requireCurrentRuntimeConnectorName,
   validateConnectorName,
+  validateConnectorNameSuffix,
 } = require("./connector-identity.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const { windowsTrustEnvironment } = require("./windows-trust.cjs");
+const { compareVersions } = require("./update.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
@@ -209,6 +212,8 @@ class RuntimeHost {
     this.lifecycleOperation = null;
     this.cleanupEphemeralSecrets();
     this.passkeyContinuationRequested = false;
+    this.passkeyPhase = null;
+    this.passkeyProgress = null;
     try {
       this.cleanupPasskeyTransfers();
     } catch (error) {
@@ -298,6 +303,7 @@ class RuntimeHost {
   continuePasskeyLogin() {
     const child = this.activeChild;
     if (this.active !== "passkey-login"
+      || this.passkeyPhase !== "waiting"
       || this.passkeyContinuationRequested
       || !child
       || child.exitCode !== null
@@ -306,6 +312,8 @@ class RuntimeHost {
       throw new Error("No passkey sign-in is waiting for Continue");
     }
     this.passkeyContinuationRequested = true;
+    this.passkeyPhase = "importing";
+    this.passkeyProgress?.("importing");
     this.publishOperation?.({
       name: "passkey-login",
       status: "running",
@@ -317,6 +325,8 @@ class RuntimeHost {
         error => {
           if (error) {
             this.passkeyContinuationRequested = false;
+            this.passkeyPhase = "waiting";
+            this.passkeyProgress?.("waiting");
             reject(error);
           } else {
             resolve(true);
@@ -326,7 +336,7 @@ class RuntimeHost {
     });
   }
 
-  async capturePasskeyLogin() {
+  async capturePasskeyLogin(onProgress = () => {}) {
     this.cleanupPasskeyTransfers();
     const chrome = this.passkeyChromeExecutable();
     const parent = path.join(this.app.getPath("userData"), "passkey-login");
@@ -338,7 +348,10 @@ class RuntimeHost {
     const markerPath = `${storageStatePath}.verified.json`;
     const cleanup = async () => fs.rmSync(transferRoot, { recursive: true, force: true });
     this.passkeyContinuationRequested = false;
+    this.passkeyPhase = "opening";
+    this.passkeyProgress = onProgress;
     try {
+      onProgress("opening");
       await this.run("passkey-login", [
         "login",
         "--launcher-control",
@@ -350,6 +363,15 @@ class RuntimeHost {
         embedded: true,
         controlStdin: true,
         env: this.launcherControlEnvironment(),
+        onStdoutLine: line => {
+          let event;
+          try { event = JSON.parse(line); } catch { return; }
+          if (event?.version === 1 && event.type === "passkey-login-ready" && this.passkeyPhase === "opening") {
+            this.passkeyPhase = "waiting";
+            onProgress("waiting");
+            return true;
+          }
+        },
         message: "Sign in with your passkey in Chrome, then return here and choose Continue",
         successMessage: "Passkey session captured for private Launcher verification",
         timeoutMs: PASSKEY_LOGIN_TIMEOUT_MS,
@@ -378,6 +400,8 @@ class RuntimeHost {
       throw error;
     } finally {
       this.passkeyContinuationRequested = false;
+      this.passkeyPhase = null;
+      this.passkeyProgress = null;
     }
   }
 
@@ -616,13 +640,11 @@ class RuntimeHost {
         ? embeddedRuntimeInvocation({ app: this.app, sourceRoot: this.sourceRoot, args })
         : this.command(args);
       const result = await new Promise((resolve, reject) => {
-        const environment = options.environment
-          ? { ...options.environment }
-          : { ...process.env };
-        Object.assign(environment, {
+        const environment = windowsTrustEnvironment({
+          ...(options.environment ?? process.env),
           CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
           ...(options.env || {}),
-        });
+        }, this.platform);
         const child = spawn(invocation.executable, invocation.args, {
           cwd: invocation.cwd,
           detached: DETACH_OWNED_CHILD,
@@ -639,7 +661,9 @@ class RuntimeHost {
         };
         collect(child.stdout, stdout, (line) => {
           this.logger.info("runtime.stdout", { operation: name, line });
-          this.publishOperation?.({ name, status: "running", message: redactText(line) });
+          if (options.onStdoutLine?.(line) !== true) {
+            this.publishOperation?.({ name, status: "running", message: redactText(line) });
+          }
         }, recordPipeError("stdout"));
         collect(child.stderr, stderr, (line) => {
           this.logger.warn("runtime.stderr", { operation: name, line });
@@ -839,8 +863,10 @@ class RuntimeHost {
 
   async restoreBridgeRouteWithinOperation(operationName) {
     const current = await this.bridgeStatus(operationName);
-    if (!current.installed || !current.active) return current;
-    const disconnected = await this.run(operationName, ["route", "disconnect"], {
+    const forRuntimeRecovery = operationName === "runtime-start-fail-safe";
+    if (!current.installed || (!current.active && (forRuntimeRecovery || !current.reconnectOnStartup))) return current;
+    const disconnected = await this.run(operationName, ["route", "disconnect",
+      ...(forRuntimeRecovery ? ["--for-runtime-recovery"] : [])], {
       embedded: true,
       message: "Restoring the previous Codex route",
       successMessage: "Previous Codex route restored",
@@ -848,7 +874,7 @@ class RuntimeHost {
     });
     const result = parseBridgeRouteResult(disconnected.stdout, { expectedActive: false });
     const verified = await this.bridgeStatus(operationName);
-    if (!verified.installed || verified.active) {
+    if (!verified.installed || verified.active || (!forRuntimeRecovery && verified.reconnectOnStartup)) {
       throw new Error("Codex bridge route restore did not persist in the active config");
     }
     return {
@@ -867,7 +893,7 @@ class RuntimeHost {
     }
   }
 
-  async connectBridgeRoute() {
+  async connectBridgeRoute({ recoveryOnly = false } = {}) {
     this.assertProductionProfile("Codex bridge routing");
     const name = "bridge-connect";
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
@@ -875,17 +901,17 @@ class RuntimeHost {
     try {
       const current = await this.bridgeStatus(name);
       if (!current.installed) throw new Error("Install the Codex integration before connecting the bridge route");
-      if (current.active) return current;
+      if (current.active || (recoveryOnly && current.reconnectOnStartup !== true)) return current;
       try {
-        const connected = await this.run(name, ["route", "connect"], {
+        const connected = await this.run(name, ["route", recoveryOnly ? "recover" : "connect"], {
           embedded: true,
           message: "Connecting Codex to the launcher",
           successMessage: "Codex bridge connected",
           timeoutMs: 15_000,
         });
-        const result = parseBridgeRouteResult(connected.stdout, { expectedActive: true });
+        const result = parseBridgeRouteResult(connected.stdout, recoveryOnly ? {} : { expectedActive: true });
         const verified = await this.bridgeStatus(name);
-        if (!verified.installed || !verified.active) {
+        if (!verified.installed || verified.active !== result.active) {
           throw new Error("Codex bridge route connection did not persist in the active config");
         }
         return result;
@@ -908,22 +934,62 @@ class RuntimeHost {
     if (!current.configured || current.mode !== "full") {
       throw new Error("The native MCP runtime is not configured");
     }
-    return this.launcherProfile === "development"
+    return this.launcherProfile === "development" && !current.config?.automaticAppName
       ? connectorNameForDevSetup(current.config?.appName)
       : requireCurrentRuntimeConnectorName(current.config?.appName);
   }
 
   browserConnectorName() {
     const current = this.runtimeConfigSnapshot();
-    if (this.launcherProfile === "development") {
+    if (this.launcherProfile === "development" && !current.config?.automaticAppName) {
       return connectorNameForDevSetup(current.config?.appName);
     }
-    if (!current.configured || current.mode !== "full") return CURRENT_CONNECTOR_NAME;
+    if (!current.configured) return CURRENT_CONNECTOR_NAME;
     return connectorNameForSetup(current.config?.appName);
   }
 
-  setupConnectorName() {
-    return this.launcherProfile === "development" ? DEV_CONNECTOR_NAME : CURRENT_CONNECTOR_NAME;
+  setupConnectorName(mode = "automatic") {
+    if (mode !== "automatic" && mode !== "manual") throw new Error("Invalid interaction mode");
+    const current = this.runtimeConfigSnapshot().config;
+    const defaultName = mode === "manual" ? "Codex Zero Risk"
+      : this.launcherProfile === "development" ? DEV_CONNECTOR_NAME : CURRENT_CONNECTOR_NAME;
+    const stored = mode === "manual" ? current?.manualAppName : current?.automaticAppName;
+    if (stored !== undefined) return isLegacyConnectorName(stored) ? defaultName : validateConnectorName(stored);
+    if (mode !== "manual" && current?.browserInteractionMode !== "manual" && current?.appName) {
+      return this.launcherProfile === "development" ? connectorNameForDevSetup(current.appName)
+        : connectorNameForSetup(current.appName);
+    }
+    return defaultName;
+  }
+
+  async setConnectorNameSuffix(value) {
+    const suffix = validateConnectorNameSuffix(value);
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) throw new Error("Set up the launcher before changing the plugin name");
+    const mode = this.browserInteractionMode();
+    const name = `Codex ${suffix}`;
+    if (name === this.setupConnectorName(mode)) return { changed: false };
+    if (name === this.setupConnectorName(mode === "manual" ? "automatic" : "manual")) {
+      throw new Error("Automatic and Zero Risk connector names must differ");
+    }
+    const args = [
+      ...(this.launcherProfile === "development" ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      "--connector-name-suffix", suffix,
+      "--acknowledge-unofficial",
+      ...(this.launcherProfile === "production" ? ["--replace-codex-route", "--restart-service"] : []),
+    ];
+    if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    const options = {
+      message: "Changing the plugin name",
+      successMessage: "Plugin name changed; complete MCP setup with the new name",
+      timeoutMs: current.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
+    };
+    if (this.launcherProfile === "development") await this.runDevSetup("connector-name", args, options);
+    else await this.runSetup("connector-name", args, options);
+    return { changed: true };
   }
 
   cancelActiveTurns() {
@@ -1096,6 +1162,145 @@ class RuntimeHost {
     return { ...result, mode, enabled: enabled === true };
   }
 
+  async setComposerPredictions(enabled) {
+    if (typeof enabled !== "boolean") throw new Error("Next-message predictions preference must be a boolean");
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) throw new Error("Initialize the runtime before changing next-message predictions");
+    const development = this.launcherProfile === "development";
+    const args = [
+      ...(development ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      "--acknowledge-unofficial",
+      ...(development ? [] : ["--replace-codex-route", "--restart-service"]),
+      enabled ? "--composer-predictions" : "--no-composer-predictions",
+    ];
+    // DEV setup preserves approvals directly; only production setup parses this flag.
+    if (!development && current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    const options = {
+      message: enabled ? "Enabling next-message predictions" : "Disabling next-message predictions",
+      successMessage: enabled ? "Next-message predictions enabled" : "Next-message predictions disabled",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    };
+    const result = development
+      ? await this.runDevSetup("composer-predictions", args, options)
+      : await this.runSetup("composer-predictions", args, options);
+    return { ...result, enabled };
+  }
+
+  async setSkillAttachments(enabled) {
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) throw new Error("Initialize the runtime before changing Skills as files");
+    if (current.config?.browserInteractionMode === "manual") {
+      throw new Error("Skills as files is unavailable in Zero Risk mode");
+    }
+    const development = this.launcherProfile === "development";
+    const args = [
+      ...(development ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      "--acknowledge-unofficial",
+      ...(development ? [] : ["--replace-codex-route", "--restart-service"]),
+      enabled === true ? "--skill-attachments" : "--inline-skills",
+    ];
+    if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    const options = {
+      message: enabled ? "Enabling Skills as files" : "Disabling Skills as files",
+      successMessage: enabled ? "Skills as files enabled" : "Inline skills restored",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    };
+    const result = development
+      ? await this.runDevSetup("skill-attachments", args, options)
+      : await this.runSetup("skill-attachments", args, options);
+    return { ...result, enabled: enabled === true };
+  }
+
+  async setAutoApproveToolCalls(enabled) {
+    if (typeof enabled !== "boolean") throw new Error("Tool approval preference must be a boolean");
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) throw new Error("Initialize the runtime before changing tool approvals");
+    if ((current.config?.browserInteractionMode ?? "automatic") !== "automatic") {
+      throw new Error("Automatic tool approvals are unavailable in Zero Risk mode");
+    }
+    const development = this.launcherProfile === "development";
+    const args = [
+      ...(development ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      "--acknowledge-unofficial",
+      ...(development ? [] : ["--replace-codex-route", "--restart-service"]),
+      // Setup explicitly writes false when this opt-in flag is absent.
+      ...(enabled ? ["--auto-approve-tool-calls"] : []),
+    ];
+    const options = {
+      message: "Updating ChatGPT tool approvals",
+      successMessage: enabled ? "One-time tool requests will be approved automatically" : "Manual tool approvals restored",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    };
+    const result = development
+      ? await this.runDevSetup("auto-approve-tool-calls", args, options)
+      : await this.runSetup("auto-approve-tool-calls", args, options);
+    return { ...result, enabled };
+  }
+
+  async setFreshConversationPerTurn(enabled) {
+    if (typeof enabled !== "boolean") throw new Error("Fresh conversation preference must be a boolean");
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) throw new Error("Initialize the runtime before changing browser conversation retention");
+    if ((current.config?.browserInteractionMode ?? "automatic") !== "automatic") {
+      throw new Error("New browser chats per turn are unavailable in Zero Risk mode");
+    }
+    const development = this.launcherProfile === "development";
+    const args = [
+      ...(development ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      "--acknowledge-unofficial",
+      ...(development ? [] : ["--replace-codex-route", "--restart-service"]),
+      enabled ? "--fresh-conversation" : "--retained-conversation",
+    ];
+    if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    const options = {
+      message: enabled ? "Enabling a new browser chat for each turn" : "Restoring browser chat retention",
+      successMessage: enabled ? "New browser chats per turn enabled" : "Browser chat retention restored",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    };
+    const result = development
+      ? await this.runDevSetup("fresh-conversation-per-turn", args, options)
+      : await this.runSetup("fresh-conversation-per-turn", args, options);
+    return { ...result, enabled };
+  }
+
+  async setTemporaryChats(enabled) {
+    if (typeof enabled !== "boolean") throw new Error("Temporary Chat preference must be a boolean");
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) throw new Error("Initialize the runtime before changing Temporary Chat");
+    const development = this.launcherProfile === "development";
+    const args = [
+      ...(development ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      "--acknowledge-unofficial",
+      ...(development ? [] : ["--replace-codex-route", "--restart-service"]),
+      enabled ? "--temporary-chats" : "--ordinary-chats",
+    ];
+    if (!development && current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    const options = {
+      message: enabled ? "Enabling Temporary Chat" : "Restoring ordinary chats",
+      successMessage: enabled ? "Temporary Chat enabled" : "Ordinary chats restored",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    };
+    const result = development
+      ? await this.runDevSetup("temporary-chats", args, options)
+      : await this.runSetup("temporary-chats", args, options);
+    return { ...result, enabled };
+  }
+
   async setZeroRiskPro(enabled) {
     const current = this.runtimeConfigSnapshot();
     if (!current.configured) {
@@ -1161,17 +1366,27 @@ class RuntimeHost {
         && !tunnelProfileMigrationRequired)) {
       return { updated: false };
     }
+    if (compareVersions(currentVersion, existing.config.releaseVersion) < 0) {
+      throw new Error(
+        `This launcher is version ${currentVersion}, but a newer runtime ${existing.config.releaseVersion} is already installed. `
+        + `Open Codex Web GPT ${existing.config.releaseVersion} or newer to continue.`,
+      );
+    }
     const args = [
       "setup",
       existing.mode === "full" ? "--full" : "--browser-only",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
-      // A release may repair capability detection. Reusing the previous result can
-      // keep eligible models disabled even after the corrected probe is installed.
-      ...this.browserInteractionArgs({ mode: interactionMode, refreshCapabilities: true }),
+      // Preserve the installed model selection during an update. Account refresh is
+      // a separate Setup action and must not prevent the local bridge from starting.
+      ...this.browserInteractionArgs({ mode: interactionMode }),
       "--acknowledge-unofficial",
       "--restart-service",
     ];
+    if (interactionMode === "automatic" && existing.config?.autoApproveToolCalls === true) {
+      args.push("--auto-approve-tool-calls");
+    }
+    args.push("--preserve-disconnected-route");
     const result = await this.runSetup("runtime-upgrade", args, {
       message: tunnelProfileMigrationRequired
         ? `Separating ${interactionMode === "manual" ? "Zero Risk" : "Automatic"} MCP credentials`
@@ -1180,6 +1395,7 @@ class RuntimeHost {
         ? `${interactionMode === "manual" ? "Zero Risk" : "Automatic"} MCP profile migrated`
         : `Launcher runtime upgraded to ${currentVersion}`,
       timeoutMs: existing.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
+      previousRuntimeCompatible: existing.config.releaseVersion === currentVersion,
     });
     return {
       updated: true,
@@ -1342,13 +1558,14 @@ class RuntimeHost {
     this.lifecycleOperation = name;
     let setupCommandStarted = false;
     let runtimeTransitionStarted = false;
+    let runtimeStartAttempted = false;
     try {
       if (this.launcherProfile === "production") {
         await this.run(name, [...args, "--preflight-only"], {
           ...options,
           message: "Validating Codex configuration before changing the runtime",
           successMessage: "Codex configuration is ready for setup",
-          timeoutMs: Math.min(options.timeoutMs || 15_000, 15_000),
+          timeoutMs: options.timeoutMs || CORE_SETUP_TIMEOUT_MS,
         });
       }
       runtimeTransitionStarted = true;
@@ -1356,6 +1573,7 @@ class RuntimeHost {
       else await this.supervisor.stopForSetup();
       setupCommandStarted = true;
       const result = await this.run(name, args, options);
+      runtimeStartAttempted = true;
       const runtime = await this.supervisor.startIfConfigured();
       if (runtime.status !== "ready") {
         throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);
@@ -1367,6 +1585,7 @@ class RuntimeHost {
       const failures = [];
       let rolledBack = false;
       let checkpointChanged = false;
+      let checkpointRestored = false;
       if (!previousRuntime.configured && setupCommandStarted) {
         try {
           rolledBack = await this.rollbackFirstSetup(checkpoint);
@@ -1386,13 +1605,25 @@ class RuntimeHost {
           );
         }
         try {
+          if (options.previousRuntimeCompatible === false && runtimeStartAttempted) {
+            // Stop any incomplete new runtime while its own configuration is still
+            // available. Never restore old process inputs underneath a live candidate.
+            await this.supervisor.stopForSetup();
+          }
           this.restoreSetupCheckpoint(checkpoint);
+          checkpointRestored = true;
         } catch (caught) {
           failures.push(caught instanceof Error ? caught.message : String(caught));
         }
       }
       let recoveryError;
-      if (runtimeTransitionStarted) {
+      if (runtimeTransitionStarted && options.previousRuntimeCompatible === false) {
+        // The installed launcher cannot run an older configuration. Keep the restored
+        // inputs for a retry instead of attempting an impossible runtime rollback.
+        if (checkpointRestored) {
+          failures.push("The saved configuration was preserved. Restart the launcher to retry the update.");
+        }
+      } else if (runtimeTransitionStarted) {
         try {
           await this.restorePreviousRuntime(previousRuntime, name, {
             repairExternal: previousRuntime.owner === "external" && checkpointChanged,
@@ -1412,7 +1643,7 @@ class RuntimeHost {
         ...failures,
       ].join("; ");
       this.publishOperation?.({ name, status: "failed", message });
-      throw new Error(message);
+      throw new Error(message, { cause: error });
     } finally {
       this.lifecycleOperation = null;
     }

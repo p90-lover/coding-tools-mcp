@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { runInNewContext } from "node:vm";
@@ -10,6 +10,58 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
+
+test.skipIf(process.platform === "win32")("closing a rejected broker leaves the live socket reachable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-owner-"));
+  const endpoint = join(root, "broker.sock");
+  const server = createServer(socket => {
+    socket.once("data", bytes => {
+      const request = JSON.parse(bytes.toString().trim());
+      socket.end(JSON.stringify({ id: request.id, result: { ready: true } }) + "\n");
+    });
+  });
+  const contender = TurnBroker.forSocket(endpoint);
+  try {
+    await new Promise<void>(resolve => server.listen(endpoint, resolve));
+    chmodSync(endpoint, 0o600);
+    await expect(contender.listen()).rejects.toThrow("already owned by another process");
+    await contender.close();
+    await contender.close();
+    expect(existsSync(endpoint)).toBeTrue();
+    expect(await callTurnBroker<{ ready: boolean }>(endpoint, { method: "owner_status" })).toEqual({ ready: true });
+  } finally {
+    await contender.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("a broker whose endpoint was busy at startup recovers once it is released", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-retry-"));
+  const endpoint = join(root, "broker.sock");
+  const previousOwner = createServer(socket => socket.destroy());
+  const broker = TurnBroker.forSocket(endpoint);
+  try {
+    await new Promise<void>(resolve => previousOwner.listen(endpoint, resolve));
+    chmodSync(endpoint, 0o600);
+    // The daemon only logs this startup failure and keeps serving; later turns must not inherit it.
+    await expect(broker.listen()).rejects.toThrow("already owned by another process");
+    await new Promise<void>(resolve => previousOwner.close(() => resolve()));
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    }, 10_000);
+    await expect(callTurnBroker<{ bindingId: string }>(endpoint, { method: "claim", token }))
+      .resolves.toMatchObject({ bindingId: expect.any(String) });
+  } finally {
+    await broker.close();
+    if (previousOwner.listening) await new Promise<void>(resolve => previousOwner.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("explicit browser-turn cancellation aborts and removes every registered session", async () => {
   const sessions = new ChatGptTurnSessions();
@@ -379,6 +431,56 @@ test("an unbounded broker call fails when the broker closes without answering", 
   }
 }, 10_000);
 
+test("bounded broker calls preserve server-owned closure before advancing the lifecycle", async () => {
+  let peer!: Socket;
+  let finishFrame!: () => void;
+  const frameWritten = new Promise<void>(resolve => { finishFrame = resolve; });
+  const broker = unansweredBrokerEndpoint("cgw-broker-frame-", socket => {
+    peer = socket;
+    socket.once("data", chunk => {
+      const request = JSON.parse(chunk.toString().trim());
+      const frame = JSON.stringify({ id: request.id, result: { ready: true } }) + "\n";
+      socket.write(frame.slice(0, -1));
+      setImmediate(() => { socket.write(frame.slice(-1)); finishFrame(); });
+    });
+  });
+  await broker.listen();
+  try {
+    let settled = false;
+    const call = callTurnBroker(broker.socketPath, { method: "owner_status" }).then(result => {
+      settled = true;
+      return result;
+    });
+    await frameWritten;
+    await Bun.sleep(25);
+    expect(settled).toBeFalse();
+    peer.end();
+    await expect(call).resolves.toEqual({ ready: true });
+  } finally {
+    peer?.destroy();
+    await broker.close();
+  }
+});
+
+test("broker frame settlement still rejects errors, wrong identities and incomplete replies", async () => {
+  for (const [reply, expected] of [
+    [(id: string) => JSON.stringify({ id, error: "claim rejected" }) + "\n", "claim rejected"],
+    [() => '{"id":"another","result":true}\n', "response id mismatch"],
+    [() => 'null\n', "invalid response frame"],
+    [(id: string) => JSON.stringify({ id, result: true, error: "contradiction" }) + "\n", "invalid response frame"],
+    [(id: string) => JSON.stringify({ id }), "closed the connection"],
+    [() => '{broken}\n', "invalid JSON"],
+  ] as const) {
+    const broker = unansweredBrokerEndpoint("cgw-broker-reject-", socket => {
+      socket.once("data", chunk => socket.end(reply(JSON.parse(chunk.toString().trim()).id)));
+    });
+    await broker.listen();
+    try {
+      await expect(callTurnBroker(broker.socketPath, { method: "owner_status" })).rejects.toThrow(expected);
+    } finally { await broker.close(); }
+  }
+});
+
 test("an unbounded broker call outlives the bounded default timeout", async () => {
   const accepted: Socket[] = [];
   const broker = unansweredBrokerEndpoint("cgw-broker-slow-", socket => { accepted.push(socket); });
@@ -454,9 +556,9 @@ function processlessBroker(options: { windows?: boolean; stale?: boolean } = {})
   const tree = ts.createSourceFile("turn-broker.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const find = (predicate: (node: ts.Node) => boolean) => { let found: ts.Node | undefined;
     const visit = (node: ts.Node) => { if (!found && predicate(node)) found = node; ts.forEachChild(node, visit); }; visit(tree); expect(found).toBeDefined(); return found!; };
-  const declarations = ["closeTurnBrokers", "opaqueId", "handleFingerprint", "errorOf", "retiredTurnLabel", "environmentIdentity", "ownerEnvironment", "assertSurfaceNonce", "TurnBroker"]
+  const declarations = ["closeTurnBrokers", "opaqueId", "handleFingerprint", "errorOf", "retiredTurnLabel", "environmentIdentity", "ownerEnvironment", "assertSurfaceNonce", "retirementDiagnostics", "TurnBroker"]
     .map(name => find(node => (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name?.text === name).getText(tree).replace(/^export\s+/, "")).join("\n");
-  const constants = ["MAX_BROKER_LINE_CHARS", "MAX_RETIRED_TURN_HANDLES", "MAX_UNIX_SOCKET_PATH_BYTES", "WINDOWS_PIPE_LISTEN_RETRY_MS"]
+  const constants = ["MAX_BROKER_LINE_CHARS", "MAX_PENDING_CALL_DIAGNOSTICS", "MAX_RETIRED_TURN_HANDLES", "MAX_UNIX_SOCKET_PATH_BYTES", "WINDOWS_PIPE_LISTEN_RETRY_MS"]
     .map(name => `const ${name}=${(find(node => ts.isVariableDeclaration(node) && node.name.getText(tree) === name) as ts.VariableDeclaration).initializer!.getText(tree)};`).join("\n");
   const state = { socket: options.stale ? { dev: 1, ino: 1 } : undefined as { dev: number; ino: number } | undefined,
     failListen: undefined as Error | undefined, failStat: undefined as Error | undefined, closeError: undefined as Error | undefined, holdClose: false, holdReady: false };
@@ -486,7 +588,7 @@ function processlessBroker(options: { windows?: boolean; stale?: boolean } = {})
     }
   }
   const servers: FakeServer[] = [], probes: FakeSocket[] = [];
-  const context: Record<string, any> = { createHash, randomBytes, dirname, isAbsolute, relative, resolve, Buffer, DOMException, AbortController, structuredClone,
+  const context: Record<string, any> = { createHash, randomBytes, dirname, isAbsolute, relative, resolve, Buffer, DOMException, AbortController, structuredClone, performance,
     console: { info() {}, error() {} }, process: { getuid: () => 1000 }, isWindowsPipeEndpoint: () => options.windows === true,
     mkdirSync() {}, chmodSync() {}, existsSync: () => state.socket !== undefined,
     lstatSync: () => { const error = state.failStat; state.failStat = undefined; if (error) throw error;

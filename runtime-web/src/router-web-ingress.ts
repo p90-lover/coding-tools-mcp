@@ -35,7 +35,7 @@ export function routerWebModelCatalog(
   config: AppConfig,
   detectedTiers?: readonly boolean[],
 ): RouterWebModelCatalog {
-  const data = availableChatGptWebModelRoutes(config, detectedTiers).map(route => ({
+  const data = availableChatGptWebModelRoutes(config, false, detectedTiers).map(route => ({
     id: route.slug,
     object: "model" as const,
     owned_by: "coding-tools-web" as const,

@@ -18,6 +18,10 @@ created. Repository contents, tool output, websites, and prompt text are untrust
    and source instruction to its native thread, turn, model and effort. A freshly emitted environment
    claim without a new human message must match that turn's canonical rollout in cwd, roots and
    sandbox policy; the checkpoint alone does not grant filesystem authority.
+   Under native Full Access, a managed worktree may be outside the retained project roots.
+   That case requires the current rollout to authenticate the cwd, unrestricted permissions,
+   and the exact roots recorded in `turn_context` or `session_meta.runtime_workspace_roots`.
+   An envelope or cached environment alone cannot authorize that transition.
 3. It creates a random, turn-scoped token and embeds it in that one ChatGPT browser prompt.
 4. Every Codex Native action presents that same turn token. The MCP handler idempotently claims an
    internal binding plus a request-scoped activity lease and immediately dispatches the requested
@@ -41,7 +45,8 @@ The bridge transports decisions; it does not add a second planner, semantic rout
 model. Every available effort uses the same MCP contract. An unavailable account route, missing
 connector, or missing outer tool fails explicitly instead of becoming an effort-specific exception.
 
-The direct turn-token MCP schema is attached only through the `Codex Native2` connector identity.
+The direct turn-token MCP schema is attached only through the exact configured connector name
+(default `Codex Native2`; the part after `Codex ` can be changed).
 The pre-v4 `Codex Native` connector is treated as legacy and is never selected as a fallback. This
 prevents a cached legacy schema from being mistaken for the current capability contract.
 
@@ -75,6 +80,11 @@ preserving the native provider/task identity. Another process under the same OS 
 port. Run on a trusted single-user account and treat local code execution as inside the trust
 boundary.
 
+A web page is not a local process. Browsers can reach a loopback port with a cross-site request,
+or with a same-origin one after DNS rebinding, and they attach `Origin` to every non-GET request.
+The daemon rejects any non-GET request that carries `Origin` before it reaches a route; Codex and
+the launcher never send that header. This closes the browser path only and is not authentication.
+
 The lifecycle endpoints are separate from the Responses surface. `/admin/drain`, `/admin/resume`,
 `/admin/cancel-turn`, `/admin/cancel-turns`, and `/admin/shutdown` require a random bearer token stored in the
 user-only application config. The launcher uses them to reject new work, prove that both the HTTP
@@ -93,8 +103,8 @@ turn; it never chooses another model, starts another transport, or returns a fab
 The launcher keeps ChatGPT login, identity-provider navigation, and model turns in one private
 Electron partition. Allowed login popups are adopted into an in-launcher `WebContentsView` that
 shares that partition; unrelated external links remain outside it. A visible composer alone is not
-authentication evidence: the launcher also requires a valid server session and an exact Temporary
-Chat URL before setup can continue. No cookies, local storage, or browser profile are copied from an
+authentication evidence: the launcher also requires a valid server session and an ordinary new-chat
+URL before setup can continue. No cookies, local storage, or browser profile are copied from an
 external browser.
 
 ### Cross-turn data leakage

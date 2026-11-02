@@ -1,0 +1,1755 @@
+{
+  "schema": 1,
+  "repository": "miuuyy/codex-chatgpt-web",
+  "tag": "v6.1.17",
+  "commit": "860fa576eb47d9e20d7d8289235bfea94392d2fd",
+  "tunnelClientVersion": "0.0.16",
+  "licenseSha256": "d8b06e8d802722749b8f09e4ed1f2439fde0995a09b7e47c65dca3cc54d43d6e",
+  "files": [
+    {
+      "path": ".github/actionlint.yaml",
+      "size": 279,
+      "sha256": "b9b945e14c1c530e18579d4feb10548bbdc4ae3710d097dbb6682378b8bffd81"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug-report.yml",
+      "size": 4297,
+      "sha256": "bb9b8e87c3d45196a41e0d2067345cca43eeb6b40bef286ed4608d64f52ef3b1"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "size": 896,
+      "sha256": "758c7ec1cf7568ab4c7ceb43d3fce1c7bebc45adc73149dc068e615eac50bd66"
+    },
+    {
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "size": 2366,
+      "sha256": "75acbd544945a337f00b83a255b621583b9b16635f07e21a83712c7977fd96a7"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "size": 3429,
+      "sha256": "cc4c2437f5cbc802404a48e65904525ae5362d57f303588923bcdeaac0878db1"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "size": 9634,
+      "sha256": "2ea3914e3e4a29143effd4b70ff07d8dd64cb496f04478a7fd55190db7824129"
+    },
+    {
+      "path": ".gitignore",
+      "size": 250,
+      "sha256": "3ee5072d71187d971f7b61add029d6a085ab0123c632f6f56c6a9685fffa4cd8"
+    },
+    {
+      "path": "assets/demo.gif",
+      "size": 5829366,
+      "sha256": "3b8cda5caaac1e971b52e32ec69ea8d8e56e3bf1cba40a08c9a273eff2256012"
+    },
+    {
+      "path": "assets/readme/download-linux.svg",
+      "size": 854,
+      "sha256": "bc91060f1b68a5d11c566b18d6fe8109c19550f142525a5137fb1b6ea92082bf"
+    },
+    {
+      "path": "assets/readme/download-macos.svg",
+      "size": 1308,
+      "sha256": "c94d05e0a20d9a8eac2d81890151814aab0dd5ec98e5025b67c32a4c94c1cf4e"
+    },
+    {
+      "path": "assets/readme/download-windows.svg",
+      "size": 726,
+      "sha256": "0ddaff62b59cc700d8061a4d3f3c029e100f6246a7ffbb8a1020868f4cba0cd2"
+    },
+    {
+      "path": "assets/readme/hero.svg",
+      "size": 1396,
+      "sha256": "919c7f98bb45278db154b0444cce1d90e924c6348e2f426aedf9502e17357325"
+    },
+    {
+      "path": "assets/readme/persona-voice.svg",
+      "size": 603,
+      "sha256": "f63f81aa04dd0e373055b7d9abf1caec2b73e56e8137afcaaa9ad6526ed709fd"
+    },
+    {
+      "path": "bun.lock",
+      "size": 22080,
+      "sha256": "d0f8e12a6f87de6e17defd19c97ece4ee38af131155131f3089148d9b0294ce9"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "size": 3313,
+      "sha256": "81ac3454b92bdeb114b97ef9ddfa78176e4ea2692c8ca9629f062da145946589"
+    },
+    {
+      "path": "docs/architecture.md",
+      "size": 22434,
+      "sha256": "0e3804d3e75718cdc855f75b0a6e0e2e4df543d2b9e24d1be1ba59813c63c44a"
+    },
+    {
+      "path": "docs/dev-chat.md",
+      "size": 11364,
+      "sha256": "b7aa1fcf58c066713762ea9fffb179a75fcdaf4a850b9901cc54eb6148de17ad"
+    },
+    {
+      "path": "docs/release-validation.md",
+      "size": 5485,
+      "sha256": "89f1b4d8472d4bc406745ccab1754af26803be9b5e2de028a9579a59fc6d4d90"
+    },
+    {
+      "path": "docs/security-model.md",
+      "size": 9259,
+      "sha256": "a72dd423b0a42722ac10bc3dac3d3f22804f1fa24e018609df1700ad3da3cc78"
+    },
+    {
+      "path": "launcher/assets/icon.ico",
+      "size": 38747,
+      "sha256": "cf85d470b4a24071d78b6f9765cd428eb8cab1db05ad7cf54893bc0b11796f4c"
+    },
+    {
+      "path": "launcher/assets/icon.png",
+      "size": 467097,
+      "sha256": "f251b2f98e35ecdba402028bc36ac2bf89c091a4f83f46ba2000a847bd855da5"
+    },
+    {
+      "path": "launcher/assets/linux-appimage-runner.sh",
+      "size": 3295,
+      "sha256": "ff370085dcbc714c03299a4a06aec011299598326bf37ed3c6c4b9bf5572c391"
+    },
+    {
+      "path": "launcher/assets/mcp-mark.svg",
+      "size": 1067,
+      "sha256": "75b007e05880de1648832e86695d7b02b5e92746fa9a3c51f622cbba56137afb"
+    },
+    {
+      "path": "launcher/assets/trayTemplate.png",
+      "size": 299,
+      "sha256": "8fba1c2cc3fd89823c1cf7d754496a9a5fc26b62ee18cc9c3506d8e5a521e63b"
+    },
+    {
+      "path": "launcher/assets/trayTemplate@2x.png",
+      "size": 507,
+      "sha256": "8c7b6037994531236ec966468ca17eefe6fc5dad9d6478a9ce76ea875a992411"
+    },
+    {
+      "path": "launcher/bun.lock",
+      "size": 89620,
+      "sha256": "99fe32e89ddcd6c062b565bb19f92be8fcebbccd303c88aea8da93de2dfad511"
+    },
+    {
+      "path": "launcher/electron/atomic-file.cjs",
+      "size": 1563,
+      "sha256": "274a849d3004a2c22c8507b13e671d0e81fc2532ba7d90a0493bc375f59e3ef8"
+    },
+    {
+      "path": "launcher/electron/autostart.cjs",
+      "size": 3204,
+      "sha256": "fbd1e62683342c265f4907e781aff8805d76515b6777792575b14df267b635e8"
+    },
+    {
+      "path": "launcher/electron/browser-announcements.cjs",
+      "size": 2316,
+      "sha256": "a95b5e2807e51745e16696bb45da6f50f070623ebc4efeaac61c91b5ce3568f7"
+    },
+    {
+      "path": "launcher/electron/browser-helper-verifier.cjs",
+      "size": 6656,
+      "sha256": "5d92fc1372aa5b939debe15b2eee2de00fba784cfbf47cf920e5957dd063471e"
+    },
+    {
+      "path": "launcher/electron/browser-host.cjs",
+      "size": 139594,
+      "sha256": "7b6a24d6bf04df3fbafeb3d5e70d89d699ae0417d410fefd5089da208ae9b4be"
+    },
+    {
+      "path": "launcher/electron/browser-page-script.cjs",
+      "size": 1668,
+      "sha256": "c458eb9f64df0f2028f155134f4651c3892f86920217e5a80662420316395b28"
+    },
+    {
+      "path": "launcher/electron/browser-state.cjs",
+      "size": 2586,
+      "sha256": "da76e18553ad552a2e9ca9aef2578d9de110ddcec2916116c37ce7d7506341a6"
+    },
+    {
+      "path": "launcher/electron/chatgpt-auth-session.cjs",
+      "size": 2510,
+      "sha256": "6c99cfd3d843441bb5ecd67a84b1fbe2e023eddc78603536e97221bf759b41c8"
+    },
+    {
+      "path": "launcher/electron/connector-identity.cjs",
+      "size": 2132,
+      "sha256": "ee33533d706e5e75099fe5b4ff3b9a4b83b950c7fc6b3f47d4931d57d0cd8b33"
+    },
+    {
+      "path": "launcher/electron/control-server.cjs",
+      "size": 16685,
+      "sha256": "182d40cd835d1dea3c34c35550ea700fb076b9c5e6aab75ab876dc7bfb5586fd"
+    },
+    {
+      "path": "launcher/electron/languages.json",
+      "size": 429,
+      "sha256": "491a0037b77b753f572a7f2a86ce41661a6a74cd7c665a93935d433c29d0746d"
+    },
+    {
+      "path": "launcher/electron/limits-controller.cjs",
+      "size": 4027,
+      "sha256": "8f7b8f2fbe73e76647ca2e4c3e1199caad07975321555c002ca23f52107783b4"
+    },
+    {
+      "path": "launcher/electron/limits-policy.json",
+      "size": 303,
+      "sha256": "02da3d94839b7230bc74a97923b81799b7b1acd4487ef605ce261f9a16cb2611"
+    },
+    {
+      "path": "launcher/electron/limits-store.cjs",
+      "size": 11204,
+      "sha256": "1d7e7b97593eda719094df23d8fc7b2cfb4f2952f40e3a11ea42b7325f217654"
+    },
+    {
+      "path": "launcher/electron/logging.cjs",
+      "size": 8306,
+      "sha256": "2544371bada8fc8724ebc6463eaec95d9a8328ed25c34ce98088e64851415c0c"
+    },
+    {
+      "path": "launcher/electron/main.cjs",
+      "size": 70561,
+      "sha256": "7223da1c8a278a3480e3d69ee623a97fc787cc76944e07e3e63842883f3ae58f"
+    },
+    {
+      "path": "launcher/electron/passkey-login-state.cjs",
+      "size": 4813,
+      "sha256": "02e4ccd40aca8d832398f2a4fb9e0e6f5ddc240583c0768d09373276e1b7e95d"
+    },
+    {
+      "path": "launcher/electron/preload.cjs",
+      "size": 4944,
+      "sha256": "a3cc4935f54fae463ea818b672979e0225ac2d2f9b16feb18105ee0006d2cdc3"
+    },
+    {
+      "path": "launcher/electron/process-tree.cjs",
+      "size": 1907,
+      "sha256": "750c0e7e89aa562c8ac6b28eba5649f0f5140a7e88262551dbc62d0176372aa1"
+    },
+    {
+      "path": "launcher/electron/profile.cjs",
+      "size": 2293,
+      "sha256": "a3a5358d4ce228820e52cc579e359d1f3cfdc29f8a1a726e95f9e20377b314d6"
+    },
+    {
+      "path": "launcher/electron/retained-turn-release.cjs",
+      "size": 534,
+      "sha256": "6d161d413140962de07ccebde7f7719a4a115141d911f9529d7e608c3058dfca"
+    },
+    {
+      "path": "launcher/electron/runtime-command.cjs",
+      "size": 2295,
+      "sha256": "b08d4ccd30460471599df5873af5d9a3123bb58e725f42389b691321d73652b2"
+    },
+    {
+      "path": "launcher/electron/runtime-install.cjs",
+      "size": 11413,
+      "sha256": "fc1fd29967d84fb7c3c12e73589a091e4f247b52674441dad3058e1a230ab837"
+    },
+    {
+      "path": "launcher/electron/runtime-supervisor.cjs",
+      "size": 82512,
+      "sha256": "2cf806fa8c5183f99517f3e6ecf394ae9758052d03795dae4e58ac99e0a20055"
+    },
+    {
+      "path": "launcher/electron/runtime.cjs",
+      "size": 69894,
+      "sha256": "744711f0a1816570fefac6c94ac2aa676fab8fc791b108f77f42c4351b62e000"
+    },
+    {
+      "path": "launcher/electron/session-reminder-preload.cjs",
+      "size": 635,
+      "sha256": "4bf4ac66af9d96368e7e5b59ff7683ce4807b5bcc1d33da3b056795dd767dfca"
+    },
+    {
+      "path": "launcher/electron/session-reminder-view.cjs",
+      "size": 6184,
+      "sha256": "5c75307da981fa65217a172b5b6c4affe241b4052fe0a3f8f3f7dc477452ff01"
+    },
+    {
+      "path": "launcher/electron/state.cjs",
+      "size": 4843,
+      "sha256": "97026527d92848e483ad43d486b2888329cdcb46f2cf4b8b5690d2161b9d0457"
+    },
+    {
+      "path": "launcher/electron/tunnel-proxy.cjs",
+      "size": 4562,
+      "sha256": "445d9a8a7a9c2c7533720dce363c8d76e8b0a8b0f079a63cb8f0edc8b98b1968"
+    },
+    {
+      "path": "launcher/electron/turn-suspension.cjs",
+      "size": 1913,
+      "sha256": "6364570ab9de2d94afda14d18bca7d900b5467cf99cd1250fceeef522c326523"
+    },
+    {
+      "path": "launcher/electron/update-worker.cjs",
+      "size": 5708,
+      "sha256": "faa240cace42a6bac39217b4cc62f15a820b2e201805153232fd678b741b08f9"
+    },
+    {
+      "path": "launcher/electron/update.cjs",
+      "size": 16862,
+      "sha256": "2fc0a412aed9967ac46e973368d69cc237b3e9e7f4501f8cbb18f9977ec7f48a"
+    },
+    {
+      "path": "launcher/electron/window-state.cjs",
+      "size": 4019,
+      "sha256": "2d4d27b9187f6239798e4623bf9f95fabdc90a102b6b914376ea1a283ea1888c"
+    },
+    {
+      "path": "launcher/electron/windows-trust.cjs",
+      "size": 1178,
+      "sha256": "35563c86cc8485a0b3a436253301d18b575af515f6329f790ba2e88af9292ff1"
+    },
+    {
+      "path": "launcher/index.html",
+      "size": 624,
+      "sha256": "39f6b258b74bacaeb0a510f7c444b31faa55c52eb25140d1b8a3380f4ddf7b75"
+    },
+    {
+      "path": "launcher/package.json",
+      "size": 2924,
+      "sha256": "8895aba395385dc0c4d0c9c60d392ad5e90b608dd8f0addbf77c5ada25662de6"
+    },
+    {
+      "path": "launcher/scripts/dev.cjs",
+      "size": 2134,
+      "sha256": "45f52a0321e1de7361f9218ff01a3d8a5946b9cb50f6344d9541c5cf7d74118f"
+    },
+    {
+      "path": "launcher/scripts/package.cjs",
+      "size": 5257,
+      "sha256": "c283c7bb055819f4115ada17b244f532579175d186467918633c56ed0bf49475"
+    },
+    {
+      "path": "launcher/scripts/prepare-linux-appimage-tools.cjs",
+      "size": 4690,
+      "sha256": "f636933459526b51cc4f108280566e4866ddc9c7b1a5b16c54dad807e2c2959b"
+    },
+    {
+      "path": "launcher/scripts/prepare-runtime.cjs",
+      "size": 1122,
+      "sha256": "a5c9e71e4e42ba8dd6418feb498f462945ef8ff7d6d8ed203231c5ee13290e22"
+    },
+    {
+      "path": "launcher/scripts/smoke-linux-appimage-symbols.sh",
+      "size": 2616,
+      "sha256": "99bdb59fc1e6b6410806e67354c64a91f14d7b075e077b338c6ac1fcb3f9e97a"
+    },
+    {
+      "path": "launcher/scripts/smoke-package.cjs",
+      "size": 6078,
+      "sha256": "3a5bac63d0e8c81ca97a9e4dc1fe880146cec00f4b108b169ba0475d39d854c8"
+    },
+    {
+      "path": "launcher/src/App.tsx",
+      "size": 95809,
+      "sha256": "3671bd824ba0adbd130ddb7699a9d6d422de396b6e3ddde975ecad98c8704e62"
+    },
+    {
+      "path": "launcher/src/assets/mcp-connect-connector.gif",
+      "size": 1187553,
+      "sha256": "125ed1e66b77c088dc44f52f0e728833dcbcf6396d1dac0b745a6876f52c6b30"
+    },
+    {
+      "path": "launcher/src/assets/mcp-connect-connector.mp4",
+      "size": 1839205,
+      "sha256": "2cebfe72ea9f29cfd57a2e8c69153dc57c8716e2c9b952be604348658645c3f2"
+    },
+    {
+      "path": "launcher/src/assets/mcp-create-tunnel.gif",
+      "size": 2704422,
+      "sha256": "e9461ca6191a959f749cf0ec2eb4a646f051af08e5dd06caa6e26d888dee7390"
+    },
+    {
+      "path": "launcher/src/assets/mcp-create-tunnel.mp4",
+      "size": 715638,
+      "sha256": "c342b71d2ca533c28a23913119db87ba9c0576885017c86dd57cb3ef7df07f3a"
+    },
+    {
+      "path": "launcher/src/i18n.ts",
+      "size": 96365,
+      "sha256": "19b83247fcc13f67bb6e93cbfd719ff6e9cc9ce820d6f515b9beef1e500e3dc4"
+    },
+    {
+      "path": "launcher/src/icons.tsx",
+      "size": 4540,
+      "sha256": "798f0134030bf5b24692c4da1f6aad94a7349011db50db1be9c560507568311a"
+    },
+    {
+      "path": "launcher/src/limits-copy.ts",
+      "size": 18769,
+      "sha256": "4c7807544beabb928c9eb02001347fb6d81ff01f8b3e1da393d2da21cf7dacba"
+    },
+    {
+      "path": "launcher/src/limits-types.ts",
+      "size": 948,
+      "sha256": "868e627180bb40a3504ac5a5737d966c9f17873d935685d9a102fcebaf683922"
+    },
+    {
+      "path": "launcher/src/limits.css",
+      "size": 8070,
+      "sha256": "fe6a6495b5190b27b2dc172d323a678f0e97d5f4a17d699eacb2857a95252459"
+    },
+    {
+      "path": "launcher/src/LimitsSurface.tsx",
+      "size": 12045,
+      "sha256": "e5572e9b340e527680d9377af1f8e605a3ac2e02a48e1147c4dad6103ae08fab"
+    },
+    {
+      "path": "launcher/src/main.tsx",
+      "size": 393,
+      "sha256": "6f2ef4bc66f78fca888b7dd3a436b85bc88b6a86d567b269f01329b285a8df2f"
+    },
+    {
+      "path": "launcher/src/SessionReminderOverlay.tsx",
+      "size": 1638,
+      "sha256": "057c7da65ae52ddec37faef0936f9476e99d4af17dbccd7fa5ef6a6c95c1061c"
+    },
+    {
+      "path": "launcher/src/styles.css",
+      "size": 53601,
+      "sha256": "bb766354aff1c65a6121e64a96731e8fbcd623b599ad18030ae45fdd09722a23"
+    },
+    {
+      "path": "launcher/src/tokens.css",
+      "size": 2512,
+      "sha256": "9e2524cdade2b0394c244eafd7c533f19e3b7d76e979a4d72d138280e3815edd"
+    },
+    {
+      "path": "launcher/src/turn-activity.ts",
+      "size": 881,
+      "sha256": "0b46fa9cb6b1462d3ad4bca0c1b06b79cd53e63a767115cfc1de19204a02775e"
+    },
+    {
+      "path": "launcher/src/types.ts",
+      "size": 8056,
+      "sha256": "8c0312f5fef5370d9d9953551736d414f8b0ac15dc6ceb7a09c3b96ed176e88d"
+    },
+    {
+      "path": "launcher/src/useLimits.ts",
+      "size": 3297,
+      "sha256": "a3699bb02222e6384c343f123789d13686d05047ac6a3434b14d241b232faa20"
+    },
+    {
+      "path": "launcher/tests/atomic-file.test.cjs",
+      "size": 1833,
+      "sha256": "30415b7e984537ef1b9ff90cb4dce5cfc5ff749964e3176a8507ebe8af8e92f6"
+    },
+    {
+      "path": "launcher/tests/browser-announcements.test.cjs",
+      "size": 4972,
+      "sha256": "23ad00255f8cfcdb77f2447645ce8fd12172215152f21a1efe61ffce064cc648"
+    },
+    {
+      "path": "launcher/tests/browser-helper-verifier.test.cjs",
+      "size": 4078,
+      "sha256": "f31f8a165962e7edd9b642b45fb4656b628bddeeddd75a2cb31d6e61715887fe"
+    },
+    {
+      "path": "launcher/tests/browser-host.test.cjs",
+      "size": 167565,
+      "sha256": "ebd5cccbc6847ea12ce50b8fc479ab84024a72d0f1e1c79dbd6b31c642191393"
+    },
+    {
+      "path": "launcher/tests/browser-page-script.test.cjs",
+      "size": 2239,
+      "sha256": "32b3caf824251d1ebdaf6984b66cf7fdae5d763119a7ca9820f72e8743f642df"
+    },
+    {
+      "path": "launcher/tests/control-server.test.cjs",
+      "size": 32665,
+      "sha256": "b53cb72bb5daeac72d535d3fb54f4d23d8abbc638a353ac0b0deb8399b95b896"
+    },
+    {
+      "path": "launcher/tests/fixtures/chatgpt-link-regexp.json",
+      "size": 307,
+      "sha256": "a35daec957edb2eeeac34d2c3f17c9c779cee5eb221824d08e7dbec2913df404"
+    },
+    {
+      "path": "launcher/tests/fixtures/composer-controls.cjs",
+      "size": 183,
+      "sha256": "1db238bb405e382e5482ec2ab26a9c4647e661fac00c3273e7e3dd501c4b7cd9"
+    },
+    {
+      "path": "launcher/tests/fixtures/context-markdown-regexp.cjs",
+      "size": 1486,
+      "sha256": "db8cc385db05a16c70101acd61c026cb6c4a2c46570bff28813f77b4e2a76270"
+    },
+    {
+      "path": "launcher/tests/fixtures/navigation-viewport.cjs",
+      "size": 3123,
+      "sha256": "383f0cb26e4dd018e816f94b76c4b00e3247a51208d7414185b6aa7764948133"
+    },
+    {
+      "path": "launcher/tests/fixtures/session-reminder.cjs",
+      "size": 3479,
+      "sha256": "43f235d78f05abb480139df3a6824fb92be5bd5f49cb1fbf39edb5c7d4dc6ed8"
+    },
+    {
+      "path": "launcher/tests/fixtures/viewport.cjs",
+      "size": 1849,
+      "sha256": "715ce1f927dda2e51c287d04a0261bdbc43f2b89a59cb4c8032d52579c54b23f"
+    },
+    {
+      "path": "launcher/tests/limits-controller.test.cjs",
+      "size": 8257,
+      "sha256": "07f6a14b881ef12741ec4ad8ac75cce8f39d99dbafae90f0b81a33842ac371f7"
+    },
+    {
+      "path": "launcher/tests/limits-store.test.cjs",
+      "size": 12752,
+      "sha256": "01fdd720ded32f92af46007fc55224602811932db6c9a0863e420539099b1395"
+    },
+    {
+      "path": "launcher/tests/localization.test.cjs",
+      "size": 10290,
+      "sha256": "b1dd88fd33c9684c13eb6e998dea61214c2d3ea561c0e0c5cd6ff3e93884518d"
+    },
+    {
+      "path": "launcher/tests/logging.test.cjs",
+      "size": 8680,
+      "sha256": "c362b8b1192da0090bdf85d0ef1faa23c5d7465067bbf4f437460da41b38cd6a"
+    },
+    {
+      "path": "launcher/tests/packaging-contract.test.cjs",
+      "size": 21180,
+      "sha256": "3e48d25855530f3d865eb0db5c02d77109144bf098be895def555ef5316d8ad5"
+    },
+    {
+      "path": "launcher/tests/passkey-login-state.test.cjs",
+      "size": 2185,
+      "sha256": "67d29c501feed66beeb344fd007cf8859cbe42bb7a824bf66bd6c83aaf12aa42"
+    },
+    {
+      "path": "launcher/tests/profile.test.cjs",
+      "size": 2557,
+      "sha256": "67462a2f09180cc482412135994553f5ebaa1f0d7b20bad8e1b80891e55c3f3b"
+    },
+    {
+      "path": "launcher/tests/renderer-wiring.test.cjs",
+      "size": 56070,
+      "sha256": "71f2b667574b5f6e55c1acf651d6ca0872ff78471ee8bcd7c329eb97fab09e73"
+    },
+    {
+      "path": "launcher/tests/runtime-host.test.cjs",
+      "size": 67099,
+      "sha256": "e5eb3b8f4512e4c0c5c1593b90b1cf5008521b2bc8f2cb42346348912fadb14b"
+    },
+    {
+      "path": "launcher/tests/runtime-install.test.cjs",
+      "size": 13128,
+      "sha256": "4737a62e50bba84c3afd594f5d0fc8d6f1607bf94bdb55ffea3511582f52d074"
+    },
+    {
+      "path": "launcher/tests/runtime-supervisor.test.cjs",
+      "size": 88168,
+      "sha256": "805dd858e4004ecd0cfc81616be16f128a62693cd625440bcaeb5c46905f11f5"
+    },
+    {
+      "path": "launcher/tests/state.test.cjs",
+      "size": 10202,
+      "sha256": "523c2b226d92e6793e2a15c25af9e4e16b97c8d6ed3b264a490a0d2c5b33dc7b"
+    },
+    {
+      "path": "launcher/tests/tunnel-proxy.test.cjs",
+      "size": 9014,
+      "sha256": "3b17cd3fe82fe5aef37b538da8e8058d6d33db8f588d56d26734c484a06cca23"
+    },
+    {
+      "path": "launcher/tests/turn-suspension.test.cjs",
+      "size": 3924,
+      "sha256": "e2951839781cf738daecc5620023d105a43c6b769e2f9c5af932150f7b4789b2"
+    },
+    {
+      "path": "launcher/tests/update.test.cjs",
+      "size": 21211,
+      "sha256": "a5d81b8cd33ee11740da307834d9ebe41209250fb1425ee713f7dbb3ea4bba6b"
+    },
+    {
+      "path": "launcher/tests/window-state.test.cjs",
+      "size": 3079,
+      "sha256": "3cdcc5675e9ee81f7da03d1ccd87995f8ffe8d9b96149b057e15b1af7dd82126"
+    },
+    {
+      "path": "launcher/tests/windows-installer.test.cjs",
+      "size": 859,
+      "sha256": "ea018b8b2d6b32cb5a443200e0043391cf6030c198ce529c59f5cbb6156551f2"
+    },
+    {
+      "path": "launcher/tests/windows-installer.test.ps1",
+      "size": 2242,
+      "sha256": "c3f0c186f30f57819b1ef35cfb7dc75fa154becc14942914596b687c3467aaed"
+    },
+    {
+      "path": "launcher/tests/windows-trust.test.cjs",
+      "size": 3929,
+      "sha256": "a15c1de5593d035cfaf4939497fbf062c6b6a2f77733ed47b6c36ded70e2b110"
+    },
+    {
+      "path": "launcher/tsconfig.json",
+      "size": 507,
+      "sha256": "20a936e14228ab8ea4d2899ae3004096da5d2fd8ffd1f74368d826d53b04fed0"
+    },
+    {
+      "path": "launcher/vite.config.ts",
+      "size": 416,
+      "sha256": "ef56e64d250eafc59e1a8b06e5e0f640da1adabfa0f1654d63fd6e999cfdb075"
+    },
+    {
+      "path": "LICENSE",
+      "size": 1087,
+      "sha256": "d8b06e8d802722749b8f09e4ed1f2439fde0995a09b7e47c65dca3cc54d43d6e"
+    },
+    {
+      "path": "LICENSES/Bun-1.4.0.md",
+      "size": 5377,
+      "sha256": "2cb858b2db8fc793bca2093489c5bc8eee615d002cc4924254904044c27a0afa"
+    },
+    {
+      "path": "LICENSES/libnotify-0.8.7-LGPL-2.1.md",
+      "size": 26607,
+      "sha256": "fb293dcf753752a80c7bec86cd406b53c55b086c1f1bbf71425ce437ea3f1e4c"
+    },
+    {
+      "path": "LICENSES/tiktoken-MIT.txt",
+      "size": 1078,
+      "sha256": "418cb499b436128d653d79941333a5437b7be2ea9213dcc2f04d15d5d2c51d86"
+    },
+    {
+      "path": "package.json",
+      "size": 3154,
+      "sha256": "9371567d8a60fe731f2505fc3459cbd080040c3bb29632e3f01c1f678d7570fb"
+    },
+    {
+      "path": "README.ja.md",
+      "size": 14503,
+      "sha256": "e5299ed5b77adea09736e7e6f1f454581568a46eb2ee34da274e5c0893a46635"
+    },
+    {
+      "path": "README.ko.md",
+      "size": 12534,
+      "sha256": "c0c1b54bf3d81740c84ca6030d79a61ac7ab84f30d54793a0cfd6e55243ae77d"
+    },
+    {
+      "path": "README.md",
+      "size": 11829,
+      "sha256": "e5346cdf1bc94e716762db850e12138fb9b6b64dd7b0a6594efb23c636622eab"
+    },
+    {
+      "path": "README.zh-CN.md",
+      "size": 11212,
+      "sha256": "928caeb7eb6ac89153dd0f138d9c256bed72de5ec62a462bcc4a4a7a35006c26"
+    },
+    {
+      "path": "scripts/build-browser-helper.ts",
+      "size": 848,
+      "sha256": "089669c9655532d180d9b9e696d3a45dfe96001dfed8fcf70cc94f4209809eb6"
+    },
+    {
+      "path": "scripts/build-runtime-bundle.ts",
+      "size": 7619,
+      "sha256": "7729913e69919b199d3c41fbfb6c2eacfa0cccb4c094c3e69e397bab5f1758ac"
+    },
+    {
+      "path": "scripts/check-version.ts",
+      "size": 3298,
+      "sha256": "559c537b800119f2874d407cb7b72044daccf5ebafbe3d1e3b31c07d5c84aa4e"
+    },
+    {
+      "path": "scripts/clean.ts",
+      "size": 271,
+      "sha256": "100066a30f25c5cf6904c3d3f1f2e0e3a81e4d40182d648533fa0170a93cb2f6"
+    },
+    {
+      "path": "scripts/generate-third-party-notices.ts",
+      "size": 4752,
+      "sha256": "b916a603f27ec73ca503d6ba1cdf54f0d0282ae3bcb34702456fa9af672787cb"
+    },
+    {
+      "path": "scripts/install-launcher.ps1",
+      "size": 5119,
+      "sha256": "f319b61fdaffc6a937a06e1fc894790716918a7fcaead9a3009ed50fa9a0ac8b"
+    },
+    {
+      "path": "scripts/install-launcher.sh",
+      "size": 6736,
+      "sha256": "7a92e1aec6365315e6d0d7aaebc22a4c41426bed865bf918acc7089665fd0abb"
+    },
+    {
+      "path": "scripts/install.sh",
+      "size": 2998,
+      "sha256": "eb3b9704c158bd95d27468e75c9930435863d7be1f8bec6ef9cebd1091bf25e0"
+    },
+    {
+      "path": "scripts/prepare-linux-libnotify.sh",
+      "size": 2042,
+      "sha256": "a26f3ca0ac7cc89628f2d4a47a6e70ac30a7c9a0d35a3c64cf547e00fdcb023f"
+    },
+    {
+      "path": "scripts/prepare-windows-baseline-bun.ps1",
+      "size": 1777,
+      "sha256": "ffd1a068ef244074335dfbf3b4d29c54fea1bb76b5cbd80fe00e769f2069bbb2"
+    },
+    {
+      "path": "scripts/smoke-codex-cancel.ts",
+      "size": 6623,
+      "sha256": "9dde3e391ac28362dc939d524ac8216a40991f5fa1ce34059da606b75ba25c2b"
+    },
+    {
+      "path": "scripts/smoke-codex-catalog.ts",
+      "size": 5172,
+      "sha256": "bba77890c224868daa0180228b621e1281ea0db12ab994c4a8915b24d038af82"
+    },
+    {
+      "path": "scripts/smoke-codex-environment.ts",
+      "size": 11687,
+      "sha256": "565340ef9c14642c8fc1c08c391d44bca4bb59cb9720e11ad08f1d3e653ee249"
+    },
+    {
+      "path": "scripts/smoke-codex-interrupt.ts",
+      "size": 11270,
+      "sha256": "aaec74a30bb9c2253fd4b2552f93fe7a4625c7c95e18da7d9f7f593250f11a61"
+    },
+    {
+      "path": "scripts/smoke-codex-subagents.ts",
+      "size": 15832,
+      "sha256": "05006e5b4961a7e238e71987fdf5be992c241dd4a86047bbfcdb73c03e9f8e74"
+    },
+    {
+      "path": "scripts/smoke-codex-web-subagents.ts",
+      "size": 8638,
+      "sha256": "e8a2180f536e1086361448abe828a8448c70d0e780eed60f5ed6ff3c32d7c225"
+    },
+    {
+      "path": "scripts/smoke-release.ts",
+      "size": 8597,
+      "sha256": "16c7a10c3fe611b8119904e9eafa2d5a6f32a53b360d6860832c742f9e89b5e3"
+    },
+    {
+      "path": "scripts/start-launcher.ts",
+      "size": 736,
+      "sha256": "6c08c2ee404640f3894a11a780a68933b5d38b18a1c7906f6ee28a7e0487d5d3"
+    },
+    {
+      "path": "scripts/verify.ts",
+      "size": 1471,
+      "sha256": "43a147bc40e4cac21117030e81ed0ee4dcccad2cb9efef20bd93f80f3fc4752f"
+    },
+    {
+      "path": "SECURITY.md",
+      "size": 1349,
+      "sha256": "0dec44022ac0ed56e6a9bee583c57ade9258ace0290c25157b82f9d30e5190cd"
+    },
+    {
+      "path": "skills/pro-researcher/agents/openai.yaml",
+      "size": 220,
+      "sha256": "811077a9c0142447247b6d09fd1a8021833b2d9b3b4676825336307c9b13bed7"
+    },
+    {
+      "path": "skills/pro-researcher/SKILL.md",
+      "size": 6217,
+      "sha256": "a6243029f80955ff16ed293fb1cc576ec81fa6603882f0b962864fe78d436f37"
+    },
+    {
+      "path": "src/adapters/base.ts",
+      "size": 419,
+      "sha256": "8441cdd6621d8fcd700383a07c01a234029b3adea854fc6f79119bdcc58ea4f2"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/adapter-error.ts",
+      "size": 3479,
+      "sha256": "82d771c37640d6218828a8a6809f5f488c2ed33562bc1c10326ff6ca5b8cdf41"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/attachment-upload.ts",
+      "size": 8123,
+      "sha256": "516d8825e2180c14a1d2665973709ba71549c42357765db9263c713fedfcf5fd"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/browser-diagnostic-history.ts",
+      "size": 4144,
+      "sha256": "e1946a6c7f1962ba2377910bf1897ae53b58f64e55acb598f870afa2c08f1b12"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/browser-helper-main.ts",
+      "size": 24106,
+      "sha256": "1e8eb2513bed348dccc7acb47ee4175f73bc4aab00e5256558d5b4492ba66dac"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/browser-helper-prompt-selection.ts",
+      "size": 951,
+      "sha256": "72e0293b5aad62d99525e3e8552f5ddc1b702dab8520837a2128ea5e4dc6a96f"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/browser-interaction-state.ts",
+      "size": 1756,
+      "sha256": "2bbcd2885f740e53ca5afc71fac1aaef29f0313373788d480450f055f5728b90"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/browser-response-structure.ts",
+      "size": 4229,
+      "sha256": "62a255f4ba496974cce9fa09daafc46eb68b1839cf721ab955556c9ea69dc040"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/browser-user-message.ts",
+      "size": 3191,
+      "sha256": "367745e2d7c881ef973b08f3691591a5beebc5ac74b690dfcd426c8e2136bdcd"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/browser-worker.ts",
+      "size": 273962,
+      "sha256": "e27eaedf8ebf6c44c6537f99a9917099e84ef977de0547f98e3d00fca71dd0a3"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/codex-rollout-environment.ts",
+      "size": 33469,
+      "sha256": "ee313610a4e624ac7357f13c6c17e1848dc5eec560d3ff7c9b110c8e07929708"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/compaction-continuation.ts",
+      "size": 9583,
+      "sha256": "120b6549341358e35db534fdec846dfcd40df9ceb067f8fb2db4fffd21a8b7af"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/compaction-handoff.ts",
+      "size": 22730,
+      "sha256": "4034c3b0f72fd16dabc7ad1a3ddcf6e7dd89bc78475a67223f5a4a9730447bb3"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/compaction-transaction.ts",
+      "size": 5677,
+      "sha256": "58aaad580dbb072013b3b8130580118de0bf8783801b57eef75e53c44b4b050d"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/concurrency.ts",
+      "size": 281,
+      "sha256": "11b393a9a63d11f059ee8941a363640fa4266830e1227c5ef8e9800e08d01782"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/conversation-key.ts",
+      "size": 2416,
+      "sha256": "536c5de53852e4073ad7ddffc31b3cbf28bbfd292967154495a8812d8b978ca0"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/environment.ts",
+      "size": 54545,
+      "sha256": "f47f8ab60a61c292e528fc9a4a72f8d6e5d4b27d80989d8e389913b150063485"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/index.ts",
+      "size": 79016,
+      "sha256": "ff01fe03e5f280f7a2cf7856d0523be3b1c5951ebe115cbd359f6eee40ae5c0a"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/input-tokens.ts",
+      "size": 2612,
+      "sha256": "0861aa2d56a1bbb992b6ba59c2bf40695a8a20f9d5abb8ef3bfa730f2c3a97b6"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/launcher-helper-client.ts",
+      "size": 31882,
+      "sha256": "8844e318bbf0da09fa577d0938c9310d9207f2492bd09ecc264f5c524acdd029"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/limits.ts",
+      "size": 4772,
+      "sha256": "9f00a12915b35280ee4f0f6af716fa32c02f61be0c80a72cb3506de5adc5cf5c"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/markdown.ts",
+      "size": 23624,
+      "sha256": "1e35f042fac0d2bf677f1a4f7b8e05f656d037e528db31c4d9c12ed84d8eebeb"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/mcp-main.ts",
+      "size": 1105,
+      "sha256": "1d648681cf0d2481236c1ec5b2bc90836474725bdc34252b06a2f47f440fe317"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/mcp-observation.ts",
+      "size": 3558,
+      "sha256": "9f50b6512bdea241605628b917e72719593531e0b782a7d99e0c9be1b598d377"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/mcp-server.ts",
+      "size": 47702,
+      "sha256": "26d4106e194e22feda67031fa94f57e6dbd66c49a435d439c376313357153367"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/model-selection.ts",
+      "size": 4609,
+      "sha256": "6cf65ea4cb7b61ce1c6a52a486110d3de78c806a5d80e87aafc7f78f282b8bd6"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/model.ts",
+      "size": 2890,
+      "sha256": "95330db2ec89c0c58fb59050f1946b7326efa5d37f6c8225fc6fd6d8e7cc1611"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/native-compaction-control.ts",
+      "size": 4425,
+      "sha256": "3033bfb9dec8877ec68184be4d1321a350b9b71b3876befa7597811c71a93104"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/output-validation.ts",
+      "size": 1951,
+      "sha256": "f8e7e2c1fde027d0388a8a83241884c93729a41f2c3932b5d92e630a77db29fc"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/process-line-writer.ts",
+      "size": 1193,
+      "sha256": "727b115fc87663fdf476ec5af6fbb4763093d14da706780b9067dc180c0af91d"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/prompt.ts",
+      "size": 47019,
+      "sha256": "d676b7a5796dcb3e0d6a81e8539493e7a2260e7b0186e60b851c133518996bf5"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/retry-policy.ts",
+      "size": 2275,
+      "sha256": "70c49df9b0baa80e997fd3c25c8efe50062f54e2cf49c863654df15a89a188e9"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/rolling-checkpoint.ts",
+      "size": 15766,
+      "sha256": "6e8e624f555cd42f1a5e32ab222b8494d1bdccf5f6e503e9557548845f283365"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/skill-attachments.ts",
+      "size": 2652,
+      "sha256": "eec8b77fb38954240375e862e7ed5a17d84426cc0f971c70c800061e302ff817"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/stream-diagnostics.ts",
+      "size": 13248,
+      "sha256": "92229cdc3e386ffa4a46d5df1c2ed591cf94b6414620d1889abd8a1be0309d9e"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/thread-environment.ts",
+      "size": 21204,
+      "sha256": "212ec64ad1be9587ca2c7f998b049b670eb9ada0607ad1257136a69f0b179e01"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/turn-broker.ts",
+      "size": 69099,
+      "sha256": "8c7a4f10c7e9b9426968fe0af0ff6b54e5439f21a9affead2b3d766bf5ede96f"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/turn-execution.ts",
+      "size": 33386,
+      "sha256": "1d5298973e6e22d8a48a06fc1ca249ca5ec906ee739ed67acb9e0542e479eb5f"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/turn-progress.ts",
+      "size": 11801,
+      "sha256": "906e63e3e9cbb85478a02c7605babc14a166b617b8f97e660109c8f8ece5263e"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/ui-labels.ts",
+      "size": 2973,
+      "sha256": "3ffe3bba94951f7fe7aa98cb686ed8121f3ef5c0cca09c3bcc4fbb5f51ac3346"
+    },
+    {
+      "path": "src/adapters/chatgpt-web/usage.ts",
+      "size": 7654,
+      "sha256": "3ce0085ba81b391f05ef621641c3e7698d6c2cceac7e7ce7f8a2488fb416ac05"
+    },
+    {
+      "path": "src/adapters/image.ts",
+      "size": 416,
+      "sha256": "daabf37ff2147c319020e5675743e0ef1c8757bf29bb451a255f171a6ed471fb"
+    },
+    {
+      "path": "src/bridge.ts",
+      "size": 49488,
+      "sha256": "720408cb98557ddd430bbdbe28af8f70afbdbf700b60746d839b8a205c6dba1e"
+    },
+    {
+      "path": "src/browser-login.ts",
+      "size": 18542,
+      "sha256": "8fd6e5d41845c681530d51dd0d7d82f156557dc4395a8ab2bc82dccd1ddd17fa"
+    },
+    {
+      "path": "src/chatgpt-session.ts",
+      "size": 6361,
+      "sha256": "7ff23a15b32929bd8faf597c4cf02156760872e58dbf83f497a6499e81ce31c4"
+    },
+    {
+      "path": "src/chatgpt-ui/composer.ts",
+      "size": 3774,
+      "sha256": "9afaef5a1eab56e241f44e8022d0aee55f88422420b23b3a5b08adc659d85a6c"
+    },
+    {
+      "path": "src/chatgpt-ui/model-picker.ts",
+      "size": 14563,
+      "sha256": "e92b5678bbeeecd60ec5d36fcf30a124a1dd28c01abdbe3c6b05bf4e2c20a856"
+    },
+    {
+      "path": "src/chatgpt-ui/observations.ts",
+      "size": 3126,
+      "sha256": "89edc7425d68c835d57db97d4d149b31cb731efa71539dd8dbac35954fbe8f84"
+    },
+    {
+      "path": "src/chatgpt-ui/README.md",
+      "size": 7736,
+      "sha256": "31a285c81ca7db486b800b978cfb0254cc8bf692b8a2aa7e07d2bd5de5ee9386"
+    },
+    {
+      "path": "src/chatgpt-ui/turns.ts",
+      "size": 2148,
+      "sha256": "ceca23d450d901169e8ad382ce79bcbf9c036d984ceac3a092137f8e295c0933"
+    },
+    {
+      "path": "src/chatgpt-web-models.ts",
+      "size": 27821,
+      "sha256": "4779a15aa463aab2fd2eaea542e7f8a18859e224b208de93177a74c153bfd58e"
+    },
+    {
+      "path": "src/cli.ts",
+      "size": 28985,
+      "sha256": "db845cf525ce088fa71f5f205ba679518e507e28b172b22220c297a369492edf"
+    },
+    {
+      "path": "src/codex-integration-document.ts",
+      "size": 30935,
+      "sha256": "f358623998662de2673f66e8ba6cb88f2b9f8d7c897965a7686fc5495b27792b"
+    },
+    {
+      "path": "src/codex-integration-journal.ts",
+      "size": 8946,
+      "sha256": "c2398376d99a387f166fe2ba7f318eec5b2224c0fd2aba6a90814c2c84648ab7"
+    },
+    {
+      "path": "src/codex-integration-route.ts",
+      "size": 24183,
+      "sha256": "0d48f695ef10567732b9b516551d6ae554f10b98f7811aeafbecffc80e986a2a"
+    },
+    {
+      "path": "src/codex-integration-shared.ts",
+      "size": 13593,
+      "sha256": "3dfc21efa7f05c39333f0d81d3b9c3dda22f1ce05375953149594afb4db6e479"
+    },
+    {
+      "path": "src/codex-integration.ts",
+      "size": 22922,
+      "sha256": "ae84a4b0312113da0f240d6bfa2cd1af887bc518a9117e90b976f3019f864356"
+    },
+    {
+      "path": "src/codex-interrupt-hook.ts",
+      "size": 18683,
+      "sha256": "bdb5afaf587d2283df5795d4ae7ad6db08978f8f080a4c1fe74dcc234dc3109c"
+    },
+    {
+      "path": "src/composer-predictions.ts",
+      "size": 2374,
+      "sha256": "6a962cdf2f094a46b58d6e390a34a3cbc765f1ec5adec8f2ee7a39741d8f55dd"
+    },
+    {
+      "path": "src/config.ts",
+      "size": 28765,
+      "sha256": "7d30ce72a82d02db3b090a8e2ee82f4c6723087d790ea029120368a17ade2d44"
+    },
+    {
+      "path": "src/dev-chat/cli.ts",
+      "size": 20770,
+      "sha256": "ba15a124c470c3a2c1827093b25cf14f2b3128e3bd2efd315959bbd5e82c71bf"
+    },
+    {
+      "path": "src/dev-chat/constants.ts",
+      "size": 188,
+      "sha256": "9283b1e0cb36794d4b3adb9f08fdaf667a1bc0600b130fc026ec82608ad77389"
+    },
+    {
+      "path": "src/dev-chat/driver.ts",
+      "size": 25384,
+      "sha256": "f2d460340774664bf896635debbba472d8099feb36fbf7d8d42232bcbcf6ebb4"
+    },
+    {
+      "path": "src/dev-chat/profile.ts",
+      "size": 8732,
+      "sha256": "f3ed0da792f446701e040785ceb9896905494430ee9de5212695a779017e8358"
+    },
+    {
+      "path": "src/dev-chat/session.ts",
+      "size": 11771,
+      "sha256": "19c2274f0bd7087803016b6e10d748361c104187b435bf1eecb360dcd1394358"
+    },
+    {
+      "path": "src/dev-chat/transport.ts",
+      "size": 1751,
+      "sha256": "88c9ccb3d05642765e2115087b96f20018011590eb09b40e1e7424e49955f44b"
+    },
+    {
+      "path": "src/doctor-compaction.ts",
+      "size": 3141,
+      "sha256": "9460071e65261bbefd803e0a4646fcf9c641ec56a195133827c8d930ea992178"
+    },
+    {
+      "path": "src/doctor.ts",
+      "size": 12430,
+      "sha256": "8062b7df1d991f09dbd5ca08b3604f536e68b716f4ca1c34a7a08442644b6044"
+    },
+    {
+      "path": "src/domino.d.ts",
+      "size": 116,
+      "sha256": "6dc26d3df1a4d78854ba16c99a37c52cd64c3205d367c389cfd5d4133deb15ea"
+    },
+    {
+      "path": "src/event-queue.ts",
+      "size": 1378,
+      "sha256": "21f3be62898aeb317e785e128c2c325b2c6942ab552f82077d0c121c7a73fb88"
+    },
+    {
+      "path": "src/http-body.ts",
+      "size": 1313,
+      "sha256": "de03e4dd84d4732b9d1c6a7fa448bef6b318b50e3ef3b4a8b826896ae6189400"
+    },
+    {
+      "path": "src/launcher-browser-host.ts",
+      "size": 31564,
+      "sha256": "7a26212ef5d43de44ad8b98e7fa18addef3a1f481f98e2f9fb34629f18b415df"
+    },
+    {
+      "path": "src/lib/errors.ts",
+      "size": 10299,
+      "sha256": "1e9ecf1edffbe63d1c190bc060639bd394596253eb3ff809d523e229232d5939"
+    },
+    {
+      "path": "src/lib/token-estimate.ts",
+      "size": 1743,
+      "sha256": "a00a81c847d0e264b66b0c5f11187a191d8e62d7bf3fff154cb575912799e2f6"
+    },
+    {
+      "path": "src/model-catalog.ts",
+      "size": 10154,
+      "sha256": "acbe75da80818be647367946884f300cad10e5e8f9dff8a0d3ef9dd2dc50c3f0"
+    },
+    {
+      "path": "src/native-network.ts",
+      "size": 2484,
+      "sha256": "d6ff1f4d13d67c54e72c92d5d1cb20c2eadcf6688c7d1df48c73c6f27d164b5e"
+    },
+    {
+      "path": "src/native-passthrough.ts",
+      "size": 12044,
+      "sha256": "9da225f9581e19914ed192ba4ccaf17c6b99f4eafa78aa6d30b426d164b4f22e"
+    },
+    {
+      "path": "src/process.ts",
+      "size": 1567,
+      "sha256": "788126f540921897b9d978af25b8b4de992ec2b088d1cb908c2ea1b330fc3e6a"
+    },
+    {
+      "path": "src/responses/compaction.ts",
+      "size": 11443,
+      "sha256": "f4812623ce5a803acc2e837fe87566e3b0a94f3259948146b809a19c18b5dbdf"
+    },
+    {
+      "path": "src/responses/native-context.ts",
+      "size": 1874,
+      "sha256": "258dffab56cc511e793b5b8a7d20cc22797a6903d850b2cbcdc24c91fb4a8aa7"
+    },
+    {
+      "path": "src/responses/parser.ts",
+      "size": 30147,
+      "sha256": "753b71b31302a4fbf5aa085aa91a3a8ad99047b3b6309598293b05abc85c044e"
+    },
+    {
+      "path": "src/responses/reasoning-envelope.ts",
+      "size": 2200,
+      "sha256": "5df8453122d8816358a013b6b96d4e53a0d2d3820a741754fc68622feebc3fe8"
+    },
+    {
+      "path": "src/responses/schema.ts",
+      "size": 7213,
+      "sha256": "8be73a8ebd278e1254fe615327eb85bed636f35d51ad752053f549fb3e2d1653"
+    },
+    {
+      "path": "src/responses/state.ts",
+      "size": 9747,
+      "sha256": "b432b1d1beb54877a74f28e6ec0f951ed548a3c5fffe5d1ef4c3f02b56102c0b"
+    },
+    {
+      "path": "src/server.ts",
+      "size": 55920,
+      "sha256": "371f8c91cb47660221d0bea26cffe2fc58d1ee76e0720bf3dee64eb76ddc8db8"
+    },
+    {
+      "path": "src/service.ts",
+      "size": 11573,
+      "sha256": "a9026e84b3fd825ade6c9d69faaf208faef83662b504d12f64ef2dbcff2b0542"
+    },
+    {
+      "path": "src/setup.ts",
+      "size": 30941,
+      "sha256": "c90e7826db74a53b60ffeadd9a1397b24ddbf443e49a62b2f8efe86d4146faff"
+    },
+    {
+      "path": "src/stall-timeout.ts",
+      "size": 1019,
+      "sha256": "3be4873187e20953627e3d9b59f65a52194756eb947384075b35ab9d0ce6a9f0"
+    },
+    {
+      "path": "src/tunnel-service.ts",
+      "size": 5685,
+      "sha256": "b8c50e4bdf4943117990bbb7e60f1ed431a5ae1031b70917f98f3507f48428ad"
+    },
+    {
+      "path": "src/tunnel.ts",
+      "size": 20259,
+      "sha256": "258180fbc37d06ad9ffd856fcc7c49d40437aac6d0e9cc935aefddcff3f96943"
+    },
+    {
+      "path": "src/turndown-plugin-gfm.d.ts",
+      "size": 134,
+      "sha256": "ea990b5626ea8873e7b47591225d19b6b4c3816331cd5fc4980118779768bfd5"
+    },
+    {
+      "path": "src/types.ts",
+      "size": 11823,
+      "sha256": "667a34e47dfb3fae8e1aa1e082939707d27bd240dc3938e9ef21c7d301cc4d74"
+    },
+    {
+      "path": "src/usage/totals.ts",
+      "size": 545,
+      "sha256": "c2f05d79c896c9719dade24b0d31f2824abf86e7e77aacb3843f7fd32d2d8c13"
+    },
+    {
+      "path": "src/version.ts",
+      "size": 33,
+      "sha256": "d2823d12783a564b455e79aa82497bce63fc31c3b54b8b269e753bc112b9b98b"
+    },
+    {
+      "path": "tests/attachment-upload-electron.test.ts",
+      "size": 3860,
+      "sha256": "eb2a83444b6ce9c266e5decf663953380fec1f15840e2915a2739a332ce9f71f"
+    },
+    {
+      "path": "tests/attachment-upload.test.ts",
+      "size": 10690,
+      "sha256": "f22b7b2be79ef96e0a8284f93cd26a4dcbe06e426d17d9f5d619e64d484afcb2"
+    },
+    {
+      "path": "tests/bridge-collaboration.test.ts",
+      "size": 2685,
+      "sha256": "bce12fe5ad2faeb9621e940cfd374e610c8b6198e81e7ad2735584590d51d066"
+    },
+    {
+      "path": "tests/bridge-platform.test.ts",
+      "size": 1768,
+      "sha256": "1eda67229ab8b33fbdf6087b3142e0d8efe9f0d8b6e5e3c376f732f46ef86bdd"
+    },
+    {
+      "path": "tests/bridge-stall-timeout.test.ts",
+      "size": 2870,
+      "sha256": "d0cd07ff69d74d26d97f152262ad48e6a53624ef8f14b21b231cd85a7e2ddf4d"
+    },
+    {
+      "path": "tests/browser-cancellation.test.ts",
+      "size": 2083,
+      "sha256": "631a7f6cb845d9335a8178625ee3314c90bf26ca5b7b7f45b2e07f205f12e9d4"
+    },
+    {
+      "path": "tests/browser-diagnostic-history.test.ts",
+      "size": 5916,
+      "sha256": "cff5b7152ee9fe969795932ead56ed636f31ecd5148d1370d66e07414efd6ef7"
+    },
+    {
+      "path": "tests/browser-generation.test.ts",
+      "size": 13480,
+      "sha256": "c18a67a0083833b636fdbb75a7518306496b6ef06a2fd47e8172dbd18a25e532"
+    },
+    {
+      "path": "tests/browser-live-progress.test.ts",
+      "size": 19981,
+      "sha256": "78ff346510777783d2633a09a35cbb1576df268ac2849ea51b240836a160eb42"
+    },
+    {
+      "path": "tests/browser-login.test.ts",
+      "size": 6605,
+      "sha256": "a5ab25700b24528091cb18fa4fe6f7872238505bc2bac628803884a0de0ee84e"
+    },
+    {
+      "path": "tests/browser-response-dom.test.ts",
+      "size": 44008,
+      "sha256": "eb576ecbe5fb749118c721ea8e2fea71c25ff5ff9810f4bf3d5febe33f772e36"
+    },
+    {
+      "path": "tests/browser-turn-binding.test.ts",
+      "size": 28928,
+      "sha256": "57e699c933f347de2c5214ff9f463337b657bc646ef8a6e1dcdefed388c2b8d5"
+    },
+    {
+      "path": "tests/browser-worker-contract.test.ts",
+      "size": 200506,
+      "sha256": "e42b370fea160a937b3c5bc483b10a593be9c637eb1a08399c83d12141c8427a"
+    },
+    {
+      "path": "tests/chatgpt-capabilities-browser.test.ts",
+      "size": 4651,
+      "sha256": "3d45aa8cf68125d90ca97f773fa55a7489680e3b3a50ded0f04c63d829f96912"
+    },
+    {
+      "path": "tests/chatgpt-effort-browser.test.ts",
+      "size": 24188,
+      "sha256": "b748b620adc4bb49ceb5f02cf2cd3d18912f32eec6503a20b486b5a5302d5e8d"
+    },
+    {
+      "path": "tests/chatgpt-limits-browser.test.ts",
+      "size": 3237,
+      "sha256": "73af2d264069c5c32cde1b9a7490ef3cbb0e24b63feec05fee55bd8eb7b58d9f"
+    },
+    {
+      "path": "tests/chatgpt-limits.test.ts",
+      "size": 3954,
+      "sha256": "2f9b6f5970c40b9baaf6affe9b59ee17dcac4a644194da50a06f4f446c7c461e"
+    },
+    {
+      "path": "tests/chatgpt-markdown-parser.test.ts",
+      "size": 3220,
+      "sha256": "8b57c0ab78272bcd97e574c7cbe2d1cd378b2ce3c281b8579c3594466abc2b47"
+    },
+    {
+      "path": "tests/chatgpt-model-family-browser.test.ts",
+      "size": 8877,
+      "sha256": "06add0dfcca2bd1242c9357fb994930148186601eb76efbe8c5ca0f483130e9f"
+    },
+    {
+      "path": "tests/chatgpt-model-selection.test.ts",
+      "size": 6000,
+      "sha256": "374fdaf52be30904ee0dce3be0a45e78cd8cb2866268f6f30e1430e6b0008035"
+    },
+    {
+      "path": "tests/chatgpt-session.test.ts",
+      "size": 24184,
+      "sha256": "5a03a39b2642d08463f54308027e4ee2f28e26d043b570744dbd015024ee3af1"
+    },
+    {
+      "path": "tests/chatgpt-ui-observations-browser.test.ts",
+      "size": 4800,
+      "sha256": "f3b52b0e6d7f7b5acd12b6b91c17c93e1b667dd59e8e8a10cd6aaba6af37a2b7"
+    },
+    {
+      "path": "tests/chatgpt-ui-observations.test.ts",
+      "size": 1131,
+      "sha256": "89a950a5cae0f7247ec6deb042f64aaa2283eb1246b2b1bafc7c7116fff7a678"
+    },
+    {
+      "path": "tests/chatgpt-web-harness.test.ts",
+      "size": 215584,
+      "sha256": "8413cf60b5206e7846dc8a0617729ad9cc4a51d479ab45f42ae657742d321112"
+    },
+    {
+      "path": "tests/chatgpt-web-markdown.test.ts",
+      "size": 9966,
+      "sha256": "ad42a9d0b893f300f1249b5df6755b0f518d7cd0bbeee9116b2ac97d37a4681c"
+    },
+    {
+      "path": "tests/chatgpt-web-models.test.ts",
+      "size": 18650,
+      "sha256": "0cf37b609ddfa892daa39c40578ed79a003cd9f4b8a7677086eb592fa4b8986f"
+    },
+    {
+      "path": "tests/chatgpt-web-usage.test.ts",
+      "size": 13707,
+      "sha256": "87eb4b40d792822d1552c6d59698ba0d146284a347eeac13672d3709af366d79"
+    },
+    {
+      "path": "tests/cli.test.ts",
+      "size": 27680,
+      "sha256": "251ab38893dc39b2b5cea266043eca81b97d6a47b0a197db3f12c435c7be8ddb"
+    },
+    {
+      "path": "tests/codex-integration.test.ts",
+      "size": 58516,
+      "sha256": "04207d26a24daf479bf04ecb89fb7b0d4ab180717d21169133ef6e1aa00641e5"
+    },
+    {
+      "path": "tests/codex-interrupt-hook.test.ts",
+      "size": 20361,
+      "sha256": "2648a2509557c1aaaac044e8868ddd554948f06204ec00a99a2ef5eea6c1e54c"
+    },
+    {
+      "path": "tests/compaction-browser-recovery.test.ts",
+      "size": 9748,
+      "sha256": "228118956631e8fb5092418489e6792d5d705241ea97567e7c7a0986f960087d"
+    },
+    {
+      "path": "tests/compaction-goal-source.test.ts",
+      "size": 4479,
+      "sha256": "26a9597d142ea7fad3f68de4205e6740e828f740cfcf24b26878addecf65e8bf"
+    },
+    {
+      "path": "tests/compaction-task-context-review.test.ts",
+      "size": 7867,
+      "sha256": "4f6c49b3976ef0bc25f93dd7316e78755ded71b81b7bd377e29bf978dde928ef"
+    },
+    {
+      "path": "tests/compaction-task-context.test.ts",
+      "size": 10484,
+      "sha256": "59d2e17184050766edbd819404c42993cad6c3cef0188e35a6d36812d5c67ba2"
+    },
+    {
+      "path": "tests/compaction-v1.test.ts",
+      "size": 3624,
+      "sha256": "c1521ecf44599c32512a501755ac32d405f0f31590a55f31fb13b9fdb2bad4bc"
+    },
+    {
+      "path": "tests/composer-insert.test.ts",
+      "size": 5867,
+      "sha256": "a7978cbddb18bec51e4d272cd3bdf84e879ddd102d88a1cf3f7a875935e3d484"
+    },
+    {
+      "path": "tests/context-markdown-regexp.test.ts",
+      "size": 1496,
+      "sha256": "a43edaf0928a23c61c8c4649d47b414e4a47ab2d435199d6845cb3fb56bc739e"
+    },
+    {
+      "path": "tests/delivery-timeout.test.ts",
+      "size": 4911,
+      "sha256": "e999744232f9019c21c3332664ad77a01c441b7472fe2cc4c4305d55b287eddb"
+    },
+    {
+      "path": "tests/dev-chat.test.ts",
+      "size": 22396,
+      "sha256": "a02eea09ce2b7a9b29b95f0a65f22abedea5340136061171e779c5f11ad459a5"
+    },
+    {
+      "path": "tests/dev-profile.test.ts",
+      "size": 6635,
+      "sha256": "98441ade1a5ac5393355659d8a60a22f98fcc32b1f341321d2ffe704e0223b2c"
+    },
+    {
+      "path": "tests/doctor-compaction.test.ts",
+      "size": 3125,
+      "sha256": "31dcd416b7e0cc8f9963ed3fbf9de212cf9548571edd7d5996edc4b12fd8bc5a"
+    },
+    {
+      "path": "tests/environment.test.ts",
+      "size": 162709,
+      "sha256": "ae1ce3316abeafe354add308a0b313bae6862083f998ca3b7cbae0370205e9ca"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-activity-summaries.html",
+      "size": 3475,
+      "sha256": "1cee4f88d70ed214656310defb925c0a16704ae673d36575a063660841f7c5fa"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-codemirror-reply-2026-10-11.html",
+      "size": 5997,
+      "sha256": "aa6cad28252b5a511ea3ba948a0753934d6d8dff88c1ee7db99a67acd90ad434"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-composer-stop.html",
+      "size": 742,
+      "sha256": "a5603bf20596b6633b3f9c71d135ce6f8b33d617e339ee0c1af278b63d357db0"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-composer-think-2026-10-11.html",
+      "size": 913,
+      "sha256": "65db2d0116ccf97ce1efef2ac7a6604d8ca4f0bb563f5671ca576bad2c04806b"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-composer-think-2026-10-28.html",
+      "size": 288,
+      "sha256": "811ed944dbe05235733a46afd71392e4311bf99790ead72c8105d23f7f63178b"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-composer-think.html",
+      "size": 3795,
+      "sha256": "99aab251cfd747576625d98709736328d1ea6eddbce1ae026747adc3da16fcf4"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-dil-smoke.html",
+      "size": 1050,
+      "sha256": "848a24b7f7db7204bb0ddeb701e8b614d0929a0728e4cb9bc37fb7ae28d52388"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-markdown-link-regexp.json",
+      "size": 307,
+      "sha256": "a35daec957edb2eeeac34d2c3f17c9c779cee5eb221824d08e7dbec2913df404"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-model-picker-explicit-2026-10-28.html",
+      "size": 4275,
+      "sha256": "0c756afed000e5b874a895d4a5ba11546f14b41e4797bbf41dd04280b736c669"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-model-picker-power-2026-09-29.html",
+      "size": 3562,
+      "sha256": "4210122def904d4f4698373663b715203335b5bda379416cb4d61f936ce083d5"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-power-activity.html",
+      "size": 1073,
+      "sha256": "53df98a71534bfed9de809c36e0f647ea675305f12abb1f8a62f3b88134f04d2"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-power-complete.html",
+      "size": 3706,
+      "sha256": "00c91f92a88d0a49632af7de43f8f8bd5983f5137915632ef76543af8368bd22"
+    },
+    {
+      "path": "tests/fixtures/chatgpt-power-streaming.html",
+      "size": 1289,
+      "sha256": "fe5ef61ee163643b952f104d11447ffa923a8ea442e2a6375aac063ac92a6238"
+    },
+    {
+      "path": "tests/http-body.test.ts",
+      "size": 1085,
+      "sha256": "25f861514628a697f87279e37c8c668619164396dd1b193871ae8768ab41d640"
+    },
+    {
+      "path": "tests/launcher-browser-host.test.ts",
+      "size": 29313,
+      "sha256": "420f2bccdad16de41ecb6871460a405b324a2219a82d0dbac341c86be918c164"
+    },
+    {
+      "path": "tests/launcher-helper-client.test.ts",
+      "size": 21839,
+      "sha256": "30bfab571cb148d30d648a99547b2ff25a3623dcba877c19a719c36996732228"
+    },
+    {
+      "path": "tests/launcher-localization.test.ts",
+      "size": 1178,
+      "sha256": "353081f682dce5b5c1b2a0ae0e1086f351c90f15ff9f12443a7a759609b682f6"
+    },
+    {
+      "path": "tests/launcher-navigation-viewport.test.ts",
+      "size": 3820,
+      "sha256": "7200917c82c18e1f32d25ab680c28b9321889dcd696f15caa0a38a17fced87a2"
+    },
+    {
+      "path": "tests/launcher-session-reminder-browser.test.ts",
+      "size": 5179,
+      "sha256": "3a6ef816731eaf57a6a1ba62f60704201243f952c791420225abd5ef5a48f7e9"
+    },
+    {
+      "path": "tests/launcher-status.test.ts",
+      "size": 1208,
+      "sha256": "6228fd4a2029891f1d963b8d07bc59a39214f6fabadc41f5eb0341e74e8ef9af"
+    },
+    {
+      "path": "tests/launcher-system-theme.test.ts",
+      "size": 4238,
+      "sha256": "f47587d58ad00d56b22abe97170e7ab35d18f41d28fcdee5d9372e2ad00ae20d"
+    },
+    {
+      "path": "tests/launcher-viewport-browser.test.ts",
+      "size": 3042,
+      "sha256": "e6a19ee56653f4064adf52370f30da41bc564d3adab695a43031664ec0732799"
+    },
+    {
+      "path": "tests/luna-bigger-context.test.ts",
+      "size": 5803,
+      "sha256": "655a630f984610fabc9a0f80808cd4d23577ad4b8e36d89886e55acf2e6cac43"
+    },
+    {
+      "path": "tests/mcp-observation.test.ts",
+      "size": 5383,
+      "sha256": "c380fc3ef107aad855012a5883e5fbf9a9c329eabefe299f0d54d14e5ab919dc"
+    },
+    {
+      "path": "tests/model-catalog.test.ts",
+      "size": 19972,
+      "sha256": "9e4eba6837e024260ccc1e2a600e2d258679a3c19fdddffd85b76791cc596a58"
+    },
+    {
+      "path": "tests/model-contract.test.ts",
+      "size": 3396,
+      "sha256": "2d5575446a01759fcf6030c43b44d253e449dea8609715a631fa77c897d30130"
+    },
+    {
+      "path": "tests/multipart-compaction.test.ts",
+      "size": 14710,
+      "sha256": "4a030af72153f6fd3bccedf83ead783e7fcc7f85f9bf2730fd7317e7fac21352"
+    },
+    {
+      "path": "tests/multipart-history.test.ts",
+      "size": 15219,
+      "sha256": "acc822fcaf8e6c541df3335a2a4f591cee0b836382fff487c1340cd19afbccc9"
+    },
+    {
+      "path": "tests/native-network.test.ts",
+      "size": 5668,
+      "sha256": "c1693f0c193457db0cd3dfe39ab04af7927c673b66d80365ae48449e2e16889d"
+    },
+    {
+      "path": "tests/native-passthrough.test.ts",
+      "size": 18358,
+      "sha256": "52f18db4cadae2c146116810b995f15a31c773c3160dec1aca6cd83e1b8298bb"
+    },
+    {
+      "path": "tests/process-line-writer.test.ts",
+      "size": 823,
+      "sha256": "cae3020ee9fc54b19a4c5387c06a310da6e11d06ce76c5a857db63f34f9db203"
+    },
+    {
+      "path": "tests/prompt-contract.test.ts",
+      "size": 37875,
+      "sha256": "b4aa92e9dc3f233e805ff47373c4d64bddabd024a0f86c596c8d72cec81ea833"
+    },
+    {
+      "path": "tests/prompt-history-metadata.test.ts",
+      "size": 3335,
+      "sha256": "2d10b69ec9d7738e4f26764ec54bd2b0f2226db5cb91902fce5041426bd6e2e6"
+    },
+    {
+      "path": "tests/responses-agent-message.test.ts",
+      "size": 6644,
+      "sha256": "5857bf15b8acc0ee6af8b5b4bbc47db30902a3d728d9f8ccc1a0aa792f68a266"
+    },
+    {
+      "path": "tests/responses-lite-tools.test.ts",
+      "size": 3464,
+      "sha256": "e03c09f7aa6e91cf8895ae94f2d950f5fb8c70d998dbf73f076e02792edd81ac"
+    },
+    {
+      "path": "tests/responses-text-controls.test.ts",
+      "size": 6650,
+      "sha256": "04458e2d3b921d5058952619867f8e24c9bd7c0cbd506d9c6cea18043e1c0547"
+    },
+    {
+      "path": "tests/retained-compaction.test.ts",
+      "size": 85041,
+      "sha256": "b419405b1d1122e8d34749161da519179b1110959db4827ab61cda7b0282ee5c"
+    },
+    {
+      "path": "tests/rolling-checkpoint.test.ts",
+      "size": 11850,
+      "sha256": "8db02a774179d6cee4233ef188d4608188874def881363a2b958bd5c985b79ab"
+    },
+    {
+      "path": "tests/runtime-layout.test.ts",
+      "size": 20410,
+      "sha256": "5958d66bba892da8fa4ce7a5f73d85ba86138c9c5bed2409e1a4be1ba1cda06a"
+    },
+    {
+      "path": "tests/server-compaction.test.ts",
+      "size": 38775,
+      "sha256": "ed96082d16d22a75962757c63f7f8bfe05c1301bd0844bc4f0cc93c5c77aa112"
+    },
+    {
+      "path": "tests/server-lifecycle.test.ts",
+      "size": 63349,
+      "sha256": "e1dda76415a5207fe6f33c5ed75c974516b0a60be777c3a952ee73a00d674a12"
+    },
+    {
+      "path": "tests/server-models.test.ts",
+      "size": 9804,
+      "sha256": "b5ad9d14f3b225d4d02faa0e2ef91e8100133363faa2730b3b552f8f7e8f4b4e"
+    },
+    {
+      "path": "tests/server-predictions.test.ts",
+      "size": 6377,
+      "sha256": "ebbbabd31162cccb996d6cc9a5626228e8e07a2816f3c9d3ef5b9d018da6255c"
+    },
+    {
+      "path": "tests/server-subagents.test.ts",
+      "size": 1333,
+      "sha256": "ce7e181644c24eb95457df58652fe80f9d80573f160e102834f8b00ce4397604"
+    },
+    {
+      "path": "tests/service-lifecycle.test.ts",
+      "size": 1328,
+      "sha256": "f971f04b9dfa8aa5e70cdae20e5f22f4913067571434d1ec4d7b79ed6cdfa40b"
+    },
+    {
+      "path": "tests/setup-lifecycle.test.ts",
+      "size": 18016,
+      "sha256": "425214f24b35e68792255edd51d71e23836021cf4485ddacc0bb62517298e99c"
+    },
+    {
+      "path": "tests/skill-attachments.test.ts",
+      "size": 6957,
+      "sha256": "38b937bfa7caa97aa23d59df31de81305a3cf6eb82726b8c715984a21632c83b"
+    },
+    {
+      "path": "tests/smoke-codex-cancel.test.ts",
+      "size": 2330,
+      "sha256": "a695547de5676339f31d66c24f4c7d0e805014d1c653b5ec5c91a2fda7949296"
+    },
+    {
+      "path": "tests/stream-diagnostics.test.ts",
+      "size": 7871,
+      "sha256": "670417740ad7a6c6942d4574b19229fc90688f0c5a6e4292f2bf48edd49b1654"
+    },
+    {
+      "path": "tests/subagent-environment-history.test.ts",
+      "size": 6187,
+      "sha256": "8040bcc478c45a4ba775b1818b1d4af58d2079faba1c3f29c6f709f2ab6c9344"
+    },
+    {
+      "path": "tests/submission-error-alert.test.ts",
+      "size": 4531,
+      "sha256": "a97b6cba028286a9de5a3430839f9e1d1c98299cb87d2704d5f0e963034bf2e6"
+    },
+    {
+      "path": "tests/token-estimate.test.ts",
+      "size": 1603,
+      "sha256": "4c00a7bdff935ff57343399326b4a1e9bf18c48daff4870b13834213fee3a08c"
+    },
+    {
+      "path": "tests/tool-approval-dom.test.ts",
+      "size": 8765,
+      "sha256": "7a06750046002a550d39231cdff851c29c0f0a33f54d190bb8fa91d64c50fde6"
+    },
+    {
+      "path": "tests/trusted-codex-homes.test.ts",
+      "size": 12952,
+      "sha256": "0af846e9a480e792aa801ccd7a489b5b5b1b0df5ade2bbb133c8f0509e4505ac"
+    },
+    {
+      "path": "tests/tunnel-service.test.ts",
+      "size": 6446,
+      "sha256": "fbe0a7b30ff60488c8502156c0f9aef78c760bee6d2282b790fb3a47ef3cf183"
+    },
+    {
+      "path": "tests/tunnel.test.ts",
+      "size": 15470,
+      "sha256": "e23f975c52ac811f9403439c098066a468af57ec9d35f4ba66b70b219ffc3db2"
+    },
+    {
+      "path": "tests/turn-broker-diagnostics.test.ts",
+      "size": 6910,
+      "sha256": "04bf821c512fc946d1ff0af408d3d562ba68df8ed7ad00f65777459bf10d6399"
+    },
+    {
+      "path": "tests/turn-broker-lifecycle.test.ts",
+      "size": 17890,
+      "sha256": "2ea6920f4b1fef6cf6a8dd1523eb47be8b0d2a8357da171f9e0ac8e2907d02ef"
+    },
+    {
+      "path": "tests/zero-risk-adapter.test.ts",
+      "size": 26958,
+      "sha256": "6d03c25e3cb48962af2039803c265cce0c9636c42e5afabe4787c5e64cfc72fc"
+    },
+    {
+      "path": "tests/zero-risk-mcp-lifecycle.test.ts",
+      "size": 19677,
+      "sha256": "61128064bf6d4141beb6831f97a8b60a200f98c06757f80754e70417ae42a469"
+    },
+    {
+      "path": "tests/zero-risk-prompt-contract.test.ts",
+      "size": 4625,
+      "sha256": "66eca404db036b7e5850e2e7e9fdca9b425c7213505250bd9fdd87328c320d0e"
+    },
+    {
+      "path": "TROUBLESHOOTING.md",
+      "size": 32532,
+      "sha256": "e27e48b6b33ffe5bf67b373ebde109be52e94ecb12a2d26a7dee7a5de12cea39"
+    },
+    {
+      "path": "tsconfig.json",
+      "size": 273,
+      "sha256": "a7be042199d6e05c2441c7184ab6c85152cad6d8baed625963b6390d4a34b133"
+    }
+  ]
+}

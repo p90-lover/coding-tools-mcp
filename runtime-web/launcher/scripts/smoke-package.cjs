@@ -87,7 +87,10 @@ try {
     command = executable;
     args = ["--launcher-smoke-test"];
   } else if (process.platform === "linux") {
-    executable = artifact(/-linux-x64\.AppImage$/, "Linux AppImage");
+    if (!["x64", "arm64"].includes(process.arch)) {
+      throw new Error(`Unsupported Linux AppImage architecture: ${process.arch}`);
+    }
+    executable = artifact(new RegExp(`-linux-${process.arch}\\.AppImage$`), `Linux ${process.arch} AppImage`);
     fs.chmodSync(executable, 0o755);
     run(path.join(launcherRoot, "scripts", "smoke-linux-appimage-symbols.sh"), [executable], {
       timeout: 120_000,

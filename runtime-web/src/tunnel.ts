@@ -6,24 +6,25 @@ import type { AppConfig, BrowserInteractionMode, TunnelConfig } from "./config";
 import { atomicWriteFile, getConfigDir } from "./config";
 import { runCommand, runChecked } from "./process";
 
-export const TUNNEL_VERSION = "0.0.12";
-const MIGRATABLE_TUNNEL_VERSIONS = new Set(["0.0.10"]);
+export const TUNNEL_VERSION = "0.0.16";
+const MIGRATABLE_TUNNEL_VERSIONS = new Set(["0.0.10", "0.0.12"]);
 const RELEASE_BASE = `https://github.com/openai/tunnel-client/releases/download/v${TUNNEL_VERSION}`;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 // SHA-256 of each release archive, pinned here. The release's own SHA256SUMS.txt came over the same
 // connection as the archive, so anyone able to intercept that TLS (Bun 1.4.3's fetch still trusted
 // the compromised eMudhra CAs, 2026-11) could serve a matching pair, and the binary runs at once.
-// Taken from SHA256SUMS.txt and GitHub's own asset digests for v0.0.12, which agree.
+// Taken from SHA256SUMS.txt and GitHub's own asset digests for v0.0.16, which agree.
 const TUNNEL_ARCHIVE_SHA256: Readonly<Record<string, string>> = {
-  "tunnel-client-v0.0.12-darwin-amd64.zip": "33de53aec680faafedc795f8f8268d6861577bddb871cb2d49529c91f88c2009",
-  "tunnel-client-v0.0.12-darwin-arm64.zip": "42fb3138dc9c081d5777cb7e8bd1e041cc48b67c4978dbab3c5167ca1aabca02",
-  "tunnel-client-v0.0.12-linux-amd64.zip": "2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81",
-  "tunnel-client-v0.0.12-linux-arm64.zip": "6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6",
-  "tunnel-client-v0.0.12-windows-amd64.zip": "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356",
-  "tunnel-client-v0.0.12-windows-arm64.zip": "65ab54221554481bb1c23b6015b99abe0b7f79b08593f4fb17a9e2e25532281d",
+  "tunnel-client-v0.0.16-darwin-amd64.zip": "57b3dd73f2d042c7aeb5664681f7538078359f55538b9e048640f1df71a0c83f",
+  "tunnel-client-v0.0.16-darwin-arm64.zip": "a160820d45089b5253d8d671fe2a689bde0f73d78c135d1497a7b33f28a3ac62",
+  "tunnel-client-v0.0.16-linux-amd64.zip": "d60cdba019bce451bcc3a15478cc5b9cb11270b049f5b56ea39a80b517f8b117",
+  "tunnel-client-v0.0.16-linux-arm64.zip": "963d0384aaa7c798778479c45673f9051a4039dd891aef8f8978d2a1a628b74f",
+  "tunnel-client-v0.0.16-windows-amd64.zip": "edef7241b0c647fcb30f1a80ff376b6b25c51927960f257a3f01e21b17c2aba6",
+  "tunnel-client-v0.0.16-windows-arm64.zip": "ecd748288b9bd9cc8f5a963855eb143f4788b831475156703d0bafdcd2dcb149",
 };
 export const TUNNEL_READY_TIMEOUT_MS = 120_000;
 const TUNNEL_STATUS_POLL_INTERVAL_MS = 1_000;
+const WINDOWS_REMOVE_RETRY_DELAYS_MS = [100, 200, 500, 1_000, 2_000] as const;
 
 interface TunnelInstallManifest {
   version: 1;
@@ -72,9 +73,18 @@ async function fetchBytes(url: string, timeoutMs = 120_000): Promise<Uint8Array>
   }
 }
 
+// Tests build their own archives, which can never match a real pin. They swap in a table for
+// one fixture and restore it; nothing outside tests calls the setter.
+let archiveChecksums: Readonly<Record<string, string>> = TUNNEL_ARCHIVE_SHA256;
+
+/** Test-only: pin `table` instead of the release checksums until called again with `undefined`. */
+export function setTunnelArchiveChecksumsForTests(table: Readonly<Record<string, string>> | undefined): void {
+  archiveChecksums = table ?? TUNNEL_ARCHIVE_SHA256;
+}
+
 /** The pinned SHA-256 of a tunnel-client release archive; an archive with no pin is never installed. */
 export function pinnedTunnelArchiveSha256(asset: string): string {
-  const checksum = TUNNEL_ARCHIVE_SHA256[asset];
+  const checksum = archiveChecksums[asset];
   if (!checksum) throw new Error(`tunnel-client ${asset} has no pinned checksum`);
   return checksum;
 }
@@ -85,6 +95,28 @@ function binaryPath(): string {
 
 function manifestPath(): string {
   return join(getConfigDir(), "bin", "tunnel-client-manifest.json");
+}
+
+/** Remove only a file explicitly owned by this install, never sweep other staging files. */
+async function removeTunnelInstallFile(path: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      rmSync(path, { force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      const delay = WINDOWS_REMOVE_RETRY_DELAYS_MS[attempt];
+      if (process.platform !== "win32" || (code !== "EBUSY" && code !== "EPERM") || delay === undefined) throw error;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
+function tunnelInstallRecoveryError(primary: unknown, failures: unknown[], operation: string): Error {
+  const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+  return new AggregateError([primary, ...failures],
+    `${message(primary)}; tunnel-client ${operation} also failed: ${failures.map(message).join("; ")}`,
+    { cause: primary });
 }
 
 export async function installTunnelClient(): Promise<string> {
@@ -113,8 +145,8 @@ export async function installTunnelClient(): Promise<string> {
     previousInstallation = { binary: installedBinary, manifestText };
   }
   if (!previousInstallation && (existsSync(executable) || existsSync(manifestFile))) {
-    rmSync(executable, { force: true });
-    rmSync(manifestFile, { force: true });
+    await removeTunnelInstallFile(executable);
+    await removeTunnelInstallFile(manifestFile);
   }
 
   const asset = platformAsset();
@@ -131,16 +163,18 @@ export async function installTunnelClient(): Promise<string> {
   // Avoid Windows installer detection: "install" in an unsigned executable name requests elevation.
   const stagedExecutable = `${executable}.stage-${process.pid}-${randomUUID()}${process.platform === "win32" ? ".exe" : ""}`;
   atomicWriteFile(stagedExecutable, binary);
-  let version: ReturnType<typeof runChecked>;
   try {
     if (process.platform !== "win32") chmodSync(stagedExecutable, 0o700);
-    version = runChecked(stagedExecutable, ["--version"], { timeout: 10_000 });
+    const version = runChecked(stagedExecutable, ["--version"], { timeout: 10_000 });
     if (!version.stdout.includes(TUNNEL_VERSION) && !version.stderr.includes(TUNNEL_VERSION)) {
       throw new Error(`Installed tunnel-client did not report version ${TUNNEL_VERSION}`);
     }
-  } finally {
-    rmSync(stagedExecutable, { force: true });
+  } catch (error) {
+    try { await removeTunnelInstallFile(stagedExecutable); }
+    catch (cleanupError) { throw tunnelInstallRecoveryError(error, [cleanupError], "temporary file cleanup"); }
+    throw error;
   }
+  await removeTunnelInstallFile(stagedExecutable);
   const manifest: TunnelInstallManifest = {
     version: 1,
     tunnelClientVersion: TUNNEL_VERSION,
@@ -153,14 +187,20 @@ export async function installTunnelClient(): Promise<string> {
     if (process.platform !== "win32") chmodSync(executable, 0o700);
     atomicWriteFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
   } catch (error) {
+    const failures: unknown[] = [];
     if (previousInstallation) {
-      atomicWriteFile(executable, previousInstallation.binary);
-      if (process.platform !== "win32") chmodSync(executable, 0o700);
-      atomicWriteFile(manifestFile, previousInstallation.manifestText);
+      try {
+        atomicWriteFile(executable, previousInstallation.binary);
+        if (process.platform !== "win32") chmodSync(executable, 0o700);
+        atomicWriteFile(manifestFile, previousInstallation.manifestText);
+      } catch (rollbackError) { failures.push(rollbackError); }
     } else {
-      rmSync(executable, { force: true });
-      rmSync(manifestFile, { force: true });
+      for (const path of [executable, manifestFile]) {
+        try { await removeTunnelInstallFile(path); }
+        catch (cleanupError) { failures.push(cleanupError); }
+      }
     }
+    if (failures.length > 0) throw tunnelInstallRecoveryError(error, failures, "rollback");
     throw error;
   }
   return executable;
@@ -262,7 +302,11 @@ export function connectTunnel(config: AppConfig): void {
     "--runtime-api-key", `file:${settings.runtimeKeyFile}`,
     "--mcp-command", mcpCommand(config),
     "--json",
-  ], { timeout: TUNNEL_READY_TIMEOUT_MS });
+  ], {
+    timeout: TUNNEL_READY_TIMEOUT_MS,
+    // Finish initialization before another chat can call the shared MCP server.
+    env: { ...process.env, MCP_STDIO_SEND_INITIALIZED_NOTIFICATION: "true" },
+  });
   const structuredOutput = result.stdout.trim();
   const launchError = structuredOutput
     ? tunnelConnectLaunchError(structuredOutput)
@@ -287,8 +331,29 @@ export function stopTunnel(config: AppConfig): void {
     && !/not found|not running|unknown alias|\balias\b[^\r\n]{0,160}\bis not known\b/i.test(
       `${result.stdout}\n${result.stderr}`,
     )) {
+    // v0.0.12 clears its saved PID even when SIGTERM times out. Its subsequent
+    // "stopped" inventory is not exit evidence; probe the PID from the stop error.
+    if (tunnelStopProcessExited(result.stdout, settings.alias)) {
+      console.warn("[codex-chatgpt-web] tunnel stop timed out; OS confirmed process exit");
+      return;
+    }
     throw new Error(`Failed to stop tunnel runtime: ${result.stderr.trim() || result.stdout.trim()}`);
   }
+}
+
+function tunnelStopProcessExited(output: string, alias: string): boolean {
+  let pid: number;
+  try {
+    const result = JSON.parse(output);
+    if (result?.alias !== alias || typeof result.stop_error !== "string") return false;
+    const match = /^process ([1-9]\d*) did not exit after SIGTERM$/.exec(result.stop_error);
+    if (!match) return false;
+    pid = Number(match[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 1) return false;
+  } catch { return false; }
+  try { process.kill(pid, 0); }
+  catch (error) { return (error as NodeJS.ErrnoException)?.code === "ESRCH"; }
+  return false;
 }
 
 export interface TunnelRuntimeStatus {
@@ -365,23 +430,24 @@ export function tunnelConnectLaunchError(output: string): string | undefined {
   ].join("; "));
 }
 
-export function parseTunnelStatus(output: string, exitStatus = 0): TunnelRuntimeStatus {
+export function parseTunnelStatus(output: string, alias: string, exitStatus = 0): TunnelRuntimeStatus {
   if (exitStatus !== 0) {
     return { ok: false, processRunning: false, healthy: false, ready: false, detail: safeTunnelDetail(output) };
   }
   try {
     const parsed = JSON.parse(output) as Record<string, unknown>;
-    const processRunning = parsed.process_running === true;
-    const healthy = parsed.healthy === true;
-    const ready = parsed.ready === true;
-    const state = typeof parsed.runtime_state === "string" ? parsed.runtime_state
-      : typeof parsed.status === "string" ? parsed.status
-        : undefined;
-    const issues = parsed.local && typeof parsed.local === "object" && Array.isArray((parsed.local as { issues?: unknown }).issues)
-      ? ((parsed.local as { issues: unknown[] }).issues).filter(issue => typeof issue === "string").slice(0, 3)
-      : [];
-    const explicitError = typeof parsed.error === "string" && parsed.error ? parsed.error : undefined;
-    const logTail = runtimeLogTail(parsed);
+    if (!Array.isArray(parsed.entries)) throw new Error("local inventory has no entries array");
+    const matches = parsed.entries.filter(entry => entry?.alias === alias);
+    if (matches.length > 1) throw new Error("local inventory contains duplicate aliases");
+    const state = matches.length === 0 ? "stopped" : matches[0].runtime_state;
+    if (!["stopped", "starting", "healthy", "ready"].includes(state)) {
+      throw new Error("local inventory has an unsupported runtime state");
+    }
+    // tunnel-client 0.0.12 derives these states from the live process and local healthz/readyz
+    // probes. It does not need the optional remote control-plane lookup made by `status`.
+    const processRunning = state !== "stopped";
+    const healthy = state === "healthy" || state === "ready";
+    const ready = state === "ready";
     const ok = processRunning && healthy && ready;
     const detail = ok
       ? "process_running=true healthy=true ready=true"
@@ -389,14 +455,12 @@ export function parseTunnelStatus(output: string, exitStatus = 0): TunnelRuntime
         `process_running=${processRunning}`,
         `healthy=${healthy}`,
         `ready=${ready}`,
-        ...(state ? [`state=${state}`] : []),
-        ...(explicitError ? [explicitError] : []),
-        ...issues,
-        ...(logTail ? [`runtime_log=${logTail}`] : []),
+        `state=${state}`,
+        ...(matches.length === 0 ? ["local_inventory=absent"] : []),
       ].join("; "));
-    return { ok, processRunning, healthy, ready, ...(state ? { state } : {}), detail };
-  } catch {
-    return { ok: false, processRunning: false, healthy: false, ready: false, detail: `tunnel-client returned non-JSON status: ${safeTunnelDetail(output)}` };
+    return { ok, processRunning, healthy, ready, state, detail };
+  } catch (error) {
+    return { ok: false, processRunning: false, healthy: false, ready: false, detail: `tunnel-client returned invalid local inventory: ${safeTunnelDetail(error instanceof Error ? error.message : String(error))}` };
   }
 }
 
@@ -407,10 +471,10 @@ export function tunnelStatus(config: AppConfig): TunnelRuntimeStatus {
   }
   const result = runCommand(
     settings.binaryPath,
-    ["runtimes", "status", settings.alias, "--json"],
+    ["runtimes", "cleanup", "--json"],
     { timeout: 10_000 },
   );
-  return parseTunnelStatus(tunnelCommandOutput(result), result.status);
+  return parseTunnelStatus(tunnelCommandOutput(result), settings.alias, result.status);
 }
 
 export async function waitForTunnelReady(

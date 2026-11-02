@@ -3,12 +3,12 @@
 ## codex-chatgpt-web
 
 - Repository: miuuyy/codex-chatgpt-web
-- Tag: v5.0.6
-- Commit: e85e3693fdb4e3e033348c08df0298c20fcdb612
+- Tag: v6.1.17
+- Commit: 860fa576eb47d9e20d7d8289235bfea94392d2fd
 - License: MIT
 - License file: `third_party/LICENSES/codex-chatgpt-web-MIT.txt`
-- Vendored source: `vendor/codex-chatgpt-web-v5.0.6/`
-- Pinned tunnel-client: 0.0.12
+- Vendored source: `vendor/codex-chatgpt-web-v6.1.17/`
+- Pinned tunnel-client: 0.0.16
 
 The upstream and transitive license files remain in the vendored source tree.
 
