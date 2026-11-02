@@ -282,6 +282,8 @@ let rendererLoaded = false;
 let cpaUpdater = null;
 // Connections > App plugins (app-plugins.cjs): CPA and its plugins, their versions and updates.
 let appPluginsService = null;
+// The Antigravity CLI service, made with the backend (startBackendFrom); App plugins updates it.
+let antigravityCliService = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
@@ -4134,6 +4136,8 @@ async function start() {
     services: () => externalServicesController,
     // A plugin DLL loads when CPA starts.
     restartCpa: () => externalServicesController.restart("cpa"),
+    antigravityCli: () => antigravityCliService,
+    rtk,
     logger,
   });
   managedBootstrapController = createManagedBootstrap({
@@ -4499,6 +4503,7 @@ async function start() {
       toolsRoot: path.join(app.getPath("userData"), "tools"),
       confirm: confirmAoAction, getWorkspaces: listHeadlessWorkspaces, logger,
     });
+    antigravityCliService = antigravityCli;
     antigravityAuthBrowser = createAntigravityAuthBrowser({
       BrowserWindow, sessionFor: partition => session.fromPartition(partition),
       proxyEnvironment: antigravityProxyEnvironment, cleanUserAgent,

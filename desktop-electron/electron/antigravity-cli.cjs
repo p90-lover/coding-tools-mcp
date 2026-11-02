@@ -12,13 +12,49 @@ const EXECUTABLE_NAMES = new Set(["antigravity", "antigravity.exe", "agy", "agy.
 const tarBinary = (platform = process.platform) => (platform === "win32"
   ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe") : "tar");
 
-function loadManifest(manifestPath = MANIFEST_PATH) {
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  if (manifest?.id !== "antigravity-cli" || !/^\d+\.\d+\.\d+$/.test(String(manifest.version))
+const VERSION = /^\d+\.\d+\.\d+$/;
+// The pinned archive is ~60 MB; a release asset far beyond that isn't the CLI.
+const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
+
+function checkManifest(manifest) {
+  if (manifest?.id !== "antigravity-cli" || !VERSION.test(String(manifest.version))
     || manifest.repository !== "google-antigravity/antigravity-cli") {
     throw new Error("Antigravity CLI manifest is invalid");
   }
   return manifest;
+}
+
+function loadManifest(manifestPath = MANIFEST_PATH) {
+  return checkManifest(JSON.parse(fs.readFileSync(manifestPath, "utf8")));
+}
+
+/** -1, 0 or 1 for two x.y.z versions. */
+function compareVersion(left, right) {
+  const a = String(left).split(".").map(Number);
+  const b = String(right).split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
+  return 0;
+}
+
+/**
+ * A manifest for a newer GitHub release (App plugins' update): the pinned manifest's file names and
+ * executables, with the size and SHA-256 GitHub computed for each of that release's assets. A
+ * platform whose asset is missing or has no digest is left out, so it has nothing to install.
+ */
+function releaseManifest(base, release) {
+  const version = String(release?.tag_name || "").replace(/^v/u, "");
+  if (!VERSION.test(version)) throw new Error("Antigravity CLI release has no x.y.z version");
+  const assets = new Map((release.assets || []).map(asset => [asset.name, asset]));
+  const platforms = {};
+  for (const [platform, arches] of Object.entries(base.platforms || {})) {
+    for (const [arch, pinned] of Object.entries(arches || {})) {
+      const asset = assets.get(pinned.fileName);
+      const sha256 = /^sha256:([a-f0-9]{64})$/u.exec(String(asset?.digest || ""))?.[1];
+      if (!sha256 || !(asset.size > 0 && asset.size <= MAX_ARCHIVE_BYTES)) continue;
+      (platforms[platform] ??= {})[arch] = { fileName: pinned.fileName, size: asset.size, sha256, executable: pinned.executable };
+    }
+  }
+  return checkManifest({ ...base, version, platforms });
 }
 
 function platformAsset(manifest, platform, arch) {
@@ -127,21 +163,34 @@ function createAntigravityCli({
   const markerPath = (home) => path.join(home, "CODING_TOOLS_TOOL.json");
   let installing = null;
 
-  function installed() {
+  function versionDirs() {
     try {
-      const marker = JSON.parse(fs.readFileSync(markerPath(path.join(root, manifest.version)), "utf8"));
-      const executable = path.join(root, manifest.version, marker.executable);
-      if (marker.version !== manifest.version || !fs.statSync(executable).isFile()) return null;
+      return fs.readdirSync(root, { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && VERSION.test(entry.name)).map(entry => entry.name);
+    } catch { return []; }
+  }
+
+  function installedVersion(version) {
+    try {
+      const marker = JSON.parse(fs.readFileSync(markerPath(path.join(root, version)), "utf8"));
+      const executable = path.join(root, version, marker.executable);
+      if (marker.version !== version || !fs.statSync(executable).isFile()) return null;
       return { version: marker.version, executable, installedAt: marker.installedAt };
     } catch { return null; }
   }
 
-  function previousVersions() {
-    try {
-      return fs.readdirSync(root, { withFileTypes: true })
-        .filter(entry => entry.isDirectory() && /^\d+\.\d+\.\d+$/.test(entry.name) && entry.name !== manifest.version)
-        .map(entry => entry.name);
-    } catch { return []; }
+  /** The newest complete install: the pinned build, or a newer release App plugins updated to. */
+  function installed() {
+    const versions = versionDirs().sort((left, right) => compareVersion(right, left));
+    for (const version of versions) {
+      const found = installedVersion(version);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function previousVersions(keep = installed()?.version ?? manifest.version) {
+    return versionDirs().filter(version => version !== keep);
   }
 
   function status() {
@@ -150,7 +199,7 @@ function createAntigravityCli({
     try { asset = platformAsset(manifest, platform, arch); } catch {}
     return {
       ok: true, id: manifest.id, name: manifest.name, command: manifest.command,
-      version: manifest.version, supported: Boolean(asset), installing: Boolean(installing),
+      version: current?.version ?? manifest.version, pinned: manifest.version, supported: Boolean(asset), installing: Boolean(installing),
       installed: Boolean(current), installedAt: current?.installedAt ?? null,
       previous: previousVersions(), shim: current && fs.existsSync(shimPath) ? shimPath : null,
       binDir: current ? binDir : null, download: asset ? { fileName: asset.fileName, size: asset.size, url: asset.url } : null,
@@ -190,25 +239,30 @@ function createAntigravityCli({
     fs.renameSync(`${shimPath}.tmp`, shimPath);
   }
 
-  /** Previous builds move to Trash; nothing the user installed is deleted. */
-  function retirePrevious() {
-    for (const version of previousVersions()) {
-      const trash = path.join(toolsRoot, "Trash", "antigravity-cli", `${version}-${now()}`);
-      fs.mkdirSync(path.dirname(trash), { recursive: true });
-      fs.renameSync(path.join(root, version), trash);
+  /**
+   * Previous builds move to Trash; nothing the user installed is deleted. A build an agent is still
+   * running can't be moved on Windows: it stays until the next install, and the newest one is used.
+   */
+  function toTrash(source, name) {
+    const trash = path.join(toolsRoot, "Trash", "antigravity-cli", name);
+    fs.mkdirSync(path.dirname(trash), { recursive: true });
+    fs.renameSync(source, trash);
+  }
+
+  function retirePrevious(keep) {
+    for (const version of previousVersions(keep)) {
+      try {
+        toTrash(path.join(root, version), `${version}-${now()}`);
+      } catch (error) {
+        logger.warn?.("antigravity_cli.retire_failed", { version, message: String(error?.message || error) });
+      }
     }
   }
 
-  async function install() {
-    if (installing) return installing;
-    const asset = platformAsset(manifest, platform, arch);
-    if (installed()) return status();
-    if (!await confirm({
-      message: `Install ${manifest.name} ${manifest.version}?`,
-      detail: `Source: ${asset.url}\nFile: ${asset.fileName} (${(asset.size / 1048576).toFixed(1)} MB)\nSHA-256: ${asset.sha256}\n\nIt's installed for Coding Tools only, and agents run it as "${manifest.command}". You sign in from the CLI.`,
-    })) return { ok: false, cancelled: true };
+  /** Downloads, checks and unpacks `target`'s build into <root>/<version>, then points the shim at it. */
+  function installManifest(target, asset) {
     installing = (async () => {
-      const staging = path.join(root, `.staging-${manifest.version}-${now()}`);
+      const staging = path.join(root, `.staging-${target.version}-${now()}`);
       const archive = path.join(root, `.download-${asset.fileName}`);
       fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
       try {
@@ -219,14 +273,15 @@ function createAntigravityCli({
         const executable = findExecutable(staging);
         if (platform !== "win32") fs.chmodSync(executable, 0o755);
         const relative = path.relative(staging, executable);
-        fs.writeFileSync(markerPath(staging), `${JSON.stringify({ id: manifest.id, version: manifest.version,
+        fs.writeFileSync(markerPath(staging), `${JSON.stringify({ id: target.id, version: target.version,
           executable: relative, sha256: asset.sha256, installedAt: new Date(now()).toISOString() }, null, 2)}\n`);
-        retirePrevious();
-        const home = path.join(root, manifest.version);
-        if (fs.existsSync(home)) fs.renameSync(home, path.join(toolsRoot, "Trash", "antigravity-cli", `${manifest.version}-incomplete-${now()}`));
+        const home = path.join(root, target.version);
+        if (fs.existsSync(home)) toTrash(home, `${target.version}-incomplete-${now()}`);
         fs.renameSync(staging, home);
         writeShim(path.join(home, relative));
-        logger.info?.("antigravity_cli.installed", { version: manifest.version });
+        // After the switch: a failed move of the old build leaves the new one in use.
+        retirePrevious(target.version);
+        logger.info?.("antigravity_cli.installed", { version: target.version });
         return status();
       } finally {
         installing = null;
@@ -235,6 +290,33 @@ function createAntigravityCli({
       }
     })();
     return installing;
+  }
+
+  async function install() {
+    if (installing) return installing;
+    const asset = platformAsset(manifest, platform, arch);
+    const current = installed();
+    if (current && compareVersion(current.version, manifest.version) >= 0) return status();
+    if (!await confirm({
+      message: `Install ${manifest.name} ${manifest.version}?`,
+      detail: `Source: ${asset.url}\nFile: ${asset.fileName} (${(asset.size / 1048576).toFixed(1)} MB)\nSHA-256: ${asset.sha256}\n\nIt's installed for Coding Tools only, and agents run it as "${manifest.command}". You sign in from the CLI.`,
+    })) return { ok: false, cancelled: true };
+    return installManifest(manifest, asset);
+  }
+
+  /**
+   * Updates to a newer release (App plugins' Update button, which is the person's consent): a
+   * manifest from releaseManifest, installed with the same checksum and archive checks as the pin.
+   */
+  async function update(target) {
+    if (installing) throw new Error("The Antigravity CLI is already being installed");
+    checkManifest(target);
+    const current = installed();
+    if (!current) throw new Error("Install the Antigravity CLI first");
+    if (compareVersion(target.version, current.version) <= 0) return status();
+    const asset = platformAsset(target, platform, arch);
+    if (asset.size > MAX_ARCHIVE_BYTES) throw new Error("Antigravity CLI release is larger than the CLI can be");
+    return installManifest(target, asset);
   }
 
   /** The pinned executable; it only runs inside the in-app terminal with proxy variables. */
@@ -247,7 +329,7 @@ function createAntigravityCli({
     return current.executable;
   }
 
-  return Object.freeze({ status, install, executable, binDir: () => { if (!installed()) return null; executable(); return binDir; }, manifest });
+  return Object.freeze({ status, install, update, executable, binDir: () => { if (!installed()) return null; executable(); return binDir; }, manifest });
 }
 
-module.exports = { createAntigravityCli, loadManifest, platformAsset, validateArchive, findExecutable, tarBinary, shimBody, shimProxyEnvironment, manualAuthEnvironment };
+module.exports = { createAntigravityCli, loadManifest, releaseManifest, compareVersion, platformAsset, validateArchive, findExecutable, tarBinary, shimBody, shimProxyEnvironment, manualAuthEnvironment };

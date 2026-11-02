@@ -2631,9 +2631,9 @@ function RtkSurface({ active, enabled, setError, updateState }: {
 }
 
 /**
- * Connections > App plugins (app-plugins.cjs): CPA and its plugins, the version installed and the
- * newest release on GitHub, and Update where the app can install it (CPA's own updater, or a
- * plugin's Windows build checked against GitHub's SHA-256).
+ * Connections > App plugins (app-plugins.cjs): CPA, the agent tools (Antigravity CLI, RTK) and CPA's
+ * plugins, the version installed and the newest release on GitHub, and Update where the app can
+ * install it (CPA's own updater, a build checked against GitHub's SHA-256, or winget for RTK).
  */
 function AppPluginsSurface({ active, setError }: { active: boolean; setError: (error: string | null) => void }) {
   const [snapshot, setSnapshot] = useState<AppPluginsSnapshot | null>(null);
@@ -2673,7 +2673,8 @@ function AppPluginsSurface({ active, setError }: { active: boolean; setError: (e
           {item.updateAvailable && item.canUpdate
             ? <PrimaryButton disabled={busy || updating !== null} onClick={() => void update(item)}>{busy ? "Updating…" : `Update to ${item.latest}`}</PrimaryButton>
             : <span className={`rtk-chip${item.updateAvailable ? " is-attention" : ""}`}>
-              {item.updateAvailable ? "Comes with the app" : item.latest ? "Up to date" : item.error ? "Not checked" : "…"}
+              {item.updateAvailable ? (item.kind === "tool" ? "Update available" : "Comes with the app")
+                : !item.installed && item.kind === "tool" ? "Not installed" : item.latest ? "Up to date" : item.error ? "Not checked" : "…"}
             </span>}
           {item.releaseUrl ? <IconButton icon="external" label="Open the release on GitHub"
             onClick={() => void api!.openExternal(item.releaseUrl!).catch((cause) => setError(messageOf(cause)))} /> : null}
@@ -2682,6 +2683,7 @@ function AppPluginsSurface({ active, setError }: { active: boolean; setError: (e
     );
   };
   const services = snapshot?.items.filter((item) => item.kind === "service") ?? [];
+  const tools = snapshot?.items.filter((item) => item.kind === "tool") ?? [];
   const plugins = snapshot?.items.filter((item) => item.kind === "cpa-plugin") ?? [];
   return (
     <ContentSurface narrow title="App plugins" subtitle="What Coding Tools runs from other projects: the version installed and the newest release on GitHub. Private repositories are read with your GitHub CLI sign-in (gh auth login).">
@@ -2693,6 +2695,11 @@ function AppPluginsSurface({ active, setError }: { active: boolean; setError: (e
       <div className="settings-list">
         {services.length ? services.map((item, index) => row(item, index === services.length - 1))
           : <p className="surface-empty-note">{snapshot ? "No services." : "Checking…"}</p>}
+      </div>
+      <SectionHeading label="Agent tools" />
+      <div className="settings-list">
+        {tools.length ? tools.map((item, index) => row(item, index === tools.length - 1))
+          : <p className="surface-empty-note">{snapshot ? "No agent tools." : "Checking…"}</p>}
       </div>
       <SectionHeading label="CPA plugins" />
       <div className="settings-list">
