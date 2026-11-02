@@ -301,6 +301,27 @@ test("launcher runtime ownership rejects a different browser descriptor", () => 
   );
 });
 
+test("a descriptor named through a junction is the same browser host", { skip: process.platform !== "win32" }, () => {
+  // The app started with CODING_TOOLS_HOME at G:\AppData\.coding-tools refused a config.json that
+  // named the descriptor through the C:\Users\simon\.coding-tools junction to that folder.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-descriptor-junction-"));
+  try {
+    const home = path.join(root, "real-home");
+    fs.mkdirSync(path.join(home, "runtime"), { recursive: true });
+    const junction = path.join(root, "linked-home");
+    fs.symlinkSync(home, junction, "junction");
+    const throughJunction = path.join(junction, "runtime", "launcher-browser.json");
+    const real = path.join(home, "runtime", "launcher-browser.json");
+    const config = launcherConfig(throughJunction);
+    assert.equal(validateConfig(config, real).browserHostDescriptorPath, throughJunction);
+    assert.equal(validateConfig(launcherConfig(real), throughJunction).browserHostDescriptorPath, real);
+    const other = path.join(root, "other-home", "runtime", "launcher-browser.json");
+    assert.throws(() => validateConfig(config, other), /different launcher browser host/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher runtime ownership cannot cross production and DEV profiles", () => {
   const descriptorPath = path.join(os.tmpdir(), "launcher.json");
   const production = { ...launcherConfig(descriptorPath), solAvailable: true };
