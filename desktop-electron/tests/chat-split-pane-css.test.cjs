@@ -56,5 +56,13 @@ test("a narrow chat box has two rows: what runs it on top, attach, permissions, 
   assert.match(tier, /\.cx-composer-bar::before \{ flex: 0 0 100%; order: 1; content: ""; \}/, "one break between them");
   assert.match(tier, /\[aria-label="Choose model"\], \[aria-label="Choose saved team"\]\)\) \{ flex: 1 1 0; min-width: 0; \}/,
     "the model starts from no width, so effort and window stay on its row instead of wrapping");
-  assert.match(container(560), /\.cx-goal-objective \{ order: 1; flex: 1 1 60%;/, "the goal's objective gets a line of its own");
+});
+
+// Reported 2026-11-02: in a ~500 px pane the goal's objective fit on the first row, the state read "F"
+// and the time sat alone on a second row.
+test("a narrow goal bar always breaks before its objective, whatever the pane's width", () => {
+  const tier = container(560);
+  assert.match(tier, /\.cx-goal::before \{ flex: 0 0 100%; order: 1; content: ""; \}/, "one break after the state and buttons");
+  assert.match(tier, /\.cx-goal-objective \{ order: 2; flex: 1 1 0;/, "the objective starts the second row, from no width");
+  assert.match(tier, /\.cx-goal \.cx-goal-meta \{ order: 3; \}/, "its time beside it");
 });
