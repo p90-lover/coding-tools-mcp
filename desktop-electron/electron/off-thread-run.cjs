@@ -2,6 +2,7 @@
 
 const { execFile, spawn } = require("node:child_process");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
 const { PassThrough, Writable } = require("node:stream");
 const { Worker } = require("node:worker_threads");
 
@@ -416,4 +417,123 @@ function resetSpawnWorker() {
   spawned.clear();
 }
 
-module.exports = { runOffThread, warmProgram, spawnOffThread, resetSpawnWorker };
+/*
+ * Folder watches. libuv answers each change Windows reports for a watched folder on the thread that
+ * owns the watch, and for any change but a removal it first asks the disk for the file's long name
+ * (GetLongPathNameW, one lookup per part of the path). The folders we watch hold the app's data on the
+ * busy hard disk, so a change could hold the main process: 5.2 s with 16 ms of CPU on 2026-11-02, and
+ * three of the day's six stall probes found main resuming in a watch callback. watchOffThread keeps
+ * every watch in one worker and passes only the change on; where no worker can start, it watches here.
+ */
+const WATCH_WORKER_SOURCE = `
+const { parentPort } = require("node:worker_threads");
+const fs = require("node:fs");
+const watchers = new Map();
+const describe = (error) => ({ message: String((error && error.message) || error), code: error && error.code });
+parentPort.on("message", ({ type, id, directory }) => {
+  if (type === "close") {
+    const watcher = watchers.get(id);
+    watchers.delete(id);
+    try { if (watcher) watcher.close(); } catch {}
+    return;
+  }
+  let watcher;
+  try {
+    watcher = fs.watch(directory, { persistent: false }, (event, name) => parentPort.postMessage({ id, event, name: name == null ? null : String(name) }));
+  } catch (error) {
+    parentPort.postMessage({ id, error: describe(error) });
+    return;
+  }
+  watcher.on("error", (error) => { watchers.delete(id); parentPort.postMessage({ id, error: describe(error) }); });
+  watchers.set(id, watcher);
+  parentPort.postMessage({ id, armed: true });
+});`;
+
+let watchWorker = null;
+let watchWorkerBroken = false;
+let watchIds = 0;
+const watches = new Map();
+
+function startWatchWorker() {
+  const started = new Worker(WATCH_WORKER_SOURCE, { eval: true });
+  started.on("message", ({ id, event, name, armed, error }) => {
+    const watch = watches.get(id);
+    if (!watch) return;
+    if (error) {
+      watches.delete(id);
+      watch.settle();
+      if (watch.listenerCount("error")) watch.emit("error", Object.assign(new Error(error.message), { code: error.code }));
+      return;
+    }
+    if (armed) {
+      watch.settle();
+      // A change made before the worker began watching was never reported: say something may have
+      // changed, as a watch does when it cannot name the file.
+      watch.listener("rename", null);
+      return;
+    }
+    watch.listener(event, name);
+  });
+  const stopped = () => {
+    if (watchWorker !== started) return;
+    watchWorker = null;
+    watchWorkerBroken = true;
+    // Their owners close them on an error and watch again (here, from now on) or fall back to their
+    // own slower checks, as for any watch that fails.
+    const open = [...watches.values()];
+    watches.clear();
+    for (const watch of open) {
+      watch.settle();
+      if (watch.listenerCount("error")) watch.emit("error", new Error("The folder watch worker stopped"));
+    }
+  };
+  started.on("error", stopped);
+  started.on("exit", stopped);
+  // After the listeners: adding a 'message' listener refs the worker again, and an earlier unref left
+  // every process that watched a folder unable to exit (seen in tests: files hung until killed).
+  started.unref();
+  return started;
+}
+
+/**
+ * Watches `directory` (not its subfolders) and calls `listener(eventType, fileName)` as fs.watch does;
+ * fileName may be null. Returns a handle with close(), ref(), unref(), an 'error' event and `ready`, a
+ * promise settled once the watch is in place or has failed. A folder that cannot be watched (missing)
+ * reports 'error' rather than throwing. Unlike fs.watch it never keeps the process running.
+ */
+function watchOffThread(directory, listener, watchHere = fs.watch) {
+  if (!watchWorkerBroken && !watchWorker) {
+    try { watchWorker = startWatchWorker(); } catch { watchWorkerBroken = true; }
+  }
+  if (watchWorkerBroken) {
+    const watcher = watchHere(directory, { persistent: false }, listener);
+    watcher.ready = Promise.resolve();
+    return watcher;
+  }
+  const id = ++watchIds;
+  const handle = new EventEmitter();
+  let settle;
+  handle.ready = new Promise((resolve) => { settle = resolve; });
+  handle.settle = () => settle();
+  handle.listener = listener;
+  handle.close = () => {
+    handle.settle();
+    if (watches.delete(id)) watchWorker?.postMessage({ type: "close", id });
+  };
+  handle.ref = () => handle;
+  handle.unref = () => handle;
+  watches.set(id, handle);
+  watchWorker.postMessage({ type: "watch", id, directory });
+  return handle;
+}
+
+/** For tests: forget the watch worker so the next watch starts a new one. */
+function resetWatchWorker() {
+  const worker = watchWorker;
+  watchWorker = null;
+  watches.clear();
+  worker?.terminate?.();
+  watchWorkerBroken = false;
+}
+
+module.exports = { runOffThread, warmProgram, spawnOffThread, resetSpawnWorker, watchOffThread, resetWatchWorker };

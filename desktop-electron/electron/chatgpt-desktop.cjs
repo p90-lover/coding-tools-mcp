@@ -13,6 +13,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { watchOffThread } = require("./off-thread-run.cjs");
 const { createWin32Helper } = require("./chatgpt-desktop-win32.cjs");
 const { createLocalChatGpt } = require("./chatgpt-desktop-local.cjs");
 const {
@@ -237,11 +238,15 @@ function createChatGptDesktopHost({
     };
     if (current.directory) {
       try {
-        current.watcher = fs.watch(current.directory, (_event, name) => {
+        current.watcher = watchOffThread(current.directory, (_event, name) => {
           if (!name || /\.json$/i.test(String(name))) check();
         });
-        // The folder removed or renamed (a CPA repair) emits 'error'; the slow re-check covers it.
-        current.watcher.on("error", () => current.watcher?.close());
+        // The folder missing (no CPA account yet), removed or renamed (a CPA repair) emits 'error';
+        // the slow re-check covers it.
+        current.watcher.on("error", (error) => {
+          current.watcher?.close();
+          if (error?.code !== "ENOENT") logger?.warn?.("chatgpt_desktop.account_watch_failed", { message: error?.message });
+        });
       } catch (error) {
         // Missing folder (no CPA account yet) or a watch failure: the slow re-check still covers it.
         if (error?.code !== "ENOENT") logger?.warn?.("chatgpt_desktop.account_watch_failed", { message: error.message });
@@ -453,12 +458,16 @@ function createChatGptDesktopHost({
     };
     for (const [directory, fileName] of [[paths.codexHome, "auth.json"], [path.dirname(account.file), null]]) {
       try {
-        const watcher = fs.watch(directory, (_event, changed) => {
+        const watcher = watchOffThread(directory, (_event, changed) => {
           const name = changed ? String(changed) : "";
           if (fileName ? name === fileName : /\.json$/i.test(name)) schedule();
         });
-        // A watched folder removed (a slot's Codex home, a moved CPA auth folder) emits 'error'.
-        watcher.on("error", () => watcher.close());
+        // A watched folder missing or removed (a slot's Codex home, a moved CPA auth folder) emits
+        // 'error'; the slow sweep covers it.
+        watcher.on("error", (error) => {
+          watcher.close();
+          logger?.warn?.("chatgpt_desktop.watch_failed", { message: error?.message });
+        });
         current.watchers.push(watcher);
       } catch (error) {
         logger?.warn?.("chatgpt_desktop.watch_failed", { message: error.message });

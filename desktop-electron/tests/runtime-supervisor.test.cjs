@@ -481,7 +481,9 @@ test("with the folder watched, reads of an unchanged runtime config never touch 
     fs.readFileSync = function (file, ...rest) { if (file === configPath) blocking.push("read"); return sync.readFileSync.call(this, file, ...rest); };
     assert.equal(supervisor.readConfig().port, 17841);
     assert.deepEqual(blocking, ["stat", "read"], "the first read checks and parses the file");
-    // The watch may still report the write above; once it settles, reads stop checking.
+    // The watch runs in a worker and says once it is in place that something may have changed, and it
+    // may still report the write above; once both settle, reads stop checking.
+    await supervisor.configWatcher?.ready;
     await new Promise(resolve => setTimeout(resolve, 100));
     supervisor.readConfig();
     blocking.length = 0;

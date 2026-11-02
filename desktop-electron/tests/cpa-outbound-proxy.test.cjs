@@ -209,8 +209,14 @@ test("a services snapshot reads CPA's config once, and again only after CPA rewr
 
   controller.snapshot();
   assert.equal(reads, 1);
+  // The folder is watched from a worker. Once the watch is in place it reports that something may
+  // have changed (a write before then would otherwise be missed), so the config is read once more.
+  await settle();
+  controller.snapshot();
+  const watched = reads;
+  assert.ok(watched <= 2, `read ${watched} times before the watch settled`);
   for (let index = 0; index < 5; index += 1) controller.snapshot();
-  assert.equal(reads, 1, "later snapshots reuse it");
+  assert.equal(reads, watched, "later snapshots reuse it");
 
   // CPA's own data in its subfolders changes often; that isn't its config.
   published.length = 0;
@@ -218,14 +224,14 @@ test("a services snapshot reads CPA's config once, and again only after CPA rewr
   fs.writeFileSync(path.join(cpaState, "notes.txt"), "x");
   await settle();
   controller.snapshot();
-  assert.equal(reads, 1, "other files leave the cached config alone");
+  assert.equal(reads, watched, "other files leave the cached config alone");
   assert.equal(published.length, 0);
 
   fs.writeFileSync(path.join(cpaState, "config.yaml"), "requests:\n  proxy-url: \"http://127.0.0.1:1/\"\n");
   const deadline = Date.now() + 5_000;
   while (!published.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
   assert.ok(published.length > 0, "a rewritten config publishes a snapshot");
-  assert.equal(reads, 2, "and is read again");
+  assert.equal(reads, watched + 1, "and is read again");
 });
 
 test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets the bare route", async (t) => {
