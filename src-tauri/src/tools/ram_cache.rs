@@ -172,6 +172,14 @@ pub struct OutputCache {
     wake: Condvar,
 }
 impl OutputCache {
+    #[cfg(test)]
+    pub(super) fn isolated_for_test() -> Self {
+        Self {
+            state: Mutex::new(CacheState::new(MAX_BYTES, STREAM_BYTES)),
+            wake: Condvar::new(),
+        }
+    }
+
     pub fn append(&self, key: &str, chunk: &[u8]) {
         let mut state = self.state.lock().expect("RAM output cache lock");
         let was_empty = state.bytes == 0;
