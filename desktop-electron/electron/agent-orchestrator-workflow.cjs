@@ -2652,7 +2652,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       stopping.detail = "Stopping owned agents";
       reportRun(id, run, stopping, null);
     }
-    const beforeStop = action === "stop" ? await runs({ workspaceId: id, runId: run }).catch(() => null) : null;
+    // Stop must not inherit a background poll's occupied admission slot or shared read promise.
+    const readForStop = async (allRuns = false) => {
+      const saved = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(!allRuns ? { run_id: run } : {}) }, { admissionControl: true });
+      if (saved?.ok !== true || !Array.isArray(saved.runs)) throw new Error("AO run read failed");
+      return saved;
+    };
+    const beforeStop = action === "stop" ? await readForStop().catch(() => null) : null;
     const stopTargets = (beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
       .filter(node => externalAgent(node) && node.receipt?.thread_id)
       .map(node => ({ nodeId: node.id, sessionId: node.receipt.thread_id,
@@ -2668,7 +2674,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Stop the local loop and known owned agents even when saved mission cancellation
       // cannot be confirmed; report that uncertainty instead of claiming the saved state changed.
       if (action !== "stop") throw error;
-      const saved = await runs({ workspaceId: id, runId: run }).catch(() => null);
+      const saved = await readForStop().catch(() => null);
       const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
       if (!mission && !backgroundRuns.has(runKey(id, run))) throw error;
       logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
@@ -2696,7 +2702,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     }
     if (action === "stop") {
-      const saved = await runs({workspaceId:id}).catch(() => null);
+      const saved = await readForStop(true).catch(() => null);
       const life = saved ? taskLifecycle(saved,result.run.project_id) : {};
       if (life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)) {
         await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
