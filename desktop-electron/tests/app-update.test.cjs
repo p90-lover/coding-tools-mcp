@@ -13,7 +13,7 @@ const {
   STAGE_DIRECTORY, sweepUpdateLeftovers, commitAppliedUpdate, handOffUpdateRecovery, pendingAppliedUpdate, readJournal, waitForUpdateApply,
   AUTO_INSTALL_FAILURE_LIMIT,
 } = require("../electron/app-update.cjs");
-const { createJournal, recordResult, rollBack, rollForward, swapIn, writeJsonDurable } = require("../electron/app-update-worker.cjs");
+const { createJournal, recordResult, rollBack, rollForward, swapIn, sweep, writeJsonDurable } = require("../electron/app-update-worker.cjs");
 const { waitForPackagedRuntimeSource } = require("../electron/runtime-install.cjs");
 const { buildAppUpdate, packFor } = require("../scripts/package-app-update.cjs");
 
@@ -262,6 +262,25 @@ test("the worker applies the update after the app has closed, keeps the old file
     assert.equal(fs.existsSync(journalPath), false);
     assert.equal(fs.existsSync(stageRoot), false);
     assert.equal(readResult(installRoot).stage, "started");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the commit's sweep never holds the main thread and keeps a copy it could not remove for the next start", async () => {
+  const root = tempRoot();
+  try {
+    const installRoot = path.join(root, "install");
+    fs.mkdirSync(path.join(installRoot, "_update"), { recursive: true });
+    const removable = path.join(installRoot, "old.js.old-5");
+    const refused = path.join(installRoot, "busy.old-5");
+    fs.writeFileSync(removable, "old");
+    fs.mkdirSync(refused); // a plain rm refuses a folder, as Windows refuses a still-running image
+    const pending = sweep({ installRoot }, [{ aside: removable }, { aside: refused }, { aside: null }]);
+    assert.ok(pending instanceof Promise, "the deletes run on the event loop, not inside the caller");
+    assert.equal(await pending, 1);
+    assert.equal(fs.existsSync(removable), false);
+    assert.deepEqual(JSON.parse(read(installRoot, "_update/set-aside.json")), ["busy.old-5"]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
