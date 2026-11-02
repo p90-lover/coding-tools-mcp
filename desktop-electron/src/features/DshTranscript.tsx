@@ -320,10 +320,16 @@ function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseSt
   // A retried single card's earlier attempts come first, folded, as in a team card's row: they were
   // not shown at all here, and the other view drew them under the new attempt's work.
   const earlier = <EarlierRounds rounds={step.earlier} />;
-  if (!work.length) return <>{earlier}{step.hasWork && !step.working ? <p className="dsh-hint">Loading…</p> : null}</>;
-  return <>{earlier}<SteerReader.Provider value={steerReader(step)}>
-    <DshFlow items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} hideReply={answer} />
-  </SteerReader.Provider></>;
+  // A held or retried card can have a reply before its timeline is available, just as a team
+  // card can (DshAgent). Keep that reply, but leave the turn's final answer outside its work.
+  const reply = step.text && step.text.trim() !== answer?.trim() ? step.text : undefined;
+  return <>{earlier}{work.length ? <SteerReader.Provider value={steerReader(step)}>
+    <DshFlow items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} hideReply={reply ?? answer} />
+  </SteerReader.Provider> : !reply ? step.working
+    ? <p className="dsh-hint" role="status">{step.working.activity || "Waiting for the model's first response…"}</p>
+    : step.hasWork ? <p className="dsh-hint">Loading…</p> : null : null}
+    {reply ? <div className="dsh-reply"><ChatMarkdown text={reply} /></div> : null}
+  </>;
 }
 
 /** A team card as one row: its name and what it is doing or how it ended, opening on its own work. */
