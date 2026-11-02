@@ -1388,7 +1388,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal.is-achieved .cx-goal-state { color: var(--ao-green); }
 .cx-goal.is-stalled .cx-goal-state, .cx-goal.is-limited .cx-goal-state { color: var(--ao-amber); }
 .cx-wakeup-glyph { flex: 0 0 auto; color: var(--ao-blue); font-size: 13px; line-height: 1; }
-.cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }
+/* The objective holds one line and fades out before its time, as a thread title does, and its type
+   shrinks with the pane (12 px from a 500 px chat, 10 px at 375 px and under). */
+.cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); font-size: clamp(10px, 1.6cqi + 4px, 12px); white-space: nowrap;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
 .cx-goal-meta, .cx-goal-note { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The goal check's verdict, opened from the goal bar's target: a box of its own on the row above the
@@ -1893,11 +1896,14 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   /* The bars above and below the chat box keep its width, so the goal and queued bars line up with it. */
   :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 24px); }
   /* The goal bar's objective takes a line of its own under its state and buttons, beside its time:
-     on one line it got a few letters, and in a 350 px pane none at all. */
+     on one line it got a few letters, and in a 350 px pane none at all. A break puts it there at every
+     width: left to wrap, in a ~480-560 px pane it fit on the first row, squeezed the state to "F" and
+     pushed the time alone onto the second. */
   .cx-goal { flex-wrap: wrap; row-gap: 0; }
+  .cx-goal::before { flex: 0 0 100%; order: 1; content: ""; }
   .cx-goal-state { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cx-goal-objective { order: 1; flex: 1 1 60%; padding-left: 20px; }
-  .cx-goal .cx-goal-meta { order: 2; }
+  .cx-goal-objective { order: 2; flex: 1 1 0; padding-left: 20px; }
+  .cx-goal .cx-goal-meta { order: 3; }
 }
 @container cx-thread (max-width: 420px) {
   /* Too narrow for one row: two rows, the break right after the model, so a long name ("DeepSeek V4.1
