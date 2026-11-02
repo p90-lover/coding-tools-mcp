@@ -1133,6 +1133,10 @@ export async function runChatGptMcpServer(options: {
               excludedNames: excludedGatewayNames,
             }),
           }, extra.signal);
+          // Keep discovery receipts available for later observation.
+          const receiptCode = response.structuredContent?.code;
+          if (receiptCode === "codex_tool_pending" || receiptCode === "codex_tool_submission_unknown"
+            || receiptCode === "codex_tool_status_unknown") return response;
           const catalog = gatewayToolCatalogPage(response, new Set(excludedGatewayNames));
           nestedTotal = catalog.total;
           nestedPage = catalog.tools.map(tool => ({
