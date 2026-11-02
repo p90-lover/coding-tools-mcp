@@ -15,7 +15,7 @@ import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
-import { SurfaceHiddenContext } from "./features/page-visibility";
+import { NativeViewsCoveredContext, SurfaceHiddenContext } from "./features/page-visibility";
 import { PartErrorBoundary } from "./PartErrorBoundary";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { McpTunnelsPanel } from "./features/McpTunnelsPanel";
@@ -926,6 +926,7 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
+        <NativeViewsCoveredContext.Provider value={sidebarCovers || biggerContextRecommendationOpen}>
         <div className="surface-transition">
             {keepAlive("browser", () => (
               <BrowserSurface
@@ -940,11 +941,13 @@ function LauncherShell({
             ))}
             {keepAlive("chatgpt-browser-management", () => (
               <ChatGptBrowserManagement
+                active={surface === "chatgpt-browser-management"}
                 api={api!}
                 browser={browser}
                 onOpenBrowser={() => navigateSurface("browser")}
                 setError={setError}
-                setup={{ mcpReady: snapshot.state.mcpSetupComplete === true, bridgeReady: snapshot.state.coreSetupComplete === true }}
+                setup={{ mcpReady: snapshot.state.mcpSetupComplete === true, bridgeReady: snapshot.state.coreSetupComplete === true,
+                  inspectionDisabled: snapshot.state.browserInteractionMode === "manual" }}
               />
             ))}
             {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
@@ -1084,6 +1087,7 @@ function LauncherShell({
               />
             ))}
         </div>
+        </NativeViewsCoveredContext.Provider>
       </section>
 
       <AnimatePresence>

@@ -961,7 +961,6 @@ class RuntimeSupervisor {
    */
   async detach(reason = "launcher-restart") {
     if (!this.persistentBridge) return { status: "not-persistent" };
-    const daemon = this.daemon;
     this.stopping = true;
     this.stopTunnelMonitor();
     this.extraTunnels.detach();
@@ -971,6 +970,11 @@ class RuntimeSupervisor {
         this.restartTimers[name] = null;
       }
     }
+    if (this.recoveryTasks.size > 0) {
+      await Promise.allSettled([...this.recoveryTasks]);
+      this.stopTunnelMonitor();
+    }
+    const daemon = this.daemon;
     if (daemon) this.expectedExits.add(daemon);
     daemon?.release?.();
     daemon?.unref?.();
@@ -1002,14 +1006,21 @@ class RuntimeSupervisor {
 
   /** Restart only the MCP tunnel. */
   async restartTunnelOnly() {
-    const config = this.readConfig();
-    if (!config) throw new Error("MCP tunnel is not configured");
-    if (config.mode !== "full") throw new Error("MCP tunnel is not part of the browser-only setup");
-    if (this.tunnel) await this.stopTunnelGracefully(config);
-    this.stopping = false;
-    await this.startTunnel(config, "runtime-restart", { forceRestart: true });
-    this.writeState("ready");
-    return { status: "restarted", pid: this.tunnel?.pid ?? null };
+    if (this.stopping || this.startPromise || this.stopPromise || this.recoveryTasks.size) {
+      throw new Error("A runtime lifecycle operation is already in progress; retry the MCP restart after it finishes");
+    }
+    const restart = (async () => {
+      const config = this.readConfig();
+      if (!config) throw new Error("MCP tunnel is not configured");
+      if (config.mode !== "full") throw new Error("MCP tunnel is not part of the browser-only setup");
+      if (this.tunnel) await this.stopTunnelGracefully(config);
+      await this.startTunnel(config, "runtime-restart", { forceRestart: true });
+      this.writeState("ready");
+      return { status: "restarted", pid: this.tunnel?.pid ?? null };
+    })();
+    this.recoveryTasks.add(restart);
+    try { return await restart; }
+    finally { this.recoveryTasks.delete(restart); }
   }
 
   runtimeCommand(args) {
@@ -2176,19 +2187,28 @@ class RuntimeSupervisor {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
     if (!env) {
-      const stateDir = path.join(fs.realpathSync.native(this.coreHome), "tunnel", "primary-runtime");
+      const stateDir = path.join(await fs.promises.realpath(this.coreHome), "tunnel", "primary-runtime");
       const tempDir = path.join(stateDir, "temp");
       if (typeof tunnel.alias === "string" && tunnel.alias) {
-        const legacyRoots = [...new Set([
+        const key = async (value) => {
+          let resolved;
+          try { resolved = await fs.promises.realpath(value); }
+          catch { resolved = path.resolve(value); }
+          return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+        };
+        const legacyRoots = [];
+        for (const root of [
           process.env.TUNNEL_CLIENT_STATE_DIR?.trim(),
           process.env.XDG_STATE_HOME?.trim() && path.join(process.env.XDG_STATE_HOME.trim(), "tunnel-client"),
           path.join(os.homedir(), ".local", "state", "tunnel-client"),
           path.join(os.homedir(), ".tunnel-client"),
-        ].filter(root => root && !samePath(root, stateDir)))];
-        for (const root of [stateDir, ...legacyRoots]) {
+        ]) {
+          if (root && await key(root) !== await key(stateDir)) legacyRoots.push(root);
+        }
+        for (const root of [stateDir, ...new Set(legacyRoots)]) {
           let aliases;
           try {
-            aliases = readJson(path.join(root, "aliases.yaml"));
+            aliases = JSON.parse((await fs.promises.readFile(path.join(root, "aliases.yaml"), "utf8")).replace(/^\uFEFF/, ""));
             if (!aliases || typeof aliases !== "object" || Array.isArray(aliases)) throw new Error("Invalid alias state");
           } catch (error) {
             if (error?.code === "ENOENT") continue;
@@ -2201,7 +2221,7 @@ class RuntimeSupervisor {
           throw new Error("Existing primary tunnel requires migration to the dedicated runtime state directory before it can be used.");
         }
       }
-      fs.mkdirSync(tempDir, { recursive: true, mode: 0o700 });
+      await fs.promises.mkdir(tempDir, { recursive: true, mode: 0o700 });
       env = { TUNNEL_CLIENT_STATE_DIR: stateDir, TEMP: tempDir, TMP: tempDir };
     }
     const reply = await runOffThread({ file: tunnel.binaryPath, args, cwd: tunnel.profileDir,

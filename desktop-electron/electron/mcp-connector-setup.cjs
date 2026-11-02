@@ -3,7 +3,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { validateConnectorName } = require("./connector-identity.cjs");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+// An original result object is usable once during a held workspace operation, never after JSON persistence.
+const freshConnectorResults = new WeakMap();
+const UNVERIFIED_CONNECTOR = "Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.";
 
 // activeAccountId comes from a fresh ChatGPT request in the owned window, never the default alias
 // or the JWT's possibly stale workspace claim. The token and unrelated account fields stay there.
@@ -33,6 +36,8 @@ function chatGptMcpContext({ user, auth, activeAccountId, accounts } = {}) {
     workspaceType: account.workspace_type ?? null, workspaceUserId: account.account_user_id ?? null,
     workspaceOwnerId: account.account_owner_id ?? null, chatGptOrganizationId: account.organization_id ?? null,
     planType: account.plan_type ?? null,
+    ...(typeof account.name === "string" && account.name.trim() && account.name.length <= 200 ? { workspaceName: account.name.trim() } : {}),
+    ...(typeof user.email === "string" && user.email.length <= 200 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.email) ? { userEmail: user.email } : {}),
   };
 }
 
@@ -119,11 +124,12 @@ function platformMcpOwnerContext({ user, organizationId, permissions, tunnels } 
 async function observeMcpSetupContext(contents, tunnelId) {
   const client = contents?.debugger;
   const unavailable = () => new Error("MCP metadata inspection is unavailable in this browser window.");
-  if (!client || client.isAttached() || !/^tunnel_[a-f0-9]{32}$/.test(tunnelId)) throw unavailable();
+  if (!client || client.isAttached() || (tunnelId !== null && !/^tunnel_[a-f0-9]{32}$/.test(tunnelId))) throw unavailable();
   const limit = 1024 * 1024;
   const requests = new Map(), organizations = new Map(), latest = new Map();
   let attached = false, disposed = false, user = null, organizationId = null, activeAccountId = null;
   let selectionVersion = 0, platformSelectionVersion = 0, platformIdentityVersion = 0, metadataVersion = 0, sequence = 0, error = null;
+  let navigationRequest = null, navigationAccountId = null, navigationVersion = 0;
   const header = (headers, wanted) => {
     const key = Object.keys(headers || {}).find(name => name.toLowerCase() === wanted);
     return key && typeof headers[key] === "string" ? headers[key] : null;
@@ -150,10 +156,19 @@ async function observeMcpSetupContext(contents, tunnelId) {
     const id = params.requestId;
     if (method === "Network.requestWillBeSent") {
       requests.delete(id); // A redirect cannot carry a previous origin's metadata identity.
+      if (navigationRequest?.id === id) { navigationRequest = null; navigationAccountId = null; }
       const request = params.request;
       let url;
       try { url = new URL(request?.url); } catch { return; }
       let kind = null;
+      if (url.origin === "https://chatgpt.com" && request.method === "GET"
+        && ["/backend-api/models", "/backend-api/conversations"].includes(url.pathname)) {
+        const account = header(request.headers, "chatgpt-account-id");
+        if (typeof account === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(account)) {
+          navigationRequest = { id, account, path: url.pathname }; navigationAccountId = null;
+        }
+        return;
+      }
       if (url.origin === "https://chatgpt.com" && request.method === "POST"
         && url.pathname === "/backend-api/aip/connectors/mcp/list_accessible") kind = "chatgpt";
       if (url.origin === "https://api.openai.com") {
@@ -162,6 +177,7 @@ async function observeMcpSetupContext(contents, tunnelId) {
         else if (request.method === "GET" && url.pathname === "/v1/tunnels") kind = "tunnels";
       }
       if (!kind) return;
+      if (tunnelId === null && kind !== "chatgpt") return;
       const org = header(request.headers, "openai-organization"), account = header(request.headers, "chatgpt-account-id");
       const fact = { kind, origin: url.origin, path: url.pathname,
         org: typeof org === "string" && /^org-[A-Za-z0-9_-]{1,120}$/.test(org) ? org : null,
@@ -193,6 +209,17 @@ async function observeMcpSetupContext(contents, tunnelId) {
         metadataVersion++;
       }
       requests.set(id, fact);
+      return;
+    }
+    if (navigationRequest?.id === id && ["Network.responseReceived", "Network.loadingFailed"].includes(method)) {
+      const pending = navigationRequest; navigationRequest = null;
+      try {
+        const url = new URL(params.response?.url);
+        if (url.origin === "https://chatgpt.com" && url.pathname === pending.path && params.response.status >= 200
+          && params.response.status < 300 && String(params.response.mimeType || "").includes("application/json")) {
+          navigationAccountId = pending.account; navigationVersion++;
+        }
+      } catch {}
       return;
     }
     const fact = requests.get(id);
@@ -257,6 +284,7 @@ async function observeMcpSetupContext(contents, tunnelId) {
     if (attached) { try { client.detach(); } catch {} }
     attached = false;
     requests.clear(); organizations.clear(); latest.clear(); user = null;
+    navigationRequest = null; navigationAccountId = null;
   };
   try {
     client.attach("1.3"); attached = true;
@@ -264,11 +292,23 @@ async function observeMcpSetupContext(contents, tunnelId) {
     await client.sendCommand("Network.enable", { maxTotalBufferSize: limit * 4, maxResourceBufferSize: limit });
   } catch { dispose(); throw unavailable(); }
   return {
-    snapshot: () => structuredClone({ activeAccountId, selectionVersion, platformSelectionVersion, platformIdentityVersion, metadataVersion, error,
+    snapshot: () => structuredClone({ activeAccountId, selectionVersion, navigationAccountId, navigationVersion,
+      platformSelectionVersion, platformIdentityVersion, metadataVersion, error,
       platform: { user, organizationId, permissions: organizations.get(organizationId)?.permissions ?? null,
         tunnels: organizations.get(organizationId)?.tunnels ?? null } }),
     dispose,
   };
+}
+
+function requireAutomaticConnectorSetup(runtimeHost, browserHost) {
+  const snapshot = runtimeHost.runtimeConfigSnapshot(), config = snapshot.config;
+  if (config?.browserInteractionMode === "manual" || browserHost?.interactionModeOverride === "manual"
+    || browserHost?.getBrowserInteractionMode?.() === "manual") {
+    throw Object.assign(new Error("MCP connector setup is disabled in Zero Risk mode."), { code: "manual_browser_inspection_disabled" });
+  }
+  if (!snapshot.configured || snapshot.owner !== "launcher" || config?.mode !== "full") {
+    throw new Error("Connect the saved automatic MCP harness before creating its ChatGPT connector.");
+  }
 }
 
 function currentConnectorSettings(runtimeHost) {
@@ -302,6 +342,62 @@ function extraConnectorSettings(runtimeHost, tunnelId) {
     transport: "tunnel",
     authentication: "none",
   };
+}
+
+async function readAccountConnectorBindings(app) {
+  let handle;
+  try {
+    handle = await fs.promises.open(path.join(app.getPath("userData"), "mcp-account-connector-bindings.json"), "r");
+    if (!(await handle.stat()).isFile()) throw new Error();
+    const bytes = Buffer.alloc(64 * 1024 + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, length, bytes.length - length, null);
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    if (length > 64 * 1024) throw new Error();
+    const saved = JSON.parse(bytes.subarray(0, length).toString("utf8"));
+    if (saved?.version !== 1 || !saved.bindings || typeof saved.bindings !== "object" || Array.isArray(saved.bindings)) throw new Error();
+    if (saved.scopedBindings !== undefined && (!saved.scopedBindings || typeof saved.scopedBindings !== "object" || Array.isArray(saved.scopedBindings))) throw new Error();
+    const bindings = Object.create(null), scopedBindings = Object.create(null);
+    const partition = value => typeof value === "string" && /^persist:[A-Za-z0-9_-]{1,160}$/.test(value);
+    const clean = value => {
+      try {
+        if (!/^tunnel_[a-f0-9]{32}$/.test(value?.tunnelId) || typeof value.href !== "string" || value.href.length > 512) return null;
+        const url = new URL(value.href, "https://chatgpt.com");
+        if (url.origin !== "https://chatgpt.com" || url.username || url.password || !url.pathname.startsWith("/plugins/")) return null;
+        const hint = { name: validateConnectorName(value.name), tunnelId: value.tunnelId, href: url.pathname };
+        for (const key of ["userId", "publisherUserId"]) if (typeof value[key] === "string" && /^user-[A-Za-z0-9_-]{1,120}$/.test(value[key])) hint[key] = value[key];
+        if (typeof value.workspaceId === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value.workspaceId)) hint.workspaceId = value.workspaceId;
+        if (partition(value.publisherPartition)) hint.publisherPartition = value.publisherPartition;
+        return hint;
+      } catch { return null; }
+    };
+    for (const [key, value] of Object.entries(saved.bindings)) {
+      const hint = clean(value); if (partition(key) && hint) bindings[key] = hint;
+    }
+    for (const [key, value] of Object.entries(saved.scopedBindings || {})) {
+      const hint = clean(value);
+      try {
+        const scope = JSON.parse(key);
+        if (hint && Array.isArray(scope) && scope.length === 4 && partition(scope[0])
+          && scope[1] === hint.workspaceId && scope[2] === hint.tunnelId && scope[3] === hint.name) scopedBindings[key] = hint;
+      } catch { /* Invalid cached fields never become provenance or get copied forward. */ }
+    }
+    return { version: 1, bindings, scopedBindings };
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw new Error("Saved account connector bindings could not be read; they were kept for recovery.");
+    return { version: 1, bindings: Object.create(null), scopedBindings: Object.create(null) };
+  } finally { await handle?.close(); }
+}
+
+function accountConnectorBinding(saved, partition, { workspaceId, tunnelId, name }) {
+  if (typeof partition !== "string") return undefined;
+  const scoped = saved.scopedBindings?.[JSON.stringify([partition, workspaceId, tunnelId, name])];
+  const legacy = saved.bindings[partition];
+  return [scoped, legacy].find(value => value && value.workspaceId === workspaceId && value.tunnelId === tunnelId
+    && (value.name === undefined || value.name === name));
 }
 
 function extensionHelpersSource({ testLegacy = false } = {}) {
@@ -338,6 +434,56 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     const identities = new Map(matches.map(link => [new URL(link.href, location.href).pathname, link]));
     if (identities.size > 1) throw new Error('More than one connector has the configured name.');
     return identities.values().next().value || null;
+  }
+  async function selectWorkspace(name) {
+    if (typeof name !== 'string' || !name.trim() || name.length > 200) throw new Error('ChatGPT did not expose the target workspace name.');
+    const profiles = allClickable(document).filter(element => visible(element)
+      && normalize(element.getAttribute('aria-label')) === 'open profile menu');
+    if (profiles.length !== 1) throw new Error('ChatGPT did not expose one workspace menu.');
+    await pointerActivateMenu(profiles[0]);
+    const choice = await waitFor(() => {
+      const menus = [...document.querySelectorAll('[role="menu"],[role="dialog"]')].filter(visible);
+      const candidates = menus.flatMap(menu => allClickable(menu).filter(element => visible(element)
+        && !element.disabled && element.getAttribute('aria-disabled') !== 'true'
+        && normalize(element.innerText || element.textContent) === normalize(name)));
+      return candidates.length === 1 ? candidates[0] : null;
+    }, 5000);
+    if (!choice) throw new Error('ChatGPT did not expose one matching workspace. Select it in that account and retry.');
+    await pointerActivateMenu(choice);
+    return { selected: true };
+  }
+  async function inspectTunnelConnectorIdentity(settings) {
+    const unverified = () => new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
+    if (location.origin !== 'https://chatgpt.com' || !isPluginDetailUrl(location.href)) throw unverified();
+    const pluginPath = location.pathname, main = document.querySelector('main');
+    if (!main || !exactNameIn(main, settings.name)) throw unverified();
+    const read = () => {
+      if (location.pathname !== pluginPath) throw unverified();
+      const root = activeSurface();
+      if (root === document) return null;
+      // Use the connector configuration component, never tool argument inputs or a page-wide URL.
+      const fields = inputs(root).filter(element => element.id === 'custom-connector-tunnel-id' && element.getAttribute('type') !== 'password');
+      const names = inputs(root).filter(element => element.id === 'custom-connector-name');
+      const saves = allClickable(root).filter(element => !element.disabled && element.getAttribute('aria-disabled') !== 'true'
+        && textMatches(element, ['Save', 'Save changes'], true));
+      if (fields.length > 1 || names.length > 1 || saves.length > 1) throw unverified();
+      if (fields.length !== 1 || names.length !== 1 || saves.length !== 1) return null;
+      if (canonicalAppIdentity(names[0].value) !== canonicalAppIdentity(settings.name)) throw unverified();
+      // A generic /mcp endpoint cannot establish an opaque tunnel ID. Read the saved Tunnel ID itself.
+      if (fields[0].value !== settings.tunnelId) throw unverified();
+      return { verified: true, href: pluginPath, name: settings.name, tunnelId: fields[0].value };
+    };
+    let identity = read();
+    if (!identity) {
+      const controls = allClickable(main).filter(element => !element.disabled && element.getAttribute('aria-disabled') !== 'true'
+        && textMatches(element, [...STRINGS.manage, 'Edit'], true));
+      if (controls.length !== 1) throw unverified();
+      await pointerActivateMenu(controls[0]);
+      identity = await waitFor(read, 5000);
+    }
+    if (!identity) throw unverified();
+    if (visibleDialogs().length && !await closeOpenDialog()) throw unverified();
+    return identity;
   }
   async function createTunnelConnector(settings, phase = 'legacy') {
     if (/just a moment|verify you are human|checking your browser/i.test(document.title + ' ' + (document.body?.innerText || '').slice(0, 300))) {
@@ -377,12 +523,11 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     if (!listed) throw new Error('The Personal plugins list did not finish loading, so the connector was not created.');
     if (listed.card) {
       if (phase === 'prepare') {
-        if (!settings.existingHref) throw new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
         const href = new URL(listed.card.getAttribute('href'), location.origin);
-        const known = new URL(settings.existingHref, location.origin);
-        if (href.origin !== location.origin || known.origin !== location.origin || href.pathname !== known.pathname) {
+        if (href.origin !== location.origin || href.username || href.password || !isPluginDetailUrl(href.href)) {
           throw new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
         }
+        // This is a navigation candidate only; the host verifies fresh saved tunnel fields before Connect.
         return { prepared: true, existing: true, href: href.pathname + href.search };
       }
       return { created: false, href: listed.card.getAttribute('href') };
@@ -560,12 +705,12 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
   globalThis.__codingToolsConnectorHelpers = Object.freeze({
     activeSurface, acknowledgeCustomServerTrust, allClickable, canonicalAppIdentity,
     cardDetailUrl, clearPluginSearch, connectControlIn, elementLabels, ensurePersonalView, findClickable, findExactAppNode,
-    prepareTunnelConnector: settings => createTunnelConnector(settings, 'prepare'), submitPreparedTunnelConnector,
+    prepareTunnelConnector: settings => createTunnelConnector(settings, 'prepare'), submitPreparedTunnelConnector, inspectTunnelConnectorIdentity,
     prepareTunnelConnectorConnection, openTunnelConnectorConsent, confirmTunnelConnectorConsent,
     ${testLegacy ? "createTunnelConnector, ensureTunnelConnectorConnected," : ""}
     findGridArticle, findInput, findManagedAppCard, isPersonalPluginsPage, observeAppConnection, personalPluginsLoaded,
     openCreateFormStrict, pluginCardLinks, pointerActivate, setInputValue,
-    textMatches, visible, waitFor, waitForPersonalPluginsPage, waitForPluginsPageReady
+    textMatches, visible, waitFor, waitForPersonalPluginsPage, waitForPluginsPageReady, selectWorkspace
   });
 })();`;
 }
@@ -574,20 +719,36 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
  * Creates the ChatGPT connector for the main tunnel, or with `target` ({ tunnelId, partition }) for
  * an extra tunnel in its account's browser partition; the caller records an extra tunnel's connector.
  */
-async function createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost, target, assertCurrent }) {
+async function createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost, target, assertCurrent,
+  operationHeld = false, expectedContext, selectWorkspace = false, shared, onContext }) {
+  requireAutomaticConnectorSetup(runtimeHost, browserHost);
+  if (operationHeld && browserHost.currentOperation?.() !== "MCP connector creation") throw new Error("MCP connector setup is busy");
   const extra = target?.tunnelId !== undefined;
   const settings = extra
     ? extraConnectorSettings(runtimeHost, target.tunnelId)
     : currentConnectorSettings(runtimeHost);
   const partition = target?.partition ?? browserHost.partition;
+  const sharedProof = shared && freshConnectorResults.get(shared.creationResult);
+  if (shared) {
+    if (!operationHeld || !sharedProof || sharedProof.browserHost !== browserHost || sharedProof.runtimeHost !== runtimeHost
+      || Date.now() - sharedProof.at > 180_000 || sharedProof.partition !== shared.publisherPartition
+      || sharedProof.userId !== shared.userId || sharedProof.workspaceId !== shared.workspaceId
+      || sharedProof.tunnelId !== settings.tunnelId || shared.tunnelId !== settings.tunnelId
+      || sharedProof.name !== settings.name || sharedProof.href !== shared.href) throw new Error(UNVERIFIED_CONNECTOR);
+    sharedProof.assertCurrent?.();
+    freshConnectorResults.delete(shared.creationResult);
+  }
   const activePartition = browserHost.partition;
   const checkHost = () => {
+    requireAutomaticConnectorSetup(runtimeHost, browserHost);
+    if (operationHeld && browserHost.currentOperation?.() !== "MCP connector creation") throw new Error("MCP connector setup is busy");
     if (browserHost.partition !== activePartition) throw new Error("The browser account changed during MCP setup.");
     assertCurrent?.();
+    if (shared) sharedProof.assertCurrent?.();
     const current = extra ? extraConnectorSettings(runtimeHost, settings.tunnelId) : currentConnectorSettings(runtimeHost);
     if (current.name !== settings.name || current.tunnelId !== settings.tunnelId) throw new Error("The MCP configuration changed during setup.");
   };
-  return browserHost.withManualOperation("MCP connector creation", async () => {
+  const run = async () => {
     checkHost();
     // Another account's sign-in is checked by the page itself: the Plugins page will not load.
     if (partition === browserHost.partition && !(await browserHost.probeAuthentication()).authenticated) {
@@ -607,8 +768,8 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         offscreen: true,
       },
     });
-    let timedOut = false, observer = null, navigating = false, submitting = false, navigationChanged = false, navigationVersion = 0;
-    let expectedPath = null, platformPhase = true;
+    let timedOut = false, observer = null, navigating = false, submitting = false, navigationChanged = false, navigationVersion = 0, mutationStarted = false;
+    let expectedPath = null, platformPhase = !shared;
     const timer = setTimeout(() => {
       timedOut = true;
       if (!popup.isDestroyed()) popup.destroy();
@@ -624,6 +785,9 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     };
     try {
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      // Initialize the hidden renderer before awaiting CDP Network.enable.
+      await popup.loadURL("about:blank");
+      checkHost();
       const guardNavigation = (event, value) => {
         try {
           const url = new URL(value);
@@ -654,12 +818,38 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         }
         throw new Error("MCP context inspection did not finish.");
       };
-      await navigate("https://platform.openai.com/settings/organization/tunnels");
-      await evidence(snapshot => snapshot.platform.user && snapshot.platform.organizationId && snapshot.platform.permissions && snapshot.platform.tunnels);
+      if (!shared) {
+        await navigate("https://platform.openai.com/settings/organization/tunnels");
+        await evidence(snapshot => snapshot.platform.user && snapshot.platform.organizationId && snapshot.platform.permissions && snapshot.platform.tunnels);
+      }
       platformPhase = false;
       await navigate("https://chatgpt.com/plugins?view=personal");
-      const initial = await evidence(snapshot => snapshot.activeAccountId);
-      const context = await popup.webContents.executeJavaScript(chatGptMcpContextScript(initial.activeAccountId), true);
+      let initial = await evidence(snapshot => snapshot.activeAccountId);
+      let context = await popup.webContents.executeJavaScript(chatGptMcpContextScript(initial.activeAccountId), true);
+      if (selectWorkspace && expectedContext && context.workspaceId !== expectedContext.workspaceId) {
+        const membership = await popup.webContents.executeJavaScript(chatGptMcpContextScript(expectedContext.workspaceId), true);
+        checkHost();
+        if (context.userId !== expectedContext.userId || membership.userId !== expectedContext.userId
+          || membership.workspaceRole !== expectedContext.workspaceRole || membership.workspaceStructure !== "workspace"
+          || !["account-owner", "account-admin"].includes(membership.workspaceRole)) {
+          throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
+        }
+        await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
+        const beforeNavigation = observer.snapshot();
+        navigating = true;
+        try {
+          await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.selectWorkspace(${JSON.stringify(membership.workspaceName)})`, true);
+          await evidence(snapshot => snapshot.activeAccountId === expectedContext.workspaceId
+            || (snapshot.navigationVersion > beforeNavigation.navigationVersion && snapshot.navigationAccountId === expectedContext.workspaceId));
+        } finally { navigating = false; }
+        await navigate("https://chatgpt.com/plugins?view=personal");
+        initial = await evidence(snapshot => snapshot.activeAccountId === expectedContext.workspaceId);
+        context = await popup.webContents.executeJavaScript(chatGptMcpContextScript(initial.activeAccountId), true);
+      }
+      if (expectedContext && (context.userId !== expectedContext.userId || context.workspaceId !== expectedContext.workspaceId
+        || context.workspaceRole !== expectedContext.workspaceRole || context.workspaceStructure !== expectedContext.workspaceStructure)) {
+        throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
+      }
       const freshContext = async () => {
         checkHost();
         const before = observer.snapshot(), version = navigationVersion;
@@ -673,59 +863,72 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         checkHost();
         const after = observer.snapshot();
         if (navigationChanged || version !== navigationVersion || !matches(after)
-          || current.userId !== context.userId || current.workspaceId !== context.workspaceId) {
+          || current.userId !== context.userId || current.workspaceId !== context.workspaceId
+          || current.workspaceRole !== context.workspaceRole || current.workspaceStructure !== context.workspaceStructure) {
           throw new Error("The MCP authentication or workspace context changed. Retry in the intended workspace.");
         }
-        platformMcpOwnerContext(after.platform, settings.tunnelId, current);
+        if (shared) {
+          if (current.workspaceStructure !== "workspace" || shared.workspaceId !== current.workspaceId
+            || shared.memberUserId !== current.userId || shared.tunnelId !== settings.tunnelId) {
+            throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
+          }
+        } else platformMcpOwnerContext(after.platform, settings.tunnelId, current);
         return current;
       };
-      await freshContext();
+      await onContext?.(partition, await freshContext());
       const bindingPath = path.join(app.getPath("userData"), "mcp-account-connector-bindings.json");
-      let saved = { version: 1, bindings: {} };
-      try {
-        saved = JSON.parse(fs.readFileSync(bindingPath, "utf8"));
-        if (saved?.version !== 1 || !saved.bindings || typeof saved.bindings !== "object" || Array.isArray(saved.bindings)) {
-          throw new Error("Invalid saved connector bindings");
-        }
-      } catch (error) {
-        if (error?.code !== "ENOENT") throw new Error("Saved account connector bindings could not be read; they were kept for recovery.");
-      }
-      let legacy = null;
-      try { legacy = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "mcp-connector-binding.json"), "utf8")); } catch {}
-      const known = [saved.bindings[partition], legacy, ...(target?.connectorBindings ?? [])].find(value => value
-        && (value.name === undefined || value.name === settings.name) && value.tunnelId === settings.tunnelId
-        && value.userId === context.userId && value.workspaceId === context.workspaceId
-        && typeof value.href === "string" && /^\/plugins\/[^?#]+(?:\?[^#]*)?$/.test(value.href));
+      const saved = await readAccountConnectorBindings(app);
+      await freshContext();
       await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
-      const prepared = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnector(${JSON.stringify({ ...settings, ...(known ? { existingHref: known.href } : {}) })})`, true);
+      const prepared = shared ? { prepared: true, existing: true, href: sharedProof.href }
+        : await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnector(${JSON.stringify(settings)})`, true);
       if (prepared?.prepared !== true) throw new Error("ChatGPT did not prepare the exact tunnel connector.");
       await freshContext();
       let result;
-      if (prepared.existing === true && known) result = { created: false, href: prepared.href };
+      if (prepared.existing === true) result = { created: false, href: prepared.href };
       else {
+        mutationStarted = true;
         submitting = true;
         try { result = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.submitPreparedTunnelConnector(${JSON.stringify(settings)})`, true); }
         finally { submitting = false; }
       }
       const url = new URL(result?.href, "https://chatgpt.com");
       if (url.origin !== "https://chatgpt.com" || !url.pathname.startsWith("/plugins/")
-        || url.username || url.password || (result.created !== true && !(prepared.existing === true && known
-          && url.pathname === new URL(known.href, url.origin).pathname))) {
+        || url.username || url.password || (result.created !== true && prepared.existing !== true)) {
         throw new Error("ChatGPT returned an invalid connector identity.");
       }
       const href = url.pathname + url.search;
       await navigate(url.href);
+      if (prepared.existing && !shared) {
+        await freshContext();
+        await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
+        const identity = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.inspectTunnelConnectorIdentity(${JSON.stringify(settings)})`, true);
+        await freshContext();
+        if (identity?.verified !== true || identity.name !== settings.name || identity.tunnelId !== settings.tunnelId
+          || identity.href !== url.pathname) throw new Error(UNVERIFIED_CONNECTOR);
+      }
       const createdContext = await freshContext();
       // Retain verified creation for consent retries without replacing other accounts' provenance.
-      if (result.created) writePrivateFileAtomic(bindingPath, JSON.stringify({ version: 1,
-        bindings: { ...saved.bindings, [partition]: { name: settings.name, tunnelId: settings.tunnelId, href,
-          userId: createdContext.userId, workspaceId: createdContext.workspaceId } },
-      }));
+      const remember = async () => {
+        const binding = { name: settings.name, tunnelId: settings.tunnelId, href,
+          userId: createdContext.userId, workspaceId: createdContext.workspaceId,
+          ...(shared ? { publisherUserId: shared.userId, publisherPartition: shared.publisherPartition } : {}) };
+        const content = JSON.stringify({ version: 1,
+          bindings: { ...saved.bindings, [partition]: binding }, scopedBindings: { ...saved.scopedBindings,
+            [JSON.stringify([partition, binding.workspaceId, binding.tunnelId, binding.name])]: binding },
+        });
+        if (Buffer.byteLength(content) > 64 * 1024) throw new Error("Saved account connector bindings could not be read; they were kept for recovery.");
+        await writePrivateFileAtomicAsync(bindingPath, content, { durable: true });
+        await freshContext();
+      };
+      if (result.created) await remember();
       await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
       const connection = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnectorConnection(${JSON.stringify(settings.name)})`, true);
       if (typeof connection?.connected !== "boolean") throw new Error("ChatGPT did not confirm the exact connector state.");
+      if (shared || prepared.existing) await remember();
       if (!connection.connected) {
         await freshContext();
+        mutationStarted = true;
         const consent = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.openTunnelConnectorConsent(${JSON.stringify(settings.name)})`, true);
         if (consent?.connected !== true) {
           if (consent?.consentReady !== true) throw new Error("ChatGPT did not prepare the exact connector consent.");
@@ -737,20 +940,28 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       const stable = await freshContext();
       const binding = { userId: stable.userId, workspaceId: stable.workspaceId, tunnelId: settings.tunnelId };
       if (result.created && !target) {
-        writePrivateFileAtomic(path.join(app.getPath("userData"), "mcp-connector-binding.json"),
-          JSON.stringify({ version: 1, name: settings.name, tunnelId: settings.tunnelId, href, ...binding }));
+        await writePrivateFileAtomicAsync(path.join(app.getPath("userData"), "mcp-connector-binding.json"),
+          JSON.stringify({ version: 1, name: settings.name, tunnelId: settings.tunnelId, href, ...binding }), { durable: true });
+        await freshContext();
       }
-      return { created: result.created, name: settings.name, href, binding, connected: true };
+      const connected = { created: result.created, name: settings.name, href, binding, connected: true };
+      if (!shared) freshConnectorResults.set(connected, { browserHost, runtimeHost, partition, assertCurrent,
+        ...binding, name: settings.name, href, at: Date.now() });
+      return connected;
     } catch (error) {
       if (timedOut) throw new Error("ChatGPT connector setup took too long. Retry from Configuration.");
+      if (error instanceof Error) error.mcpMutationStarted = mutationStarted;
       throw error;
     } finally {
       clearTimeout(timer);
       observer?.dispose();
-      popup.webContents.removeListener("did-start-navigation", navigation);
-      if (!popup.isDestroyed()) popup.destroy();
+      if (!popup.isDestroyed()) {
+        popup.webContents.removeListener("did-start-navigation", navigation);
+        popup.destroy();
+      }
     }
-  });
+  };
+  return operationHeld ? run() : browserHost.withManualOperation("MCP connector creation", run);
 }
 
 async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtimeHost, partition = browserHost.partition }) {
@@ -793,4 +1004,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource, extraConnectorSettings, openConfiguredTunnelSettings };
+module.exports = { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };

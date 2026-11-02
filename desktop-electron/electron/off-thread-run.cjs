@@ -1,6 +1,8 @@
 "use strict";
 
 const { execFile, spawn } = require("node:child_process");
+const { EventEmitter } = require("node:events");
+const { PassThrough, Writable } = require("node:stream");
 const { Worker } = require("node:worker_threads");
 
 /**
@@ -133,4 +135,240 @@ async function warmProgram(file, args = [], timeoutMs = 30_000, run = runOffThre
   await run({ file, args, timeoutMs, maxBytes: 4096 });
 }
 
-module.exports = { runOffThread, warmProgram };
+/*
+ * Long-lived children. warmProgram only loads the program first, and the start that follows on this
+ * thread still waits for Windows to create the process: 13-48 s each on the busy hard disk while the
+ * antivirus scanned bun.exe and ao-daemon.exe (launcher.main_blocked on 0.8.40, 2026-11-01: the
+ * runtime's setup after a Browser sign-in held every window 47.8 s). spawnOffThread starts the
+ * program in a worker that keeps it, and hands back a child that looks like one started here: its
+ * pid, exitCode and signalCode, stdout and stderr as streams, stdin, kill() and the error, exit and
+ * close events. Where no worker can start it falls back to spawn() on this thread.
+ */
+const SPAWN_WORKER_SOURCE = `
+const { parentPort } = require("node:worker_threads");
+const { spawn } = require("node:child_process");
+const children = new Map();
+const post = (message) => parentPort.postMessage(message);
+const describe = (error) => ({ message: String((error && error.message) || error), code: error && error.code });
+parentPort.on("message", (message) => {
+  const { id } = message;
+  if (message.type === "spawn") {
+    let child;
+    try {
+      child = spawn(message.file, message.args, message.options);
+    } catch (error) {
+      post({ type: "spawned", id, pid: null });
+      post({ type: "error", id, error: describe(error) });
+      return;
+    }
+    children.set(id, child);
+    post({ type: "spawned", id, pid: Number.isInteger(child.pid) ? child.pid : null });
+    for (const stream of ["stdout", "stderr"]) {
+      if (!child[stream]) continue;
+      child[stream].on("data", (chunk) => post({ type: "data", id, stream, chunk }));
+      child[stream].on("end", () => post({ type: "end", id, stream }));
+      child[stream].on("error", (error) => post({ type: "stream-error", id, stream, error: describe(error) }));
+    }
+    child.stdin?.on("error", (error) => post({ type: "stream-error", id, stream: "stdin", error: describe(error) }));
+    child.on("error", (error) => post({ type: "error", id, error: describe(error) }));
+    child.on("exit", (code, signal) => post({ type: "exit", id, code, signal }));
+    child.on("close", (code, signal) => { children.delete(id); post({ type: "close", id, code, signal }); });
+    if (message.unref) child.unref();
+  } else if (message.type === "kill") {
+    let sent = false;
+    try { sent = children.get(id)?.kill(message.signal) ?? false; } catch {}
+    post({ type: "killed", id, sent });
+  } else if (message.type === "write") {
+    const stdin = children.get(id)?.stdin;
+    if (!stdin) { post({ type: "written", id, seq: message.seq, error: { message: "stdin is closed" } }); return; }
+    stdin.write(Buffer.from(message.chunk), (error) => post({ type: "written", id, seq: message.seq, error: error ? describe(error) : null }));
+  } else if (message.type === "end") {
+    children.get(id)?.stdin?.end();
+  }
+});`;
+
+const asError = ({ message, code }) => Object.assign(new Error(message), code ? { code } : {});
+
+/** A child started in the spawn worker, as this thread sees it. */
+class OffThreadChild extends EventEmitter {
+  constructor(id, send, stdio) {
+    super();
+    this.id = id;
+    this.pid = undefined;
+    this.exitCode = null;
+    this.signalCode = null;
+    this.killed = false;
+    this.send = send;
+    const piped = (index) => stdio[index] === "pipe";
+    this.stdout = piped(1) ? new PassThrough() : null;
+    this.stderr = piped(2) ? new PassThrough() : null;
+    this.writes = new Map();
+    let seq = 0;
+    this.stdin = piped(0) ? new Writable({
+      write: (chunk, _encoding, done) => {
+        const at = ++seq;
+        this.writes.set(at, done);
+        send({ type: "write", id, seq: at, chunk });
+      },
+      final: (done) => { send({ type: "end", id }); done(); },
+    }) : null;
+    // Events wait for the caller that awaited the start to attach its listeners, and keep their
+    // order: exit before close, output before both.
+    this.queue = Promise.resolve();
+  }
+
+  later(action) {
+    this.queue = this.queue.then(() => new Promise((resolve) => setImmediate(() => { action(); resolve(); })));
+  }
+
+  receive(message) {
+    switch (message.type) {
+      case "data": this[message.stream]?.write(Buffer.from(message.chunk.buffer, message.chunk.byteOffset, message.chunk.byteLength)); break;
+      case "end": this.later(() => this[message.stream]?.end()); break;
+      case "stream-error": this.later(() => this[message.stream]?.destroy(asError(message.error))); break;
+      case "written": { const done = this.writes.get(message.seq); this.writes.delete(message.seq); done?.(message.error ? asError(message.error) : null); break; }
+      case "error": this.later(() => this.emit("error", asError(message.error))); break;
+      case "exit": this.later(() => { this.exitCode = message.code; this.signalCode = message.signal; this.emit("exit", message.code, message.signal); }); break;
+      case "close": this.later(() => {
+        if (this.exitCode === null && this.signalCode === null) { this.exitCode = message.code; this.signalCode = message.signal; }
+        this.stdin?.destroy();
+        this.emit("close", message.code, message.signal);
+      }); break;
+      default: break;
+    }
+  }
+
+  /** The worker stopped: its pipes to this child are gone, as when a parent loses its child's. */
+  lost() {
+    for (const done of this.writes.values()) done(new Error("The process start worker stopped"));
+    this.writes.clear();
+    this.later(() => {
+      this.stdout?.end();
+      this.stderr?.end();
+      this.emit("error", new Error("The process start worker stopped; this program's output and exit are no longer seen"));
+    });
+  }
+
+  kill(signal = "SIGTERM") {
+    if (this.exitCode !== null || this.signalCode !== null || this.pid === undefined) return false;
+    this.killed = true;
+    this.send({ type: "kill", id: this.id, signal });
+    return true;
+  }
+
+  // The worker never holds this process open (it is unref'ed), so these have nothing to change.
+  ref() {}
+  unref() {}
+}
+
+let spawnWorker = null;
+let spawnWorkerBroken = false;
+let spawnCalls = 0;
+const spawned = new Map();
+
+function startSpawnWorker(createWorker) {
+  const started = createWorker(SPAWN_WORKER_SOURCE, { eval: true });
+  started.on("message", (message) => {
+    const entry = spawned.get(message.id);
+    if (!entry) return;
+    if (message.type === "spawned") {
+      entry.child.pid = message.pid ?? undefined;
+      entry.resolve(entry.child);
+      return;
+    }
+    // A program that never started may send no close: its error ends it here.
+    if (message.type === "close" || (message.type === "error" && entry.child.pid === undefined)) {
+      spawned.delete(message.id);
+      holdWhileRunning(started);
+    }
+    entry.child.receive(message);
+  });
+  const stopped = () => {
+    if (spawnWorker !== started) return;
+    spawnWorker = null;
+    spawnWorkerBroken = true;
+    const lost = [...spawned.values()];
+    spawned.clear();
+    for (const entry of lost) {
+      // A start the worker never answered runs here; a running child is reported lost.
+      if (entry.child.pid === undefined && !entry.started) entry.retry();
+      else entry.child.lost();
+    }
+  };
+  started.on("error", stopped);
+  started.on("exit", stopped);
+  // After the listeners: listening for messages refs the worker again, and then it would hold the
+  // process open after its last child has gone.
+  started.unref();
+  return started;
+}
+
+/**
+ * Like a child started here, a running child with pipes keeps this process alive; a persistent one
+ * (detached, output discarded) does not, and neither does an idle worker.
+ */
+function holdWhileRunning(worker) {
+  const piped = [...spawned.values()].some((entry) => !entry.persistent);
+  if (piped) worker.ref();
+  else worker.unref();
+}
+
+const WORKER_OPTION_KEYS = new Set(["cwd", "env", "detached", "windowsHide", "windowsVerbatimArguments", "shell", "argv0", "stdio"]);
+
+/**
+ * Options a worker can receive: plain data only (no streams or functions in stdio). Any other option
+ * (a timeout, an AbortSignal, uid) starts the program here, where spawn() honours it.
+ */
+function workerOptions(options) {
+  if (Object.keys(options).some((key) => options[key] !== undefined && !WORKER_OPTION_KEYS.has(key))) return null;
+  const { cwd, env, detached, windowsHide, windowsVerbatimArguments, shell, argv0 } = options;
+  const stdio = options.stdio ?? "pipe";
+  const list = typeof stdio === "string" ? [stdio, stdio, stdio] : stdio;
+  if (!Array.isArray(list) || list.some((entry) => !["pipe", "ignore", "inherit", null, undefined].includes(entry))) return null;
+  if (shell !== undefined && typeof shell !== "boolean" && typeof shell !== "string") return null;
+  const plain = { stdio: list.map((entry) => entry ?? "pipe") };
+  for (const [key, value] of Object.entries({ cwd, env, detached, windowsHide, windowsVerbatimArguments, shell, argv0 })) {
+    if (value !== undefined) plain[key] = value;
+  }
+  return plain;
+}
+
+/**
+ * Starts `file` like child_process.spawn, from the spawn worker, and resolves the child once the
+ * worker has started it (its pid known, or its error to follow). Never rejects: a start failure
+ * arrives as the child's error event, as with spawn(). Options the worker cannot receive, or a
+ * worker that cannot run, start it here instead.
+ */
+function spawnOffThread(file, args = [], options = {}, { createWorker = (source, workerOptions) => new Worker(source, workerOptions) } = {}) {
+  const plain = workerOptions(options);
+  const here = () => spawn(file, args, options);
+  if (!plain || spawnWorkerBroken) return Promise.resolve(here());
+  try {
+    spawnWorker ??= startSpawnWorker(createWorker);
+  } catch {
+    spawnWorkerBroken = true;
+    return Promise.resolve(here());
+  }
+  return new Promise((resolve) => {
+    const id = ++spawnCalls;
+    const send = (message) => spawnWorker?.postMessage(message);
+    const child = new OffThreadChild(id, send, plain.stdio);
+    // A persistent child (detached, its output discarded) need not keep either side's loop busy.
+    const persistent = plain.detached === true && plain.stdio.every((entry) => entry !== "pipe");
+    const entry = { child, persistent, started: false, resolve: (value) => { entry.started = true; resolve(value); }, retry: () => resolve(here()) };
+    spawned.set(id, entry);
+    holdWhileRunning(spawnWorker);
+    spawnWorker.postMessage({ type: "spawn", id, file, args, options: plain, unref: persistent });
+  });
+}
+
+/** For tests: forget the worker so the next start makes a new one. */
+function resetSpawnWorker() {
+  const worker = spawnWorker;
+  spawnWorker = null;
+  worker?.terminate?.();
+  spawnWorkerBroken = false;
+  spawned.clear();
+}
+
+module.exports = { runOffThread, warmProgram, spawnOffThread, resetSpawnWorker };

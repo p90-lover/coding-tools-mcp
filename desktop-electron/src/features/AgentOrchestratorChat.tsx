@@ -6,6 +6,7 @@ import { AgentOrchestratorComposerControls, type ComposerControlsProps } from ".
 import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
+import type { AoNode } from "./AgentOrchestratorSurface";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
 import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
@@ -14,7 +15,7 @@ import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotati
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
-import { ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
+import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
 import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, type ChatStyle } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
@@ -205,10 +206,6 @@ export type ChatThreadActions = {
   pinned: boolean;
 };
 
-/** What a stuck turn's Restart sends the same agent as its next turn. */
-export const RESTART_MESSAGE = "Your previous turn stopped responding and was restarted. Continue the same task from where you left off; "
-  + "do not start over or repeat work that is already done. If a command or tool call never returned, do not run it the same way again.";
-
 /**
  * How long since `since`, counting up once a second by itself while `live`: only this label
  * re-renders on a tick, never the transcript around it. Stopped, it holds at `until`.
@@ -252,12 +249,11 @@ function TurnRunning({ turn, refusal }: { turn: ChatTurn; refusal?: CpaRefusal |
   return <p className={`cx-note cx-turn-running${(step.working.stalled && !asking) || refused ? " is-stalled" : ""}`} role="status" aria-live="polite">
     <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
     {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}${hint}`}
-    {/* A stuck turn has a button of its own: the person looking at "may be stuck" had nothing to
-        press, and a tool call that never returned held a chat for hours (Restart: chat_steer's restart). */}
+    {/* Inspect the accepted turn without adding another prompt or interrupting its work. */}
     {!hint && note.includes("may be stuck") ? onRestart
       ? <> · <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
-        title="Stop this turn and have the same agent continue where it left off">{restarting ? "Restarting…" : "Restart"}</button></>
-      : " · send a message to restart it" : ""}
+        title="Check the same agent and accepted turn without sending another message">{restarting ? "Checking…" : "Recover"}</button></>
+      : " · recovery is unavailable for this turn" : ""}
   </p>;
 }
 
@@ -820,7 +816,7 @@ function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, warning, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
 }: {
   /** The app's queue of this project's chats: a message typed while a turn runs waits there. */
@@ -858,6 +854,8 @@ export function AgentOrchestratorChat({
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
   /** `restart`: stop the turn and send the message as its next turn, whatever its quiet time (Restart). */
   steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
+  /** Checks the captured accepted turn without sending a prompt, stopping it, or replaying work. */
+  recover?: (input: { taskId: string; runId: string; nodeId: string; requestKey: string; threadId: string }) => Promise<{ message: string }>;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -1508,11 +1506,42 @@ export function AgentOrchestratorChat({
       return false;
     } finally { setSending(false); }
   };
-  // Restart on a stuck turn's foot: the same agent continues where it left off, told why.
-  const [restarting, setRestarting] = useState(false);
-  const restartTurn = steer && selectedTaskId ? () => {
-    setRestarting(true);
-    void deliver(RESTART_MESSAGE, undefined, false, true).finally(() => setRestarting(false));
+  // This action never enters deliver(): that path adds a user bubble and a queued provider turn.
+  const recoveryNode = (latest?.nodes as AoNode[] | undefined)?.find(node => node.receipt?.thread_id && node.receipt.request_key
+    && (latest.execution_mode === "single" || node.role === "planner"));
+  const recoveryKey = JSON.stringify([projectId, selectedTaskId, latest?.id, recoveryNode?.id,
+    recoveryNode?.receipt?.request_key, recoveryNode?.receipt?.thread_id, recoveryNode?.receipt?.turn_id,
+    recoveryNode?.route]);
+  const recoveryOwner = useRef<{ key: string; pending: boolean; cancel?: () => void }>({ key: recoveryKey, pending: false });
+  if (recoveryOwner.current.key !== recoveryKey) {
+    recoveryOwner.current.cancel?.();
+    recoveryOwner.current = { key: recoveryKey, pending: false };
+  }
+  useEffect(() => () => recoveryOwner.current.cancel?.(), []);
+  const [turnRecovery, setTurnRecovery] = useState<{ owner: typeof recoveryOwner.current; pending: boolean; message: string } | null>(null);
+  const restarting = turnRecovery?.owner === recoveryOwner.current && turnRecovery.pending;
+  const recoveryMessage = turnRecovery?.owner === recoveryOwner.current ? turnRecovery.message : "";
+  const restartTurn = recover && selectedTaskId && latest && recoveryNode ? () => {
+    if (recoveryOwner.current.pending) return;
+    const owner: typeof recoveryOwner.current = { key: recoveryKey, pending: true };
+    recoveryOwner.current = owner;
+    setTurnRecovery({ owner, pending: true, message: "" });
+    const current = () => alive.current && recoveryOwner.current === owner;
+    let timer: number | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      owner.cancel = () => reject(new Error("Recovery is no longer shown for this chat."));
+      timer = window.setTimeout(() => reject(new Error("The recovery check timed out. The original work was kept; no message was sent. Check again when the app responds.")), 35_000);
+    });
+    const operation = Promise.resolve().then(() => {
+      if (!current()) throw new Error("Recovery is no longer shown for this chat.");
+      return recover({ taskId: selectedTaskId, runId: latest.id, nodeId: recoveryNode.id,
+        requestKey: recoveryNode.receipt!.request_key!, threadId: recoveryNode.receipt!.thread_id! });
+    });
+    void Promise.race([operation, deadline]).then(result => {
+      if (current()) setTurnRecovery({ owner, pending: false, message: result.message });
+    }, error => {
+      if (current()) setTurnRecovery({ owner, pending: false, message: error instanceof Error ? error.message : String(error) });
+    }).finally(() => { window.clearTimeout(timer); owner.pending = false; owner.cancel = undefined; });
   } : undefined;
 
   const submit = async () => {
@@ -1990,7 +2019,7 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
     // team's answering card marked Team. How it ran (harness, provider, effort, window) is the tooltip.
     const answerRun = chatRuns.find((run) => run.id === turn.runId);
     const teamAnswer = Boolean(answerRun) && answerRun?.execution_mode !== "single";
-    // The reply's head (ReplyHead): who answered, how it stands, why it failed and what it changed.
+    // The reply's summary (ReplyHead, under the answer): who answered, how it stands and what it changed; a failure (ReplyError) leads.
     const live = !idle && liveTurn(turn);
     const cards = [...turn.steps, ...(turn.final ? [turn.final] : [])];
     const modelOf = (step: ChatStep) => answerRun?.nodes.find((node) => node.id === step.nodeId)?.route?.model;
@@ -2041,11 +2070,9 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
                   <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
                 </div>)}</SteerReader.Provider> : null}
               {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} aria-label="Reply">
-              <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
-                startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
-                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} error={headError} members={members} changes={changes} />
+              {headError ? <ReplyError team={teamAnswer} error={headError} /> : null}
               {plan ? <ReplyPlanView plan={plan} style={replyStyle} live={live} /> : null}
-              {/* The head says the error, so the DeepSeek turn leaves its own copy out. */}
+              {/* The reply's top says the error, so the DeepSeek turn leaves its own copy out. */}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
                   errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null}
@@ -2056,7 +2083,7 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
               {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
               {!dsh && live ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
-                {/* Who answered and its verdict are in the head; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
+                {/* Who answered and its verdict are in the summary below; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
                 <ChatMarkdown text={turn.final.text ?? ""} onVisualize={turn.status === "done" && !turn.final.working
                   && chatRuns.find(run => run.id === turn.runId)?.nodes.some(node => node.id === turn.final?.nodeId
@@ -2069,7 +2096,12 @@ Change it with /autocompact on, off, or a share like /autocompact 80.`);
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
-              {/* How long it worked is in the head; the foot keeps the turn's model requests. */}
+              {/* The reply's summary closes it, under the answer: the files it changed, a team's cards,
+                  who answered, how it stands and for how long. */}
+              <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
+                startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
+                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes} />
+              {/* How long it worked is in the summary; the foot keeps the turn's model requests. */}
               {turn.runId && turn.startedAtMs && !liveTurn(turn)
                 ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={false}
                   to={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs} /> : null}
@@ -2208,6 +2240,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             {/* A tool call that timed out: the chat keeps going by itself, so this is a red line in the
                 conversation, not the failed-step card that waited for a click (2026-10-31). */}
             {warning && latest && !recovering ? <p className="cx-step-error cx-timeout-line" role="status">{warning}</p> : null}
+            {recoveryMessage ? <p className="cx-route-note" role="status">{recoveryMessage}</p> : null}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
                 <strong>{notice ? "Couldn't start the run" : "This run hasn't started"}</strong>

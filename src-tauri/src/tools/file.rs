@@ -13,15 +13,14 @@ use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 /// Default per-file cap for `search_text`. Files are scanned line by line, so this only keeps
 /// multi-GB assets out of a search; large logs and generated sources are searched.
 const DEFAULT_SEARCH_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
-/// How long one `search_text` call may scan before it stops and returns what it found so far
-/// (`timed_out: true`), well inside the callers' own deadlines: a search over a huge folder answers
-/// with partial results instead of failing.
+/// Cooperative scan budget: walking and bounded reads return partial results on expiry
+/// (`timed_out: true`). A blocked filesystem operation or one regex evaluation cannot be preempted.
 const DEFAULT_SEARCH_TIME_BUDGET_MS: u64 = 15_000;
 const MAX_SEARCH_TIME_BUDGET_MS: u64 = 60_000;
+const SEARCH_READ_CHUNK_BYTES: u64 = 64 * 1024;
 const BINARY_PEEK_BYTES: usize = 8192;
-/// Largest `content` one read_file call returns. Tool results pass through the headless service,
-/// which keeps at most 256 KiB of serialized result, so a page stays under that even after JSON
-/// escaping. Larger files are read in pages with `next_offset`; there is no whole-file limit.
+/// Raw-byte upper bound for one read_file page. Shared dispatch can return a smaller page so the
+/// complete decorated result fits its serialized budget. Larger files use `next_offset`.
 const MAX_READ_PAGE_BYTES: u64 = 192 * 1024;
 const DEFAULT_READ_PAGE_BYTES: u64 = 128 * 1024;
 /// UTF-16 text is decoded whole (Windows tools often write it), so it keeps a size limit.
@@ -43,6 +42,132 @@ struct ReadWindow {
     truncated: bool,
     cut_mid_line: bool,
     next_line: usize,
+}
+
+pub(super) struct ReadFilePage {
+    window: ReadWindow,
+    path: String,
+    encoding: &'static str,
+    total_bytes: u64,
+    total_lines: Option<usize>,
+    warnings: Vec<String>,
+    requested_max: Option<u64>,
+}
+
+impl ReadFilePage {
+    pub(super) fn value(&self) -> Value {
+        self.value_for(&self.window)
+    }
+
+    fn value_for(&self, window: &ReadWindow) -> Value {
+        let mut warnings = self.warnings.clone();
+        let content = match String::from_utf8(window.content.clone()) {
+            Ok(text) => text,
+            Err(error) => {
+                warnings.push("invalid UTF-8 bytes were replaced with U+FFFD".to_string());
+                String::from_utf8_lossy(error.as_bytes()).into_owned()
+            }
+        };
+        if self
+            .requested_max
+            .is_some_and(|requested| requested > MAX_READ_PAGE_BYTES)
+        {
+            warnings.push(format!(
+                "max_bytes is capped at {MAX_READ_PAGE_BYTES} per call"
+            ));
+        }
+        if window.truncated {
+            warnings.push("content truncated; continue with next_offset".to_string());
+        }
+        let more = window.end < self.total_bytes;
+        let mut result = json!({
+            "path": self.path,
+            "content": content,
+            "encoding": self.encoding,
+            "start_line": window.first_line,
+            "end_line": window.last_line,
+            "total_bytes": self.total_bytes,
+            "bytes_read": window.end - window.begin,
+            "offset": window.begin,
+            "truncated": window.truncated,
+            "truncated_by": window.truncated.then_some("bytes"),
+            "cut_mid_line": window.cut_mid_line,
+            "next_offset": more.then_some(window.end),
+            "next_start_line": (more && !window.cut_mid_line).then_some(window.next_line),
+            "warnings": warnings
+        });
+        if let Some(lines) = self.total_lines {
+            result["total_lines"] = json!(lines);
+        }
+        tool_ok(result)
+    }
+
+    pub(super) fn fit_result(self, mut output: Value, limit: usize) -> Value {
+        let mut buffer = vec![0; limit];
+        let mut fits = |value: &Value| {
+            let mut writer = std::io::Cursor::new(buffer.as_mut_slice());
+            serde_json::to_writer(&mut writer, value).is_ok()
+        };
+        if fits(&output) {
+            return output;
+        }
+
+        let mut candidate = output.clone();
+        let mut raw_cap = self.window.content.len();
+        while raw_cap > 4 {
+            raw_cap = (raw_cap / 2).max(4);
+            // This is an already-owned window: offset=Some(0) would skip leading invalid
+            // continuation bytes. Only the original file read performs offset alignment.
+            let mut window = read_window(
+                std::io::Cursor::new(self.window.content.as_slice()),
+                0,
+                None,
+                1,
+                None,
+                raw_cap,
+            )
+            .expect("reading an in-memory file page");
+            if window.content.is_empty() || window.content.len() >= self.window.content.len() {
+                break;
+            }
+            window.begin += self.window.begin;
+            window.end += self.window.begin;
+            let line_shift = self.window.first_line - 1;
+            window.first_line += line_shift;
+            window.last_line += line_shift;
+            window.next_line += line_shift;
+            window.truncated |= self.window.truncated;
+            let Value::Object(fields) = self.value_for(&window) else {
+                unreachable!("file result is an object")
+            };
+            candidate
+                .as_object_mut()
+                .expect("decorated file result is an object")
+                .extend(fields);
+            if fits(&candidate) {
+                return candidate;
+            }
+        }
+
+        let mut error = crate::tools::workspace::tool_err(WorkspaceError::Tool {
+            code: "RESULT_TOO_LARGE",
+            message: "Required response metadata and the minimum file page exceed the tool-result byte budget; no file page or continuation cursor was returned.".into(),
+            category: "validation",
+            retryable: false,
+        });
+        // Required metadata is never trimmed or loaded again. If it alone exceeds the limit,
+        // the transport's existing whole-value guard still reports the explicit failure.
+        for key in [
+            "project_instructions",
+            "project_scope",
+            "server_dispatch_ms",
+        ] {
+            if let Some(value) = output.as_object_mut().and_then(|object| object.remove(key)) {
+                error[key] = value;
+            }
+        }
+        error
+    }
 }
 
 /// Reads at most `max_bytes` starting either at byte `offset` or at line `start_line`, stopping
@@ -181,6 +306,10 @@ fn count_lines<R: Read>(mut reader: R) -> std::io::Result<usize> {
 }
 
 pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
+    read_file_page(ws, args).map(|page| page.value())
+}
+
+pub(super) fn read_file_page(ws: &Workspace, args: &Value) -> Result<ReadFilePage, WorkspaceError> {
     let path = args
         .get("path")
         .and_then(Value::as_str)
@@ -320,42 +449,15 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         .map_err(read_error)?;
         (window, "utf-8", file_bytes, total_lines)
     };
-    let content = match String::from_utf8(window.content) {
-        Ok(text) => text,
-        Err(error) => {
-            warnings.push("invalid UTF-8 bytes were replaced with U+FFFD".to_string());
-            String::from_utf8_lossy(error.as_bytes()).into_owned()
-        }
-    };
-    if requested_max.is_some_and(|requested| requested > MAX_READ_PAGE_BYTES) {
-        warnings.push(format!(
-            "max_bytes is capped at {MAX_READ_PAGE_BYTES} per call"
-        ));
-    }
-    let more = window.end < total_bytes;
-    if window.truncated {
-        warnings.push("content truncated; continue with next_offset".to_string());
-    }
-    let mut result = json!({
-        "path": resolved.display,
-        "content": content,
-        "encoding": encoding,
-        "start_line": window.first_line,
-        "end_line": window.last_line,
-        "total_bytes": total_bytes,
-        "bytes_read": window.end - window.begin,
-        "offset": window.begin,
-        "truncated": window.truncated,
-        "truncated_by": window.truncated.then_some("bytes"),
-        "cut_mid_line": window.cut_mid_line,
-        "next_offset": more.then_some(window.end),
-        "next_start_line": (more && !window.cut_mid_line).then_some(window.next_line),
-        "warnings": warnings
-    });
-    if let Some(lines) = total_lines {
-        result["total_lines"] = json!(lines);
-    }
-    Ok(tool_ok(result))
+    Ok(ReadFilePage {
+        window,
+        path: resolved.display,
+        encoding,
+        total_bytes,
+        total_lines,
+        warnings,
+        requested_max,
+    })
 }
 
 pub fn list_dir(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
@@ -488,6 +590,49 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
     })))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchStop {
+    Complete,
+    ResultLimit,
+    Deadline,
+}
+
+fn walk_search_files(
+    root: &Path,
+    skip_entry: impl Fn(&walkdir::DirEntry) -> bool,
+    mut consider_file: impl FnMut(&Path) -> SearchStop,
+    expired: &dyn Fn() -> bool,
+) -> SearchStop {
+    let mut entries = WalkDir::new(root).follow_links(false).into_iter();
+    loop {
+        if expired() {
+            return SearchStop::Deadline;
+        }
+        let next = entries.next();
+        if expired() {
+            return SearchStop::Deadline;
+        }
+        let entry = match next {
+            Some(Ok(entry)) => entry,
+            Some(Err(_)) => continue,
+            None => return SearchStop::Complete,
+        };
+        if skip_entry(&entry) {
+            if entry.file_type().is_dir() {
+                entries.skip_current_dir();
+            }
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let stop = consider_file(entry.path());
+        if stop != SearchStop::Complete {
+            return stop;
+        }
+    }
+}
+
 pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let query = args
         .get("query")
@@ -530,6 +675,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             .clamp(1, MAX_SEARCH_TIME_BUDGET_MS),
     );
     let started = std::time::Instant::now();
+    let expired = || started.elapsed() >= budget;
     let matcher = build_matcher(query, use_regex, case_sensitive)?;
     // What git ignores (generated output, virtualenvs, caches) is skipped like the heavy folders
     // is_ignored_path already skips, unless the caller asks for ignored files too.
@@ -543,47 +689,43 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     let mut warnings = Vec::new();
     let mut skipped_large = 0usize;
     let mut skipped_binary = 0usize;
-    let mut truncated = false;
-    let mut timed_out = false;
     let mut files_searched = 0usize;
 
     let mut consider_file = |p: &Path| {
         if matches.len() >= max_results {
-            truncated = true;
-            return false;
+            return SearchStop::ResultLimit;
         }
-        if started.elapsed() >= budget {
-            timed_out = true;
-            return false;
+        if expired() {
+            return SearchStop::Deadline;
         }
         if !ws.is_safe_read_path(p) {
-            return true;
+            return SearchStop::Complete;
         }
         if ws.is_ignored_path(p, false, include_ignored) {
-            return true;
+            return SearchStop::Complete;
         }
         files_searched += 1;
         let rel = ws.display_path(p);
         if !passes_glob_filters(&rel, &include_globs, &exclude_globs) {
-            return true;
+            return SearchStop::Complete;
         }
         let meta = match p.metadata() {
             Ok(m) if m.is_file() => m,
-            _ => return true,
+            _ => return SearchStop::Complete,
         };
         if meta.len() > max_file_bytes {
             skipped_large += 1;
-            return true;
+            return SearchStop::Complete;
         }
         match file_text_eligibility(p) {
             FileEligibility::Binary => {
                 skipped_binary += 1;
-                return true;
+                return SearchStop::Complete;
             }
-            FileEligibility::Unreadable => return true,
+            FileEligibility::Unreadable => return SearchStop::Complete,
             FileEligibility::Text => {}
         }
-        let stop = search_file_streaming(
+        search_file_streaming(
             p,
             &rel,
             &matcher,
@@ -591,37 +733,31 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             max_preview,
             max_results,
             &mut matches,
-        );
-        if stop {
-            truncated = true;
-            return false;
-        }
-        true
+            &expired,
+        )
     };
 
-    if resolved.path.is_file() {
-        let _ = consider_file(&resolved.path);
+    let mut stop = if resolved.path.is_file() {
+        consider_file(&resolved.path)
     } else {
         // Ignored and hidden directories are pruned whole, matching the per-file rule below.
-        for entry in WalkDir::new(&resolved.path)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|entry| {
-                entry.path() == resolved.path
-                    || (!(entry.file_type().is_dir()
+        walk_search_files(
+            &resolved.path,
+            |entry| {
+                entry.path() != resolved.path
+                    && ((entry.file_type().is_dir()
                         && ws.is_ignored_path(entry.path(), false, include_ignored))
-                        && !gitignore.ignores(entry.path(), entry.file_type().is_dir()))
-            })
-            .filter_map(Result::ok)
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            if !consider_file(entry.path()) {
-                break;
-            }
-        }
+                        || gitignore.ignores(entry.path(), entry.file_type().is_dir()))
+            },
+            &mut consider_file,
+            &expired,
+        )
+    };
+    if stop == SearchStop::Complete && expired() {
+        stop = SearchStop::Deadline;
     }
+    let mut truncated = stop == SearchStop::ResultLimit;
+    let timed_out = stop == SearchStop::Deadline;
 
     if truncated {
         warnings.push("result limit reached; scan stopped early".to_string());
@@ -629,7 +765,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     if timed_out {
         truncated = true;
         warnings.push(format!(
-            "search stopped after {} ms with partial results ({files_searched} file(s) searched); \
+            "search time budget of {} ms reached with partial results ({files_searched} file(s) searched); \
              narrow it with path or include_globs",
             budget.as_millis()
         ));
@@ -781,7 +917,8 @@ fn file_text_eligibility(path: &Path) -> FileEligibility {
     FileEligibility::Text
 }
 
-/// Stream a file line-by-line. Returns true when `max_results` is reached.
+/// Stream a file line-by-line, retaining the reason a scan stops early.
+#[allow(clippy::too_many_arguments)]
 fn search_file_streaming(
     path: &Path,
     rel: &str,
@@ -790,25 +927,76 @@ fn search_file_streaming(
     max_preview: usize,
     max_results: usize,
     matches: &mut Vec<Value>,
-) -> bool {
-    let file = match File::open(path) {
+    expired: &dyn Fn() -> bool,
+) -> SearchStop {
+    if expired() {
+        return SearchStop::Deadline;
+    }
+    let opened = File::open(path);
+    if expired() {
+        return SearchStop::Deadline;
+    }
+    let file = match opened {
         Ok(f) => f,
-        Err(_) => return false,
+        Err(_) => return SearchStop::Complete,
     };
-    let mut reader = BufReader::new(file);
+    search_reader_streaming(
+        BufReader::new(file),
+        rel,
+        matcher,
+        context_lines,
+        max_preview,
+        max_results,
+        matches,
+        expired,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_reader_streaming(
+    mut reader: impl BufRead,
+    rel: &str,
+    matcher: &Matcher,
+    context_lines: usize,
+    max_preview: usize,
+    max_results: usize,
+    matches: &mut Vec<Value>,
+    expired: &dyn Fn() -> bool,
+) -> SearchStop {
     let mut recent: VecDeque<String> = VecDeque::with_capacity(context_lines.max(1));
     let mut pending: Vec<PendingMatch> = Vec::new();
     let mut line_no = 0usize;
     let mut raw = Vec::new();
 
-    loop {
+    'lines: loop {
         raw.clear();
-        match reader.read_until(b'\n', &mut raw) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => {
+        loop {
+            if expired() {
                 flush_pending(&mut pending, matches, max_results);
-                return matches.len() >= max_results;
+                return SearchStop::Deadline;
+            }
+            // Keep a logical line intact for UTF-8, anchors and context, but check the
+            // deadline between bounded reads. A blocked OS read cannot be preempted here.
+            let read = (&mut reader)
+                .take(SEARCH_READ_CHUNK_BYTES)
+                .read_until(b'\n', &mut raw);
+            if expired() {
+                flush_pending(&mut pending, matches, max_results);
+                return SearchStop::Deadline;
+            }
+            match read {
+                Ok(0) if raw.is_empty() => break 'lines,
+                Ok(0) => break,
+                Ok(_) if raw.last() == Some(&b'\n') => break,
+                Ok(_) => continue,
+                Err(_) => {
+                    flush_pending(&mut pending, matches, max_results);
+                    return if matches.len() >= max_results {
+                        SearchStop::ResultLimit
+                    } else {
+                        SearchStop::Complete
+                    };
+                }
             }
         }
         // Invalid UTF-8 no longer ends the file: such lines are searched with U+FFFD in place.
@@ -831,7 +1019,7 @@ fn search_file_streaming(
                 let done = pending.remove(0);
                 matches.push(done.into_value());
                 if matches.len() >= max_results {
-                    return true;
+                    return SearchStop::ResultLimit;
                 }
             }
         }
@@ -846,7 +1034,7 @@ fn search_file_streaming(
                     "preview": preview
                 }));
                 if matches.len() >= max_results {
-                    return true;
+                    return SearchStop::ResultLimit;
                 }
             } else {
                 pending.push(PendingMatch {
@@ -871,10 +1059,10 @@ fn search_file_streaming(
     for pend in pending {
         matches.push(pend.into_value());
         if matches.len() >= max_results {
-            return true;
+            return SearchStop::ResultLimit;
         }
     }
-    false
+    SearchStop::Complete
 }
 
 struct PendingMatch {
@@ -1093,4 +1281,477 @@ fn format_mtime(st: Option<SystemTime>) -> Option<String> {
         let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         format!("{}.{:03}Z", d.as_secs(), d.subsec_millis())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::io::{self, Cursor};
+
+    struct ControlledReader<'a> {
+        inner: Cursor<Vec<u8>>,
+        consumed: &'a Cell<usize>,
+        largest_read: &'a Cell<usize>,
+        fail_after: Option<usize>,
+    }
+
+    impl Read for ControlledReader<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let count = bytes.len().min(available.len());
+            bytes[..count].copy_from_slice(&available[..count]);
+            self.consume(count);
+            Ok(count)
+        }
+    }
+
+    impl BufRead for ControlledReader<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            let position = self.inner.position() as usize;
+            if self.fail_after.is_some_and(|limit| position >= limit) {
+                return Err(io::Error::other("controlled read failure"));
+            }
+            let available = self.inner.fill_buf()?;
+            let length = self.fail_after.map_or(available.len(), |limit| {
+                available.len().min(limit - position)
+            });
+            Ok(&available[..length])
+        }
+
+        fn consume(&mut self, count: usize) {
+            self.inner.consume(count);
+            self.consumed.set(self.consumed.get() + count);
+            self.largest_read.set(self.largest_read.get().max(count));
+        }
+    }
+
+    #[test]
+    fn read_file_fitter_preserves_owned_bytes_and_metadata() {
+        let decorate = |mut value: Value| {
+            value["project_instructions"] = json!({"instructions":"keep this rule","revision":"r"});
+            value["project_scope"] = json!({"root":".","workspace_id":"fixture"});
+            value["server_dispatch_ms"] = json!(u64::MAX);
+            value
+        };
+        for raw in [
+            b"\x80\xbfX\xff\r\n".repeat(1024),
+            "界🙂\r\n".repeat(1024).into_bytes(),
+        ] {
+            let mut source = b"skip\r\n".to_vec();
+            source.extend_from_slice(&raw);
+            let page = ReadFilePage {
+                window: read_window(Cursor::new(&source), 0, None, 2, None, 128 * 1024).unwrap(),
+                path: "fixture.txt".into(),
+                encoding: "utf-8",
+                total_bytes: source.len() as u64,
+                total_lines: Some(count_lines(source.as_slice()).unwrap()),
+                warnings: Vec::new(),
+                requested_max: None,
+            };
+            let original = decorate(page.value());
+            assert!(serde_json::to_vec(&original).unwrap().len() > 2048);
+            let fitted = page.fit_result(original.clone(), 2048);
+            assert_eq!(fitted["ok"], true);
+            assert!(serde_json::to_vec(&fitted).unwrap().len() <= 2048);
+            for key in [
+                "project_instructions",
+                "project_scope",
+                "server_dispatch_ms",
+            ] {
+                assert_eq!(fitted[key], original[key]);
+            }
+            let consumed = fitted["bytes_read"].as_u64().unwrap() as usize;
+            assert!(consumed > 0 && consumed < raw.len());
+            assert_eq!(fitted["offset"], 6);
+            assert_eq!(fitted["next_offset"], (6 + consumed) as u64);
+            assert_eq!(fitted["start_line"], 2);
+            assert_eq!(
+                fitted["content"],
+                String::from_utf8_lossy(&raw[..consumed]).as_ref()
+            );
+            assert_eq!(
+                fitted["end_line"],
+                (1 + count_lines(&raw[..consumed]).unwrap()) as u64
+            );
+            assert_eq!(fitted["cut_mid_line"], raw[consumed - 1] != b'\n');
+            assert_eq!(fitted["truncated"], true);
+        }
+
+        let small = || ReadFilePage {
+            window: read_window(Cursor::new(b"ok\n"), 0, None, 1, None, 4).unwrap(),
+            path: "small.txt".into(),
+            encoding: "utf-8",
+            total_bytes: 3,
+            total_lines: Some(1),
+            warnings: Vec::new(),
+            requested_max: None,
+        };
+        let original = decorate(small().value());
+        let exact = serde_json::to_vec(&original).unwrap().len();
+        assert_eq!(small().fit_result(original.clone(), exact), original);
+        for limit in [0, exact - 1] {
+            let failed = small().fit_result(original.clone(), limit);
+            assert_eq!(failed["ok"], false);
+            assert_eq!(failed["error"]["code"], "RESULT_TOO_LARGE");
+            assert!(failed.get("content").is_none());
+            assert!(failed.get("next_offset").is_none());
+            assert_eq!(
+                failed["project_instructions"],
+                original["project_instructions"]
+            );
+        }
+        let mut irreducible = original.clone();
+        irreducible["project_instructions"]["instructions"] = json!("x".repeat(4096));
+        let failed = small().fit_result(irreducible.clone(), 2048);
+        assert_eq!(failed["ok"], false);
+        assert_eq!(
+            failed["project_instructions"],
+            irreducible["project_instructions"]
+        );
+        assert!(serde_json::to_vec(&failed).unwrap().len() > 2048);
+        assert!(failed.get("next_offset").is_none());
+
+        let raw = "🙂".repeat(16).into_bytes();
+        let page = ReadFilePage {
+            window: read_window(Cursor::new(&raw), 0, None, 1, None, raw.len()).unwrap(),
+            path: "emoji.txt".into(),
+            encoding: "utf-8",
+            total_bytes: raw.len() as u64,
+            total_lines: Some(1),
+            warnings: Vec::new(),
+            requested_max: None,
+        };
+        let minimum = read_window(Cursor::new(&raw), 0, None, 1, None, 4).unwrap();
+        let exact = serde_json::to_vec(&decorate(page.value_for(&minimum)))
+            .unwrap()
+            .len();
+        let original = decorate(page.value());
+        let fitted = page.fit_result(original, exact);
+        assert_eq!(fitted["ok"], true);
+        assert_eq!(fitted["content"], "🙂");
+        assert_eq!(fitted["bytes_read"], 4);
+        assert_eq!(fitted["next_offset"], 4);
+        assert_eq!(serde_json::to_vec(&fitted).unwrap().len(), exact);
+    }
+
+    #[test]
+    fn read_file_shared_result_fits_with_instructions_and_raw_cursors() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aiTemp/read-file-budget-tests");
+        fs::create_dir_all(&base).unwrap();
+        let tree = tempfile::Builder::new()
+            .prefix("shared-")
+            .tempdir_in(&base)
+            .unwrap();
+        let root = tree.path().join("project");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("AGENTS.md"), "\u{1}".repeat(16 * 1024)).unwrap();
+        fs::write(root.join("nested/agent.md"), "\u{1}".repeat(16 * 1024)).unwrap();
+        let ctx =
+            crate::tools::ToolContext::for_test(root.clone(), tree.path().join("harness")).unwrap();
+        let wide = "界🙂\r\n".repeat(20_000);
+        let mut utf16 = vec![0xff, 0xfe];
+        for unit in wide.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        let cases = [
+            ("control.txt", b"\x01\r\n".repeat(44_000), None, None),
+            (
+                "quotes.txt",
+                vec![b'"'; 192 * 1024 + 64],
+                Some(192 * 1024),
+                None,
+            ),
+            ("invalid.txt", vec![0xff; 128 * 1024 + 64], None, None),
+            ("wide.txt", utf16, None, Some(wide)),
+        ];
+        for (name, source, maximum, decoded) in cases {
+            let path = format!("nested/{name}");
+            fs::write(root.join(&path), &source).unwrap();
+            let expected = decoded.unwrap_or_else(|| String::from_utf8_lossy(&source).into_owned());
+            let total_bytes = if name == "wide.txt" {
+                expected.len()
+            } else {
+                source.len()
+            };
+            let instructions =
+                crate::tools::project_context::for_tool(&ctx, "read_file", &json!({"path":path}));
+            let mut offset = 0u64;
+            let mut joined = String::new();
+            for page_index in 0..128 {
+                let mut args = json!({"path":path,"offset":offset});
+                if let Some(maximum) = maximum {
+                    args["max_bytes"] = json!(maximum);
+                }
+                let value = crate::tools::call_tool(&ctx, "read_file", &args);
+                assert_eq!(value["ok"], true);
+                assert!(
+                    serde_json::to_vec(&value).unwrap().len()
+                        <= crate::tools::workspace::MAX_SERIALIZED_TOOL_RESULT_BYTES
+                );
+                assert_eq!(value["project_instructions"], instructions);
+                assert!(value["project_scope"].is_object());
+                assert!(value["server_dispatch_ms"].is_number());
+                assert_eq!(value["offset"], offset);
+                assert_eq!(value["total_bytes"], total_bytes as u64);
+                joined.push_str(value["content"].as_str().unwrap());
+                if let Some(next) = value["next_offset"].as_u64() {
+                    assert!(next > offset);
+                    assert_eq!(next - offset, value["bytes_read"].as_u64().unwrap());
+                    offset = next;
+                    assert!(page_index < 127, "paging did not finish");
+                } else {
+                    assert_eq!(
+                        offset + value["bytes_read"].as_u64().unwrap(),
+                        total_bytes as u64
+                    );
+                    break;
+                }
+            }
+            assert_eq!(joined, expected);
+            let acknowledged = crate::tools::dispatch::call_tool_mcp(
+                &ctx,
+                "read_file",
+                &json!({"path":path,"max_bytes":4,"known_project_instructions_revision":instructions["revision"]}),
+            );
+            assert_eq!(acknowledged["ok"], true);
+            assert_eq!(acknowledged["project_instructions"]["instructions"], "");
+            assert_eq!(acknowledged["project_instructions"]["unchanged"], true);
+            assert_eq!(
+                acknowledged["project_instructions"]["revision"],
+                instructions["revision"]
+            );
+        }
+        fs::write(root.join("small.txt"), b"ok\n").unwrap();
+        let direct = read_file(&ctx.workspace, &json!({"path":"small.txt"})).unwrap();
+        let shared = crate::tools::call_tool(&ctx, "read_file", &json!({"path":"small.txt"}));
+        for (key, value) in direct.as_object().unwrap() {
+            assert_eq!(&shared[key], value);
+        }
+        assert_eq!(direct["content"], "ok\n");
+        assert_eq!(direct["bytes_read"], 3);
+    }
+
+    #[test]
+    fn search_deadline_discards_unfinished_line_and_keeps_pending_context() {
+        let first = b"first needle\n";
+        let mut text = first.to_vec();
+        text.extend_from_slice(b"needle ");
+        text.extend(std::iter::repeat_n(b'x', SEARCH_READ_CHUNK_BYTES as usize));
+        text.extend_from_slice(b" end\n");
+        let consumed = Cell::new(0);
+        let largest_read = Cell::new(0);
+        let reader = ControlledReader {
+            inner: Cursor::new(text),
+            consumed: &consumed,
+            largest_read: &largest_read,
+            fail_after: None,
+        };
+        let mut matches = Vec::new();
+        let stop = search_reader_streaming(
+            reader,
+            "log.txt",
+            &Matcher::Exact("needle".into()),
+            2,
+            64,
+            10,
+            &mut matches,
+            &|| consumed.get() >= first.len() + SEARCH_READ_CHUNK_BYTES as usize,
+        );
+        assert_eq!(stop, SearchStop::Deadline);
+        assert_eq!(
+            consumed.get(),
+            first.len() + SEARCH_READ_CHUNK_BYTES as usize
+        );
+        assert!(largest_read.get() <= SEARCH_READ_CHUNK_BYTES as usize);
+        assert_eq!(
+            matches,
+            vec![json!({"path":"log.txt","line":1,"column":1,
+            "preview":"first needle","before":[],"after":[]})]
+        );
+
+        let mut matches = Vec::new();
+        let mut reader = Cursor::new(b"needle\n".to_vec());
+        assert_eq!(
+            search_reader_streaming(
+                &mut reader,
+                "log.txt",
+                &Matcher::Exact("needle".into()),
+                0,
+                64,
+                10,
+                &mut matches,
+                &|| true
+            ),
+            SearchStop::Deadline
+        );
+        assert_eq!(reader.position(), 0);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn search_chunks_preserve_lines_context_utf8_errors_and_limit_reason() {
+        let mut text = b"before\r\n".to_vec();
+        text.extend(std::iter::repeat_n(
+            b'x',
+            SEARCH_READ_CHUNK_BYTES as usize - 1,
+        ));
+        text.extend_from_slice("é\r\nafter\r\nbad".as_bytes());
+        text.push(0xff);
+        let matcher = build_matcher("^(x+é|bad�)$", true, true).unwrap();
+        let mut matches = Vec::new();
+        assert_eq!(
+            search_reader_streaming(
+                Cursor::new(&text),
+                "text",
+                &matcher,
+                1,
+                12,
+                10,
+                &mut matches,
+                &|| false
+            ),
+            SearchStop::Complete
+        );
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0]["line"], 2);
+        assert_eq!(matches[0]["preview"], "xxxxxxxxxxxx...");
+        assert_eq!(matches[0]["before"], json!(["before"]));
+        assert_eq!(matches[0]["after"], json!(["after"]));
+        assert_eq!(matches[1]["line"], 4);
+        assert_eq!(matches[1]["preview"], "bad�");
+        assert_eq!(matches[1]["before"], json!(["after"]));
+        assert_eq!(matches[1]["after"], json!([]));
+
+        let mut limited = Vec::new();
+        assert_eq!(
+            search_reader_streaming(
+                Cursor::new(&text),
+                "text",
+                &matcher,
+                1,
+                12,
+                1,
+                &mut limited,
+                &|| false
+            ),
+            SearchStop::ResultLimit
+        );
+        assert_eq!(limited, matches[..1]);
+
+        let consumed = Cell::new(0);
+        let largest_read = Cell::new(0);
+        let first = b"first needle\n";
+        let reader = ControlledReader {
+            inner: Cursor::new(b"first needle\nunfinished needle\n".to_vec()),
+            consumed: &consumed,
+            largest_read: &largest_read,
+            fail_after: Some(first.len() + 4),
+        };
+        let mut partial = Vec::new();
+        assert_eq!(
+            search_reader_streaming(
+                reader,
+                "text",
+                &Matcher::Exact("needle".into()),
+                2,
+                64,
+                10,
+                &mut partial,
+                &|| false
+            ),
+            SearchStop::Complete
+        );
+        assert_eq!(
+            partial,
+            vec![json!({"path":"text","line":1,"column":1,
+            "preview":"first needle","before":[],"after":[]})]
+        );
+    }
+
+    #[test]
+    fn search_walk_checks_deadline_through_directory_only_and_pruned_entries() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aiTemp/search-deadline-tests");
+        fs::create_dir_all(&base).unwrap();
+        let tree = tempfile::Builder::new()
+            .prefix("walk-")
+            .tempdir_in(&base)
+            .unwrap();
+        for name in ["one", "two"] {
+            fs::create_dir_all(tree.path().join(name).join("child")).unwrap();
+            fs::write(tree.path().join(name).join("unseen.txt"), "needle").unwrap();
+        }
+        let visited = Cell::new(0);
+        let checks = Cell::new(0);
+        let stop = walk_search_files(
+            tree.path(),
+            |entry| entry.path() != tree.path(),
+            |_| {
+                visited.set(visited.get() + 1);
+                SearchStop::Complete
+            },
+            &|| {
+                checks.set(checks.get() + 1);
+                checks.get() >= 6
+            },
+        );
+        assert_eq!(stop, SearchStop::Deadline);
+        assert_eq!(visited.get(), 0);
+        assert_eq!(
+            walk_search_files(
+                tree.path(),
+                |entry| entry.path() != tree.path(),
+                |_| {
+                    visited.set(visited.get() + 1);
+                    SearchStop::Complete
+                },
+                &|| false
+            ),
+            SearchStop::Complete
+        );
+        assert_eq!(visited.get(), 0);
+
+        for name in ["eligible-a.txt", "eligible-b.txt"] {
+            fs::write(tree.path().join(name), "needle").unwrap();
+        }
+        let ignored = std::cell::RefCell::new(None);
+        let mut files = Vec::new();
+        assert_eq!(
+            walk_search_files(
+                tree.path(),
+                |entry| {
+                    if entry.depth() == 1 && entry.file_type().is_file() {
+                        let mut ignored = ignored.borrow_mut();
+                        if ignored.is_none() {
+                            *ignored = Some(entry.path().to_path_buf());
+                            return true;
+                        }
+                    }
+                    false
+                },
+                |path| {
+                    files.push(path.to_path_buf());
+                    SearchStop::Complete
+                },
+                &|| false,
+            ),
+            SearchStop::Complete
+        );
+        let ignored = ignored.into_inner().expect("one root file was ignored");
+        assert_eq!(files.len(), 3);
+        assert!(!files.contains(&ignored));
+        for expected in [
+            tree.path().join("one").join("unseen.txt"),
+            tree.path().join("two").join("unseen.txt"),
+            tree.path().join("eligible-a.txt"),
+            tree.path().join("eligible-b.txt"),
+        ] {
+            if expected != ignored {
+                assert!(
+                    files.contains(&expected),
+                    "eligible sibling missing: {expected:?}"
+                );
+            }
+        }
+    }
 }

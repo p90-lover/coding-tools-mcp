@@ -1,7 +1,7 @@
 const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { renameAtomicFile } = require("./atomic-file.cjs");
+const { renameAtomicFile, renameAtomicFileAsync } = require("./atomic-file.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 
 const DEFAULT_SOURCE_WAIT_TIMEOUT_MS = 30_000;
@@ -39,12 +39,32 @@ function validateManifestPath(relativePath) {
   return relativePath;
 }
 
-function readRuntimeManifest(runtimeRoot, { version, platform, arch, bundleId }) {
+function readRuntimeManifest(runtimeRoot, identity) {
   const manifestPath = path.join(runtimeRoot, "manifest.json");
   if (!fs.existsSync(manifestPath)) throw new Error(`Runtime manifest is missing: ${manifestPath}`);
+  let text;
+  try { text = fs.readFileSync(manifestPath, "utf8"); } catch (error) { text = error; }
+  return parseRuntimeManifest(text, manifestPath, identity);
+}
+
+async function readRuntimeManifestAsync(runtimeRoot, identity) {
+  const manifestPath = path.join(runtimeRoot, "manifest.json");
+  let text;
+  try {
+    text = await fs.promises.readFile(manifestPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error(`Runtime manifest is missing: ${manifestPath}`);
+    text = error;
+  }
+  return parseRuntimeManifest(text, manifestPath, identity);
+}
+
+/** `text` is the manifest's contents, or the error its read failed with. */
+function parseRuntimeManifest(text, manifestPath, { version, platform, arch, bundleId }) {
   let manifest;
   try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (text instanceof Error) throw text;
+    manifest = JSON.parse(text);
   } catch (error) {
     throw new Error(
       `Runtime manifest is invalid: ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -140,6 +160,10 @@ function statRuntimeFile(runtimeRoot, canonicalRoot, file) {
     if (error instanceof Error && error.message.startsWith("Runtime bundle")) throw error;
     throw new Error(`Runtime bundle file is missing: ${absolutePath}`);
   }
+  return checkedMetadata(absolutePath, file, metadata);
+}
+
+function checkedMetadata(absolutePath, file, metadata) {
   if (!metadata.isFile()) throw new Error(`Runtime bundle entry is not a file: ${absolutePath}`);
   if (metadata.size !== file.size) {
     throw new Error(`Runtime bundle file size mismatch: ${absolutePath}`);
@@ -186,8 +210,8 @@ function rememberVerified(stampDir, bundleId, signature) {
   }
 }
 
-function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
-  const manifest = readRuntimeManifest(runtimeRoot, identity);
+/** The manifest's file paths, after checking it declares every file the app starts from. */
+function declaredPaths(runtimeRoot, identity, manifest) {
   const expectedPaths = manifest.files.map(file => file.path);
   const expectedSet = new Set(expectedPaths);
   const paths = runtimeBundlePaths(runtimeRoot, identity.platform);
@@ -202,8 +226,11 @@ function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
       throw new Error(`Runtime manifest does not declare required file: ${required}`);
     }
   }
+  return { expectedPaths, expectedSet, paths };
+}
 
-  const actualPaths = runtimeFilePaths(runtimeRoot);
+/** Fails unless the files found on disk are exactly the declared ones. */
+function compareListing(runtimeRoot, { expectedPaths, expectedSet }, actualPaths) {
   const actualSet = new Set(actualPaths);
   const missing = expectedPaths.find(relativePath => !actualSet.has(relativePath));
   if (missing) throw new Error(`Runtime bundle file is missing: ${path.join(runtimeRoot, ...missing.split("/"))}`);
@@ -214,6 +241,13 @@ function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
   if (actualPaths.length !== expectedPaths.length) {
     throw new Error(`Runtime bundle file count mismatch: expected ${expectedPaths.length}, received ${actualPaths.length}`);
   }
+}
+
+function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
+  const manifest = readRuntimeManifest(runtimeRoot, identity);
+  const declared = declaredPaths(runtimeRoot, identity, manifest);
+  const { paths } = declared;
+  compareListing(runtimeRoot, declared, runtimeFilePaths(runtimeRoot));
 
   const canonicalRoot = fs.realpathSync(runtimeRoot);
   const stats = createHash("sha256");
@@ -234,6 +268,115 @@ function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
 
 function validateRuntimeBundle(runtimeRoot, identity, options = {}) {
   return inspectRuntimeBundle(runtimeRoot, identity, options).runtimeRoot;
+}
+
+// The same check as inspectRuntimeBundle without holding the main thread. Each launch checks the
+// packaged and the installed copy, about 6,150 files each; one synchronous lstat or readdir after
+// another held the main process 22.7 s + 6.5 s on the busy hard disk before the window opened
+// (2026-11-01). Up to RUNTIME_CHECK_CONCURRENCY requests are in flight, so the disk serves them in
+// the order its head reaches them instead of one seek per call.
+const RUNTIME_CHECK_CONCURRENCY = 32;
+
+// Whole files are read to hash them (bun.exe is about 100 MB), so fewer are read at once.
+const RUNTIME_HASH_CONCURRENCY = 4;
+
+/** Runs `run` over `items` with at most `limit` in flight; the first failure stops new work. */
+async function mapLimit(items, limit, run) {
+  const results = new Array(items.length);
+  let next = 0;
+  let failed = false;
+  const lane = async () => {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await run(items[index], index);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  return results;
+}
+
+async function runtimeFilePathsAsync(runtimeRoot, limit) {
+  const paths = [];
+  let level = [runtimeRoot];
+  while (level.length > 0) {
+    const listings = await mapLimit(level, limit, directory => fs.promises.readdir(directory, { withFileTypes: true }));
+    const nextLevel = [];
+    listings.forEach((entries, index) => {
+      for (const entry of entries) {
+        const absolutePath = path.join(level[index], entry.name);
+        const relativePath = path.relative(runtimeRoot, absolutePath).split(path.sep).join("/");
+        if (relativePath === "manifest.json") continue;
+        if (!entry.isDirectory() && SET_ASIDE_FILE.test(entry.name)) continue;
+        if (entry.isDirectory()) nextLevel.push(absolutePath);
+        else paths.push(relativePath);
+      }
+    });
+    level = nextLevel;
+  }
+  return paths.sort(comparePaths);
+}
+
+async function statRuntimeFileAsync(runtimeRoot, canonicalRoot, file) {
+  const absolutePath = path.join(runtimeRoot, ...file.path.split("/"));
+  let metadata;
+  try {
+    metadata = await fs.promises.lstat(absolutePath);
+    if (metadata.isSymbolicLink()) {
+      const target = await fs.promises.realpath(absolutePath);
+      if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${path.sep}`)) {
+        throw new Error(`Runtime bundle symlink escapes the bundle: ${absolutePath}`);
+      }
+      metadata = await fs.promises.stat(absolutePath);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Runtime bundle")) throw error;
+    throw new Error(`Runtime bundle file is missing: ${absolutePath}`);
+  }
+  return checkedMetadata(absolutePath, file, metadata);
+}
+
+async function hashRuntimeFileAsync(runtimeRoot, file) {
+  const absolutePath = path.join(runtimeRoot, ...file.path.split("/"));
+  const sha256 = createHash("sha256").update(await fs.promises.readFile(absolutePath)).digest("hex");
+  if (sha256 !== file.sha256) {
+    throw new Error(`Runtime bundle file checksum mismatch: ${absolutePath}`);
+  }
+}
+
+async function inspectRuntimeBundleAsync(runtimeRoot, identity, {
+  stampDir = null,
+  concurrency = RUNTIME_CHECK_CONCURRENCY,
+} = {}) {
+  const manifest = await readRuntimeManifestAsync(runtimeRoot, identity);
+  const declared = declaredPaths(runtimeRoot, identity, manifest);
+  const { paths } = declared;
+  compareListing(runtimeRoot, declared, await runtimeFilePathsAsync(runtimeRoot, concurrency));
+
+  const canonicalRoot = await fs.promises.realpath(runtimeRoot);
+  const metadata = await mapLimit(manifest.files, concurrency, file => statRuntimeFileAsync(runtimeRoot, canonicalRoot, file));
+  // Hashed in manifest order, so the signature is the synchronous check's.
+  const stats = createHash("sha256");
+  manifest.files.forEach((file, index) => {
+    stats.update(`${file.path}\0${metadata[index].size}\0${metadata[index].mtimeMs}\0${metadata[index].ctimeMs}\0`);
+  });
+  const signature = stats.digest("hex");
+  if (!verifiedSignatures(stampDir, manifest.bundleId).includes(signature)) {
+    await mapLimit(manifest.files, Math.min(concurrency, RUNTIME_HASH_CONCURRENCY), file => hashRuntimeFileAsync(runtimeRoot, file));
+    rememberVerified(stampDir, manifest.bundleId, signature);
+  }
+  if (identity.platform !== "win32" && ((await fs.promises.stat(paths.executable)).mode & 0o111) === 0) {
+    throw new Error(`Bundled Bun runtime is not executable: ${paths.executable}`);
+  }
+  return { manifest, runtimeRoot: paths.runtimeRoot };
+}
+
+async function validateRuntimeBundleAsync(runtimeRoot, identity, options = {}) {
+  return (await inspectRuntimeBundleAsync(runtimeRoot, identity, options)).runtimeRoot;
 }
 
 /** Where verified bundles are remembered (see verifiedSignatures), outside every bundle. */
@@ -277,7 +420,7 @@ async function waitForPackagedRuntimeSource({
   let lastError;
   for (;;) {
     try {
-      return validateRuntimeBundle(source, identity, verify);
+      return await validateRuntimeBundleAsync(source, identity, verify);
     } catch (error) {
       lastError = error;
       // A whole installed copy of this version runs the app; a damaged source is reported, not fatal.
@@ -318,29 +461,128 @@ function retireSideBundles(versionsRoot, baseName) {
   }
 }
 
+// Installing this release's runtime is written once, as steps that yield each disk operation
+// (packagedRuntimeSteps); runSteps performs them synchronously and runStepsAsync awaits them. The
+// launch uses the asynchronous run: the first start of a new version copies ~6,150 files and renames
+// the copy into place, which held the main process 7.6 s + 26.7 s on the busy hard disk before the
+// window opened (0.8.48, 2026-11-01). A later call during the session (the runtime folder was
+// removed) still runs synchronously, as its callers expect a value.
+const step = (op, ...args) => ({ op, args });
+
+async function retireDirectoryAsync(directory) {
+  const doomed = `${directory}.retired-${process.pid}-${Date.now()}`;
+  try { await fs.promises.rename(directory, doomed); } catch { return false; }
+  try { await fs.promises.rm(doomed, { recursive: true, force: true }); } catch {}
+  return true;
+}
+
+async function retireSideBundlesAsync(versionsRoot, baseName) {
+  let entries = [];
+  try { entries = await fs.promises.readdir(versionsRoot); } catch { return; }
+  for (const name of entries) {
+    if (name.startsWith(`${baseName}-`) && /^[0-9a-f]{12}$/.test(name.slice(baseName.length + 1))) {
+      await retireDirectoryAsync(path.join(versionsRoot, name));
+    }
+  }
+}
+
+async function installedPackagedRuntimeAsync({ app, coreHome }) {
+  if (!app.isPackaged || !coreHome) return null;
+  const identity = { version: app.getVersion(), platform: process.platform, arch: process.arch };
+  const destination = path.join(coreHome, "versions", `${identity.version}-${identity.platform}-${identity.arch}`);
+  try {
+    return await validateRuntimeBundleAsync(destination, identity, { stampDir: runtimeVerifiedDir(coreHome) });
+  } catch {
+    return null;
+  }
+}
+
+function copyRuntimeOptions() {
+  return {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+    verbatimSymlinks: true,
+    // Not a file an update set aside because something still ran it.
+    filter: (from) => !SET_ASIDE_FILE.test(path.basename(from)),
+  };
+}
+
+const SYNC_STEPS = {
+  manifest: (root, identity) => readRuntimeManifest(root, identity),
+  exists: (target) => fs.existsSync(target),
+  validate: (root, identity, verify) => validateRuntimeBundle(root, identity, verify),
+  inspect: (root, identity, verify) => inspectRuntimeBundle(root, identity, verify),
+  installed: (options) => installedPackagedRuntime(options),
+  retireSides: (versionsRoot, baseName) => retireSideBundles(versionsRoot, baseName),
+  retire: (directory) => retireDirectory(directory),
+  mkdir: (directory) => fs.mkdirSync(directory, { recursive: true, mode: 0o700 }),
+  copy: (from, to) => fs.cpSync(from, to, copyRuntimeOptions()),
+  rename: (from, to) => renameAtomicFile(from, to),
+  remove: (target) => fs.rmSync(target, { recursive: true, force: true }),
+  chmod: (target, mode) => fs.chmodSync(target, mode),
+};
+
+const ASYNC_STEPS = {
+  manifest: (root, identity) => readRuntimeManifestAsync(root, identity),
+  exists: (target) => fs.promises.access(target).then(() => true, () => false),
+  validate: (root, identity, verify) => validateRuntimeBundleAsync(root, identity, verify),
+  inspect: (root, identity, verify) => inspectRuntimeBundleAsync(root, identity, verify),
+  installed: (options) => installedPackagedRuntimeAsync(options),
+  retireSides: (versionsRoot, baseName) => retireSideBundlesAsync(versionsRoot, baseName),
+  retire: (directory) => retireDirectoryAsync(directory),
+  mkdir: (directory) => fs.promises.mkdir(directory, { recursive: true, mode: 0o700 }),
+  copy: (from, to) => fs.promises.cp(from, to, copyRuntimeOptions()),
+  rename: (from, to) => renameAtomicFileAsync(from, to),
+  remove: (target) => fs.promises.rm(target, { recursive: true, force: true }),
+  chmod: (target, mode) => fs.promises.chmod(target, mode),
+};
+
+function runSteps(steps) {
+  let next = steps.next();
+  while (!next.done) {
+    let value;
+    let failure = null;
+    try { value = SYNC_STEPS[next.value.op](...next.value.args); } catch (error) { failure = { error }; }
+    next = failure ? steps.throw(failure.error) : steps.next(value);
+  }
+  return next.value;
+}
+
+async function runStepsAsync(steps) {
+  let next = steps.next();
+  while (!next.done) {
+    let value;
+    let failure = null;
+    try { value = await ASYNC_STEPS[next.value.op](...next.value.args); } catch (error) { failure = { error }; }
+    next = failure ? steps.throw(failure.error) : steps.next(value);
+  }
+  return next.value;
+}
+
 // Moves a validated side bundle into the version directory. Returns null (keep using the side
 // bundle) when either directory is still in use; the previous release is restored in that case.
-function promoteSideBundle(side, destination, expectedIdentity, verify) {
+function* promoteSideBundleSteps(side, destination, expectedIdentity, verify) {
   const previous = `${destination}.previous-${process.pid}-${Date.now()}`;
-  const hadDestination = fs.existsSync(destination);
+  const hadDestination = yield step("exists", destination);
   if (hadDestination) {
-    try { renameAtomicFile(destination, previous); } catch (error) {
+    try { yield step("rename", destination, previous); } catch (error) {
       if (directoryInUse(error)) return null;
       throw error;
     }
   }
   try {
-    renameAtomicFile(side, destination);
+    yield step("rename", side, destination);
   } catch (error) {
-    if (hadDestination) renameAtomicFile(previous, destination);
+    if (hadDestination) yield step("rename", previous, destination);
     if (directoryInUse(error)) return null;
     throw error;
   }
-  if (hadDestination) retireDirectory(previous);
-  return validateRuntimeBundle(destination, expectedIdentity, verify);
+  if (hadDestination) yield step("retire", previous);
+  return yield step("validate", destination, expectedIdentity, verify);
 }
 
-function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
+function* packagedRuntimeSteps({ app, coreHome, resourcesPath }) {
   if (!app.isPackaged) return null;
   const identity = {
     version: app.getVersion(),
@@ -355,17 +597,17 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   // them at every launch, then the installed copy as well, was two walks of 6,149 files on the
   // main process before the app could start (blocked up to 1 s per stat on the busy hard disk,
   // 2026-10-31). The installed copy, which the app runs, is still checked whole every launch.
-  const sourceFailed = (error) => {
+  function* sourceFailed(error) {
     // The installed copy of this version, when whole, runs the app (installedPackagedRuntime).
-    const installed = installedPackagedRuntime({ app, coreHome });
+    const installed = yield step("installed", { app, coreHome });
     if (installed) return installed;
     throw error;
-  };
+  }
   let sourceManifest;
   try {
-    sourceManifest = readRuntimeManifest(source, identity);
+    sourceManifest = yield step("manifest", source, identity);
   } catch (error) {
-    return sourceFailed(error);
+    return yield* sourceFailed(error);
   }
   const expectedIdentity = { ...identity, bundleId: sourceManifest.bundleId };
   const versionsRoot = path.join(coreHome, "versions");
@@ -378,69 +620,62 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   // directory. That release then lives beside it, named by its bundle id, until a later launch
   // finds the version directory free and promotes it.
   const side = `${destination}-${String(sourceManifest.bundleId).slice(0, 12)}`;
-  if (fs.existsSync(destination)) {
+  if (yield step("exists", destination)) {
     try {
-      const root = validateRuntimeBundle(destination, expectedIdentity, verify);
-      retireSideBundles(versionsRoot, path.basename(destination));
+      const root = yield step("validate", destination, expectedIdentity, verify);
+      yield step("retireSides", versionsRoot, path.basename(destination));
       return root;
     } catch {
       // A terminated installer or external cleanup can leave a version directory present but
       // incomplete. Rebuild the launcher-owned bundle transactionally from the signed package.
     }
   }
-  if (fs.existsSync(side)) {
+  if (yield step("exists", side)) {
     let sideRoot = null;
-    try { sideRoot = validateRuntimeBundle(side, expectedIdentity, verify); } catch {}
-    if (sideRoot) return promoteSideBundle(side, destination, expectedIdentity, verify) ?? sideRoot;
-    retireDirectory(side);
+    try { sideRoot = yield step("validate", side, expectedIdentity, verify); } catch {}
+    if (sideRoot) return (yield* promoteSideBundleSteps(side, destination, expectedIdentity, verify)) ?? sideRoot;
+    yield step("retire", side);
   }
 
   // A copy is needed: the packaged files must be whole before they are copied.
   let sourceBundle;
   try {
-    sourceBundle = inspectRuntimeBundle(source, identity, verify);
+    sourceBundle = yield step("inspect", source, identity, verify);
   } catch (error) {
-    return sourceFailed(error);
+    return yield* sourceFailed(error);
   }
-  fs.mkdirSync(versionsRoot, { recursive: true, mode: 0o700 });
+  yield step("mkdir", versionsRoot);
   const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`;
   const previous = `${destination}.previous-${process.pid}-${Date.now()}`;
   let previousMoved = false;
   try {
     try {
-      fs.cpSync(source, temporary, {
-        recursive: true,
-        errorOnExist: true,
-        force: false,
-        verbatimSymlinks: true,
-        // Not a file an update set aside because something still ran it.
-        filter: (from) => !SET_ASIDE_FILE.test(path.basename(from)),
-      });
+      yield step("copy", source, temporary);
     } catch (error) {
       // A full disk stopped the app at every start ("ENOSPC ... copyfile"). The packaged copy was
       // just checked whole: this session runs from it, and a later start copies it again.
       if (error?.code === "ENOSPC") return sourceBundle.runtimeRoot;
       throw error;
     }
-    validateRuntimeBundle(temporary, expectedIdentity, verify);
-    if (fs.existsSync(destination)) {
+    yield step("validate", temporary, expectedIdentity, verify);
+    if (yield step("exists", destination)) {
       try {
-        renameAtomicFile(destination, previous);
+        yield step("rename", destination, previous);
       } catch (error) {
         if (!directoryInUse(error)) throw error;
-        renameAtomicFile(temporary, side);
-        return validateRuntimeBundle(side, expectedIdentity, verify);
+        yield step("rename", temporary, side);
+        return yield step("validate", side, expectedIdentity, verify);
       }
       previousMoved = true;
     }
     try {
-      renameAtomicFile(temporary, destination);
-      validateRuntimeBundle(destination, expectedIdentity, verify);
+      yield step("rename", temporary, destination);
+      yield step("validate", destination, expectedIdentity, verify);
     } catch (error) {
-      try { fs.rmSync(destination, { recursive: true, force: true }); } catch { /* restored over below */ }
+      try { yield step("remove", destination); } catch { /* restored over below */ }
       if (previousMoved) {
         try {
-          renameAtomicFile(previous, destination);
+          yield step("rename", previous, destination);
           previousMoved = false;
         } catch (restoreError) {
           throw new Error(
@@ -454,18 +689,27 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     if (previousMoved) {
       // The new runtime is in place and valid: removing the old one is cleanup, never a reason to
       // stop the app (seen: "EPERM, Permission denied ...versions\<ver>.previous-..." at startup).
-      try { fs.rmSync(previous, { recursive: true, force: true }); } catch { /* left for a later start */ }
+      try { yield step("remove", previous); } catch { /* left for a later start */ }
       previousMoved = false;
     }
   } finally {
-    try { fs.rmSync(temporary, { recursive: true, force: true }); } catch { /* left for a later start */ }
-    if (previousMoved && fs.existsSync(previous) && !fs.existsSync(destination)) {
-      renameAtomicFile(previous, destination);
+    try { yield step("remove", temporary); } catch { /* left for a later start */ }
+    if (previousMoved && (yield step("exists", previous)) && !(yield step("exists", destination))) {
+      yield step("rename", previous, destination);
       previousMoved = false;
     }
   }
-  try { fs.chmodSync(destination, 0o700); } catch {}
-  return validateRuntimeBundle(destination, expectedIdentity, verify);
+  try { yield step("chmod", destination, 0o700); } catch {}
+  return yield step("validate", destination, expectedIdentity, verify);
+}
+
+function ensurePackagedRuntime(options) {
+  return runSteps(packagedRuntimeSteps(options));
+}
+
+/** ensurePackagedRuntime without holding the main thread; used when the app starts. */
+function ensurePackagedRuntimeAsync(options) {
+  return runStepsAsync(packagedRuntimeSteps(options));
 }
 
 const STALE_RUNTIME_TEMP_MS = 60 * 60_000;
@@ -520,6 +764,8 @@ module.exports = {
   ensurePackagedRuntime,
   pruneOldRuntimes,
   installedPackagedRuntime,
+  ensurePackagedRuntimeAsync,
   validateRuntimeBundle,
+  validateRuntimeBundleAsync,
   waitForPackagedRuntimeSource,
 };

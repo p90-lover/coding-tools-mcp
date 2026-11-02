@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const { execFile, spawn } = require("node:child_process");
+const { execFile } = require("node:child_process");
 const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway.cjs");
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
 const { MAX_RESPONSE_BYTES } = require("./ipc-schema.cjs");
@@ -17,7 +17,7 @@ const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
-const { warmProgram } = require("./off-thread-run.cjs");
+const { spawnOffThread } = require("./off-thread-run.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -1296,6 +1296,32 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       rememberLaunchWindow(created, contextWindow);
       return created;
     },
+    async recover(id, expectedTurn) {
+      const key = sessionId(id), owner = child, port = daemonPort;
+      const unavailable = message => ({ recovery: "unavailable", status: "unknown", message });
+      const current = () => state === "ready" && child === owner && daemonPort === port;
+      // Even a GET through internalApi starts AO when it is down. Starting it may restore queued
+      // work, so this inspection uses only the already-running daemon and never calls start().
+      if (!current() || !owner || owner.exitCode !== null || owner.signalCode !== null || !expectedTurn) {
+        return unavailable("The original accepted turn cannot be inspected safely. Its session was kept; no input was sent.");
+      }
+      const record = await requestApi("GET", `/api/v1/sessions/${key}`, undefined, { timeoutMs: 15000 });
+      if (!current() || record?.ok !== true || record.data?.session?.id !== key || record.data.session.mode !== "chat"
+        || record.data.session.isTerminated || ["provisioning", "failed"].includes(record.data.session.provisionState)) {
+        return unavailable("The original agent is unavailable or still starting. No input was sent and recovery did not retry its queue.");
+      }
+      const read = await requestApi("GET", `/api/v1/sessions/${key}/conversation?limit=1&includePending=1&trimLargeFields=1`, undefined, { timeoutMs: 15000 });
+      const conversation = read?.data, turn = conversation?.turns?.find(entry => entry.id === expectedTurn);
+      if (!current() || read?.ok !== true || conversation?.sessionId !== key || !turn || !turn.providerTurnId || turn.rolledBack) {
+        return unavailable("The original accepted turn could not be confirmed. No message was sent; its session was kept.");
+      }
+      if (TERMINAL_TURN_STATES.has(turn.state)) return { recovery: "observed", status: turn.state,
+        message: `The original turn is ${turn.state}. Its history was kept; no message was sent or inference restarted.` };
+      if (turn.state !== "running" || conversation.controller === "stopped") {
+        return unavailable("The original turn has no confirmed running controller. Automatic reattachment cannot safely exclude queued work, so no input was sent.");
+      }
+      return { recovery: "observed", status: "working", message: "The existing accepted turn is still working. No message was sent or work replayed." };
+    },
     async observe(id, expectedTurn) {
       const shared = sharedObserveRead(id);
       const read = shared.read;
@@ -1699,7 +1725,33 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return projectFolder ? { root, projectFolder } : { root };
     },
     /** Whether any live session's agent is mid-turn: restarting the app now would cut it off. */
-    async anySessionWorking() {
+    async anySessionWorking({ start = true } = {}) {
+      if (start === false) {
+        const generation = lifecycleGeneration, owner = child, port = daemonPort;
+        const sameOwner = () => state === "ready" && !stopping && generation === lifecycleGeneration
+          && child === owner && owner?.exitCode === null && owner?.signalCode === null
+          && Number.isInteger(owner?.pid) && owner.pid > 0 && daemonPort === port
+          && Number.isInteger(port) && port > 0 && port <= 65535;
+        if (!sameOwner()) throw new Error("AO session activity is unavailable without starting its runtime");
+        const result = await requestApi("GET", "/api/v1/sessions");
+        if (!sameOwner() || result?.ok !== true) throw new Error("AO session activity could not be confirmed");
+        const list = result.data;
+        const fields = ["sessions", "items"].filter(key => list && Object.hasOwn(list, key));
+        if (!list || typeof list !== "object" || Array.isArray(list) || !fields.length
+          || fields.some(key => !Array.isArray(list[key]))) throw new Error("AO returned an invalid session list");
+        const sessions = fields.flatMap(key => list[key]);
+        const statuses = new Set(["working", "pr_open", "draft", "ci_failed", "review_pending", "changes_requested",
+          "approved", "mergeable", "merged", "needs_input", "exited", "idle", "terminated", "no_signal"]);
+        for (const session of sessions) {
+          if (!session || typeof session !== "object" || Array.isArray(session)
+            || typeof session.isTerminated !== "boolean" || !statuses.has(session.status)) {
+            throw new Error("AO returned an invalid session activity record");
+          }
+          sessionId(session.id);
+          if (!session.isTerminated && session.status === "no_signal") throw new Error("AO session activity is not confirmed");
+        }
+        return sessions.some(session => session.status === "working" && !session.isTerminated);
+      }
       const list = await internalApi("GET", "/api/v1/sessions");
       const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
       return sessions.some(session => session?.status === "working" && !session.isTerminated);
@@ -2003,15 +2055,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const profiler = await profilerAddress(dataRoot);
         checkStartup();
         if (profiler) logger.info?.("ao.profiler_enabled", { address: profiler });
-        // spawn() holds this thread, every window's, until Windows has loaded the program and the
-        // antivirus has scanned it: 4.8 s once after a reboot (launcher.main_blocked, 2026-10-30).
-        // The daemon's pipes and exit must live here, so its program is run once from a worker
-        // first (--help exits at once) and the start below finds it loaded and scanned.
-        await warmProgram(executable, ["--help"]);
-        checkStartup();
+        // spawn() holds this thread, every window's, until Windows has created the process and the
+        // antivirus has scanned it: 4.8 s after a reboot (2026-10-30) and, even after a warm-up run,
+        // 15.4 s on the busy hard disk (0.8.40, 2026-11-01). The daemon starts in a worker, and its
+        // output and exit reach this thread as before. A stop during the start waits for it to
+        // settle, and the next checkStartup() hands this daemon to cleanup().
           // The AO CLI build answers the daemon command and the internal commands the daemon
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
-          child = spawn(executable, ["daemon"], {
+          child = await spawnOffThread(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
           env: { ...daemonEnvironment, ...(profiler ? { AO_PPROF_ADDR: profiler } : {}), AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
             // AO bounds every request at 60 s, and starting a chat agent (worktree, agent process,

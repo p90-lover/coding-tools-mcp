@@ -181,6 +181,76 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
   assert.equal(creates, 1);
 });
 
+test("account setup keeps its captured account and tunnel across awaited workspace setup", async t => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const start = source.indexOf('  handle("launcher:mcp-create-connector",');
+  const end = source.indexOf('\n  handle("launcher:doctor",', start);
+  for (const scenario of [
+    { name: "no assigned tunnel cannot borrow the global primary", missing: true },
+    { name: "a global switch during readiness aborts", readySwitch: true },
+    { name: "a global switch during cookie inspection aborts", cookieSwitch: true },
+    { name: "a target partition remap during routing aborts", remap: true },
+    { name: "a reconnect cannot silently replace the tunnel", retarget: true },
+    { name: "another browser operation keeps setup out", busy: true },
+    { name: "an active browser turn keeps setup out", active: true },
+    { name: "a switch during setup cannot acquire a binding", setupSwitch: true },
+    { name: "an unconfirmed connection cannot acquire a binding", unconfirmed: true },
+    { name: "a switch during binding persistence cannot mark success", saveSwitch: true },
+    { name: "a new turn during verified binding persistence still completes", saveActive: true, completes: true },
+    { name: "a new browser inspection during verified binding persistence still completes", saveBusy: true, completes: true },
+    { name: "a runtime operation during binding persistence cannot mark success", saveRuntime: true },
+    { name: "a tunnel replacement during binding persistence cannot mark success", saveRetarget: true },
+    { name: "an account remap during binding persistence cannot mark success", saveRemap: true },
+  ]) await t.test(scenario.name, async () => {
+    let handler, partition = "persist:account-2", browserOperation = scenario.busy ? "MCP tunnel settings" : null, runtimeOperation = null;
+    const calls = { create: 0, save: 0, bound: 0 };
+    const host = { partition: "persist:global", currentOperation: () => browserOperation,
+      activeTraceId: scenario.active ? "fixture-turn" : null,
+      ready: async () => { if (scenario.readySwitch) host.partition = "persist:other"; } };
+    const tunnel = { id: "extra-2", accountId: "account-2", tunnelId: "tunnel_original", state: scenario.retarget ? "stopped" : "ready" };
+    const context = {
+      Error, handle: (_channel, callback) => { handler = callback; }, assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+      quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
+      browserAccounts: { has: id => id === "account-2", partitionOf: () => partition,
+        recordConnector: (_id, value) => { if (value.bound) calls.bound++; return true; } },
+      browserHost: host, runtimeHost: { currentOperation: () => runtimeOperation },
+      session: { fromPartition: () => ({ cookies: { get: async () => { if (scenario.cookieSwitch) host.partition = "persist:other"; return []; } } }) },
+      signedInFromCookies: () => true,
+      routeIdleAccountPartition: async () => { if (scenario.remap) partition = "persist:remapped"; },
+      runtimeSupervisor: { extraTunnels: { status: () => scenario.missing ? [] : [tunnel],
+        reconnect: async () => { tunnel.state = "ready"; tunnel.tunnelId = "tunnel_replaced"; },
+        setConnector: async () => {
+          calls.save++;
+          assert.equal(browserOperation, null, "workspace setup releases its manual operation before saving");
+          await Promise.resolve(); // The disk write yields after browser admission has reopened.
+          if (scenario.saveActive) host.activeTraceId = "new-legitimate-turn";
+          if (scenario.saveBusy) browserOperation = "session inspection";
+          if (scenario.saveSwitch) host.partition = "persist:other";
+          if (scenario.saveRuntime) runtimeOperation = "runtime setup";
+          if (scenario.saveRetarget) tunnel.tunnelId = "tunnel_replaced";
+          if (scenario.saveRemap) partition = "persist:remapped";
+        } } },
+      createWorkspaceConnector: async options => {
+        calls.create++; browserOperation = "MCP connector creation";
+        try {
+          options.assertCurrent();
+          if (scenario.setupSwitch) host.partition = "persist:other";
+          return { created: false, connected: !scenario.unconfirmed, href: "/plugins/exact", binding: { tunnelId: "tunnel_original" } };
+        } finally { browserOperation = null; }
+      },
+      app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
+      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation() {},
+    };
+    vm.runInNewContext(source.slice(start, end), context);
+    if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
+    else await assert.rejects(handler({}, "account-2"));
+    const saving = scenario.saveSwitch || scenario.saveActive || scenario.saveBusy || scenario.saveRuntime || scenario.saveRetarget || scenario.saveRemap;
+    assert.equal(calls.create, scenario.setupSwitch || scenario.unconfirmed || saving ? 1 : 0);
+    assert.equal(calls.save, saving ? 1 : 0);
+    assert.equal(calls.bound, scenario.completes ? 1 : 0);
+  });
+});
+
 test("extra tunnel Platform settings open only the registered account partition without changing configuration", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const start = source.indexOf('  handle("launcher:mcp-tunnel-settings",');

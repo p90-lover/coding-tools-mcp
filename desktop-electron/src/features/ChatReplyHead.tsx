@@ -3,11 +3,12 @@ import { ModelLogo } from "./HarnessLogo";
 import { dshDuration, type ChatLiveItem, type ChatStep, type ChatTurn } from "./ao-chat";
 
 /**
- * The head of a reply: what a turn came to, read before any of its work. Who answered (a single
- * chat's model, or the team and every card on it), how it stands and for how long, why it failed,
- * and which files it changed. Each of these sat somewhere else, in grey 12px text: the model's name
- * above the answer, the time at the foot, the error between tool rows, the files only as one
- * "Edited x.js +1 −1" row per edit, and a team's cards only once its work was opened.
+ * A reply's summary: what a turn came to. Who answered (a single chat's model, or the team and
+ * every card on it), how it stands and for how long, and which files it changed. Each of these sat
+ * somewhere else, in grey 12px text: the model's name above the answer, the time at the foot, the
+ * files only as one "Edited x.js +1 −1" row per edit, and a team's cards only once its work was
+ * opened. It closes the reply, under the answer, where the reading ends (Codex's changed-files
+ * card sits there too); only a failure (ReplyError) still leads the reply.
  */
 
 export type ReplyTone = "working" | "stalled" | "waiting" | "queued" | "done" | "failed" | "stopped";
@@ -97,14 +98,20 @@ export type ReplyHeadProps = {
   verdict?: string;
   /** The answering card's attempt, from 2 when it was retried ("Attempt 3"). */
   attempt?: number;
-  /** The failing card's error, unless the chat's failed-step card below already shows it. */
-  error?: { step: string; message: string };
   /** A team's cards, in pipeline order; empty for a single chat. */
   members: ReplyMember[];
   changes: ChangedFile[];
 };
 
-export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, verdict, attempt = 1, error, members, changes }: ReplyHeadProps) {
+/** Why a turn failed, at the top of its reply: the one part of the summary read before the work. */
+export function ReplyError({ team, error }: { team: boolean; error: { step: string; message: string } }) {
+  return <p className="cx-reply-error" role="alert">
+    <span className="cx-reply-error-title">{team ? `${error.step} failed` : "Failed"}</span>
+    <span className="cx-reply-error-text">{error.message}</span>
+  </p>;
+}
+
+export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, verdict, attempt = 1, members, changes }: ReplyHeadProps) {
   const live = tone === "working" || tone === "stalled" || tone === "queued";
   const now = useNow(live);
   const end = live ? now : endedAtMs;
@@ -113,7 +120,22 @@ export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, ver
   const removed = changes.reduce((sum, file) => sum + file.deletions, 0);
   const shown = changes.slice(0, CHANGES_SHOWN);
   const rest = changes.slice(CHANGES_SHOWN);
-  return <header className="cx-reply-head">
+  // Read top to bottom after the answer: the files it changed, a team's cards, then who answered and how it ended.
+  return <footer className="cx-reply-head">
+    {changes.length ? <ul className="cx-reply-files" aria-label="Changed files">
+      {shown.map((file) => <li key={file.path} className="cx-reply-file" title={file.path}>
+        <span className="cx-reply-file-name">{baseName(file.path)}</span><Diff additions={file.additions} deletions={file.deletions} />
+      </li>)}
+      {rest.length ? <li className="cx-reply-file is-more" title={rest.map((file) => file.path).join("\n")}>{rest.length} more</li> : null}
+    </ul> : null}
+    {members.length ? <ul className="cx-reply-roster" aria-label="Team">
+      {members.map((member) => <li key={member.key} className={`cx-reply-member is-${member.tone}`} title={member.model || undefined}>
+        <span className="cx-reply-dot" aria-hidden="true" />
+        <span className="cx-reply-member-name">{member.name}</span>
+        {member.modelName && member.modelName !== member.name ? <span className="cx-reply-member-model">{member.modelName}</span> : null}
+        <span className="cx-reply-member-state">{member.state}</span>
+      </li>)}
+    </ul> : null}
     <div className="cx-reply-top">
       <span className="cx-reply-who" title={team ? `${members.length} ${members.length === 1 ? "card" : "cards"}` : name}>
         {!team && model ? <ModelLogo model={model} label={name} size={15} /> : null}
@@ -129,23 +151,5 @@ export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, ver
         {changes.length === 1 ? "1 file" : `${changes.length} files`} <Diff additions={added} deletions={removed} />
       </span> : null}
     </div>
-    {error ? <p className="cx-reply-error" role="alert">
-      <span className="cx-reply-error-title">{team ? `${error.step} failed` : "Failed"}</span>
-      <span className="cx-reply-error-text">{error.message}</span>
-    </p> : null}
-    {members.length ? <ul className="cx-reply-roster" aria-label="Team">
-      {members.map((member) => <li key={member.key} className={`cx-reply-member is-${member.tone}`} title={member.model || undefined}>
-        <span className="cx-reply-dot" aria-hidden="true" />
-        <span className="cx-reply-member-name">{member.name}</span>
-        {member.modelName && member.modelName !== member.name ? <span className="cx-reply-member-model">{member.modelName}</span> : null}
-        <span className="cx-reply-member-state">{member.state}</span>
-      </li>)}
-    </ul> : null}
-    {changes.length ? <ul className="cx-reply-files" aria-label="Changed files">
-      {shown.map((file) => <li key={file.path} className="cx-reply-file" title={file.path}>
-        <span className="cx-reply-file-name">{baseName(file.path)}</span><Diff additions={file.additions} deletions={file.deletions} />
-      </li>)}
-      {rest.length ? <li className="cx-reply-file is-more" title={rest.map((file) => file.path).join("\n")}>{rest.length} more</li> : null}
-    </ul> : null}
-  </header>;
+  </footer>;
 }

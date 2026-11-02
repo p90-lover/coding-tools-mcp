@@ -45,6 +45,7 @@ const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
+const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
@@ -57,7 +58,12 @@ const {
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
-const { ensurePackagedRuntime, pruneOldRuntimes, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
+const {
+  ensurePackagedRuntime,
+  ensurePackagedRuntimeAsync,
+  pruneOldRuntimes,
+  waitForPackagedRuntimeSource,
+} = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
@@ -108,7 +114,7 @@ const {
   scheduleFullIpcAfterPaint,
 } = require("./launcher-ready-path.cjs");
 const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
-const { createMainStallMonitor } = require("./main-stall-monitor.cjs");
+const { createMainStallMonitor, createMainStallProbe } = require("./main-stall-monitor.cjs");
 const { createDiskHealthMonitor } = require("./disk-health.cjs");
 const { createMemoryWatch } = require("./memory-watch.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
@@ -590,7 +596,12 @@ async function refreshPart(part, logger) {
   };
   const actions = {
     bridge: () => runtimeSupervisor.restartDaemonOnly(),
-    mcp: () => runtimeSupervisor.restartTunnelOnly(),
+    mcp: () => {
+      if (quitting || shutdownInProgress) throw new Error("Launcher shutdown is already in progress");
+      const operation = runtimeHost?.currentOperation();
+      if (operation) throw new Error(`Another launcher operation is active: ${operation}`);
+      return runtimeSupervisor.restartTunnelOnly();
+    },
     "agent-orchestrator": async () => { await agentOrchestratorUpstream?.stop(); return agentOrchestratorUpstream?.start(); },
     cpa: () => externalServicesController.restart("cpa"),
     headless: async () => { await headlessHost?.shutdown("part-refresh"); return headlessHost?.ensureStarted(); },
@@ -1110,7 +1121,15 @@ async function readChatGptAccountEmail(partition) {
 let bridgePlanKey = null;
 function browserAccountPlanKey(accountId) {
   const plan = browserAccounts.status().accounts.find((entry) => entry.id === accountId)?.plan;
-  return plan ? `${plan.solAvailable}:${plan.proAvailable}` : null;
+  return plan && typeof plan.solAvailable === "boolean" && typeof plan.proAvailable === "boolean"
+    ? `${plan.solAvailable}:${plan.proAvailable}` : null;
+}
+
+function recordBrowserWorkspaceContext(partition, context) {
+  const accountId = browserAccounts.accountIdOfPartition(partition);
+  if (!accountId) throw new Error("The browser account changed during MCP setup.");
+  const renamed = context.userEmail ? browserAccounts.setEmail(accountId, context.userEmail) : false;
+  if (browserAccounts.recordPlan(accountId, context) || renamed) publishBrowserAccounts();
 }
 
 async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore }) {
@@ -2142,11 +2161,22 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:complete-onboarding", (_event, language, rawInteractionMode) => {
     const current = stateStore.read();
-    if (current.autoStart) setAutostart(app, true);
+    let autoStart = current.autoStart;
+    if (autoStart) {
+      try { setAutostart(app, true); }
+      catch (error) {
+        try { autoStart = getAutostart(app).enabled === true; }
+        catch { autoStart = false; }
+        logger.warn("launcher.autostart_unavailable", {
+          message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+        });
+      }
+    }
     const next = stateStore.update({
       language: validateLanguage(language),
       browserInteractionMode: validateBrowserInteractionMode(rawInteractionMode),
       onboardingComplete: true,
+      autoStart,
     });
     updateTrayMenu(next.language);
     logger.info("launcher.onboarding_completed", {
@@ -2509,9 +2539,25 @@ function registerIpc({ logger, stateStore }) {
     publishBrowserAccounts();
     return browserAccountsStatus();
   });
-  handle("launcher:browser-account-inspect", async (event) => {
+  handle("launcher:browser-account-inspect", async (event, accountId = browserAccounts.activeId()) => {
     assertFocusedMainWindow(event, true);
-    await browserHost.inspectSession(true);
+    const partition = browserAccounts.partitionOf(accountId);
+    const assertCurrent = () => {
+      if ((browserHost?.interactionModeOverride ?? stateStore.read().browserInteractionMode) === "manual") {
+        throw Object.assign(new Error("ChatGPT account inspection is disabled in Zero Risk mode"), { code: "manual_browser_inspection_disabled" });
+      }
+      if (browserAccounts.partitionOf(accountId) !== partition || quitting || shutdownInProgress) {
+        throw new Error("The browser account changed during MCP setup.");
+      }
+    };
+    assertCurrent();
+    if (!signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }))) {
+      throw new Error("Sign in to this account before checking its plan.");
+    }
+    await routeIdleAccountPartition(partition, logger);
+    const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent, metadataOnly: true });
+    assertCurrent();
+    recordBrowserWorkspaceContext(partition, context);
     return browserAccountsStatus();
   });
   // Codex threads bound to ChatGPT accounts. Every change needs the focused main window.
@@ -3005,50 +3051,90 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     if (accountId === undefined) return mcpConnectorCommand.request("create", "settings");
     if (IS_DEV_PROFILE) throw new Error("Automatic connector creation is available in the production profile only");
-    await runtimeStartupInFlight;
     const partition = browserAccounts.partitionOf(accountId);
-    const operationBrowser = browserHost;
+    const operationBrowser = browserHost, operationPartition = operationBrowser?.partition;
+    const extraTunnels = runtimeSupervisor?.extraTunnels;
+    const tunnel = extraTunnels?.status().find(entry => entry.accountId === accountId);
+    const id = tunnel?.id, tunnelId = tunnel?.tunnelId;
+    const missingTunnel = new Error("Assign an existing account-owned MCP tunnel in More tunnels, then retry this account.");
+    let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
-      browserAccounts.partitionOf(accountId);
       if (runtimeHost.currentOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
-      if (!operationBrowser || operationBrowser !== browserHost || browserAccountsStatus().switching || quitting || shutdownInProgress) {
+      if (!operationBrowser || operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
+        || browserAccounts.partitionOf(accountId) !== partition || extraTunnels !== runtimeSupervisor?.extraTunnels
+        || browserAccountsStatus().switching || quitting || shutdownInProgress) {
         throw new Error("Browser account switching or shutdown is in progress");
+      }
+      const operation = operationBrowser.currentOperation();
+      if (!connectorConfirmed && (operationBrowser.activeTraceId || (operation && (!creating || operation !== "MCP connector creation")))) {
+        throw new Error("MCP connector setup is busy");
+      }
+      if (!id) throw missingTunnel;
+      if (!extraTunnels.status().some(current => current.id === id && current.accountId === accountId
+        && current.tunnelId === tunnelId && (!requireReady || current.state === "ready"))) {
+        throw new Error("The account's MCP tunnel changed or is not ready.");
       }
     };
     publishOperation({ name: "mcp-connector-create", status: "running", message: "Connecting this account's MCP connector" });
     try {
       assertCurrent();
-      if (!signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }))) {
+      await runtimeStartupInFlight;
+      assertCurrent();
+      await operationBrowser.ready();
+      assertCurrent();
+      const signedIn = signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
+      assertCurrent();
+      if (!signedIn) {
         throw new Error("Sign in to this account in the Browser tab before connecting MCP.");
       }
       await routeIdleAccountPartition(partition, logger);
-      const extraTunnels = runtimeSupervisor?.extraTunnels;
-      let tunnel = extraTunnels?.status().find(entry => entry.accountId === accountId);
-      if (tunnel && tunnel.state !== "ready") {
-        await extraTunnels.reconnect(tunnel.id);
-        tunnel = extraTunnels.status().find(entry => entry.id === tunnel.id && entry.accountId === accountId);
-        if (tunnel?.state !== "ready") throw new Error("This account's MCP tunnel is not ready. Reconnect it and retry.");
-      }
       assertCurrent();
-      const result = await createConfiguredConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
-        target: { partition, requireTunnelMatch: true,
-          ...(tunnel ? { tunnelId: tunnel.tunnelId, connectorBindings: tunnel.connectorBindings } : {}) },
-      });
-      assertCurrent();
-      if (tunnel) {
-        const current = extraTunnels.status().find(entry => entry.id === tunnel.id && entry.accountId === accountId);
-        if (current?.state !== "ready" || current.tunnelId !== tunnel.tunnelId) throw new Error("This account's MCP tunnel changed during setup. Retry the connection.");
-        await extraTunnels.setConnector(tunnel.id, result.href, result.binding);
+      if (tunnel.state !== "ready") {
+        await extraTunnels.reconnect(id);
         assertCurrent();
       }
-      const recorded = await browserAccounts.recordConnector(accountId, { bound: result.connected === true });
+      requireReady = true;
+      assertCurrent();
+      let result;
+      creating = true;
+      try {
+        result = await createWorkspaceConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
+        onContext: recordBrowserWorkspaceContext,
+        accountCandidates: async () => {
+          const candidates = [];
+          for (const entry of browserAccounts.status().accounts) {
+            assertCurrent();
+            const candidatePartition = browserAccounts.partitionOf(entry.id);
+            const signedIn = signedInFromCookies(await session.fromPartition(candidatePartition).cookies.get({ url: "https://chatgpt.com/" }));
+            assertCurrent();
+            if (!signedIn || !browserAccounts.has(entry.id) || browserAccounts.partitionOf(entry.id) !== candidatePartition) continue;
+            candidates.push({ id: entry.id, partition: candidatePartition,
+              prepare: () => routeIdleAccountPartition(candidatePartition, logger),
+              assertCurrent: () => { assertCurrent(); if (browserAccounts.partitionOf(entry.id) !== candidatePartition) throw new Error("The browser account changed during MCP setup."); },
+            });
+          }
+          return candidates;
+        },
+        target: { partition, requireTunnelMatch: true, tunnelId, connectorBindings: tunnel.connectorBindings },
+        });
+      } finally { creating = false; }
+      if (result.connected !== true || result.binding?.tunnelId !== tunnelId) throw new Error("ChatGPT did not confirm the exact connector state.");
+      // The helper has released browser admission; new work cannot undo its verified connection.
+      connectorConfirmed = true;
+      assertCurrent();
+      await extraTunnels.setConnector(id, result.href, result.binding);
+      assertCurrent();
+      const recorded = await browserAccounts.recordConnector(accountId, { bound: true });
       assertCurrent();
       if (recorded) publishBrowserAccounts();
       publishOperation({ name: "mcp-connector-create", status: "completed", message: "This account's MCP connector is connected" });
       return result;
     } catch (error) {
-      const failure = mcpConnectorCommandFailure(error);
-      try { if (await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts(); } catch {}
+      const failure = error === missingTunnel ? { code: "configuration_required", message: missingTunnel.message } : mcpConnectorCommandFailure(error);
+      try {
+        if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
+          && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
+      } catch {}
       publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
@@ -3712,6 +3798,19 @@ async function start() {
     }
     return installedRuntimeRoot;
   };
+  // The launch checks, and on a new version's first start copies, the runtime without holding the
+  // main thread (ensurePackagedRuntimeAsync). If that fails, the synchronous call below runs the
+  // same steps again and reports the failure as before.
+  const launchRuntimeRoot = await ensurePackagedRuntimeAsync({
+    app,
+    coreHome: CORE_HOME,
+    resourcesPath: process.resourcesPath,
+  }).catch(() => null);
+  if (launchRuntimeRoot) {
+    installedRuntimeRoot = launchRuntimeRoot;
+    runtimeRootResolved = true;
+    runtimeRootCheck.at = Date.now();
+  }
   installedRuntimeRoot = runtimeRootProvider();
   // Older versions' runtime copies (165 MB each) are removed in the background (pruneOldRuntimes).
   void pruneOldRuntimes({ app, coreHome: CORE_HOME }).catch(() => undefined);
@@ -3786,9 +3885,16 @@ async function start() {
   // copies the worker held stay; a version still not healthy after Settings' health window goes back
   // to the previous one. It used to be kept here at whenReady, before any of that was known.
   // Work that an update, or an update's rollback, must not end: a browser, bridge or AO turn.
-  const appBusy = async () => Boolean(browserHost?.currentOperation() || runtimeHost?.currentOperation()
-    || runtimeStartupInFlight || codexBridgeConnectInFlight
-    || await agentOrchestratorUpstream?.harness.anySessionWorking());
+  const localAppBusy = () => Boolean(quitting || shutdownInProgress || exitCommitted
+    || browserHost?.currentOperation() || runtimeHost?.currentOperation()
+    || runtimeStartupInFlight || codexBridgeConnectInFlight);
+  const appBusy = async ({ start = true } = {}) => {
+    if (localAppBusy()) return true;
+    const working = await (start
+      ? agentOrchestratorUpstream?.harness.anySessionWorking()
+      : agentOrchestratorUpstream.harness.anySessionWorking({ start: false }));
+    return Boolean(working || localAppBusy());
+  };
   if (app.isPackaged && pendingAppliedUpdate(path.dirname(process.execPath), app.getVersion())) {
     const installRoot = path.dirname(process.execPath);
     const commit = () => commitAppliedUpdate(installRoot, app.getVersion())
@@ -3813,10 +3919,18 @@ async function start() {
       isBusy: () => appBusy(),
       commit,
       rollBack: async (reason) => {
+        if (localAppBusy()) return false;
         // The recovery worker waits for this process to exit, puts the previous version back and starts it.
         if (!handOffUpdateRecovery(installRoot, { currentVersion: app.getVersion(), startFailed: reason, logger })) return;
         const quit = await requestQuit().catch((error) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
-        if (quit?.ok === false) app.exit(1);
+        if (quit?.ok === false) {
+          // Handoff already armed a worker: never spawn another or restart AO to inspect a refusal.
+          if (await appBusy({ start: false }).catch(() => true)) {
+            logger.warn("launcher.update_rollback_deferred", { message: String(quit.message || "Work is still active or could not be checked").slice(0, 500) });
+            return;
+          }
+          app.exit(1);
+        }
       },
       logger,
     }).start();
@@ -5058,7 +5172,10 @@ async function start() {
   startBridgeWatchdog(logger, stateStore);
   // A blocked main loop freezes every window; this is the only thing that can tell afterwards.
   blockingCalls.attach((entry) => logger.warn("launcher.main_blocked", entry));
-  createMainStallMonitor({ logger, blockingCalls }).start();
+  // A stall no wrapped call explains gets the code that was waiting named by a paused stack.
+  const stallProbe = createMainStallProbe({ logger });
+  stallProbe.start();
+  createMainStallMonitor({ logger, blockingCalls, probe: stallProbe }).start();
   const notifyPerson = ({ title, body }) => { if (Notification.isSupported()) new Notification({ title, body }).show(); };
   // A failing or full disk tears files and freezes the app with nothing else saying why (G:/H:, 2026-10-30).
   const diskHealth = createDiskHealthMonitor({ paths: [app.getPath("userData"), path.dirname(process.execPath)], logger, notify: notifyPerson });

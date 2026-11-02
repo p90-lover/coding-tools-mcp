@@ -13,6 +13,7 @@ const { BrowserHost } = require("../electron/browser-host.cjs");
 
 const THREAD = "123e4567-e89b-12d3-a456-426614174000";
 const OTHER_THREAD = "123e4567-e89b-12d3-a456-426614174001";
+const THIRD_THREAD = "123e4567-e89b-12d3-a456-426614174002";
 const CHAT_ID = "6adf644e-9994-83ea-9463-1f856c9d2595";
 const CHAT = `https://chatgpt.com/c/${CHAT_ID}`;
 const KEY = "a".repeat(64);
@@ -58,6 +59,71 @@ test("an unreadable binding file is kept for recovery and never overwritten", (t
   store.bind(THREAD, "main");
   assert.equal(fs.readFileSync(filePath, "utf8"), "{ broken");
   assert.deepEqual(warnings, ["browser.thread_accounts_unavailable"]);
+});
+
+for (const mutation of [
+  { name: "new binding", seed: [[OTHER_THREAD, SECOND]], apply: store => store.bind(THREAD, "main") },
+  { name: "account move", seed: [[THREAD, "main"]], apply: store => store.bind(THREAD, SECOND) },
+  { name: "timestamp touch", seed: [[THREAD, "main"]], apply: store => store.bind(THREAD, "main") },
+  { name: "unbind", seed: [[THREAD, "main"]], apply: store => store.unbind(THREAD) },
+  { name: "account removal", seed: [[THREAD, "main"], [OTHER_THREAD, "main"], [THIRD_THREAD, SECOND]], apply: store => store.removeAccount("main") },
+]) {
+  for (const stage of ["writeFileSync", "renameSync"]) {
+    test(`a failed ${mutation.name} ${stage} preserves live and persisted bindings`, (t) => {
+      const filePath = path.join(fixtureRoot(t), "codex-thread-accounts.json");
+      let clock = 1_000;
+      const store = createThreadAccounts({ filePath, now: () => clock });
+      for (const [thread, account] of mutation.seed) store.bind(thread, account);
+      const before = store.list();
+      const bytes = fs.readFileSync(filePath);
+      const original = fs[stage];
+      t.after(() => { fs[stage] = original; });
+      const failure = Object.assign(new Error("injected registry save failure"), { code: "EIO" });
+      fs[stage] = function (target, ...args) {
+        const destination = stage === "renameSync" ? args[0] : target;
+        if (destination === filePath || String(destination).startsWith(`${filePath}.tmp-`)) throw failure;
+        return original.call(fs, target, ...args);
+      };
+      clock = 2_000;
+      assert.throws(() => mutation.apply(store), error => error === failure);
+      fs[stage] = original;
+      assert.deepEqual(store.list(), before, "a rejected mutation is not published in memory");
+      assert.deepEqual(fs.readFileSync(filePath), bytes, "the previous registry stays recoverable");
+      assert.deepEqual(createThreadAccounts({ filePath }).list(), before);
+
+      mutation.apply(store);
+      assert.deepEqual(createThreadAccounts({ filePath }).list(), store.list(), "retry persists the complete change");
+    });
+  }
+}
+
+test("binding changes become visible only after replacement and exact no-op touches skip writes", (t) => {
+  const filePath = path.join(fixtureRoot(t), "codex-thread-accounts.json");
+  let clock = 1_000;
+  const store = createThreadAccounts({ filePath, now: () => clock });
+  const original = fs.renameSync;
+  const observed = [];
+  let renames = 0;
+  fs.renameSync = function (from, to) {
+    if (to === filePath) {
+      renames += 1;
+      observed.push(store.accountFor(THREAD));
+    }
+    return original.call(fs, from, to);
+  };
+  t.after(() => { fs.renameSync = original; });
+  assert.equal(store.bind(THREAD, "main"), "main");
+  assert.deepEqual(observed, [null], "the first binding waits for disk replacement");
+  for (let repeat = 0; repeat < 100; repeat += 1) store.bind(THREAD, "main");
+  assert.equal(renames, 1, "unchanged account and timestamp do not replace identical data");
+  clock = 2_000;
+  store.bind(THREAD, "main");
+  assert.equal(renames, 2, "a changed timestamp is still immediately persisted");
+  assert.equal(createThreadAccounts({ filePath }).list()[0].lastUsedAt, clock);
+  store.bind(THREAD, SECOND);
+  assert.equal(renames, 3, "a same-timestamp account move is never skipped");
+  assert.deepEqual(observed, [null, "main", "main"]);
+  assert.equal(createThreadAccounts({ filePath }).accountFor(THREAD), SECOND);
 });
 
 function memoryRegistry(entries = []) {

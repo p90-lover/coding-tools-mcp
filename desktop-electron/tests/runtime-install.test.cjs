@@ -8,8 +8,10 @@ const path = require("node:path");
 const { runtimeInvocation } = require("../electron/runtime-command.cjs");
 const {
   ensurePackagedRuntime,
+  ensurePackagedRuntimeAsync,
   pruneOldRuntimes,
   validateRuntimeBundle,
+  validateRuntimeBundleAsync,
   waitForPackagedRuntimeSource,
 } = require("../electron/runtime-install.cjs");
 
@@ -194,8 +196,11 @@ test("a launch after the runtime was hashed does not read its files again, and s
   const coreHome = path.join(root, "core-home");
   const app = { isPackaged: true, getVersion: () => "0.2.0" };
   const originalRead = fs.readFileSync;
+  const originalAsyncRead = fs.promises.readFile;
   const reads = [];
   fs.readFileSync = function (file, ...rest) { reads.push(String(file)); return originalRead.call(this, file, ...rest); };
+  // The startup wait checks off the main thread, so its reads go through fs.promises.
+  fs.promises.readFile = function (file, ...rest) { reads.push(String(file)); return originalAsyncRead.call(this, file, ...rest); };
   try {
     const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
     assert.ok(reads.some(file => file.endsWith("cli.js")), "the first launch hashes the files");
@@ -218,7 +223,128 @@ test("a launch after the runtime was hashed does not read its files again, and s
     assert.equal(originalRead(path.join(repaired, "app", "cli.js"), "utf8"), "cli");
   } finally {
     fs.readFileSync = originalRead;
+    fs.promises.readFile = originalAsyncRead;
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const SYNC_FS_CALLS = [
+  "readdirSync", "lstatSync", "statSync", "readFileSync", "realpathSync", "existsSync", "openSync",
+  "cpSync", "copyFileSync", "renameSync", "rmSync", "mkdirSync", "chmodSync",
+];
+
+/** Records every synchronous fs call on a path under one of `roots` while `run` runs. */
+async function syncCallsUnder(roots, run) {
+  const originals = Object.fromEntries(SYNC_FS_CALLS.map(name => [name, fs[name]]));
+  const touched = [];
+  for (const name of SYNC_FS_CALLS) {
+    fs[name] = function (file, ...rest) {
+      if (roots.some(root => String(file).startsWith(root))) touched.push(`${name} ${file}`);
+      return originals[name].call(this, file, ...rest);
+    };
+  }
+  try {
+    return { result: await run(), touched };
+  } finally {
+    Object.assign(fs, originals);
+  }
+}
+
+test("the launch check of a whole installed copy holds no synchronous call on its files", async () => {
+  // Seen live 2026-11-01: one readdirSync or lstatSync after another over ~6,150 runtime files held
+  // the main process 22.7 s + 6.5 s on the busy hard disk before the window opened.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-launch-async-"));
+  const resourcesPath = runtimeFixture(root);
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  const originalAsyncRead = fs.promises.readFile;
+  try {
+    // The first launch installs and hashes it; the launch check trusts what that remembered.
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    const asyncReads = [];
+    fs.promises.readFile = function (file, ...rest) {
+      if (!String(file).endsWith("manifest.json")) asyncReads.push(String(file));
+      return originalAsyncRead.call(this, file, ...rest);
+    };
+    const { result, touched } = await syncCallsUnder([installed], () => ensurePackagedRuntimeAsync({ app, coreHome, resourcesPath }));
+    assert.equal(result, installed);
+    assert.deepEqual(touched, [], "no synchronous call on the installed runtime's files");
+    assert.deepEqual(asyncReads, [], "the remembered verification is shared with the synchronous check");
+    fs.promises.readFile = originalAsyncRead;
+
+    // Same size, different content: rehashed, refused and replaced from the package.
+    fs.writeFileSync(path.join(installed, "app", "cli.js"), "CLI");
+    assert.equal(await ensurePackagedRuntimeAsync({ app, coreHome, resourcesPath }), installed);
+    assert.equal(fs.readFileSync(path.join(installed, "app", "cli.js"), "utf8"), "cli");
+    // A stray file is replaced the same way, and a source run has no packaged runtime.
+    fs.writeFileSync(path.join(installed, "app", "stray.js"), "x");
+    assert.equal(await ensurePackagedRuntimeAsync({ app, coreHome, resourcesPath }), installed);
+    assert.equal(fs.existsSync(path.join(installed, "app", "stray.js")), false);
+    assert.equal(await ensurePackagedRuntimeAsync({ app: { ...app, isPackaged: false }, coreHome, resourcesPath }), null);
+  } finally {
+    fs.promises.readFile = originalAsyncRead;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a new version's first launch copies its runtime without a synchronous call on it", async () => {
+  // Seen live 2026-11-01 (0.8.48): the copy and the rename that moves it into place held the main
+  // process 7.6 s + 26.7 s on the busy hard disk before the window opened.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-first-async-"));
+  const resourcesPath = runtimeFixture(root);
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  const versions = path.join(coreHome, "versions");
+  const source = path.join(resourcesPath, "runtime");
+  try {
+    const { result, touched } = await syncCallsUnder([versions, source], () => ensurePackagedRuntimeAsync({ app, coreHome, resourcesPath }));
+    const destination = path.join(versions, `0.2.0-${process.platform}-${process.arch}`);
+    assert.equal(result, destination);
+    assert.deepEqual(touched, [], "no synchronous call on the packaged or the installed runtime");
+    assert.equal(fs.readFileSync(path.join(destination, "app", "cli.js"), "utf8"), "cli");
+    assert.deepEqual(fs.readdirSync(versions), [path.basename(destination)], "no temporary copy is left behind");
+    // The synchronous run accepts what the asynchronous one installed, without copying again.
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), destination);
+
+    // A full disk runs this session from the packaged copy, as the synchronous run does.
+    fs.rmSync(versions, { recursive: true, force: true });
+    const originalCopy = fs.promises.cp;
+    fs.promises.cp = async (from, to) => {
+      fs.mkdirSync(to, { recursive: true });
+      throw Object.assign(new Error("ENOSPC: no space left on device, copyfile"), { code: "ENOSPC" });
+    };
+    try {
+      assert.equal(await ensurePackagedRuntimeAsync({ app, coreHome, resourcesPath }), source);
+      assert.deepEqual(fs.readdirSync(versions), [], "the partial copy is removed");
+    } finally {
+      fs.promises.cp = originalCopy;
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the asynchronous runtime check refuses what the synchronous one refuses", async () => {
+  const identity = { version: "0.2.0", platform: process.platform, arch: process.arch };
+  const damages = [
+    ["a missing file", source => fs.rmSync(path.join(source, "app", "cli.js")), /file is missing/],
+    ["an unmanifested file", source => fs.writeFileSync(path.join(source, "app", "extra.js"), "x"), /unmanifested file/],
+    ["a size change", source => fs.writeFileSync(path.join(source, "app", "cli.js"), "longer cli"), /size mismatch/],
+    ["a same-size edit", source => fs.writeFileSync(path.join(source, "app", "cli.js"), "CLI"), /checksum mismatch/],
+    ["a wrong version", () => {}, /identity mismatch/, { ...identity, version: "0.3.0" }],
+    ["a missing manifest", source => fs.rmSync(path.join(source, "manifest.json")), /manifest is missing/],
+  ];
+  for (const [label, damage, message, checkedAs = identity] of damages) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-async-refuse-"));
+    try {
+      const source = path.join(runtimeFixture(root), "runtime");
+      assert.equal(await validateRuntimeBundleAsync(source, identity), validateRuntimeBundle(source, identity));
+      damage(source);
+      assert.throws(() => validateRuntimeBundle(source, checkedAs), message, `sync: ${label}`);
+      await assert.rejects(validateRuntimeBundleAsync(source, checkedAs), message, `async: ${label}`);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

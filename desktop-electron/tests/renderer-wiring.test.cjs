@@ -49,6 +49,13 @@ test("a hidden docked sidebar folds to an icon rail that shows the whole panel o
   assert.match(appSource, /const sidebarCovers = \(compactSidebar && sidebarOpen\) \|\| \(sidebarRail && sidebarPeek\);/);
   assert.doesNotMatch(appSource, /!\(compactSidebar && sidebarOpen\)/);
   assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 4);
+  // AO's view (its own UI, the project board, the Antigravity terminal) steps aside the same way:
+  // it covered the hover panel's labels from the rail's edge (2026-11-01).
+  assert.match(appSource, /<section className="workspace">\s*<NativeViewsCoveredContext\.Provider value=\{sidebarCovers \|\| biggerContextRecommendationOpen\}>/);
+  const aoViewSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "AgentOrchestratorOriginalSurface.tsx"), "utf8");
+  assert.match(aoViewSource, /const covered = laidOver \|\| tabHidden;/);
+  assert.match(aoViewSource, /useEffect\(\(\) => \{\s*if \(covered\) return;/);
+  assert.match(aoViewSource, /\}, \[covered, generation,/);
   // The hover panel can be pinned from inside itself, and the toggle also clears the hover state.
   assert.match(appSource, /\{sidebarRail \? \(\s*<IconButton icon="sidebar" label=\{copy\.keepSidebarOpen\} onClick=\{toggleSidebar\}/);
   assert.match(appSource, /const toggleSidebar = \(\) => \{\s*closeSidebarPeek\(\);/);

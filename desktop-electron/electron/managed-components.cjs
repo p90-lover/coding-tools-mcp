@@ -6,7 +6,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
+const { spawnOffThread } = require("./off-thread-run.cjs");
 const { EventEmitter } = require("node:events");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { readStateFile, writeStateFile } = require("./durable-state.cjs");
@@ -511,7 +512,7 @@ function createManagedComponentController({
   safeStorage = null,
   logger = null,
   fetchImpl = globalThis.fetch,
-  spawnProcess = spawn,
+  spawnProcess = spawnOffThread,
   terminateProcessTree = terminateOwnedProcessTree,
   spawnSyncProcess = spawnSync,
   resolveRuntimeExecutable = () => process.execPath,
@@ -555,8 +556,14 @@ function createManagedComponentController({
   });
   const operations = new Map();
   const processes = new Map();
+  // An admitted start owns its awaits, including a worker that has not published its pid yet.
+  const componentLifecycles = new Map(COMPONENT_IDS.map((id) => [id, {
+    generation: 0, start: null, stop: null, pending: new Set(), retiring: new Set(), attention: null,
+  }]));
   const stoppingChildren = new WeakSet();
   let disposed = false;
+  // Whether dispose() left persistent components running (a keep-running quit).
+  let keptPersistent = false;
   const persistentIds = new Set(Array.isArray(persistentComponents) ? persistentComponents : []);
   // Install state remembered per version folder (see sourceState), and whether this build bundles
   // each version's runtime, which cannot change while it runs.
@@ -1250,56 +1257,73 @@ function createManagedComponentController({
     return combined.length > 24_000 ? combined.slice(-24_000) : combined;
   }
 
-  function runCommand(entry, context, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS) {
+  async function runCommand(entry, context, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS, allowStopping = false) {
+    const lifecycle = componentLifecycles.get(context.id);
+    const generation = lifecycle.generation;
+    if (disposed) throw new Error("Managed component controller has been disposed");
+    if (!allowStopping && lifecycle.start?.error) throw lifecycle.start.error;
+    if (lifecycle.stop && !allowStopping) throw new Error(context.id + " is stopping");
     const spec = commandSpec(entry, context);
-    return new Promise((resolve, reject) => {
-      if (disposed) throw new Error("Managed component controller has been disposed");
-      const child = spawnProcess(spec.executable, spec.args, spec.options);
-      const active = processes.get(context.id) || new Map();
-      processes.set(context.id, active);
-      active.set(entry.id, child);
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        if (platform === "win32") {
-          try { terminateProcessTree(child, "SIGTERM"); }
-          catch (error) {
-            reject(new Error(`${entry.id} timed out; cleanup failed: ${error.message}`, { cause: error }));
-            return;
-          }
-        } else try { child.kill("SIGTERM"); } catch {}
-        reject(new Error(`${entry.id} timed out`));
-      }, timeoutMs);
-      timer.unref?.();
-      child.stdout?.on?.("data", (chunk) => {
-        stdout = boundedOutput(chunk, stdout);
-        const message = String(chunk || "").trim().slice(-2_000);
-        if (message) logger?.debug?.("managed-component.stdout", { componentId: context.id, step: entry.id, message });
+    const pending = {};
+    lifecycle.pending.add(pending);
+    try {
+      const child = await spawnProcess(spec.executable, spec.args, spec.options);
+      if (disposed || generation !== lifecycle.generation) {
+        await stopLateChild(child, context.id, entry.id);
+        throw new Error(disposed ? "Managed component controller has been disposed" : context.id + " start was canceled by Stop");
+      }
+      return await new Promise((resolve, reject) => {
+        const active = processes.get(context.id) || new Map();
+        processes.set(context.id, active);
+        active.set(entry.id, child);
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          if (platform === "win32") {
+            try { terminateProcessTree(child, "SIGTERM"); }
+            catch (error) {
+              reject(new Error(`${entry.id} timed out; cleanup failed: ${error.message}`, { cause: error }));
+              return;
+            }
+          } else try { child.kill("SIGTERM"); } catch {}
+          reject(new Error(`${entry.id} timed out`));
+        }, timeoutMs);
+        timer.unref?.();
+        child.stdout?.on?.("data", (chunk) => {
+          stdout = boundedOutput(chunk, stdout);
+          const message = String(chunk || "").trim().slice(-2_000);
+          if (message) logger?.debug?.("managed-component.stdout", { componentId: context.id, step: entry.id, message });
+        });
+        child.stderr?.on?.("data", (chunk) => {
+          stderr = boundedOutput(chunk, stderr);
+          const message = String(chunk || "").trim().slice(-2_000);
+          if (message) logger?.debug?.("managed-component.stderr", { componentId: context.id, step: entry.id, message });
+        });
+        child.once?.("error", (error) => {
+          if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
+            if (active.get(entry.id) === child) active.delete(entry.id);
+          } else lifecycle.retiring.add(child);
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        });
+        child.once?.("exit", (code, signal) => {
+          if (active.get(entry.id) === child) active.delete(entry.id);
+          lifecycle.retiring.delete(child);
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (code === 0) resolve({ stdout, stderr });
+          else reject(new Error(`${entry.id} failed (${code ?? signal ?? "unknown"}): ${stderr.trim() || stdout.trim()}`));
+        });
       });
-      child.stderr?.on?.("data", (chunk) => {
-        stderr = boundedOutput(chunk, stderr);
-        const message = String(chunk || "").trim().slice(-2_000);
-        if (message) logger?.debug?.("managed-component.stderr", { componentId: context.id, step: entry.id, message });
-      });
-      child.once?.("error", (error) => {
-        active.delete(entry.id);
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        reject(error);
-      });
-      child.once?.("exit", (code, signal) => {
-        active.delete(entry.id);
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (code === 0) resolve({ stdout, stderr });
-        else reject(new Error(`${entry.id} failed (${code ?? signal ?? "unknown"}): ${stderr.trim() || stdout.trim()}`));
-      });
-    });
+    } finally {
+      lifecycle.pending.delete(pending);
+    }
   }
 
   function retryableDownloadStatus(status) {
@@ -1866,6 +1890,20 @@ function createManagedComponentController({
     try { fs.rmSync(persistedRecordPath(id), { force: true }); } catch {}
   }
 
+  /** A terminal owned handle may clear only the exact process record it published or adopted. */
+  function clearProcessRecord(id, child) {
+    const expected = child?.managedRecord;
+    if (!expected || (child.exitCode === null && child.signalCode === null)) return false;
+    const current = readPersistedRecord(id);
+    const same = JSON.stringify(current) === JSON.stringify(expected);
+    const lifecycle = componentLifecycles.get(id);
+    if (same) clearPersistedRecord(id);
+    else if (current && !lifecycle.attention) lifecycle.attention = { record: expected };
+    if (lifecycle.attention && JSON.stringify(lifecycle.attention.record) === JSON.stringify(expected)
+      && (same || !current)) lifecycle.attention = null;
+    return same;
+  }
+
   async function probeHealth(id) {
     const health = manifestFor(id).health;
     if (!health?.endpoint) return false;
@@ -1893,59 +1931,149 @@ function createManagedComponentController({
   }
 
   /** Adopt a healthy persistent component left running by an earlier launcher. */
-  async function adoptPersistedComponent(manifest, active, dependencyFingerprint) {
+  async function adoptPersistedComponent(manifest, active, dependencyFingerprint, owner) {
     if (!persistentIds.has(manifest.id)) return false;
-    const record = readPersistedRecord(manifest.id);
+    const id = manifest.id;
+    const lifecycle = componentLifecycles.get(id);
+    const attention = lifecycle.attention;
+    const record = readPersistedRecord(id);
     if (!record) return false;
+    const recordJson = JSON.stringify(record);
+    const recordMatches = () => JSON.stringify(readPersistedRecord(id)) === recordJson;
+    if (attention && JSON.stringify(attention.record) !== recordJson) {
+      throw new Error(id + " stop needs attention: saved process verification is unresolved");
+    }
     if (!processRunning(record.pid)) {
-      clearPersistedRecord(manifest.id);
+      if (!recordMatches()) {
+        lifecycle.attention ||= { record };
+        throw new Error(id + " stop needs attention: its saved process record changed");
+      }
+      clearPersistedRecord(id);
+      if (lifecycle.attention === attention) lifecycle.attention = null;
       return false;
     }
-    if (manifest.id === "cpa" && record.dependencyFingerprint !== dependencyFingerprint) return false;
-    // A component from another version, or one that no longer answers, is replaced.
-    if (record.version !== manifest.version || !await probeHealth(manifest.id)) return false;
-    // The running process kept the files an earlier build wrote (CPA's config.yaml); the manifest's
-    // adopt steps bring them up to date in place. A failed step keeps the component running.
-    for (const adoptEntry of manifest.launch.adopt || []) {
-      try { await runCommand(adoptEntry, launchContext(manifest), adoptEntry.timeoutMs); }
-      catch (error) {
-        logger?.warn?.("managed-component.adopt-step-failed", {
-          componentId: manifest.id,
-          step: adoptEntry.id,
-          message: error instanceof Error ? error.message : String(error),
-        });
+    if (id === "cpa" && record.dependencyFingerprint !== dependencyFingerprint) return false;
+    if (record.version !== manifest.version) return false;
+    // Until health answers, this is only a saved candidate, never a child Stop may signal.
+    const verification = { record };
+    owner.verification = verification;
+    let handle;
+    const primaryId = persistentPrimaryId(manifest);
+    try {
+      const healthy = await probeHealth(id);
+      checkComponentStart(owner);
+      if (!recordMatches()) {
+        lifecycle.attention ||= verification;
+        throw new Error(id + " stop needs attention: its saved process record changed");
+      }
+      if (!healthy) return false;
+      if (!processRunning(record.pid)) {
+        if (!recordMatches()) {
+          lifecycle.attention ||= verification;
+          throw new Error(id + " stop needs attention: its saved process record changed");
+        }
+        clearPersistedRecord(id);
+        if (lifecycle.attention === attention) lifecycle.attention = null;
+        throw new Error(id + " stopped while it was being adopted");
+      }
+      handle = new PersistedComponentProcess(record.pid);
+      handle.managedRecord = record;
+      owner.adopting = handle;
+      active.set(primaryId, handle);
+      owner.verification = null;
+      handle.once("exit", (code, signal) => {
+        if (active.get(primaryId) !== handle) return;
+        const stopping = lifecycle.retiring.has(handle) || stoppingChildren.has(handle);
+        active.delete(primaryId);
+        lifecycle.retiring.delete(handle);
+        clearProcessRecord(id, handle);
+        if (processes.get(id) !== active) return;
+        if (!stopping) {
+          setOperation(id, { state: "error", step: null, error: primaryId + " exited (" + (code ?? signal ?? "unknown") + ")" });
+        } else emit();
+      });
+      const checkAdoption = () => {
+        checkComponentStart(owner);
+        if (active.get(primaryId) !== handle || handle.exitCode !== null || handle.signalCode !== null) {
+          throw new Error(id + " stopped while it was being adopted");
+        }
+        if (!recordMatches()) {
+          lifecycle.attention ||= verification;
+          throw new Error(id + " stop needs attention: its saved process record changed");
+        }
+      };
+      for (const adoptEntry of manifest.launch.adopt || []) {
+        try { await runCommand(adoptEntry, launchContext(manifest), adoptEntry.timeoutMs); }
+        catch (error) {
+          checkAdoption();
+          logger?.warn?.("managed-component.adopt-step-failed", {
+            componentId: id, step: adoptEntry.id,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+        checkAdoption();
+      }
+      checkAdoption();
+      if (lifecycle.attention === attention) lifecycle.attention = null;
+      owner.adopting = null;
+      logger?.info?.("managed-component.adopted", { componentId: id, pid: record.pid, version: record.version });
+      return true;
+    } finally {
+      if (owner.verification === verification) owner.verification = null;
+      if (handle && owner.adopting === handle) {
+        owner.adopting = null;
+        if (!lifecycle.retiring.has(handle)) {
+          if (!disposed && processes.get(id) === active && active.get(primaryId) === handle
+            && handle.exitCode === null && handle.signalCode === null) {
+            lifecycle.retiring.add(handle);
+          } else {
+            if (active.get(primaryId) === handle) active.delete(primaryId);
+            handle.release();
+          }
+        }
       }
     }
-    const primaryId = persistentPrimaryId(manifest);
-    const handle = new PersistedComponentProcess(record.pid);
-    active.set(primaryId, handle);
-    handle.once("exit", (code, signal) => {
-      active.delete(primaryId);
-      clearPersistedRecord(manifest.id);
-      if (!stoppingChildren.has(handle)) {
-        setOperation(manifest.id, { state: "error", step: null, error: `${primaryId} exited (${code ?? signal ?? "unknown"})` });
-      } else emit();
-    });
-    logger?.info?.("managed-component.adopted", { componentId: manifest.id, pid: record.pid, version: record.version });
-    return true;
   }
 
-  /** Stop a stale persistent component (another version, or unhealthy) before replacing it. */
-  async function stopStalePersistedComponent(manifest) {
+  /** Stop a stale recorded child without losing it if tree cleanup is refused. */
+  async function stopStalePersistedComponent(manifest, owner) {
     if (!persistentIds.has(manifest.id)) return;
-    const record = readPersistedRecord(manifest.id);
+    const id = manifest.id;
+    const lifecycle = componentLifecycles.get(id);
+    const record = readPersistedRecord(id);
+    const attention = lifecycle.attention;
+    if (attention) {
+      // A retry must not convert the failed verification into permission to kill that pid.
+      if (processRunning(attention.record.pid) || (record
+        && JSON.stringify(record) !== JSON.stringify(attention.record))) {
+        throw new Error(id + " stop needs attention: saved process verification is unresolved");
+      }
+      if (JSON.stringify(readPersistedRecord(id)) !== JSON.stringify(record)) {
+        throw new Error(id + " stop needs attention: its saved process record changed");
+      }
+      if (record) clearPersistedRecord(id);
+      if (lifecycle.attention === attention) lifecycle.attention = null;
+      return;
+    }
     if (!record || !processRunning(record.pid)) {
-      clearPersistedRecord(manifest.id);
+      const current = readPersistedRecord(id);
+      if (JSON.stringify(current) !== JSON.stringify(record)) {
+        lifecycle.attention ||= { record: current || record };
+        throw new Error(id + " stop needs attention: its saved process record changed");
+      }
+      if (record) clearPersistedRecord(id);
       return;
     }
     const handle = new PersistedComponentProcess(record.pid);
+    handle.managedRecord = record;
+    if (owner) owner.adopting = handle;
     try {
-      await stopChild(handle);
+      await stopLateChild(handle, id, persistentPrimaryId(manifest));
     } finally {
-      handle.release();
-      clearPersistedRecord(manifest.id);
+      if (owner?.adopting === handle) owner.adopting = null;
+      if (!lifecycle.retiring.has(handle)) handle.release();
     }
-    logger?.info?.("managed-component.replaced_stale", { componentId: manifest.id, pid: record.pid, version: record.version });
+    logger?.info?.("managed-component.replaced_stale", { componentId: id, pid: record.pid, version: record.version });
   }
 
   function attachProcessLogging(manifest, processEntry, child) {
@@ -1957,75 +2085,190 @@ function createManagedComponentController({
     child.stderr?.on?.("data", (chunk) => log("stderr", chunk));
   }
 
-  async function startComponent(idValue) {
-    if (disposed) throw new Error("Managed component controller has been disposed");
+  function checkComponentStart(owner, allowKeptPersistent = false) {
+    if (owner.error) throw owner.error;
+    const lifecycle = componentLifecycles.get(owner.id);
+    if (disposed && !(allowKeptPersistent && keptPersistent)) throw new Error("Managed component controller has been disposed");
+    if (lifecycle.start !== owner || lifecycle.generation !== owner.generation) {
+      throw new Error(owner.id + " start was canceled by Stop");
+    }
+  }
+
+  async function componentStart(idValue, restart) {
     const id = requiredComponentId(idValue);
+    if (disposed) throw new Error("Managed component controller has been disposed");
+    const lifecycle = componentLifecycles.get(id);
+    if (lifecycle.stop) throw new Error(id + " is still stopping; retry after cleanup");
+    if (lifecycle.start) {
+      if (lifecycle.start.error) throw new Error(id + " start is still retiring; retry after cleanup");
+      if (lifecycle.retiring.size && !(lifecycle.start.restart && lifecycle.start.phase === "stopping")) {
+        throw new Error(id + " is still stopping; retry after cleanup");
+      }
+      if (restart && !lifecycle.start.restart) {
+        await stopComponent(id);
+        throw new Error(id + " start was canceled; retry restart after cleanup");
+      }
+      return lifecycle.start.result;
+    }
+    if (lifecycle.retiring.size) throw new Error(id + " is still stopping; retry after cleanup");
+    if (lifecycle.pending.size) throw new Error(id + " has a command still starting or stopping");
+    const owner = { id, generation: ++lifecycle.generation, restart, error: null, adopting: null, verification: null, persistentSpawn: false, phase: restart ? "stopping" : "starting" };
+    const canceled = new Promise((_resolve, reject) => { owner.cancel = reject; });
+    lifecycle.start = owner;
+    const work = Promise.resolve().then(async () => {
+      checkComponentStart(owner);
+      if (restart) {
+        owner.stopWork = stopComponentWork(id);
+        await owner.stopWork;
+        owner.phase = "starting";
+        checkComponentStart(owner);
+      }
+      return startComponentWork(id, owner);
+    });
+    owner.result = Promise.race([work, canceled]);
+    // Cancellation owns a background cleanup continuation even if the caller has already left.
+    owner.result.catch(() => {});
+    const finished = () => { if (lifecycle.start === owner) lifecycle.start = null; };
+    work.then(finished, finished);
+    return owner.result;
+  }
+
+  function startComponent(id) {
+    return componentStart(id, false);
+  }
+
+  async function startComponentWork(id, owner) {
+    checkComponentStart(owner);
     const manifest = manifestFor(id);
     const source = await refreshSourceState(manifest);
+    checkComponentStart(owner);
     if (persistentIds.has(id) && readPersistedRecord(id)?.version !== manifest.version) {
-      // An older persistent build still holds its files open; stop it before installing over them.
-      await stopStalePersistedComponent(manifest);
+      await stopStalePersistedComponent(manifest, owner);
+      checkComponentStart(owner);
     }
     if (source.state !== "installed") {
       await installComponent(id, { repair: source.state === "repair-required" || source.state === "error" });
+      checkComponentStart(owner);
     }
-    if (disposed) throw new Error("Managed component controller has been disposed");
     const context = launchContext(manifest);
     const existing = processes.get(id);
-    if (existing && [...existing.values()].some((child) => child && child.exitCode === null && child.signalCode === null)) {
-      return project(id);
-    }
-
-    // Capture the bundled plugin revision before spawn; later file changes are not what this process loaded.
+    if (existing && [...existing.values()].some((child) => child && child.exitCode === null && child.signalCode === null)) return project(id);
     const dependencyFingerprint = id === "cpa" && persistentIds.has(id)
-      ? sha256File(path.join(context.adapterRoot, "..", "vendor", "bundled", "cpa-plugins", "BUNDLE.json"))
-      : undefined;
+      ? sha256File(path.join(context.adapterRoot, "..", "vendor", "bundled", "cpa-plugins", "BUNDLE.json")) : undefined;
     const active = new Map();
     processes.set(id, active);
     try {
-      if (await adoptPersistedComponent(manifest, active, dependencyFingerprint)) {
+      if (await adoptPersistedComponent(manifest, active, dependencyFingerprint, owner)) {
+        checkComponentStart(owner);
         setOperation(id, { state: "installed", step: null, error: null });
         return project(id);
       }
-      await stopStalePersistedComponent(manifest);
+      checkComponentStart(owner);
+      await stopStalePersistedComponent(manifest, owner);
+      checkComponentStart(owner);
       for (const processEntry of manifest.launch.processes) {
+        checkComponentStart(owner);
         if (processEntry.detached === true || processEntry.mode === "command") {
           await runCommand(processEntry, context);
+          checkComponentStart(owner);
           continue;
         }
         const spec = commandSpec(processEntry, context);
-        if (disposed) throw new Error("Managed component controller has been disposed");
         const persistent = isPersistentProcess(manifest, processEntry);
-        // A persistent component outlives the app, so it cannot write to a pipe; its output is
-        // discarded rather than appended to a log file for as long as it runs.
         if (persistent) removeOldPersistedLogs(id);
-        const child = spawnProcess(spec.executable, spec.args, persistent
-          ? { ...spec.options, detached: true, stdio: "ignore" }
-          : spec.options);
+        const lifecycle = componentLifecycles.get(id);
+        const previousRecord = persistent ? readPersistedRecord(id) : null;
+        if (previousRecord) {
+          lifecycle.attention ||= { record: previousRecord };
+          throw new Error(id + " stop needs attention: its saved process record changed before start");
+        }
+        const pending = {};
+        lifecycle.pending.add(pending);
+        owner.persistentSpawn = persistent;
+        let child;
+        try {
+          child = await spawnProcess(spec.executable, spec.args, persistent
+            ? { ...spec.options, detached: true, stdio: "ignore" } : spec.options);
+          try {
+            checkComponentStart(owner, persistent);
+            const currentRecord = persistent ? readPersistedRecord(id) : null;
+            if (JSON.stringify(currentRecord) !== JSON.stringify(previousRecord)) {
+              lifecycle.attention ||= { record: currentRecord || previousRecord };
+              throw new Error(id + " stop needs attention: its saved process record changed during start");
+            }
+          } catch (error) {
+            await stopLateChild(child, id, processEntry.id);
+            throw error;
+          }
+        } finally {
+          lifecycle.pending.delete(pending);
+        }
         active.set(processEntry.id, child);
         if (persistent && Number.isInteger(child.pid)) {
-          writePrivateFileAtomic(persistedRecordPath(id), `${JSON.stringify({
+          const record = {
             pid: child.pid, version: manifest.version, startedAt: now(),
             ...(dependencyFingerprint ? { dependencyFingerprint } : {}),
-          })}\n`);
+          };
+          writePrivateFileAtomic(persistedRecordPath(id), JSON.stringify(record) + "\n");
+          child.managedRecord = record;
         }
         attachProcessLogging(manifest, processEntry, child);
         child.once?.("error", (error) => {
-          active.delete(processEntry.id);
-          setOperation(id, { state: "error", step: null, error: `${processEntry.id}: ${error.message}` });
+          if (active.get(processEntry.id) !== child) return;
+          if (!child.pid || child.exitCode !== null || child.signalCode !== null) active.delete(processEntry.id);
+          else lifecycle.retiring.add(child);
+          if (processes.get(id) === active) {
+            setOperation(id, { state: "error", step: null, error: processEntry.id + ": " + error.message });
+          }
         });
         child.once?.("exit", (code, signal) => {
+          if (active.get(processEntry.id) !== child) return;
+          const stopping = lifecycle.retiring.has(child) || stoppingChildren.has(child);
           active.delete(processEntry.id);
-          if (code !== 0 && code !== null && !stoppingChildren.has(child)) {
-            setOperation(id, { state: "error", step: null, error: `${processEntry.id} exited (${code ?? signal ?? "unknown"})` });
+          lifecycle.retiring.delete(child);
+          clearProcessRecord(id, child);
+          if (processes.get(id) !== active) return;
+          if (code !== 0 && code !== null && !stopping) {
+            setOperation(id, { state: "error", step: null, error: processEntry.id + " exited (" + (code ?? signal ?? "unknown") + ")" });
           } else emit();
         });
       }
+      checkComponentStart(owner, owner.persistentSpawn);
       setOperation(id, { state: "installed", step: null, error: null });
       return project(id);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setOperation(id, { state: "error", step: null, error: message });
+      if (!owner.error && owner.generation === componentLifecycles.get(id).generation && !disposed) {
+        setOperation(id, { state: "error", step: null, error: error instanceof Error ? error.message : String(error) });
+      }
+      throw error;
+    }
+  }
+
+  /** A late PID is owned until bounded cleanup succeeds; Stop can retry a refused cleanup. */
+  async function stopLateChild(child, id, processId) {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    const lifecycle = componentLifecycles.get(id);
+    const active = processes.get(id) || new Map();
+    processes.set(id, active);
+    if (!active.has(processId)) active.set(processId, child);
+    if (!lifecycle.retiring.has(child)) {
+      lifecycle.retiring.add(child);
+      child.on?.("error", () => {});
+      child.once?.("exit", () => {
+        lifecycle.retiring.delete(child);
+        if (active.get(processId) === child) active.delete(processId);
+        clearProcessRecord(id, child);
+        emit();
+      });
+    }
+    try {
+      await stopChild(child);
+      if (child.exitCode === null && child.signalCode === null) throw new Error(id + " cleanup has not confirmed process exit");
+      lifecycle.retiring.delete(child);
+      if (active.get(processId) === child) active.delete(processId);
+      clearProcessRecord(id, child);
+    } catch (error) {
+      setOperation(id, { state: "error", step: null, error: "Couldn't stop " + processId + ": " + (error instanceof Error ? error.message : String(error)) });
       throw error;
     }
   }
@@ -2065,22 +2308,38 @@ function createManagedComponentController({
     }
   }
 
-  async function stopComponent(idValue) {
-    const id = requiredComponentId(idValue);
+  async function stopComponentWork(id) {
     const manifest = manifestFor(id);
+    const lifecycle = componentLifecycles.get(id);
     const active = processes.get(id) || new Map();
-    for (const child of [...active.values()].reverse()) await stopChild(child);
-    processes.delete(id);
-    if (persistentIds.has(id)) clearPersistedRecord(id);
+    const children = new Set([...active.values(), ...lifecycle.retiring]);
+    const record = readPersistedRecord(id);
+    if (lifecycle.start?.verification) lifecycle.attention ||= lifecycle.start.verification;
+    if (record && ![...children].some((child) =>
+      child?.managedRecord && JSON.stringify(child.managedRecord) === JSON.stringify(record))) {
+      lifecycle.attention ||= { record };
+    }
+    for (const child of children) lifecycle.retiring.add(child);
+    for (const child of [...children].reverse()) {
+      await stopChild(child);
+      if (child && child.exitCode === null && child.signalCode === null) throw new Error(id + " cleanup has not confirmed process exit");
+      lifecycle.retiring.delete(child);
+      clearProcessRecord(id, child);
+      for (const [processId, current] of active) if (current === child) active.delete(processId);
+    }
+    if (processes.get(id) === active && active.size === 0) processes.delete(id);
+    if (lifecycle.attention) {
+      const error = new Error(id + " stop needs attention: saved process verification is unresolved");
+      setOperation(id, { state: "error", step: null, error: error.message });
+      throw error;
+    }
     const context = (await refreshSourceState(manifest)).state === "installed" ? launchContext(manifest) : null;
     if (context) {
       for (const stopEntry of manifest.launch.stop || []) {
-        try { await runCommand(stopEntry, context); }
+        try { await runCommand(stopEntry, context, stopEntry.timeoutMs, true); }
         catch (error) {
           logger?.warn?.("managed-component.stop-step-failed", {
-            componentId: id,
-            step: stopEntry.id,
-            message: error instanceof Error ? error.message : String(error),
+            componentId: id, step: stopEntry.id, message: error instanceof Error ? error.message : String(error),
           });
         }
       }
@@ -2089,9 +2348,27 @@ function createManagedComponentController({
     return project(id);
   }
 
-  async function restartComponent(id) {
-    await stopComponent(id);
-    return startComponent(id);
+  async function stopComponent(idValue) {
+    const id = requiredComponentId(idValue);
+    const lifecycle = componentLifecycles.get(id);
+    if (lifecycle.stop) return lifecycle.stop;
+    lifecycle.generation += 1;
+    const owner = lifecycle.start;
+    if (owner?.verification) lifecycle.attention ||= owner.verification;
+    if (owner && !owner.error) {
+      owner.stopped = true;
+      owner.error = new Error(id + " start was canceled by Stop");
+      owner.cancel(owner.error);
+    }
+    const work = owner?.phase === "stopping" && owner.stopWork
+      ? owner.stopWork.then(() => project(id)) : stopComponentWork(id);
+    lifecycle.stop = work;
+    try { return await work; }
+    finally { if (lifecycle.stop === work) lifecycle.stop = null; }
+  }
+
+  function restartComponent(id) {
+    return componentStart(id, true);
   }
 
   function runtimeConfiguration(idValue) {
@@ -2135,11 +2412,39 @@ function createManagedComponentController({
   }
 
   function dispose({ keepPersistent = false } = {}) {
+    const unresolved = [];
+    for (const [id, lifecycle] of componentLifecycles) {
+      const owner = lifecycle.start;
+      if (!lifecycle.attention && (keepPersistent || !owner?.verification)) continue;
+      lifecycle.attention ||= owner.verification;
+      const error = new Error(id + " stop needs attention: saved process verification is unresolved");
+      if (owner && !owner.error) {
+        lifecycle.generation += 1;
+        owner.stopped = true;
+        owner.error = error;
+        owner.cancel(error);
+      }
+      setOperation(id, { state: "error", step: null, error: error.message });
+      unresolved.push(error);
+    }
+    if (unresolved.length) throw new AggregateError(unresolved, "Managed component stop needs attention");
     disposed = true;
+    keptPersistent = keepPersistent;
+    for (const lifecycle of componentLifecycles.values()) {
+      const owner = lifecycle.start;
+      if (keepPersistent && owner?.persistentSpawn && !owner.error) continue;
+      lifecycle.generation += 1;
+      if (owner && !owner.error) {
+        owner.error = new Error("Managed component controller has been disposed");
+        owner.cancel(owner.error);
+      }
+    }
     const failures = [];
     for (const [id, active] of processes) {
       for (const [processId, child] of active) {
-        if (keepPersistent && persistentIds.has(id) && processId === persistentPrimaryId(manifestFor(id))) {
+        if (keepPersistent && !componentLifecycles.get(id).retiring.has(child)
+          && !componentLifecycles.get(id).start?.stopped
+          && persistentIds.has(id) && processId === persistentPrimaryId(manifestFor(id))) {
           // Leave the component running for the next launcher, which adopts it.
           child?.release?.();
           child?.unref?.();

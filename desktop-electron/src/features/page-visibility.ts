@@ -16,6 +16,13 @@ export function pageHidden(): boolean {
 export const SurfaceHiddenContext = createContext(false);
 
 /**
+ * True while the app lays something over the page: the sidebar peeking out of its rail, the
+ * compact sidebar, a full-page prompt. A native view is drawn above every element of the page, so
+ * a screen hosting one takes it off meanwhile, or it covered the sidebar's labels (2026-11-01).
+ */
+export const NativeViewsCoveredContext = createContext(false);
+
+/**
  * For a screen's polls: true while the window is hidden or the screen's own tab is. A tab stays
  * mounted once visited, and its polls kept running behind every other tab; the chat's alone read
  * the headless service several times a second (~45% of a core there) with nobody looking. A

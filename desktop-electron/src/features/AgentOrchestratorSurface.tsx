@@ -1760,6 +1760,12 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       throw cause;
     }
   };
+  // A contentless recovery stays outside run(), steer(), and the persistent message queue.
+  const recoverChat = async (input: { taskId: string; runId: string; nodeId: string; requestKey: string; threadId: string }) => {
+    if (!workspaceId) throw new Error("Add a project first");
+    const result = await moduleCall("chat_recover", { workspaceId, ...input });
+    return { message: String(result.message || "The original work was kept; no message was sent.") };
+  };
   // The chats' queued messages are the app's (chat_queue): it sends them when a chat's turn settles,
   // whichever chat is open. A queued message runs on the model or team picked when it was queued.
   const queueCall = async (taskId: string, args: JsonObject) => {
@@ -2783,7 +2789,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} queue={chatQueue} commands={chatCommands}
+                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} queue={chatQueue} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
                   <span>Team</span>

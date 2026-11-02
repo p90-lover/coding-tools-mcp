@@ -367,7 +367,7 @@ function DshRunning({ since, divider, heardAt, retry = "", refusal = null, askin
       <span className="dsh-shimmer is-deep">{since ? `Deep diving for ${dshDuration(now - since)}${quietNote} ···` : `Deep diving${quietNote}`}</span>
       {/* A stuck turn has something to press here too (see TurnRunning). */}
       {quietNote.includes("may be stuck") && onRestart ? <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
-        title="Stop this turn and have the same agent continue where it left off">{restarting ? "Restarting…" : "Restart"}</button> : null}
+        title="Check the same agent and accepted turn without sending another message">{restarting ? "Checking…" : "Recover"}</button> : null}
     </span>
   </div>;
 }
