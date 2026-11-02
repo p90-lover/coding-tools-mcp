@@ -598,7 +598,82 @@ test("AO WebGPT catalog serves Luna from a Luna-only account's template and rena
   assert.deepEqual(aoWebCatalogForModel({ models: [high] }, "chatgpt-web/extra-high").models[0].display_name, "ChatGPT Web — Extra High");
   assert.throws(() => aoWebCatalogForModel({ models: [high] }, "gpt-5.5"), /invalid/);
   assert.throws(() => aoWebCatalogForModel({ models: [{ slug: "gpt-5.5" }] }, "chatgpt-web/luna"), /unavailable/);
-  assert.throws(() => aoWebCatalogForModel({ models: [high, luna] }, "chatgpt-web/luna"), /unavailable/);
+  assert.deepEqual(aoWebCatalogForModel({ models: [high, luna] }, "chatgpt-web/luna"), { models: [luna] });
+});
+
+test("AO WebGPT catalog preserves each exact named row's context, compaction and efforts", () => {
+  const { aoWebCatalogForModel } = require("../electron/agent-orchestrator-workflow.cjs");
+  const high = { slug: "chatgpt-web/high", display_name: "ChatGPT Web — High",
+    context_window: 270000, max_context_window: 270000, auto_compact_token_limit: 204255,
+    default_reasoning_level: "high", supported_reasoning_levels: [{ effort: "high" }] };
+  const sol = { slug: "chatgpt-web/gpt-6-sol", display_name: "GPT-6 Sol (Web)",
+    context_window: 120000, max_context_window: 120000, auto_compact_token_limit: 93840,
+    default_reasoning_level: "high", supported_reasoning_levels: [{ effort: "medium" }, { effort: "high" }, { effort: "xhigh" }] };
+  const pro = { ...sol, slug: "chatgpt-web/gpt-5.6-pro", display_name: "GPT-5.6 Pro (Web)",
+    default_reasoning_level: "max", supported_reasoning_levels: [{ effort: "max" }] };
+  const catalog = { models: [high, sol, pro], available: [high.slug, sol.slug, pro.slug] };
+  const before = structuredClone(catalog);
+  for (const row of catalog.models) {
+    assert.deepEqual(aoWebCatalogForModel(catalog, row.slug), { models: [row] });
+  }
+  assert.deepEqual(catalog, before, "selecting one row does not alter the shared runtime catalog");
+  for (const model of ["chatgpt-web/gpt-6-sol", "chatgpt-web/gpt-7-sol", "chatgpt-web/unknown"]) {
+    assert.throws(() => aoWebCatalogForModel({ models: [high], available: [model] }, model), /invalid|unavailable/,
+      "an available slug alone cannot supply a named model's budget");
+  }
+  assert.throws(() => aoWebCatalogForModel({ models: [high, sol, { ...sol }] }, sol.slug), /unavailable/);
+  const luna = { slug: "chatgpt-web/luna", context_window: 1050000, default_reasoning_level: "low" };
+  const lunaOnly = { models: [luna, { ...luna, slug: "chatgpt-web/gpt-5.6-luna" }] };
+  assert.deepEqual(aoWebCatalogForModel(lunaOnly, "chatgpt-web/high"), {
+    models: [{ ...luna, slug: "chatgpt-web/high", display_name: "ChatGPT Web — High" }],
+  }, "saved legacy tiers retain the Luna-only account fallback");
+});
+
+test("AO WebGPT connect forwards only the exact canonical named model row", async () => {
+  const { aoWebCatalogForModel } = require("../electron/agent-orchestrator-workflow.cjs");
+  for (const model of ["chatgpt-web/gpt-6-sol-instant", "chatgpt-web/gpt-6-sol",
+    "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol", "chatgpt-web/gpt-5.6-pro",
+    "chatgpt-web/gpt-6-pro", "chatgpt-web/gpt-5.6-luna", "chatgpt-web/gpt-7-sol"]) {
+    const calls = [];
+    const row = { slug: model, context_window: 120000, max_context_window: 120000, auto_compact_token_limit: 93840 };
+    let confirmed = false;
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
+          id: "run-1", workspace_id: "ws-1", nodes: [{ id: "planner", role: "planner", state: "pending",
+            route: { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+              model, permission_profile: ":read-only" } }],
+        }] };
+        calls.push(body);
+        return { ok: true, owned: true, status: { model } };
+      },
+      webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+      webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+      webModelCatalog: async ({ model: selected }) => {
+        assert.equal(confirmed, true, "catalog lookup follows the existing local approval");
+        return aoWebCatalogForModel({ models: [{ slug: "chatgpt-web/high", context_window: 270000 }, row] }, selected);
+      },
+      resolveHarness: async () => ({ executable: "C:\\codex.exe", expected_sha256: "0".repeat(64),
+        codex_home: "C:\\ao-home", model, allow_model_usage: true, allow_command_execution: false,
+        permission_profile: ":read-only", request_limit: 2, lifetime_seconds: 120 }),
+      confirm: async () => { confirmed = true; return true; },
+    });
+    try {
+      const connect = workflow.call("connect_harness", {
+        workspaceId: "ws-1", runId: "run-1", nodeId: "planner", executable: "C:\\codex.exe",
+      });
+      if (model === "chatgpt-web/gpt-7-sol") {
+        await assert.rejects(connect, /route does not match/);
+        assert.equal(calls.length, 0);
+        assert.equal(confirmed, false);
+      } else {
+        await connect;
+        assert.equal(calls.length, 1, model);
+        assert.deepEqual(calls[0].web_model_catalog, { models: [row] }, model);
+        assert.equal(calls[0].connection.allow_command_execution, false);
+      }
+    } finally { workflow.dispose(); }
+  }
 });
 
 test("AO WebGPT catalog names a tier the account no longer offers and keeps `available` from Codex", () => {

@@ -198,7 +198,7 @@ export function resolveChatGptWebContextLimits(
   } else if (effort === "low") {
     contextWindow = CHATGPT_WEB_INSTANT_CONTEXT_WINDOW;
     usableTokenLimit = CHATGPT_WEB_INSTANT_AUTO_COMPACT_TOKEN_LIMIT;
-  } else if (effort === "medium" || effort === "high" || (effort === "xhigh" && capabilities.extraHighAvailable)) {
+  } else if (effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") {
     contextWindow = CHATGPT_WEB_MEDIUM_HIGH_CONTEXT_WINDOW;
     usableTokenLimit = CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT;
   } else {
@@ -234,7 +234,7 @@ export function resolveChatGptWebTransportLimits(
     if (effort === "low") {
       return { browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT };
     }
-    if (effort === "medium" || effort === "high" || (effort === "xhigh" && capabilities.extraHighAvailable)) {
+    if (effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") {
       return { browserComposerCharLimit: CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT };
     }
     throw new Error(`ChatGPT Plus transport limit is not defined for unavailable effort: ${effort}`);
@@ -333,6 +333,8 @@ export interface ChatGptWebAccountCapabilities {
   /** Missing in older saved observations; setup must probe before exposing Extra High. */
   extraHighAvailable?: boolean;
   proAvailable: boolean;
+  /** Admission is deferred only to an owned native page, independently of account-sized budgets. */
+  deferUpperTierAdmission?: boolean;
   experimentalBiggerContext?: boolean;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;
@@ -630,8 +632,9 @@ export function chatGptWebRouteEfforts(
 }
 
 function solTierAvailable(index: number, capabilities: ChatGptWebAccountCapabilities): boolean {
-  if (index === 4) return capabilities.proAvailable;
-  if (index === 3) return capabilities.extraHighAvailable === true;
+  if (index === 4) return capabilities.proAvailable || capabilities.deferUpperTierAdmission === true;
+  if (index === 3) return capabilities.extraHighAvailable === true || capabilities.proAvailable
+    || capabilities.deferUpperTierAdmission === true;
   return true;
 }
 
@@ -742,6 +745,16 @@ export function requireChatGptWebModelRoute(
   }
   const route = routesBySlug.get(modelId);
   if (!route) throw new Error(`ChatGPT web model is not enabled: ${modelId}`);
+  if (route.interactionMode === "automatic" && !route.legacy && capabilities.browserInteractionMode !== "manual") {
+    if ((route.backendModel === CHATGPT_WEB_BACKEND_MODEL) !== capabilities.solAvailable) {
+      throw new Error(`ChatGPT web model is not enabled: ${modelId}`);
+    }
+    const effort = requestedRouteEffort(route, reasoning);
+    if (route.backendModel === CHATGPT_WEB_BACKEND_MODEL && !solTierAvailable(solTierIndex(effort), capabilities)) {
+      throw new Error(`ChatGPT web model is not enabled for this account: ${modelId}`);
+    }
+    return withEffort(route, effort);
+  }
   return servedChatGptWebModelRoute(route, capabilities, reasoning);
 }
 

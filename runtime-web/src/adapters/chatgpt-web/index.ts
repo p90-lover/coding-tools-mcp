@@ -298,7 +298,7 @@ function submittedTurnFailure(
       );
     }
   }
-  if (normalized instanceof ChatGptWebAdapterError) return normalized;
+  if (normalized instanceof ChatGptWebAdapterError && !normalized.retryable) return normalized;
   const phase = session.runtime.submission?.phase;
   if (!phase || phase === "prepared") return normalized;
   try {
@@ -1532,6 +1532,14 @@ export function createChatGptWebAdapter(
               toolWaitAbort.abort();
             }
              } catch (error) {
+              // Observer detach and request abort keep the existing ownership path below.
+              if (incoming.abortSignal?.aborted && error instanceof DOMException && error.name === "AbortError") {
+                throw error;
+              }
+              const submittedFailure = submittedTurnFailure(session, error, parsed, provider);
+              if (submittedFailure !== error) throw submittedFailure;
+              // Native retries own this budget; a fresh browser recovery must not multiply it.
+              if (error instanceof ChatGptWebAdapterError && error.retryable) throw error;
               if (!recoverableBrowserFailure(error) || incoming.abortSignal?.aborted) throw error;
               const traces = session.runtime.trace.drain();
               session.appendRoundReasoning(roundKey, traces.map(trace => trace.text));

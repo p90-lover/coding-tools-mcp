@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { defaultConfig } from "../src/config";
 import {
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
@@ -10,8 +11,8 @@ import {
   CHATGPT_WEB_LEGACY_MODEL_ROUTES,
   availableChatGptWebModelRoutes,
   chatGptWebRouteEfforts,
-  requireChatGptWebModelRoute,
   resolveChatGptWebContextLimits,
+  servedChatGptWebModelRoute,
 } from "../src/chatgpt-web-models";
 import { augmentNativeModelCatalog, buildChatGptWebModel } from "../src/model-catalog";
 
@@ -50,6 +51,40 @@ function source(): Record<string, unknown> {
 }
 
 describe("native /models augmentation", () => {
+  test.each([true, false])("AO catalog CLI wire preserves each Web row and its legacy first row (Sol=%s)", solAvailable => {
+    const native = source();
+    const config = { ...defaultConfig("full"), browserHost: "launcher" as const,
+      browserHostDescriptorPath: "G:/fixture/launcher.json", experimentalBiggerContext: true,
+      solAvailable, proAvailable: solAvailable, extraHighAvailable: solAvailable };
+    const cliSource = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    const start = cliSource.indexOf('    const bundled = runCommand(codex, ["debug", "models", "--bundled"]');
+    const end = cliSource.indexOf('\n  }\n  else if (command === "subagents")', start);
+    expect(start >= 0 && end > start).toBe(true);
+    const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(cliSource.slice(start, end));
+    let written = "";
+    new Function("codex", "runCommand", "augmentNativeModelCatalog", "loadConfig", "freshChatGptEffortTiers", "stdout", javascript)(
+      "G:/fixture/codex.exe", () => ({ status: 0, stdout: JSON.stringify(native) }),
+      augmentNativeModelCatalog, () => config, () => undefined, { write: (text: string) => { written += text; } },
+    );
+    const wire = JSON.parse(written) as { models: Array<Record<string, unknown>>; available: string[] };
+    const expected = (augmentNativeModelCatalog(native, config).models as Array<Record<string, unknown>>)
+      .filter(model => String(model.slug).startsWith("chatgpt-web/"));
+    expect(wire.models[0]?.slug).toBe(solAvailable ? "chatgpt-web/high" : "chatgpt-web/luna");
+    expect(wire.models.map(model => model.slug).sort()).toEqual(expected.map(model => model.slug).sort());
+    expect(wire.available).toEqual(expected.map(model => String(model.slug)));
+    for (const model of expected) expect(wire.models.find(row => row.slug === model.slug)).toEqual(model);
+    if (solAvailable) {
+      expect(wire.models.find(model => model.slug === "chatgpt-web/high")).toMatchObject({ context_window: 270_000 });
+      expect(wire.models.find(model => model.slug === "chatgpt-web/gpt-6-sol"))
+        .toMatchObject({ context_window: 120_000, auto_compact_token_limit: 93_840, default_reasoning_level: "high" });
+      const sol = wire.models.find(model => model.slug === "chatgpt-web/gpt-6-sol")!;
+      expect((sol.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
+        .toEqual(["medium", "high", "xhigh"]);
+      expect(wire.models.find(model => model.slug === "chatgpt-web/gpt-6-pro"))
+        .toMatchObject({ context_window: 270_000, auto_compact_token_limit: 204_255, default_reasoning_level: "max" });
+    }
+  });
+
   test("preserves native models, groups supported efforts, and retains hidden legacy metadata", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
@@ -154,11 +189,10 @@ describe("native /models augmentation", () => {
         });
       }
       for (const family of ["5.6", "6"]) {
-        // Without Pro the Pro rows run as that family's Sol and advertise its window.
-        const sol = models.find(model => model.slug === `chatgpt-web/gpt-${family}-sol`)!;
+        // Catalog estimates retain each named Pro route's own Max budget; admission is separate.
         expect(models.find(model => model.slug === `chatgpt-web/gpt-${family}-pro`)).toMatchObject(proAvailable
           ? { context_window: 336_579, auto_compact_token_limit: 243_178 }
-          : { context_window: sol.context_window, auto_compact_token_limit: sol.auto_compact_token_limit });
+          : { context_window: 270_000, auto_compact_token_limit: 204_255 });
       }
     }
   });
@@ -223,7 +257,7 @@ describe("native /models augmentation", () => {
     expect(spawnOverrides).toContain("gpt-5.6-sol");
   });
 
-  test("owns only its namespace, is idempotent, and lists Pro-only modes at their fallback window", () => {
+  test("owns only its namespace, is idempotent, and keeps named and legacy model metadata", () => {
     const config = defaultConfig("browser-only");
     config.subagentProtocol = "native";
     config.proAvailable = false;
@@ -237,7 +271,7 @@ describe("native /models augmentation", () => {
     const second = augmentNativeModelCatalog(first, config);
     const models = second.models as Array<Record<string, unknown>>;
     const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
-    // Pro rows stay listed and advertise the window of the tier they run at without Pro.
+    // Pro metadata remains listed; its account admission is checked when a turn starts.
     expect(web.map(model => model.slug)).toEqual([
       ...CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug),
       ...CHATGPT_WEB_LEGACY_MODEL_ROUTES.map(route => route.slug),
@@ -340,8 +374,9 @@ describe("native /models augmentation", () => {
     expect(models[1]!.context_window).toBe(300_000);
     expect(models[1]!.auto_compact_token_limit).toBe(270_000);
     for (const [index, model] of models.slice(3).entries()) {
-      // A tier the account lacks is advertised at the window of the tier that serves it.
-      const route = requireChatGptWebModelRoute(availableChatGptWebModelRoutes(config, true)[index]!.slug, config);
+      const requested = availableChatGptWebModelRoutes(config, true)[index]!;
+      const route = requested.interactionMode === "automatic" && requested.legacy
+        ? servedChatGptWebModelRoute(requested, config) : requested;
       const limits = resolveChatGptWebContextLimits(
         route.backendModel,
         route.adapterEffort,

@@ -21,7 +21,7 @@ import { CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL } from "../src/chatgpt-web-models";
 import { defaultBrokerEndpoint } from "../src/config";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../src/types";
 
-const testTempRoot = process.platform === "win32" ? tmpdir() : "/tmp";
+const testTempRoot = tmpdir();
 const root = mkdtempSync(join(testTempRoot, "cgw-zero-risk-adapter-"));
 afterAll(() => {
   chatGptTurnSessions.clear();
