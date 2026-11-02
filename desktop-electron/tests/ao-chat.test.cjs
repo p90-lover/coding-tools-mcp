@@ -485,7 +485,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   const component = {};
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   const jsx = (type, props) => ({ type, props: props || {} });
-  const react = { useMemo: calculate => calculate(), useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
+  const react = { useMemo: calculate => calculate(), useCallback: callback => callback, useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
     createContext: value => ({ Provider: ({ children }) => children, value }), useContext: context => context.value,
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
   const replyHead = {};
@@ -504,6 +504,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
       : name === "./ChatReplyHead" ? replyHead
       : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView
       : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
+      : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: text => text }
       : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
         TurnRestart: react.createContext({ restarting: false }) } : {},
@@ -1171,8 +1172,11 @@ function rendererCallback(file, name, globals) {
   const text = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8");
   const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let body;
+  const jsx = /^jsx:([^.]+)\.(.+)$/.exec(name);
   const visit = node => {
     if (ts.isVariableDeclaration(node) && node.name.getText(tree) === name) body ??= node.initializer;
+    if (jsx && ts.isJsxAttribute(node) && node.name.getText(tree) === jsx[2]
+      && node.parent.parent.tagName?.getText(tree) === jsx[1]) body ??= node.initializer?.expression;
     const hook = name.startsWith("layout:") ? "useLayoutEffect" : "useEffect";
     if ((name.startsWith("effect:") || name.startsWith("layout:")) && ts.isCallExpression(node) && node.expression.getText(tree) === hook
       && node.arguments[0]?.getText(tree).includes(name.slice(7))) body ??= node.arguments[0];
@@ -1186,6 +1190,36 @@ function rendererCallback(file, name, globals) {
   return exports.callback;
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
+
+for (const changedWhileSaving of [false, true]) test(`markup replacement preserves eight attachments${changedWhileSaving ? " after another attachment changes during saving" : ""}`, async () => {
+  const initial = Array.from({ length: 8 }, (_, index) => ({ name: `image-${index}.png`, path: `G:/fixtures/image-${index}.png`, image: true, preview: `blob:image-${index}` }));
+  const source = initial[3], saved = delayedReply(), updates = [], saves = [];
+  const result = { bytes: new Uint8Array([1]), preview: "blob:marked-image", prompt: "Marked instructions" };
+  const setAttachments = update => updates.push(update);
+  const addMarkup = rendererCallback("AgentOrchestratorChat.tsx", "addMarkup", {
+    useCallback: callback => callback, setAttachments, saver: { current: input => { saves.push(input); return saved.promise; } },
+  });
+  const onMarkup = rendererCallback("AgentOrchestratorChat.tsx", "jsx:ImagePreviewDialog.onMarkup", {
+    saveAttachment: true, attachments: initial, previewing: 3, addMarkup, setAttachments,
+  });
+  let current = initial;
+  const submitting = onMarkup(result);
+  try {
+    assert.equal(saves.length, 1);
+    assert.equal(saves[0].bytes, result.bytes);
+    assert.equal(updates.length, 0, "saving must succeed before changing the attachment list");
+    if (changedWhileSaving) current = [...initial.slice(1), { name: "new-file.txt", path: "G:/fixtures/new-file.txt" }];
+    const others = current.filter(item => item !== source);
+    saved.resolve({ path: "G:/fixtures/markup.png" });
+    await submitting;
+    for (const update of updates) current = update(current);
+    assert.equal(current.length, 8, "replace the original before applying the eight-attachment limit");
+    assert.equal(updates.length, 1, "replacement is one atomic functional state update");
+    assert.equal(current.includes(source), false);
+    for (const item of others) assert.equal(current.filter(value => value === item).length, 1, "every other attachment stays exactly once");
+    assert.deepEqual(plain(current.filter(item => item.name === "Markup")), [{ name: "Markup", path: "G:/fixtures/markup.png", image: true, preview: result.preview, markup: result.prompt }]);
+  } finally { saved.resolve({ path: "G:/fixtures/markup.png" }); await Promise.allSettled([submitting]); }
+});
 
 test("a split pane acknowledges parent selection before reporting its own chat, then reports its first send", () => {
   for (const requested of [{ workspaceId: "ws", taskId: "" }, { workspaceId: "ws", taskId: "task-b" }, { workspaceId: "other", taskId: "task-b" }]) {

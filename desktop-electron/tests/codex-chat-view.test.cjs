@@ -66,7 +66,7 @@ function mount(props) {
       if (!(at in states)) states[at] = typeof initial === "function" ? initial() : initial;
       return [states[at], (value) => { states[at] = typeof value === "function" ? value(states[at]) : value; }];
     },
-    useMemo: (calculate) => calculate(), useEffect() {},
+    useMemo: (calculate) => calculate(), useCallback: (callback) => callback, useEffect() {},
     useRef(initial) {
       const states = frames.get(frame) ?? frames.set(frame, []).get(frame);
       const at = cursor++;
@@ -106,6 +106,7 @@ function mount(props) {
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
           : name === "./AgentOrchestratorRoleEditor" ? { modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
           : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
+          : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: (text) => text }
           : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
             // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),

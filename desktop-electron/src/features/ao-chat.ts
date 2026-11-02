@@ -1838,6 +1838,8 @@ export type ChatAttachment = {
   name: string; path?: string; text?: string; image?: boolean;
   /** The chat box's thumbnail (an object URL of the file); never sent. */
   preview?: string;
+  /** An image marked up in the preview: its pin lines, sent ahead of the message (Codex's order). */
+  markup?: string;
 };
 
 /** Attachments appended to the message: a file path agents read themselves, or a small text file inline. */
