@@ -1,7 +1,7 @@
 # Tasks: configurable chat pages
 
 ## 交付物清单 / Scope and evidence
-Eleven implementation/test paths are expected, plus these three specification files. Keep new production modules below 350 lines each and integrate into existing large components with small changes.
+Twelve implementation/test paths are expected, plus these three specification files. Keep new production modules below 350 lines each and integrate into existing large components with small changes.
 Current evidence: App.tsx:1031 mounts one AgentOrchestratorSurface. Surface:1888 holds its split panes; :2014 and :2023 persist one SPLIT_STORE. ChatSettingsPage:115 exposes the existing Settings primitives. page-visibility.ts exports the hidden-screen context and hook. No existing renderer shortcut parser or page store was found.
 
 ## 任务列表 / Tasks
@@ -29,6 +29,8 @@ Current evidence: App.tsx:1031 mounts one AgentOrchestratorSurface. Surface:1888
 The implementation and test files are enumerated in design.md under 文件结构. These three specification documents are the remaining delivery artifacts. Existing large components retain their current structure; only page integration and hidden-page guards are added.
 
 ## Verification
+The model-tuning fixture's 12 additional checks also pass after updating its legacy page-context mock.
+
 The focused Node group covers 431 checks, including production callback regressions for removed projects, late hidden restores and hidden retention scans. Renderer TypeScript checking passes. A disposable Electron renderer using the actual components and fixture backend verifies drafts across pages, default and rebound keys, navigation toggles, wheel scoping and throttling, owner-page reuse, removed-project recovery and the tab bar at 640 px. It does not exercise the installed app or live providers.
 
 The shared October 1 graph index is stale. A local refresh failed in native code, its bounded single-worker retry timed out, and both CLI and explicit-worktree change-analysis attempts failed to return results. Current source callers and ownership flows were reviewed directly; these failures are not a clean graph check. The delivery PR records this remaining verification limit.
