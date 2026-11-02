@@ -2242,6 +2242,28 @@ test("a tool title with a path reads by its file name in the folded line, never 
   assert.equal(chat.activitySummary([read("a", "C:/x/skills/a.md"), read("b", "C:/y/b.md")]), "Read a.md, Read b.md");
 });
 
+test("a turn's own message gets a receipt: sending until an agent takes it, then unread, then read", () => {
+  const now = 10 * 3_600_000;
+  const card = (state, extra = {}, runExtra = {}) => [run("r1", "t", [node("w", "worker", state, { route: { harness_id: "ao:claude-code", model: "cpa/gpt-6.1-sol" }, ...extra })],
+    { execution_mode: "single", ...runExtra })];
+  const receipt = (runs, live, frame) => {
+    const turn = chat.chatTurns(runs, "keep going", { activity: frame ? { "r1:w": frame } : {}, now }).at(-1);
+    return chat.turnReceipt(turn, turn.steps.flatMap((step) => step.working?.timeline ?? []), live);
+  };
+  // Seen live 2026-11-02: AO held the turn queued for 7 minutes while a fresh agent came up.
+  assert.equal(receipt(card("running", { receipt: { thread_id: "s" } }), true, { activity: "waiting for the agent to take the message", turn_started: false }), "sending");
+  assert.equal(receipt(card("reserved"), true, { activity: "launching" }), "sending", "no agent session yet");
+  assert.equal(receipt(card("running", { receipt: { thread_id: "s" } }), true, { activity: "waiting for the model", turn_started: true }), "unread");
+  const wrote = { activity: "thinking", turn_started: true, timeline: [{ id: "r", kind: "reasoning", status: "running", text: "" }] };
+  assert.equal(receipt(card("running", { receipt: { thread_id: "s" } }), true, wrote), "read");
+  assert.equal(receipt(card("finished", { receipt: { answer: "Opened the PR." } }), false), "read");
+  // A retried card shows its earlier reply until the new attempt writes: that reply never read this message.
+  const retried = card("running", { receipt: { thread_id: "s2" }, history: [{ receipt: { answer: "Earlier answer" } }] });
+  assert.equal(receipt(retried, true, { activity: "waiting for the model", turn_started: true }), "unread");
+  // A turn stopped before its model wrote anything may never have been read.
+  assert.equal(receipt(card("running", { receipt: { thread_id: "s" } }, { cancelled: true }), false), undefined);
+});
+
 test("a steer reads as Claude Code's receipt: unread until the model's next request, read after", () => {
   const at = (kind, id = kind) => ({ id, kind, status: "completed", text: kind === "steer" ? "use the other API" : "" });
   const receipt = (items, finished = false) => chat.steerReceipts(items, finished).find((item) => item.kind === "steer").receipt;

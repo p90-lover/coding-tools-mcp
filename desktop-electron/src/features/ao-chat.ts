@@ -197,6 +197,23 @@ export function steerReader(step: Pick<ChatStep, "reader" | "detail"> | undefine
   return !harness || /^claude code$/i.test(harness) ? "Claude" : harness;
 }
 
+/**
+ * The read receipt on a turn's own message, as a steer has one: "sending" while it is on its way to
+ * an agent (launching, or AO's turn still queued), "unread" once an agent has it but its model has
+ * written nothing, "read" once the model has answered with anything. `items` is the turn's work so
+ * far (every card's timeline), `live` whether the turn is still running.
+ */
+export function turnReceipt(turn: ChatTurn, items: ChatLiveItem[], live: boolean): SteerReceipt | undefined {
+  if (turn.status === "done" || items.some((item) => MODEL_OUTPUT_KINDS.has(item.kind))) return "read";
+  // Only a finished card's answer counts: a retried card shows its earlier attempt's reply until
+  // the new attempt writes, and that reply was not written with this message in hand.
+  const cards = [...turn.steps, ...(turn.final ? [turn.final] : [])];
+  if (cards.some((step) => step.state === "finished" && step.text)) return "read";
+  // A turn that ended before its model wrote anything may never have been read: no mark.
+  if (!live) return undefined;
+  return cards.some((step) => step.working?.taken) ? "unread" : "sending";
+}
+
 /** A model's name for its read receipt; a Claude model keeps "Claude", which its short label drops. */
 function modelReader(model: string, modelName?: (model: string) => string): string {
   const label = modelName?.(model) || model.slice(model.lastIndexOf("/") + 1).replace(/\([^)]*\)$/, "");
@@ -944,8 +961,11 @@ export type ChatStep = {
   text?: string;
   verdict?: string;
   error?: string;
-  /** For a working card: runtime, current step and when it was last heard. */
-  working?: { detail: string; stalled: boolean; activity?: string; timeline?: ChatLiveItem[]; heardAtMs?: number };
+  /**
+   * For a working card: runtime, current step and when it was last heard. `taken`: its agent has the
+   * turn's message (AO started the turn); false while the agent is still coming up or busy.
+   */
+  working?: { detail: string; stalled: boolean; activity?: string; timeline?: ChatLiveItem[]; heardAtMs?: number; taken?: boolean };
   startedAtMs?: number;
   /** When the card's turn ended (Unix ms); cards saved before builds that kept it have none. */
   finishedAtMs?: number;
@@ -1102,7 +1122,7 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     // person's to answer, and "waiting for approval" with no request shown read as stuck on them.
     const reviewing = /^the reviewer is checking/i.test(textOf(live?.activity));
     step.working = { ...working, ...(asking && !reviewing ? { activity: "waiting for approval" } : live?.activity ? { activity: textOf(live.activity) } : {}),
-      ...(timeline.length ? { timeline } : {}) };
+      ...(timeline.length ? { timeline } : {}), ...(typeof live?.turn_started === "boolean" ? { taken: live.turn_started } : {}) };
     // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
     const earlier = copiesEarlier ? latestHistoryAnswer(node) : undefined;
     if (!step.text && earlier && !timeline.some((item) => item.kind === "message")) {

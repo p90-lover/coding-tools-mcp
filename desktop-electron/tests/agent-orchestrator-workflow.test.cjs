@@ -2689,10 +2689,11 @@ test("activity reports each working card's runtime and current step without adva
   // "Approve for me": the reviewer answers this card's requests, so it is not waiting on the person.
   const reviewed = { ...agent, id: "w6", route: { ...agent.route, approval_policy: "on-request", approvals_reviewer: "auto_review" },
     receipt: { status: "submitted", thread_id: "sess-6" } };
+  const queued = { ...agent, id: "w7", receipt: { status: "submitted", thread_id: "sess-7" } };
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async (endpoint, body) => {
       calls.push(endpoint);
-      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking, reviewed] }] };
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking, reviewed, queued] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
         return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN npm run task-runner sk-abcdefghijklmnopqrst1234" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
@@ -2705,13 +2706,15 @@ test("activity reports each working card's runtime and current step without adva
       // AO marks the session needs_input while a permission request waits: the card names the command.
       : session === "sess-5" ? { turnState: "running", turnId: "t-5", needsInput: true, approvals: [{ approval_id: "r1", kind: "command", command: "npm run build", tool: "Bash" }] }
       : session === "sess-6" ? { turnState: "running", turnId: "t-6", needsInput: true, approvals: [{ approval_id: "r2", kind: "command", command: "Get-CimInstance Win32_Process", tool: "PowerShell" }] }
+      // AO took the message but no agent has it yet (a fresh one still coming up).
+      : session === "sess-7" ? { turnState: "queued", turnId: "t-7" }
       : { turnState: "running", turnId: "t-3" } },
     confirm: async () => true,
   });
   await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   await new Promise(resolve => setImmediate(resolve));
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
-  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5", "w6"], "only working cards");
+  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5", "w6", "w7"], "only working cards");
   assert.equal(result.nodes.w5.activity, "waiting for approval: npm run build");
   // Seen live: "waiting for approval" for the two minutes a review took, with nothing to answer.
   assert.equal(result.nodes.w6.activity, "the reviewer is checking: Get-CimInstance Win32_Process");
@@ -2726,6 +2729,10 @@ test("activity reports each working card's runtime and current step without adva
   // An AO card says what its turn is doing, not just "running": waiting on the model, or the command
   // it runs with that command's own timeout.
   assert.equal(result.nodes.w3.activity, "waiting for the model");
+  assert.equal(result.nodes.w3.turn_started, true);
+  // Seen live 2026-11-02: 7 minutes of "waiting for the model" while AO's turn sat queued.
+  assert.equal(result.nodes.w7.activity, "waiting for the agent to take the message");
+  assert.equal(result.nodes.w7.turn_started, false, "a queued turn has not started: it can read as stuck");
   assert.equal(result.nodes.w4.activity, "running python -m pytest tests -q (timeout 5m)");
   assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });

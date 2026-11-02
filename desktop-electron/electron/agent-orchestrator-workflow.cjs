@@ -2122,6 +2122,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }
     if (live.some(item => item.kind === "reasoning" || item.kind === "thinking")) return "thinking";
     if (live.some(item => item.kind === "message")) return "writing the reply";
+    // AO opens a turn when it takes the message and starts it once an agent has it. A queued turn
+    // waits for its agent, not the model: seen live 2026-11-02, two fresh agents took 7 minutes to
+    // come up while the chat said "waiting for the model", and the model then answered in 7 s.
+    if (observed.turnId && observed.turnState === "queued") return "waiting for the agent to take the message";
     return observed.turnId ? "waiting for the model" : "waiting for the turn to start";
   }
 
@@ -2168,7 +2172,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session);
                 const observed = await harnessService().observe(session, expectedTurn);
                 const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
-                frame = { ...base, turn_started: Boolean(observed.turnId),
+                // Started: an agent took the message (AO starts the turn only then; see describeTurn).
+                frame = { ...base, turn_started: Boolean(observed.turnId) && observed.turnState !== "queued",
                   activity: currentTurn ? describeTurn(observed, { mission, node }) : observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
                   step: publicText(observed.activity || observed.turnState || "working", 120),
                   output: currentTurn ? publicText(observed.liveOutput ?? observed.answer) : "",
