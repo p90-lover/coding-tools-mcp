@@ -44,7 +44,7 @@ const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
-const { createConfiguredConnector, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
+const { createConfiguredConnector, currentConnectorSettings, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
 const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
@@ -3055,8 +3055,8 @@ function registerIpc({ logger, stateStore }) {
     const operationBrowser = browserHost, operationPartition = operationBrowser?.partition;
     const extraTunnels = runtimeSupervisor?.extraTunnels;
     const tunnel = extraTunnels?.status().find(entry => entry.accountId === accountId);
-    const id = tunnel?.id, tunnelId = tunnel?.tunnelId;
-    const missingTunnel = new Error("Assign an existing account-owned MCP tunnel in More tunnels, then retry this account.");
+    const id = tunnel?.id;
+    let primarySettings = null, tunnelId = tunnel?.tunnelId;
     let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
       if (runtimeHost.currentOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
@@ -3069,14 +3069,25 @@ function registerIpc({ logger, stateStore }) {
       if (!connectorConfirmed && (operationBrowser.activeTraceId || (operation && (!creating || operation !== "MCP connector creation")))) {
         throw new Error("MCP connector setup is busy");
       }
-      if (!id) throw missingTunnel;
-      if (!extraTunnels.status().some(current => current.id === id && current.accountId === accountId
-        && current.tunnelId === tunnelId && (!requireReady || current.state === "ready"))) {
+      if (tunnel ? !id || !extraTunnels.status().some(current => current.id === id && current.accountId === accountId
+        && current.tunnelId === tunnelId && (!requireReady || current.state === "ready"))
+        : extraTunnels?.status().some(current => current.accountId === accountId)) {
         throw new Error("The account's MCP tunnel changed or is not ready.");
+      }
+      if (!tunnel) {
+        const current = currentConnectorSettings(runtimeHost);
+        if (current.name !== primarySettings.name || current.tunnelId !== tunnelId) {
+          throw new Error("The MCP configuration changed during setup.");
+        }
       }
     };
     publishOperation({ name: "mcp-connector-create", status: "running", message: "Connecting this account's MCP connector" });
     try {
+      // The main tunnel is a candidate; the helper must still prove its fresh account/workspace ownership.
+      if (!tunnel) {
+        primarySettings = currentConnectorSettings(runtimeHost);
+        tunnelId = primarySettings.tunnelId;
+      }
       assertCurrent();
       await runtimeStartupInFlight;
       assertCurrent();
@@ -3089,7 +3100,7 @@ function registerIpc({ logger, stateStore }) {
       }
       await routeIdleAccountPartition(partition, logger);
       assertCurrent();
-      if (tunnel.state !== "ready") {
+      if (tunnel && tunnel.state !== "ready") {
         await extraTunnels.reconnect(id);
         assertCurrent();
       }
@@ -3115,14 +3126,14 @@ function registerIpc({ logger, stateStore }) {
           }
           return candidates;
         },
-        target: { partition, requireTunnelMatch: true, tunnelId, connectorBindings: tunnel.connectorBindings },
+        target: { partition, requireTunnelMatch: true, tunnelId, connectorBindings: tunnel?.connectorBindings },
         });
       } finally { creating = false; }
       if (result.connected !== true || result.binding?.tunnelId !== tunnelId) throw new Error("ChatGPT did not confirm the exact connector state.");
       // The helper has released browser admission; new work cannot undo its verified connection.
       connectorConfirmed = true;
       assertCurrent();
-      await extraTunnels.setConnector(id, result.href, result.binding);
+      if (tunnel) await extraTunnels.setConnector(id, result.href, result.binding);
       assertCurrent();
       const recorded = await browserAccounts.recordConnector(accountId, { bound: true });
       assertCurrent();
@@ -3130,7 +3141,7 @@ function registerIpc({ logger, stateStore }) {
       publishOperation({ name: "mcp-connector-create", status: "completed", message: "This account's MCP connector is connected" });
       return result;
     } catch (error) {
-      const failure = error === missingTunnel ? { code: "configuration_required", message: missingTunnel.message } : mcpConnectorCommandFailure(error);
+      const failure = mcpConnectorCommandFailure(error);
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
