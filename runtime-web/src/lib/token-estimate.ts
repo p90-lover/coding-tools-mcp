@@ -25,6 +25,8 @@ export function estimateTokens(text: string, modelId?: string): number {
   if (!text) return 0;
 
   const encoding = chatGptTokenizer();
+  // Long padding/code runs often contain identical chunks. Reuse exact chunk counts
+  // within this call only; never retain prompt text between requests.
   const chunkTokenCounts = new Map<string, number>();
   let count = 0;
   for (let start = 0; start < text.length;) {

@@ -21,7 +21,8 @@ const trail = (root: string): string[] => {
   if (!existsSync(root)) return [];
   const [trace] = readdirSync(root);
   if (!trace) return [];
-  return readdirSync(join(root, trace)).sort()
+  // Dotfiles (the diagnostic history's .trace-state) are bookkeeping, not checkpoints.
+  return readdirSync(join(root, trace)).filter(name => !name.startsWith(".")).sort()
     .map(name => JSON.parse(readFileSync(join(root, trace, name), "utf8")).checkpoint as string);
 };
 

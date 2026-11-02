@@ -9,7 +9,7 @@ test('uses Coding Tools identities without impersonating upstream', () => {
   assert.deepEqual(PRODUCT_IDENTITY, {
     appId: 'dev.codingtools.fullharness',
     productName: 'Coding Tools',
-    version: '0.8.56',
+    version: '0.8.58',
     protocolVersion: 1,
     connectorName: 'Coding Tools Native2',
     devConnectorName: 'Coding Tools Native2 DEV',
@@ -24,7 +24,7 @@ test('materialized workspaces retain an exact upstream mapping', () => {
   const mapping = JSON.parse(fs.readFileSync(mappingPath, 'utf8'));
   assert.equal(mapping.schema, 1);
   assert.equal(mapping.upstream.repository, 'miuuyy/codex-chatgpt-web');
-  assert.equal(mapping.upstream.commit, 'e85e3693fdb4e3e033348c08df0298c20fcdb612');
+  assert.equal(mapping.upstream.commit, '860fa576eb47d9e20d7d8289235bfea94392d2fd');
   assert.ok(mapping.launcherFiles > 20);
   assert.ok(mapping.runtimeFiles > 100);
   assert.equal(mapping.deletedFiles, 0);

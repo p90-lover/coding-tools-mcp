@@ -73,7 +73,7 @@ const SPECS = Object.freeze({
   chat_model_judges: { readOnly: false, description: "Read or set \"Let the model judge\": requests the command reviewer would hand to you, and goal rounds that end needing you or failed, are judged by the model, which may also end the goal." },
   chat_auto_compact: { readOnly: false, description: "Read or store legacy task-record auto-compact preferences for compatibility. These do not control agent token-context compaction or hard-limit task-record rollover." },
   compact_chat: { readOnly: false, description: "Compact the settled chat's owned live agent session (/compact). Acceptance is pending until the provider confirms completion; task history stays unchanged." },
-  chat_delete_message: { readOnly: false, description: "Delete one message of a settled chat with its reply: the message leaves the task, its run is hidden from the chat, and the next turn starts a fresh agent session." },
+  chat_delete_message: { readOnly: false, description: "Delete one message of a settled chat with its reply. Requires sourceDescription: the exact task description used for the message index; reload if it changed. Its run is hidden and the next turn starts a fresh agent session." },
   chat_diff: { readOnly: true, description: "Read the project's uncommitted git changes (/diff)." },
   codex_executable: { readOnly: true, description: "Locate the installed Codex desktop app's codex.exe used to run missions." },
   chat_processes: { readOnly: true, description: "List the commands a chat's agents started through the app's terminal (the chat's Terminal pane), with whether each still runs." },

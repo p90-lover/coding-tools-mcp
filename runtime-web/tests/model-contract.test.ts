@@ -3,7 +3,7 @@ import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModel
 import type { CodexParsedRequest } from "../src/types";
 
 test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes", () => {
-  const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
+  const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "low", capabilities)).toMatchObject({
     displayLabel: "Instant",
     uiEffortIndex: 0,
@@ -31,32 +31,32 @@ test("capabilities gate tools and Pro-only efforts explicitly without changing t
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "high", {
     localToolsEnabled: false,
     solAvailable: true,
-    proAvailable: true,
+    extraHighAvailable: true, proAvailable: true,
   })).toMatchObject({ localTools: false });
   expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", {
     localToolsEnabled: false,
     solAvailable: true,
-    proAvailable: false,
+    extraHighAvailable: false, proAvailable: false,
   })).toThrow("Pro effort is not available");
   expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "xhigh", {
     localToolsEnabled: true,
     solAvailable: true,
-    proAvailable: false,
+    extraHighAvailable: false, proAvailable: false,
   })).toThrow("Extra High effort is not available");
   expect(() => resolveChatGptWebModelMode("unknown", "high", {
     localToolsEnabled: false,
     solAvailable: true,
-    proAvailable: true,
+    extraHighAvailable: true, proAvailable: true,
   })).toThrow("model is not supported");
   expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "turbo", {
     localToolsEnabled: false,
     solAvailable: true,
-    proAvailable: true,
+    extraHighAvailable: true, proAvailable: true,
   })).toThrow("effort is not supported");
 });
 
 test("only an owned native launcher thread defers the current account's capability gates", () => {
-  const configured = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
+  const configured = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
   const browser = { browserHost: "launcher" as const, browserHostDescriptorPath: "G:/fixture/launcher.json" };
   const parsed: CodexParsedRequest = {
     modelId: CHATGPT_WEB_MODEL_ID, stream: false, context: { messages: [] }, options: { reasoning: "xhigh" },
@@ -88,7 +88,7 @@ test("Luna-only capability binds the default model without a UI effort selector"
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_LUNA_MODEL_ID, "low", {
     localToolsEnabled: true,
     solAvailable: false,
-    proAvailable: false,
+    extraHighAvailable: false, proAvailable: false,
   })).toEqual({
     modelId: CHATGPT_WEB_LUNA_MODEL_ID,
     effort: "low",
@@ -100,7 +100,7 @@ test("Luna-only capability binds the default model without a UI effort selector"
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_LUNA_MODEL_ID, "medium", {
     localToolsEnabled: true,
     solAvailable: false,
-    proAvailable: false,
+    extraHighAvailable: false, proAvailable: false,
   })).toEqual({
     modelId: CHATGPT_WEB_LUNA_MODEL_ID,
     effort: "medium",
@@ -112,6 +112,6 @@ test("Luna-only capability binds the default model without a UI effort selector"
   expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "low", {
     localToolsEnabled: false,
     solAvailable: false,
-    proAvailable: false,
+    extraHighAvailable: false, proAvailable: false,
   })).toThrow("Luna-only account");
 });

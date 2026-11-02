@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-web",
-  "version": "5.0.6",
+  "version": "6.1.17",
   "private": true,
   "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT web session.",
   "repository": {
@@ -41,6 +41,7 @@
     "smoke:interrupt": "bun run scripts/smoke-codex-interrupt.ts",
     "smoke:subagents": "bun run scripts/smoke-codex-subagents.ts --v1 && bun run scripts/smoke-codex-subagents.ts --v2",
     "smoke:subagents:live": "bun run scripts/smoke-codex-web-subagents.ts",
+    "smoke:environment": "bun run scripts/smoke-codex-environment.ts",
     "launcher": "bun run scripts/start-launcher.ts",
     "app": "bun run scripts/start-launcher.ts",
     "app:package": "bun run --cwd launcher package",
@@ -53,13 +54,14 @@
     "verify": "bun run scripts/verify.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@mixmark-io/domino": "2.2.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "chromium-bidi": "12.1.0",
     "fflate": "^0.8.3",
     "playwright-core": "^1.64.1",
     "tiktoken": "1.0.22",
+    "toml-eslint-parser": "1.0.3",
     "turndown": "7.2.4",
     "turndown-plugin-gfm": "1.0.2",
     "zod": "4.6.7"
@@ -74,10 +76,12 @@
   },
   "overrides": {
     "@hono/node-server": "2.1.5",
+    "body-parser": "2.4.0",
     "fast-uri": "3.1.9",
-    "hono": "4.13.13",
-    "ip-address": "10.7.4",
-    "qs": "6.16.1",
+    "hono": "4.13.16",
+    "ip-address": "10.7.5",
+    "proxy-addr": "2.0.8",
+    "qs": "6.17.1",
     "zod-to-json-schema": "3.25.2"
   },
   "keywords": [

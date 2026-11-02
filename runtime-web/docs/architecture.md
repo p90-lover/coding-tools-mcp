@@ -21,13 +21,23 @@ launcher-owned codex-chatgpt-web daemon
 
 ### `browser-only`
 
-- Exposes Instant (`chatgpt-web/light`), Medium, High, Extra High and Pro; each model advertises
-  exactly one immutable Codex effort matching its ChatGPT browser mode. Every Sol turn reads the
-  effort slider's ticks in passing (never stepping it) and so do setup and sign-in; the result lives
-  in `runtime/chatgpt-account-capabilities.json` for 24 hours. While it is fresh, `/v1/models`,
-  `/router/v1/models` and `catalog ao-web` list only the tiers whose ticks are unlocked; otherwise
-  the static list stays. Ids never change, and a hidden tier still selected in Codex runs at the
-  nearest lower tier.
+- Exposes `GPT-5.6 Luna (Web)` with ordinary/Think effort on Luna-only accounts. Sol-capable accounts
+  get `GPT-5.6 Sol Instant (Web)` and `GPT-5.6 Sol (Web)` with Medium/High and available Extra High.
+  Pro-capable accounts also get separate `GPT-5.6 Pro (Web)` and `GPT-6 Pro (Web)` rows.
+- Instant retains its own context budget. Grouped efforts must have identical context and compaction
+  limits; catalog generation rejects a mismatch rather than reducing a budget. Pro rows use the
+  native `max` effort; `ultra` is not used for new rows because Codex transforms it before transport.
+- Named Sol/Pro routes select the exact browser family and verify it again before every Send.
+  Latest must identify version 6 for a GPT-6 Pro response. Its existing lower-effort multipart
+  acknowledgements identify 5.6, then the final part returns to verified 6 Pro. No version fallback.
+- Pre-6.0 slugs remain hidden catalog entries with their original fixed bindings, including the
+  unpinned `chatgpt-web/pro`. They keep old tasks and cached selections working. The existing release
+  upgrade reruns integration setup and invalidates the model cache; Codex must restart for the new
+  picker. Native models and existing context/compaction budgets are preserved.
+- Every Sol turn reads the effort slider's ticks in passing (never stepping it), and so do setup and
+  sign-in; the result lives in `runtime/chatgpt-account-capabilities.json` for 24 hours. While it is
+  fresh, the model lists show only the tiers whose ticks are unlocked. A hidden tier still selected
+  in Codex runs at the nearest lower tier.
 - Sends the complete Codex context and image attachments to a fresh ChatGPT chat (saved in ChatGPT
   history by default; Temporary Chat when **Save chats in ChatGPT** is off).
 - Never starts the broker, tunnel, or MCP server.
@@ -35,7 +45,7 @@ launcher-owned codex-chatgpt-web daemon
 
 ### `full`
 
-- Exposes the same fixed models and attaches the turn-bound connector capability to every available
+- Exposes the same models and attaches the turn-bound connector capability to every available
   effort, from Luna through Pro. There are no effort-specific MCP exclusions.
 - ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call presents one outer Codex turn capability; the MCP server keeps the derived
@@ -75,16 +85,28 @@ probe. The DEV launcher supervisor owns only the isolated MCP tunnel. Browser di
 state, thread authority, checkpoints, and named chat state live
 under `~/.codex-chatgpt-web-dev` by default.
 
-The ChatGPT connector name is also the public MCP ABI identity. The direct turn-token contract uses
-`Codex Native2`; the retired `Codex Native` identity is never selected or refreshed in place. Setup
-migrates known legacy local configuration to the new name, clears prior verification state, and
+The direct turn-token contract defaults to `Codex Native2`; the retired `Codex Native` identity is
+never selected or refreshed in place. Setup migrates known legacy local configuration to the new name, clears prior verification state, and
 requires the user to create the new connector. Browser verification accepts the exact new identity,
 reports a specific migration error when only the legacy identity is visible, and never falls back to
 the legacy connector. Future public schema changes require another explicit connector identity.
 Repository DEV mode uses `Codex Native2 DEV` so the same ChatGPT account can keep both production
 and development connectors installed without renaming, refreshing, or deleting either one.
 
+Settings fixes only the `Codex ` prefix and edits the rest of the selected mode's name: `Native2`
+by default in Automatic, `Zero Risk` in manual mode, and `Native2 DEV` in Automatic DEV. Mode names
+are stored independently and must differ. Setup preserves them across upgrades and mode changes.
+A name change uses the existing setup transaction, rejects active work, and clears MCP verification
+only after success. The user must create a new plugin with that exact name. Renaming a display
+label does not itself replace a remote connector's cached schema; legacy connectors are still never reused.
+
 ## Browser lifecycle
+
+ChatGPT DOM contracts live in [`src/chatgpt-ui`](../src/chatgpt-ui/README.md), grouped
+by composer, model picker and turn renderer. Each component records its historical
+evidence and regression coverage. Model policy and turn ownership remain outside
+that layer. Diagnostic checkpoints identify observed structural variants without
+copying message content; a variant's age never selects or retires it automatically.
 
 The desktop launcher owns one persistent Electron partition and up to five task-bound browser
 tabs. Each task/model/effort/compaction epoch owns one exact `WebContentsView` lease; sequential
@@ -106,7 +128,7 @@ logical identities fail explicitly; accepted messages are never resent to repair
 Sign-in uses that same persistent Electron partition. ChatGPT login pages and allowed identity-
 provider popups are adopted into a temporary `WebContentsView` inside the launcher instead of being
 redirected to another browser. After the provider returns to ChatGPT, the launcher requires both a
-server-authenticated session and the Temporary Chat composer in the primary owned view, then closes
+server-authenticated session and a new ordinary chat composer in the primary owned view, then closes
 the temporary auth view. There is no browser-profile handoff, cookie import, CDP login port, or
 temporary session-transfer directory.
 
@@ -121,9 +143,10 @@ the installed catalog, and requires a Codex restart. Zero Risk never reads or mu
 For a new ChatGPT chat the adapter provides the complete compiled prompt; for an exactly retained
 chat it also provides an incremental prompt containing only the Codex suffix after the last assistant
 reply. The Launcher chooses between those two prompts from its own retained-tab ownership and writes
-the selected text to the system clipboard. The user has thirty seconds to paste, select the visible
+the selected text to the system clipboard. The user has sixty seconds to paste, select the visible
 ChatGPT model, effort, and Zero Risk connector, send, and confirm Sent; a manual compaction handoff
-allows two minutes. Sent ends that confirmation deadline. Waiting for the first MCP bind is part of
+allows two minutes. Copying the prompt again restarts this confirmation timer. Sent ends that
+confirmation deadline; the prompt remains available to copy until the plugin starts. Waiting for the first MCP bind is part of
 the live turn, which remains subject to explicit cancellation and runtime-owner cleanup.
 The pasted task carries one opaque `request_id` for routing concurrent requests. Start/completion
 sequencing lives in the Zero Risk MCP server metadata, not in user-authored imperative text; the
@@ -149,11 +172,21 @@ Saved history does not authorize continuing an arbitrary conversation: a retaine
 while it still shows the exact `/c/<id>` page its last turn ended on. ChatGPT memory and custom
 instructions may apply to saved conversations.
 
+Automatic mode also offers an explicit **New browser chat for each turn** setting, disabled by
+default (`setup --fresh-conversation`; `--retained-conversation` restores reuse). Each native turn
+gets a new browser chat, the complete canonical Codex context and a fresh connector attachment.
+Tool rounds and reconnects within that turn keep their existing owner. Compaction deliberately
+uses a fresh read-only summarization chat with the same bounded lifecycle. This can isolate lost
+connector access on retained follow-ups, at the cost of resending more context. The preference is
+preserved but inactive in Zero Risk mode.
+
 Bigger Context partitions complete ordered records against each message's available token and
 composer budgets. Inert stages carry text; the final message also carries all retained attachments,
 the execution contract and any output schema. Their reserves are deducted before partitioning,
 then preflight checks the actual compiled messages and total transaction. The selected execution
-effort, attachment references and three-part maximum remain unchanged.
+effort and attachment references remain unchanged. Large transactions use up to six messages;
+the advertised context and compaction thresholds remain three times the base limits. More parts
+reduce message size, not the amount of history retained.
 
 In Full mode, routed compaction v1/v2 uses the exact retained source agent and a one-shot MCP control
 capability that accepts only the bound checkpoint; it cannot claim or invoke the ordinary Codex tool
@@ -170,6 +203,22 @@ by Codex. A prompt-level checkpoint marker is translated into a visible Codex tr
 every later tool action in the same turn continues to present the current turn capability. Visible
 ChatGPT status rows become reasoning summaries, while stable prose between rows becomes native
 Codex commentary.
+
+## Local ChatGPT Limits
+
+The launcher Limits page is an opt-in estimate of its own accepted browser submissions. Setup
+reads the current personal ChatGPT account and the Billing panel's Pro tier; a model-picker Pro
+badge alone cannot distinguish Pro $100 from Pro $200. The private store keeps account hashes,
+submission receipt IDs, timestamps, and model families, never prompts or authentication tokens.
+Every physical Send is counted once after semantic acceptance, including Bigger Context stages;
+native tool rounds and stream reconnects do not create receipts. The selected slider's accessibility
+announcement identifies GPT-6 Pro versus GPT-5.6 Pro. Unidentified Pro sends are visibly uncertain.
+
+The page compares rolling 24-hour and seven-day local counts with the published Chat allowances.
+It does not claim OpenAI's reset time, include messages sent elsewhere, or enforce a model limit.
+Writes are drained before the browser lease is released; accounting failure cannot replay an
+accepted Send. Account changes require another plan check, and Zero Risk performs no inspection
+or tracking. Production and DEV keep separate stores in their own launcher profiles.
 
 ## Installation and service lifecycle
 
@@ -242,6 +291,15 @@ unexpected child exit is recovered with a bounded restart budget; a crash loop b
 launcher error.
 
 ## Security invariants
+
+Native task recovery normally uses the bridge's own `CODEX_HOME`. An operator can register up to
+seven additional local homes through `CODEX_CHATGPT_WEB_TRUSTED_CODEX_HOMES`, a JSON array of absolute
+existing directories. Request data cannot register homes. Directory aliases are canonicalized;
+the resolver establishes one owning home before reading the current turn's permissions and rejects
+duplicate thread ownership. Each secondary home uses its own `sqlite_home` configuration, without
+inheriting the primary process's SQLite override. With multiple homes, every turn needs current
+native proof and the legacy single-home environment cache is neither read nor written. DEV profile
+activation removes the production registration. See [setup details](../TROUBLESHOOTING.md#a-second-codex_home-fails-with-missing-network-access-in-trusted-codex-environment-context).
 
 - Bind the Responses proxy and health endpoint to loopback only.
 - Store browser state and tunnel credentials under the application home with mode `0600`.

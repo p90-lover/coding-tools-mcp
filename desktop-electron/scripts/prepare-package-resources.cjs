@@ -7,7 +7,7 @@ const zlib = require("node:zlib");
 const { spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
 
-const PRODUCT_VERSION = "0.8.56";
+const PRODUCT_VERSION = "0.8.58";
 const PRODUCT_NAME = "Coding Tools";
 const APP_ID = "dev.codingtools.fullharness";
 const SOURCE_REPOSITORY = "p90-lover/coding-tools-mcp";
@@ -15,13 +15,13 @@ const SOURCE_SHA = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const UPSTREAM = Object.freeze({
   repository: "miuuyy/codex-chatgpt-web",
-  version: "v5.0.6",
-  commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
+  version: "v6.1.17",
+  commit: "860fa576eb47d9e20d7d8289235bfea94392d2fd",
 });
-const TUNNEL_VERSION = "0.0.12";
+const TUNNEL_VERSION = "0.0.16";
 const TUNNEL_REPOSITORY = "openai/tunnel-client";
-const CLOUDFLARED_VERSION = "2026.7.2";
-const CLOUDFLARED_RELEASE_COMMIT = "8679787525edc8575b2948a7c4a50b6292c6d426";
+const CLOUDFLARED_VERSION = "2026.8.2";
+const CLOUDFLARED_RELEASE_COMMIT = "733bfb939963e150dcf5c4faddb1603f744fbc98";
 const MAX_TUNNEL_ARCHIVE_BYTES = 80 * 1024 * 1024;
 const MAX_TUNNEL_MEMBER_BYTES = 64 * 1024 * 1024;
 const MAX_TUNNEL_MEMBERS = 16;
@@ -43,78 +43,78 @@ const OFFICIAL_TUNNEL_RELEASES = Object.freeze({
     version: `v${TUNNEL_VERSION}`,
     platform: "darwin",
     arch: "arm64",
-    archiveName: "tunnel-client-v0.0.12-darwin-arm64.zip",
-    archiveSha256: "42fb3138dc9c081d5777cb7e8bd1e041cc48b67c4978dbab3c5167ca1aabca02",
+    archiveName: "tunnel-client-v0.0.16-darwin-arm64.zip",
+    archiveSha256: "a160820d45089b5253d8d671fe2a689bde0f73d78c135d1497a7b33f28a3ac62",
     binaryName: "tunnel-client",
-    licenseName: "tunnel-client-v0.0.12-darwin-arm64-licenses.txt",
-    licenseSha256: "961dd697f068eeba060699ebcda2318779fe952831c45e2743b773a776d697a3",
-    spdxName: "tunnel-client-v0.0.12-darwin-arm64.spdx.json",
-    spdxSha256: "b3cf00f998d7137335969c2f78811561afaca6094686b9824808ad5286f3df4d",
+    licenseName: "tunnel-client-v0.0.16-darwin-arm64-licenses.txt",
+    licenseSha256: "88cb2f313e4d12adc110cc5ebd9d626a5b4aae3874bb4abf386fdda59c215062",
+    spdxName: "tunnel-client-v0.0.16-darwin-arm64.spdx.json",
+    spdxSha256: "2d116935e74f5571a0880e7d1ccda1ffe57332ab8b8b5f0a1fe447b58502457a",
   }),
   "darwin/x64": Object.freeze({
     repository: TUNNEL_REPOSITORY,
     version: `v${TUNNEL_VERSION}`,
     platform: "darwin",
     arch: "amd64",
-    archiveName: "tunnel-client-v0.0.12-darwin-amd64.zip",
-    archiveSha256: "33de53aec680faafedc795f8f8268d6861577bddb871cb2d49529c91f88c2009",
+    archiveName: "tunnel-client-v0.0.16-darwin-amd64.zip",
+    archiveSha256: "57b3dd73f2d042c7aeb5664681f7538078359f55538b9e048640f1df71a0c83f",
     binaryName: "tunnel-client",
-    licenseName: "tunnel-client-v0.0.12-darwin-amd64-licenses.txt",
-    licenseSha256: "661df2b81de81ec60df1820e2f152f120ad9fd14455c116c159b3bc9041d0ba2",
-    spdxName: "tunnel-client-v0.0.12-darwin-amd64.spdx.json",
-    spdxSha256: "cbed744781fd63f2def30322a2ae41feb3bd16f15c03c127a006ce734bb7001c",
+    licenseName: "tunnel-client-v0.0.16-darwin-amd64-licenses.txt",
+    licenseSha256: "9cb81b39cb09acb80061708c6a2f26968e89393269581288629f2f65e93f2612",
+    spdxName: "tunnel-client-v0.0.16-darwin-amd64.spdx.json",
+    spdxSha256: "fa952e475063847760afcacfa864d5fa20e5d2524346fd73e5786e592123b687",
   }),
   "linux/arm64": Object.freeze({
     repository: TUNNEL_REPOSITORY,
     version: `v${TUNNEL_VERSION}`,
     platform: "linux",
     arch: "arm64",
-    archiveName: "tunnel-client-v0.0.12-linux-arm64.zip",
-    archiveSha256: "6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6",
+    archiveName: "tunnel-client-v0.0.16-linux-arm64.zip",
+    archiveSha256: "963d0384aaa7c798778479c45673f9051a4039dd891aef8f8978d2a1a628b74f",
     binaryName: "tunnel-client",
-    licenseName: "tunnel-client-v0.0.12-linux-arm64-licenses.txt",
-    licenseSha256: "2504135d0ddc2965429044fe06ea93d72582c3694f83b02eebe6cbc515dc9aaa",
-    spdxName: "tunnel-client-v0.0.12-linux-arm64.spdx.json",
-    spdxSha256: "0c8c84a40e9b96d5c87d35ab650d6cb33671176d1cbb81846a1f52ed401bbed6",
+    licenseName: "tunnel-client-v0.0.16-linux-arm64-licenses.txt",
+    licenseSha256: "3a4435ed9e610853e3dd963e86905ce4323ecc4f33849baeba555a387220da7e",
+    spdxName: "tunnel-client-v0.0.16-linux-arm64.spdx.json",
+    spdxSha256: "6e9c99800649b89754d3cebcc1d2a0a6b1577cbd91137370dbfd6c313879fff6",
   }),
   "linux/x64": Object.freeze({
     repository: TUNNEL_REPOSITORY,
     version: `v${TUNNEL_VERSION}`,
     platform: "linux",
     arch: "amd64",
-    archiveName: "tunnel-client-v0.0.12-linux-amd64.zip",
-    archiveSha256: "2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81",
+    archiveName: "tunnel-client-v0.0.16-linux-amd64.zip",
+    archiveSha256: "d60cdba019bce451bcc3a15478cc5b9cb11270b049f5b56ea39a80b517f8b117",
     binaryName: "tunnel-client",
-    licenseName: "tunnel-client-v0.0.12-linux-amd64-licenses.txt",
-    licenseSha256: "fbe3d5c7d3a6a14317915d4c058f97342c9a533654f533adcba3261acc821a33",
-    spdxName: "tunnel-client-v0.0.12-linux-amd64.spdx.json",
-    spdxSha256: "f2c5548c7bff0aff2a3fbd00cf936cf96071d88110ec078837370f468c6b313d",
+    licenseName: "tunnel-client-v0.0.16-linux-amd64-licenses.txt",
+    licenseSha256: "fa2de0dd02c120d9d4283059fa3bd489666808b616c4b788610558b8fb4198e6",
+    spdxName: "tunnel-client-v0.0.16-linux-amd64.spdx.json",
+    spdxSha256: "6e55f7d59863c7f0313d51c3da211c86ac068ac4cafa28713cf8004138d2a46b",
   }),
   "win32/arm64": Object.freeze({
     repository: TUNNEL_REPOSITORY,
     version: `v${TUNNEL_VERSION}`,
     platform: "windows",
     arch: "arm64",
-    archiveName: "tunnel-client-v0.0.12-windows-arm64.zip",
-    archiveSha256: "65ab54221554481bb1c23b6015b99abe0b7f79b08593f4fb17a9e2e25532281d",
+    archiveName: "tunnel-client-v0.0.16-windows-arm64.zip",
+    archiveSha256: "ecd748288b9bd9cc8f5a963855eb143f4788b831475156703d0bafdcd2dcb149",
     binaryName: "tunnel-client.exe",
-    licenseName: "tunnel-client-v0.0.12-windows-arm64-licenses.txt",
-    licenseSha256: "d2cd87a75bc8121e1579e67cf8f011d55d91d358436be101c0992f3cfb0f1e95",
-    spdxName: "tunnel-client-v0.0.12-windows-arm64.spdx.json",
-    spdxSha256: "d125eeec8b308cf20550d1e74658285f0211e909143942f6c5743f801219c01c",
+    licenseName: "tunnel-client-v0.0.16-windows-arm64-licenses.txt",
+    licenseSha256: "353a487b204cbadf8a6f07c6b948e5f6a0cfe68706587847cf6df9a13da4b19a",
+    spdxName: "tunnel-client-v0.0.16-windows-arm64.spdx.json",
+    spdxSha256: "82fd4aa16ae1d0646d113028778c5d9cfd90ea953c877915075c0572cb888fbc",
   }),
   "win32/x64": Object.freeze({
     repository: TUNNEL_REPOSITORY,
     version: `v${TUNNEL_VERSION}`,
     platform: "windows",
     arch: "amd64",
-    archiveName: "tunnel-client-v0.0.12-windows-amd64.zip",
-    archiveSha256: "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356",
+    archiveName: "tunnel-client-v0.0.16-windows-amd64.zip",
+    archiveSha256: "edef7241b0c647fcb30f1a80ff376b6b25c51927960f257a3f01e21b17c2aba6",
     binaryName: "tunnel-client.exe",
-    licenseName: "tunnel-client-v0.0.12-windows-amd64-licenses.txt",
-    licenseSha256: "7d85227df86c38a689fca913d6f4a0b49ad030d6e056155a6832312cf7fb4bad",
-    spdxName: "tunnel-client-v0.0.12-windows-amd64.spdx.json",
-    spdxSha256: "4c6b46a645b71853d55f50cfb4b2c51324422a57f007984ba113d3edcfeb4f2c",
+    licenseName: "tunnel-client-v0.0.16-windows-amd64-licenses.txt",
+    licenseSha256: "9399ced2b36f82fa18e5fe1e6df5712015680c48b8de51a4bd983e9a58de6b4c",
+    spdxName: "tunnel-client-v0.0.16-windows-amd64.spdx.json",
+    spdxSha256: "4a4852a97ee25d7f72b6ffc54378e57b72b4047959c1d9eede6606efece10bd5",
   }),
 });
 

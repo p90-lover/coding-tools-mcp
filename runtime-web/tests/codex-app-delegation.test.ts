@@ -37,7 +37,7 @@ for (const name of ["create_thread", "send_message_to_thread"]) {
       cwd: root, roots: [root], writableRoots: [], sandboxPolicy: { type: "readOnly", networkAccess: false },
     });
     expect(extractChatGptTurnUserRevision(parsed)).toBe(output);
-    const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: true, solAvailable: true, proAvailable: true }, "test-turn-token");
+    const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: true, solAvailable: true, proAvailable: true, extraHighAvailable: true }, "test-turn-token");
     expect(compiled.text).toContain("Codex app delegation");
     expect(compiled.text).toContain("Calculate 17 * 23 without editing files.");
   });
@@ -68,7 +68,7 @@ test("active delegated constraints survive replay after newer tool results", () 
       content: `${"x".repeat(3_000)}ORDINARY_OUTPUT_MIDDLE${"y".repeat(2_000)}`,
       isError: false, timestamp: index });
   }
-  const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: true, solAvailable: true, proAvailable: true }, "test-turn-token");
+  const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: true, solAvailable: true, proAvailable: true, extraHighAvailable: true }, "test-turn-token");
   expect(compiled.text.includes(instruction)).toBe(true);
   expect(compiled.text).toContain("characters of this earlier tool output omitted");
   expect(extractChatGptTurnUserRevision(parsed)).toBe(delegated);

@@ -29,7 +29,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
   cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
@@ -205,8 +205,9 @@ export type ChatThreadActions = {
   /**
    * Delete a message and its reply from the chat (asked to confirm first). `runIds` are the runs
    * its turn showed: the run it started first, then any restart or replacement of that run.
+   * The description and workspace belong to the rendered snapshot that supplied the index.
    */
-  deleteMessage?: (messageIndex: number, runIds: string[]) => Promise<void>;
+  deleteMessage?: (messageIndex: number, runIds: string[], sourceDescription: string, sourceWorkspaceId: string) => Promise<void>;
   copyConversation: () => void;
   togglePin: () => void;
   pinned: boolean;
@@ -860,7 +861,7 @@ function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
-  approvals, approve, describeRoute: _describeRoute, notice, warning, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
+  approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
 }: {
@@ -1757,23 +1758,25 @@ export function AgentOrchestratorChat({
   }
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
   const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
-  // Delete message: the turn whose message waits for the in-chat confirmation, or null. A message
-  // goes with its reply and the steers sent during its turn; the agent's files stay as they are.
-  const [deleting, setDeleting] = useState<number | null>(null);
+  // Keep the intent from the rendered transcript, even if it changes before confirmation.
+  const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
+    && projectId && typeof shownDescription === "string"
+    ? { taskId: selectedTaskId, workspaceId: projectId, index: turn.messageIndex,
+      runIds: chatRunsOfMessage(chatRuns, turn.runId), sourceDescription: shownDescription } : null;
+  const [deleting, setDeleting] = useState<ReturnType<typeof deletion>>(null);
   const [deletingBusy, setDeletingBusy] = useState(false);
-  useEffect(() => { setDeleting(null); }, [selectedTaskId]);
+  useEffect(() => { setDeleting(null); }, [selectedTaskId, projectId]);
   const deleteBlocked = runOpen || working ? "Stop the chat first to delete a message"
     : rewindPoints.length <= 1 ? "This is the chat's only message; archive or delete the chat instead" : "";
-  // A message is deleted with the runs its turn showed, so exactly that reply leaves the chat.
-  const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
-    ? { index: turn.messageIndex, runIds: chatRunsOfMessage(chatRuns, turn.runId) } : null;
   const notYet = "This message hasn't run yet. Delete it after its turn runs";
   const confirmDelete = async () => {
-    const target = deleting === null ? null : deletion(turns[deleting]), task = selectedTaskId;
+    const target = deleting;
     if (!target || !thread?.deleteMessage || deleteBlocked) return;
+    if (target.taskId !== selectedTaskId || target.workspaceId !== projectId) { setDeleting(null); return; }
+    const task = target.taskId;
     setDeletingBusy(true);
     try {
-      await thread.deleteMessage(target.index, target.runIds);
+      await thread.deleteMessage(target.index, target.runIds, target.sourceDescription, target.workspaceId);
       void loadDescription(task).then((text) => setDescriptions((current) => ({ ...current, [task]: text }))).catch(() => {});
     } catch {
       // The surface already shows why it could not be deleted.
@@ -1915,14 +1918,18 @@ export function AgentOrchestratorChat({
           const pick = Number(arg);
           if (arg) {
             const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
-            if (point && !deletion(turns[point.turnIndex])) say("Delete message", `${notYet}.`);
-            else if (point) { setCard(null); setDeleting(point.turnIndex); }
+            const target = point ? deletion(turns[point.turnIndex]) : null;
+            if (point && !target) say("Delete message", `${notYet}.`);
+            else if (target) { setCard(null); setDeleting(target); }
             else say("Delete message", `Choose a message from 1 to ${rewindPoints.length}, like /delete ${rewindPoints.length}.`);
             break;
           }
           setCard({ title: "Delete message", text: "Choose a message to delete. You confirm before it goes.",
-            items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
-              run: () => deletion(turns[point.turnIndex]) ? setDeleting(point.turnIndex) : say("Delete message", `${notYet}.`) })).reverse() });
+            items: rewindPoints.map((point, index) => {
+              const target = deletion(turns[point.turnIndex]);
+              return { label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
+                run: () => target ? setDeleting(target) : say("Delete message", `${notYet}.`) };
+            }).reverse() });
           break;
         }
         case "status": if (commands) setCard(commands.status()); break;
@@ -2168,14 +2175,17 @@ export function AgentOrchestratorChat({
     const hasReply = Boolean(turn.runId && (cards.length || live));
     // The request belongs to its agent's card, like a steer. Before a run exists it stays visible
     // on its own; constructing it once keeps the attachments and message actions identical.
+    // Its read receipt leads the actions, as on a steer: "Sending…" while an agent comes up for it,
+    // then one check, then two once the model has read it (turnReceipt).
     const userMessage = !feedback && turn.user ? <div className="cx-user">
       <SentMessage text={turn.user.text} />
+      <div className="cx-msg-foot"><SteerReader.Provider value={steerReader(lead)}><SteerReceiptMark receipt={turnReceipt(turn, items, live)} /></SteerReader.Provider>
       <MessageActions text={chatMessageReadable(turn.user.text)}>
         {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
         {thread?.rewind ? <button type="button" title="Rewind and resend this message (files are unchanged)" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
         {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
-          disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}><ChatGlyph name="delete" /></button> : null}
-      </MessageActions>
+          disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(deletion(turn))}><ChatGlyph name="delete" /></button> : null}
+      </MessageActions></div>
       {turn.user.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null}
     </div> : null;
     // Live steers already appear in the timeline. Saved ones stay with the initial message,
@@ -2368,9 +2378,6 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
               </>}
             </div> : null}
             {threadTurns}
-            {/* A tool call that timed out: the chat keeps going by itself, so this is a red line in the
-                conversation, not the failed-step card that waited for a click (2026-10-31). */}
-            {warning && latest && !recovering ? <p className="cx-step-error cx-timeout-line" role="status">{warning}</p> : null}
             {recoveryMessage ? <p className="cx-route-note" role="status">{recoveryMessage}</p> : null}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">

@@ -25,9 +25,9 @@ env:
   SOURCE_SHA: ${{ github.sha }}
   VALIDATION_WORKFLOW: .github/workflows/codex-router-multiprovider-release-rc6-csc.yml
   WINDOWS_INSTALLER: Coding.Tools_0.7.0-rc.6_windows_x64_setup.exe
-  TUNNEL_ARCHIVE: tunnel-client-v0.0.12-windows-amd64.zip
-  TUNNEL_ARCHIVE_SHA256: '2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356'
-  TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12
+  TUNNEL_ARCHIVE: tunnel-client-v0.0.16-windows-amd64.zip
+  TUNNEL_ARCHIVE_SHA256: 'edef7241b0c647fcb30f1a80ff376b6b25c51927960f257a3f01e21b17c2aba6'
+  TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.16
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -211,7 +211,7 @@ jobs:
       - name: Acquire checksum-pinned official tunnel-client archive
         run: |
           set -euo pipefail
-          input_dir="aiTemp/input/tunnel-client/v0.0.12/windows-amd64"
+          input_dir="aiTemp/input/tunnel-client/v0.0.16/windows-amd64"
           archive="$input_dir/$TUNNEL_ARCHIVE"
           partial_archive="$archive.partial"
           asset_url="$TUNNEL_RELEASE_URL/$TUNNEL_ARCHIVE"
@@ -456,8 +456,8 @@ jobs:
             product: { name: 'Coding Tools', app_id: 'dev.codingtools.fullharness' },
             upstream: {
               repository: 'miuuyy/codex-chatgpt-web',
-              version: 'v5.0.6',
-              commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+              version: 'v6.1.17',
+              commit: '860fa576eb47d9e20d7d8289235bfea94392d2fd',
             },
             validation_run: {
               id: validationRunId,

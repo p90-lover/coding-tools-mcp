@@ -78,6 +78,35 @@ test("remote outer harness owns a turn through the live broker protocol", async 
   }
 });
 
+test("remote owners preserve Full Access worktree cwd outside project roots", async () => {
+  const root = scratch("cgw-dev-worktree");
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  const remote = new RemoteTurnBroker(socketPath);
+  await broker.listen();
+  const environment = {
+    cwd: join(root, "worktree"), roots: [join(root, "project")],
+    writableRoots: [join(root, "project")],
+    sandboxPolicy: { type: "dangerFullAccess" as const }, tools: [],
+  };
+  try {
+    const token = await remote.register(environment, 60_000, "worktree-owner");
+    const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+    const resolved = await callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId });
+    expect(resolved).toMatchObject({ environment });
+    await remote.revoke(token);
+    for (const sandboxPolicy of [
+      { type: "readOnly" as const, networkAccess: false },
+      { type: "workspaceWrite" as const, writableRoots: environment.roots, networkAccess: false },
+    ]) {
+      await expect(remote.register({ ...environment, sandboxPolicy }, 60_000, "restricted-worktree"))
+        .rejects.toThrow("environment is invalid");
+    }
+  } finally {
+    await broker.close();
+  }
+});
+
 test("disconnecting a remote owner_next removes its broker waiter", async () => {
   const root = scratch("cgw-dev-owner-waiter");
   const socketPath = defaultBrokerEndpoint(root);
@@ -158,8 +187,8 @@ test("coherent DEV MCP payloads are bounded, deterministic, and distinct", () =>
 });
 
 test("new DEV chats default to the cheapest account-supported browser model", () => {
-  expect(defaultDevChatModel({ ...defaultConfig("full"), solAvailable: true })).toBe("chatgpt-web/light");
-  expect(defaultDevChatModel({ ...defaultConfig("full"), solAvailable: false })).toBe("chatgpt-web/luna");
+  expect(defaultDevChatModel({ ...defaultConfig("full"), solAvailable: true })).toBe("chatgpt-web/gpt-5.6-sol-instant");
+  expect(defaultDevChatModel({ ...defaultConfig("full"), solAvailable: false })).toBe("chatgpt-web/gpt-5.6-luna");
   expect(DEV_CHAT_MODELS).toContain("chatgpt-web/think");
   expect(defaultDevChatModel({
     ...defaultConfig("full"),
@@ -220,13 +249,13 @@ test("an existing DEV chat changes route only when the user explicitly requests 
   });
 });
 
-test("Bigger Context triples the DEV compaction window and fails closed for Luna", async () => {
+test("Bigger Context exposes bounded full-history windows for Sol and Luna", async () => {
   const root = scratch("cgw-dev-bigger-context");
   const config = {
     ...defaultConfig("browser-only"),
     purpose: "dev-harness" as const,
     solAvailable: true,
-    proAvailable: true,
+    extraHighAvailable: true, proAvailable: true,
   };
   const factory = (): ProviderAdapter => ({
     name: "dev-bigger-context-test",
@@ -252,13 +281,25 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
     contextWindow: 333_579,
   });
   expect(biggerStatus.percent).toBe(Math.round((biggerStatus.inputTokens / 241_010) * 1_000) / 10);
+  // Coding Tools compacts at 85% of each window's usable share (upstream: 220k / 95k / 285k).
+  for (const [model, contextWindow, autoCompactTokenLimit] of [
+    ["chatgpt-web/gpt-6-sol", 240_000, 187_680],
+    ["chatgpt-web/gpt-6-sol-instant", 111_193, 80_336],
+  ] as const) {
+    const state = bigger.open(model.split("/")[1]!, model).state;
+    expect(bigger.status(state)).toMatchObject({ contextWindow, autoCompactTokenLimit });
+  }
+  const proState = bigger.open("six-pro", "chatgpt-web/gpt-6-pro").state;
+  expect(bigger.status(proState)).toMatchObject({ contextWindow: 336_579, autoCompactTokenLimit: 243_178 });
   const luna = new DevChatDriver({
     ...biggerConfig,
     solAvailable: false,
-    proAvailable: false,
+    extraHighAvailable: false, proAvailable: false,
   }, store, factory, root, { biggerContext: true });
-  expect(() => luna.open("luna-window", "chatgpt-web/luna")).toThrow("unavailable for Luna");
-  expect(() => luna.open("think-window", "chatgpt-web/think")).toThrow("unavailable for Luna");
+  for (const model of ["chatgpt-web/luna", "chatgpt-web/think"] as const) {
+    const state = luna.open(model.split("/")[1]!, model).state;
+    expect(luna.status(state)).toMatchObject({ contextWindow: 84_000, autoCompactTokenLimit: 50_694 });
+  }
   await Promise.all([normal.close(), bigger.close(), luna.close()]);
 });
 
@@ -268,7 +309,7 @@ test("browser-only DEV driver runs real turns without advertising simulated tool
     ...defaultConfig("browser-only"),
     purpose: "dev-harness" as const,
     solAvailable: true,
-    proAvailable: true,
+    extraHighAvailable: true, proAvailable: true,
   };
   const factory = (): ProviderAdapter => ({
     name: "dev-browser-only-test",

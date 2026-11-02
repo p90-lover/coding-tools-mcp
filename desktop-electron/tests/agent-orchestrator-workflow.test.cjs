@@ -2689,10 +2689,11 @@ test("activity reports each working card's runtime and current step without adva
   // "Approve for me": the reviewer answers this card's requests, so it is not waiting on the person.
   const reviewed = { ...agent, id: "w6", route: { ...agent.route, approval_policy: "on-request", approvals_reviewer: "auto_review" },
     receipt: { status: "submitted", thread_id: "sess-6" } };
+  const queued = { ...agent, id: "w7", receipt: { status: "submitted", thread_id: "sess-7" } };
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async (endpoint, body) => {
       calls.push(endpoint);
-      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking, reviewed] }] };
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking, reviewed, queued] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
         return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN npm run task-runner sk-abcdefghijklmnopqrst1234" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
@@ -2705,13 +2706,15 @@ test("activity reports each working card's runtime and current step without adva
       // AO marks the session needs_input while a permission request waits: the card names the command.
       : session === "sess-5" ? { turnState: "running", turnId: "t-5", needsInput: true, approvals: [{ approval_id: "r1", kind: "command", command: "npm run build", tool: "Bash" }] }
       : session === "sess-6" ? { turnState: "running", turnId: "t-6", needsInput: true, approvals: [{ approval_id: "r2", kind: "command", command: "Get-CimInstance Win32_Process", tool: "PowerShell" }] }
+      // AO took the message but no agent has it yet (a fresh one still coming up).
+      : session === "sess-7" ? { turnState: "queued", turnId: "t-7" }
       : { turnState: "running", turnId: "t-3" } },
     confirm: async () => true,
   });
   await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   await new Promise(resolve => setImmediate(resolve));
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
-  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5", "w6"], "only working cards");
+  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5", "w6", "w7"], "only working cards");
   assert.equal(result.nodes.w5.activity, "waiting for approval: npm run build");
   // Seen live: "waiting for approval" for the two minutes a review took, with nothing to answer.
   assert.equal(result.nodes.w6.activity, "the reviewer is checking: Get-CimInstance Win32_Process");
@@ -2726,6 +2729,10 @@ test("activity reports each working card's runtime and current step without adva
   // An AO card says what its turn is doing, not just "running": waiting on the model, or the command
   // it runs with that command's own timeout.
   assert.equal(result.nodes.w3.activity, "waiting for the model");
+  assert.equal(result.nodes.w3.turn_started, true);
+  // Seen live 2026-11-02: 7 minutes of "waiting for the model" while AO's turn sat queued.
+  assert.equal(result.nodes.w7.activity, "waiting for the agent to take the message");
+  assert.equal(result.nodes.w7.turn_started, false, "a queued turn has not started: it can read as stuck");
   assert.equal(result.nodes.w4.activity, "running python -m pytest tests -q (timeout 5m)");
   assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });
@@ -7970,7 +7977,8 @@ test("deleting a chat message removes it and its steers from the task and hides 
     { id: "task-2", title: "Alone", description: "only ask", state: "in_progress", clauses: [] }],
   runs: [done("r1"), done("other", "task-2"), done("r2"), done("r3")] });
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless });
-  const remove = (index, runId, extra = {}) => workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index, runId, ...extra });
+  const remove = (index, runId, extra = {}) => workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index, runId,
+    sourceDescription: world.tasks[0].description, ...extra });
   const deleted = await remove(1, "r2");
   assert.deepEqual(JSON.parse(JSON.stringify(deleted)), { ok: true, taskId: "task-1", index: 1, runIds: ["r2"] }, "the run the chat showed under message 1");
   assert.equal(world.tasks[0].description, "first ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask", "the steer goes with its message");
@@ -7982,7 +7990,7 @@ test("deleting a chat message removes it and its steers from the task and hides 
   assert.equal(world.tasks[0].description, "third ask");
   assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["other", "r3"]);
   await assert.rejects(remove(0, "r3"), /only message; archive or delete the chat instead/);
-  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-2", index: 0, runId: "other" }), /only message/);
+  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-2", index: 0, runId: "other", sourceDescription: world.tasks[1].description }), /only message/);
   world.tasks[0].description = description;
   await assert.rejects(remove(4, "r3"), /no longer in this chat/);
   // The reply must be one this chat shows: not a deleted run, another chat's run, or none at all.
@@ -7995,6 +8003,241 @@ test("deleting a chat message removes it and its steers from the task and hides 
   const edits = world.edits.length;
   await assert.rejects(remove(1, "r3"), /Stop the chat first/);
   assert.equal(world.edits.length, edits, "nothing is changed");
+});
+
+test("delete refuses stale descriptions in either order and a reloaded snapshot deletes the intended message", async (t) => {
+  const parts = ["A", "\n\nFollow-up (2026-10-10 10:00 UTC):\nB", "\n\nFollow-up (2026-10-10 11:00 UTC):\nC", "\n\nFollow-up (2026-10-10 12:00 UTC):\nD"];
+  const description = parts.join("");
+  for (const [first, stale] of [[1, 2], [2, 1]]) {
+    await t.test(`${first} then stale ${stale}`, async () => {
+      const runs = [1, 2, 3, 4].map(index => ({ id: `r${index}`, workspace_id: "ws-1", project_id: "task-1",
+        cancelled: false, nodes: [{ id: "one", role: "planner", state: "finished" }] }));
+      const world = chatWorld({ tasks: [{ id: "task-1", title: "Snapshot", description, state: "in_progress", clauses: [] }], runs });
+      const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless });
+      const input = { workspaceId: "ws-1", taskId: "task-1", sourceDescription: description };
+      try {
+        await workflow.call("chat_delete_message", { ...input, index: first, runId: `r${first + 1}` });
+        const afterFirst = parts.filter((_part, index) => index !== first).join("");
+        assert.equal(world.tasks[0].description, afterFirst);
+        await assert.rejects(workflow.call("chat_delete_message", { ...input, index: stale, runId: `r${stale + 1}` }), /chat changed.*deletion.*reload/i);
+        assert.equal(world.edits.length, 1, "the stale index never reaches a second board write");
+        assert.equal(world.tasks[0].description, afterFirst, "the stale index cannot remove another prompt");
+        assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id),
+          runs.filter((_run, index) => index !== first).map(run => run.id), "the rejected reply stays visible");
+        await workflow.call("chat_delete_message", { ...input, sourceDescription: afterFirst, index: 1, runId: `r${stale + 1}` });
+        assert.equal(world.tasks[0].description, parts[0] + parts[3]);
+        assert.equal(world.edits.length, 2);
+        assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r4"]);
+      } finally { workflow.dispose(); }
+    });
+  }
+});
+
+test("delete requires a string snapshot before reading and rejects an empty stale snapshot without hiding replies", async () => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Snapshot", description, state: "in_progress", clauses: [] }],
+    runs: ["r1", "r2"].map(id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] })) });
+  const requests = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (...args) => { requests.push(args); return world.requestHeadless(...args); } });
+  const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2" };
+  try {
+    for (const snapshot of [undefined, null, false, 0, {}, []]) {
+      await assert.rejects(workflow.call("chat_delete_message", { ...input, ...(snapshot === undefined ? {} : { sourceDescription: snapshot }) }), /requires sourceDescription.*displayed chat.*reload/);
+    }
+    assert.equal(requests.length, 0, "legacy or malformed snapshots cannot start any read");
+    await assert.rejects(workflow.call("chat_delete_message", { ...input, sourceDescription: "" }), /chat changed.*reload/i);
+    assert.ok(requests.length > 0, "empty string is a present snapshot, compared to the saved description");
+    assert.equal(world.edits.length, 0);
+    assert.equal(world.tasks[0].description, description);
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2"]);
+  } finally { workflow.dispose(); }
+});
+
+test("an empty saved description accepts its snapshot and still refuses deleting a nonexistent message", async () => {
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Empty", description: "", state: "in_progress", clauses: [] }],
+    runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless });
+  try {
+    await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0, runId: "r1", sourceDescription: "" }), /message is no longer in this chat/i);
+    assert.equal(world.edits.length, 0);
+  } finally { workflow.dispose(); }
+});
+
+test("a failed snapshot-checked delete restores reply visibility and permits a fresh explicit retry", async () => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Snapshot", description, state: "in_progress", clauses: [] }],
+    runs: ["r1", "r2", "r3"].map(id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] })) });
+  let fail = true;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+    if (body.tool === "workflow_update" && fail) { fail = false; throw new Error("Board revision changed"); }
+    return world.requestHeadless(endpoint, body, options);
+  } });
+  const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: description };
+  try {
+    await assert.rejects(workflow.call("chat_delete_message", input), /Board revision changed/);
+    assert.equal(world.edits.length, 0);
+    assert.equal(world.tasks[0].description, description);
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3"]);
+    await workflow.call("chat_delete_message", input);
+    assert.equal(world.edits.length, 1);
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r3"]);
+  } finally { workflow.dispose(); }
+});
+
+test("delete reservation rejects same-chat overlap in either write order and releases on success or failure", async (t) => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC\n\nFollow-up (2026-10-10 12:00 UTC):\nD";
+  for (const firstIndex of [1, 2]) for (const fail of [false, true]) {
+    await t.test(`${firstIndex} first, ${fail ? "failed" : "committed"}`, async () => {
+      const runs = [1, 2, 3, 4].map(index => ({ id: `r${index}`, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }));
+      const world = chatWorld({ tasks: [{ id: "task-1", title: "Admission", description, state: "in_progress", clauses: [] }], runs });
+      let enter, releaseWrite, writes = 0, requests = 0;
+      const entered = new Promise(resolve => { enter = resolve; });
+      const held = new Promise(resolve => { releaseWrite = resolve; });
+      const failure = new Error("First write failed");
+      const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+        requests++;
+        if (body.tool === "workflow_update" && ++writes === 1) { enter(); await held; if (fail) throw failure; }
+        return world.requestHeadless(endpoint, body, options);
+      } });
+      const input = { workspaceId: "ws-1", taskId: "task-1", sourceDescription: description };
+      const first = workflow.call("chat_delete_message", { ...input, index: firstIndex, runId: `r${firstIndex + 1}` }).then(value => ({ value }), error => ({ error }));
+      try {
+        await entered;
+        const before = requests, other = firstIndex === 1 ? 2 : 1;
+        await assert.rejects(workflow.call("chat_delete_message", { ...input, workspaceId: " ws-1 ", taskId: " task-1 ", index: other, runId: `r${other + 1}` }), /operation is already in progress/);
+        assert.equal(requests, before, "the refused delete performs no read or write and is never queued");
+        assert.equal(writes, 1);
+        releaseWrite();
+        const outcome = await first;
+        if (fail) {
+          assert.equal(outcome.error, failure);
+          assert.equal(world.tasks[0].description, description);
+          assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3", "r4"]);
+        } else {
+          assert.equal(outcome.value.ok, true);
+          assert.equal(world.edits.length, 1);
+        }
+        await workflow.call("chat_delete_message", { ...input, sourceDescription: world.tasks[0].description, index: fail ? other : 1, runId: `r${other + 1}` });
+        assert.equal(world.edits.length, fail ? 1 : 2, "only the new explicit retry can delete after admission is released");
+      } finally { releaseWrite(); await first; workflow.dispose(); }
+    });
+  }
+});
+
+test("delete reservation separates chats and workspaces and rollback preserves their successful edits", async () => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC";
+  const short = "X\n\nFollow-up (2026-10-10 10:00 UTC):\nY";
+  const done = (id, task, workspace = "ws-1") => ({ id, workspace_id: workspace, project_id: task, cancelled: false, nodes: [{ state: "finished" }] });
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "First", description, state: "in_progress", clauses: [] }, { id: "task-2", title: "Other", description: short, state: "in_progress", clauses: [] }],
+    runs: [done("r1", "task-1"), done("r2", "task-1"), done("r3", "task-1"), done("other-1", "task-2"), done("other-2", "task-2")] });
+  const foreign = chatWorld({ tasks: [{ id: "task-1", title: "Other workspace", description: short, state: "in_progress", clauses: [] }], runs: [done("r1", "task-1", "ws-2"), done("r2", "task-1", "ws-2")] });
+  let enter, releaseWrite, holding = true;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const held = new Promise(resolve => { releaseWrite = resolve; });
+  const failure = new Error("Owner write failed");
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+    if (holding && body.workspace_id === "ws-1" && body.tool === "workflow_update" && body.arguments.change.id === "task-1") { holding = false; enter(); await held; throw failure; }
+    const result = await (body.workspace_id === "ws-2" ? foreign : world).requestHeadless(endpoint, body, options);
+    if (body.tool === "workflow_list") result.operation.result.workspace_id = body.workspace_id;
+    return result;
+  } });
+  const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: description };
+  const first = workflow.call("chat_delete_message", input).then(value => ({ value }), error => ({ error }));
+  try {
+    await entered;
+    await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-2", index: 1, runId: "other-2", sourceDescription: short });
+    await workflow.call("chat_delete_message", { workspaceId: "ws-2", taskId: "task-1", index: 1, runId: "r2", sourceDescription: short });
+    releaseWrite();
+    assert.equal((await first).error, failure);
+    assert.equal(world.tasks[0].description, description);
+    assert.equal(world.tasks[1].description, "X");
+    assert.equal(foreign.tasks[0].description, "X");
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3", "other-1"]);
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-2" })).runs.map(run => run.id), ["r1"]);
+    await workflow.call("chat_delete_message", input);
+    assert.equal(world.edits.length, 2);
+  } finally { releaseWrite(); await first; workflow.dispose(); }
+});
+
+test("delete admission shares the sender's per-chat gate without replaying or deadlocking", async () => {
+  const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Admission", description, state: "in_progress", clauses: [] }],
+    runs: ["r1", "r2", "r3"].map(id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] })) });
+  let enterWrite, releaseWrite, enterSend, releaseSend, interceptSend = false, sendReads = 0;
+  const writing = new Promise(resolve => { enterWrite = resolve; }), writeHeld = new Promise(resolve => { releaseWrite = resolve; });
+  const sending = new Promise(resolve => { enterSend = resolve; }), sendHeld = new Promise(resolve => { releaseSend = resolve; });
+  const stopped = new Error("Send fixture stopped after admission");
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+    if (interceptSend) { if (++sendReads > 1) throw new Error("Unexpected read while the sender owns admission"); enterSend(); await sendHeld; throw stopped; }
+    if (body.tool === "workflow_update") { enterWrite(); await writeHeld; }
+    return world.requestHeadless(endpoint, body, options);
+  } });
+  const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: description };
+  const first = workflow.call("chat_delete_message", input);
+  let queued;
+  try {
+    await writing;
+    interceptSend = true;
+    queued = workflow.call("chat_send", { workspaceId: " ws-1 ", taskId: " task-1 ", message: "after the edit", deferStart: true }).then(value => ({ value }), error => ({ error }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sendReads, 0, "a queued send waits for the delete before reading");
+    releaseWrite();
+    await first;
+    await sending;
+    await assert.rejects(workflow.call("chat_delete_message", { ...input, index: 1, runId: "r3", sourceDescription: world.tasks[0].description }), /operation is already in progress/);
+    assert.equal(sendReads, 1, "the delete's finally must not remove the queued sender's ownership");
+    releaseSend();
+    assert.equal((await queued).error, stopped);
+    interceptSend = false;
+    await workflow.call("chat_delete_message", { ...input, index: 1, runId: "r3", sourceDescription: world.tasks[0].description });
+    assert.equal(world.edits.length, 2);
+  } finally { releaseWrite(); releaseSend(); await Promise.allSettled([first, queued]); workflow.dispose(); }
+});
+
+test("delete persistence failures restore message visibility and preserve the original failure", async (t) => {
+  for (const phase of ["hide", "rollback"]) await t.test(phase, async (t) => {
+    const fixtureRoot = path.resolve(__dirname, "../../aiTemp");
+    fs.mkdirSync(fixtureRoot, { recursive: true });
+    const directory = fs.mkdtempSync(path.join(fixtureRoot, "delete-persist-"));
+    const parent = path.join(directory, "blocked");
+    if (phase === "hide") fs.writeFileSync(parent, "owned persistence fixture");
+    const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC";
+    const world = chatWorld({ tasks: [{ id: "task-1", title: "Persistence", description, state: "in_progress", clauses: [] }],
+      runs: ["r1", "r2", "r3"].map(id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] })) });
+    const mkdir = fs.mkdirSync, persistenceErrors = [];
+    t.mock.method(fs, "mkdirSync", function (...args) {
+      try { return mkdir.apply(this, args); } catch (error) { if (path.resolve(String(args[0])) === parent) persistenceErrors.push(error); throw error; }
+    });
+    const original = new Error("Board write failed before rollback persistence");
+    let failWrite = phase === "rollback";
+    const workflow = createAgentOrchestratorWorkflow({ chatEditsFile: path.join(parent, "edits.json"), requestHeadless: async (endpoint, body, options) => {
+      if (failWrite && body.tool === "workflow_update") {
+        failWrite = false;
+        assert.equal(path.dirname(parent), directory);
+        fs.rmSync(parent, { recursive: true, force: true });
+        fs.writeFileSync(parent, "owned rollback fixture");
+        throw original;
+      }
+      return world.requestHeadless(endpoint, body, options);
+    } });
+    const input = { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: description };
+    try {
+      const error = await workflow.call("chat_delete_message", input).then(() => null, failure => failure);
+      assert.equal(error, phase === "hide" ? persistenceErrors[0] : original);
+      assert.equal(persistenceErrors.length, phase === "hide" ? 2 : 1, "rollback persistence also fails with a real blocking-path EEXIST");
+      assert.ok(persistenceErrors.every(failure => failure.code === "EEXIST"));
+      assert.equal(world.edits.length, 0);
+      assert.equal(world.tasks[0].description, description);
+      assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3"]);
+      fs.rmSync(parent, { force: true });
+      await workflow.call("chat_delete_message", input);
+      assert.equal(world.edits.length, 1, "a fresh retry works after the owned persistence fixture is removed");
+    } finally {
+      workflow.dispose();
+      assert.equal(path.dirname(directory), fixtureRoot);
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 });
+    }
+  });
 });
 
 test("history deletion validates older displayed replies without crossing ownership or activity boundaries", async (t) => {
@@ -8026,7 +8269,7 @@ test("history deletion validates older displayed replies without crossing owners
         return { ok: true, runs: structuredClone(selected) };
       } });
       try {
-        const input = { workspaceId: "ws-1", taskId: "task-1", index: 0,
+        const input = { workspaceId: "ws-1", taskId: "task-1", index: 0, sourceDescription: description,
           runId: ["unknown", "wrong-id", "lookup-failure"].includes(scenario) ? "missing" : scenario === "mixed-foreign" ? "new" : "old",
           ...(scenario === "mixed-foreign" ? { runIds: ["other-0"] } : scenario === "lookup-failure" ? { runIds: ["also-missing"] } : {}) };
         if (scenario === "project-window" || scenario === "cached-over-200") {
@@ -8037,7 +8280,7 @@ test("history deletion validates older displayed replies without crossing owners
           assert.ok(!(await workflow.call("runs", { workspaceId: "ws-1", taskId: "task-1" })).runs.some(run => run.id === "old"));
           if (cached) {
             assert.equal(reads.filter(body => body.run_id === "old").length, 1, "one bounded lookup restores the cached ID outside 200");
-            await assert.rejects(workflow.call("chat_delete_message", input), /reply was not found/);
+            await assert.rejects(workflow.call("chat_delete_message", { ...input, sourceDescription: world.tasks[0].description }), /reply was not found/);
             assert.equal(world.edits.length, 1, "a previously hidden reply stays hidden even after direct lookup");
           }
         } else {
@@ -8083,11 +8326,11 @@ test("a restarted message keeps its restart: deleting the next message hides tha
   const second = aoChat.chatTurns(await shown(), world.tasks[0].description).find(turn => turn.messageIndex === 1);
   const runIds = aoChat.chatRunsOfMessage(await shown(), second.runId);
   assert.deepEqual([...runIds], ["r2"]);
-  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: second.messageIndex, runId: runIds[0], runIds: runIds.slice(1) });
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: second.messageIndex, runId: runIds[0], runIds: runIds.slice(1), sourceDescription: world.tasks[0].description });
   assert.deepEqual(JSON.parse(JSON.stringify(await turns())), [["r1", "first ask", 0], ["restart", null, null], ["r3", "third ask", 1]],
     "the second message's own run is hidden, not the first message's restart");
   // Deleting the first message takes its restart along, even if the chat named only the first run.
-  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0, runId: "r1" });
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0, runId: "r1", sourceDescription: world.tasks[0].description });
   assert.deepEqual(JSON.parse(JSON.stringify(await turns())), [["r3", "third ask", 0]], "no turn is left without its message");
 });
 
@@ -8127,7 +8370,7 @@ test("after a deleted message the next turn starts a fresh agent session (chat_s
   });
   const prewarm = () => workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId: "task-1" });
   assert.equal((await prewarm()).continues, true, "before the delete the chat's agent takes the next message");
-  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2" });
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2", sourceDescription: world.tasks[0].description });
   const warmed = await prewarm();
   assert.equal(warmed.continues, undefined, "the old agent still remembers the deleted exchange");
   assert.equal(warmed.warmed, true, "a fresh agent is made ready instead");
@@ -8865,10 +9108,9 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
   assert.deepEqual(capabilities["claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
 });
 
-test("a CPA model's picked effort goes in the request body, never as a model suffix, and Auto sends none", async () => {
-  // A/B against CPA (2026-10-22): a suffix 400ed whenever the plugin lacked the level ("(auto)" on
-  // Cline, "(none)" on MiMo and GLM, "(medium)" on DeepSeek) and Claude Code's retries looked like a
-  // launch stuck for good; the body's output_config.effort was a 200 everywhere and honoured.
+test("Claude Code CPA effort survives AO in a supported suffix, Codex keeps body effort, and Auto sends none", async () => {
+  // AO clears gateway AgentConfig.Effort before Claude Code's ACP driver runs. Preserve the
+  // fitted level in the model, but never an unsupported suffix (medium on DeepSeek) or auto.
   const spawned = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
     aoHarness: { spawn: async input => { spawned.push({ model: input.model, effort: input.effort }); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
@@ -8879,11 +9121,11 @@ test("a CPA model's picked effort goes in the request body, never as a model suf
     for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     return spawned.at(-1);
   };
-  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), { model: "cline-pass/glm-5.3-flash", effort: "medium" });
-  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), { model: "cline-pass/deepseek-v4.1-flash", effort: "max" });
-  assert.deepEqual(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), { model: "commandcode-go/glm-5.3-flash", effort: "high" });
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), { model: "cline-pass/glm-5.3-flash(medium)", effort: "medium" });
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), { model: "cline-pass/deepseek-v4.1-flash(max)", effort: "max" });
+  assert.deepEqual(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), { model: "commandcode-go/glm-5.3-flash(high)", effort: "high" });
   // A level the model lacks runs at its nearest one (a tie goes up) instead of a 400.
-  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "medium"), { model: "cline-pass/deepseek-v4.1-flash", effort: "high" });
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "medium"), { model: "cline-pass/deepseek-v4.1-flash(high)", effort: "high" });
   // Auto: the model's own effort; nothing is sent, and no level saved in the model's name comes back.
   assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
   assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash(high)", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
@@ -8914,9 +9156,9 @@ test("a saved effort a plugin model's reported levels lack runs at its nearest o
     for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     return spawned.at(-1);
   };
-  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "medium"), { model: "opencode-go/glm-5.3-flash", effort: "high" });
-  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "low"), { model: "opencode-go/glm-5.3-flash", effort: "low" });
-  assert.deepEqual(await warm("cpa/opencode-go/kimi-k3", "low"), { model: "opencode-go/kimi-k3", effort: "max" });
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "medium"), { model: "opencode-go/glm-5.3-flash(high)", effort: "high" });
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "low"), { model: "opencode-go/glm-5.3-flash(low)", effort: "low" });
+  assert.deepEqual(await warm("cpa/opencode-go/kimi-k3", "low"), { model: "opencode-go/kimi-k3(max)", effort: "max" });
   // No levels reported (it only switches reasoning on and off): the model's own effort.
   assert.deepEqual(await warm("cpa/opencode-go/qwen3.7-plus", "high"), { model: "opencode-go/qwen3.7-plus", effort: undefined });
   workflow.dispose();
@@ -9274,7 +9516,7 @@ function workflowInternals(options) {
   fixture.filename = filename;
   fixture.paths = module.paths;
   const source = fs.readFileSync(filename, "utf8").replace("return Object.freeze({ call, restoreSchedules,",
-    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, stopExternalTurn, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
+    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
   fixture._compile(source, filename);
   return fixture.exports.createAgentOrchestratorWorkflow(options);
 }
@@ -9404,6 +9646,39 @@ test("concurrent host-release upgrades recheck the in-flight stop after its firs
     assert.equal(children, 1, "one descendant shutdown");
     assert.equal(interrupts, 2, "the two release upgrades share their settlement check");
   } finally { releaseObservation(); workflow.dispose(); }
+});
+
+test("an automatic stop that skips fresh activity does not swallow a waiting explicit Stop", async (t) => {
+  for (const autoRelease of [false, true]) for (const force of [false, true]) {
+    await t.test(`auto release ${autoRelease}, explicit force ${force}`, async () => {
+      let observationStarted, releaseObservation, first = true;
+      const entered = new Promise(resolve => { observationStarted = resolve; });
+      const gate = new Promise(resolve => { releaseObservation = resolve; });
+      const calls = [];
+      let current = { turnId: "owned-turn", turnState: "running", status: "working", lastActivityAt: 2_000_000_000_000 };
+      const workflow = workflowInternals({
+        chatPreferencesFile: null, findCodexExecutable: () => null,
+        setTimer: (resolve, ms) => ms === 250 ? queueMicrotask(resolve) : setTimeout(resolve, ms),
+        aoHarness: {
+          observe: async () => {
+            if (first) { first = false; observationStarted(); await gate; }
+            return current;
+          },
+          interrupt: async () => { calls.push("interrupt"); current = { ...current, turnState: "interrupted", status: "idle" }; },
+          exitAgent: async () => { calls.push("exit"); return { ok: true }; },
+        },
+      });
+      try {
+        const automatic = workflow.stopExternalTurn("session", { owner: "owner", turnId: "owned-turn", escalate: true,
+          isStalled: () => false, ...(autoRelease ? { releaseAgent: true } : {}) });
+        await entered;
+        const explicit = workflow.stopExternalTurn("session", force ? { owner: "owner", turnId: "owned-turn", releaseAgent: true } : undefined);
+        releaseObservation();
+        await Promise.all([automatic, explicit]);
+        assert.deepEqual(calls, force ? ["interrupt", "exit"] : ["interrupt"], "the waiting explicit intent must perform its own stop");
+      } finally { releaseObservation(); workflow.dispose(); }
+    });
+  }
 });
 
 test("follow-ups and warmed sessions wait for Stop to exit the host before checking its restoration", async () => {
@@ -9756,7 +10031,7 @@ test("with Retry automatically on, a turn silent past its limit is stopped so it
   let observed;
   const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
     route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
-    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1", turn_id: "turn-1" } };
   const workflow = createAgentOrchestratorWorkflow({
     now: () => clock,
     requestHeadless: async (endpoint) => {
@@ -9801,7 +10076,7 @@ test("a message queued behind a working turn is not stopped as hung: the whole s
   let observed;
   const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
     route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
-    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1", turn_id: "queued-turn" } };
   const workflow = createAgentOrchestratorWorkflow({
     now: () => clock,
     requestHeadless: async (endpoint) => {
@@ -9833,6 +10108,105 @@ test("a message queued behind a working turn is not stopped as hung: the whole s
   workflow.dispose();
 });
 
+test("the stall watchdog stops only its captured current owned turn", async (t) => {
+  const cases = [
+    "a newer request and turn replace the awaited observation",
+    "the original request key changes in place",
+    "the expected turn changes while the observation waits",
+    "the current harness turn changes",
+    "the saved card no longer runs",
+    "the saved card changes sessions",
+    "the original owned turn ID is missing",
+    "the returned observation has the wrong turn ID",
+    "the fresh current turn ID is missing",
+    "the fresh same turn reports recent activity",
+    "the fresh same turn starts a tool within its timeout",
+    "a new turn appears during stop settlement",
+    "the current turn ID disappears during stop settlement",
+    "a new turn appears after a refused interrupt",
+    "the current turn ID disappears after a refused interrupt",
+    "a different run owns the session",
+    "the current turn has recent activity",
+    "a quiet tool is within its timeout",
+    "the known owned turn is truly hung",
+    "only the saved receipt owns the hung turn",
+    "only the dispatched expected ID owns the hung turn",
+  ];
+  for (const name of cases) await t.test(name, async () => {
+    const clock = 2_000_000_000_000, calls = [];
+    let releaseObservation, observationStarted, first = true, reads = 0;
+    const entered = new Promise(resolve => { observationStarted = resolve; });
+    const gate = new Promise(resolve => { releaseObservation = resolve; });
+    const missingOwned = name === "the original owned turn ID is missing";
+    const node = { id: "worker", role: "worker", state: "running", route: { harness_id: "ao:claude-code", model: "fixture" },
+      receipt: { thread_id: "session", request_key: "original-key",
+        ...(missingOwned || name === "only the dispatched expected ID owns the hung turn" ? {} : { turn_id: "original-turn" }) } };
+    const mission = { id: "run", workspace_id: "ws", cancelled: false, nodes: [node] };
+    const hung = { turnId: "original-turn", turnState: "running", status: "working", approvals: [], timeline: [],
+      lastActivityAt: clock - 15 * 60_000, sessionActivityAt: clock - 15 * 60_000, sessionTools: [] };
+    const current = { ...hung };
+    if (name === "the fresh same turn reports recent activity") current.lastActivityAt = current.sessionActivityAt = clock;
+    if (name === "the fresh same turn starts a tool within its timeout") current.sessionTools = [{ timeoutMs: 3_600_000 }];
+    if (name === "the current harness turn changes" || name === cases[0]) current.turnId = "new-turn";
+    if (name === "the fresh current turn ID is missing") delete current.turnId;
+    const workflow = workflowInternals({
+      now: () => clock, chatPreferencesFile: null, findCodexExecutable: () => null,
+      setTimer: (resolve, ms) => ms === 250 ? queueMicrotask(resolve) : setTimeout(resolve, ms),
+      requestHeadless: async endpoint => {
+        assert.equal(endpoint, "/api/v1/ao/read", "this fixture performs no headless writes");
+        reads++;
+        return { ok: true, runs: [mission] };
+      },
+      aoHarness: {
+        observe: async (_session, expected) => {
+          if (first) {
+            first = false;
+            assert.equal(expected, missingOwned ? undefined : "original-turn");
+            observationStarted();
+            return gate;
+          }
+          return current;
+        },
+        interrupt: async () => {
+          calls.push("interrupt");
+          if (name === "a new turn appears during stop settlement" || name === "a new turn appears after a refused interrupt") current.turnId = "new-turn";
+          if (["the current turn ID disappears during stop settlement", "the current turn ID disappears after a refused interrupt"].includes(name)) delete current.turnId;
+          if (["a new turn appears after a refused interrupt", "the current turn ID disappears after a refused interrupt"].includes(name)) throw new Error("fixture interrupt refused");
+        },
+        exitAgent: async () => { calls.push("exit"); return { ok: true }; },
+      },
+    });
+    try {
+      workflow.sessionOwners.set("session", JSON.stringify(["ws", "run"]));
+      if (!missingOwned && name !== "only the saved receipt owns the hung turn") workflow.expectedTurns.set("session", "original-turn");
+      await workflow.call("chat_auto_retry", { enabled: true });
+      const reading = workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "worker" });
+      await entered;
+      const observed = { ...hung };
+      if (name === cases[0]) {
+        node.receipt = { thread_id: "session", request_key: "new-key", turn_id: "new-turn" };
+        workflow.expectedTurns.set("session", "new-turn");
+      }
+      if (name === "the original request key changes in place") node.receipt.request_key = "new-key";
+      if (name === "the expected turn changes while the observation waits") workflow.expectedTurns.set("session", "new-turn");
+      if (name === "the saved card no longer runs") node.state = "cancelled";
+      if (name === "the saved card changes sessions") node.receipt.thread_id = "other-session";
+      if (name === "the returned observation has the wrong turn ID") observed.turnId = "other-turn";
+      if (name === "a different run owns the session") workflow.sessionOwners.set("session", JSON.stringify(["ws", "other-run"]));
+      if (name === "the current turn has recent activity") observed.sessionActivityAt = clock;
+      if (name === "a quiet tool is within its timeout") observed.sessionTools = [{ timeoutMs: 3_600_000 }];
+      releaseObservation(observed);
+      await reading;
+      const expectedCalls = ["the known owned turn is truly hung", "only the saved receipt owns the hung turn", "only the dispatched expected ID owns the hung turn"].includes(name) ? ["interrupt", "exit"]
+        : ["a new turn appears during stop settlement", "the current turn ID disappears during stop settlement", "a new turn appears after a refused interrupt", "the current turn ID disappears after a refused interrupt"].includes(name) ? ["interrupt"] : [];
+      assert.deepEqual(calls, expectedCalls, name);
+      if (["the current turn has recent activity", "a quiet tool is within its timeout"].includes(name)) {
+        assert.equal(reads, 1, "healthy polling does not make an additional card read");
+      }
+    } finally { releaseObservation(hung); workflow.dispose(); }
+  });
+});
+
 // Seen live 2026-11-02: two chats "may be stuck" for over an hour with Retry automatically on. Every
 // 10 minutes one stall stop failed "Owned turn is still working; stop needs attention", and the other
 // logged "stopped" while its turn stayed running (idle 4914 s, then 5514 s). Neither card retried.
@@ -9842,7 +10216,7 @@ test("a hung turn the stall stop cannot interrupt has its agent shut down, so th
     const calls = [];
     const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
       route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
-      receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+      receipt: { request_key: "k", status: "submitted", thread_id: "sess-1", turn_id: "turn-1" } };
     const workflow = createAgentOrchestratorWorkflow({
       now: () => clock,
       // The 15 s settle window's 250 ms polls run at once; other timers keep their length.
@@ -9879,13 +10253,13 @@ test("a hung turn the stall stop cannot interrupt has its agent shut down, so th
   assert.deepEqual(orphaned.calls, [["interrupt", "sess-1"], ["exit", "sess-1"]], "a session with no controller is shut down at once");
   orphaned.workflow.dispose();
 
-  // The interrupt reads as settled once (the session's newest turn), yet the card's own turn stays hung.
+  // The owned turn reads as settled once, yet the card's next observation still finds it hung.
   let settled = false;
   const stale = stallWorld({
     observe: (_expected, clock) => {
       if (!settled) return hung(clock);
       settled = false;
-      return { turnId: "turn-2", turnState: "interrupted", status: "idle" };
+      return { turnId: "turn-1", turnState: "interrupted", status: "idle" };
     },
     interrupt: () => { settled = true; },
   });

@@ -119,20 +119,22 @@ async function dispatched(agent, model, tuning, catalog = DISPATCH_CATALOG) {
   return spawned[0];
 }
 
-test("CPA effort goes once, in the request body (Claude Code, Codex) or as a session-local suffix (opencode), and context is forwarded for each client", async () => {
+test("CPA effort survives each client's gateway transport and context is forwarded unchanged", async () => {
   for (const agent of ["codex", "claude-code", "opencode"]) {
-    // Claude Code and Codex send the bare model and the effort in the body (output_config.effort,
-    // reasoning.effort); opencode has no body transport in AO and keeps CPA's "(level)" suffix.
+    // Claude Code keeps the body setting and the suffix that survives AO's gateway effort reset.
+    // Codex keeps its body transport; opencode has only the session-local suffix.
     const body = agent !== "opencode";
+    const suffix = agent !== "codex";
+    const gatewayModel = suffix ? "gpt-5.5(high)" : "gpt-5.5";
     const input = await dispatched(agent, "cpa/gpt-5.5(low)", { effort: "high", context_window: 262144 });
-    assert.equal(input.model, body ? "gpt-5.5" : "openai/gpt-5.5(high)");
-    assert.deepEqual(input.gateway, { provider: "cpa", model: body ? "gpt-5.5" : "gpt-5.5(high)" });
+    assert.equal(input.model, agent === "opencode" ? `openai/${gatewayModel}` : gatewayModel);
+    assert.deepEqual(input.gateway, { provider: "cpa", model: gatewayModel });
     assert.equal(input.contextWindow, 262144);
-    assert.equal(input.effort, body ? "high" : undefined, "the effort goes once: in the body or in the name");
+    assert.equal(input.effort, body ? "high" : undefined, "keep the body setting for drivers that can forward it");
     // A card left blank on a model without "auto" starts on a real effort (High: there is no
     // Medium), so a send made before the composer's list loaded still names one.
     const untuned = await dispatched(agent, "cpa/gpt-5.5", {});
-    assert.deepEqual([untuned.gateway.model, untuned.effort], body ? ["gpt-5.5", "high"] : ["gpt-5.5(high)", undefined]);
+    assert.deepEqual([untuned.gateway.model, untuned.effort], [gatewayModel, body ? "high" : undefined]);
     assert.equal(untuned.contextWindow, 262144, "a card left blank starts with the model's full known window");
   }
   const own = await dispatched("codex", "own-model", { effort: "high", context_window: 131072 });
@@ -153,17 +155,18 @@ test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged
     });
     const result = await workflow.call("models", { harness: "ao:" + agent });
     assert.deepEqual(result.capabilities["cpa/" + id].efforts, ["none", "low", "high", "max"], agent);
-    // Claude Code and Codex carry the effort in the body, opencode in the model's name.
+    // Claude Code also carries the validated level in the name; Codex keeps the bare model.
     const body = agent !== "opencode";
     for (const effort of ["none", "low", "high", "max"]) {
       const input = await dispatched(agent, "cpa/" + id + "(high)", { effort }, catalog);
-      assert.equal(input.model, body ? id : "openai/" + id + "(" + effort + ")");
-      assert.deepEqual(input.gateway, { provider: "cpa", model: body ? id : id + "(" + effort + ")" });
+      const gatewayModel = agent === "codex" ? id : id + "(" + effort + ")";
+      assert.equal(input.model, agent === "opencode" ? "openai/" + gatewayModel : gatewayModel);
+      assert.deepEqual(input.gateway, { provider: "cpa", model: gatewayModel });
       assert.equal(input.effort, body ? effort : undefined);
     }
     await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "xhigh" }, catalog), /doesn't support the chosen reasoning effort/i);
     const blank = await dispatched(agent, "cpa/" + id, {}, catalog);
-    assert.deepEqual([blank.gateway.model, blank.effort], body ? [id, "high"] : [id + "(high)", undefined],
+    assert.deepEqual([blank.gateway.model, blank.effort], [agent === "codex" ? id : id + "(high)", body ? "high" : undefined],
       "None/Low/High/Max has no Auto: a blank card starts on High, not on no effort CPA cannot serve");
   }
 });
@@ -176,7 +179,7 @@ test("agy gets the bare model name and runs unattended only with Full access", a
   assert.deepEqual([blank.model, blank.gateway.model], ["gemini-3-flash", "gemini-3-flash"], "no start effort suffix");
   assert.equal((await dispatched("agy", "cpa/gemini-3-flash(low)", { effort: "low" }, catalog)).model, "gemini-3-flash", "a picked or saved suffix is dropped");
   const other = await dispatched("claude-code", "cpa/gemini-3-flash", {}, catalog);
-  assert.deepEqual([other.model, other.effort], ["gemini-3-flash", "medium"], "other harnesses keep the start effort (Claude Code's in the body)");
+  assert.deepEqual([other.model, other.effort], ["gemini-3-flash(medium)", "medium"], "Claude Code keeps its supported start effort through the gateway");
   const full = await dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }, catalog);
   assert.equal(full.approvalMode, "bypass-permissions");
   // Ask stays at an approval in agy's terminal, which nobody sees, and Approve for me (--mode auto)
@@ -208,10 +211,10 @@ test("every provider plugin's model reaches CPA by its bare name, by namespace o
   const catalog = [...DISPATCH_CATALOG, { slug: "commandcode-go/deepseek-v4.1-flash", supported_reasoning_levels: levels },
     { slug: "kimi-k3", owned_by: "kimi", supported_reasoning_levels: levels }];
   // Command Code's plugin 1.0.0-codingtools.2 reads the suffix as the request's reasoning level;
-  // Claude Code sends the bare model and the picked level in the body instead.
+  // Claude Code keeps that supported suffix too, alongside the body setting.
   for (const model of ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/commandcode-go/deepseek-v4.1-flash(low)"]) {
     const input = await dispatched("claude-code", model, { effort: "high" }, catalog);
-    assert.deepEqual([input.gateway, input.effort], [{ provider: "cpa", model: "commandcode-go/deepseek-v4.1-flash" }, "high"], "the picked level, in the body");
+    assert.deepEqual([input.gateway, input.effort], [{ provider: "cpa", model: "commandcode-go/deepseek-v4.1-flash(high)" }, "high"], "the picked level survives the gateway in its suffix");
     const named = await dispatched("opencode", model, { effort: "high" }, catalog);
     assert.deepEqual(named.gateway, { provider: "cpa", model: "commandcode-go/deepseek-v4.1-flash(high)" }, "opencode's is its suffix");
   }

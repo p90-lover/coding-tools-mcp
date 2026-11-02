@@ -2,9 +2,10 @@ import type { AppConfig } from "./config";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
+  chatGptWebRouteEfforts,
   CHATGPT_WEB_MODEL_PREFIX,
-  requireChatGptWebModelRoute,
   resolveChatGptWebContextLimits,
+  servedChatGptWebModelRoute,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
 
@@ -48,13 +49,11 @@ function routedModelPriority(
   const priority = modelPriority(template);
   if (priority === undefined
     || config.subagentProtocol !== "compatibility-v1"
-    || route.slug !== "chatgpt-web/light") return priority;
+    || !["chatgpt-web/light", "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-6-sol-instant"].includes(route.slug)) return priority;
   if (priority === Number.MAX_SAFE_INTEGER) {
     throw new Error("Native Codex model template priority cannot reserve the Compatibility V1 roster");
   }
-  // Codex V1 exposes at most five model overrides. Keep the native Sol row plus the four useful
-  // delegated Web efforts (Medium, High, Extra High, Pro); Instant remains a selectable root model
-  // but does not displace Pro from spawn_agent's bounded registry.
+  // Preserve the native model and the reasoning/Pro choices in Codex V1's bounded registry.
   return priority + 1;
 }
 
@@ -99,6 +98,8 @@ export function buildChatGptWebModel(
   templateValue: unknown,
   route: ChatGptWebModelRoute,
   config: AppConfig,
+  /** Fresh effort-slider reading (freshChatGptEffortTiers); trims the listed efforts. */
+  detectedTiers?: readonly boolean[],
 ): JsonObject {
   const template = object(templateValue, "native Codex model template");
   const templateSlug = slug(template);
@@ -106,8 +107,22 @@ export function buildChatGptWebModel(
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
   // A tier the account lacks runs as a lower one; advertise the window that tier really gets.
-  const served = route.interactionMode === "automatic" ? requireChatGptWebModelRoute(route.slug, config) : route;
-  const limits = resolveChatGptWebContextLimits(served.backendModel, served.adapterEffort, config);
+  const servedLimits = (effort?: string) => {
+    const served = route.interactionMode === "automatic"
+      ? servedChatGptWebModelRoute(route, config, effort)
+      : route;
+    if ((served.adapterEffort as string) === "ultra") throw new Error("Ultra is not a browser effort");
+    const modelFamily = served.interactionMode === "automatic" ? served.modelFamily : undefined;
+    return resolveChatGptWebContextLimits(served.backendModel, served.adapterEffort, config, modelFamily);
+  };
+  const limits = servedLimits();
+  const efforts = chatGptWebRouteEfforts(route, config, detectedTiers);
+  for (const effort of efforts) {
+    const candidate = servedLimits(route.supportedCodexEfforts ? effort : undefined);
+    if (JSON.stringify(candidate) !== JSON.stringify(limits)) {
+      throw new Error(`Cannot group different context budgets under ${route.slug}`);
+    }
+  }
   const multiAgentVersion = routedSubagentVersion(template, config);
   const priority = routedModelPriority(template, route, config);
   const model: JsonObject = {
@@ -116,7 +131,7 @@ export function buildChatGptWebModel(
     display_name: route.displayName,
     description: route.description,
     input_modalities: route.interactionMode === "manual" ? ["text"] : ["text", "image"],
-    visibility: "list",
+    visibility: route.legacy ? "hide" : "list",
     // These slugs are implemented by this local Responses-compatible bridge. Marking them false
     // makes Codex drop them from spawn_agent whenever openai_base_url points at the bridge.
     supported_in_api: true,
@@ -135,7 +150,10 @@ export function buildChatGptWebModel(
     tool_mode: null,
     upgrade: null,
     default_reasoning_level: route.codexEffort,
-    supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
+    supported_reasoning_levels: efforts.map(effort => reasoningLevel(template, effort,
+      efforts.length === 1 ? route.displayName
+        : route.backendModel === "gpt-5.6-luna" ? effort === "low" ? "Ordinary Luna" : "Think"
+          : `${route.displayName} — ${effort === "xhigh" ? "Extra High" : effort}`)),
     context_window: limits.contextWindow,
     max_context_window: limits.contextWindow,
     effective_context_window_percent: limits.effectiveContextWindowPercent,
@@ -193,8 +211,9 @@ export function augmentNativeModelCatalog(
       }
     }
   }
-  const webModels = availableChatGptWebModelRoutes(config, detectedTiers)
-    .map(route => buildChatGptWebModel(template, route, config));
+  // Hidden legacy rows keep saved tasks resolvable; the fresh reading trims only listed rows.
+  const webModels = availableChatGptWebModelRoutes(config, true, detectedTiers)
+    .map(route => buildChatGptWebModel(template, route, config, detectedTiers));
   return {
     ...structuredClone(catalog),
     models: [...nativeModels, ...webModels],

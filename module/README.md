@@ -2,14 +2,14 @@
 
 `agent-orchestrator/` is a Git submodule pinned to the Coding Tools fork
 https://github.com/p90-lover/agent-orchestrator (branch
-`coding-tools/cpa-gateway`), which tracks upstream
+`main`), which tracks upstream
 https://github.com/Untrivial-ai/agent-orchestrator.
 
 Develop the Coding Tools AO integration from this checkout. Do not install or
 launch a separate AO desktop application. Keep generated build artifacts in the
 project's `aiTemp/` directory and preserve upstream licenses.
 
-The upstream base is commit `73473d45f0c18f3a81f66f150868459e3098ca35`. The fork
+The upstream base is commit `4c7dbf0ff4d1aacc30567229dd65003a8e7e1c3b`. The fork
 adds, on top of it:
 
 - the per-session CPA gateway, so external harnesses can run any CPA model;

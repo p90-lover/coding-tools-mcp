@@ -15,7 +15,7 @@ import type { ChatGptTurnEnvironment } from "../src/adapters/chatgpt-web/environ
 import type { CodexToolResultMessage } from "../src/types";
 
 const runtimeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
+const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true, extraHighAvailable: true };
 const turnToken = "turn_native_envelope_projection_12345678901234567890";
 const privateSentinel = "COMPONENT_ONLY_PRIVATE_SENTINEL";
 const canonical = {

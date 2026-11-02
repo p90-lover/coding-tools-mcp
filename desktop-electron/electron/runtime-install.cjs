@@ -772,7 +772,8 @@ async function pruneOldRuntimes({ app, coreHome, now = Date.now(), keepOthers = 
     try { mtimeMs = (await fs.promises.stat(path.join(versionsRoot, name))).mtimeMs; } catch { continue; }
     if (leftover) {
       if (now - mtimeMs > STALE_RUNTIME_TEMP_MS) doomed.push(name);
-    } else if (/-(win32|darwin|linux)-[a-z0-9]+$/.test(name)) {
+    } else if (/-(win32|darwin|linux)-[a-z0-9]+$/.test(name)
+      || /^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?-(win32|darwin|linux)-[a-z0-9]+-[0-9a-f]{12}$/.test(name)) {
       others.push({ name, mtimeMs });
     }
   }

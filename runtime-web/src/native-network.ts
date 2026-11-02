@@ -26,6 +26,9 @@ export function nativeProxyFromPac(value: unknown): string | undefined {
 
 /**
  * Native Codex keeps its own bearer auth while Chromium supplies the launcher's proxy session.
+ * Coding Tools relays the request through the launcher (/v1/network/native-fetch) rather than
+ * resolving a proxy and fetching from Bun (upstream's /v1/network/resolve-proxy): an
+ * authenticated system proxy's credentials stay in the launcher's Chromium session.
  *
  * The launcher's descriptor is read for every request, never cached. When the app crashed (its
  * descriptor names an exited process) or announced a restart, the request waits for the relaunched

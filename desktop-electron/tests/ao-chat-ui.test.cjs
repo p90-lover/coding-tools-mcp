@@ -435,15 +435,34 @@ test("normal asynchronous startup detail is not shown as a failed launch", () =>
   assert.ok(failed.includes("start the run"));
 });
 
-test("a tool call that timed out is a red line in a running chat, not the failed-step card", () => {
-  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [{ id: "lead", role: "planner", state: "running" }] }],
-    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [], working: true,
+test("recoverable tool timeouts do not add warning text to the chat", () => {
+  const props = { tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
     loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
-  const warning = "A tool call timed out (Headless request timed out). The chat keeps going by itself.";
-  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, warning }));
-  assert.match(html, /<p class="cx-step-error cx-timeout-line" role="status">A tool call timed out \(Headless request timed out\)\. The chat keeps going by itself\.<\/p>/);
-  assert.equal(html.includes("Step failed"), false, "nothing waits for a click");
-  assert.equal(renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props)).includes("cx-timeout-line"), false);
+  for (const state of ["running", "finished"]) {
+    for (const model of ["cpa/gpt-6.1-sol", "cpa/deepseek-v4.1-flash"]) {
+      for (const count of ["", ", 4 times"]) {
+        const warning = `A tool call timed out (Headless request timed out)${count}. The chat keeps going by itself.`;
+        const runs = [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single",
+          nodes: [{ id: "lead", role: "planner", state, route: { harness_id: "ao:codex", model },
+            receipt: { answer: "The useful response remains visible.", started_at_ms: 1, ...(state === "finished" ? { finished_at_ms: 2 } : {}) } }] }];
+        const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, runs, working: state === "running", warning }));
+        assert.doesNotMatch(html, /A tool call timed out|The chat keeps going by itself|cx-timeout-line/);
+        assert.equal(html.includes("Step failed"), false, "a recovered timeout does not require a click");
+        if (state === "finished") assert.ok(html.includes("The useful response remains visible."));
+      }
+    }
+  }
+});
+
+test("hiding recoverable timeout text does not hide an actual failed-step message", () => {
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, {
+    runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [{ id: "lead", role: "planner", state: "held", receipt: { error: "Authorization required" } }] }],
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [], working: false,
+    warning: "A tool call timed out (Headless request timed out). The chat keeps going by itself.",
+    notice: "Authorization required", loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},
+  }));
+  assert.match(html, /Authorization required/);
+  assert.doesNotMatch(html, /A tool call timed out|cx-timeout-line/);
 });
 
 test("terminal failed work never becomes a successful chat just because review finished", () => {
