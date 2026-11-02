@@ -8586,6 +8586,33 @@ test("Stop attempts every owned agent and reports an unconfirmed interrupt", asy
   }
 });
 
+test("Stop hands an agent AO is already stopping to the exit worker and drops it from the card once gone", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [{ id: "one", state: "running", route, receipt: { thread_id: "s1" } }] };
+  let gone;
+  const exited = new Promise(resolve => { gone = resolve; });
+  const released = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/control")) return { ok: true, run: { ...structuredClone(mission), cancelled: true, nodes: [{ ...mission.nodes[0], state: "held" }] } };
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      throw new Error("unexpected " + endpoint);
+    },
+    // Seen live 2026-11-02: Stop waited on the same lock and failed "Agent stop could not be confirmed:
+    // The agent is already exiting". The exit worker waits for it instead.
+    aoHarness: { releaseAgent: async id => { released.push(id); return { ok: true, exiting: true, exited }; },
+      exitAgent: async () => { throw new Error("Stop must not wait on the exit lock"); },
+      interrupt: async () => undefined, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+  });
+  try {
+    assert.equal((await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })).ok, true,
+      "Stop is confirmed while the agent finishes exiting in the background");
+    assert.deepEqual(released, ["s1"]);
+    gone(true);
+    await exited;
+  } finally { workflow.dispose(); }
+});
+
 test("a working external card is not rewired when its interrupt fails", async () => {
   const route = { harness_id: "ao:claude-code", model: "fixture" };
   const mission = { id: "run", workspace_id: "ws", revision: 3, nodes: [{ id: "one", state: "running", route, receipt: { thread_id: "s1" } }] };
