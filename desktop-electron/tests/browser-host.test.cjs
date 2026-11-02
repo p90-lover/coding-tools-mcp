@@ -472,7 +472,10 @@ test("the idle home browser performs one bounded reload for a Cloudflare challen
     webContentsId: 42,
     responseHeaders: { "content-type": ["application/json"] },
   });
-  assert.equal(fixture.cloudflareChallengeRecoveryArmed, true);
+  assert.equal(fixture.cloudflareChallengeRecoveryArmed, false, "an unrelated healthy response must not rearm a reload loop");
+  BrowserHost.prototype.handleChatGptBackendResponse.call(fixture, challenge);
+  await fixture.cloudflareChallengeRecovery;
+  assert.equal(calls.filter(([name]) => name === "loadURL").length, 1);
 });
 
 function createContents() {
