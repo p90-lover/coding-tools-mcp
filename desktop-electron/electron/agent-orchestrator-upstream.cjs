@@ -18,6 +18,7 @@ const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CON
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 const { spawnOffThread } = require("./off-thread-run.cjs");
+const { redactionLabel } = require("./chat-redaction.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -878,7 +879,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   const REDACT_TOOL = /(^|__)redact_message$/;
   function hiddenSecretsInput(input) {
     const count = Array.isArray(input.secrets) ? input.secrets.length : 0;
-    return { ...(typeof input.label === "string" ? { label: input.label.slice(0, 40) } : {}),
+    return { ...(typeof input.label === "string" ? { label: redactionLabel(input.label, input.secrets) } : {}),
       secrets: `${count} hidden (not shown)` };
   }
   function timelineActivity(activity) {

@@ -36,10 +36,20 @@ function redactList(value) {
   return [...new Set(lines)].slice(0, MAX_LIST_ITEMS);
 }
 
+/** Labels remain visible in both the chat and Worked; a quoted secret cannot be their label. */
+function redactionLabel(label, secrets = []) {
+  const text = String(label ?? "");
+  const given = Array.isArray(secrets) ? secrets : [];
+  if (text.length > MAX_SECRET || given.length > MAX_SECRETS) return "";
+  const word = text.replace(/[\]\[\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 40);
+  const normalized = text.replace(/\r\n/g, "\n");
+  return given.some((secret) => typeof secret === "string" && secret.length > 0
+    && (secret.length > MAX_SECRET || normalized.includes(secret.replace(/\r\n/g, "\n")) || word.includes(secret))) ? "" : word;
+}
+
 /** The marker a secret becomes: its label kept to one short line without brackets. */
-function hiddenMarker(label) {
-  const word = String(label ?? "").replace(/[\]\[\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 40);
-  return `[hidden: ${word || "secret"}]`;
+function hiddenMarker(label, secrets = []) {
+  return `[hidden: ${redactionLabel(label, secrets) || "secret"}]`;
 }
 
 /**
@@ -66,9 +76,11 @@ function acceptableSecret(secret) {
  */
 function chatDescriptionRedacted(description, secrets, label) {
   const given = Array.isArray(secrets) ? secrets.slice(0, MAX_SECRETS) : [];
-  const refused = given.filter((secret) => !acceptableSecret(secret));
-  const wanted = [...new Set(given.filter(acceptableSecret))].sort((a, b) => b.length - a.length);
-  const marker = hiddenMarker(label);
+  const accepted = [...new Set(given.filter(acceptableSecret))].sort((a, b) => b.length - a.length);
+  const marker = hiddenMarker(label, accepted);
+  // A value in the marker's fixed syntax cannot truthfully be reported as hidden.
+  const wanted = accepted.filter((secret) => !marker.includes(secret));
+  const refused = given.filter((secret) => !wanted.includes(secret));
   let hidden = 0;
   // split with a capturing group keeps the headers at odd indexes.
   const parts = String(description ?? "").split(FOLLOW_UP).map((part, index) => {
@@ -92,5 +104,5 @@ function chatDescriptionRedacted(description, secrets, label) {
 
 module.exports = {
   DEFAULT_REDACT_LIST, HIDDEN, MAX_SECRET, MAX_SECRETS,
-  acceptableSecret, chatDescriptionRedacted, hiddenMarker, redactList,
+  acceptableSecret, chatDescriptionRedacted, hiddenMarker, redactList, redactionLabel,
 };
