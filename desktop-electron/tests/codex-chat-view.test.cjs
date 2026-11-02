@@ -710,6 +710,29 @@ test("two queued messages fold into Claude Code's stack: Next: …, then a list 
   assert.equal(cleared, 1);
 });
 
+test("the composer sends annotations and typed text once, together, for both send and steer", async () => {
+  for (const running of [false, true]) {
+    const delivered = [];
+    const taskId = `t-annotation-together-${running}`;
+    const { props } = base({ selectedTaskId: taskId,
+      runs: running ? [run("r1", taskId, [node("w", "planner", "running", { route: { harness_id: "ao:codex", model: "cpa/test" } })], { execution_mode: "single" })] : [],
+      send: async (input) => { delivered.push(input); }, steer: async (input) => { delivered.push(input); return true; } });
+    const view = mount(props);
+    const all = () => walk(view.render());
+    const annotator = () => all().find((element) => typeof element.props?.onAdd === "function");
+    const id = annotator().props.onAdd("the OCR worker count is fixed");
+    annotator().props.onComment(id, "one worker per account");
+    all().find((element) => element.type === "textarea").props.onChange({ target: { value: "Can OCR handle multiple accounts?" } });
+    await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+    assert.equal(delivered.length, 1, "one request, not an annotation-only send followed by the typed text");
+    const parts = chat.chatMessageParts(delivered[0].message);
+    assert.equal(parts.text, "Can OCR handle multiple accounts?");
+    assert.deepEqual(JSON.parse(JSON.stringify(parts.annotations)), [{ text: "the OCR worker count is fixed", comment: "one worker per account" }]);
+    const tray = all().find((element) => Array.isArray(element.props?.annotations) && typeof element.props?.onRemove === "function");
+    assert.equal(tray.props.annotations.length, 0);
+  }
+});
+
 test("Edit in composer gives a queued message's annotations back as the composer's own, not as the block the agent reads", async () => {
   const { props } = base({ selectedTaskId: "t-notes", working: true,
     runs: [run("r1", "t-notes", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],

@@ -264,9 +264,12 @@ function autoReviewSignInScript(marker) {
  *   here to refresh quota" (Antigravity, Claude, ...) are pressed, one per tick.
  * "running" when the page already has it, "unseeded" before the panel session is seeded.
  */
-function quotaPageScript(marker) {
+function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA_QUOTA_REFRESH_DELAY_MS } = {}) {
+  const configuredDelay = Number(refreshDelayMs);
+  const delay = Number.isFinite(configuredDelay) && configuredDelay >= 250 && configuredDelay <= 60_000 ? configuredDelay : 2_000;
   return `(() => {
     const marker = ${JSON.stringify(marker)};
+    const REFRESH_DELAY_MS = ${delay};
     if (sessionStorage.getItem('coding-tools-cpa-session') !== marker) return 'unseeded';
     if (window.__codingToolsQuota) return 'running';
     window.__codingToolsQuota = true;
@@ -285,6 +288,46 @@ function quotaPageScript(marker) {
     // The slower pace lasts 30 minutes from the last 429; a limit still hit renews it.
     function refreshEvery() {
       return Date.now() - limitedAt() < 30 * 60e3 ? 5 * 60e3 : 2 * 60e3;
+    }
+    // Upstream quota reads share one lane, with a gap AFTER completion, not just between starts.
+    const refreshQueue = [];
+    let refreshBusy = false, refreshWaiting = false, nextRefreshAt = 0;
+    function startRefresh() {
+      while (refreshQueue[0]?.cancelled()) refreshQueue.shift();
+      const job = refreshQueue.shift();
+      if (!job) return;
+      refreshBusy = true;
+      let finished = false;
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        refreshBusy = false;
+        nextRefreshAt = Date.now() + REFRESH_DELAY_MS;
+        pumpRefresh();
+      };
+      try { job.start(done); } catch (error) { done(); throw error; }
+    }
+    function pumpRefresh() {
+      if (refreshBusy || refreshWaiting) return;
+      while (refreshQueue[0]?.cancelled()) refreshQueue.shift();
+      if (!refreshQueue.length) return;
+      const wait = nextRefreshAt - Date.now();
+      if (wait <= 0) startRefresh();
+      else {
+        refreshWaiting = true;
+        setTimeout(() => { refreshWaiting = false; startRefresh(); }, wait);
+      }
+    }
+    function enqueueRefresh(start, cancelled = () => false) {
+      refreshQueue.push({ start, cancelled });
+      pumpRefresh();
+    }
+    function queuedRefresh(work) {
+      return new Promise((resolve, reject) => enqueueRefresh((done) => {
+        let result;
+        try { result = work(); } catch (error) { done(); reject(error); return; }
+        Promise.resolve(result).then((value) => { done(); resolve(value); }, (error) => { done(); reject(error); });
+      }));
     }
     const savedCline = read(CLINE_SAVED);
     let refreshedThisVisit = false;
@@ -401,9 +444,12 @@ function quotaPageScript(marker) {
           const index = file.auth_index ?? file.authIndex;
           const name = String(file.name || '').replace(/[.]json$/, '');
           try {
-            const response = await fetch('/v0/management/api-call', { method: 'POST', headers: authorized({ 'content-type': 'application/json' }),
-              body: JSON.stringify({ authIndex: index, method: 'GET', url: 'https://chatgpt.com/backend-api/wham/usage', header: { Authorization: 'Bearer $TOKEN$' } }) });
-            const reply = response.ok ? await response.json() : null;
+            const { response, reply } = await queuedRefresh(async () => {
+              const response = await fetch('/v0/management/api-call', { method: 'POST', headers: authorized({ 'content-type': 'application/json' }),
+                signal: typeof AbortSignal === 'undefined' ? undefined : AbortSignal.timeout(8_000),
+                body: JSON.stringify({ authIndex: index, method: 'GET', url: 'https://chatgpt.com/backend-api/wham/usage', header: { Authorization: 'Bearer $TOKEN$' } }) });
+              return { response, reply: response.ok ? await response.json() : null };
+            });
             const upstream = Number(reply?.status_code) || 0;
             if (upstream === 429 || response.status === 429) noteLimited();
             const body = typeof reply?.body === 'string' ? JSON.parse(reply.body) : reply?.body;
@@ -608,6 +654,8 @@ function quotaPageScript(marker) {
     if (NativeXhr) {
       const { open, send, setRequestHeader, abort } = NativeXhr.prototype;
       NativeXhr.prototype.open = function (method, url, ...rest) {
+        const previous = this.__codingTools;
+        if (previous) { previous.aborted = true; previous.inner?.abort(); previous.finish?.(); }
         this.__codingTools = { method: String(method), url: String(url), headers: [] };
         return open.call(this, method, url, ...rest);
       };
@@ -616,7 +664,8 @@ function quotaPageScript(marker) {
         return setRequestHeader.call(this, name, value);
       };
       NativeXhr.prototype.abort = function () {
-        this.__codingTools?.inner?.abort();
+        const request = this.__codingTools;
+        if (request) { request.aborted = true; request.inner?.abort(); request.finish?.(); }
         return abort.call(this);
       };
       NativeXhr.prototype.send = function (body) {
@@ -625,26 +674,38 @@ function quotaPageScript(marker) {
         if (!key) return send.call(this, body);
         const saved = savedAnswers()[key];
         if (saved && Date.now() > networkUntil && Date.now() - saved.at < refreshEvery()) return answerWith(this, 200, saved.text);
-        const inner = new NativeXhr();
-        request.inner = inner;
-        open.call(inner, request.method, request.url, true);
-        for (const [name, value] of request.headers) setRequestHeader.call(inner, name, value);
-        inner.timeout = this.timeout;
-        inner.withCredentials = this.withCredentials;
-        inner.onloadend = () => {
-          let upstream = 0;
-          try { upstream = Number(JSON.parse(inner.responseText).status_code) || 0; } catch {}
-          const good = inner.status === 200 && upstream >= 200 && upstream < 300;
-          if (inner.status === 429 || upstream === 429) noteLimited();
-          const answers = savedAnswers();
-          if (good) {
-            answers[key] = { at: Date.now(), text: inner.responseText };
-            write(SAVED, answers);
+        enqueueRefresh((done) => {
+          request.finish = done;
+          try {
+            const inner = new NativeXhr();
+            request.inner = inner;
+            open.call(inner, request.method, request.url, true);
+            for (const [name, value] of request.headers) setRequestHeader.call(inner, name, value);
+            inner.timeout = this.timeout || 8_000;
+            inner.withCredentials = this.withCredentials;
+            inner.onloadend = () => {
+              try {
+                if (request.aborted) return;
+                let upstream = 0;
+                try { upstream = Number(JSON.parse(inner.responseText).status_code) || 0; } catch {}
+                const good = inner.status === 200 && upstream >= 200 && upstream < 300;
+                if (inner.status === 429 || upstream === 429) noteLimited();
+                const answers = savedAnswers();
+                if (good) {
+                  answers[key] = { at: Date.now(), text: inner.responseText };
+                  write(SAVED, answers);
+                }
+                if (!good && answers[key]) answerWith(this, 200, answers[key].text);
+                else answerWith(this, inner.status, inner.responseText);
+              } finally { request.finish = null; done(); }
+            };
+            send.call(inner, body);
+          } catch {
+            if (!request.aborted) answerWith(this, 0, '');
+            request.finish = null;
+            done();
           }
-          if (!good && answers[key]) answerWith(this, 200, answers[key].text);
-          else answerWith(this, inner.status, inner.responseText);
-        };
-        send.call(inner, body);
+        }, () => request.aborted === true);
       };
     }
     function tick() {
