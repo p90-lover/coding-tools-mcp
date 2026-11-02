@@ -42,6 +42,7 @@ export type IconName =
   | "team"
   | "terminal"
   | "update"
+  | "user"
   | "userPlus"
   | "x";
 
@@ -89,7 +90,8 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
       {name === "sidebar" ? <><rect {...common} x="3" y="4" width="18" height="16" rx="2.5" /><path {...common} d="M9 4v16" /></> : null}
       {name === "team" ? <><circle {...common} cx="9" cy="8" r="3" /><path {...common} d="M3.5 19a5.5 5.5 0 0 1 11 0" /><path {...common} d="M15.5 5.3a3 3 0 0 1 0 5.4M17.5 14a5.5 5.5 0 0 1 3 5" /></> : null}
       {name === "terminal" ? <><rect {...common} x="3" y="4" width="18" height="16" rx="2.5" /><path {...common} d="m7 9 3 3-3 3M12.5 15H17" /></> : null}
-      {name === "userPlus" ? <><circle {...common} cx="9" cy="8" r="3.5" /><path {...common} d="M3 20a6 6 0 0 1 12 0M18.5 8v6M15.5 11h6" /></> : null}
+      {name === "user" ? <><circle {...common} cx="12" cy="8" r="3.5" /><path {...common} d="M5 20a7 7 0 0 1 14 0" /></> : null}
+      {name === "userPlus" ?<><circle {...common} cx="9" cy="8" r="3.5" /><path {...common} d="M3 20a6 6 0 0 1 12 0M18.5 8v6M15.5 11h6" /></> : null}
       {name === "update" ?<><path {...common} d="M12 3v12M7.5 10.5 12 15l4.5-4.5" /><path {...common} d="M5 19h14" /></> : null}
       {name === "x" ? <path fill="currentColor" d="M5 4h3.9l3.8 5.1L17.1 4H19l-5.4 6.4L19.5 20h-3.9l-4.1-5.6L6.7 20H4.8l5.8-6.9L5 4Zm3 1.5 8.4 13h1.2l-8.4-13H8Z" /> : null}
     </svg>
