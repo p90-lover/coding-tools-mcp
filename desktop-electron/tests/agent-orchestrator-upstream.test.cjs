@@ -1059,6 +1059,23 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   assert.equal(calls.filter(([, endpoint]) => endpoint.endsWith("/exit-agent")).length, 4);
   exitBusy = 99;
   await assert.rejects(upstream.exitAgent("old"), error => error.code === "AGENT_EXIT_IN_PROGRESS", "the wait is bounded");
+  // Seen live 2026-11-02: a Stop and the card's retry each waited 10 s on that lock and failed.
+  exitBusy = 3; calls.length = 0;
+  let handed = await upstream.releaseAgent("old");
+  assert.equal(handed.ok, true);
+  assert.equal(handed.exiting, true, "a stop AO is already carrying out is handed to the exit worker at once");
+  assert.equal(await upstream.continuable("old"), false, "an agent on its way out is not continued: the retry starts a fresh one");
+  assert.equal(calls.filter(([, endpoint]) => endpoint.endsWith("/resume-agent")).length, 0);
+  assert.equal(await handed.exited, true, "the worker keeps asking until AO reports the agent exited");
+  assert.equal(calls.filter(([, endpoint]) => endpoint.endsWith("/exit-agent")).length, 4);
+  exitBusy = 0;
+  assert.equal((await upstream.releaseAgent("old")).exiting, false, "a free agent is stopped there and then");
+  exitBusy = 100_000;
+  handed = await upstream.releaseAgent("old");
+  assert.equal(await handed.exited, false, "the worker gives up after its limit");
+  assert.equal((await upstream.releaseAgent("old")).exiting, true, "and a later stop starts a new one");
+  exitBusy = 0;
+  assert.equal(await (await upstream.releaseAgent("old")).exited, true, "a stop already handed over shares that worker");
   exitBusy = 0;
   assert.equal(await upstream.continuable("old"), true, "a released agent is resumed for the next message");
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
@@ -1961,8 +1978,9 @@ test("resume waits distinguish terminal failure from timeout and transport uncer
         return { session: { id: "owned", mode: "chat", status: reads > 1 && scenario === "terminal" ? "terminated" : "exited", provisionState: "ready" } };
       },
     });
-    if (scenario === "terminal") assert.equal(await upstream.continuable("owned"), false);
-    else await assert.rejects(upstream.continuable("owned"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED");
+    // One whose stop AO cannot take now (startup still owns the resume) goes to the exit worker, which
+    // stops it once it is back, so the message starts a fresh agent instead of failing.
+    assert.equal(await upstream.continuable("owned"), false);
     assert.equal(resumes, 1);
     assert.ok(reads <= 152, "readiness polling is bounded");
   }
@@ -2180,8 +2198,10 @@ test("chats AO still calls working with no agent activity for long are listed, s
     { id: "ended", mode: "chat", status: "working", isTerminated: true, activity: { lastActivityAt: ago(24 * 60) } },
     { id: "worker", mode: "worker", status: "working", activity: { lastActivityAt: ago(24 * 60) } },
     { id: "unknown", mode: "chat", status: "working", activity: {} },
+    // The exit worker already waits on this one (releaseAgent).
+    { id: "handed", mode: "chat", status: "working", activity: { state: "active", lastActivityAt: ago(24 * 60) } },
   ];
-  const upstream = vm.runInNewContext("({" + method + "})", { Date, Number, Array, String,
+  const upstream = vm.runInNewContext("({" + method + "})", { Date, Number, Array, String, exitingAgents: new Map([["handed", Promise.resolve(true)]]),
     internalApi: async (method, endpoint) => { assert.equal(endpoint, "/api/v1/sessions"); return { sessions }; } });
   assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now)], ["stranded"],
     "only a live chat quiet past the limit: not a busy one, an idle or ended one, a non-chat, or one with no activity time");

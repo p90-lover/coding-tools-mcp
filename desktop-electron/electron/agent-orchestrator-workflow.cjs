@@ -1496,7 +1496,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         });
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
-          const stopped = await harnessService().exitAgent?.(continued.session);
+          // One AO is already stopping is left to the exit worker: the fresh agent need not wait for it.
+          const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId));
           if (stopped?.ok !== true) throw unconfirmed;
         }
         if (usable) {
@@ -6954,6 +6955,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const STOP_SETTLE_POLL_MS = 250;
   /** How long a Stop that ends the agent waits for its interrupt before shutting the agent down. */
   const STOP_RELEASE_SETTLE_MS = 3_000;
+  // Stops an agent without waiting on a stop or start AO is already carrying out for it: that agent
+  // goes to the service's exit worker (releaseAgent), which leaves its card once AO reports it gone.
+  // Waiting failed Stop ("Agent stop could not be confirmed: The agent is already exiting") and the
+  // card's retry, seen live 2026-11-02.
+  async function releaseAgent(session, owner = null) {
+    const service = harnessService();
+    if (typeof service.releaseAgent !== "function") return service.exitAgent?.(session);
+    const outcome = await service.releaseAgent(session);
+    if (outcome?.exiting) {
+      logger?.info?.("ao.agent_exit_handed_off", { session });
+      void Promise.resolve(outcome.exited).then(exited => {
+        if (exited === true && owner && sessionOwners.get(session) === owner) sessionOwners.delete(session);
+      }, () => undefined);
+    }
+    return outcome;
+  }
+
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
     for (;;) {
@@ -7023,7 +7041,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       if (shutDown && owns()) {
         const outcomes = await Promise.allSettled([
-          Promise.resolve().then(() => service.exitAgent(session)).then(outcome => {
+          Promise.resolve().then(() => releaseAgent(session, ownership?.owner)).then(outcome => {
             if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);
           }),
           Promise.resolve().then(() => subagents?.stopParent(session)),
