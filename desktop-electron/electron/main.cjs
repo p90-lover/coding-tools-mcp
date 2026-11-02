@@ -4288,7 +4288,8 @@ async function start() {
       // the worktree and package caches writable, the network on), as Codex runs its own.
       const { createSandboxRunner } = backendBundles.requireModule(backend, "chat-sandbox.cjs");
       // An agent's `ao` commands work in the app's terminal too, as in its own shell.
-      const chatSandbox = createSandboxRunner({ logger, scriptDir: path.join(launcherUserData, "sandbox-scripts"), extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.(), rtk.binDir()].filter(Boolean) });
+      const chatSandbox = createSandboxRunner({ logger, scriptDir: path.join(launcherUserData, "sandbox-scripts"), extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.(), rtk.binDir()].filter(Boolean),
+        extraEnv: () => rtk.commandEnvironment() });
       app.on("will-quit", () => chatSandbox.killAll());
       // A chat's computer control: the request card in the asking chat (no window of its own, which
       // took the focus), and the control bar whose heartbeat keeps input on.

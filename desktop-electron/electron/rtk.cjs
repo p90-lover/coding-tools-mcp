@@ -23,6 +23,14 @@ const AUTO_INSTALL_RETRY_MS = 24 * 60 * 60 * 1000;
 const REWRITE_TIMEOUT_MS = 3_000;
 const MAX_COMMAND = 16_384;
 const VERSION_LINE = /^rtk\s+(\d+)\.(\d+)\.(\d+)/m;
+/**
+ * What every rtk run for an agent or the RTK page gets. Without its hook in the person's global
+ * Claude settings, which Coding Tools never edits (each session gets the hook instead), rtk starts
+ * every run with "[rtk] /!\ No hook installed — run `rtk init -g`" on stderr. Claude Code's Bash
+ * tool showed that line atop 952 of the agents' outputs in two days (2026-11-02), telling the agent
+ * and the person that rtk wasn't set up when it had just compacted that very output.
+ */
+const QUIET = Object.freeze({ RTK_SUPPRESS_HOOK_WARNING: "1" });
 
 const atLeast = (version, minimum) => {
   for (let index = 0; index < 3; index += 1) {
@@ -157,7 +165,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
   async function rewrite(command) {
     const tool = enabled() ? await locateAsync() : null;
     if (!tool || typeof command !== "string" || !command.trim() || command.length > MAX_COMMAND) return null;
-    const childEnv = { ...env };
+    const childEnv = { ...env, ...QUIET };
     // That channel relaxes rtk's approval gate; only a delegate that sets it itself may rely on it.
     delete childEnv.RTK_REWRITE_HOST;
     const out = await runAsync(tool.path, ["rewrite", command], { encoding: "utf8", timeout: REWRITE_TIMEOUT_MS, windowsHide: true, env: childEnv });
@@ -194,17 +202,24 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     const tool = active();
     return tool ? path.dirname(tool.path) : "";
   };
+  /** What a command an agent runs gets while rtk is on: no "No hook installed" line (QUIET). */
+  const commandEnvironment = () => (active() ? { ...QUIET } : {});
   /** What AO's daemon passes to every chat agent. An empty hook turns it off. */
-  const daemonEnvironment = () => ({ CODING_TOOLS_RTK_CLAUDE_HOOK: claudeHook() });
+  const daemonEnvironment = () => {
+    const hook = claudeHook();
+    return { CODING_TOOLS_RTK_CLAUDE_HOOK: hook, ...(hook ? QUIET : {}) };
+  };
 
   /** RTK's own savings report (`rtk gain`), as text and, when rtk can give it, JSON (resolves). */
   async function gain() {
     const tool = await locateAsync();
     if (!tool) return { available: false };
     // Two runs of up to 10 s each blocked the main process while the RTK page asked for them.
+    // Quiet too: the page showed "No hook installed — run `rtk init -g`" above the savings.
+    const quietEnv = { ...env, ...QUIET };
     const [text, json] = await Promise.all([
-      runAsync(tool.path, ["gain"], { encoding: "utf8", timeout: 10_000, windowsHide: true }),
-      runAsync(tool.path, ["gain", "--all", "--format", "json"], { encoding: "utf8", timeout: 10_000, windowsHide: true }),
+      runAsync(tool.path, ["gain"], { encoding: "utf8", timeout: 10_000, windowsHide: true, env: quietEnv }),
+      runAsync(tool.path, ["gain", "--all", "--format", "json"], { encoding: "utf8", timeout: 10_000, windowsHide: true, env: quietEnv }),
     ]);
     let data = null;
     try { data = json?.status === 0 ? JSON.parse(String(json.stdout)) : null; } catch { data = null; }
@@ -289,7 +304,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     });
   }
 
-  return { locate, active, rewrite, unwrap, claudeHook, binDir, daemonEnvironment, gain, status, install, autoInstall, ready };
+  return { locate, active, rewrite, unwrap, claudeHook, binDir, commandEnvironment, daemonEnvironment, gain, status, install, autoInstall, ready };
 }
 
 module.exports = { createRtk };
