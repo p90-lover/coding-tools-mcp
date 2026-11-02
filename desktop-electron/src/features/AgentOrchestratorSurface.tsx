@@ -2452,29 +2452,35 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
     compact: async (instructions = "") => {
       if (!chatTaskId) throw new Error("Open a chat first");
       const result = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId, ...(instructions ? { instructions } : {}) });
-      await loadBoard(workspaceId);
-      const full = (size: number) => Math.round(size / CHAT_CONTEXT_LIMIT * 100);
-      return result.compacted
-        ? `Context compacted from ${Number(result.before).toLocaleString("en-US")} to ${Number(result.after).toLocaleString("en-US")} characters, now ${full(Number(result.after))}% full.`
-        : `Nothing to compact yet. The context is ${Number(result.before).toLocaleString("en-US")} characters, ${full(Number(result.before))}% full.`;
+      let progress = result;
+      const deadline = Date.now() + 120_000;
+      while (progress.status === "in_progress") {
+        if (Date.now() >= deadline) throw new Error("Compaction is not confirmed complete yet. Check the agent before retrying.");
+        await new Promise(resolve => window.setTimeout(resolve, 1000));
+        progress = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId, status: true, compactionId: String(result.compactionId) });
+      }
+      if (progress.status !== "completed") throw new Error("The agent did not confirm compaction completed");
+      return "Context compacted";
     },
     autoCompact: async (change = {}) => {
       const result = await moduleCall("chat_auto_compact", change);
       return { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || 95, limit: Number(result.limit) || CHAT_CONTEXT_LIMIT };
     },
     context: async () => {
-      const description = board?.tasks.find(task => task.id === chatTaskId)?.description ?? "";
-      const setting = await moduleCall("chat_auto_compact", {});
-      const percent = Number(setting.percent) || 95;
-      const used = Math.round(description.length / CHAT_CONTEXT_LIMIT * 100);
-      // A compacted chat starts with its summary's heading (compactChat), which says when.
-      const compacted = /^Summary of the earlier conversation \(compacted ([^)]+) UTC\)/.exec(description)?.[1];
-      const rows: [string, string][] = [
-        ["Context", `${description.length.toLocaleString("en-US")} of ${CHAT_CONTEXT_LIMIT.toLocaleString("en-US")} characters (${used}% full)`],
-        ["Auto-compact", setting.autoCompact === false ? "Off: a full chat stops until you /compact" : `On: compacts before a message that would fill ${percent}%`],
-        ["Last compacted", compacted ? `${compacted} UTC` : "Never"],
-      ];
-      return { title: "Context", rows, text: "The chat's context is its messages, sent to every new agent session. Each agent also compacts its own session by itself." };
+      const node = chatRunsHere.at(-1)?.nodes?.[0];
+      const sessionId = node?.receipt?.thread_id;
+      if (!sessionId) return { title: "Context", text: "No agent session yet." };
+      if (node?.route.harness_id === NATIVE_HARNESS) return { title: "Context",
+        text: "Token usage for this native Codex session is not available in the app yet. The native agent manages its context and automatic compaction." };
+      const result = await moduleCall("chat_context", { sessionIds: [sessionId] });
+      const snapshot = (result.sessions as Record<string, { usage?: { contextUsed: number | null; contextWindow: number | null }; compactedAt?: string }> | undefined)?.[sessionId];
+      const used = snapshot?.usage?.contextUsed, limit = snapshot?.usage?.contextWindow;
+      const number = (value: number) => value.toLocaleString("en-US");
+      const context = used == null ? "Not reported yet" : limit && limit > 0
+        ? `${number(used)} / ${number(limit)} tokens (${Math.round(used / limit * 100)}% full)` : `${number(used)} tokens`;
+      return { title: "Context", rows: [["Context window", context],
+        ["Auto-compact", "Managed by the agent using its model's token limit"],
+        ["Last compacted", snapshot?.compactedAt ? new Date(snapshot.compactedAt).toLocaleString() : "Not reported"]] };
     },
     diff: async () => {
       const result = await moduleCall("chat_diff", { workspaceId });

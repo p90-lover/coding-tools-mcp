@@ -1603,7 +1603,7 @@ export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
   { name: "goal", hint: "Set a goal to keep pursuing", args: "<objective> | pause | resume | edit | clear" },
   { name: "loop", hint: "Run a prompt or command on a recurring interval", args: "[interval] <prompt or /review, /init> | stop", needsChat: true },
   { name: "plan", hint: "Turn plan mode on or off" },
-  { name: "compact", hint: "Compact this chat's context", args: "[what the summary should focus on]", needsChat: true },
+  { name: "compact", hint: "Compact this chat's context", needsChat: true },
   { name: "autocompact", hint: "Turn auto-compact on or off, or set how full the chat gets first", args: "[on | off | <percent>]" },
   { name: "context", hint: "Show how full this chat's context is", needsChat: true },
   { name: "review", hint: "Review the current changes", args: "[what to focus on]" },
@@ -1781,7 +1781,7 @@ export type ChatCommands = {
   stopLoop?: () => Promise<void>;
   /** Edit goal: saves a new objective for the rounds still to come. */
   goalEdit: (objective: string) => Promise<void>;
-  /** Compacts the chat's context, the summary focused as `instructions` say; says what happened. */
+  /** Compacts the live agent session and waits for provider completion, as local Codex does. */
   compact: (instructions?: string) => Promise<string>;
   /** Auto-compact (/autocompact): read with no change, or turned on/off and its threshold set. */
   autoCompact?: (change?: AutoCompactChange) => Promise<AutoCompactSetting>;

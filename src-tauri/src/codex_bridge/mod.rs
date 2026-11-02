@@ -1699,6 +1699,18 @@ impl Hub {
         })?
         .run()
     }
+    /// Uses the same owned-thread admission and replay ledger as a normal model operation.
+    pub fn compact(&self, thread_id: String) -> Result<Value> {
+        self.admit(Control {
+            operation: "compact".into(),
+            request_id: format!("compact-{}", uuid::Uuid::new_v4()),
+            thread_id: Some(thread_id),
+            text: None,
+            model: None,
+            effort: None,
+        })?
+        .run()
+    }
     /// Sends `text` into the thread's running turn; `steered` is false when no turn is running.
     pub fn steer(&self, request_key: String, thread_id: String, text: String) -> Result<Value> {
         self.admit(Control {
