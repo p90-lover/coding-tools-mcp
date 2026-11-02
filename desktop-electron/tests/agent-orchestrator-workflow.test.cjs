@@ -7831,6 +7831,61 @@ test("deleting a chat message removes it and its steers from the task and hides 
   assert.equal(world.edits.length, edits, "nothing is changed");
 });
 
+test("history deletion validates older displayed replies without crossing ownership or activity boundaries", async (t) => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
+  const done = (id, task = "task-1") => ({ id, workspace_id: "ws-1", project_id: task, revision: 1,
+    cancelled: false, nodes: [{ id: "one", role: "planner", state: "finished" }] });
+  for (const scenario of ["project-window", "cached-over-200", "wrong-task", "wrong-workspace", "unknown", "wrong-id", "latest-working", "older-unsettled", "mixed-foreign", "lookup-failure"]) {
+    await t.test(scenario, async () => {
+      const old = done("old"), latest = done("new");
+      if (scenario === "wrong-task") old.project_id = "other";
+      if (scenario === "wrong-workspace") old.workspace_id = "ws-other";
+      if (scenario === "latest-working") latest.nodes[0].state = "running";
+      if (scenario === "older-unsettled") old.nodes[0].state = "pending";
+      const cached = scenario === "cached-over-200" || scenario === "older-unsettled";
+      const world = chatWorld({ tasks: [{ id: "task-1", title: "History", description, state: "in_progress", clauses: [] }],
+        runs: [old, ...Array.from({ length: cached ? 205 : 0 }, (_, i) => done(`mine-${i}`)),
+          ...Array.from({ length: 105 }, (_, i) => done(`other-${i}`, "other")), latest] });
+      const reads = [];
+      const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+        if (endpoint !== "/api/v1/ao/read") return world.requestHeadless(endpoint, body, options);
+        reads.push(structuredClone(body));
+        if (scenario === "lookup-failure" && body.run_id) throw new Error("Older read unavailable");
+        const scoped = world.runs.filter(run => run.workspace_id === body.workspace_id);
+        // Model the actual API's project/chat windows. Direct reads deliberately return a
+        // foreign/mismatched row too, to prove the caller still checks all three identities.
+        const selected = body.run_id
+          ? scenario === "wrong-id" ? [old] : world.runs.filter(run => run.id === body.run_id)
+          : body.task_id ? scoped.filter(run => run.project_id === body.task_id).slice(-200) : scoped.slice(-100);
+        return { ok: true, runs: structuredClone(selected) };
+      } });
+      try {
+        const input = { workspaceId: "ws-1", taskId: "task-1", index: 0,
+          runId: ["unknown", "wrong-id", "lookup-failure"].includes(scenario) ? "missing" : scenario === "mixed-foreign" ? "new" : "old",
+          ...(scenario === "mixed-foreign" ? { runIds: ["other-0"] } : scenario === "lookup-failure" ? { runIds: ["also-missing"] } : {}) };
+        if (scenario === "project-window" || scenario === "cached-over-200") {
+          const removed = await workflow.call("chat_delete_message", input);
+          assert.deepEqual([...removed.runIds], ["old"]);
+          assert.equal(world.edits.length, 1);
+          assert.equal(world.tasks[0].description, description.slice(description.indexOf("second ask")));
+          assert.ok(!(await workflow.call("runs", { workspaceId: "ws-1", taskId: "task-1" })).runs.some(run => run.id === "old"));
+          if (cached) {
+            assert.equal(reads.filter(body => body.run_id === "old").length, 1, "one bounded lookup restores the cached ID outside 200");
+            await assert.rejects(workflow.call("chat_delete_message", input), /reply was not found/);
+            assert.equal(world.edits.length, 1, "a previously hidden reply stays hidden even after direct lookup");
+          }
+        } else {
+          await assert.rejects(workflow.call("chat_delete_message", input),
+            scenario === "lookup-failure" ? /Older read unavailable/ : scenario === "latest-working" || scenario === "older-unsettled" ? /Stop the chat first/ : /reply was not found/);
+          if (scenario === "lookup-failure") assert.deepEqual(reads.filter(body => body.run_id).map(body => body.run_id), ["missing"], "a failed read stops before requesting the remaining IDs");
+          assert.equal(world.edits.length, 0, "validation fails before editing the task");
+          assert.equal(world.tasks[0].description, description);
+        }
+      } finally { workflow.dispose(); }
+    });
+  }
+});
+
 // The chat's own pairing (ao-chat.ts), to check what a deletion leaves on screen.
 const aoChat = (() => {
   const vm = require("node:vm");

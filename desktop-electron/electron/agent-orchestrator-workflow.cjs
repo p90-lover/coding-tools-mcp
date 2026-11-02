@@ -6860,10 +6860,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (typeof runId !== "string" || !runId) throw new Error("This message has no reply yet. Delete it after its turn runs.");
     if (!Array.isArray(runIds) || runIds.length > 50) throw new Error("This message's reply was not found; reload the chat");
     const own = [runId, ...runIds].map(value => clean(value, 80));
-    const saved = await runs({ workspaceId: id });
-    const chatRuns = saved.runs.filter(run => run.project_id === task);
+    const saved = await runs({ workspaceId: id, taskId: task });
+    const chatRuns = saved.runs.filter(run => run.workspace_id === id && run.project_id === task);
     const latest = chatRuns.at(-1);
-    if ((latest && !runSettled(latest)) || chatWorking(id, task, saved.runs)) throw new Error("Stop the chat first to delete a message");
+    // The open chat can still show cached replies older than its newest-200 read. Read only
+    // those requested IDs, with the same workspace/task ownership and visibility checks below.
+    for (const requested of new Set(own)) {
+      if (chatRuns.some(run => run.id === requested)) continue;
+      const older = await runs({ workspaceId: id, runId: requested });
+      const found = older.runs.find(run => run.id === requested && run.workspace_id === id && run.project_id === task);
+      if (found) chatRuns.push(found);
+    }
+    if ((latest && !runSettled(latest)) || chatWorking(id, task, chatRuns)
+      || chatRuns.some(run => own.includes(run.id) && !runSettled(run))) throw new Error("Stop the chat first to delete a message");
     const detail = await board({ workspaceId: id, taskId: task });
     if (!detail.task) throw new Error("This chat's task no longer exists");
     // The chat says which of its runs answered this message; each must be one it shows.
