@@ -9108,10 +9108,9 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
   assert.deepEqual(capabilities["claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
 });
 
-test("a CPA model's picked effort goes in the request body, never as a model suffix, and Auto sends none", async () => {
-  // A/B against CPA (2026-10-22): a suffix 400ed whenever the plugin lacked the level ("(auto)" on
-  // Cline, "(none)" on MiMo and GLM, "(medium)" on DeepSeek) and Claude Code's retries looked like a
-  // launch stuck for good; the body's output_config.effort was a 200 everywhere and honoured.
+test("Claude Code CPA effort survives AO in a supported suffix, Codex keeps body effort, and Auto sends none", async () => {
+  // AO clears gateway AgentConfig.Effort before Claude Code's ACP driver runs. Preserve the
+  // fitted level in the model, but never an unsupported suffix (medium on DeepSeek) or auto.
   const spawned = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
     aoHarness: { spawn: async input => { spawned.push({ model: input.model, effort: input.effort }); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
@@ -9122,11 +9121,11 @@ test("a CPA model's picked effort goes in the request body, never as a model suf
     for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     return spawned.at(-1);
   };
-  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), { model: "cline-pass/glm-5.3-flash", effort: "medium" });
-  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), { model: "cline-pass/deepseek-v4.1-flash", effort: "max" });
-  assert.deepEqual(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), { model: "commandcode-go/glm-5.3-flash", effort: "high" });
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), { model: "cline-pass/glm-5.3-flash(medium)", effort: "medium" });
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), { model: "cline-pass/deepseek-v4.1-flash(max)", effort: "max" });
+  assert.deepEqual(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), { model: "commandcode-go/glm-5.3-flash(high)", effort: "high" });
   // A level the model lacks runs at its nearest one (a tie goes up) instead of a 400.
-  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "medium"), { model: "cline-pass/deepseek-v4.1-flash", effort: "high" });
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "medium"), { model: "cline-pass/deepseek-v4.1-flash(high)", effort: "high" });
   // Auto: the model's own effort; nothing is sent, and no level saved in the model's name comes back.
   assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
   assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash(high)", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
@@ -9157,9 +9156,9 @@ test("a saved effort a plugin model's reported levels lack runs at its nearest o
     for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     return spawned.at(-1);
   };
-  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "medium"), { model: "opencode-go/glm-5.3-flash", effort: "high" });
-  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "low"), { model: "opencode-go/glm-5.3-flash", effort: "low" });
-  assert.deepEqual(await warm("cpa/opencode-go/kimi-k3", "low"), { model: "opencode-go/kimi-k3", effort: "max" });
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "medium"), { model: "opencode-go/glm-5.3-flash(high)", effort: "high" });
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "low"), { model: "opencode-go/glm-5.3-flash(low)", effort: "low" });
+  assert.deepEqual(await warm("cpa/opencode-go/kimi-k3", "low"), { model: "opencode-go/kimi-k3(max)", effort: "max" });
   // No levels reported (it only switches reasoning on and off): the model's own effort.
   assert.deepEqual(await warm("cpa/opencode-go/qwen3.7-plus", "high"), { model: "opencode-go/qwen3.7-plus", effort: undefined });
   workflow.dispose();
