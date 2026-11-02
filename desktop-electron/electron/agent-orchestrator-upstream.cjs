@@ -433,22 +433,36 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * Whether the chat host recorded for an AO session (dataRoot/chat-hosts/<id>/host.json) is
    * gone. A missing or unreadable record is not treated as gone. The recorded loopback address
    * is probed rather than the PID: Windows reuses PIDs, so a dead host's PID can belong to an
-   * unrelated process (seen: the restarted AO daemon itself).
+   * unrelated process (seen: the restarted AO daemon itself). With `reuseAliveMs`, an address that
+   * accepted a connection that recently is taken as still up without connecting again.
    */
-  async function chatHostGone(id) {
+  async function chatHostGone(id, { reuseAliveMs = 0 } = {}) {
     let address;
     try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
     catch { return false; }
     const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
     if (!match) return false;
+    if (Date.now() - (chatHostAcceptedAt.get(address) ?? -Infinity) < reuseAliveMs) return false;
     return new Promise(resolve => {
       const socket = net.connect({ host: "127.0.0.1", port: Number(match[1]) });
-      const settle = gone => { socket.destroy(); resolve(gone); };
+      const settle = gone => { socket.destroy(); if (gone) chatHostAcceptedAt.delete(address); resolve(gone); };
       socket.setTimeout(1500, () => settle(false));
-      socket.once("connect", () => settle(false));
+      socket.once("connect", () => {
+        const at = Date.now();
+        for (const [known, seen] of chatHostAcceptedAt) if (at - seen > CHAT_HOST_ALIVE_REUSE_MS) chatHostAcceptedAt.delete(known);
+        chatHostAcceptedAt.set(address, at);
+        settle(false);
+      });
       socket.once("error", error => settle(error?.code === "ECONNREFUSED"));
     });
   }
+  // Every read of a running card asks whether its host is gone, and the chat reads each running
+  // card about twice a second: with four chats working, main made 7 loopback connects a second at
+  // ~6.6 ms of its own CPU each, and on a CPU-saturated machine those connects filled main for 2-7 s
+  // at a time (profile, 2026-11-02). Those reads reuse a live answer this long; a host that died is
+  // still found within it, and a gone answer, a new address or a send's own check always connects.
+  const CHAT_HOST_ALIVE_REUSE_MS = 10000;
+  const chatHostAcceptedAt = new Map();
   /**
    * Whether the chat host recorded for an AO session is known to be up: its record is there and its
    * loopback address accepts a connection. A host deletes its record when its agent exits, so a
@@ -1403,7 +1417,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // retried, while two of the turns ran on, so each chat got a needless "you were interrupted"
       // turn queued behind its own. An agent that really exited took its host with it.
       const deadAgent = agentGone && turn?.state === "running" && !(await chatHostAlive(id));
-      if (reconciled || deadAgent || ((settling || settled) && await chatHostGone(id))) {
+      if (reconciled || deadAgent || ((settling || settled) && await chatHostGone(id, { reuseAliveMs: CHAT_HOST_ALIVE_REUSE_MS }))) {
         if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
         return {
           status, turnId: turn.id, turnState: "interrupted",

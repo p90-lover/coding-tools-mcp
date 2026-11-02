@@ -326,9 +326,9 @@ function delayToMilliseconds(value, unit) {
  * The chat's own preferences that outlive a restart: autoRetry (a failed single-model step is
  * retried by itself, chatAutoRetry) and modelJudges (what would wait for the person, a request the
  * reviewer would hand on or a goal round that ended needing them, is judged by the model instead,
- * chatModelJudges), and autoCompact / autoCompactPercent (a chat compacts itself once a follow-up
- * would fill that share of its size limit, as Claude Code's autoCompactEnabled and
- * CLAUDE_AUTOCOMPACT_PCT_OVERRIDE; chatAutoCompact). Kept in memory when no file is given (tests).
+ * chatModelJudges). Legacy autoCompact / autoCompactPercent values remain readable for older
+ * callers, but do not control native token compaction or bounded task-record rollover.
+ * Kept in memory when no file is given (tests).
  */
 const AUTO_COMPACT_PERCENT = 95;
 const AUTO_COMPACT_MIN_PERCENT = 20;
@@ -3495,9 +3495,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * use, chat-agent-tools.cjs). Every such call is reviewed, whatever the chat's approval mode: by
    * the chat's own approver when it has one, else by Codex's auto-review on the card's route.
    * Resolves { action: "allow"|"deny"|"ask", reason }; a reviewer that cannot answer is "ask", and
-   * the call then waits for the person.
+   * the call then waits for the person, unless "Let the model judge" is on: then it must choose
+   * allow or deny, and one that cannot answer denies.
    */
   async function reviewToolCall({ workspaceId, session, tool, args, reason = "" } = {}) {
+    const judges = chatPreferences.get().modelJudges;
     const id = clean(workspaceId, 128), thread = clean(session, 256);
     let run;
     try { ({ run } = await sessionChat(id, thread, "have its screen actions reviewed")); } catch (error) {
@@ -3509,10 +3511,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const approval = { kind: "tool", tool: `${APP_TOOL_PREFIX}${clean(tool, 80)}`, thread_id: thread,
       toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
     try {
-      return await askApprover({ approver, mission: run, approval, partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT });
+      const verdict = await askApprover({ approver, mission: run, approval, decide: judges, partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT });
+      return judges && verdict.action === "ask" ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
     } catch (error) {
       logger?.warn?.("ao.tool_review_failed", { tool: approval.tool, message: publicText(error?.message || error, 200) });
-      return { action: "ask", reason: "The reviewer could not answer" };
+      return judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" };
     }
   }
   /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
@@ -3648,6 +3651,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (advice.action === "ask" && advice.reviewed) {
       const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete }).catch(() => null);
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
+      // "Let the model judge": a decide pass that failed or still said "ask" is a deny, never the
+      // person's: the request sat on the card though the switch was on.
+      else if (judges) advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
     }
     if (advice.reviewed && approval.thread_id && advice.action === "deny") {
       reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
@@ -3662,7 +3668,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
         return `The reviewer couldn't answer yet, trying again: ${why}`;
       }
-      advice = { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
+      // "Let the model judge" leaves nothing to the person: a reviewer that never answered denies,
+      // in doubt, and the agent hears why and goes another way.
+      advice = judges
+        ? { action: "deny", reason: `The command reviewer couldn't answer after ${tries} tries, so it was denied (Let the model judge is on): ${why}` }
+        : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
     }
     reviewFailures.delete(approval.approval_id);
     const offered = approval.request?.availableDecisions;
@@ -3995,9 +4005,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, modelJudges: chatPreferences.get().modelJudges };
   }
   /**
-   * chat_auto_compact: reads auto-compact, or sets it with `enabled` and/or `percent` (how full a
-   * chat gets, of its size limit, before its next message compacts it first). The user: "make a
-   * command to set how much to auto compact like claude code".
+   * chat_auto_compact: compatibility storage for older callers, not native model-token control.
+   * Record rollover is required only at the board's hard byte limit, regardless of these values.
    */
   function chatAutoCompact({ enabled, percent } = {}) {
     const change = {};
@@ -5301,30 +5310,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
       let description = rewoundDescription ?? extended();
       if (rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This rewind exceeds the chat size limit; shorten the conversation first");
-      const { autoCompact, autoCompactPercent: percent } = chatPreferences.get();
-      const full = utf8Bytes(description) > BOARD_TEXT_BYTES;
-      if (!rewind && (full || (autoCompact && utf8Bytes(description) > Math.floor(BOARD_TEXT_BYTES * percent / 100)))) {
-        if (!autoCompact) throw new Error("This chat is full. Use /compact, or turn auto-compact on with /autocompact on.");
-        // A long chat compacts itself, as Claude Code does, once the follow-up would fill the share
-        // of the limit set with /autocompact: the earlier conversation becomes a handoff summary
-        // (what /compact does) and the chat goes on. The summary leaves room for this follow-up: a
-        // goal round's feedback is up to 3.5 KB, and a 6,000-character summary plus that was still
-        // over the limit, so a goal stalled "full" right after compacting.
+      if (!rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) {
+        // This is bounded task-record storage, not the agent's token context. Only roll it over
+        // at the hard byte limit: obsolete /autocompact preferences must neither summarize early
+        // nor strand a chat. Native /compact and model-token auto-compaction are independent.
         const reserve = utf8Bytes(`\n\nFollow-up (${stamp} UTC):\n${text}`);
-        let compacted = { compacted: false };
+        let compacted;
         try {
           compacted = await compactChat({ workspaceId: id, taskId: task, reserve });
         } catch (error) {
-          // Below the limit the follow-up still fits: compacting waits for the next one.
-          if (full) throw new Error(`This chat is full and couldn't be compacted: ${String(error?.message || error).slice(0, 200)}`);
-          logger?.warn?.("ao.chat_auto_compact_failed", { error: String(error?.message || error).slice(0, 200) });
+          throw new Error(`This chat's task record is full and couldn't be rolled over: ${String(error?.message || error).slice(0, 200)}`);
         }
         if (compacted.compacted) {
           detail = await board({ workspaceId: id, taskId: task });
           if (!detail.task) throw new Error("This chat's task no longer exists");
           description = extended();
         }
-        if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full even after compacting. Shorten the message or start a new chat.");
+        if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat's task record is full even after rollover. Shorten the message or start a new chat.");
       }
       const saidBefore = String(detail.task.description || "");
       checkCurrent();
