@@ -100,14 +100,18 @@
   border: 2px solid color-mix(in srgb, var(--cc-muted) 22%, transparent); border-top-color: var(--cc-text-2); border-right-color: var(--cc-text-2);
   animation: cx-spin .8s linear infinite; }
 .cx-thread-dot.status-attention { background: var(--cc-warning); }
+/* A paused chat still has work to resume: a muted dot, so it does not look finished. */
+.cx-thread-dot.status-paused { background: var(--cc-muted); box-shadow: 0 0 0 .5px var(--cc-side-bg); }
 .cx-thread-row.is-unread .cx-thread-dot:not(.status-running):not(.status-queued):not(.status-attention) { background: var(--cc-accent); box-shadow: 0 0 0 .5px var(--cc-side-bg); }
 @keyframes cx-spin { to { transform: rotate(360deg); } }
 /* On hover the dot gives way to "More options" (24 px). */
 .cx-thread-more { position: absolute; top: 50%; right: 0; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
   padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; opacity: 0; transform: translateY(-50%);
   transition: opacity .15s ease; }
-.cx-thread-row:hover .cx-thread-more, .cx-thread-row:focus-within .cx-thread-more { opacity: 1; }
-.cx-thread-row:hover .cx-thread-dot, .cx-thread-row:focus-within .cx-thread-dot { opacity: 0; }
+/* Keyboard focus only: a clicked row keeps focus on its button, and with :focus-within the open
+   chat's spinner stayed hidden after the click, so a running chat showed as idle. */
+.cx-thread-row:hover .cx-thread-more, .cx-thread-row:has(:focus-visible) .cx-thread-more { opacity: 1; }
+.cx-thread-row:hover .cx-thread-dot, .cx-thread-row:has(:focus-visible) .cx-thread-dot { opacity: 0; }
 .cx-thread-more:hover { background: var(--cc-hover-selected); color: var(--cc-text); }
 .cx-thread-row.is-renaming input { width: 100%; height: 28px; padding: 0 10px; border: 1px solid var(--cc-accent); border-radius: 6px; background: var(--color-bg-primary); color: inherit; font: inherit; font-size: 13px; }
 .cx-thread-empty { padding: 4px 10px; color: var(--cc-muted); font-size: 12px; }
