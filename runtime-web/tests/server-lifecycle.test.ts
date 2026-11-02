@@ -1142,10 +1142,12 @@ test("a second full-mode runtime reports an occupied broker pipe before acceptin
   const server = startServer(config);
   try {
     let response: Response | undefined;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    // The broker retries a held Windows pipe for about 7.5 s before it fails (#631).
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
       response = await server.fetch(new Request("http://localhost/healthz"));
       if ((await response.clone().json() as { broker_state: string }).broker_state === "failed") break;
-      await Bun.sleep(10);
+      await Bun.sleep(50);
     }
     expect(response?.status).toBe(503);
     expect(await response!.json()).toMatchObject({
@@ -1165,7 +1167,7 @@ test("a second full-mode runtime reports an occupied broker pipe before acceptin
     await closeTurnBrokers();
     await new Promise<void>((resolve, reject) => owner.close(error => error ? reject(error) : resolve()));
   }
-});
+}, 20_000);
 
 test("a full-mode runtime exposes its broker endpoint before any turn registers", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-serve-"));

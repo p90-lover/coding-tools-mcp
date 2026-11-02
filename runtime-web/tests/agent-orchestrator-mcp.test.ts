@@ -20,7 +20,8 @@ test("WebGPT's native MCP catalog exposes mission execution but not self-approva
     expect(operation?.enum).toContain("observe");
     expect(operation?.enum).not.toContain("approve_harness");
   } finally { await client.close(); }
-});
+// Starting the whole CLI from source took 3.5-5 s on a busy Windows machine, past the 5 s default.
+}, 30_000);
 
 test("the MCP models operation defaults to WebGPT and CPA while explicit CPA stays CPA-only", async () => {
   const runtimeRoot = resolve(import.meta.dir, "..");
