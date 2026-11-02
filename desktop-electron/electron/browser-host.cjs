@@ -68,6 +68,11 @@ const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
 const MAX_MANUAL_TERMINAL_SIGNALS = 256;
 const MAX_MANUAL_PROMPT_CHARS = 1_000_000;
 const INTERACTION_MODE_CHANGE_OPERATION = "browser interaction mode change";
+// The automatic MCP check runs while Codex holds its bridge connections open, so a turn can start
+// in the middle of it: the turn waits for the check (it reloads the page and reads the connector
+// list) rather than failing. Every other manual operation still refuses a turn at once.
+const CONNECTOR_VERIFICATION_OPERATION = "connector verification";
+const CONNECTOR_VERIFICATION_TURN_WAIT_MS = 120_000;
 const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
 // These are lease/initialization guards only. They do not limit a live ChatGPT turn: active turns
 // stay alive as long as the helper keeps heartbeating. They only reclaim a blank surface or a turn
@@ -500,6 +505,20 @@ function requireAutomaticBrowserInspection(host, operation) {
   }
 }
 
+/** Waits while the connector check holds the browser, at most `timeoutMs`; the caller re-checks. */
+async function waitForConnectorVerification(host, timeoutMs = CONNECTOR_VERIFICATION_TURN_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (host.manualOperation === CONNECTOR_VERIFICATION_OPERATION && host.manualOperationSettled
+    && Date.now() < deadline) {
+    let timer;
+    await Promise.race([
+      host.manualOperationSettled,
+      new Promise((resolve) => { timer = setTimeout(resolve, deadline - Date.now()); }),
+    ]);
+    clearTimeout(timer);
+  }
+}
+
 class BrowserTurnCancelledError extends Error {
   constructor(traceId) {
     super(`Browser turn ${traceId} was cancelled by the user`);
@@ -674,6 +693,7 @@ class BrowserHost {
     this.interactionModeOverride = null;
     this.selectedTabId = "home";
     this.manualOperation = null;
+    this.manualOperationSettled = null;
     this.loginOperation = null;
     this.sessionRefreshOperation = null;
     this.cloudflareChallengeRecovery = null;
@@ -3067,6 +3087,7 @@ class BrowserHost {
     startRequest = null,
     nativeThreadId,
   ) {
+    await waitForConnectorVerification(this);
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
     }
@@ -3870,7 +3891,7 @@ class BrowserHost {
 
   async verifyConnector(appName) {
     requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
-    return await this.withManualOperation("connector verification", () => this.runConnectorVerification(appName));
+    return await this.withManualOperation(CONNECTOR_VERIFICATION_OPERATION, () => this.runConnectorVerification(appName));
   }
 
   async runConnectorVerification(appName) {
@@ -3951,6 +3972,8 @@ class BrowserHost {
     }
     this.activateHomeSurface();
     this.manualOperation = name;
+    let settle;
+    this.manualOperationSettled = new Promise((resolve) => { settle = resolve; });
     const contents = this.view?.webContents;
     if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(false);
     try {
@@ -3962,6 +3985,8 @@ class BrowserHost {
     } finally {
       if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(true);
       this.manualOperation = null;
+      this.manualOperationSettled = null;
+      settle();
     }
   }
 
@@ -4140,4 +4165,5 @@ module.exports = {
   navigationFailurePage,
   navigationOriginForLog,
   TEMPORARY_CHAT_URL,
+  waitForConnectorVerification,
 };

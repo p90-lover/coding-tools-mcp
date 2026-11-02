@@ -439,6 +439,15 @@ function samePath(left, right) {
   return key(left) === key(right);
 }
 
+/** Tells the app the main tunnel is ready (onTunnelReady); a listener's failure never fails the tunnel. */
+function notifyTunnelReady(supervisor, adopted) {
+  try {
+    supervisor.onTunnelReady?.({ pid: supervisor.tunnel?.pid ?? null, adopted });
+  } catch (error) {
+    supervisor.logger?.warn?.("runtime.tunnel_ready_listener_failed", { message: errorMessage(error).slice(0, 200) });
+  }
+}
+
 class RuntimeSupervisor {
   constructor({
     app,
@@ -463,7 +472,11 @@ class RuntimeSupervisor {
     // change (readConfigJson); off, every read checks the file, as tests that write it and read it
     // back at once expect.
     watchConfigFile = false,
+    // Called with { pid, adopted } each time the main MCP tunnel becomes ready (started, adopted, or
+    // found running under a new process): main.cjs checks the ChatGPT connector again then.
+    onTunnelReady,
   }) {
+    this.onTunnelReady = onTunnelReady;
     this.watchConfigFile = watchConfigFile;
     this.configWatcher = null;
     this.configTrusted = false;
@@ -1506,6 +1519,7 @@ class RuntimeSupervisor {
         }
         this.startTunnelMonitor(config);
         this.logger.info("runtime.tunnel_adopted", { pid: existing.pid });
+        notifyTunnelReady(this, true);
         return;
       }
       this.tunnel = null;
@@ -1534,6 +1548,7 @@ class RuntimeSupervisor {
       await this.waitForTunnelMcpTransport(config);
       this.startTunnelMonitor(config);
       await this.recordTunnelOwner(config, this.tunnel.pid);
+      notifyTunnelReady(this, false);
     } catch (error) {
       let cleanupError;
       try {
@@ -1661,6 +1676,7 @@ class RuntimeSupervisor {
               managed: true,
             };
             this.tryWriteState("ready");
+            notifyTunnelReady(this, true);
           }
           return;
         }

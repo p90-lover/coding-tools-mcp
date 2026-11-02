@@ -10,13 +10,18 @@ function fixture() {
   const file = ts.createSourceFile("main.cjs", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   let automatic;
   let manual;
+  let restart;
+  let retryDelays;
   function visit(node) {
     if (ts.isFunctionDeclaration(node) && node.name?.text === "autoConnectExistingMcpIfReady") automatic = node.getText(file);
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "restartAutomaticMcpVerification") restart = node.getText(file);
     if (ts.isVariableDeclaration(node) && node.name.getText(file) === "performMcpVerification") manual = node.initializer.getText(file);
+    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "AUTOMATIC_MCP_RETRY_DELAYS_MS") retryDelays = node.initializer.getText(file);
     ts.forEachChild(node, visit);
   }
   visit(file);
   assert(automatic && manual, "automatic and manual paths reuse the same verifier");
+  assert(restart && retryDelays, "a new round and the retry delays are defined beside it");
   const state = { autoConnectExistingMcp: true, coreSetupComplete: true, browserInteractionMode: "automatic", mcpSetupComplete: false };
   const calls = [];
   const health = { service: "codex-chatgpt-web", status: "ok", pid: 123, version: "5.0.6", mode: "full", accepting_turns: true, successful_model_catalog_requests: 1, active_http_turns: 0, active_browser_turns: 0 };
@@ -28,7 +33,7 @@ function fixture() {
   };
   const context = vm.createContext({
     ...options, IS_DEV_PROFILE: false, quitting: false, shutdownInProgress: false,
-    automaticMcpAttemptPid: null, mcpVerificationInFlight: null,
+    automaticMcpAttempt: null, mcpVerificationInFlight: null, catalogVerificationTimer: null,
     send() {}, publishOperation: op => calls.push(op.status), mainWindow: null,
     runtimeSupervisor: { readConfig: () => ({ mode: "full", releaseVersion: "5.0.6" }), readState: () => ({ daemonPid: 123 }) },
     runtimeHost: { currentOperation: () => null, mcpCredentialsConfigured: () => true,
@@ -38,9 +43,27 @@ function fixture() {
       view: { webContents: { isDestroyed: () => false, executeJavaScript: async () => false } },
       verifyConnector: async name => { assert.equal(name, "Saved connector"); calls.push("connector"); } },
   });
+  context.AUTOMATIC_MCP_RETRY_DELAYS_MS = vm.runInContext(`(${retryDelays})`, context);
   context.verifyMcpConnection = vm.runInContext(`(${manual})`, context);
+  const monitors = [];
+  context.startCatalogVerificationMonitor = () => monitors.push("monitor");
   const run = vm.runInContext(`(${automatic})`, context);
-  return { state, browser, health, context, calls, run: (extra = {}) => run({ ...options, ...extra }) };
+  const restartRound = vm.runInContext(`(${restart})`, context);
+  return {
+    state, browser, health, context, calls, monitors,
+    run: (extra = {}) => run({ ...options, ...extra }),
+    restart: reason => restartRound({ ...options, reason }),
+    // The retry is due: what the clock reaching retryAt does.
+    retryNow: () => { context.automaticMcpAttempt.retryAt = 0; },
+  };
+}
+
+/** The draft check run against a page with no composer, at `hostname`. */
+async function draftWithoutComposer(f, hostname) {
+  let script;
+  f.context.browserHost.view.webContents.executeJavaScript = async (source) => { script = source; return false; };
+  await f.run();
+  return vm.runInNewContext(script, { document: { querySelector: () => null, querySelectorAll: () => [] }, location: { hostname } });
 }
 
 test("automatic MCP waits for an owned accepting bridge and real Codex catalog observation", async () => {
@@ -56,12 +79,12 @@ test("automatic MCP waits for an owned accepting bridge and real Codex catalog o
   }
 });
 
-test("automatic MCP defers active turns and drafts then verifies once in doctor-connector order", async () => {
+test("automatic MCP defers browser turns and drafts then verifies once in doctor-connector order", async () => {
   const f = fixture();
-  f.health.active_http_turns = 1;
+  f.health.active_browser_turns = 1;
   assert.equal(await f.run(), true);
   assert.deepEqual(f.calls, []);
-  f.health.active_http_turns = 0;
+  f.health.active_browser_turns = 0;
   f.context.browserHost.view.webContents.executeJavaScript = async () => true;
   assert.equal(await f.run(), true);
   assert.deepEqual(f.calls, []);
@@ -73,14 +96,81 @@ test("automatic MCP defers active turns and drafts then verifies once in doctor-
   assert.equal(f.calls.filter(x => x === "doctor").length, 1);
 });
 
-test("automatic MCP reports doctor failure without setup, connector changes, or endless retries", async () => {
+test("automatic MCP verifies while Codex holds its bridge connections open", async () => {
+  // Seen live 2026-11-02: 9-12 open HTTP turns at every sample, none in the browser, so the old
+  // all-idle gate never let the check run while any chat was open.
   const f = fixture();
-  f.context.runtimeHost.doctor = async () => { f.calls.push("doctor"); return { ok: false, checks: [{ status: "error", message: "Tunnel unavailable" }] }; };
+  f.health.active_http_turns = 11;
   assert.equal(await f.run(), false);
+  assert.deepEqual(f.calls.filter(x => ["doctor", "connector"].includes(x)), ["doctor", "connector"]);
+  assert.equal(f.state.mcpSetupComplete, true);
+});
+
+test("the blank page the browser parks on is not a draft; a loading ChatGPT page still is", async () => {
+  assert.equal(await draftWithoutComposer(fixture(), ""), false);
+  assert.equal(await draftWithoutComposer(fixture(), "chatgpt.com"), true);
+});
+
+test("automatic MCP retries a failed check on its delays, then stops, without setup or connector changes", async () => {
+  const f = fixture();
+  const doctors = () => f.calls.filter(x => x === "doctor").length;
+  f.context.runtimeHost.doctor = async () => { f.calls.push("doctor"); return { ok: false, checks: [{ status: "error", message: "Tunnel unavailable" }] }; };
+  assert.equal(await f.run(), true, "a retry is scheduled");
   assert.equal(f.state.mcpSetupComplete, false);
   assert.deepEqual(f.calls, ["running", "doctor", "failed"]);
-  await f.run();
-  assert.equal(f.calls.filter(x => x === "doctor").length, 1);
+  assert.equal(await f.run(), true, "waiting for the retry");
+  assert.equal(doctors(), 1, "nothing runs before the retry is due");
+  const delays = f.context.AUTOMATIC_MCP_RETRY_DELAYS_MS;
+  assert(delays.length >= 3 && delays.every((delay, i) => i === 0 || delay > delays[i - 1]), "growing delays");
+  for (let i = 1; i < delays.length; i += 1) {
+    f.retryNow();
+    assert.equal(await f.run(), true);
+    assert.equal(doctors(), i + 1);
+  }
+  f.retryNow();
+  assert.equal(await f.run(), false, "out of retries: the monitor stops");
+  assert.equal(doctors(), delays.length + 1);
+  assert.equal(await f.run(), false);
+  assert.equal(doctors(), delays.length + 1, "no endless retries");
+});
+
+test("a failed check that passes on retry stops retrying", async () => {
+  const f = fixture();
+  let ok = false;
+  f.context.runtimeHost.doctor = async () => { f.calls.push("doctor"); return ok ? { ok: true, checks: [] } : { ok: false, checks: [{ status: "error", message: "slow" }] }; };
+  assert.equal(await f.run(), true);
+  ok = true;
+  f.retryNow();
+  assert.equal(await f.run(), false);
+  assert.equal(f.state.mcpSetupComplete, true);
+  assert.equal(await f.run(), false);
+  assert.equal(f.calls.filter(x => x === "doctor").length, 2);
+});
+
+test("a tunnel restart or sign-in starts a new round that checks the connector again", async () => {
+  const f = fixture();
+  assert.equal(await f.run(), false);
+  assert.equal(f.calls.filter(x => x === "connector").length, 1);
+  f.restart("tunnel-started");
+  assert.deepEqual(f.monitors, ["monitor"], "the stopped monitor starts again");
+  assert.equal(await f.run(), false);
+  assert.equal(f.calls.filter(x => x === "connector").length, 2, "checked again, which reloads ChatGPT's connector list");
+  f.context.catalogVerificationTimer = {};
+  f.restart("browser-login");
+  assert.deepEqual(f.monitors, ["monitor"], "a running monitor is reused");
+  f.state.autoConnectExistingMcp = false;
+  f.context.catalogVerificationTimer = null;
+  f.restart("tunnel-started");
+  assert.deepEqual(f.monitors, ["monitor"], "nothing starts with the setting off");
+});
+
+test("a new round that begins during a check runs a fresh check next", async () => {
+  const f = fixture();
+  f.context.browserHost.verifyConnector = async () => { f.calls.push("connector"); f.restart("tunnel-started"); };
+  assert.equal(await f.run(), true, "keeps the monitor for the new round");
+  f.context.browserHost.verifyConnector = async () => { f.calls.push("connector"); };
+  assert.equal(await f.run(), false);
+  assert.equal(f.calls.filter(x => x === "connector").length, 2);
 });
 
 test("automatic MCP reads no file while the browser is busy, and uses the config the monitor read", async () => {
