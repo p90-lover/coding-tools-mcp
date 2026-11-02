@@ -46,6 +46,75 @@ test("the filter joins lines split across chunks and flushes the last one", () =
   assert.equal(written.length, 2);
 });
 
+test("UTF-8 text survives every byte boundary", () => {
+  const line = 'time=2026-10-20 level=WARN msg="µ μ 中文 😀"\n';
+  const bytes = Buffer.from(line);
+  for (let split = 1; split < bytes.length; split++) {
+    const written = [];
+    const filter = createDaemonLogFilter((text) => written.push(text));
+    filter.push(bytes.subarray(0, split));
+    filter.push(bytes.subarray(split));
+    filter.flush();
+    assert.equal(written.join(""), line, `split at byte ${split}`);
+  }
+});
+
+test("split microsecond durations still suppress quick successful reads", () => {
+  for (const unit of ["µs", "μs"]) {
+    const bytes = Buffer.from(`${access("GET", 200, `80${unit}`)}\n`);
+    const split = bytes.indexOf(Buffer.from(unit)) + 1;
+    const written = [];
+    const filter = createDaemonLogFilter((text) => written.push(text));
+    filter.push(bytes.subarray(0, split));
+    filter.push(bytes.subarray(split));
+    filter.flush();
+    assert.deepEqual(written, [], unit);
+  }
+});
+
+test("mixed byte and text chunks preserve BOMs and text surrogate pairs", () => {
+  const written = [];
+  const filter = createDaemonLogFilter((text) => written.push(text));
+  const bytes = Buffer.from("\uFEFFWARN 中文 ");
+  const split = bytes.indexOf(Buffer.from("中")) + 1;
+  filter.push(bytes.subarray(0, split));
+  filter.push("");
+  filter.push(bytes.subarray(split));
+  filter.push("\ud83d");
+  filter.push("\ude00\n");
+  // A decoded text chunk cannot complete an unfinished byte sequence.
+  filter.push(Buffer.from([0xe4, 0xb8]));
+  filter.push("tail\n");
+  filter.flush();
+  assert.equal(written.join(""), "\uFEFFWARN 中文 😀\n\uFFFDtail\n");
+});
+
+test("flush finishes an incomplete UTF-8 tail once and permits another stream", () => {
+  const written = [];
+  const filter = createDaemonLogFilter((text) => written.push(text));
+  filter.push(Buffer.from("panic: 尾"));
+  filter.push(Buffer.from([0xf0, 0x9f]));
+  filter.flush();
+  filter.flush();
+  assert.deepEqual(written, ["panic: 尾\uFFFD\n"]);
+  filter.push(Buffer.from("next: 中"));
+  filter.flush();
+  assert.deepEqual(written, ["panic: 尾\uFFFD\n", "next: 中\n"]);
+});
+
+test("each output stream has independent UTF-8 state", () => {
+  const stdout = [], stderr = [];
+  const out = createDaemonLogFilter((text) => stdout.push(text));
+  const err = createDaemonLogFilter((text) => stderr.push(text));
+  out.push(Buffer.from([0xe4]));
+  err.push(Buffer.from("WARN: µ\n"));
+  out.push(Buffer.from([0xb8, 0xad, 0x0a]));
+  out.flush();
+  err.flush();
+  assert.deepEqual(stdout, ["中\n"]);
+  assert.deepEqual(stderr, ["WARN: µ\n"]);
+});
+
 test("an endless line is passed on rather than held", () => {
   const written = [];
   const filter = createDaemonLogFilter((text) => written.push(text));
