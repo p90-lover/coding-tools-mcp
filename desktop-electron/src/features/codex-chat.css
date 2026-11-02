@@ -1043,8 +1043,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .ao-chip-effort { color: var(--ao-muted); }
 /* The branch bar above the chat box: the branch in use, and every branch of the project. */
 /* In a chat it lines up with the composer column, like the route note; in the new-chat strip it is one chip. */
-.ao-workflow .cx-branch-bar { display: flex; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; max-width: 760px; min-width: 0;
-  margin: 0 auto 6px; padding: 0 12px; color: var(--ao-muted); font-size: 12.5px; }
+.ao-workflow .cx-branch-bar { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; box-sizing: border-box; width: calc(100% - 48px); max-width: 780px; min-width: 0;
+  margin: 0 auto 2px; padding: 0 8px; color: var(--ao-muted); font-size: 12.5px; }
 .ao-workflow .cx-branch-bar.is-inline { display: inline-flex; width: auto; max-width: 40%; margin: 0; padding: 0; color: inherit; font-size: inherit; }
 .ao-workflow .cx-branch-bar > .ao-composer-picker { min-width: 0; }
 .ao-workflow .cx-branch-chip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: min(420px, 100%); height: 26px; padding: 0 8px;
@@ -1879,6 +1879,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   .cx-head-team select { min-width: 0; max-width: 120px; }
   /* The bars above and below the chat box keep its width, so the goal and queued bars line up with it. */
   :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 24px); }
+  .ao-workflow .cx-branch-bar:not(.is-inline) { width: calc(100% - 24px); }
   /* The mic is a placeholder ("isn't available yet"); the permission chip keeps its icon, its name on hover. */
   .cx-composer-bar > .cx-mic { display: none; }
   .ao-workflow .cx-composer .ao-permissions > .ao-composer-chip > span { display: none; }
@@ -1892,6 +1893,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 @container cx-thread (max-width: 400px) {
   .cx-thread-head > :is(.cx-head-folder, .cx-status) { display: none; }
   :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 16px); }
+  .ao-workflow .cx-branch-bar:not(.is-inline) { width: calc(100% - 16px); }
 }
 /* A window narrowed under split panes squeezes them below the 320 px a dragged divider keeps. Preview
    (or the browser chip), Show cards and Side panel move to the More menu (NARROW_HEAD_PX in
