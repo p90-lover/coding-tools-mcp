@@ -33,6 +33,9 @@ export async function changeBoard(change:Change) {
 }
 // Each source owns a generation; discarded reads may finish but cannot publish.
 const integrationGeneration:Record<Source,number>={paseo:0,anneal:0};
+// Newer pending polls must not starve an older completed response.
+let liveRefreshIssued=0;
+let liveRefreshAccepted=0;
 function snapshotEndpoint(source:Source,value:string):string {
  const u=new URL(value);
  if(source==='paseo'&&(u.pathname===''||u.pathname==='/'))u.pathname='/ws';
@@ -40,6 +43,7 @@ function snapshotEndpoint(source:Source,value:string):string {
 }
 export function clearIntegration(source:Source) {
  integrationGeneration[source]++;
+ liveRefreshAccepted=++liveRefreshIssued;
  snapshots.update(v=>{const {[source]:_discarded,...next}=v;return next;});
  integrationErrors.update(v=>({...v,[source]:''}));
  integrationBusy.update(v=>({...v,[source]:false}));
@@ -89,34 +93,50 @@ export interface LiveStatus {
 }
 export const liveStatus = writable<LiveStatus[]>([]);
 export async function refreshLive() {
+ const ticket=++liveRefreshIssued;
+ const owners={...integrationGeneration};
+ const selected={...get(endpoints)};
  try {
   const rows = await invoke<LiveStatus[]>('integration_live_status');
-  liveStatus.set(rows);
+  if(ticket<=liveRefreshAccepted||owners.paseo!==integrationGeneration.paseo||owners.anneal!==integrationGeneration.anneal)return;
   const next = { ...get(snapshots) };
   for (const row of rows) {
    if ((row.source === 'paseo' || row.source === 'anneal') && row.snapshot) {
-    next[row.source] = row.snapshot;
+     try {
+      const expected=snapshotEndpoint(row.source,selected[row.source]);
+      if(row.snapshot.source===row.source&&snapshotEndpoint(row.source,row.endpoint)===expected&&snapshotEndpoint(row.source,row.snapshot.endpoint)===expected)next[row.source]=row.snapshot;
+     } catch { /* An unfinished draft must not suppress another source's valid snapshot. */ }
    }
   }
+  liveRefreshAccepted=ticket;
+  liveStatus.set(rows);
   snapshots.set(next);
  } catch { /* Keep last live status; the next poll retries. */ }
 }
 export async function connectLive(source: string, endpoint: string, webUi: string, credential: string, keepAlive: boolean, remember: boolean) {
+ const owned=source==='paseo'||source==='anneal'?source:undefined;
+ if(owned)clearIntegration(owned);else liveRefreshAccepted=++liveRefreshIssued;
+ const ticket=owned?integrationGeneration[owned]:0;
+ const current=()=>!owned||ticket===integrationGeneration[owned];
  integrationBusy.update(v => source === 'paseo' || source === 'anneal' ? ({ ...v, [source]: true }) : v);
  integrationErrors.update(v => ({ ...v, [source]: '' }));
  try {
   await invoke('integration_live_connect', { source, endpoint, webUi, credential: credential || null, keepAlive, remember });
-  await refreshLive();
+  if(current()){liveRefreshAccepted=++liveRefreshIssued;await refreshLive();}
  } catch (e) {
+  if(!current())return;
   if (source === 'paseo' || source === 'anneal') integrationErrors.update(v => ({ ...v, [source]: String(e) }));
   else throw e;
  } finally {
-  if (source === 'paseo' || source === 'anneal') integrationBusy.update(v => ({ ...v, [source]: false }));
+  if (owned&&current()) integrationBusy.update(v => ({ ...v, [owned]: false }));
  }
 }
 export async function disconnectLive(source: string) {
+ const owned=source==='paseo'||source==='anneal'?source:undefined;
+ if(owned)clearIntegration(owned);else liveRefreshAccepted=++liveRefreshIssued;
+ const ticket=owned?integrationGeneration[owned]:0;
  await invoke('integration_live_disconnect', { source });
- await refreshLive();
+ if(!owned||ticket===integrationGeneration[owned]){liveRefreshAccepted=++liveRefreshIssued;await refreshLive();}
 }
 export async function actIntegration(source: string, endpoint: string, request: Record<string, string>) {
  return invoke('integration_act', { source, endpoint, credential: null, request: { source, ...request } });
