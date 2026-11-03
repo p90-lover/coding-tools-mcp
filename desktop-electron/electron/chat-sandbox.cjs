@@ -131,8 +131,8 @@ function cacheRoots({ localAppData = process.env.LOCALAPPDATA, env = process.env
   return [...new Set(candidates.filter((folder) => { try { return fs.statSync(folder).isDirectory(); } catch { return false; } }))];
 }
 
-/** A TOML literal string (single quotes; a path never holds one) for a `-c` override. */
-const tomlPath = (value) => `'${String(value).replace(/\\/g, "/").replace(/'/g, "")}'`;
+/** A TOML basic string for a `-c` override; JSON escapes cover controls except TOML's DEL. */
+const tomlPath = (value) => JSON.stringify(String(value).replace(/\\/g, "/")).replace(/\u007f/g, "\\u007f");
 
 /** Keep raw cursors on complete scalars; invalid bytes still use Buffer's lossy decoding. */
 function outputPageEnd(bytes, limit, complete) {
