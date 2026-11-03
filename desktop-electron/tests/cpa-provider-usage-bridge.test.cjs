@@ -85,11 +85,10 @@ test("supported quotas pass only numbers and safe state, never errors or key nam
   f.dispose();
 });
 
-test("the host serves usage to the CPA frame and keeps its own strip until the plugin shows it", () => {
-  // CPA Provider Manager does not send cpm:usage:read yet (no branch of it does, 2026-10-31), so the
-  // app's strip above CPA stays; removing it first left CPA with no per-account usage at all.
+test("the host serves usage to the CPA frame and no longer mounts its own strip", () => {
+  // CPA Provider Manager v0.2.2+ reads cpm:usage:read and shows accounts and quota itself.
   const ui = fs.readFileSync(path.join(__dirname, "../src/features/OriginalUiSurface.tsx"), "utf8");
-  assert.match(ui, /toolId === "cpa" \? <CpaUsagePanel/);
+  assert.doesNotMatch(ui, /CpaUsagePanel/);
   assert.match(ui, /attachCpaProviderUsageBridge/);
   assert.match(ui, /ref=\{cpaFrame\}/);
 });
