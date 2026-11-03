@@ -96,7 +96,7 @@ export type QuestionField = {
  * A question the AO agent asked (Claude Code's AskUserQuestion), answered in the chat: one choice,
  * several, or the person's own words for each, then sent back as the agent's form expects.
  */
-function AoQuestion({ approval, busy, approve }: { approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => void }) {
+function AoQuestion({ approval, busy, approve }: { approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => Promise<void> }) {
   const fields = approval.fields ?? [];
   const [values, setValues] = useState<Record<string, string | string[] | boolean>>({});
   const [other, setOther] = useState<Record<string, string>>({});
@@ -208,7 +208,7 @@ function ApprovalCode({ text, label }: { text: string; label: string }) {
  * answers at once: no Submit or Deny button. Escape answers Deny.
  */
 function AoAsk({ approval, busy, approve, actor }: {
-  approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => void; actor: string;
+  approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => Promise<void>; actor: string;
 }) {
   const tool = String(approval.tool ?? "").replace(/^mcp__[\w-]+__/, "");
   const shell = approval.kind === "command" || Boolean(approval.command) || SHELL_TOOL.test(String(approval.tool ?? ""));
@@ -220,14 +220,20 @@ function AoAsk({ approval, busy, approve, actor }: {
   const offered = (approval.decisions ?? []).length ? approval.decisions!
     : [{ id: "allow", kind: "allow_once", label: "Allow once" }, { id: "deny", kind: "reject_once", label: "Deny" }];
   const options = offered.map((decision) => ({ value: decision.id, label: DECISION_WORDS[decision.kind] ?? decision.label }));
-  // The answer sent, shown picked until the card goes; a second click (or key) sends nothing.
+  // Keep the pick while its attempt is pending; cancellation/failure permits another explicit click.
   const [sent, setSent] = useState<string | null>(null);
+  const sending = useRef(false);
   const card = useCardFocus();
-  const send = (id: string | null) => {
-    if (busy || sent || !id) return;
+  const send = async (id: string | null) => {
+    if (busy || sending.current || sent || !id) return;
+    sending.current = true;
     setSent(id);
-    if (!(approval.decisions ?? []).length) { approve(approval, id === "allow"); return; }
-    approve(approval, { decisionId: id });
+    try {
+      await approve(approval, (approval.decisions ?? []).length ? { decisionId: id } : id === "allow");
+    } finally {
+      sending.current = false;
+      setSent(null);
+    }
   };
   const denyId = offered.find((decision) => decision.kind === "reject_once")?.id ?? offered.find((decision) => decision.kind.startsWith("reject"))?.id ?? null;
   const reason = approval.reason && approval.reason !== approval.summary ? approval.reason : approval.summary && approval.summary !== tool ? approval.summary : "";
@@ -260,7 +266,7 @@ const object = (value: unknown): Record<string, unknown> => value && typeof valu
 
 
 export function AgentOrchestratorApproval({ approval, busy, approve, actor = "the agent" }: {
-  approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => void;
+  approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => Promise<void>;
   /** Who asks, as Codex names "ChatGPT" in "Allow ChatGPT to run this command?": the card's model. */
   actor?: string;
 }) {

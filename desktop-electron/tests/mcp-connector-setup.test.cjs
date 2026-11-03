@@ -228,6 +228,10 @@ test("the production connector action verifies fresh owner and workspace proof b
   for (const scenario of [
     { name: "Personal free succeeds with its actual observed workspace" },
     { name: "Business succeeds with its distinct binding", business: true },
+    { name: "a team admin cannot create even when the tunnel belongs to that user", business: true, creatorRole: "account-admin", error: /verified owner/ },
+    { name: "a team member cannot create even when the tunnel belongs to that user", business: true, creatorRole: "standard-user", error: /verified owner/ },
+    { name: "an unknown workspace role cannot grant creation access", business: true, creatorRole: "future-role", error: /verified owner/ },
+    { name: "owner authority revoked after prepare cannot submit", business: true, change: "owner-role", error: /context.*changed/i },
     { name: "another Platform creator cannot be reused", nonOwner: true, error: /different Platform user/ },
     { name: "unknown creator shape cannot be guessed", unknownOwner: true, error: /ownership.*unknown/ },
     { name: "incompatible workspace evidence cannot submit", mismatch: true, error: /workspace context.*unknown/ },
@@ -255,7 +259,7 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "a publisher's scoped cache alone cannot authorize a member", business: true, shared: true, publisherMoved: true, error: /unverified/i },
     { name: "an unavailable shared plugin does not seed a member binding", business: true, shared: true, transient: true, sharedUnavailable: true, error: /plugin connection/ },
     { name: "a transient publisher result cannot be replayed", business: true, shared: true, transient: true, replay: true },
-    { name: "an admin creator explicitly selects its intended workspace in a fresh popup", business: true, selectAdmin: true },
+    { name: "an owner creator explicitly selects its intended workspace in a fresh popup", business: true, selectAdmin: true },
   ]) await t.test(scenario.name, async () => {
     const work = path.resolve(__dirname, "../../aiTemp/account-mcp-bindings");
     fs.mkdirSync(work, { recursive: true });
@@ -283,8 +287,9 @@ test("the production connector action verifies fresh owner and workspace proof b
       ...(scenario.oversized ? { padding: "x".repeat(64 * 1024) } : {}) });
     fs.writeFileSync(bindingPath, original);
     const network = fakeMcpNetwork(), counts = { create: 0, open: 0, confirm: 0 };
+    let platformVisits = 0;
     let accountId = scenario.business && !scenario.selectAdmin ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
-    let workspaceRole = scenario.shared ? "standard-user" : "account-owner", publishing = false, held = false, publisherResult;
+    let workspaceRole = scenario.shared ? "standard-user" : scenario.creatorRole ?? "account-owner", publishing = false, held = false, publisherResult;
     const runtimeHost = runtime();
     const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: true }),
       currentOperation: () => held ? "MCP connector creation" : null,
@@ -309,6 +314,7 @@ test("the production connector action verifies fresh owner and workspace proof b
             return { prepared: true, existing: true, href: "/plugins/plugin_fixture" };
           }
           if (scenario.change === "workspace") { accountId = businessId; select(accountId); }
+          if (scenario.change === "owner-role") workspaceRole = "account-admin";
           if (scenario.change === "user") userId = "user-other";
           if (scenario.change === "partition") host.partition = "persist:other";
           if (scenario.change === "navigation") { url = "https://chatgpt.com/"; contents.emit("did-start-navigation", {}, url, false, true); }
@@ -328,7 +334,7 @@ test("the production connector action verifies fresh owner and workspace proof b
         }
         if (phase === "openTunnelConnectorConsent") {
           counts.open++;
-          if (scenario.change === "role") workspaceRole = "account-admin";
+          if (scenario.change === "role" && !publishing) workspaceRole = "account-admin";
           if (scenario.change === "consent") { accountId = businessId; select(accountId); }
           return { consentReady: true };
         }
@@ -356,6 +362,7 @@ test("the production connector action verifies fresh owner and workspace proof b
           if (next === "about:blank") { rendererInitialized = true; url = next; return; }
           contents.emit("did-start-navigation", {}, next, false, true); url = next;
           if (next.startsWith("https://platform.openai.com/")) {
+            platformVisits++;
             assert(!scenario.shared || publishing, "a member never borrows Platform authentication from its publisher");
             assert(network.debuggerClient.isAttached(), "observation must precede Platform navigation");
             network.observed("POST", "https://api.openai.com/v1/dashboard/onboarding/login", {}, { user: { id: userId, orgs: { data: [{ id: org, role: "owner" }] } } });
@@ -376,7 +383,7 @@ test("the production connector action verifies fresh owner and workspace proof b
         workspaceRole: "account-owner", workspaceStructure: "workspace" } } : {}),
       assertCurrent: () => { if (busy) throw new Error("Caller is busy"); } });
     if (scenario.transient) {
-      publishing = true; held = true; userId = "user-admin"; workspaceRole = "account-admin";
+      publishing = true; held = true; userId = "user-admin"; workspaceRole = "account-owner";
       publisherResult = await createConfiguredConnector({ app: { getPath: () => userData }, BrowserWindow: Window,
         browserHost: host, runtimeHost, operationHeld: true, target: { tunnelId, partition: "persist:admin" } });
       publishing = false; userId = initialUser; workspaceRole = "standard-user";
@@ -405,6 +412,7 @@ test("the production connector action verifies fresh owner and workspace proof b
       assert.doesNotMatch(JSON.stringify(retained), /DO_NOT_COPY_HINT_KEY|runtimeKey/);
       if (scenario.replay) await assert.rejects(action(), /unverified/i);
     }
+    if (scenario.creatorRole) assert.equal(platformVisits, 0, "nonowners stop before Platform or form setup");
     assert.equal(windowCount, scenario.transient ? 2 : scenario.shared ? 0 : scenario.name.startsWith("a failed consent") ? 2 : 1);
     if (windowCount) assert.equal(destroyed, true);
     assert.equal(network.debuggerClient.isAttached(), false);

@@ -908,7 +908,7 @@ export function AgentOrchestratorChat({
   recover?: (input: { taskId: string; runId: string; nodeId: string; requestKey: string; threadId: string }) => Promise<{ message: string }>;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
-  approve: (approval: ChatApproval, reply: ApprovalReply) => void;
+  approve: (approval: ChatApproval, reply: ApprovalReply) => Promise<void>;
   permissions?: ReactNode;
   composer?: Omit<ComposerControlsProps, "permissions" | "busy">;
   onOpenTeam?: () => void;

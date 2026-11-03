@@ -6,6 +6,17 @@ const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
 
+test("workspace-owner refusal stays actionable across command and UI error boundaries", () => {
+  const { WORKSPACE_OWNER_REQUIRED } = require("../electron/mcp-connector-setup.cjs");
+  const { PUBLISH_REQUIRED } = require("../electron/chatgpt-workspace.cjs");
+  assert.deepEqual(mcpConnectorCommandFailure(new Error(WORKSPACE_OWNER_REQUIRED)), {
+    code: "workspace_owner_required", message: WORKSPACE_OWNER_REQUIRED,
+  });
+  assert.deepEqual(mcpConnectorCommandFailure(new Error(PUBLISH_REQUIRED)), {
+    code: "workspace_publish_required", message: PUBLISH_REQUIRED,
+  });
+});
+
 // The receipt is written off the main thread: wait for it, then for the command to start running.
 async function ran(command) {
   await command.written();

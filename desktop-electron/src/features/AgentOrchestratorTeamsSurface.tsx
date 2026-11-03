@@ -188,11 +188,12 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
         team: { ...sent, name: sent.name.trim(), editable_graph: true, is_default: makeDefault || sent.id === defaultId || !defaultId } as unknown as JsonObject } });
       if (result.cancelled) return;
       const updated = result.team as AoTeam;
+      const current = await moduleCall("runs", { workspaceId });
       // Edits made while saving stay in the draft, on the new revision, for the next save.
       const edited = JSON.stringify(draftRef.current) !== JSON.stringify(sent);
-      accept(await moduleCall("runs", { workspaceId }), updated.id, edited);
+      accept(current, updated.id, edited);
       setFailed("");
-      setNotice(makeDefault ? "Default team saved" : "All changes saved");
+      setNotice(edited ? "" : makeDefault ? "Default team saved" : "All changes saved");
       window.dispatchEvent(new CustomEvent("coding-tools:ao:teams-changed", { detail: { workspaceId } }));
     } catch (cause) {
       const message = String(cause instanceof Error ? cause.message : cause);

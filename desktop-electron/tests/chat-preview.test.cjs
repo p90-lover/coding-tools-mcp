@@ -249,6 +249,57 @@ test("native visualization widget state stays local to its owner across replacem
   });
 });
 
+test("native visualization reads expose only bounded public widget state", async () => {
+  const state = { modelContent: { counter: 1, selection: "blue" }, privateContent: { token: "private-ui-only" } };
+  let malformed = false, unavailable = false, publicReads = 0;
+  const { service } = previews({ page: { evaluate: (expression, contents) => {
+    if (expression.includes("document.querySelectorAll")) return { url: contents.getURL(), title: "Panel", text: "Counter 1", elements: [] };
+    if (expression.includes("widgetState?.modelContent")) {
+      publicReads++;
+      if (unavailable) throw new Error("private-ui-only");
+      if (malformed) return "{not-json";
+    }
+    return vm.runInNewContext(expression, { window: { openai: { widgetState: state } } });
+  } } });
+  try {
+    await service.call("owner", "preview_render", { html: "<button>1</button>" }, { visualization: true });
+    for (const value of [state.modelContent, null, 0, false, ["blue"]]) {
+      state.modelContent = value;
+      const read = await service.call("owner", "preview_read");
+      assert.deepEqual(read.structuredContent.modelContent, value);
+      assert.deepEqual(JSON.parse(read.content[0].text).modelContent, value);
+      assert.ok(!JSON.stringify(read).includes("private-ui-only"));
+    }
+    for (const value of ["x".repeat(16 * 1024), "界".repeat(6000)]) {
+      state.modelContent = value;
+      const read = await service.call("owner", "preview_read");
+      assert.equal(read.isError, false);
+      assert.equal(read.structuredContent.text, "Counter 1");
+      assert.equal(read.structuredContent.modelContentUnavailable, true);
+      assert.equal(Object.hasOwn(read.structuredContent, "modelContent"), false);
+    }
+    state.modelContent = { counter: 1 };
+    for (const failure of ["malformed", "unavailable"]) {
+      malformed = failure === "malformed"; unavailable = failure === "unavailable";
+      const read = await service.call("owner", "preview_read");
+      assert.equal(read.isError, false);
+      assert.equal(read.structuredContent.text, "Counter 1");
+      assert.equal(read.structuredContent.modelContentUnavailable, true);
+      assert.ok(!JSON.stringify(read).includes("private-ui-only"));
+    }
+    malformed = unavailable = false;
+    await service.call("owner", "preview_open", { url: "http://localhost:5173/" });
+    const before = publicReads;
+    for (const explicit of [false, true]) {
+      if (explicit) await service.call("owner", "preview_render", { html: "<p>Explicit panel</p>" });
+      const read = await service.call("owner", "preview_read");
+      assert.equal(Object.hasOwn(read.structuredContent, "modelContent"), false);
+      assert.equal(Object.hasOwn(read.structuredContent, "modelContentUnavailable"), false);
+      assert.equal(publicReads, before, "web pages and explicit HTML do not inspect a widget API");
+    }
+  } finally { service.closeAll(); }
+});
+
 test("parallel panel updates stay ordered and an ended owner cannot render queued content", async () => {
   let started, release;
   const began = new Promise(resolve => { started = resolve; });

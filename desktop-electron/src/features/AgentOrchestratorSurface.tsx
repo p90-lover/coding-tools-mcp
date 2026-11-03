@@ -2357,12 +2357,12 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       .finally(() => setStoppingRuns((current) => current.filter((id) => id !== runId)));
   };
 
-  const approve = (approval: AoApproval, reply: ApprovalReply) => {
+  const approve = async (approval: AoApproval, reply: ApprovalReply) => {
     const owner = approvalScope.current;
     if (!mounted.current || owner.workspaceId !== workspaceId || owner.runId !== selectedRun?.id
       || selection.current.workspaceId !== owner.workspaceId || selection.current.runId !== owner.runId
       || !shownApprovals.some(item => item.nodeId === approval.nodeId && item.approval_id === approval.approval_id)) return;
-    void run("approval", async () => {
+    await run("approval", async () => {
       const result = await moduleCall("approve_harness", { workspaceId: owner.workspaceId, runId: owner.runId,
         nodeId: approval.nodeId, approvalId: approval.approval_id,
         ...(typeof reply === "boolean" ? { allow: reply }

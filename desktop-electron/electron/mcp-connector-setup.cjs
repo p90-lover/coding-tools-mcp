@@ -7,6 +7,13 @@ const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 // An original result object is usable once during a held workspace operation, never after JSON persistence.
 const freshConnectorResults = new WeakMap();
 const UNVERIFIED_CONNECTOR = "Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.";
+const WORKSPACE_OWNER_REQUIRED = "Only a verified owner of this ChatGPT workspace can create its MCP connector. Add or sign in to the workspace owner account, refresh its workspace details, then retry.";
+
+function requireMcpWorkspaceOwner(context) {
+  if (!["workspace", "personal"].includes(context?.workspaceStructure) || context.workspaceRole !== "account-owner") {
+    throw new Error(WORKSPACE_OWNER_REQUIRED);
+  }
+}
 
 // activeAccountId comes from a fresh ChatGPT request in the owned window, never the default alias
 // or the JWT's possibly stale workspace claim. The token and unrelated account fields stay there.
@@ -733,6 +740,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     if (!operationHeld || !sharedProof || sharedProof.browserHost !== browserHost || sharedProof.runtimeHost !== runtimeHost
       || Date.now() - sharedProof.at > 180_000 || sharedProof.partition !== shared.publisherPartition
       || sharedProof.userId !== shared.userId || sharedProof.workspaceId !== shared.workspaceId
+      || sharedProof.workspaceRole !== "account-owner" || sharedProof.workspaceStructure !== "workspace"
       || sharedProof.tunnelId !== settings.tunnelId || shared.tunnelId !== settings.tunnelId
       || sharedProof.name !== settings.name || sharedProof.href !== shared.href) throw new Error(UNVERIFIED_CONNECTOR);
     sharedProof.assertCurrent?.();
@@ -769,7 +777,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       },
     });
     let timedOut = false, observer = null, navigating = false, submitting = false, navigationChanged = false, navigationVersion = 0, mutationStarted = false;
-    let expectedPath = null, platformPhase = !shared;
+    let expectedPath = null, platformPhase = false;
     const timer = setTimeout(() => {
       timedOut = true;
       if (!popup.isDestroyed()) popup.destroy();
@@ -818,11 +826,6 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         }
         throw new Error("MCP context inspection did not finish.");
       };
-      if (!shared) {
-        await navigate("https://platform.openai.com/settings/organization/tunnels");
-        await evidence(snapshot => snapshot.platform.user && snapshot.platform.organizationId && snapshot.platform.permissions && snapshot.platform.tunnels);
-      }
-      platformPhase = false;
       await navigate("https://chatgpt.com/plugins?view=personal");
       let initial = await evidence(snapshot => snapshot.activeAccountId);
       let context = await popup.webContents.executeJavaScript(chatGptMcpContextScript(initial.activeAccountId), true);
@@ -831,7 +834,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         checkHost();
         if (context.userId !== expectedContext.userId || membership.userId !== expectedContext.userId
           || membership.workspaceRole !== expectedContext.workspaceRole || membership.workspaceStructure !== "workspace"
-          || !["account-owner", "account-admin"].includes(membership.workspaceRole)) {
+          || membership.workspaceRole !== "account-owner") {
           throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
         }
         await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
@@ -849,6 +852,19 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       if (expectedContext && (context.userId !== expectedContext.userId || context.workspaceId !== expectedContext.workspaceId
         || context.workspaceRole !== expectedContext.workspaceRole || context.workspaceStructure !== expectedContext.workspaceStructure)) {
         throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
+      }
+      // Reject unverified/non-owner workspaces before Platform login or connector-form work.
+      // Returning from Platform establishes a new observation baseline; freshContext still checks
+      // the original user/workspace/role before any creation or consent mutation.
+      if (!shared) {
+        requireMcpWorkspaceOwner(context);
+        platformPhase = true;
+        await navigate("https://platform.openai.com/settings/organization/tunnels");
+        await evidence(snapshot => snapshot.platform.user && snapshot.platform.organizationId && snapshot.platform.permissions && snapshot.platform.tunnels);
+        platformPhase = false;
+        await navigate("https://chatgpt.com/plugins?view=personal");
+        initial = await evidence(snapshot => snapshot.activeAccountId);
+        if (initial.activeAccountId !== context.workspaceId) throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
       }
       const freshContext = async () => {
         checkHost();
@@ -872,7 +888,10 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
             || shared.memberUserId !== current.userId || shared.tunnelId !== settings.tunnelId) {
             throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
           }
-        } else platformMcpOwnerContext(after.platform, settings.tunnelId, current);
+        } else {
+          requireMcpWorkspaceOwner(current);
+          platformMcpOwnerContext(after.platform, settings.tunnelId, current);
+        }
         return current;
       };
       await onContext?.(partition, await freshContext());
@@ -946,7 +965,8 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       }
       const connected = { created: result.created, name: settings.name, href, binding, connected: true };
       if (!shared) freshConnectorResults.set(connected, { browserHost, runtimeHost, partition, assertCurrent,
-        ...binding, name: settings.name, href, at: Date.now() });
+        ...binding, workspaceRole: stable.workspaceRole, workspaceStructure: stable.workspaceStructure,
+        name: settings.name, href, at: Date.now() });
       return connected;
     } catch (error) {
       if (timedOut) throw new Error("ChatGPT connector setup took too long. Retry from Configuration.");
@@ -1004,4 +1024,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
+module.exports = { WORKSPACE_OWNER_REQUIRED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
