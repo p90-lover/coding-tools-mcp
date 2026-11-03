@@ -1,8 +1,8 @@
 import { getCodingToolsClient } from "../api/client";
 
 // What the cpa_usage operation (electron/cpa-usage.cjs) returns: each CPA account's tokens,
-// requests and estimated cost over a range, with its quota where one is known. Shared by the CPA
-// accounts view (CpaUsagePanel) and the chat's context meter.
+// requests and estimated cost over a range, with its quota where one is known. Shared by the bridge
+// to CPA Provider Manager's usage view (cpa-provider-usage-bridge.ts) and the chat's context meter.
 
 export type CpaUsageRange = "24h" | "7d" | "30d" | "all";
 /** Where a cost came from: CPA Helper's price book, the built-in list-price table, or both. */

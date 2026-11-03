@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { JsonObject } from "../api/contracts";
 import type { Language, OriginalUiId, OriginalUiSnapshot, OriginalUiCatalog } from "../types";
-import { CpaUsagePanel } from "./CpaUsagePanel";
 import { readCpaUsage } from "./cpa-usage";
 import { attachCpaProviderUsageBridge } from "./cpa-provider-usage-bridge";
 import "./original-ui.css";
@@ -280,9 +279,8 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
       ) : null}
       {localError || tool.error ? <p className="original-ui-error">{localError || tool.error}</p> : null}
       {notice ? <p className="original-ui-note">{notice}</p> : null}
-      {/* CPA's own panel shows no per-account tokens or cost; the app adds them above it. It stays
-          until CPA Provider Manager reads them through the bridge (cpm:usage:read) and shows them itself. */}
-      {toolId === "cpa" ? <CpaUsagePanel language={language} /> : null}
+      {/* CPA's per-account tokens, cost and quota are shown by CPA Provider Manager inside the frame,
+          which reads them through the bridge above (cpm:usage:read). */}
 
       <div className="original-ui-frame-shell">
         {frameUrl ? (
