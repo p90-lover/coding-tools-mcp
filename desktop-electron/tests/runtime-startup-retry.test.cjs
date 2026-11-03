@@ -170,7 +170,7 @@ test("main's startup, failed by Cloudflare's check at launch, brings the bridge 
       upgradeManagedRuntime: async () => {
         events.push("upgrade");
         if (!world.browser.authenticated) {
-          throw new Error("ChatGPT is showing a Cloudflare security check. Open the GPT Browser, complete the check, then run Setup → Install models.");
+          throw new Error("ChatGPT is showing a Cloudflare security check. Open the Browser tab, complete the check, then run Setup → Install models.");
         }
         world.bridge = "6.1.17";
         return { updated: true, mode: "full", fromVersion: "5.0.6", toVersion: "6.1.17", connectorMigrated: false };

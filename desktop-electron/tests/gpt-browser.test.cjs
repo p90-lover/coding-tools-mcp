@@ -78,6 +78,9 @@ test("the address bar accepts any http(s) site and defaults bare addresses to ht
 
 test("the Electron and app tokens are removed from the sign-in user agent", () => {
   assert.equal(cleanUserAgent("Mozilla/5.0 Chrome/140.0 Electron/41.10.7 coding-tools-desktop/0.7.0 Safari/537.36"), "Mozilla/5.0 Chrome/140.0 Safari/537.36");
+  // The app name Electron puts in the agent (seen live on 0.8.81).
+  assert.equal(cleanUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) CodingTools/0.8.81 Chrome/156.0.8078.75 Safari/537.36"),
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.75 Safari/537.36");
 });
 
 test("each account gets its own persistent partition and survives a restart", async () => {

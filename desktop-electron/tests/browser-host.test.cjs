@@ -1038,7 +1038,7 @@ test("a sign-in wait that ends on Cloudflare's check page names the check, not t
   const { fixture, warnings } = securityCheckWaitFixture(async () => true);
   await assert.rejects(
     BrowserHost.prototype.waitForAuthenticated.call(fixture, 0),
-    /Cloudflare security check\. Open the GPT Browser, complete the check, then run Setup → Install models\./,
+    /Cloudflare security check\. Open the Browser tab, complete the check, then run Setup → Install models\./,
   );
   // The challenge token in the address never reaches the log.
   assert.deepEqual(warnings, [["browser.cloudflare_check_page", { url: "https://chatgpt.com/" }]]);
@@ -3207,7 +3207,7 @@ test("Codex tasks' five tabs are counted apart from the person's own ten", async
   await assert.rejects(host.createTurnTab("trace_six", 444), /already has 5 browser tabs/);
   assert.throws(() => host.createManualTurnTab("trace_six", 444, null, "prompt", 30_000), /already has 5 browser tabs/);
   // Five running tasks leave the person's tenth tab free: it gets past the limit checks.
-  assert.throws(() => host.createUserTab(), /Open the GPT Browser before creating a tab/);
+  assert.throws(() => host.createUserTab(), /Open the Browser tab before creating a tab/);
   userTabs.set("user-9", { id: "user-9", ordinal: 15, status: "ready" });
   assert.throws(() => host.createUserTab(), /already has 10 tabs of your own/);
   // The person's tabs do not hold back a task either.
