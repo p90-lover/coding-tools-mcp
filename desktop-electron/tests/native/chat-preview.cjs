@@ -18,7 +18,8 @@ process.on("unhandledRejection",error=>{console.error("UNHANDLED",error?.stack||
 app.whenReady().then(async()=>{
   const {createNativeChatPreviews}=require(path.join(source,"desktop-electron/electron/chat-preview.cjs"));
   const {createChatAgentTools}=require(path.join(source,"desktop-electron/electron/chat-agent-tools.cjs"));
-  window=new BrowserWindow({show:true,width:1280,height:900,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});
+  window=new BrowserWindow({show:false,opacity:0,focusable:false,skipTaskbar:true,width:1280,height:900,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});
+  window.setIgnoreMouseEvents(true);
   await window.loadURL("data:text/html,<title>Chat tools native verification</title>");
   log("WINDOW_READY",{electron:process.versions.electron});
   const html='<!doctype html><title>Chat Tool Fixture</title><input aria-label="Fixture input"><button onclick="this.textContent=\'Count 1\'">Count 0</button><a href="/next">Next</a><div style="height:3000px">Fixture page</div><script>console.log("fixture-loaded")</script>';
@@ -70,6 +71,17 @@ app.whenReady().then(async()=>{
   const scrolled=(await call("preview_screenshot")).content.find(x=>x.type==="image");log("SCROLL_STATE",{position:await nativeView.webContents.executeJavaScript("({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,body:document.body.scrollHeight})")});assert.notEqual(scrolled.data,image.data,"capture follows actual page scrolling");
   previews.show("native-session",{x:10,y:10,width:900,height:650});
   await call("preview_screenshot");
+  if(process.platform==="win32"||process.platform==="darwin"){
+    // Exercise real reparenting without showing an opaque window or taking OS focus.
+    window.showInactive();
+    assert.equal(window.getOpacity(),0);assert.equal(window.isFocusable(),false);assert.equal(window.isFocused(),false);
+    assert.ok(window.contentView.children.includes(nativeView));
+    await call("preview_screenshot");
+    window.hide();
+    assert.ok(parking.contentView.children.includes(nativeView));
+    await call("preview_screenshot");
+    log("NATIVE_OWNER_VISIBILITY_TRANSITIONS_PASS");
+  }
   await call("preview_click",{ref:read.elements.find(x=>x.name==="Next").ref});
   await call("preview_wait",{text:"Next Page"});
   await call("preview_navigate",{action:"back"});
