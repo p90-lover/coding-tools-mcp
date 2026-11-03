@@ -313,11 +313,13 @@ test("a cold account switch keeps the leaving account counted and routed while i
   const { host } = switchingHost();
   const tab = host.userTabs.get("u1");
   host.userTabs = new Map(Array.from({ length: 5 }, (_, id) => [id, { ...tab, id }]));
+  for (let id = 0; id < 5; id += 1) host.turnTabs.set(`turn-${id}`, { id: `turn-${id}`, partition: BASE, status: "running" });
   let finish;
   host.initializePrimaryView = () => new Promise(resolve => { finish = resolve; });
   const switching = host.switchAccount(`${BASE}-abcdefghijkl`);
   await new Promise(setImmediate);
   try {
+    // Its Codex turns' tabs (what its limit counts; the person's own have their own allowance).
     assert.equal(host.tabCount(BASE), 5);
     assert.ok(host.livePartitions().includes(BASE));
     assert.equal(makeTabRoom(host, BASE, false), 5);
@@ -484,17 +486,18 @@ test("each account holds its own tabs up to its limit, and frees only its own re
   assert.deepEqual(removed, ["b2"], "never another account's tab");
 });
 
-test("parked account tabs still count toward account and global tab limits", () => {
+test("parked account tabs still count toward the global tab limit", () => {
   const parked = `${BASE}-abcdefghijkl`;
   const host = Object.assign(Object.create(BrowserHost.prototype), {
     partition: BASE, userTabs: new Map(), turnTabs: new Map(),
     parkedHomes: new Map([[parked, { partition: parked, userTabs: new Map(Array.from({ length: 5 }, (_, id) => [id, {}])) }]]),
   });
-  assert.equal(host.tabCount(parked), 5, "switching accounts does not free its loaded user tabs");
-  assert.equal(makeTabRoom(host, parked, false), 5);
-  for (let id = 0; id < 10; id += 1) host.turnTabs.set(id, { partition: `other-${Math.floor(id / 5)}`, status: "running" });
-  assert.equal(makeTabRoom(host, BASE, false), 15, "the global ceiling includes every parked home");
-  assert.equal(host.turnTabs.size, 10, "a capacity read never evicts running work");
+  // The person's own tabs have their own allowance: they no longer hold back an account's turns.
+  assert.equal(host.tabCount(parked), 0);
+  assert.equal(makeTabRoom(host, parked, false), null);
+  for (let id = 0; id < 25; id += 1) host.turnTabs.set(id, { partition: `other-${Math.floor(id / 5)}`, status: "running" });
+  assert.equal(makeTabRoom(host, BASE, false), 30, "the global ceiling includes every parked home");
+  assert.equal(host.turnTabs.size, 25, "a capacity read never evicts running work");
 });
 
 test("an account counts as signed in while its own partition holds an unexpired ChatGPT session token", () => {

@@ -3192,16 +3192,38 @@ test("browser zoom applies to user tabs along with home and task tabs", () => {
   assert.deepEqual(calls, [["home", 1.1], ["task", 1.1], ["user", 1.1]]);
 });
 
-test("user and task browser tabs share the five additional-tab limit", async () => {
-  const userTabs = new Map([["user", { id: "user", ordinal: 5, status: "ready" }]]);
-  const turnTabs = new Map(Array.from({ length: 4 }, (_unused, index) => [
+// 2026-11-03: the person's own tabs have an allowance of their own. Sharing five with Codex tasks,
+// a few running tasks left no room to open one ("add more tabs").
+test("Codex tasks' five tabs are counted apart from the person's own ten", async () => {
+  const userTabs = new Map(Array.from({ length: 9 }, (_unused, index) => [
+    "user-" + index, { id: "user-" + index, ordinal: index + 6, status: "ready" },
+  ]));
+  const turnTabs = new Map(Array.from({ length: 5 }, (_unused, index) => [
     "turn-" + index, { id: "turn-" + index, ordinal: index + 1, status: "running" },
   ]));
   const host = Object.assign(Object.create(BrowserHost.prototype), { userTabs, turnTabs });
 
+  // Tasks still stop at five, the bridge's limit on one account's parallel traffic.
   await assert.rejects(host.createTurnTab("trace_six", 444), /already has 5 browser tabs/);
   assert.throws(() => host.createManualTurnTab("trace_six", 444, null, "prompt", 30_000), /already has 5 browser tabs/);
-  assert.throws(() => host.createUserTab(), /already has 5 browser tabs/);
+  // Five running tasks leave the person's tenth tab free: it gets past the limit checks.
+  assert.throws(() => host.createUserTab(), /Open the GPT Browser before creating a tab/);
+  userTabs.set("user-9", { id: "user-9", ordinal: 15, status: "ready" });
+  assert.throws(() => host.createUserTab(), /already has 10 tabs of your own/);
+  // The person's tabs do not hold back a task either.
+  turnTabs.delete("turn-0");
+  assert.equal(BrowserHost.prototype.tabCount.call(host, host.partition), 4);
+});
+
+test("every account's pages together stop at thirty", () => {
+  const turnTabs = new Map(Array.from({ length: 5 }, (_unused, index) => [`turn-${index}`, { id: `turn-${index}`, ordinal: index + 1 }]));
+  const parked = (count, from) => ({ userTabs: new Map(Array.from({ length: count }, (_unused, index) => [`p${from + index}`, {}])) });
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    userTabs: new Map([["mine", { id: "mine", ordinal: 6 }]]), turnTabs,
+    parkedHomes: new Map([["persist:a", parked(10, 0)], ["persist:b", parked(10, 10)], ["persist:c", parked(4, 20)]]),
+    surfaceActive: true,
+  });
+  assert.throws(() => host.createUserTab(), /already has 30 browser tabs/);
 });
 
 test("the GPT Browser address bar opens a typed address in the shown tab, or in a new one", () => {

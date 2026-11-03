@@ -62,9 +62,14 @@ const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 /** The primary view's idle-document windows at startup: a timed-out load is retried with the next. */
 const PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS = Object.freeze([PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS, 30_000, 60_000]);
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
-// Tabs one ChatGPT account may hold (its setting may lower it), and every account's together.
+// Codex turns' tabs one ChatGPT account may hold (its setting may lower it): a hard limit on the
+// bridge's parallel traffic on that account.
 const MAX_BROWSER_TABS = 5;
-const MAX_TOTAL_BROWSER_TABS = 15;
+// The person's own tabs per account, apart from that limit (2026-11-03: "add more tabs"; with the
+// two sharing five, a few running tasks left no room to open one).
+const MAX_USER_TABS = 10;
+// Every page together, turns' and the person's, on all accounts.
+const MAX_TOTAL_BROWSER_TABS = 30;
 const MAX_CANCELLED_TURN_TRACES = 256;
 const MANUAL_SUBMIT_TIMEOUT_MS = 30_000;
 const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
@@ -101,10 +106,14 @@ function tabLimitOf(host, partition) {
   return Number.isInteger(setting) && setting >= 1 && setting <= MAX_BROWSER_TABS ? setting : MAX_BROWSER_TABS;
 }
 
-/** The tabs on one account's partition: its Codex turns' tabs, and the Browser tab's own pages. */
+/** The Codex turns' tabs on one account's partition: what its turn limit counts. */
 function tabsOnPartition(host, partition) {
-  const ownPages = partition === host.partition ? (host.userTabs?.size ?? 0) : (host.parkedHomes?.get(partition)?.userTabs?.size ?? 0);
-  return ownPages + [...host.turnTabs.values()].filter((tab) => (tab.partition ?? host.partition) === partition).length;
+  return [...host.turnTabs.values()].filter((tab) => (tab.partition ?? host.partition) === partition).length;
+}
+
+/** The person's own tabs on one account's partition. */
+function userTabsOnPartition(host, partition) {
+  return partition === host.partition ? (host.userTabs?.size ?? 0) : (host.parkedHomes?.get(partition)?.userTabs?.size ?? 0);
 }
 
 // Accounts the Browser tab keeps loaded, the shown one included (GPT Browser keeps 4 as well).
@@ -1208,8 +1217,12 @@ class BrowserHost {
 
   /** A tab of the person's own; `initialUrl` (the address bar's) opens instead of a new chat. */
   createUserTab(initialUrl = null) {
-    const full = makeTabRoom(this, this.partition, false);
-    if (full) throw new Error(`ChatGPT Web already has ${full} browser tabs; close one before opening another`);
+    if (userTabsOnPartition(this, this.partition) >= MAX_USER_TABS) {
+      throw new Error(`This account already has ${MAX_USER_TABS} tabs of your own open; close one before opening another`);
+    }
+    const allTabs = this.turnTabs.size + (this.userTabs?.size ?? 0)
+      + [...(this.parkedHomes?.values() ?? [])].reduce((sum, home) => sum + home.userTabs.size, 0);
+    if (allTabs >= MAX_TOTAL_BROWSER_TABS) throw new Error(`ChatGPT Web already has ${MAX_TOTAL_BROWSER_TABS} browser tabs; close one before opening another`);
     if (!this.surfaceActive) throw new Error("Open the GPT Browser before creating a tab");
     if (this.manualOperation) throw new Error(`Browser tabs cannot open during ${this.manualOperation}`);
     // A signed-out account opens tabs too, as in GPT Browser: the new tab is ChatGPT's own sign-in.
@@ -2110,6 +2123,9 @@ class BrowserHost {
       // The shown account's limit and the tabs it holds; tabs of sessions on other accounts show too.
       maxTabs: tabLimitOf(this, this.partition),
       accountTabs: tabsOnPartition(this, this.partition),
+      // The person's own tabs on the shown account, and how many it may hold (the + button).
+      userTabs: userTabsOnPartition(this, this.partition),
+      maxUserTabs: MAX_USER_TABS,
     };
   }
 
