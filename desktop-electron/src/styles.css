@@ -750,124 +750,6 @@ code {
   background: transparent;
 }
 
-.browser-tab-strip {
-  position: relative;
-  display: flex;
-  height: 36px;
-  flex: 0 0 36px;
-  align-items: flex-end;
-  gap: 3px;
-  padding: 4px 8px 0;
-  border-bottom: 1px solid var(--color-border-light);
-  background: rgb(24 24 24 / 72%);
-}
-
-.app-shell:not(.is-sidebar-open) .browser-tab-strip {
-  padding-left: 112px;
-}
-
-/* The rail already sits under the title bar's buttons. */
-.app-shell.is-sidebar-rail .browser-tab-strip {
-  padding-left: calc(112px - var(--sidebar-rail-width));
-}
-
-.browser-tab {
-  position: relative;
-  display: flex;
-  width: min(220px, 32vw);
-  min-width: 96px;
-  max-width: 220px;
-  flex: 1 1 120px;
-  height: 28px;
-  align-items: center;
-  gap: 7px;
-  padding: 0 8px;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
-  user-select: none;
-  -webkit-app-region: no-drag;
-}
-
-.browser-tab::before {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  border-radius: inherit;
-  background: var(--color-background-control-hover);
-  content: "";
-}
-
-.browser-tab > .brand-mark {
-  width: 15px;
-  height: 15px;
-  flex: none;
-  color: var(--color-icon-tertiary);
-}
-
-.browser-tab > span {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.browser-tab > button {
-  display: grid;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--color-icon-tertiary);
-  opacity: 0;
-  place-items: center;
-}
-
-.browser-tab:hover > button,
-.browser-tab > button:focus-visible {
-  opacity: 1;
-}
-
-.browser-tab > button:hover {
-  background: var(--color-background-control-active);
-  color: var(--color-icon-primary);
-}
-
-.browser-tab > button svg {
-  width: 12px;
-  height: 12px;
-}
-
-.browser-new-tab {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  place-items: center;
-  border: 0;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  background: transparent;
-  color: var(--color-icon-secondary);
-  -webkit-app-region: no-drag;
-}
-
-.browser-new-tab:hover:not(:disabled) {
-  background: var(--color-background-control-hover);
-  color: var(--color-icon-primary);
-}
-
-.browser-new-tab:disabled { opacity: 0.4; }
-.browser-new-tab svg { width: 14px; height: 14px; }
-
-.browser-tab-drag {
-  height: 100%;
-  min-width: 20px;
-  flex: 1;
-}
-
 .tab-spinner {
   width: 10px;
   height: 10px;
@@ -882,106 +764,6 @@ code {
   to {
     transform: rotate(360deg);
   }
-}
-
-.browser-toolbar {
-  position: relative;
-  display: flex;
-  height: 42px;
-  flex: 0 0 42px;
-  align-items: center;
-  gap: 8px;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--color-border);
-  background: rgb(24 24 24 / 82%);
-}
-
-.browser-history {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-}
-
-.browser-address {
-  display: flex;
-  min-width: 0;
-  height: 28px;
-  flex: 1;
-  align-items: center;
-  gap: 8px;
-  padding: 0 11px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: var(--color-background-control);
-  color: var(--color-text-tertiary);
-  font-size: var(--text-sm);
-}
-
-.browser-address:hover {
-  border-color: var(--color-border-light);
-  background: var(--color-background-control-hover);
-}
-
-.browser-address svg {
-  width: 13px;
-  height: 13px;
-  flex: none;
-}
-
-.browser-address span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.browser-address input {
-  min-width: 0;
-  flex: 1;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-overflow: ellipsis;
-}
-
-.browser-address:focus-within {
-  border-color: var(--color-border-focus, var(--color-border-light));
-  background: var(--color-background-control-hover);
-  color: var(--color-text-primary);
-}
-
-.browser-zoom-controls {
-  display: flex;
-  height: 28px;
-  flex: none;
-  align-items: center;
-  border-radius: var(--radius-sm);
-  background: var(--color-background-control);
-}
-
-.browser-zoom-controls .icon-button {
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-sm);
-}
-
-.browser-zoom-reset {
-  min-width: 42px;
-  height: 26px;
-  padding: 0 4px;
-  border: 0;
-  background: transparent;
-  color: var(--color-text-tertiary);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-
-.browser-zoom-reset:hover {
-  background: var(--color-background-control-hover);
-  color: var(--color-text-primary);
 }
 
 .toolbar-text-button {
@@ -1037,25 +819,6 @@ code {
   opacity: 0.45;
 }
 
-.browser-loading-line {
-  position: absolute;
-  right: 0;
-  bottom: -1px;
-  left: 0;
-  height: 1px;
-  overflow: hidden;
-  background: rgb(51 156 255 / 18%);
-}
-
-.browser-loading-line::after {
-  display: block;
-  width: 32%;
-  height: 100%;
-  background: var(--blue-300);
-  content: "";
-  animation: browserProgress 1.25s var(--ease-enter) infinite;
-}
-
 .manual-turn-guide {
   display: grid;
   min-height: 86px;
@@ -1103,15 +866,6 @@ code {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-@keyframes browserProgress {
-  from {
-    transform: translateX(-110%);
-  }
-  to {
-    transform: translateX(360%);
-  }
 }
 
 .browser-still { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; user-select: none; }
