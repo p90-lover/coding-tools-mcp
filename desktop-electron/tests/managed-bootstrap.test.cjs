@@ -1,8 +1,11 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const { createManagedBootstrap } = require("../electron/managed-bootstrap.cjs");
+const { createExternalServicesController } = require("../electron/external-services.cjs");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -135,9 +138,10 @@ test("default bootstrap starts only CPA and rejects retired service requests", a
     install: async (id) => { calls.push(`install:${id}`); },
     repair: async (id) => { calls.push(`repair:${id}`); },
     start: async (id) => { calls.push(`start:${id}`); },
-    inspect: async (id) => { calls.push(`inspect:${id}`); },
+    inspect: async (id) => { calls.push(`inspect:${id}`); return { status: "ready" }; },
   });
   const result = await bootstrap.reconcile({ reason: "startup" });
+  assert.equal(result.status, "ready");
   assert.deepEqual(result.components.map((component) => component.id), [
     "cpa",
   ]);
@@ -250,6 +254,94 @@ test("dispose prevents future CPA reconciliation", () => {
     /disposed/i,
   );
 });
+
+for (const [state, action, installedAt] of [
+  ["not-installed", "install"],
+  ["repair-required", "repair"],
+  ["installed", "inspect"],
+  ["external", "inspect"],
+  ["error", "install"],
+  ["error", "repair", "2026-09-18T00:00:00.000Z"],
+]) {
+  for (const status of ["offline", "starting", "error"]) {
+    test(`bootstrap rejects terminal ${status} after ${state}/${action}`, async () => {
+      const finalResult = ({ id, update }) => update(id, {
+        status,
+        error: status === "error" ? "fixture health rejected" : null,
+      });
+      const { bootstrap, calls } = bootstrapFixture([
+        managedService("cpa", state, installedAt ? { installedAt } : {}),
+      ], { install: finalResult, repair: finalResult, inspect: finalResult });
+      const result = await bootstrap.reconcile();
+      assert.equal(result.status, "error");
+      assert.equal(result.components[0].status, "error");
+      assert.equal(result.components[0].action, action);
+      assert.match(result.components[0].message, status === "error" ? /fixture health rejected/ : new RegExp(status));
+      assert.deepEqual(calls, state === "installed" ? ["start:cpa", "inspect:cpa"] : [`${action}:cpa`]);
+      bootstrap.dispose();
+    });
+  }
+}
+
+for (const status of ["ready", "offline", "starting"]) {
+  test(`bootstrap uses current ${status} snapshot for a void final callback`, async () => {
+    const { bootstrap } = bootstrapFixture([managedService("cpa", "external")], {
+      inspect: ({ id, update }) => { update(id, { status }); },
+    });
+    const result = await bootstrap.reconcile();
+    assert.equal(result.status, status === "ready" ? "ready" : "error");
+    if (status !== "ready") assert.match(result.components[0].message, new RegExp(status));
+    bootstrap.dispose();
+  });
+}
+
+test("bootstrap preserves intermediate start failure without an inspection retry", async () => {
+  const { bootstrap, calls } = bootstrapFixture([managedService("cpa", "installed")], {
+    start: () => ({ status: "error", error: "fixture start failed" }),
+  });
+  const result = await bootstrap.reconcile();
+  assert.equal(result.status, "error");
+  assert.match(result.components[0].message, /fixture start failed/);
+  assert.deepEqual(calls, ["start:cpa"]);
+  bootstrap.dispose();
+});
+
+for (const healthy of [true, false]) {
+  test(`bootstrap preserves actual CPA inspection ${healthy ? "readiness" : "connection refusal"}`, async () => {
+    const scratch = path.resolve(__dirname, "../../aiTemp/bootstrap-health-tests");
+    fs.mkdirSync(scratch, { recursive: true });
+    const directory = fs.mkdtempSync(path.join(scratch, "owned-"));
+    const external = createExternalServicesController({
+      filePath: path.join(directory, "external-services.json"),
+      keyPath: path.join(directory, "external-services.key"),
+      env: {},
+      fetchImpl: async () => {
+        if (!healthy) throw new Error("fixture connection refused");
+        return { ok: true, status: 200, headers: { get: () => "text/plain" } };
+      },
+      spawnProcess: () => assert.fail("bootstrap inspection must not spawn a process"),
+      terminateProcessTree: () => assert.fail("bootstrap inspection must not terminate a process"),
+    });
+    const project = (service) => ({ ...service, managedInstall: { state: "external", missingCredentials: [] } });
+    const bootstrap = createManagedBootstrap({
+      snapshot: () => ({ services: external.snapshot().services.map(project) }),
+      install: () => assert.fail("unexpected install"),
+      repair: () => assert.fail("unexpected repair"),
+      start: () => assert.fail("unexpected start"),
+      inspect: async (id) => project(await external.inspect(id)),
+    });
+    try {
+      const result = await bootstrap.reconcile();
+      assert.equal(external.snapshot().services[0].status, healthy ? "ready" : "offline");
+      assert.equal(result.status, healthy ? "ready" : "error");
+      if (!healthy) assert.match(result.components[0].message, /fixture connection refused/);
+    } finally {
+      bootstrap.dispose();
+      external.dispose();
+      await fs.promises.rm(directory, { recursive: true, force: true });
+    }
+  });
+}
 
 test("dispose stops a queued CPA follow-up during an in-flight bootstrap pass", async () => {
   const entered = deferred();

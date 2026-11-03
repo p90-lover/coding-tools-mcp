@@ -147,6 +147,17 @@ function gitPushRequest(command) {
   endWord();
   const requests = [];
   for (const words of segments.filter(part => part.length)) {
+    const shellFlag = /(?:^|[\\/])(?:bash|sh)(?:\.exe)?$/i.test(words[0]) ? /^-(?:c|lc)$/i
+      : /(?:^|[\\/])(?:pwsh|powershell)(?:\.exe)?$/i.test(words[0]) ? /^-(?:Command|c)$/i
+        : /(?:^|[\\/])cmd(?:\.exe)?$/i.test(words[0]) ? /^\/c$/i : null;
+    if (shellFlag) {
+      const at = words.findIndex((value, index) => index > 0 && shellFlag.test(value));
+      const nested = at > 0 ? gitPushRequest(words.slice(at + 1).join(" ")) : null;
+      // A shell can change repository context; it cannot borrow the outer command's Git facts.
+      if (nested) requests.push(nested.status === "blocked" ? nested
+        : { status: "unknown", reason: "Review publication separately from its shell wrapper" });
+      continue;
+    }
     if (!/^git(?:\.exe)?$/i.test(words[0])) continue;
     let index = 1, uncertain = Boolean(quote);
     while (words[index]?.startsWith("-")) {

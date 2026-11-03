@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import {
   SPLIT_DRAG_TYPE, SPLIT_MIN_PX, SPLIT_ROW, clampRowSplit, defaultPlace, splitBadge, splitColumns, splitDropTarget, splitMaxColumns, splitWeights,
@@ -25,7 +25,7 @@ const DRAG_IDLE_MS = 400;
  * columns and the row split, a corner handle both; a chat dragged from the sidebar shows where it
  * would open; a pane dragged by its grip (or with Ctrl held) moves.
  */
-export function ChatSplit({ children, panes, focused, onFocus, weights, onWeights, rowSplit, onRowSplit, maxColumns, onMaxColumns, onDropChat, onMovePane }: {
+export function ChatSplit({ children, panes, focused, onFocus, weights, onWeights, rowSplit: savedRowSplit, onRowSplit, maxColumns, onMaxColumns, onDropChat, onMovePane }: {
   children: ReactNode;
   panes: (SplitPane & { content: ReactNode })[];
   focused: string;
@@ -42,7 +42,9 @@ export function ChatSplit({ children, panes, focused, onFocus, weights, onWeight
   onMovePane?: (id: string, target: SplitDropTarget) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const moveCleanup = useRef<(() => void) | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
+  const rowSplit = clampRowSplit(savedRowSplit, size.height);
   const [drop, setDrop] = useState<SplitBadge | null>(null);
   const dragIdle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // The moving pane's title, following the pointer (Claude Code's drag label).
@@ -76,6 +78,8 @@ export function ChatSplit({ children, panes, focused, onFocus, weights, onWeight
   useEffect(() => () => clearTimeout(dragIdle.current), []);
   // Ctrl held over a split shows which panes can be moved by dragging anywhere on them.
   const movable = split && Boolean(onMovePane);
+  const paneLayout = JSON.stringify(panes.map(({ id, workspaceId, taskId, col, row }) => [id, workspaceId, taskId, col, row]));
+  useLayoutEffect(() => () => moveCleanup.current?.(), [movable, paneLayout]);
   useEffect(() => {
     if (!movable) return;
     const key = (event: KeyboardEvent) => setCtrlHeld(event.ctrlKey && !event.altKey);
@@ -100,6 +104,7 @@ export function ChatSplit({ children, panes, focused, onFocus, weights, onWeight
     if (!onMovePane || id === "main" || event.button !== 0) return;
     const element = event.currentTarget.closest<HTMLElement>(".cx-pane");
     if (!element || !host.current) return;
+    moveCleanup.current?.();
     event.preventDefault();
     const hostElement = host.current, pointerId = event.pointerId, start = { x: event.clientX, y: event.clientY };
     const text = element.querySelector(".cx-thread-head h2")?.textContent?.trim() || "New session";
@@ -110,12 +115,14 @@ export function ChatSplit({ children, panes, focused, onFocus, weights, onWeight
       window.removeEventListener("pointerup", release, true);
       window.removeEventListener("pointercancel", finish, true);
       window.removeEventListener("keydown", escape, true);
+      window.removeEventListener("blur", finish);
+      if (moveCleanup.current === finish) moveCleanup.current = null;
       delete hostElement.dataset.paneDragging;
       setMoveLabel(null);
       setDrop(null);
     };
     const move = (next: PointerEvent) => {
-      if (next.pointerId !== pointerId) return;
+      if (next.pointerId !== pointerId || moveCleanup.current !== finish) return;
       if (!moving) {
         if (Math.abs(next.clientX - start.x) < MOVE_THRESHOLD_PX && Math.abs(next.clientY - start.y) < MOVE_THRESHOLD_PX) return;
         moving = true;
@@ -126,7 +133,7 @@ export function ChatSplit({ children, panes, focused, onFocus, weights, onWeight
       setDrop(target ? splitBadge(target, panes, tracks) : null);
     };
     const release = (next: PointerEvent) => {
-      if (next.pointerId !== pointerId) return;
+      if (next.pointerId !== pointerId || moveCleanup.current !== finish) return;
       const landed = moving ? target : null;
       finish();
       if (landed) onMovePane(id, landed);
@@ -137,10 +144,12 @@ export function ChatSplit({ children, panes, focused, onFocus, weights, onWeight
       next.stopImmediatePropagation();
       finish();
     };
+    moveCleanup.current = finish;
     window.addEventListener("pointermove", move, true);
     window.addEventListener("pointerup", release, true);
     window.addEventListener("pointercancel", finish, true);
     window.addEventListener("keydown", escape, true);
+    window.addEventListener("blur", finish);
   };
   /** Where a drop with no target goes (a hint at the next free place, as Claude Code shows it). */
   const hintBadge = (): SplitBadge => {

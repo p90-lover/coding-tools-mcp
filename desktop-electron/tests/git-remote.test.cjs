@@ -22,6 +22,26 @@ test("publication parsing distinguishes a planned action from quoted diagnostic 
   }
 });
 
+test("executable shell payloads cannot hide publication behind their wrapper", () => {
+  for (const command of [
+    'bash -lc "git push origin main"',
+    "sh -c 'git push origin main'",
+    'pwsh -NoProfile -Command "git push origin main"',
+    'powershell.exe -Command "git push origin main"',
+    'cmd.exe /d /s /c "git push origin main"',
+  ]) assert.equal(gitPushRequest(command)?.status, "blocked", command);
+  for (const command of [
+    'bash -lc "git push origin feat/fix"',
+    'pwsh -Command "git push origin feat/fix"',
+    'cmd /c git push origin feat/fix',
+  ]) assert.equal(gitPushRequest(command)?.status, "unknown", command);
+  for (const command of [
+    `bash -lc 'printf "%s\\n" "git push origin main"'`,
+    `pwsh -Command "Write-Output 'git push origin main'"`,
+    'cmd /c "echo git push origin main"',
+  ]) assert.equal(gitPushRequest(command), null, command);
+});
+
 test("destructive and protected pushes stay blocked, ambiguous publication needs a person", () => {
   for (const command of ['git push origin main', 'git push origin HEAD:master', 'git push --force origin feat/fix', 'git push --delete origin feat/fix', 'git push --mirror origin', 'git push origin +feat/fix', 'git push origin :feat/fix', 'git push --no-verify origin feat/fix']) {
     assert.equal(gitPushRequest(command).status, "blocked", command);

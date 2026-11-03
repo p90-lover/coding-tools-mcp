@@ -898,10 +898,13 @@ function createChatGptDesktopHost({
       return exclusive("launching", async () => openSlot(newLocalSlot())).then(status);
     },
     // Wipes the active account's local session (moved to Trash) and opens a fresh sign-in slot.
-    clearActive() {
+    clearActive(expectedSlotId) {
       return exclusive("clearing", async () => {
-        const slotId = state.active;
-        if (!slotId) throw new Error("No ChatGPT desktop account is active");
+        // A switch queued before this clear may have changed the active account.
+        if (typeof expectedSlotId !== "string" || !expectedSlotId.trim() || state.active !== expectedSlotId) {
+          throw new Error("The active ChatGPT desktop account changed. Confirm the account to clear again.");
+        }
+        const slotId = expectedSlotId;
         await stopInstance(slotId);
         finalSync(slotId);
         trashSlot(slotId);

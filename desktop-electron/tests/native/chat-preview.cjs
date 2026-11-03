@@ -17,8 +17,9 @@ process.on("uncaughtException",error=>{console.error("UNCAUGHT",error.stack);app
 process.on("unhandledRejection",error=>{console.error("UNHANDLED",error?.stack||error);app.exit(2)});
 app.whenReady().then(async()=>{
   const {createNativeChatPreviews}=require(path.join(source,"desktop-electron/electron/chat-preview.cjs"));
-  const {createChatAgentTools}=require(path.join(source,"desktop-electron/electron/chat-agent-tools.cjs"));
-  window=new BrowserWindow({show:true,width:1280,height:900,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});
+  const {createChatAgentTools,nativeChatPreviewSessionId}=require(path.join(source,"desktop-electron/electron/chat-agent-tools.cjs"));
+  window=new BrowserWindow({show:false,opacity:0,focusable:false,skipTaskbar:true,width:1280,height:900,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});
+  window.setIgnoreMouseEvents(true);
   await window.loadURL("data:text/html,<title>Chat tools native verification</title>");
   log("WINDOW_READY",{electron:process.versions.electron});
   const html='<!doctype html><title>Chat Tool Fixture</title><input aria-label="Fixture input"><button onclick="this.textContent=\'Count 1\'">Count 0</button><a href="/next">Next</a><div style="height:3000px">Fixture page</div><script>console.log("fixture-loaded")</script>';
@@ -26,19 +27,30 @@ app.whenReady().then(async()=>{
   await new Promise(r=>page.listen(0,"127.0.0.1",r));
   const url="http://127.0.0.1:"+page.address().port+"/";
   previews=createNativeChatPreviews({BaseWindow,WebContentsView,Menu:{buildFromTemplate(value){menu=value;return{popup(){}}}},mainWindow:()=>window,logger:{warn:(event,data)=>log(event,data)}});
+  const fragmentPath=path.join(work,"native-widget-counter.html");
   let approvals=0;
   tools=createChatAgentTools({previews,minAnswerMs:0,terminalEnabled:()=>true,confirm:async()=>{approvals++;log("APPROVAL_ACCEPTED",{approvals});return true},
     sessionWorkspace:async()=>({root:work}),
-    requestHeadless:async endpoint=>{if(endpoint.startsWith("/api/v1/tools/catalog?"))return {tools:[]};throw Error("Unexpected headless call")},
+    requestHeadless:async(endpoint,body)=>{
+      if(endpoint.startsWith("/api/v1/tools/catalog?"))return {tools:[]};
+      if(endpoint==="/api/v1/workspaces")return {workspaces:[{id:"ws1",path:work}]};
+      if(endpoint==="/api/v1/tools/call"){
+        assert.equal(body.workspace_id,"ws1");assert.equal(body.tool,"read_file");
+        assert.equal(body.root,work);assert.equal(body.root_kind,"project_folder");
+        assert.equal(body.arguments.path,fragmentPath);
+        const content=fs.readFileSync(fragmentPath,"utf8");
+        return {operation:{state:"completed",result:{ok:true,content,total_bytes:Buffer.byteLength(content)}}};
+      }
+      throw Error("Unexpected headless call");
+    },
     logger:{info(){},warn:(event,data)=>log(event,data)}
   });
   const lease=await tools.lease({agent:"claude-code",workspaceId:"ws1",approvalMode:"accept-edits"});
   assert.ok(lease.bind("native-session"));
-  const [{url:endpoint,headers}]=lease.servers;
   let id=0;
-  const call=async(name,args={})=>{
+  const call=async(name,args={},server=lease.servers[0])=>{
     log("BEGIN",{tool:name});
-    const response=await fetch(endpoint,{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:++id,method:"tools/call",params:{name,arguments:args}})});
+    const response=await fetch(server.url,{method:"POST",headers:{...server.headers,"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:++id,method:"tools/call",params:{name,arguments:args}})});
     const reply=await response.json();
     if(reply.error||reply.result?.isError)throw Error(name+": "+JSON.stringify(reply.error||reply.result.content));
     if(name==="preview_wait"&&args.text)assert.equal(reply.result.structuredContent?.found,true,"wait found "+args.text);
@@ -70,6 +82,17 @@ app.whenReady().then(async()=>{
   const scrolled=(await call("preview_screenshot")).content.find(x=>x.type==="image");log("SCROLL_STATE",{position:await nativeView.webContents.executeJavaScript("({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,body:document.body.scrollHeight})")});assert.notEqual(scrolled.data,image.data,"capture follows actual page scrolling");
   previews.show("native-session",{x:10,y:10,width:900,height:650});
   await call("preview_screenshot");
+  if(process.platform==="win32"||process.platform==="darwin"){
+    // Exercise real reparenting without showing an opaque window or taking OS focus.
+    window.showInactive();
+    assert.equal(window.getOpacity(),0);assert.equal(window.isFocusable(),false);assert.equal(window.isFocused(),false);
+    assert.ok(window.contentView.children.includes(nativeView));
+    await call("preview_screenshot");
+    window.hide();
+    assert.ok(parking.contentView.children.includes(nativeView));
+    await call("preview_screenshot");
+    log("NATIVE_OWNER_VISIBILITY_TRANSITIONS_PASS");
+  }
   await call("preview_click",{ref:read.elements.find(x=>x.name==="Next").ref});
   await call("preview_wait",{text:"Next Page"});
   await call("preview_navigate",{action:"back"});
@@ -145,6 +168,61 @@ app.whenReady().then(async()=>{
   }
   previews.close("native-codex-panel");
   log("NATIVE_LIVE_PANEL_BOTH_HARNESSES_PASS");
+
+  // Native final-answer references use the production adapter, not an explicit HTML tool call.
+  const counter=`<h2>Native widget counter</h2><button type="button">0</button><script>
+    const button=document.querySelector('button');
+    let count=window.openai.widgetState?.modelContent?.counter ?? 0;
+    button.textContent=String(count);
+    button.onclick=()=>{
+      button.textContent=String(++count);
+      window.openai.setWidgetState({modelContent:{counter:count},privateContent:null});
+    };
+  </script>`;
+  const answer='visualize'+JSON.stringify({path:fragmentPath})+'';
+  const nativeOwners=[];
+  for(const taskId of ["widget-first","widget-other"]){
+    log("NATIVE_WIDGET_STATE_BEGIN",{taskId});
+    const owner=nativeChatPreviewSessionId("ws1",taskId);
+    const scope={workspaceId:"ws1",runId:taskId,nodeId:"lead"};
+    const nativeLease=await tools.lease({agent:"codex",workspaceId:"ws1",previewOnly:true,expiresAt:Date.now()+120000,nativeScope:{runId:scope.runId,nodeId:scope.nodeId}});
+    assert.equal(nativeLease.bind(owner),true);
+    const previousViews=new Set(parking.contentView.children);
+    fs.writeFileSync(fragmentPath,counter);
+    assert.equal(await tools.renderNativeVisualization({...scope,answer,requestKey:"first",stillCurrent:async()=>true}),true);
+    const view=parking.contentView.children.find(value=>!previousViews.has(value));assert.ok(view);
+    assert.equal(tools.previewShow(owner,{x:10,y:10,width:900,height:650}),true);
+    read=(await call("preview_read",{},nativeLease.servers[0])).structuredContent;
+    assert.ok(read.text.includes("Native widget counter"));
+    log("NATIVE_WIDGET_INITIAL_STATE",{taskId,text:read.text,elements:read.elements});
+    const button=read.elements.find(element=>element.name==="0");
+    assert.ok(button,"each native owner starts with its own empty widget state");
+    await call("preview_click",{ref:button.ref},nativeLease.servers[0]);
+    assert.ok((await call("preview_read",{},nativeLease.servers[0])).structuredContent.elements.some(element=>element.name==="1"));
+    const followupScope={...scope,runId:taskId+"-followup"};
+    const followup=await tools.lease({agent:"codex",workspaceId:"ws1",previewOnly:true,expiresAt:Date.now()+120000,nativeScope:{runId:followupScope.runId,nodeId:followupScope.nodeId}});
+    assert.equal(followup.bind(owner),true);
+    nativeLease.release({ended:true});
+    fs.writeFileSync(fragmentPath,counter+"<p>AI updated this same panel</p>");
+    assert.equal(await tools.renderNativeVisualization({...followupScope,answer,requestKey:"updated",stillCurrent:async()=>true}),true);
+    read=(await call("preview_read",{},followup.servers[0])).structuredContent;
+    assert.ok(read.text.includes("AI updated this same panel"));
+    assert.ok(read.elements.some(element=>element.name==="1"),"AI replacement preserves the clicked state across native follow-up leases");
+    assert.equal(parking.contentView.children.length,previousViews.size+1);
+    assert.ok(parking.contentView.children.includes(view),"the same native WebContentsView survives AI replacement");
+    await call("preview_navigate",{action:"reload"},followup.servers[0]);
+    assert.ok((await call("preview_read",{},followup.servers[0])).structuredContent.elements.some(element=>element.name==="1"),"reload preserves native widget state");
+    assert.equal(await view.webContents.executeJavaScript("window.openai.widgetState.modelContent.counter"),1);
+    const stateImage=(await call("preview_screenshot",{},followup.servers[0])).content.find(item=>item.type==="image");
+    assert.ok(stateImage?.data?.length>100);
+    if(!nativeOwners.length)fs.writeFileSync(path.join(work,"native-widget-state.png"),Buffer.from(stateImage.data,"base64"));
+    nativeOwners.push({owner,view,lease:followup});
+    log("NATIVE_WIDGET_STATE_PASS",{taskId,webContentsId:view.webContents.id});
+  }
+  assert.notEqual(nativeOwners[0].view,nativeOwners[1].view);
+  assert.equal(await nativeOwners[0].view.webContents.executeJavaScript("window.openai.widgetState.modelContent.counter"),1);
+  for(const entry of nativeOwners){entry.lease.release({ended:true});assert.equal(previews.state(entry.owner),null);}
+  log("NATIVE_WIDGET_STATE_ISOLATION_PASS");
 
   let permitLate;
   const pendingOpen=previews.call("pending-owner","preview_open",{url},{permit:()=>new Promise(resolve=>{permitLate=resolve})});

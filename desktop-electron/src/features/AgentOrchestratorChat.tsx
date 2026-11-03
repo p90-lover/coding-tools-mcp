@@ -1,4 +1,5 @@
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { ImagePreviewDialog, type MarkupResult } from "./ImagePreview";
 import { markupReadable } from "./image-markup";
 import { getCodingToolsClient } from "../api/client";
@@ -19,7 +20,7 @@ import { ChatPet } from "./ChatPet";
 import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
-import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, type ChatStyle } from "./chat-reply-plan";
+import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, turnWindowStart, type ChatStyle } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
@@ -42,6 +43,8 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 };
 /** Text files up to this size are attached inline when their path is unknown. */
 const INLINE_ATTACHMENT_BYTES = 200 * 1024;
+/** Turns a chat draws at first, and how many more each "Show earlier" adds. */
+const TURN_WINDOW = 16;
 
 /**
  * "Retry automatically" on the failed-step card (the user: a launch that timed out waited for a
@@ -655,12 +658,12 @@ const sentMessageView = (text: string) => <SentMessage text={text} />;
  */
 function SentMessage({ text }: { text: string }) {
   const { reveal } = useContext(Attachments);
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<{ url: string; name?: string } | null>(null);
   const parts = chatMessageParts(text);
   return <>
     {parts.attachments.length ? <div className="cx-sent-attachments">
       {parts.attachments.map((item, index) => item.image && item.path
-        ? <SentImage key={`${item.path}:${index}`} item={item} onOpen={setOpen} />
+        ? <SentImage key={`${item.path}:${index}`} item={item} onOpen={(url, name) => setOpen({ url, name })} />
         : <button key={`${item.name}:${index}`} type="button" className="cx-sent-file" disabled={!item.path || !reveal}
           title={item.path ? `${item.path}\nClick to show in folder` : `${item.name} · sent inline`} onClick={() => item.path && reveal?.(item.path)}>
           <span className="cx-sent-file-icon" aria-hidden="true">{/\.pdf$/i.test(item.name) ? "PDF" : "TXT"}</span>
@@ -669,7 +672,7 @@ function SentMessage({ text }: { text: string }) {
     </div> : null}
     {parts.annotations?.length ? <SentAnnotations annotations={parts.annotations} /> : null}
     {parts.text ? <div className="cx-bubble"><p>{hasHiddenSecret(parts.text) ? <SecretText text={markupReadable(parts.text)} /> : markupReadable(parts.text)}</p></div> : null}
-    {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
+    {open ? <ImageLightbox url={open.url} name={open.name} onClose={() => setOpen(null)} /> : null}
   </>;
 }
 
@@ -2091,14 +2094,39 @@ export function AgentOrchestratorChat({
   // The conversation, kept while only the composer changes: each keystroke re-rendered every turn,
   // and a long running turn's hundreds of rows with it, which made typing lag.
   // Markup from an image's preview lands in this chat box as a "Markup" card (Codex's composer row):
-  // the marked image saved for the agent to open, and its pin lines kept for the message.
+  // the marked image saved for the agent to open, and its pin lines kept for the message. The
+  // preview's other tools land the same way under their own names (Remove BG, Erase, Resize), with
+  // Codex's instruction; Erase's mask follows as a second image.
   const saver = useRef(saveAttachment);
   saver.current = saveAttachment;
-  const addMarkup = useCallback(async ({ bytes, preview, prompt }: MarkupResult, source?: ChatAttachment) => {
-    if (!saver.current) throw new Error("Could not prepare markup. Try again");
-    const { path } = await saver.current({ name: "markup.png", type: "image/png", bytes });
-    setAttachments((current) => [...current.filter(item => item !== source), { name: "Markup", path, image: true, preview, markup: prompt }].slice(0, 8));
-  }, []);
+  const addMarkup = useCallback(async ({ bytes, preview, prompt, label = "Markup", mask }: MarkupResult, source?: ChatAttachment) => {
+    const save = saver.current;
+    if (!save) throw new Error("Could not prepare markup. Try again");
+    const attachmentError = (current: ChatAttachment[]) => {
+      if (!alive.current || composing.current.taskId !== selectedTaskId || composing.current.cacheKey !== draftKey
+        || (source && !current.includes(source))) return "This chat changed. Reopen the image in its chat and try again";
+      if (CHAT_DRAFTS.get(draftKey)?.attaching) return "Wait for files to finish attaching, then try again";
+      return current.filter(item => item !== source).length + (mask ? 2 : 1) > 8
+        ? "A message supports 8 attachments. Remove an attachment and try again" : "";
+    };
+    const before = attachmentError(composing.current.attachments);
+    if (before) throw new Error(before);
+    const { path } = await save({ name: "markup.png", type: "image/png", bytes });
+    const image: ChatAttachment = { name: label, path, image: true, preview, markup: prompt };
+    const masked: ChatAttachment | null = mask
+      ? { name: "Mask", path: (await save({ name: "mask.png", type: "image/png", bytes: mask.bytes })).path, image: true, preview: mask.preview } : null;
+    let accepted = false, failure = "";
+    // Resolve admission against queued React updates before transferring the preview URLs.
+    flushSync(() => setAttachments((current) => {
+      accepted = false;
+      failure = attachmentError(current);
+      if (failure) return current;
+      const remaining = current.filter(item => item !== source);
+      accepted = true;
+      return masked ? [image, masked, ...remaining] : [...remaining, image];
+    }));
+    if (!accepted) throw new Error(failure || "This chat changed. Reopen the image in its chat and try again");
+  }, [draftKey, selectedTaskId]);
   const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile, markup: saveAttachment ? addMarkup : undefined }),
     [attachmentPreview, revealFile, Boolean(saveAttachment), addMarkup]);
   // One work reader per run for DeepSeek turns, kept across renders so a finished turn stays memoized.
@@ -2129,18 +2157,25 @@ export function AgentOrchestratorChat({
   const roundFolds = useMemo(() => {
     const foldOf = new Map<number, string>();
     const foldAt = new Map<number, { key: string; first: number; last: number }>();
-    for (const [key, indexes] of foldedRounds(turns)) {
+    const folds = foldedRounds(turns);
+    for (const [key, indexes] of folds) {
       for (const index of indexes) foldOf.set(index, key);
       foldAt.set(indexes[0], { key, first: goalRound(turns, indexes[0])!.round, last: goalRound(turns, indexes[indexes.length - 1])!.round });
     }
-    return { foldOf, foldAt };
+    return { foldOf, foldAt, folds };
   }, [turns]);
   const toggleRounds = (key: string) => setOpenRounds((open) => {
     const next = new Set(open);
     if (!next.delete(key)) next.add(key);
     return next;
   });
+  // Only the newest turns are drawn; a row above them draws more (turnWindowStart). Ten open chats
+  // drew every turn they had, 164k elements, and each new reply restyled all of them.
+  const [shownTurns, setShownTurns] = useState(TURN_WINDOW);
+  useEffect(() => { setShownTurns(TURN_WINDOW); }, [selectedTaskId]);
+  const windowStart = turnWindowStart(turns.length, shownTurns, roundFolds.folds);
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
+    if (turnIndex < windowStart) return null;
     const foldKey = roundFolds.foldOf.get(turnIndex);
     const foldRow = roundFolds.foldAt.get(turnIndex);
     const foldToggle = foldRow ? <FoldedRounds key={`fold:${foldRow.key}`} first={foldRow.first} last={foldRow.last}
@@ -2259,7 +2294,7 @@ export function AgentOrchestratorChat({
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
-    replyStyle, roundFolds, openRounds]);
+    replyStyle, roundFolds, openRounds, windowStart]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting, onAnswer: answerRequest, onContinue: continueTurn }}>
@@ -2388,6 +2423,9 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                   : <span className="cx-empty-project">{projectName}</span>}</> : null}?</h1>
               </>}
             </div> : null}
+            {windowStart > 0 ? <button type="button" className="cx-round-fold" onClick={() => setShownTurns((shown) => shown + TURN_WINDOW)}>
+              {`Show ${Math.min(windowStart, TURN_WINDOW)} earlier turns · ${windowStart} not shown`}
+            </button> : null}
             {threadTurns}
             {recoveryMessage ? <p className="cx-route-note" role="status">{recoveryMessage}</p> : null}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
@@ -2588,7 +2626,8 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             </span>)}
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
             {attaching ? <span className="cx-attach-note" role="status">Attaching files…</span> : null}
-            {previewing !== null && attachments[previewing]?.preview ? <ImagePreviewDialog url={attachments[previewing].preview!} onClose={() => setPreviewing(null)}
+            {previewing !== null && attachments[previewing]?.preview ? <ImagePreviewDialog url={attachments[previewing].preview!}
+              name={attachments[previewing].path ?? attachments[previewing].name} onClose={() => setPreviewing(null)}
               // The marked image takes the place of the one it was drawn on: only it is sent (Codex's).
               onMarkup={saveAttachment ? (result) => addMarkup(result, attachments[previewing]) : undefined} /> : null}
           </div> : null}

@@ -250,6 +250,24 @@ test("requests a subagent raises are answered for it, except what the safety rul
   } finally { w.cleanup(); }
 });
 
+test("a subagent does not publish without the parent's repository and model review", async () => {
+  const w = world();
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "implementer", task: "prepare a scoped fix" }));
+    const decisions = [{ id: "allow", kind: "allow_once" }, { id: "deny", kind: "reject_once" }];
+    w.sessions.set(id, { turnState: "running", approvals: [
+      { approval_id: "feature", kind: "command", tool: "Bash", command: "git push origin feat/fix", decisions },
+      { approval_id: "permission", kind: "permission", tool: "mcp__coding-tools__run_command", toolInput: JSON.stringify({ cmd: "git push origin feat/fix" }), decisions },
+      { approval_id: "uncertain", kind: "command", tool: "Bash", command: "git -C ../other push origin feat/fix", decisions },
+      { approval_id: "shell", kind: "command", tool: "Bash", command: 'bash -lc "git push origin main"', decisions },
+      { approval_id: "shell-input", kind: "permission", tool: "mcp__coding-tools__run_command", toolInput: JSON.stringify({ cmd: 'pwsh -Command "git push origin feat/fix"' }), decisions },
+      { approval_id: "diagnostic", kind: "command", tool: "Bash", command: 'node lookup.cjs query "why git push origin main is denied"', decisions },
+    ] });
+    parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.deepEqual(w.resolved, [[id, "feature", "deny"], [id, "permission", "deny"], [id, "uncertain", "deny"], [id, "shell", "deny"], [id, "shell-input", "deny"], [id, "diagnostic", "allow"]]);
+  } finally { w.cleanup(); }
+});
+
 test("limits: running at once, per chat, and the time limit", async () => {
   let clock = 1_000_000;
   const w = world({ settings: { maxConcurrent: 2, maxPerChat: 1, timeoutMinutes: 5 }, now: () => clock });

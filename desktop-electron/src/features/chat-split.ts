@@ -37,6 +37,14 @@ export function defaultPlace(panes: readonly SplitPane[], maxColumns: number): P
   return { replace: (ordered.filter((pane) => pane.taskId).at(-1) ?? ordered.at(-1))!.id };
 }
 
+/**
+ * Whether a chat can start on this page without hiding another: the window's chat ("" `mainTaskId`)
+ * or a pane shows an unsent one, or a cell is free. Five columns of two: a page holds ten chats.
+ */
+export function splitHasRoom(panes: readonly SplitPane[], maxColumns: number, mainTaskId: string): boolean {
+  return !mainTaskId || panes.some((pane) => !pane.taskId) || !("replace" in defaultPlace(panes, maxColumns));
+}
+
 /** "New session below": the focused pane's column gets a bottom row when it has none. */
 export function belowPlace(panes: readonly SplitPane[], focused: PanePos, maxColumns: number): PanePos | { replace: string } {
   return taken(panes, focused.col, 1) ? defaultPlace(panes, maxColumns) : { col: focused.col, row: 1 };
@@ -97,8 +105,8 @@ export function splitWeights(saved: readonly number[] | undefined, count: number
 }
 
 export function clampRowSplit(value: number, height: number): number {
-  const least = Math.max(SPLIT_ROW.MIN, height > 0 ? SPLIT_MIN_PX / height : SPLIT_ROW.MIN);
-  return Math.min(SPLIT_ROW.MAX, Math.max(Math.min(least, SPLIT_ROW.MAX), value));
+  const least = Math.min(0.5, Math.max(SPLIT_ROW.MIN, height > 0 ? SPLIT_MIN_PX / height : SPLIT_ROW.MIN));
+  return Math.min(1 - least, Math.max(least, value));
 }
 
 /**

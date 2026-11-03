@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{AppError, AppResult};
 use crate::integrations::ao::State as NodeState;
 use crate::integrations::ao_lifecycle::ScheduleState;
-use crate::workspace::linked_projects::{
-    list_linked_projects_for_root, quick_add_linked_project_for_root, remove_linked_project_mapping,
-};
+use crate::workspace::linked_projects::{list_linked_projects_for_root, MappingEdit};
 use crate::workspace::WorkspaceProfile;
 
 use super::{AppData, DataStore};
@@ -195,7 +193,11 @@ pub fn workspace_ao_activity(data: &AppData, workspace_id: &str) -> Option<Strin
 /// Makes the root's `.mcp-paths` mappings name exactly `desired` (adds first, then removes).
 /// With `prune` false only missing folders are added: after the primary folder changes, the new
 /// folder's own existing mappings were never shown to the user, so none of them are removed.
-fn sync_linked_folders(root: &Path, desired: &[PathBuf], prune: bool) -> AppResult<(usize, usize)> {
+fn sync_linked_folders(
+    root: &Path,
+    desired: &[PathBuf],
+    prune: bool,
+) -> AppResult<(MappingEdit, usize, usize)> {
     let current: Vec<_> = list_linked_projects_for_root(root)
         .into_iter()
         .map(|project| {
@@ -203,6 +205,7 @@ fn sync_linked_folders(root: &Path, desired: &[PathBuf], prune: bool) -> AppResu
             (project, canonical)
         })
         .collect();
+    let mut mappings = MappingEdit::default();
     let mut added = 0;
     for folder in desired {
         let present = current.iter().any(|(_, canonical)| {
@@ -211,7 +214,7 @@ fn sync_linked_folders(root: &Path, desired: &[PathBuf], prune: bool) -> AppResu
                 .is_some_and(|path| same_path(path, folder))
         });
         if !present {
-            quick_add_linked_project_for_root(root, folder, None)?;
+            mappings.add(root, folder, None)?;
             added += 1;
         }
     }
@@ -221,12 +224,15 @@ fn sync_linked_folders(root: &Path, desired: &[PathBuf], prune: bool) -> AppResu
             let wanted = canonical
                 .as_deref()
                 .is_some_and(|path| desired.iter().any(|folder| same_path(path, folder)));
-            if !wanted && remove_linked_project_mapping(root, &project.alias)? {
+            if !wanted && mappings.remove(root, &project.alias)? {
                 removed += 1;
             }
         }
     }
-    Ok((added, removed))
+    if let Err(error) = mappings.apply() {
+        return Err(mappings.rollback(error));
+    }
+    Ok((mappings, added, removed))
 }
 
 /// Applies a project edit. Moving the primary folder is refused while the project's missions
@@ -243,15 +249,21 @@ pub fn edit_workspace(
             )));
         }
     }
-    let (linked_added, linked_removed) =
-        sync_linked_folders(&plan.root, &plan.linked, !plan.root_changed)?;
     let mut profile = store
         .get(&edit.workspace_id)
         .cloned()
         .ok_or_else(|| message("Workspace was not found"))?;
     profile.name = plan.name;
     profile.path = display_path(&plan.root);
-    store.update(profile.clone())?;
+    let (mappings, linked_added, linked_removed) =
+        sync_linked_folders(&plan.root, &plan.linked, !plan.root_changed)?;
+    // update changes memory before acquiring its save lock; even an early failure needs readback.
+    store.forget_sync();
+    if let Err(error) = store.update(profile.clone()) {
+        return Err(mappings.rollback(error));
+    }
+    // The profile save is the commit point for this mapping journal.
+    drop(mappings);
     Ok(WorkspaceEditOutcome {
         profile,
         root_changed: plan.root_changed,
@@ -282,9 +294,121 @@ pub fn remove_local_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::linked_projects::LINKED_PROJECTS_DIR;
+    use crate::workspace::linked_projects::{
+        quick_add_linked_project_for_root, LINKED_PROJECTS_DIR,
+    };
     use serde_json::json;
     use tempfile::tempdir;
+
+    fn edit_fixture() -> tempfile::TempDir {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/workspace-edit-tests");
+        std::fs::create_dir_all(&root).unwrap();
+        tempfile::tempdir_in(root).unwrap()
+    }
+
+    #[test]
+    fn failed_profile_save_restores_mappings_and_refresh_reads_old_profile() {
+        let fixture = edit_fixture();
+        let root = fixture.path().join("workspace");
+        let old_target = fixture.path().join("old-target");
+        let new_target = fixture.path().join("new-target");
+        for folder in [&root, &old_target, &new_target] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        quick_add_linked_project_for_root(&root, &old_target, Some("custom")).unwrap();
+        let mapping = root.join(LINKED_PROJECTS_DIR).join("custom.txt");
+        let original = format!(
+            "# retain this comment\r\nname=Custom\r\npath={}\r\nmode=read-only\r\n",
+            old_target.display()
+        );
+        std::fs::write(&mapping, &original).unwrap();
+        let file = fixture.path().join("data/profiles.json");
+        std::fs::create_dir(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            serde_json::to_vec(store_with(&[("ws", &root)]).data()).unwrap(),
+        )
+        .unwrap();
+        let original_profile = std::fs::read(&file).unwrap();
+        crate::data::with_test_file(file.clone(), || {
+            let mut store = DataStore::load().unwrap();
+            // Establish the sync cache before failing inside save's lock acquisition.
+            store.refresh().unwrap();
+            let lock = file.with_extension("lock");
+            std::fs::remove_file(&lock).unwrap();
+            std::fs::create_dir(&lock).unwrap();
+            let error = edit_workspace(&mut store, &edit("ws", "Changed", &root, &[&new_target]))
+                .unwrap_err();
+            assert!(matches!(error, AppError::Io(_)), "{error}");
+            assert_eq!(std::fs::read(&mapping).unwrap(), original.as_bytes());
+            assert_eq!(list_linked_projects_for_root(&root).len(), 1);
+            assert!(!root
+                .join(LINKED_PROJECTS_DIR)
+                .join("new-target.txt")
+                .exists());
+            assert_eq!(std::fs::read(&file).unwrap(), original_profile);
+            std::fs::remove_dir(&lock).unwrap();
+            store.refresh().unwrap();
+            assert_eq!(store.get("ws").unwrap().name, "ws");
+            assert_eq!(std::fs::read(&file).unwrap(), original_profile);
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mapping_remove_failure_restores_earlier_record_and_noop_writes_nothing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fixture = edit_fixture();
+        let target = fixture.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let directory = fixture.path().join(LINKED_PROJECTS_DIR);
+        std::fs::create_dir(&directory).unwrap();
+        let a = directory.join("a.txt");
+        let b = directory.join("b.txt");
+        let a_bytes = format!(
+            "# original a\r\nname=A\r\npath={}\r\nmode=read-only\r\n",
+            target.display()
+        );
+        let b_bytes = format!(
+            "# original b\nname=B\npath={}\nmode=read-write\n",
+            target.display()
+        );
+        std::fs::write(&a, &a_bytes).unwrap();
+        std::fs::write(&b, &b_bytes).unwrap();
+        let before = std::fs::metadata(&a).unwrap().modified().unwrap();
+        // Reads remain possible; writes and deletes are denied by the actual Windows handle.
+        let locked_a = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&a)
+            .unwrap();
+        let locked_b = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&b)
+            .unwrap();
+        let (_, added, removed) =
+            sync_linked_folders(fixture.path(), &[target.canonicalize().unwrap()], true).unwrap();
+        assert_eq!((added, removed), (0, 0));
+        assert_eq!(std::fs::metadata(&a).unwrap().modified().unwrap(), before);
+        drop(locked_a);
+        let error = sync_linked_folders(fixture.path(), &[], true)
+            .err()
+            .expect("locked b rejects removal");
+        assert!(
+            !error.to_string().contains("rollback incomplete"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&a).unwrap(), a_bytes.as_bytes());
+        assert_eq!(std::fs::read(&b).unwrap(), b_bytes.as_bytes());
+        assert!(target.is_dir());
+        drop(locked_b);
+        let (_, added, removed) = sync_linked_folders(fixture.path(), &[], true).unwrap();
+        assert_eq!((added, removed), (0, 2));
+        assert!(!a.exists() && !b.exists());
+    }
 
     fn store_with(profiles: &[(&str, &Path)]) -> DataStore {
         let profiles: Vec<_> = profiles

@@ -13,7 +13,7 @@ const storage = {
   setItem: (key, value) => { stored[key] = String(value); },
 };
 const timers = [];
-const fakeWindow = { setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {}, addEventListener() {}, removeEventListener() {} };
+const fakeWindow = { setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout(id) { if (timers[id - 1]) timers[id - 1].cancelled = true; }, addEventListener() {}, removeEventListener() {} };
 const fakeDocument = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
 
 const compile = (file, require) => {
@@ -28,6 +28,10 @@ const compile = (file, require) => {
 function mount(file, exportName, props, modules = {}) {
   const states = [];
   let cursor = 0;
+  let refCursor = 0;
+  let effectCursor = 0;
+  const refs = [];
+  const effectSlots = [];
   let effects = [];
   const react = {
     useState(initial) {
@@ -35,16 +39,24 @@ function mount(file, exportName, props, modules = {}) {
       if (!(at in states)) states[at] = typeof initial === "function" ? initial() : initial;
       return [states[at], (value) => { states[at] = typeof value === "function" ? value(states[at]) : value; }];
     },
-    useRef: (initial) => ({ current: initial }),
+    useRef: (initial) => refs[refCursor++] ??= { current: initial },
     useCallback: (fn) => fn,
-    useEffect: (fn) => { effects.push(fn); },
+    useEffect: (fn, deps) => {
+      const at = effectCursor++;
+      const previous = effectSlots[at];
+      if (!previous || !deps || deps.some((value, i) => value !== previous.deps?.[i])) {
+        effectSlots[at] = { deps };
+        effects.push(() => { previous?.cleanup?.(); effectSlots[at].cleanup = fn(); });
+      }
+    },
     useLayoutEffect() {},
   };
   const jsx = (type, elementProps) => ({ type, props: elementProps || {} });
   const module = compile(file, (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : modules[name] ?? {});
-  const render = (next = {}) => { cursor = 0; effects = []; return module[exportName]({ ...props, ...next }); };
-  const runEffects = () => effects.forEach((effect) => effect());
-  return { render, runEffects, states, module };
+  const render = (next = {}) => { cursor = 0; refCursor = 0; effectCursor = 0; effects = []; return module[exportName]({ ...props, ...next }); };
+  const runEffects = () => { const pending = effects; effects = []; pending.forEach((effect) => effect()); };
+  const unmount = () => effectSlots.forEach((effect) => effect.cleanup?.());
+  return { render, runEffects, states, module, unmount };
 }
 
 const walk = (item) => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
@@ -197,4 +209,51 @@ test("the ChatGPT Desktop page shows the panel by default and remembers hiding i
     "./ChatGptLocalPanel": { ...panel, ChatGptLocalPanel: "ChatGptLocalPanel" },
   }).render();
   assert.equal(find(reopened, (el) => el.type === "ChatGptLocalPanel"), undefined, "still hidden after a remount");
+});
+
+test("Clear confirmation stays bound to the active account and clears its old timer on a switch", async () => {
+  let changed;
+  const calls = [];
+  const status = (activeSlotId) => ({ installed: true, running: true, activeSlotId, runningSlotId: activeSlotId,
+    accounts: ["local-aaaaaa", "local-bbbbbb"].map((slotId) => ({ slotId, source: "local" })) });
+  const api = { chatGptDesktopStatus: async () => status("local-aaaaaa"),
+    onChatGptDesktopChanged: (callback) => { changed = callback; return () => {}; },
+    setChatGptDesktopSurfaceActive: async () => true,
+    clearChatGptDesktopAccount: async (id) => { calls.push(id); return status(id); },
+  };
+  const view = mount("ChatGptDesktopSurface.tsx", "ChatGptDesktopSurface", { api, active: true, setError() {} }, {
+    "./ChatGptLocalPanel": { ...panel, ChatGptLocalPanel: "ChatGptLocalPanel" },
+  });
+  const render = () => { const tree = view.render(); view.runEffects(); return tree; };
+  const button = (tree, label) => find(tree, (el) => el.type === "button" && el.props.children === label);
+  render(); await flush(); render();
+  button(render(), "Clear account & session").props.onClick();
+  const firstTimer = timers.at(-1);
+  assert.equal(firstTimer.ms, 4000);
+  assert.deepEqual(calls, []);
+  button(render(), "Confirm clear").props.onClick();
+  await flush();
+  assert.deepEqual(calls, ["local-aaaaaa"], "no-switch positive control carries the captured ID");
+  assert.equal(firstTimer.cancelled, true);
+
+  button(render(), "Clear account & session").props.onClick();
+  const oldTimer = timers.at(-1);
+  changed(status("local-bbbbbb"));
+  const switched = render();
+  assert.equal(button(switched, "Confirm clear"), undefined, "derived state disarms before the reset effect");
+  assert.equal(oldTimer.cancelled, true);
+  button(render(), "Clear account & session").props.onClick();
+  assert.deepEqual(calls, ["local-aaaaaa"], "a new account needs a new confirmation");
+  button(render(), "Confirm clear").props.onClick();
+  await flush();
+  assert.deepEqual(calls, ["local-aaaaaa", "local-bbbbbb"]);
+
+  button(render(), "Clear account & session").props.onClick();
+  const timeout = timers.at(-1);
+  timeout.fn();
+  assert.ok(button(render(), "Clear account & session"), "confirmation expires after four seconds");
+  button(render(), "Clear account & session").props.onClick();
+  const unmountTimer = timers.at(-1);
+  view.unmount();
+  assert.equal(unmountTimer.cancelled, true);
 });

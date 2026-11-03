@@ -128,6 +128,16 @@ test('publication with unknown, alternate or multiple destinations waits rather 
   }
 });
 
+test('wrapped publication waits for a person instead of taking a model allow', async () => {
+  const world = publicationReviewWorld({ command: 'bash -lc "git push origin feat/fix"' });
+  try {
+    const shown = await world.review();
+    assert.deepEqual(world.resolved, []);
+    assert.deepEqual(world.prompts, [], 'the wrapper cannot prove which repository will publish');
+    assert.equal(shown.pending_approvals[0].recommendation.unresolved, true);
+  } finally { world.workflow.dispose(); }
+});
+
 test('publication verdict caching changes with observed destinations and default branches stay protected', async () => {
   const world = publicationReviewWorld();
   try {
@@ -5566,6 +5576,77 @@ test("the user edits a wake-up's note and minutes: it fires on the new clock wit
   await assert.rejects(workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "snooze", id }), /edit or cancel/);
 });
 
+for (const change of ["cancel", "postpone", "replace", "dispose"]) {
+  test(`a wake-up honors ${change} while its due read is pending`, async (t) => {
+    const { world, workflow, advance, gate } = wakeChat();
+    t.after(() => workflow.dispose());
+    await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "old note" });
+    const { id } = await wakeupOf(workflow);
+    let release;
+    gate.read = new Promise(resolve => { release = resolve; });
+    await advance(60_000);
+    const before = world.updates.length;
+    if (change === "cancel") {
+      assert.equal((await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "cancel", id })).cancelled, true);
+    } else if (change === "postpone") {
+      await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, minutes: 2, reason: "new note" });
+    } else if (change === "replace") {
+      gate.read = null;
+      await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 2, reason: "new note" });
+    } else workflow.dispose();
+    gate.read = null;
+    release();
+    await settle();
+    assert.equal(world.updates.length, before, "the old callback cannot send after its owner changed");
+    if (change === "postpone" || change === "replace") {
+      await advance(2 * 60_000);
+      assert.equal(world.updates.length, before + 1, "the current wake-up still fires once at its own time");
+      assert.match(world.edits.at(-1).description, /Your note: new note/);
+    }
+  });
+}
+
+for (const change of ["postpone", "replace"]) {
+  test(`a rejected wake-up read preserves the ${change} timer`, async (t) => {
+    const { workflow, advance, gate, timers } = wakeChat();
+    t.after(() => workflow.dispose());
+    await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "old note" });
+    const { id } = await wakeupOf(workflow);
+    let reject;
+    gate.read = new Promise((_, fail) => { reject = fail; });
+    await advance(60_000);
+    gate.read = null;
+    const current = change === "postpone"
+      ? (await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, minutes: 10 })).wakeup
+      : await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 10, reason: "new note" });
+    assert.ok([...timers.values()].some(timer => timer.at === current.dueAt));
+    reject(new Error("old read failed"));
+    await settle();
+    assert.ok([...timers.values()].some(timer => timer.at === current.dueAt), "the stale failure cannot replace the new deadline with its retry delay");
+  });
+}
+
+test("a replacement wake-up whose timer fired during an older read is rearmed after that read settles", async (t) => {
+  const { world, workflow, advance, gate } = wakeChat();
+  t.after(() => workflow.dispose());
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "old note" });
+  let release;
+  gate.read = new Promise(resolve => { release = resolve; });
+  await advance(60_000);
+  gate.read = null;
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "replacement note" });
+  const before = world.updates.length;
+  await advance(60_000);
+  assert.equal(world.updates.length, before, "the older read still holds the chat's waking lock");
+  release();
+  await settle();
+  await advance(1);
+  assert.equal(world.updates.length, before + 1);
+  assert.match(world.edits.at(-1).description, /Your note: replacement note/, "only the current wake-up sends");
+  await advance(60_000);
+  assert.equal(world.updates.length, before + 1, "it is sent once");
+});
+
 test("a goal waits for its agent's wake-up instead of starting the next round at once", async () => {
   const { world, workflow, advance } = wakeChat({ goal: true });
   const route = world.runs[0].nodes[0].route;
@@ -10588,7 +10669,7 @@ test("a Team round that settles by itself scores its models once, graded by a fr
 });
 
 /** A Single chat whose agent works on run r1, with the clock and timers in the test's hands. */
-function queueChat({ aoHarness = undefined, state = "running" } = {}) {
+function queueChat({ aoHarness = undefined, state = "running", runReadFreshMs = 0, confirmRecoverable = undefined } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Ship", description: "fix the build", state: "in_progress", clauses: [] }], runs: [
     { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
@@ -10602,7 +10683,8 @@ function queueChat({ aoHarness = undefined, state = "running" } = {}) {
     if (endpoint === "/api/v1/ao/update" && fail.updates > 0) { fail.updates -= 1; throw new Error("AO is busy"); }
     return world.requestHeadless(endpoint, ...rest);
   };
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/codex.exe", aoHarness,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/codex.exe", aoHarness, runReadFreshMs,
+    confirmRecoverable,
     resolveHarness: async () => { throw new Error("stop before the background loop"); }, now: () => clock.at,
     setTimer: (fn, ms) => { next += 1; timers.set(next, { fn, at: clock.at + ms }); return next; }, clearTimer: (id) => timers.delete(id) });
   const advance = async (ms) => {
@@ -10617,6 +10699,99 @@ function queueChat({ aoHarness = undefined, state = "running" } = {}) {
   const queue = async () => (await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "list" })).queue;
   return { world, workflow, route, advance, queue, fail };
 }
+
+for (const change of ["none", "clear", "edit", "replace", "dispose", "archive", "model", "explicit-model", "read-failure", "rejected"]) {
+  test(`queued input uses current state after compaction: ${change}`, async (t) => {
+    let release, reject, entered = false, completed = false, failRead = false;
+    const pending = new Promise((resolve, fail) => { release = resolve; reject = fail; });
+    const { world, workflow, advance, queue, route } = queueChat({ state: "finished", runReadFreshMs: 300, confirmRecoverable: async () => true, aoHarness: {
+      compact: async () => ({ compactedAt: "earlier" }),
+      compactionStatus: async () => { entered = true; return completed ? { status: "completed" } : pending; },
+    } });
+    t.after(() => { release({ status: "completed" }); workflow.dispose(); });
+    const request = world.requestHeadless;
+    world.requestHeadless = async (endpoint, body, ...rest) => {
+      if (endpoint === "/api/v1/ao/read" && failRead) { failRead = false; throw new Error("fresh read unavailable"); }
+      if (endpoint === "/api/v1/ao/update" && body.change?.operation === "lifecycle") {
+        const change = body.change.change;
+        assert.ok(["set_visibility", "restore_task"].includes(change.operation));
+        const prior = world.lifecycle.find(life => life.task_id === change.task_id);
+        assert.equal(change.expected_revision, prior?.revision ?? 0);
+        const life = { workspace_id: body.workspace_id, task_id: change.task_id, revision: (prior?.revision ?? 0) + 1,
+          visibility: change.operation === "restore_task" ? "active" : change.visibility, reconfigure: [], schedule: null };
+        world.lifecycle = [life];
+        world.tasks[0].state = life.visibility === "active" ? "in_progress" : "archived";
+        world.revision += 1;
+        return structuredClone({ ok: true, lifecycle: life });
+      }
+      // Real JSON responses do not change when the server's runs or lifecycle changes afterward.
+      return structuredClone(await request(endpoint, body, ...rest));
+    };
+    await workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" });
+    const added = await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add",
+      item: { message: "original queued text", ...(change === "explicit-model" ? { selection: { executionMode: "single", singleRoute: route } } : {}) } });
+    await goalSettle(() => entered);
+    assert.equal(entered, true);
+    if (change === "clear" || change === "replace") {
+      assert.equal((await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "clear" })).removed, 1);
+    }
+    if (change === "edit") await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "update", itemId: added.item.id, message: "edited queued text" });
+    if (change === "replace") {
+      for (const message of ["replacement queued text", "next queued text"]) await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { message } });
+    }
+    if (change === "dispose") workflow.dispose();
+    if (change === "archive") await workflow.call("archive_task", { workspaceId: "ws-1", taskId: "task-1" });
+    if (change === "model" || change === "explicit-model") {
+      const latest = structuredClone(world.runs[0]); latest.id = "r2";
+      latest.nodes[0].route = { ...route, model: "cpa/gpt-5.5" };
+      latest.nodes[0].receipt.thread_id = "sess-2";
+      world.runs = [...world.runs, latest];
+    }
+    if (change === "read-failure") failRead = true;
+    completed = true;
+    if (change === "rejected") reject(new Error("provider status unavailable"));
+    else release({ status: "completed" });
+    await goalSettle();
+    const waiting = ["clear", "dispose", "archive", "read-failure", "rejected"].includes(change);
+    assert.equal(world.updates.length, waiting ? 0 : 1, "only the current active queue can create a follow-up");
+    assert.equal(world.edits.length, waiting ? 0 : 1, "hidden or canceled input never edits the board");
+    if (waiting) {
+      assert.equal((await queue()).length, change === "clear" ? 0 : 1);
+      if (change === "archive") {
+        await workflow.call("restore_task", { workspaceId: "ws-1", taskId: "task-1" });
+        await workflow.queueAfterRun("ws-1", "r1", "finished");
+      } else if (change === "read-failure" || change === "rejected") await advance(60_000);
+      else return;
+      await goalSettle();
+      assert.equal(world.updates.length, 1, "restored/retried input still sends once");
+      assert.deepEqual(await queue(), []);
+    } else {
+      const message = change === "edit" ? "edited queued text" : change === "replace" ? "replacement queued text" : "original queued text";
+      assert.ok(world.edits.at(-1).description.endsWith(message));
+      assert.equal(world.updates[0].single_route.model, change === "model" ? "cpa/gpt-5.5" : route.model,
+        "the latest fallback route is fresh; an explicitly queued route still wins");
+      assert.deepEqual((await queue()).map(item => item.message), change === "replace" ? ["next queued text"] : [], "FIFO is preserved");
+    }
+  });
+}
+
+test("queued input stays saved when disposal happens during the initial runs read", async (t) => {
+  const { world, workflow, queue } = queueChat({ state: "finished" });
+  let release, entered = false;
+  const pending = new Promise(resolve => { release = resolve; });
+  t.after(() => { release(); workflow.dispose(); });
+  const request = world.requestHeadless;
+  world.requestHeadless = async (endpoint, ...args) => {
+    if (endpoint === "/api/v1/ao/read") { entered = true; await pending; }
+    return request(endpoint, ...args);
+  };
+  await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { message: "keep for restart" } });
+  await goalSettle(() => entered);
+  workflow.dispose(); release(); await goalSettle();
+  assert.equal(world.updates.length, 0);
+  assert.equal(world.edits.length, 0);
+  assert.equal((await queue()).length, 1);
+});
 
 test("queued input reconciles compaction after its bounded watcher has stopped", async () => {
   let completed = false, observations = 0;

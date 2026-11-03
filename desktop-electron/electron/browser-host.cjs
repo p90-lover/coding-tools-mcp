@@ -4002,7 +4002,7 @@ class BrowserHost {
       logger: this.logger,
     });
     const inspected = result?.value;
-    if (!inspected || inspected.authenticated !== true || inspected.temporary !== true || typeof inspected.url !== "string") {
+    if (!inspected || inspected.authenticated !== true || inspected.newChat !== true || typeof inspected.url !== "string") {
       throw new Error("Browser helper returned invalid ChatGPT session evidence");
     }
     if (detectCapabilities
