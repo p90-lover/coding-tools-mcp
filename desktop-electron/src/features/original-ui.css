@@ -437,12 +437,25 @@
   color: #991b1b;
 }
 
-.register-surface { height: 100%; min-height: 0; }
-.register-surface .original-ui-hostbar { flex-wrap: wrap; }
-.register-surface .original-ui-hostbar button { min-height: 40px; }
-.register-surface .original-ui-hostbar button:active:not(:disabled) { transform: scale(0.96); }
-.register-surface .original-ui-hostbar button:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; }
-.register-project-path { overflow-wrap: anywhere; }
+/* Register (RegisterSurface.tsx): the project's own page fills the surface under a drag strip that
+   keeps it clear of the window buttons; until it is ready, one card in the app's own colours. */
+.register-surface { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; background: var(--color-background-surface); }
+.register-dragstrip { flex: 0 0 auto; height: env(titlebar-area-height, 34px); -webkit-app-region: drag; }
+.register-frame { position: relative; display: grid; flex: 1 1 auto; min-height: 0; place-items: center; padding: 24px; }
+.register-card { display: grid; justify-items: center; gap: 10px; width: min(440px, 100%); color: var(--color-text-secondary); font-size: 13px; text-align: center; }
+.register-card strong { color: var(--color-text-primary); font-size: 15px; font-weight: 500; }
+.register-card p { margin: 0; line-height: 1.5; }
+.register-card code { max-width: 100%; overflow: hidden; color: var(--color-text-tertiary); font: 11px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.register-card.is-waiting strong { animation: register-wait 1.6s ease-in-out infinite; }
+.register-error { color: var(--color-text-error); overflow-wrap: anywhere; }
+.register-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 6px; }
+.register-actions button { min-height: 30px; padding: 0 14px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-background-button-secondary); color: var(--color-text-primary); font: inherit; font-size: 12px; cursor: pointer; }
+.register-actions button:hover:not(:disabled) { background: var(--color-background-button-secondary-hover); }
+.register-actions button.is-primary { border-color: transparent; background: var(--color-text-primary); color: var(--color-background-surface); }
+.register-actions button:disabled { cursor: default; opacity: .5; }
+.register-actions button:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+@keyframes register-wait { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .register-card.is-waiting strong { animation: none; } }
 
 .cpa-usage-note.is-quiet {
   color: #6b7280;

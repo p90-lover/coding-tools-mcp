@@ -2971,9 +2971,51 @@ code {
 .surface-empty-note { color: var(--muted, #6b6a66); font-size: 13px; }
 .rtk-chip.is-attention { border-color: rgb(51 156 255 / 45%); color: var(--blue-200); }
 
-/* App plugins (App.tsx AppPluginsSurface): "Check GitHub now" and when it last looked. */
-.app-plugins-bar { align-items: center; margin: 0 0 6px; }
-.app-plugins-bar small { color: var(--muted, #6b6a66); font-size: 12px; }
+/* App plugins (App.tsx AppPluginsSurface): when it last looked and the updates waiting, then one
+   row per item in three aligned columns (name and repository, version, action) and a detail line. */
+.app-plugins-bar { display: flex; align-items: center; gap: 8px; margin: -4px 0 18px; }
+.app-plugins-bar small { flex: 1 1 auto; min-width: 0; color: var(--color-text-tertiary); font-size: var(--text-xs); }
+.app-plugins-bar .button-primary, .app-plugins-bar .button-secondary { min-height: 30px; }
+.app-plugins-group + .app-plugins-group { margin-top: 22px; }
+.app-plugins-list { border: 1px solid var(--color-border-light); border-radius: 10px; background: var(--color-background-elevated); overflow: hidden; }
+.app-plugin-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, auto) 112px 52px; align-items: center; column-gap: 16px; min-height: 52px; padding: 8px 14px; }
+/* "Auto-update" over the switch column: the heading's right edge lines up with the switches. */
+.app-plugins-group .section-heading small { width: 52px; margin-right: 15px; text-align: center; white-space: nowrap; }
+.app-plugin-row + .app-plugin-row { border-top: 1px solid var(--color-border-light); }
+.app-plugin-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.app-plugin-name strong { color: var(--color-text-primary); font-size: 13px; font-weight: 500; }
+.app-plugin-repo { display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; max-width: 100%; padding: 0; border: 0; background: none; color: var(--color-text-tertiary); font: inherit; font-size: var(--text-xs); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.app-plugin-repo { cursor: pointer; }
+button.app-plugin-repo:hover, button.app-plugin-repo:focus-visible { color: var(--color-text-secondary); text-decoration: underline; }
+.app-plugin-repo svg { flex: none; width: 11px; height: 11px; opacity: 0; }
+button.app-plugin-repo:hover svg, button.app-plugin-repo:focus-visible svg { opacity: .8; }
+.app-plugin-version { display: flex; align-items: center; justify-content: flex-end; gap: 6px; color: var(--color-text-secondary); font: 12px/1.3 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: nowrap; }
+.app-plugin-version > span[aria-hidden] { color: var(--color-text-tertiary); }
+.app-plugin-version b { color: var(--color-text-primary); font-weight: 500; }
+.app-plugin-action { display: flex; justify-content: flex-end; }
+.app-plugin-action .button-primary { min-height: 28px; padding: 0 14px; }
+.app-plugin-auto { display: flex; justify-content: center; }
+.app-plugin-chip { padding: 2px 9px; border-radius: 999px; font-size: 11px; white-space: nowrap; color: var(--color-text-tertiary); background: var(--color-background-control); }
+.app-plugin-chip.is-ok { color: var(--color-text-success); background: var(--color-background-status-success); }
+.app-plugin-chip.is-attention { color: var(--color-text-accent); background: rgb(51 156 255 / 12%); }
+.app-plugin-chip.is-error { color: var(--color-text-warning); background: var(--color-background-status-warning); }
+.app-plugin-detail { grid-column: 1 / -1; margin: 4px 0 0; color: var(--color-text-tertiary); font-size: var(--text-xs); line-height: 1.45; overflow-wrap: anywhere; }
+.app-plugin-detail.is-ok { color: var(--color-text-success); }
+.app-plugin-detail.is-error { color: var(--color-text-error); }
+.app-plugin-empty { margin: 0; padding: 14px; color: var(--color-text-tertiary); font-size: var(--text-xs); }
+.app-plugin-row.is-placeholder > span { height: 10px; border-radius: 5px; background: var(--color-background-control); animation: app-plugin-wait 1.4s ease-in-out infinite; }
+.app-plugin-row.is-placeholder > span:first-child { width: 40%; }
+.app-plugin-row.is-placeholder > span:nth-child(2) { width: 64px; justify-self: end; }
+.app-plugin-row.is-placeholder > span:nth-child(3) { width: 72px; justify-self: end; }
+.app-plugin-row.is-placeholder > span:last-child { width: 32px; justify-self: center; }
+@keyframes app-plugin-wait { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .app-plugin-row.is-placeholder > span { animation: none; } }
+@media (max-width: 560px) {
+  .app-plugin-row { grid-template-columns: minmax(0, 1fr) auto auto; row-gap: 6px; }
+  .app-plugin-version { grid-column: 1; justify-content: flex-start; }
+  .app-plugin-action { grid-column: 2; grid-row: 1 / span 2; }
+  .app-plugin-auto { grid-column: 3; grid-row: 1 / span 2; }
+}
 
 /* Plugins (App.tsx PluginsSurface): Codex's tab row with counts, and "Add" at its end. */
 .plugins-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 14px; }

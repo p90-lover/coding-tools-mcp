@@ -184,6 +184,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   rtkInstall: () => ipcRenderer.invoke("rtk:install"),
   appPlugins: (refresh) => ipcRenderer.invoke("launcher:app-plugins", refresh === true),
   updateAppPlugin: (id) => ipcRenderer.invoke("launcher:app-plugin-update", id),
+  updateAllAppPlugins: () => ipcRenderer.invoke("launcher:app-plugins-update-all"),
+  setAppPluginAutoUpdate: (id, enabled) => ipcRenderer.invoke("launcher:app-plugin-auto-update", id, enabled === true),
   // Plugins > MCPs: the person's own MCP servers for chat agents.
   mcpServers: () => ipcRenderer.invoke("mcp-servers:list"),
   saveMcpServer: (server, options) => ipcRenderer.invoke("mcp-servers:save", server, options),
