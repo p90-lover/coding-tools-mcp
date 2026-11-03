@@ -7,8 +7,10 @@ export type ChatPagePreferences = {
   enabled: boolean; pageCount: number; keyboard: boolean; wheel: boolean; previous: string; next: string;
 };
 export const DEFAULT_CHAT_PAGES: ChatPagePreferences = {
-  enabled: false, pageCount: 1, keyboard: true, wheel: true, previous: "Shift+R", next: "Shift+E",
+  enabled: false, pageCount: 1, keyboard: true, wheel: true, previous: "Shift+Q", next: "Shift+R",
 };
+// #903's defaults, written into the store by every page change since: they read as today's (Shift+Q / Shift+R).
+const LEGACY_DEFAULT_KEYS = { previous: "Shift+R", next: "Shift+E" };
 const MODIFIERS = ["Ctrl", "Alt", "Shift", "Meta"];
 const NAMED_KEYS = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Space"];
 
@@ -37,8 +39,9 @@ export function recordPageShortcut(event: Pick<KeyboardEvent, "key" | "ctrlKey" 
 export function parseChatPagePreferences(raw: string | null): ChatPagePreferences {
   let value: Partial<ChatPagePreferences> | null = null;
   try { value = JSON.parse(raw || "null"); } catch { /* Use the default layout. */ }
-  const previous = normalizePageShortcut(value?.previous) ?? DEFAULT_CHAT_PAGES.previous;
-  const next = normalizePageShortcut(value?.next) ?? DEFAULT_CHAT_PAGES.next;
+  let previous = normalizePageShortcut(value?.previous) ?? DEFAULT_CHAT_PAGES.previous;
+  let next = normalizePageShortcut(value?.next) ?? DEFAULT_CHAT_PAGES.next;
+  if (previous === LEGACY_DEFAULT_KEYS.previous && next === LEGACY_DEFAULT_KEYS.next) ({ previous, next } = DEFAULT_CHAT_PAGES);
   return {
     enabled: value?.enabled === true,
     pageCount: Number.isInteger(value?.pageCount) && value!.pageCount! >= 1 && value!.pageCount! <= CHAT_PAGE_LIMIT ? value!.pageCount! : 1,
@@ -110,10 +113,32 @@ export function adjacentChatPage(page: number, direction: number, count: number)
   return ((page - 1 + direction) % count + count) % count + 1;
 }
 
+/**
+ * The page a chat goes to when page `from` (of `count`) has no screen left for it: a page from
+ * 1..count that `hasRoom` (pages not opened yet count as having room), `count + 1` to add a page
+ * when `canAdd`, or null when there is nowhere for it (the chat then opens on `from` as before).
+ */
+export function overflowPage(from: number, count: number, hasRoom: (page: number) => boolean, canAdd: boolean): number | null {
+  // "Next" as Shift+R means it: the pages after this one, wrapping round; a page is added only when all are full.
+  for (let step = 1; step < count; step++) {
+    const page = adjacentChatPage(from, step, count);
+    if (hasRoom(page)) return page;
+  }
+  return canAdd ? count + 1 : null;
+}
+
+/** A chat ("" a new one) to start on another page because its own page had no screen for it. */
+export type PageOpen = PageSelection & { maxColumns: number; tried: number[] };
 type PageChat = PageSelection & { paneId: string };
-/** One displayed owner for a chat across all pages, including their split panes. */
-export function createChatPageRegistry(selectPage: (page: number) => void) {
-  const pages = new Map<number, { chats: PageChat[]; focus: (paneId: string) => void }>();
+type PageRoom = { room?: (maxColumns: number) => boolean; wake?: () => void };
+/**
+ * One displayed owner for a chat across all pages, including their split panes. With `layout` a
+ * full page hands a chat on to another (`openElsewhere`), which takes it once it has loaded.
+ */
+export function createChatPageRegistry(selectPage: (page: number) => void,
+  layout?: { count: () => number; canAdd: () => boolean; add: () => boolean }) {
+  const pages = new Map<number, { chats: PageChat[]; focus: (paneId: string) => void } & PageRoom>();
+  const waiting = new Map<number, PageOpen>();
   const owner = (from: number, workspaceId: string, taskId: string) => {
     if (!taskId) return undefined;
     for (const [page, entry] of pages) {
@@ -123,8 +148,8 @@ export function createChatPageRegistry(selectPage: (page: number) => void) {
     return undefined;
   };
   return {
-    register(page: number, chats: PageChat[], focus: (paneId: string) => void) {
-      const entry = { chats, focus };
+    register(page: number, chats: PageChat[], focus: (paneId: string) => void, room: PageRoom = {}) {
+      const entry = { chats, focus, ...room };
       pages.set(page, entry);
       return () => { if (pages.get(page) === entry) pages.delete(page); };
     },
@@ -135,6 +160,28 @@ export function createChatPageRegistry(selectPage: (page: number) => void) {
       selectPage(found.page);
       found.entry.focus(found.chat.paneId);
       return true;
+    },
+    /**
+     * Page `from` is full: the chat goes to the page `overflowPage` picks and waits there until that
+     * page takes it. Pages already tried are skipped, so a request passed on never comes back.
+     */
+    openElsewhere(from: number, open: Omit<PageOpen, "tried"> & { tried?: number[] }) {
+      const count = layout?.count() ?? 0;
+      if (!layout || count < 1) return false;
+      const tried = [...(open.tried ?? []), from];
+      const target = overflowPage(from, count, (page) => !tried.includes(page) && (pages.get(page)?.room?.(open.maxColumns) ?? true), layout.canAdd());
+      if (target === null || !Number.isInteger(target) || target < 1 || target > count + 1 || tried.includes(target)) return false;
+      if (target === count + 1 && !layout.add()) return false;
+      waiting.set(target, { workspaceId: open.workspaceId, taskId: open.taskId, maxColumns: open.maxColumns, tried });
+      selectPage(target);
+      pages.get(target)?.wake?.();
+      return true;
+    },
+    /** The chat waiting for this page, once: the page calls it when its saved layout has loaded. */
+    takeOpen(page: number) {
+      const open = waiting.get(page);
+      waiting.delete(page);
+      return open;
     },
   };
 }

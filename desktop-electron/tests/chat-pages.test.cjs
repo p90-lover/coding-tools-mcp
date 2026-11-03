@@ -38,6 +38,17 @@ test("chat pages default off, and corrupt or out-of-range settings preserve usab
   assert.deepEqual(plain(api.parseChatPagePreferences('{"next":"Shift+R","previous":"Shift+R"}')), plain(api.DEFAULT_CHAT_PAGES));
 });
 
+test("Shift+Q is the previous page and Shift+R the next; #903's saved defaults read as these", () => {
+  const { api } = load();
+  assert.equal(api.DEFAULT_CHAT_PAGES.previous, "Shift+Q");
+  assert.equal(api.DEFAULT_CHAT_PAGES.next, "Shift+R");
+  // Every page change saved the whole preferences, so a store from 0.8.6x holds the old pair.
+  const old = api.parseChatPagePreferences('{"enabled":true,"pageCount":3,"keyboard":true,"wheel":true,"previous":"Shift+R","next":"Shift+E"}');
+  assert.deepEqual([old.previous, old.next, old.pageCount], ["Shift+Q", "Shift+R", 3]);
+  const own = api.parseChatPagePreferences('{"previous":"Shift+R","next":"Ctrl+E"}');
+  assert.deepEqual([own.previous, own.next], ["Shift+R", "Ctrl+E"], "keys the user chose stay");
+});
+
 test("shortcut recording normalizes modifiers and rejects plain typing, duplicate modifiers and AltGr", () => {
   const { api } = load();
   assert.equal(api.normalizePageShortcut("shift+ctrl+e"), "Ctrl+Shift+E");
@@ -54,13 +65,14 @@ test("shortcut recording normalizes modifiers and rejects plain typing, duplicat
 test("next and previous defaults and rebound keys obey the enable switches", () => {
   const { api } = load();
   const preferences = configured(api);
-  assert.equal(api.pageShortcutDirection(key("E"), preferences), 1);
-  assert.equal(api.pageShortcutDirection(key("R"), preferences), -1);
+  assert.equal(api.pageShortcutDirection(key("R"), preferences), 1);
+  assert.equal(api.pageShortcutDirection(key("q"), preferences), -1);
+  assert.equal(api.pageShortcutDirection(key("E"), preferences), 0, "#903's next key no longer turns pages");
   for (const disabled of [{ enabled: false }, { keyboard: false }, { pageCount: 1 }]) {
-    assert.equal(api.pageShortcutDirection(key("E"), { ...preferences, ...disabled }), 0);
+    assert.equal(api.pageShortcutDirection(key("R"), { ...preferences, ...disabled }), 0);
   }
   const rebound = { ...preferences, next: "Ctrl+Shift+N" };
-  assert.equal(api.pageShortcutDirection(key("E"), rebound), 0);
+  assert.equal(api.pageShortcutDirection(key("R"), rebound), 0);
   assert.equal(api.pageShortcutDirection(key("N", { ctrlKey: true }), rebound), 1);
 });
 
@@ -69,7 +81,7 @@ test("page keys never consume editing, dialogs, composition, repeats or an alrea
   const preferences = configured(api);
   for (const extra of [{ repeat: true }, { isComposing: true }, { keyCode: 229 }, { defaultPrevented: true },
     { shiftKey: false }, { ctrlKey: true }, { target: { closest: () => ({}) } }]) {
-    assert.equal(api.pageShortcutDirection(key("E", extra), preferences), 0);
+    assert.equal(api.pageShortcutDirection(key("R", extra), preferences), 0);
   }
 });
 
@@ -131,6 +143,67 @@ test("a stale page cleanup cannot erase a newer ownership registration", () => {
   assert.equal(registry.has(1, "ws", "old"), false);
   current();
   assert.equal(registry.has(1, "ws", "new"), false);
+});
+
+test("a full page's chat goes to the next page with room, wrapping round, and a page is added only when all are full", () => {
+  const { api } = load();
+  const roomOn = (...pages) => (page) => pages.includes(page);
+  assert.equal(api.overflowPage(2, 4, roomOn(1, 3, 4), true), 3, "the next page first");
+  assert.equal(api.overflowPage(2, 4, roomOn(1, 4), true), 4, "then the one after");
+  assert.equal(api.overflowPage(4, 4, roomOn(1, 2), true), 1, "from the last page it wraps, as Shift+R does");
+  assert.equal(api.overflowPage(3, 4, roomOn(1), true), 1, "an earlier page with room before a new page");
+  assert.equal(api.overflowPage(1, 4, roomOn(), true), 5, "every page full: a new one");
+  assert.equal(api.overflowPage(1, 12, roomOn(), false), null, "twelve full pages: nowhere");
+  assert.equal(api.overflowPage(1, 1, roomOn(1), true), 2, "one page: never itself, a second one");
+});
+
+function overflowRegistry(api, { count = 2, limit = 12, enabled = true } = {}) {
+  const seen = [];
+  const layout = { count: () => enabled ? count : 0, canAdd: () => enabled && count < limit, add: () => { seen.push(["add", count + 1]); count++; return true; } };
+  const registry = api.createChatPageRegistry((page) => seen.push(["page", page]), layout);
+  const room = (page, has) => registry.register(page, [], () => {}, { room: () => has, wake: () => seen.push(["wake", page]) });
+  return { registry, seen, room };
+}
+const ask = { workspaceId: "ws", taskId: "", maxColumns: 5 };
+
+test("a full page's new chat waits on the page that has room, which takes it once", () => {
+  const { api } = load();
+  const { registry, seen, room } = overflowRegistry(api);
+  room(1, false); room(2, true);
+  assert.equal(registry.openElsewhere(1, ask), true);
+  assert.deepEqual(seen, [["page", 2], ["wake", 2]], "page 2 shows and is told a chat is waiting");
+  assert.deepEqual(plain(registry.takeOpen(2)), { ...ask, tried: [1] });
+  assert.equal(registry.takeOpen(2), undefined, "taken once");
+});
+
+test("with every page full a page is added for the chat, and with none left it stays where it was", () => {
+  const { api } = load();
+  const full = overflowRegistry(api);
+  full.room(1, false); full.room(2, false);
+  assert.equal(full.registry.openElsewhere(1, ask), true);
+  assert.deepEqual(full.seen, [["add", 3], ["page", 3]], "a third page, which mounts and takes it");
+  assert.deepEqual(plain(full.registry.takeOpen(3)), { ...ask, tried: [1] });
+
+  const capped = overflowRegistry(api, { count: 2, limit: 2 });
+  capped.room(1, false); capped.room(2, false);
+  assert.equal(capped.registry.openElsewhere(1, ask), false, "all twelve pages full: New chat opens on this page as before");
+  assert.deepEqual(capped.seen, []);
+});
+
+test("a chat handed on never returns to a page that already had no room, and pages off never hand one on", () => {
+  const { api } = load();
+  const { registry, seen, room } = overflowRegistry(api, { count: 2, limit: 2 });
+  room(1, false);
+  assert.equal(registry.openElsewhere(1, ask), true, "page 2 has not loaded yet: it may have room");
+  const passed = registry.takeOpen(2);
+  room(2, false);
+  assert.equal(registry.openElsewhere(2, passed), false, "page 2 loaded full: page 1 was tried, nowhere is left");
+  assert.deepEqual(seen, [["page", 2]]);
+
+  const off = overflowRegistry(api, { enabled: false });
+  off.room(1, false);
+  assert.equal(off.registry.openElsewhere(1, ask), false, "without page tabs a chat never moves to a page no one can see");
+  assert.equal(api.createChatPageRegistry(() => {}).openElsewhere(1, ask), false, "no layout: no pages to go to");
 });
 
 // Execute the production callbacks so these checks cover the integration, not a copy of it.
