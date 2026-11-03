@@ -19,8 +19,16 @@ function fixture(t, kind) {
   });
   const keyPath = path.join(root, kind === "provider" ? "provider-network.key" : "managed-components.key");
   const statePath = path.join(root, kind === "provider" ? "provider-network.json" : "managed-components.secrets.json");
+  // Provider saves land on a pool thread (provider-network.cjs); flush() waits for every store
+  // this fixture opened before the test reads the file or opens it again.
+  const stores = [];
+  const flush = () => Promise.all(stores.map(store => store.saved().catch(() => {})));
   const open = () => {
-    if (kind === "provider") return createProviderNetworkStore({ filePath: statePath, keyPath, safeStorage: null });
+    if (kind === "provider") {
+      const store = createProviderNetworkStore({ filePath: statePath, keyPath, safeStorage: null });
+      stores.push(store);
+      return store;
+    }
     const controller = createManagedComponentController({ dataRoot: root, safeStorage: null, env: {}, resolveRuntimeExecutable: () => process.execPath });
     controllers.push(controller);
     return controller;
@@ -29,40 +37,49 @@ function fixture(t, kind) {
     ? store.saveProxyProfile({ id: "fixture", name: "Fixture", endpoint: { protocol: "http", host: "proxy.example.test", port: 8080 }, username: "fixture", password: "fixture" })
     : store.runtimeSecrets("cpa");
   const read = store => kind === "provider" ? store.proxySecret("fixture") : store.runtimeSecrets("cpa");
-  return { root, keyPath, statePath, open, save, read };
+  return { root, keyPath, statePath, open, save, read, flush };
 }
 
 for (const kind of ["provider", "managed"]) {
-  if (kind === "managed") test(`${kind} legacy credentials without a container version survive a read and save roundtrip`, t => {
+  if (kind === "managed") test(`${kind} legacy credentials without a container version survive a read and save roundtrip`, async t => {
     const f = fixture(t, kind), first = f.open();
     f.save(first);
+    await f.flush();
     const expected = f.read(first), legacy = JSON.parse(fs.readFileSync(f.statePath, "utf8"));
     delete legacy.version;
     fs.writeFileSync(f.statePath, JSON.stringify(legacy));
     fs.rmSync(`${f.statePath}.bak`, { force: true });
+    await f.flush();
     const reopened = f.open();
     assert.ok(JSON.stringify(f.read(reopened)) === JSON.stringify(expected));
     reopened.setComponentCredential("cpa", "managementKey", expected.managementKey);
+    await f.flush();
     assert.equal(JSON.parse(fs.readFileSync(f.statePath, "utf8")).version, 1);
+    await f.flush();
     assert.ok(JSON.stringify(f.read(f.open())) === JSON.stringify(expected));
   });
 
-  test(`${kind} future credential container is preserved and cannot be overwritten`, t => {
+  test(`${kind} future credential container is preserved and cannot be overwritten`, async t => {
     const f = fixture(t, kind), first = f.open();
     f.save(first);
+    await f.flush();
     const future = JSON.parse(fs.readFileSync(f.statePath, "utf8"));
     future.version = 999;
     fs.writeFileSync(f.statePath, JSON.stringify(future));
     fs.rmSync(`${f.statePath}.bak`, { force: true });
+    await f.flush();
     const reopened = f.open();
     assert.throws(() => f.save(reopened), /settings|credential|key/i);
+    await f.flush();
     assert.equal(JSON.parse(fs.readFileSync(f.statePath, "utf8")).version, 999);
   });
 
-  test(`${kind} fallback key survives a transient read and recovers without rotating credentials`, t => {
+  test(`${kind} fallback key survives a transient read and recovers without rotating credentials`, async t => {
     const f = fixture(t, kind), first = f.open();
     f.save(first);
+    await f.flush();
     const expected = f.read(first), key = fs.readFileSync(f.keyPath), state = fs.readFileSync(f.statePath);
+    await f.flush();
     const reopened = f.open(), readFile = fs.readFileSync;
     let injected = false;
     fs.readFileSync = function (file, ...args) {
@@ -75,18 +92,21 @@ for (const kind of ["provider", "managed"]) {
     try { try { f.read(reopened); } catch {} } finally { fs.readFileSync = readFile; }
     assert.ok(injected);
     assert.ok(fs.readFileSync(f.keyPath).equals(key), "a read cannot replace the encryption key");
+    await f.flush();
     assert.ok(fs.readFileSync(f.statePath).equals(state), "a failed read cannot rotate CPA or proxy credentials");
     assert.ok(JSON.stringify(f.read(reopened)) === JSON.stringify(expected), "the same instance recovers when reads work again");
   });
 
   test(`${kind} missing or damaged fallback key refuses writes while preserving existing envelopes`, async t => {
-    for (const damage of ["missing", "invalid"]) await t.test(damage, t => {
+    for (const damage of ["missing", "invalid"]) await t.test(damage, async t => {
       const f = fixture(t, kind), first = f.open();
       f.save(first);
+      await f.flush();
       const expected = f.read(first), key = fs.readFileSync(f.keyPath), state = fs.readFileSync(f.statePath);
       fs.rmSync(`${f.keyPath}.bak`, { force: true });
       if (damage === "missing") fs.rmSync(f.keyPath);
       else fs.writeFileSync(f.keyPath, "torn");
+      await f.flush();
       const reopened = f.open();
       if (kind === "managed") {
         assert.doesNotThrow(() => reopened.snapshot(), "status remains available when a credential is not");
@@ -94,6 +114,7 @@ for (const kind of ["provider", "managed"]) {
         assert.throws(() => f.read(reopened), /credential|key/i);
       } else assert.equal(f.read(reopened), null);
       assert.throws(() => f.save(reopened), /credential|key/i);
+      await f.flush();
       assert.ok(fs.readFileSync(f.statePath).equals(state));
       if (damage === "missing") assert.equal(fs.existsSync(f.keyPath), false, "no replacement key is created");
       else assert.equal(fs.readFileSync(f.keyPath, "utf8"), "torn", "unreadable bytes stay in place for recovery");
@@ -102,7 +123,7 @@ for (const kind of ["provider", "managed"]) {
     });
   });
 
-  test(`${kind} failed first fallback-key save is retried before its key is cached`, t => {
+  test(`${kind} failed first fallback-key save is retried before its key is cached`, async t => {
     const f = fixture(t, kind), store = f.open(), rename = fs.renameSync;
     let injected = false;
     fs.renameSync = function (source, destination) {
@@ -117,6 +138,7 @@ for (const kind of ["provider", "managed"]) {
     assert.ok(injected);
     f.save(store);
     assert.ok(fs.existsSync(f.keyPath));
+    await f.flush();
     assert.ok(JSON.stringify(f.read(f.open())) === JSON.stringify(f.read(store)), "persisted envelopes use the successfully saved key");
   });
 }
@@ -137,10 +159,12 @@ test("provider partial credential merges reject an unreadable key cycle before c
       change: store => store.mergeAccountSecret(account.id, { cpaAuthName: "updated.json" }),
       read: store => store.accountSecret(account.id), expected: before => ({ ...before, cpaAuthName: "updated.json" }) },
   ];
-  for (const entry of cases) await t.test(entry.name, t => {
+  for (const entry of cases) await t.test(entry.name, async t => {
     const f = fixture(t, "provider"), first = f.open();
     entry.seed(first);
+    await f.flush();
     const expected = entry.read(first), state = fs.readFileSync(f.statePath), backup = fs.readFileSync(`${f.statePath}.bak`), key = fs.readFileSync(f.keyPath);
+    await f.flush();
     const reopened = f.open(), readFile = fs.readFileSync, failures = new Set([f.keyPath, `${f.keyPath}.bak`]);
     fs.readFileSync = function (file, ...args) {
       if (failures.delete(String(file))) throw Object.assign(new Error("fixture key read unavailable"), { code: "EIO" });
@@ -152,10 +176,12 @@ test("provider partial credential merges reject an unreadable key cycle before c
     } finally { fs.readFileSync = readFile; }
     assert.equal(failures.size, 0, "both copies failed in one read cycle");
     assert.ok(fs.readFileSync(f.keyPath).equals(key));
+    await f.flush();
     assert.ok(fs.readFileSync(f.statePath).equals(state), "a failed merge cannot replace original state or envelopes");
     assert.ok(fs.readFileSync(`${f.statePath}.bak`).equals(backup));
     assert.ok(JSON.stringify(entry.read(reopened)) === JSON.stringify(expected), "normal reads recover every original credential field");
     entry.change(reopened);
+    await f.flush();
     assert.ok(JSON.stringify(entry.read(f.open())) === JSON.stringify(entry.expected(expected)), "retry preserves fields outside the requested change");
   });
 });
@@ -170,9 +196,10 @@ test("authoritative credential replacements and explicit clears do not need the 
       change: store => store.saveDecodoSettings({ username: "updated-user", password: "" }),
       read: store => ({ password: store.decodoSettings().password }), expected: { password: "" } },
   ];
-  for (const entry of cases) await t.test(entry.name, t => {
+  for (const entry of cases) await t.test(entry.name, async t => {
     const f = fixture(t, "provider"), first = f.open();
     entry.seed(first);
+    await f.flush();
     const key = fs.readFileSync(f.keyPath), reopened = f.open(), readFile = fs.readFileSync, failures = new Set([f.keyPath, `${f.keyPath}.bak`]);
     fs.readFileSync = function (file, ...args) {
       if (failures.delete(String(file))) throw Object.assign(new Error("fixture key read unavailable"), { code: "EIO" });
@@ -181,17 +208,19 @@ test("authoritative credential replacements and explicit clears do not need the 
     try { assert.doesNotThrow(() => entry.change(reopened)); }
     finally { fs.readFileSync = readFile; }
     assert.ok(fs.readFileSync(f.keyPath).equals(key));
+    await f.flush();
     assert.ok(JSON.stringify(entry.read(f.open())) === JSON.stringify(entry.expected));
   });
 });
 
-test("provider metadata-only edits preserve credentials without reading the fallback key", t => {
+test("provider metadata-only edits preserve credentials without reading the fallback key", async t => {
   const f = fixture(t, "provider"), first = f.open();
   const profile = { id: "fixture", name: "Fixture", endpoint: { protocol: "http", host: "proxy.example.test", port: 8080 } };
   const account = { id: "fixture-account", providerId: "fixture-provider", label: "Fixture", auth: "api_key", status: "connected" };
   first.saveProxyProfile({ ...profile, username: "fixture", password: "fixture-password" });
   first.saveAccount({ ...account, secret: { apiKey: "fixture-key" } });
   first.saveDecodoSettings({ username: "fixture", password: "fixture-password" });
+  await f.flush();
   const saved = JSON.parse(fs.readFileSync(f.statePath, "utf8")).secrets, reopened = f.open(), readFile = fs.readFileSync;
   let keyReads = 0;
   fs.readFileSync = function (file, ...args) {
@@ -207,15 +236,17 @@ test("provider metadata-only edits preserve credentials without reading the fall
     assert.doesNotThrow(() => reopened.saveDecodoSettings({ username: "renamed-user" }));
   } finally { fs.readFileSync = readFile; }
   assert.equal(keyReads, 0);
+  await f.flush();
   assert.ok(JSON.stringify(JSON.parse(fs.readFileSync(f.statePath, "utf8")).secrets) === JSON.stringify(saved));
   assert.ok(reopened.accountSecret(account.id).apiKey === "fixture-key");
   assert.ok(reopened.proxySecret(profile.id).password === "fixture-password");
   assert.ok(reopened.decodoSettings().password === "fixture-password");
 });
 
-test("managed secrets-container read failure never replaces existing CPA credentials", t => {
+test("managed secrets-container read failure never replaces existing CPA credentials", async t => {
   const f = fixture(t, "managed"), first = f.open();
   f.save(first);
+  await f.flush();
   const expected = f.read(first), state = fs.readFileSync(f.statePath), readFile = fs.readFileSync;
   fs.rmSync(`${f.statePath}.bak`, { force: true });
   let injected = false, reopened;
@@ -226,21 +257,26 @@ test("managed secrets-container read failure never replaces existing CPA credent
     }
     return readFile.call(this, file, ...args);
   };
+  await f.flush();
   try { reopened = f.open(); } finally { fs.readFileSync = readFile; }
   assert.ok(JSON.stringify(f.read(reopened)) === JSON.stringify(expected));
+  await f.flush();
   assert.ok(fs.readFileSync(f.statePath).equals(state));
   fs.writeFileSync(f.statePath, "torn");
   fs.rmSync(`${f.statePath}.bak`, { force: true });
+  await f.flush();
   const damaged = f.open();
   assert.doesNotThrow(() => damaged.snapshot());
   assert.match(damaged.project("cpa").error, /credential/i);
   assert.throws(() => f.read(damaged), /credential/i);
+  await f.flush();
   assert.equal(fs.readFileSync(f.statePath, "utf8"), "torn");
 });
 
-test("managed unreadable secrets remain guarded when a retry temporarily reports missing", t => {
+test("managed unreadable secrets remain guarded when a retry temporarily reports missing", async t => {
   const f = fixture(t, "managed"), first = f.open();
   f.save(first);
+  await f.flush();
   const expected = f.read(first), state = fs.readFileSync(f.statePath), readFile = fs.readFileSync;
   fs.rmSync(`${f.statePath}.bak`, { force: true });
   let reads = 0, reopened;
@@ -251,17 +287,20 @@ test("managed unreadable secrets remain guarded when a retry temporarily reports
     return readFile.call(this, file, ...args);
   };
   try {
+    await f.flush();
     reopened = f.open();
     assert.throws(() => f.read(reopened), /credential/i);
   } finally { fs.readFileSync = readFile; }
+  await f.flush();
   assert.ok(fs.readFileSync(f.statePath).equals(state));
   assert.ok(JSON.stringify(f.read(reopened)) === JSON.stringify(expected));
 });
 
-test("provider settings read failure preserves every envelope until recovery and retry", t => {
+test("provider settings read failure preserves every envelope until recovery and retry", async t => {
   const f = fixture(t, "provider"), first = f.open();
   f.save(first);
   first.saveDecodoSettings({ username: "fixture", password: "fixture" });
+  await f.flush();
   const expected = f.read(first), state = fs.readFileSync(f.statePath), readFile = fs.readFileSync;
   fs.rmSync(`${f.statePath}.bak`, { force: true });
   let injected = false, reopened;
@@ -272,18 +311,22 @@ test("provider settings read failure preserves every envelope until recovery and
     }
     return readFile.call(this, file, ...args);
   };
+  await f.flush();
   try { reopened = f.open(); } finally { fs.readFileSync = readFile; }
   const newProfile = { id: "new", name: "New route", endpoint: { protocol: "http", host: "proxy.example.test", port: 8081 } };
   assert.throws(() => reopened.saveProxyProfile(newProfile), /settings|retry/i);
+  await f.flush();
   assert.ok(fs.readFileSync(f.statePath).equals(state), "no original profile or envelope was replaced");
   assert.ok(JSON.stringify(f.read(reopened)) === JSON.stringify(expected));
   assert.equal(reopened.decodoSettings().password, "fixture");
   reopened.saveProxyProfile(newProfile);
   assert.equal(reopened.snapshot().proxyProfiles.length, 2, "retry applies to the recovered store");
+  await f.flush();
   fs.writeFileSync(f.statePath, "torn");
   fs.rmSync(`${f.statePath}.bak`, { force: true });
   const damaged = f.open();
   assert.doesNotThrow(() => damaged.snapshot());
   assert.throws(() => damaged.saveProxyProfile(newProfile), /settings/i);
+  await f.flush();
   assert.equal(fs.readFileSync(f.statePath, "utf8"), "torn");
 });

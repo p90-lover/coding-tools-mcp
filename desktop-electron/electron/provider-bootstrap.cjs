@@ -147,6 +147,7 @@ function installProviderNetwork({
     // proxies it supplied become the app's own (credentials and routes kept) before the route applies.
     try {
       if (controller.store.adoptSourceProfiles("nova").changed) logger.info("proxy.nova_profiles_adopted", {});
+      await controller.store.saved();
     } catch (error) {
       logger.warn("proxy.nova_adopt_failed", { error: error instanceof Error ? error.message : String(error) });
     }
@@ -206,6 +207,9 @@ function installProviderNetwork({
 
   async function publishMutation(active, mutate, { refreshGlobal = false } = {}) {
     let snapshot = await mutate();
+    // The change is on disk before anything reads the file (CPA's route), and a failed save is
+    // reported to the page.
+    await active.store.saved?.();
     if (refreshGlobal) snapshot = await active.applyGlobalRouting();
     return publish(snapshot);
   }
@@ -258,7 +262,10 @@ function installProviderNetwork({
     return result;
   }, "network");
   // Decodo's sticky proxy list (decodo-proxies.cjs), read in-app instead of through Nova.
-  handle("launcher:decodo-save", (active, _event, input) => publish(active.store.saveDecodoSettings(input)), "network");
+  handle("launcher:decodo-save", (active, _event, input) => publishMutation(
+    active,
+    () => active.store.saveDecodoSettings(input),
+  ), "network");
   handle("launcher:decodo-sync", async (active) => {
     try {
       const result = await active.syncDecodo();

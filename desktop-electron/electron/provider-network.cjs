@@ -1,7 +1,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { readStateFile, writeStateFile } = require("./durable-state.cjs");
+const { createStateFileWriter, readStateFile, writeStateFile } = require("./durable-state.cjs");
 const { connectErrorText: tcpErrorText, probeTcpOffThread } = require("./off-thread-run.cjs");
 const {
   CPA_LOGIN_ADAPTERS,
@@ -385,12 +385,29 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       .some(envelope => envelope?.scheme === "aes-256-gcm-v1"),
   });
 
+  // Saves flush on a pool thread, not the main one: synchronously one save held every window
+  // 0.5-1.2 s on the hard disk (2026-11-03), and a Decodo sync saved once per proxy. A burst of
+  // changes is one write plus one with the latest state. Callers that need the file on disk (CPA
+  // reads it to pick its route) await saved(), which also reports a save that failed.
+  let saveError = null;
+  const writer = createStateFileWriter(filePath, { onError: (error) => { saveError = error; } });
+
   function write() {
     if (stateRead.source === "unreadable") {
       recoverState();
       throw new Error("Saved provider settings were unavailable; retry after restoring or reloading them");
     }
-    writeStateFile(filePath, `${JSON.stringify(state, null, 2)}\n`);
+    saveError = null;
+    writer.save(`${JSON.stringify(state, null, 2)}\n`);
+  }
+
+  async function saved() {
+    await writer.saved();
+    if (saveError) {
+      const error = saveError;
+      saveError = null;
+      throw error;
+    }
   }
 
   function publicSnapshot() {
@@ -878,6 +895,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
 
   return {
     snapshot: publicSnapshot,
+    saved,
     saveAccount,
     setDefaultAccount,
     setAccountEnabled,
@@ -1091,7 +1109,9 @@ function createProviderNetworkController({
       for (const endpoint of endpoints) store.saveProxyProfile(endpoint);
       const added = endpoints.filter((endpoint) => !existing.has(endpoint.id)).length;
       logger.info("proxy.decodo_synced", { count: endpoints.length, added });
-      return { added, updated: endpoints.length - added, snapshot: store.recordDecodoSync(null) };
+      const snapshot = store.recordDecodoSync(null);
+      await store.saved();
+      return { added, updated: endpoints.length - added, snapshot };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       store.recordDecodoSync(message);
