@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { AppErrorBoundary } from "./AppErrorBoundary";
+import { installEntranceSettle } from "./features/entrance-settle";
 import { installShimmerTicker } from "./features/shimmer-ticker";
 import "./tokens.css";
 import "./styles.css";
@@ -12,6 +13,7 @@ import "./providers/provider-manager.css";
 import "./features/gpt-browser.css";
 
 installShimmerTicker();
+installEntranceSettle();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
