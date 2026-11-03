@@ -1621,24 +1621,23 @@ function createManagedComponentController({
     fs.mkdirSync(componentState(manifest), { recursive: true, mode: 0o700 });
     if (platform !== "win32") fs.chmodSync(componentState(manifest), 0o700);
 
-    setOperation(key, { state: "installing", step: "prepare", error: null });
     const stagingRoot = path.join(
       aiTempRoot,
       `${id}-${timestampSegment(now())}-${crypto.randomUUID()}`,
     );
     const stagingHome = path.join(stagingRoot, "component");
-    assertWithin(aiTempRoot, stagingRoot, "Managed component staging path");
-    fs.mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
-    writeJson(path.join(stagingRoot, "INSTALL_REQUEST.json"), {
-      schemaVersion: 1,
-      id,
-      version: manifest.version,
-      commit: manifest.commit || null,
-      requestedAt: now(),
-      repair: repair === true,
-    });
-
     try {
+      setOperation(key, { state: "installing", step: "prepare", error: null });
+      assertWithin(aiTempRoot, stagingRoot, "Managed component staging path");
+      fs.mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
+      writeJson(path.join(stagingRoot, "INSTALL_REQUEST.json"), {
+        schemaVersion: 1,
+        id,
+        version: manifest.version,
+        commit: manifest.commit || null,
+        requestedAt: now(),
+        repair: repair === true,
+      });
       let prepared;
       if (manifest.strategy === "release-binary") {
         fs.mkdirSync(stagingHome, { recursive: true, mode: 0o700 });
@@ -1675,13 +1674,15 @@ function createManagedComponentController({
       return project(id);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      writeJson(path.join(stagingRoot, "FAILED.json"), {
-        schemaVersion: 1,
-        id,
-        failedAt: now(),
-        error: message,
-      });
       setOperation(key, { state: "error", step: null, error: message });
+      try {
+        writeJson(path.join(stagingRoot, "FAILED.json"), {
+          schemaVersion: 1,
+          id,
+          failedAt: now(),
+          error: message,
+        });
+      } catch { /* Diagnostic storage must not hide the install failure or block a retry. */ }
       throw error;
     }
   }
