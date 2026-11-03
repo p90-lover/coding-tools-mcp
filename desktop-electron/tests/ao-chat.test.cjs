@@ -620,7 +620,7 @@ function loadSurface(react = {}, globals = {}, imports = {}) {
   return surface;
 }
 
-function surfaceComposer(seed = {}, globals = {}) {
+function surfaceComposer(seed = {}, globals = {}, pageRegistry = null) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8").split("export function AgentOrchestratorSurface")[1];
   const names = [...source.matchAll(/const \[([A-Za-z_]+)(?:,[^\]]+)?\] = useState/g)].map(match => match[1]);
   const state = { workspaceReady: true, workspaceId: "w", chatTaskId: "", board: { revision: 1, tasks: [] }, ...seed };
@@ -638,6 +638,7 @@ function surfaceComposer(seed = {}, globals = {}) {
       callbacks[index] = { callback, deps: deps ? [...deps] : [] }; return callback;
     },
     useMemo: calculate => calculate(), useEffect: effect => effects.push(effect), useLayoutEffect() {},
+    useContext: () => pageRegistry,
   };
   let permissionKey;
   const jsx = (type, props, key) => { if (type === "Permissions") permissionKey = key; return { type, props: props || {} }; };
@@ -730,6 +731,72 @@ test("split view: Split view adds a pane, New chat opens in the focused pane, th
   list().props.actions.openSplit("w", "t2");
   fixture.walk(fixture.render()).find(item => Array.isArray(item.props?.panes)).props.panes[0].content.props.pane.onClose();
   assert.deepEqual(panes(), [], "closing the last pane leaves one chat");
+});
+
+// Ten screens: the window's chat at 0,0 and nine panes over five columns of two.
+const tenScreens = () => [[0, 1], ...[1, 2, 3, 4].flatMap(col => [[col, 0], [col, 1]])]
+  .map(([col, row], index) => ({ id: `p${index}`, workspaceId: "w", taskId: `t${index + 1}`, col, row }));
+function fakePages(handOn = true) {
+  const asked = [];
+  return { asked, waiting: null, has: () => false, reveal: () => false, register: () => () => {},
+    openElsewhere(from, open) { asked.push(plain({ from, ...open })); return handOn; },
+    takeOpen() { const open = this.waiting; this.waiting = null; return open; } };
+}
+
+test("chat pages: on a full page New chat, Ctrl+Alt+\\ and Open in split view start on another page, never in a chat's place", () => {
+  const pages = fakePages();
+  const fixture = surfaceComposer({ chatTaskId: "t0", splitMaxCols: 5, splitPanes: tenScreens(), focusedPane: "p3" }, {}, pages);
+  const list = () => fixture.walk(fixture.render()).find(item => item.props?.actions?.openSplit);
+  const before = plain(fixture.state.splitPanes);
+  list().props.actions.newChat();
+  assert.deepEqual(pages.asked, [{ from: 1, workspaceId: "w", taskId: "", maxColumns: 5 }], "New chat: to another page");
+  assert.deepEqual(plain(fixture.state.splitPanes), before, "no chat on this page made way");
+  assert.equal(fixture.state.chatTaskId, "t0");
+  list().props.actions.openSplit("w", "t99");
+  assert.deepEqual(pages.asked.at(-1), { from: 1, workspaceId: "w", taskId: "t99", maxColumns: 5 }, "Open in split view: the chat goes too");
+  assert.deepEqual(plain(fixture.state.splitPanes), before);
+
+  // Below ten screens New chat keeps the user's 2026-10-31 rule: it opens in the focused pane.
+  const room = surfaceComposer({ chatTaskId: "t0", splitMaxCols: 5, splitPanes: tenScreens().slice(0, 8), focusedPane: "p3" }, {}, fakePages());
+  room.walk(room.render()).find(item => item.props?.actions?.openSplit).props.actions.newChat();
+  assert.equal(room.state.splitPanes.find(item => item.id === "p3").taskId, "", "the focused pane shows the new chat");
+
+  // Every page full (or tabs off): it opens here as before.
+  const nowhere = surfaceComposer({ chatTaskId: "t0", splitMaxCols: 5, splitPanes: tenScreens(), focusedPane: "p3" }, {}, fakePages(false));
+  nowhere.walk(nowhere.render()).find(item => item.props?.actions?.openSplit).props.actions.newChat();
+  assert.equal(nowhere.state.splitPanes.find(item => item.id === "p3").taskId, "");
+});
+
+test("chat pages: a page takes a handed-on chat once loaded: an unsent screen first, else a free cell, else it passes it on", () => {
+  const run = (seed, open, handOn = true) => {
+    const pages = fakePages(handOn);
+    pages.waiting = open;
+    const fixture = surfaceComposer({ loadedWorkspace: "w", splitReady: true, splitMaxCols: 1, ...seed }, {}, pages);
+    fixture.render();
+    const take = fixture.effects.filter(effect => String(effect).includes("takeOpen"));
+    assert.equal(take.length, 1, "one effect takes the waiting chat");
+    take[0]();
+    return { fixture, pages, panes: () => plain(fixture.state.splitPanes.map(item => [item.taskId, item.col, item.row])) };
+  };
+  const ask = { workspaceId: "w", taskId: "", maxColumns: 5, tried: [1] };
+  const fresh = run({ chatTaskId: "" }, ask);
+  assert.equal(fresh.fixture.state.chatTaskId, "", "a new page: its own chat is the new one");
+  assert.equal(fresh.fixture.state.focusedPane, "main");
+  assert.deepEqual(fresh.pages.asked, []);
+
+  const roomy = run({ chatTaskId: "t0", splitPanes: tenScreens().slice(0, 2) }, ask);
+  assert.deepEqual(roomy.panes().at(-1), ["", 2, 0], "a new column, by the sending page's five columns, not this hidden page's one");
+  assert.equal(roomy.fixture.state.focusedPane, roomy.fixture.state.splitPanes.at(-1).id);
+
+  const unsent = run({ chatTaskId: "t0", splitPanes: tenScreens().map(item => item.id === "p4" ? { ...item, taskId: "" } : item) },
+    { ...ask, taskId: "t99" });
+  assert.equal(unsent.fixture.state.splitPanes.find(item => item.id === "p4").taskId, "t99", "the unsent screen shows it");
+  assert.equal(unsent.fixture.state.splitPanes.length, 9);
+
+  const full = run({ chatTaskId: "t0", splitPanes: tenScreens() }, ask);
+  assert.deepEqual(full.pages.asked, [{ from: 1, ...ask }], "full here too: on to the next page, with the pages tried");
+  const last = run({ chatTaskId: "t0", splitPanes: tenScreens() }, ask, false);
+  assert.deepEqual(last.panes().at(-1), ["", 4, 1], "nowhere left: the last chat makes way, as before pages");
 });
 
 test("Surface defaults to red Single and sends only one explicit route without saving a reusable team", async () => {
