@@ -23,6 +23,7 @@ export function ChatPages({ language, setError }: { language: Language; setError
   });
   const [visited, setVisited] = useState(() => [active]);
   const tabs = useRef<HTMLDivElement>(null);
+  const bar = useRef<HTMLElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const lastWheel = useRef(-Infinity);
   const selectPage = useCallback((page: number) => {
@@ -30,7 +31,17 @@ export function ChatPages({ language, setError }: { language: Language; setError
     setActive(page);
     try { localStorage.setItem(CHAT_PAGE_ACTIVE, String(page)); } catch { /* Keep this selection for the session. */ }
   }, []);
-  const registry = useMemo(() => createChatPageRegistry(selectPage), [selectPage]);
+  // A full page hands its new chat on: to another page, or one added for it, only while tabs show.
+  const latest = useRef(preferences);
+  latest.current = preferences;
+  const registry = useMemo(() => createChatPageRegistry(selectPage, {
+    count: () => latest.current.enabled ? latest.current.pageCount : 0,
+    canAdd: () => latest.current.enabled && latest.current.pageCount < CHAT_PAGE_LIMIT,
+    add: () => {
+      try { saveChatPagePreferences({ pageCount: latest.current.pageCount + 1 }); return true; }
+      catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false; }
+    },
+  }), [selectPage]);
   const navigate = (direction: number) => {
     const page = adjacentChatPage(active, direction, preferences.pageCount);
     selectPage(page);
@@ -48,8 +59,9 @@ export function ChatPages({ language, setError }: { language: Language; setError
     window.addEventListener("keydown", key, true);
     return () => window.removeEventListener("keydown", key, true);
   }, [active, preferences, covered, hidden]);
+  // Anywhere over the page bar (its arrows and + too): up the previous page, down the next.
   useEffect(() => {
-    const element = tabs.current;
+    const element = bar.current;
     if (!element || !preferences.enabled || !preferences.wheel || preferences.pageCount < 2) return;
     const wheel = (event: WheelEvent) => {
       if (hidden() || covered || event.ctrlKey || event.metaKey) return;
@@ -74,7 +86,7 @@ export function ChatPages({ language, setError }: { language: Language; setError
   };
   const pages = Array.from({ length: preferences.pageCount }, (_, index) => index + 1);
   return <div className="cx-chat-pages" ref={host}>
-    {preferences.enabled ? <nav className="cx-pages-bar" aria-label="Chat pages">
+    {preferences.enabled ? <nav className="cx-pages-bar" aria-label="Chat pages" ref={bar}>
       <button type="button" className="cx-page-step" aria-label="Previous chat page" aria-keyshortcuts={preferences.keyboard ? preferences.previous : undefined}
         title={preferences.keyboard ? `Previous page (${preferences.previous})` : "Previous page"} disabled={preferences.pageCount < 2} onClick={() => navigate(-1)}>‹</button>
       <div className="cx-page-tabs" ref={tabs} role="tablist" aria-label="Chat pages" onKeyDown={(event) => {

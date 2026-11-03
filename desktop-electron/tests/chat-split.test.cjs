@@ -39,6 +39,19 @@ test("a new pane takes a new column while one fits, then a free bottom row, then
   assert.deepEqual(plain(split.belowPlace([pane("a", 1, 0)], { col: 1, row: 0 }, 2)), { col: 1, row: 1 }, "New chat below: under the focused pane");
 });
 
+test("a page has room for a chat until all ten screens hold one", () => {
+  const ten = [pane("a", 0, 1), ...[1, 2, 3, 4].flatMap((col) => [pane(`t${col}`, col, 0), pane(`b${col}`, col, 1)])];
+  assert.equal(ten.length + 1, 10, "five columns of two, the window's chat included");
+  assert.equal(split.splitHasRoom(ten, 5, "main-chat"), false, "every screen a chat: full");
+  assert.equal(split.splitHasRoom(ten, 5, ""), true, "the window's chat not sent yet: a new chat can go there");
+  assert.equal(split.splitHasRoom(ten.map((item) => item.id === "b4" ? { ...item, taskId: "" } : item), 5, "main-chat"), true,
+    "a pane with an unsent chat is room");
+  assert.equal(split.splitHasRoom(ten.filter((item) => item.id !== "b4"), 5, "main-chat"), true, "a free cell is room");
+  assert.equal(split.splitHasRoom([], 5, "main-chat"), true, "one chat alone");
+  assert.equal(split.splitHasRoom([pane("a", 1, 0), pane("b", 0, 1), pane("c", 1, 1)], 2, "main-chat"), false,
+    "a narrow window's page fills at its own column count");
+});
+
 test("closing a pane leaves no gap: columns close up and a lone bottom pane moves to the top", () => {
   assert.deepEqual(plain(split.normalizeSplit([pane("b", 2, 0), pane("c", 2, 1)]).map((item) => [item.id, item.col, item.row])),
     [["b", 1, 0], ["c", 1, 1]]);

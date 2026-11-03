@@ -114,7 +114,7 @@
 .ao-workflow .cx-chat .cx-icon-button:hover:not(:disabled), .ao-workflow .cx-chat .cx-icon-button[aria-pressed="true"] { color: var(--claude-text); }
 
 /* ---------- Reading column ---------- */
-.ao-workflow .cx-chat .cx-column { gap: 22px; max-width: 788px; padding: 20px 24px 40px; }
+.ao-workflow .cx-chat .cx-column { gap: 22px; max-width: 788px; padding: 20px 24px 10px; }
 .ao-workflow .cx-chat .cx-turn { gap: 12px; }
 
 /* The user's message: a rounded beige bubble. */
@@ -366,8 +366,11 @@
 /* A pane is a Surface of its own: it fills its cell and draws no sidebar or drag strip. */
 .cx-pane > .cx-pane-surface { flex: 1 1 auto; height: auto; background: #faf9f5; }
 .cx-split[data-split] .cx-pane-close { color: var(--ao-muted); }
-/* A pane not focused shows its header actions only while hovered, as Claude Code's panes do. */
-.cx-split[data-split] > .cx-pane:not([data-focused]) .cx-thread-head > :is(.cx-icon-button, .cx-browser-chip, .cx-head-team) { opacity: 0; transition: opacity 0.12s ease-out; }
+/* A pane not focused dims its header actions until hovered. Hidden (as Claude Code's panes do), every
+   pane's head looked different and its buttons seemed gone (2026-11-03); faded, they stay in their row.
+   An icon fades by its colour, not its opacity, which would fade its plate (codex-chat.css) as well. */
+.cx-split[data-split] > .cx-pane:not([data-focused]) .cx-thread-head > :is(.cx-browser-chip, .cx-head-team) { opacity: 0.45; transition: opacity 0.12s ease-out; }
+.cx-split[data-split] > .cx-pane:not([data-focused]):not(:hover) .cx-thread-head > .cx-icon-button { color: color-mix(in srgb, var(--claude-text-2) 45%, transparent); }
 .cx-split[data-split] > .cx-pane:not([data-focused]):hover .cx-thread-head > :is(.cx-icon-button, .cx-browser-chip, .cx-head-team) { opacity: 1; }
 
 /* Claude Code's pane move: a grip at the top middle of each pane (its pill shows on hover), or the

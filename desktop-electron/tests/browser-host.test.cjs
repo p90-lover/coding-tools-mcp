@@ -570,9 +570,10 @@ test("session inspection delegates navigation and capability detection to the sh
         type: "result",
         value: {
           authenticated: true,
-          temporary: true,
+          newChat: true,
           url: "https://chatgpt.com/?temporary-chat=true",
           solAvailable: true,
+          extraHighAvailable: true,
           proAvailable: true,
         },
       };
@@ -583,9 +584,10 @@ test("session inspection delegates navigation and capability detection to the sh
 
   assert.deepEqual(inspected, {
     authenticated: true,
-    temporary: true,
+    newChat: true,
     url: "https://chatgpt.com/?temporary-chat=true",
     solAvailable: true,
+    extraHighAvailable: true,
     proAvailable: true,
   });
   assert.equal(calls.length, 2);
@@ -605,13 +607,33 @@ test("session inspection fails closed on incomplete shared-helper capability evi
     refreshChatGptHomeDocument: async () => {},
     runBrowserHelperOperation: async () => ({
       type: "result",
-      value: { authenticated: true, temporary: true, url: "https://chatgpt.com/?temporary-chat=true" },
+      value: { authenticated: true, newChat: true, url: "https://chatgpt.com/?temporary-chat=true" },
     }),
   });
   await assert.rejects(
     BrowserHost.prototype.runSessionInspection.call(fixture, true),
     /incomplete ChatGPT capability evidence/,
   );
+});
+
+test("session inspection rejects missing, false, and non-boolean new-chat helper evidence", async () => {
+  for (const newChat of [undefined, false, "true"]) {
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      helper: {},
+      descriptorPath: "/runtime/launcher-browser.json",
+      getConnectorName: () => "Codex Native",
+      logger: { info() {} },
+      view: { webContents: { getURL: () => "https://chatgpt.com/?temporary-chat=true" } },
+      runBrowserHelperOperation: async () => ({
+        type: "result",
+        value: { authenticated: true, temporary: true, newChat, url: "https://chatgpt.com/?temporary-chat=true" },
+      }),
+    });
+    await assert.rejects(
+      BrowserHost.prototype.runSessionInspection.call(fixture, false),
+      /invalid ChatGPT session evidence/,
+    );
+  }
 });
 
 test("browser surface reactivation preserves its last measured bounds", () => {

@@ -121,3 +121,26 @@ for (const scenario of [
   if (scenario.expected) assert.ok(sent.prompt.includes(scenario.expected));
   else assert.doesNotMatch(sent.prompt, /^1\./m, "an abandoned empty pin is absent from the submission");
 });
+
+// Asked for 2026-11-03: the preview "exact the same" as Codex's, with its tool bar (Codex 26.1016).
+test("the preview's tools carry Codex's instructions verbatim, and its tool bar is Codex's", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ImagePreview.tsx"), "utf8");
+  assert.ok(source.includes('export const REMOVE_BG_PROMPT = "Remove the background from this image. Keep all foreground subjects unchanged and fully intact, with clean, smooth edges. Make the background transparent.";'));
+  assert.ok(source.includes('export const ERASE_PROMPT = "Remove the area marked in the second image from the first image";'));
+  assert.ok(source.includes("export const resizePrompt = (ratio: string) => `Make the aspect ratio ${ratio}`;"));
+  for (const ratio of ['["Square", "1:1"', '["Portrait", "3:4"', '["Story", "9:16"', '["Landscape", "4:3"', '["Widescreen", "16:9"']) assert.ok(source.includes(ratio), ratio);
+  const bar = source.slice(source.indexOf('aria-label="Image editing tools"'), source.indexOf("Beside the scroller"));
+  assert.deepEqual([...bar.matchAll(/<span>(Markup|Comment|Remove BG|Erase|Resize)<\/span>/g)].map((match) => match[1]), ["Markup", "Comment", "Remove BG", "Erase", "Resize"]);
+  assert.ok(bar.includes('aria-label="Move toolbar"'), "a drag handle first");
+  for (const label of ['aria-label="Download"', 'aria-label="Close viewer" title="Close viewer"', 'title="Zoom"', "File actions for"]) assert.ok(source.includes(label), label);
+  assert.ok(source.includes("const ZOOM_CHOICES = [25, 50, 100, 150, 200];") && source.includes("Zoom to fit"));
+});
+
+test("Erase's strokes are round, and a tap leaves a dot", () => {
+  const calls = [];
+  const ctx = new Proxy({}, { get: (target, key) => key in target ? target[key] : (...args) => calls.push([key, ...args]), set: (target, key, value) => { target[key] = value; calls.push([`=${String(key)}`, value]); return true; } });
+  markup.paintStrokes(ctx, [{ points: [[10, 20]], width: 30 }, { points: [[0, 0], [5, 5]], width: 8 }, { points: [], width: 4 }], "#fff");
+  assert.deepEqual(calls.filter(([name]) => !name.startsWith("=")), [["beginPath"], ["moveTo", 10, 20], ["lineTo", 10.01, 20], ["stroke"], ["beginPath"], ["moveTo", 0, 0], ["lineTo", 5, 5], ["stroke"]]);
+  assert.deepEqual(calls.filter(([name]) => name === "=lineWidth").map(([, value]) => value), [30, 8], "each stroke keeps the brush it was drawn with");
+  assert.equal(ctx.lineCap, "round"); assert.equal(ctx.strokeStyle, "#fff");
+});
