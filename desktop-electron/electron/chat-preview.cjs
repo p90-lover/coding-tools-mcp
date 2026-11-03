@@ -227,9 +227,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * The previews. `createView(partition)` makes a WebContentsView, `attachView`/`detachView` add it to
  * or remove it from the main window, `contentSize()` is the window's content size [width, height],
+ * `isVisible()` reports whether the owner window can currently display the selected pane,
  * and `blockedPorts()` the app's own loopback service ports.
  */
-function createChatPreviews({ createView, attachView, detachView, contentSize = () => [VIEWPORT.width, VIEWPORT.height],
+function createChatPreviews({ createView, attachView, detachView, contentSize = () => [VIEWPORT.width, VIEWPORT.height], isVisible = () => true,
   blockedPorts = () => [], logger = console, now = Date.now, openContextMenu = null } = {}) {
   if (typeof createView !== "function") throw new Error("createView is required");
   const previews = new Map(); // key -> preview
@@ -264,7 +265,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
   function place(preview) {
     const contents = preview.view.webContents;
     if (contents.isDestroyed()) return;
-    const visible = shown?.key === preview.key;
+    const visible = shown?.key === preview.key && isVisible();
     // A clipped view can have a 0x0 native surface even when Blink emulates a viewport.
     // Keep background views at real bounds in their own invisible host.
     const moved = attachView?.(preview.view, visible) === true;
@@ -725,7 +726,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
         if (!preview) return failure("This chat has no page open yet; open one with preview_open first.");
         preview.usedAt = now();
         place(preview);
-        const hidden = shown?.key !== preview.key;
+        const hidden = shown?.key !== preview.key || !isVisible();
         const contents = preview.view.webContents;
         try {
           // Keep the page producing frames while its agent interacts, without OS window focus.
@@ -933,7 +934,7 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, Menu, clipboard
         window.once("closed", closeAll);
         // Back from the tray, a minimize or a (un)maximize, the renderer reports the same slot, so
         // nothing re-placed the page and it could come back white: it is placed and repainted here.
-        for (const event of ["restore", "show", "maximize", "unmaximize"]) {
+        for (const event of ["restore", "show", "maximize", "unmaximize", "hide", "minimize"]) {
           window.on(event, () => { try { previews.relayout(); } catch { /* closing */ } });
         }
       }
@@ -947,6 +948,10 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, Menu, clipboard
     contentSize: () => {
       const window = mainWindow();
       return window && !window.isDestroyed() ? window.getContentSize() : [VIEWPORT.width, VIEWPORT.height];
+    },
+    isVisible: () => {
+      const window = mainWindow();
+      return Boolean(window && !window.isDestroyed() && window.isVisible() && !window.isMinimized());
     },
   });
   return Object.freeze({ ...previews, closeAll });
