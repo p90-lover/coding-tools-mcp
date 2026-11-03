@@ -7839,8 +7839,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     },
     stop: ({ workspaceId, runId }) => controlRun({ workspaceId, runId, action: "stop" }),
   };
-  /** Whether the command approver's safety rules block this request text whatever anyone answers. */
-  const blockedRequest = (text) => hardDenied(text);
+  /** Automatic tools/subagents have no publication-review path, so every detected push waits on a person. */
+  const blockedRequest = (text) => hardDenied(text) || Boolean(gitPushRequest(text));
   restoreWakeups();
   restoreLoops();
   restoreQueues();

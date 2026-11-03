@@ -157,10 +157,60 @@ test('publication verdict caching changes with observed destinations and default
 test('quoted push text in an inspection is not a hard-denied publication action', () => {
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
   try {
-    assert.equal(workflow.blockedRequest('node lookup.cjs query "why git push origin main is denied"'), false);
+    assert.equal(workflow.blockedRequest('rg "why git push origin main is denied" docs'), false);
     assert.equal(workflow.blockedRequest('git push origin main'), true);
     assert.equal(workflow.blockedRequest('git push --force origin feat/fix'), true);
   } finally { workflow.dispose(); }
+});
+
+test("wrapped publications never inherit the full-access timeout allow", async () => {
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const command = (approval_id, value) => ({ approval_id, source: "ao", kind: "command", command: value,
+    since: "2000-01-01T00:00:00.000Z", decisions });
+  const requests = [
+    command("shell-main", 'bash -lc "git push origin main"'),
+    command("shell-force", 'cmd.exe /c "git push --force origin feat/fix"'),
+    command("env-feature", "env GIT_TERMINAL_PROMPT=0 git push origin feat/fix"),
+    command("escaped-main", "\\git push origin main"),
+    command("absolute-main", "/usr/bin/git push origin main"),
+    command("time-main", "time git push origin main"),
+    command("nice-main", "nice -n 10 git push origin main"),
+    command("unknown-main", "custom-runner -- git push origin main"),
+    command("rg-pre", 'rg --pre "git push origin main" needle file'),
+    { ...command("tool-json", ""), kind: "permission", command: undefined, tool: "mcp__coding-tools__exec_command",
+      toolInput: JSON.stringify({ cmd: 'sh -c "git push --delete origin feat/fix"' }) },
+    command("diagnostic", 'rg "why git push origin main is denied" docs'),
+    command("echo", 'echo "git push origin main"'),
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single",
+    grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "worker", role: "worker", state: "running", parents: [],
+      route: { harness_id: "ao:claude-code", model: "cpa/test-model", approval_policy: "never", approvals_reviewer: "user" },
+      receipt: { thread_id: "session", request_key: "key" } }] };
+  const resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => Date.parse("2026-11-03T00:00:00.000Z"),
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async endpoint => endpoint.endsWith("/read")
+      ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "turn", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([id]) => id === request.approval_id)) }),
+      resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.some(([id]) => id === "echo"); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(resolved.some(([id, decision]) => id === "diagnostic" && decision === "yes"), "the real timeout policy ran");
+    assert.ok(resolved.some(([id, decision]) => id === "echo" && decision === "yes"), "quoted diagnostics stay harmless");
+    assert.deepEqual(resolved.filter(([id, decision]) => !["diagnostic", "echo"].includes(id) && decision === "yes"), [],
+      "no wrapped protected, destructive or feature publication is allowed by elapsed time");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
 });
 
 test("archive and delete ask through confirmRecoverable, so turning the dialogs off in Settings skips them", async()=>{

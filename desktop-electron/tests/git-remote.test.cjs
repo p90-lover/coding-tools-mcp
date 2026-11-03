@@ -12,8 +12,14 @@ const { readBranch, readGitInfo, readRemote, repoSlug, gitPushRequest, reviewRem
 const HAS_GIT = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 
 test("publication parsing distinguishes a planned action from quoted diagnostic text", () => {
-  assert.equal(gitPushRequest('node lookup.cjs query "why git push origin main is denied"'), null);
+  assert.equal(gitPushRequest('rg "why git push origin main is denied" docs'), null);
   assert.equal(gitPushRequest('echo "git push origin main"'), null);
+  assert.equal(gitPushRequest('git log --grep="git push origin main"'), null);
+  assert.equal(gitPushRequest('rg "git push origin main" docs'), null);
+  assert.equal(gitPushRequest('node -e "console.log(\'git push origin main\')"'), null);
+  assert.equal(gitPushRequest('python -c "print(\'git push origin main\')"'), null);
+  assert.equal(gitPushRequest('command · Bash · echo "git push origin main"'), null);
+  assert.equal(gitPushRequest('permission · mcp__coding-tools__exec_command · ' + JSON.stringify({ cmd: 'rg "why git push origin main is denied" docs' })), null);
   for (const command of ['git push origin feat/fix', 'git -c credential.helper= -c "credential.helper=!gh auth git-credential" push origin refs/heads/feat/fix:refs/heads/feat/fix']) {
     const request = gitPushRequest(command);
     assert.equal(request.status, "review", command);
@@ -22,19 +28,58 @@ test("publication parsing distinguishes a planned action from quoted diagnostic 
   }
 });
 
-test("executable shell payloads cannot hide publication behind their wrapper", () => {
+test("wrapped, escaped and absolute Git publications stay fail-closed in command and tool inputs", () => {
+  const commands = [
+    'bash -lc "git push origin main"',
+    'sh -c "git push origin feat/fix"',
+    'cmd.exe /d /s /c "git push --force origin feat/fix"',
+    'powershell -NoProfile -Command "git push origin HEAD:master"',
+    'env GIT_TERMINAL_PROMPT=0 git push origin main',
+    'GIT_TERMINAL_PROMPT=0 git push --delete origin feat/fix',
+    '\\git push origin main',
+    'g\\it push origin feat/fix',
+    'git p\\ush origin main',
+    'bash -lc "g\\it p\\ush origin main"',
+    '/usr/bin/git push origin main',
+    '"C:/Program Files/Git/cmd/git.exe" push --mirror origin',
+    'node -e "require(\'child_process\').execSync(\'git push origin main\')"',
+    'python -c "import os; os.system(\'git push --delete origin feat/fix\')"',
+    'pwsh -Command "Invoke-Expression \'git push origin main\'"',
+    'Invoke-Expression "git push origin main"',
+    'iex "git push origin feat/fix"',
+    'eval "git push --force origin feat/fix"',
+    'call git push origin main',
+    '& { git push origin main }',
+    '{ git push origin main; }',
+    '(git push origin feat/fix)',
+    'node -e "console.log(\'git push origin main\'); require(\'child_process\').execSync(\'git push origin main\')"',
+    'echo "$(git push origin main)"',
+    'time git push origin main',
+    'nice -n 10 git push origin main',
+    'custom-runner -- git push origin main',
+    'node lookup.cjs query "why git push origin main is denied"',
+    'rg --pre "git push origin main" needle file',
+    'rg needle --pre="git push origin main" file',
+    'echo (git push origin main)',
+    "Write-Output ([scriptblock]::Create('git push origin main').Invoke())",
+    'git -c "alias.publish=!git push origin main" publish',
+  ];
+  for (const command of commands) {
+    for (const input of [command, JSON.stringify({ command }), JSON.stringify({ cmd: command }), 'command · Bash · ' + command,
+      'permission · mcp__coding-tools__exec_command · ' + JSON.stringify({ cmd: command }),
+      'permission · mcp__coding-tools__exec_command · input ' + JSON.stringify({ cmd: command })]) {
+      const request = gitPushRequest(input);
+      assert.ok(request && request.status !== "review", command + " cannot bypass publication checks");
+    }
+  }
+});
+
+test("known shells preserve passive diagnostics and protected publication classification", () => {
   for (const command of [
     'bash -lc "git push origin main"',
-    "sh -c 'git push origin main'",
-    'pwsh -NoProfile -Command "git push origin main"',
-    'powershell.exe -Command "git push origin main"',
-    'cmd.exe /d /s /c "git push origin main"',
+    'pwsh -Command "git push origin main"',
+    'cmd /c "git push origin main"',
   ]) assert.equal(gitPushRequest(command)?.status, "blocked", command);
-  for (const command of [
-    'bash -lc "git push origin feat/fix"',
-    'pwsh -Command "git push origin feat/fix"',
-    'cmd /c git push origin feat/fix',
-  ]) assert.equal(gitPushRequest(command)?.status, "unknown", command);
   for (const command of [
     `bash -lc 'printf "%s\\n" "git push origin main"'`,
     `pwsh -Command "Write-Output 'git push origin main'"`,

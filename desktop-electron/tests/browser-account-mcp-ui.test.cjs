@@ -145,6 +145,34 @@ test("management keeps partition sign-in evidence when the shown page has no aut
   assert(text(ui.card("main")).includes("Checking…"), "unknown is not signed out");
 });
 
+test("an active owner's idle or loading page preserves signed-in account proof when connecting MCP", async () => {
+  for (const authenticated of [false, null, undefined]) {
+    const ui = fixture();
+    ui.props.browser.authenticated = authenticated;
+    const connect = button(ui.card("main"), "Connect MCP");
+    assert.equal(connect.props.disabled, false);
+    connect.props.onClick();
+    await ui.flush();
+    assert.deepEqual(ui.calls.connector, ["main"], "the enabled button must use the same partition proof as its handler");
+    assert.deepEqual(ui.calls.switches, []);
+    assert(button(ui.card("main"), "Check connection"));
+  }
+});
+
+test("a member can connect through its signed-in active owner while that owner's page is idle", async () => {
+  const ui = fixture();
+  const [owner, member] = ui.accounts;
+  ui.props.browser.authenticated = false;
+  member.plan.workspaceId = owner.plan.workspaceId;
+  member.plan.workspaceRole = "standard-user";
+  const connect = button(ui.card(member.id), "Connect MCP");
+  assert.equal(connect.props.disabled, false);
+  connect.props.onClick();
+  await ui.flush();
+  assert.deepEqual(ui.calls.connector, [member.id], "owner eligibility cannot disappear when the handler maps the active account");
+  assert.deepEqual(ui.calls.switches, []);
+});
+
 test("tabs without an explicit account use their native thread's owner, not the account shown", () => {
   const ui = fixture(undefined, { threads: [{ threadId: "native-thread", accountId: "second", running: true }] });
   ui.props.browser.tabs = [{ id: "turn-tab", threadId: "native-thread", title: "Task", status: "running", otherAccount: true },

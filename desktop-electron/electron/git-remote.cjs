@@ -125,10 +125,10 @@ async function readGitInfo(folder, options) {
 /** A push is an action, not a quoted mention in a search, prompt or file being inspected. */
 function gitPushRequest(command) {
   if (typeof command !== "string") return null;
-  const wrappedInput = /^permission · [^\r\n]+? · input (\{[\s\S]*\})$/.exec(command);
+  const wrappedInput = /^(?:command|permission) · [^·\r\n]+ · (?:input (?=\{))?([\s\S]*)$/.exec(command);
   if (wrappedInput) return gitPushRequest(wrappedInput[1]);
   if (command.trimStart().startsWith("{")) {
-    try { const input = JSON.parse(command); return gitPushRequest(input.command ?? input.cmd); } catch { return null; }
+    try { const input = JSON.parse(command); return gitPushRequest(input.command ?? input.cmd); } catch { /* A shell block is not a JSON tool input. */ }
   }
   const segments = [[]];
   let word = "", quote = null;
@@ -147,19 +147,43 @@ function gitPushRequest(command) {
   endWord();
   const requests = [];
   for (const words of segments.filter(part => part.length)) {
-    const shellFlag = /(?:^|[\\/])(?:bash|sh)(?:\.exe)?$/i.test(words[0]) ? /^-(?:c|lc)$/i
-      : /(?:^|[\\/])(?:pwsh|powershell)(?:\.exe)?$/i.test(words[0]) ? /^-(?:Command|c)$/i
-        : /(?:^|[\\/])cmd(?:\.exe)?$/i.test(words[0]) ? /^\/c$/i : null;
+    const text = words.join(" ");
+    const pushText = /\bgit(?:\.exe)?\b[\s\S]*\bpush\b/i;
+    if (!pushText.test(text) && !pushText.test(text.replace(/\\(.)/g, "$1"))) continue;
+    const plainGit = /^git(?:\.exe)?$/i.test(words[0]);
+    const executable = words[0].replace(/\\/g, "/").split("/").at(-1).replace(/\.exe$/i, "").toLowerCase();
+    const gitExecutable = executable === "git" || /^git(?:\.exe)?$/i.test(words[0].replace(/\\(.)/g, "$1"));
+    // Only positively passive diagnostics may carry publication text without review. In
+    // particular, an unknown executable is not safe just because it is absent from a shell list.
+    const expansion = /[$`!]/.test(text) || /%[^%\r\n]+%/.test(text);
+    const literalArgs = words.slice(1).every(value => /^[\w\s./:@%+,=\\*?-]+$/.test(value));
+    const print = /^(?:echo|printf|Write-Output)$/i.test(words[0]) && literalArgs;
+    const lookup = /^rg(?:\.exe)?$/i.test(words[0]) && literalArgs && words.slice(1).every(value =>
+      !value.startsWith("-") || ["-n", "--line-number", "-F", "--fixed-strings", "-l", "--files-with-matches", "--no-heading", "--no-config", "--"].includes(value));
+    const log = plainGit && words[1] === "log" && literalArgs
+      && (words.length === 3 && words[2].startsWith("--grep=") || words.length === 4 && words[2] === "--grep");
+    const literalPrint = /^(?:node|bun|python[\d.]*)(?:\.exe)?$/i.test(words[0]) && words.length === 3
+      && ["-c", "-e", "-p", "--eval", "--print"].includes(words[1])
+      && /^(?:console\.log|print)\(\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\s*\);?$/.test(words[2]);
+    if (!quote && !expansion && (print || lookup || log || literalPrint)) continue;
+    const shellFlag = /^(?:bash|sh)$/.test(executable) ? /^-(?:c|lc)$/i
+      : /^(?:pwsh|powershell)$/.test(executable) ? /^-(?:Command|c)$/i
+        : executable === "cmd" ? /^\/c$/i : null;
     if (shellFlag) {
       const at = words.findIndex((value, index) => index > 0 && shellFlag.test(value));
-      const nested = at > 0 ? gitPushRequest(words.slice(at + 1).join(" ")) : null;
-      // A shell can change repository context; it cannot borrow the outer command's Git facts.
-      if (nested) requests.push(nested.status === "blocked" ? nested
-        : { status: "unknown", reason: "Review publication separately from its shell wrapper" });
+      if (at > 0) {
+        const nested = gitPushRequest(words.slice(at + 1).join(" "));
+        if (nested) requests.push(nested.status === "blocked" ? nested
+          : { status: "unknown", reason: "Review publication separately from its shell wrapper" });
+        continue;
+      }
+    }
+    if (!gitExecutable) {
+      requests.push({ status: "unknown", reason: "Noncanonical publication needs a separate, explicit Git command or a person" });
       continue;
     }
-    if (!/^git(?:\.exe)?$/i.test(words[0])) continue;
-    let index = 1, uncertain = Boolean(quote);
+    // An escaped or absolute executable must not borrow facts read using the app's plain Git.
+    let index = 1, uncertain = !plainGit || Boolean(quote);
     while (words[index]?.startsWith("-")) {
       const option = words[index++];
       if (option === "-c") {
@@ -168,7 +192,14 @@ function gitPushRequest(command) {
       } else if (option === "-C" || option === "--git-dir" || option === "--work-tree") { index++; uncertain = true; }
       else uncertain = true;
     }
-    if (words[index++] !== "push") continue;
+    const action = words[index++];
+    if (action !== "push") {
+      if (action?.replace(/\\(.)/g, "$1") !== "push") {
+        requests.push({ status: "unknown", reason: "Noncanonical publication needs a separate, explicit Git command or a person" });
+        continue;
+      }
+      uncertain = true;
+    }
     const rest = words.slice(index);
     const dangerous = rest.some(value => /^(?:\+|--(?:force(?:-with-lease|-if-includes)?|delete|mirror|all|tags|no-verify)(?:=|$)|-[^-]*[fd])/.test(value));
     const args = rest.filter(value => !["-u", "--set-upstream", "--dry-run", "-n"].includes(value));
