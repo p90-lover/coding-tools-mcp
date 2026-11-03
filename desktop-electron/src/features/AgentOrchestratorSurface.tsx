@@ -84,14 +84,6 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
-// How long a request the "Approve for me" reviewer has not answered stays hidden: longer than the
-// backend's whole review (REVIEW_DEADLINE_MS, about 3.5 min: three tries, their waits and the
-// decide pass), which then stops marking it awaiting_review and hands it to the person itself. At
-// one minute a slow review (a PowerShell check allowed after 114 s, retries while Codex's review
-// account was signed out) put a box in front of the person that the reviewer then answered anyway;
-// the user's call (2026-10-30): a request the reviewer may still accept is never theirs. This is
-// only the backstop for a request nothing screens at all.
-const REVIEW_GRACE_MS = 240_000;
 /**
  * A chat message refused only for the moment: the chat started working again under it (its
  * automatic retry), or the app window was not in front. The chat keeps it at the front of its queue
@@ -725,10 +717,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   // reading it while this filter runs during render threw "Cannot access … before initialization"
   // (the window's render error, every time a request was pending).
   const approvalRun = missions.find((mission) => mission.id === selectedRunId);
-  // A request still awaiting review after REVIEW_GRACE_MS is shown after all: when nothing was
-  // screening it (the run's loop had stopped, or its reads of the chat failed), it stayed hidden while
-  // the agent waited on it, and a long task sat "may be stuck" for hours.
-  const shownApprovals = pendingApprovalsHere.filter((approval) => !(approval.awaiting_review && Date.now() - seenAt(approval) < REVIEW_GRACE_MS) && !approvalAnsweredForYou(approval,
+  // The backend hands a failed or overdue review back explicitly; a client timer must never
+  // offer the same command to the person while its reviewer is deciding or delivering a verdict.
+  const shownApprovals = pendingApprovalsHere.filter((approval) => !approvalAnsweredForYou(approval,
     approvalRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
     Date.now() - seenAt(approval), Boolean(approvalRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
     const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);

@@ -3726,6 +3726,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // "Let the model judge": a decide pass that failed or still said "ask" is a deny, never the
       // person's: the request sat on the card though the switch was on.
       else if (judges) advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
+      else advice = { ...advice, unresolved: true };
     }
     if (advice.reviewed && approval.thread_id && advice.action === "deny") {
       reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
@@ -3750,7 +3751,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const offered = approval.request?.availableDecisions;
     if (Array.isArray(offered) && advice.action !== "ask"
       && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
-      advice = { action: "ask", reason: "Choose one of this request's own answers" };
+      advice = { action: "ask", unresolved: true, reason: "Choose one of this request's own answers" };
     }
     approverAdvice.set(approval.approval_id, advice);
     if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
@@ -3759,7 +3760,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
       const decision = aoDecision(approval, advice.action === "allow");
       const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
-      if (!decision) return `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
+      if (!decision) {
+        approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action,
+          reason: `The reviewer's decision is not offered by this request, so choose an answer yourself. It said ${advice.action}: ${advice.reason}` });
+        return null;
+      }
       if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false)) {
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
