@@ -343,7 +343,7 @@ test("a swap cut off midway is handed to a worker at the next start, which finis
   }
 });
 
-test("a cut-off swap whose staged files are gone is undone, and a worker that keeps dying is given up on", () => {
+test("a cut-off swap whose staged files are gone is undone, and capped retries keep recovery ownership", () => {
   const root = tempRoot();
   try {
     const fixture = updateFixture(root);
@@ -360,13 +360,16 @@ test("a cut-off swap whose staged files are gone is undone, and a worker that ke
     const result = readResult(installRoot);
     assert.deepEqual([result.ok, result.stage, result.failures], [false, "recover", 1]);
 
-    // A recovery worker that never finishes is started twice, then the app starts as it is.
+    // A recovery worker that never finishes is started twice; its repair journal stays after the cap.
     writeJsonDurable(journalPath, { ...createJournal(fixture.job, fixture.jobPath, 78), installRoot });
-    const spawnWorker = () => ({ pid: 4244, unref() {} });
+    let workers = 0;
+    const spawnWorker = () => { workers++; return { pid: 4244, unref() {} }; };
     assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", spawnWorker }), true);
     assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", spawnWorker }), true);
     assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", spawnWorker }), false);
-    assert.equal(fs.existsSync(journalPath), false);
+    assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", spawnWorker }), false);
+    assert.equal(workers, 2);
+    assert.equal(fs.existsSync(journalPath), true);
     // A refused worker start lets the app go on starting.
     writeJsonDurable(journalPath, { ...createJournal(fixture.job, fixture.jobPath, 79), installRoot });
     assert.equal(handOffUpdateRecovery(installRoot, { currentVersion: "0.7.0", spawnWorker: () => ({}) }), false);
@@ -693,3 +696,197 @@ test("a launch during an update's file swap waits for it; a marker whose worker 
     fsMod.rmSync(root, { recursive: true, force: true });
   }
 });
+
+/** Actual worker/controller code; every install file, process probe and launch is in memory. */
+function memoryUpdate(faults = {}) {
+  const vm = require("node:vm"), { Readable } = require("node:stream");
+  const root = path.resolve(__dirname, "../../aiTemp/update-memory-fixture");
+  const installRoot = path.join(root, "install"), stageRoot = path.join(installRoot, "_update", "stage-x"), filesRoot = path.join(stageRoot, "files");
+  const appPath = path.join(installRoot, "resources", "app.asar"), stagedApp = path.join(filesRoot, "resources", "app.asar");
+  const journalPath = path.join(installRoot, "_update", "journal.json"), jobPath = path.join(stageRoot, "job.json");
+  const workerSource = fs.readFileSync(workerPath, "utf8"), controllerPath = path.join(__dirname, "../electron/app-update.cjs");
+  const files = new Map(), directories = new Set(), descriptors = new Map(), launches = [], logs = [];
+  let nextFd = 0;
+  const owned = file => assert.ok(file === root || file.startsWith(root + path.sep), `fixture write outside its virtual root: ${file}`);
+  const missing = file => Object.assign(new Error(`fixture missing ${file}`), { code: "ENOENT" });
+  const io = {
+    mkdirSync(directory) { owned(directory); directories.add(directory); },
+    existsSync: file => files.has(file) || directories.has(file),
+    statSync(file, options) {
+      if (!files.has(file) && !directories.has(file)) { if (options?.throwIfNoEntry === false) return undefined; throw missing(file); }
+      return { isFile: () => files.has(file), isDirectory: () => directories.has(file), size: Buffer.byteLength(files.get(file) ?? "") };
+    },
+    readFileSync(file) { if (file === workerPath) return workerSource; if (!files.has(file)) throw missing(file); return files.get(file); },
+    writeFileSync(file, data) { owned(file); files.set(file, String(data)); },
+    appendFileSync(file, data) { owned(file); files.set(file, (files.get(file) ?? "") + data); logs.push(String(data)); },
+    openSync(file) { owned(file); files.set(file, ""); descriptors.set(++nextFd, file); return nextFd; },
+    writeSync(fd, data) { const file = descriptors.get(fd); files.set(file, files.get(file) + String(data)); return Buffer.byteLength(String(data)); },
+    fsyncSync() {}, closeSync: fd => descriptors.delete(fd),
+    linkSync(from, to) { owned(to); if (!files.has(from)) throw missing(from); files.set(to, files.get(from)); },
+    unlinkSync(file) { owned(file); files.delete(file); },
+    renameSync(from, to) {
+      owned(from); owned(to);
+      if (faults.swap && from === stagedApp && to === appPath) throw Object.assign(new Error("fixture placement failed"), { code: "EIO" });
+      if (faults.restore && from === `${appPath}.old-1000` && to === appPath) throw Object.assign(new Error("fixture restore denied"), { code: "EACCES" });
+      if (faults.journal && to === journalPath && JSON.parse(files.get(from)).state === "restoring") throw new Error("fixture journal rewrite failed");
+      if (!files.has(from)) throw missing(from);
+      files.set(to, files.get(from)); files.delete(from);
+    },
+    rmSync(file, options = {}) {
+      owned(file);
+      for (const known of [...files.keys()]) if (known === file || (options.recursive && known.startsWith(file + path.sep))) files.delete(known);
+      for (const known of [...directories]) if (known === file || (options.recursive && known.startsWith(file + path.sep))) directories.delete(known);
+    },
+    createReadStream(file) { if (!files.has(file)) throw missing(file); return Readable.from([Buffer.from(files.get(file))]); },
+  };
+  io.promises = {
+    readFile: async file => io.readFileSync(file), writeFile: async (...args) => io.writeFileSync(...args),
+    rm: async (...args) => io.rmSync(...args), access: async file => { if (!io.existsSync(file)) throw missing(file); },
+  };
+  class Clock extends Date { static now() { return 1000; } }
+  const fakeProcess = { pid: 42, platform: "win32", arch: "x64", env: {}, execPath: path.join(installRoot, "Coding Tools.exe"),
+    kill() { throw Object.assign(new Error("fixture parent exited"), { code: "ESRCH" }); } };
+  const dependencies = { "original-fs": io, "node:fs": io, "node:path": path, "node:crypto": require("node:crypto"), "node:zlib": require("node:zlib"),
+    "node:child_process": { spawn: (file, args) => { launches.push({ file, args }); return { on() {}, once() {}, unref() {} }; }, spawnSync: () => ({ status: 1, stdout: "" }) },
+    "./update.cjs": {},
+  };
+  const context = module => ({ module, __dirname: path.dirname(workerPath), Buffer, Date: Clock, process: fakeProcess,
+    require: name => { assert.ok(Object.hasOwn(dependencies, name), `unexpected fixture dependency ${name}`); return dependencies[name]; },
+    setTimeout: fn => { queueMicrotask(fn); return { unref() {} }; }, clearTimeout() {},
+  });
+  const workerModule = { exports: {} };
+  const worker = vm.runInNewContext(workerSource + "\n({applyJob,recoverJournal})", context(workerModule));
+  dependencies["./app-update-worker.cjs"] = workerModule.exports;
+  const controllerModule = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(controllerPath, "utf8"), context(controllerModule));
+  const original = { "resources/app.asar": "v1", "resources/runtime/manifest.json": runtimeManifest("0.7.0"), "resources/old.js": "old" };
+  const staged = { "resources/runtime/manifest.json": runtimeManifest(faults.verify ? "wrong-version" : "0.8.0"), "resources/new.js": "new", "resources/app.asar": "v2" };
+  for (const [rel, content] of Object.entries(original)) files.set(path.join(installRoot, ...rel.split("/")), content);
+  for (const [rel, content] of Object.entries(staged)) files.set(path.join(filesRoot, ...rel.split("/")), content);
+  directories.add(stageRoot); files.set(path.join(stageRoot, "app-update-worker.cjs"), workerSource);
+  const job = { version: "0.8.0", parentPid: 1, installRoot, stageRoot, filesRoot, executable: fakeProcess.execPath,
+    changed: Object.keys(staged), obsolete: ["resources/old.js"], logPath: path.join(root, "worker.log"),
+    installedManifest: { version: "0.8.0", files: Object.entries(staged).map(([rel, content]) => ({ path: rel, size: content.length, sha256: sha(content) })) } };
+  files.set(jobPath, JSON.stringify(job));
+  return { worker, helper: workerModule.exports, controller: controllerModule.exports, files, io, faults, launches, logs, job, jobPath, journalPath, stageRoot, installRoot, appPath,
+    journal: () => JSON.parse(files.get(journalPath)), result: () => JSON.parse(files.get(path.join(installRoot, "_update", "last-result.json"))),
+    read: rel => files.get(path.join(installRoot, ...rel.split("/"))),
+  };
+}
+
+test("rollback retention successful apply keeps repair files until health commit", async () => {
+  const f = memoryUpdate();
+  await f.worker.applyJob(f.jobPath);
+  assert.equal(f.read("resources/app.asar"), "v2");
+  assert.equal(f.journal().state, "placed");
+  assert.equal(f.read("resources/app.asar.old-1000"), "v1");
+  assert.equal(f.io.existsSync(f.stageRoot), true);
+  assert.equal(f.launches.length, 1);
+  assert.equal(f.controller.pendingAppliedUpdate(f.installRoot, "0.8.0"), true);
+  await f.controller.commitAppliedUpdate(f.installRoot, "0.8.0");
+  assert.equal(f.files.has(f.journalPath), false);
+  assert.equal(f.io.existsSync(f.stageRoot), false);
+  assert.equal(f.read("resources/app.asar.old-1000"), undefined);
+  assert.equal(f.read("resources/app.asar"), "v2");
+  assert.equal(f.result().stage, "started");
+});
+
+for (const failure of ["swap", "verify"]) {
+  test(`rollback retention ${failure} failure with a successful restore still cleans and relaunches`, async () => {
+    const f = memoryUpdate({ [failure]: true });
+    await f.worker.applyJob(f.jobPath);
+    assert.equal(f.read("resources/app.asar"), "v1");
+    assert.equal(f.read("resources/runtime/manifest.json"), runtimeManifest("0.7.0"));
+    assert.equal(f.read("resources/new.js"), undefined);
+    assert.equal(f.read("resources/old.js"), "old");
+    assert.equal(f.files.has(f.journalPath), false);
+    assert.equal(f.io.existsSync(f.stageRoot), false);
+    assert.equal(f.launches.length, 1);
+    assert.equal(f.result().ok, false);
+  });
+
+  test(`rollback retention ${failure} failure keeps an incomplete restore recoverable`, async () => {
+    const f = memoryUpdate({ [failure]: true, restore: true });
+    await f.worker.applyJob(f.jobPath);
+    assert.equal(f.files.has(f.journalPath), true);
+    assert.equal(f.journal().state, "restoring");
+    assert.equal(f.io.existsSync(f.stageRoot), true);
+    assert.equal(f.read("resources/app.asar.old-1000"), "v1");
+    assert.equal(f.read("resources/app.asar"), undefined);
+    assert.equal(f.launches.length, 0, "never launch a known incomplete install");
+    assert.equal(f.result().ok, false);
+    assert.match(f.result().message, /rollback incomplete/i);
+    assert.equal(f.logs.some(line => line.includes("was rolled back")), false);
+    assert.equal(f.files.has(path.join(f.installRoot, "_update", "applying.json")), false);
+    f.faults.restore = false; f.faults.swap = false;
+    await f.worker.recoverJournal(f.journalPath, 1);
+    assert.equal(f.read("resources/app.asar"), "v1");
+    assert.equal(f.files.has(f.journalPath), false);
+    assert.equal(f.io.existsSync(f.stageRoot), false);
+    assert.equal(f.launches.length, 1);
+  });
+}
+
+test("rollback retention keeps the original swap failure as its cause", async () => {
+  const f = memoryUpdate({ swap: true, restore: true });
+  await assert.rejects(f.helper.swapIn(f.job, 1000), error => {
+    assert.match(error.cause?.message ?? "", /placement failed/);
+    assert.match(error.message, /rollback incomplete/i);
+    assert.equal(error.rollbackFailures.length, 1);
+    return true;
+  });
+});
+
+test("rollback retention recovery failure retains resources and can be retried after the fault clears", async () => {
+  const f = memoryUpdate();
+  await f.worker.applyJob(f.jobPath);
+  f.files.set(f.journalPath, JSON.stringify({ ...f.journal(), state: "restoring" }));
+  f.launches.length = 0; f.faults.restore = true;
+  await f.worker.recoverJournal(f.journalPath, 1);
+  assert.equal(f.files.has(f.journalPath), true);
+  assert.equal(f.io.existsSync(f.stageRoot), true);
+  assert.equal(f.read("resources/app.asar.old-1000"), "v1");
+  assert.equal(f.launches.length, 0);
+  assert.match(f.result().message, /restore/i);
+  f.faults.restore = false;
+  await f.worker.recoverJournal(f.journalPath, 1);
+  assert.equal(f.read("resources/app.asar"), "v1");
+  assert.equal(f.files.has(f.journalPath), false);
+  assert.equal(f.io.existsSync(f.stageRoot), false);
+  assert.equal(f.launches.length, 1);
+});
+
+test("rollback retention preserves the original journal when writing restoring state fails", async () => {
+  const f = memoryUpdate({ swap: true, restore: true, journal: true });
+  await f.worker.applyJob(f.jobPath);
+  assert.equal(f.files.has(f.journalPath), true);
+  assert.equal(f.journal().state, "swapping", "failed replacement leaves the original durable journal");
+  assert.equal(f.io.existsSync(f.stageRoot), true);
+  assert.equal(f.read("resources/app.asar.old-1000"), "v1");
+  assert.equal(f.launches.length, 0);
+  f.faults.swap = false; f.faults.restore = false; f.faults.journal = false;
+  await f.worker.recoverJournal(f.journalPath, 1);
+  assert.equal(f.read("resources/app.asar"), "v2", "the existing swapping recovery may finish the verified new version");
+  assert.equal(f.journal().state, "placed");
+  assert.equal(f.launches.length, 1);
+});
+
+for (const state of ["swapping", "restoring"]) {
+  test(`rollback retention caps automatic ${state} retries without deleting recovery ownership`, async () => {
+    const f = memoryUpdate();
+    await f.worker.applyJob(f.jobPath);
+    f.files.set(f.journalPath, JSON.stringify({ ...f.journal(), state, attempts: 0 }));
+    const outcomes = [];
+    let workers = 0;
+    const spawnWorker = () => { workers++; return { pid: 1234, unref() {} }; };
+    assert.equal(f.controller.pendingAppliedUpdate(f.installRoot, "0.8.0"), false);
+    assert.equal(await f.controller.commitAppliedUpdate(f.installRoot, "0.8.0"), null);
+    for (let i = 0; i < 4; i++) outcomes.push(f.controller.handOffUpdateRecovery(f.installRoot, { currentVersion: "0.7.0", spawnWorker }));
+    assert.deepEqual(outcomes, [true, true, false, false]);
+    assert.equal(workers, 2);
+    assert.equal(f.files.has(f.journalPath), true);
+    assert.equal(f.journal().attempts, 2);
+    assert.equal(f.io.existsSync(f.stageRoot), true);
+    assert.equal(f.read("resources/app.asar.old-1000"), "v1");
+  });
+}
