@@ -176,7 +176,7 @@ app.whenReady().then(async()=>{
     button.textContent=String(count);
     button.onclick=()=>{
       button.textContent=String(++count);
-      window.openai.setWidgetState({modelContent:{counter:count},privateContent:null});
+      window.openai.setWidgetState({modelContent:{counter:count,selection:'blue'},privateContent:{marker:'private-ui-only'}});
     };
   </script>`;
   const answer='visualize'+JSON.stringify({path:fragmentPath})+'';
@@ -198,7 +198,11 @@ app.whenReady().then(async()=>{
     const button=read.elements.find(element=>element.name==="0");
     assert.ok(button,"each native owner starts with its own empty widget state");
     await call("preview_click",{ref:button.ref},nativeLease.servers[0]);
-    assert.ok((await call("preview_read",{},nativeLease.servers[0])).structuredContent.elements.some(element=>element.name==="1"));
+    const clicked=await call("preview_read",{},nativeLease.servers[0]);
+    assert.ok(clicked.structuredContent.elements.some(element=>element.name==="1"));
+    assert.deepEqual(clicked.structuredContent.modelContent,{counter:1,selection:"blue"});
+    assert.deepEqual(JSON.parse(clicked.content[0].text).modelContent,{counter:1,selection:"blue"});
+    assert.ok(!JSON.stringify(clicked).includes("private-ui-only"));
     const followupScope={...scope,runId:taskId+"-followup"};
     const followup=await tools.lease({agent:"codex",workspaceId:"ws1",previewOnly:true,expiresAt:Date.now()+120000,nativeScope:{runId:followupScope.runId,nodeId:followupScope.nodeId}});
     assert.equal(followup.bind(owner),true);
@@ -208,11 +212,13 @@ app.whenReady().then(async()=>{
     read=(await call("preview_read",{},followup.servers[0])).structuredContent;
     assert.ok(read.text.includes("AI updated this same panel"));
     assert.ok(read.elements.some(element=>element.name==="1"),"AI replacement preserves the clicked state across native follow-up leases");
+    assert.deepEqual(read.modelContent,{counter:1,selection:"blue"});
     assert.equal(parking.contentView.children.length,previousViews.size+1);
     assert.ok(parking.contentView.children.includes(view),"the same native WebContentsView survives AI replacement");
     await call("preview_navigate",{action:"reload"},followup.servers[0]);
     assert.ok((await call("preview_read",{},followup.servers[0])).structuredContent.elements.some(element=>element.name==="1"),"reload preserves native widget state");
     assert.equal(await view.webContents.executeJavaScript("window.openai.widgetState.modelContent.counter"),1);
+    assert.equal(await view.webContents.executeJavaScript("window.openai.widgetState.privateContent.marker"),"private-ui-only");
     const stateImage=(await call("preview_screenshot",{},followup.servers[0])).content.find(item=>item.type==="image");
     assert.ok(stateImage?.data?.length>100);
     if(!nativeOwners.length)fs.writeFileSync(path.join(work,"native-widget-state.png"),Buffer.from(stateImage.data,"base64"));
@@ -221,6 +227,10 @@ app.whenReady().then(async()=>{
   }
   assert.notEqual(nativeOwners[0].view,nativeOwners[1].view);
   assert.equal(await nativeOwners[0].view.webContents.executeJavaScript("window.openai.widgetState.modelContent.counter"),1);
+  await call("preview_open",{url},nativeOwners[1].lease.servers[0]);
+  const web=(await call("preview_read",{},nativeOwners[1].lease.servers[0])).structuredContent;
+  assert.equal(Object.hasOwn(web,"modelContent"),false);
+  assert.equal(Object.hasOwn(web,"modelContentUnavailable"),false);
   for(const entry of nativeOwners){entry.lease.release({ended:true});assert.equal(previews.state(entry.owner),null);}
   log("NATIVE_WIDGET_STATE_ISOLATION_PASS");
 
