@@ -886,7 +886,33 @@ test("the Subagents page's model picker lists the AO agent's own models, never W
   assert.deepEqual([...subagent.capabilities["cpa/m1"].efforts], ["high"]);
   assert.deepEqual(read, ["ao:claude-code"], "Native Codex's catalog is not read for it");
   const page = fs.readFileSync(path.resolve(__dirname, "../src/features/SubagentsSurface.tsx"), "utf8");
-  assert.equal(page.match(/<HarnessPicker\b[^>]*\bagentsOnly\b/g)?.length, 2, "both pickers on the page (default model and each subagent's)");
+  assert.match(page, /pickerModels\(harness, loadModels, true\)/, "the page reads each agent's own models, never WebGPT");
+});
+
+test("the Subagents page lists every agent's models once, and a model runs on an agent that lists it", () => {
+  // Reported 2026-11-03: with Claude Code as the page's agent, Gemini 3.8 Flash was missing (Claude
+  // Code's list leaves out Antigravity's models, which refuse it) and the saved default read "no longer listed".
+  const page = load("SubagentsSurface.tsx", { "./AgentOrchestratorSurface": {}, "./AgentOrchestratorRoleEditor": roles });
+  const plainOf = (value) => JSON.parse(JSON.stringify(value));
+  const choices = page.modelChoices([
+    { harness: "ao:codex", catalog: { models: ["cpa/gemini-3.8-flash-high", "cpa/gpt-6.1-sol"], capabilities: { "cpa/gemini-3.8-flash-high": { efforts: ["low", "high"] } } } },
+    { harness: "ao:claude-code", catalog: { models: ["cpa/gpt-6.1-sol", "default"] } },
+  ]);
+  assert.deepEqual(plainOf(choices.map((choice) => [choice.model, choice.harnesses])),
+    [["cpa/gpt-6.1-sol", ["ao:claude-code", "ao:codex"]], ["cpa/gemini-3.8-flash-high", ["ao:codex"]]], "each model once, Claude Code first; no bare \"default\"");
+  assert.deepEqual(plainOf(page.routeForModel("cpa/gemini-3.8-flash-high", choices, "ao:claude-code")),
+    { harness_id: "ao:codex", model: "cpa/gemini-3.8-flash-high", provider_id: "agent-orchestrator" }, "Gemini goes to the agent that runs it");
+  assert.equal(page.routeForModel("cpa/gpt-6.1-sol", choices, "ao:codex").harness_id, "ao:codex", "a model keeps an agent that runs it");
+  assert.equal(page.routeForModel("cpa/gone", choices), null);
+  const saved = { harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high", effort: "high" };
+  assert.deepEqual(plainOf(page.runnableRoute(saved, choices)),
+    { harness_id: "ao:codex", model: "cpa/gemini-3.8-flash-high", provider_id: "agent-orchestrator", effort: "high" }, "a saved default Claude Code can't run moves, keeping an effort its new agent offers");
+  assert.equal(page.runnableRoute({ ...saved, effort: "max" }, choices).effort, undefined, "an effort the new agent doesn't offer goes");
+  const listed = { harness_id: "ao:claude-code", model: "cpa/gpt-6.1-sol" };
+  assert.equal(page.runnableRoute(listed, choices), listed, "a route its agent runs stays as it is");
+  assert.equal(page.runnableRoute(null, choices), null);
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/SubagentsSurface.tsx"), "utf8");
+  assert.doesNotMatch(source, /HarnessPicker|Clear default model|On for new chats|All changes saved/, "no harness field, default buttons, status pills or idle save text");
 });
 
 test("edits on the Subagents page survive leaving the page and coming back before saving", () => {

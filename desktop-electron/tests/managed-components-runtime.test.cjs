@@ -479,6 +479,80 @@ test("manifest validation rejects remote listeners, unpinned sources, path escap
   );
 });
 
+for (const update of [false, true]) for (const failure of ["none", "mkdir", "request", "prepare", "failure-record"]) {
+  test(`managed install bookkeeping: ${update ? "update" : "base"} ${failure}`, async () => {
+    const vm = require("node:vm"), ts = require("typescript");
+    const sourcePath = require.resolve("../electron/managed-components.cjs");
+    const tree = ts.createSourceFile(sourcePath, fs.readFileSync(sourcePath, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const names = new Set(["installComponent", "operationState", "operationKey", "setOperation", "emit"]);
+    const bodies = [];
+    const visit = node => {
+      if (ts.isFunctionDeclaration(node) && names.has(node.name?.text)) bodies.push(node.getText(tree));
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
+    assert.equal(bodies.length, names.size);
+    const base = { id: "cpa", name: "fixture CPA", version: "1.0.0", strategy: "release-binary" };
+    const manifest = update ? { ...base, version: "2.0.0", updatedFrom: "1.0.0" } : base;
+    const key = update ? "cpa:update" : "cpa";
+    const activeOperation = { state: "installed", step: null, error: null };
+    const operations = new Map(update ? [["cpa", activeOperation]] : []);
+    const root = path.join(__dirname, "virtual-managed-install"), aiTempRoot = path.join(root, "aiTemp");
+    const original = new Error(`fixture ${failure} failed`), diagnostic = new Error("fixture FAILED record failed");
+    let installed = false, injected = false, prepares = 0, published = 0, release, entered;
+    const preparation = new Promise(resolve => { release = resolve; });
+    const preparing = new Promise(resolve => { entered = resolve; });
+    const install = vm.runInNewContext(bodies.join("\n") + "\ninstallComponent", {
+      Error, operations, manifests: new Map([["cpa", base]]), path, crypto, aiTempRoot, platform: "win32", arch: "x64",
+      requiredComponentId: id => { assert.equal(id, "cpa"); return id; }, manifestFor: () => base,
+      refreshSourceState: async () => ({ state: installed ? "installed" : "not-installed" }),
+      missingCredentials: () => [], componentState: () => path.join(root, "state"),
+      now: () => "fixture-time", timestampSegment: value => value,
+      assertWithin: (parent, child) => assert.ok(child.startsWith(parent + path.sep)),
+      snapshot: () => ({ components: [] }), publish: () => { published++; throw new Error("fixture observer failed"); },
+      fs: {
+        existsSync: () => false,
+        mkdirSync(directory) {
+          if (failure === "mkdir" && directory.startsWith(aiTempRoot) && !injected) { injected = true; throw original; }
+        },
+        renameSync() { installed = true; },
+      },
+      writeJson(file) {
+        if (failure === "request" && path.basename(file) === "INSTALL_REQUEST.json" && !injected) { injected = true; throw original; }
+        if (failure === "failure-record" && path.basename(file) === "FAILED.json") throw diagnostic;
+      },
+      prepareReleaseBinary: async () => {
+        prepares++;
+        if (prepares === 1 && ["prepare", "failure-record"].includes(failure)) throw original;
+        if (failure === "none") { entered(); await preparation; }
+        return { artifact: "" };
+      },
+      executeInstallSteps: async () => {}, expectedMarker: () => ({}), markerArtifactRelative: () => null,
+      markerPath: home => path.join(home, "marker.json"), componentHome: () => path.join(root, manifest.version),
+      project: () => ({ state: operations.get(key)?.state }),
+    });
+    const options = update ? { manifest } : {};
+    if (failure === "none") {
+      const pending = install("cpa", options);
+      await preparing;
+      await assert.rejects(install("cpa", options), /already running/);
+      release();
+      await pending;
+      assert.equal(prepares, 1);
+    } else {
+      await assert.rejects(install("cpa", options), error => error === original, "diagnostics must not replace the original error");
+      assert.equal(operations.get(key).state, "error");
+      assert.equal(operations.get(key).step, null);
+      assert.equal(operations.get(key).error, original.message);
+      await install("cpa", options);
+    }
+    assert.equal(operations.get(key).state, "installed");
+    assert.equal(operations.get(key).error, null);
+    if (update) assert.equal(operations.get("cpa"), activeOperation, "candidate progress must not replace the active version's operation");
+    assert.ok(published > 0, "the actual emit contains observer exceptions");
+  });
+}
+
 test("release installation verifies bytes, activates atomically and reports the pinned install", async () => {
   const { controller, payload } = controllerFixture();
   const installed = await controller.installComponent("cpa");

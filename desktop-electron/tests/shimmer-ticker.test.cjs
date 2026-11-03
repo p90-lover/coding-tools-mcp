@@ -143,3 +143,49 @@ test("shimmer ticker pauses an animation started in a hidden document without ad
   [...timers.values()][0].fn();
   assert.equal(shimmer.currentTime, 5000);
 });
+
+test("shimmer ticker reads every animation before pausing or retiming any of them", () => {
+  const { install, doc, timers, element, animation, start } = setup();
+  install(doc);
+  const tracked = Array.from({ length: 12 }, () => {
+    const host = element();
+    const shimmer = animation("cx-shimmer", host);
+    start("cx-shimmer", host);
+    return shimmer;
+  });
+  const operations = [];
+  for (const [index, shimmer] of tracked.entries()) {
+    Object.defineProperty(shimmer, "playState", { get() { operations.push(`read-${index}`); return "running"; } });
+    shimmer.pause = () => operations.push(`pause-${index}`);
+    Object.defineProperty(shimmer, "currentTime", { set() { operations.push(`write-${index}`); } });
+  }
+  doc.timeline.currentTime = 2000;
+  [...timers.values()][0].fn();
+  assert.equal(operations.filter(op => op.startsWith("read-")).length, 12, "one state read per animation");
+  const lastRead = operations.map(op => op.startsWith("read-")).lastIndexOf(true);
+  const firstWrite = operations.findIndex(op => !op.startsWith("read-"));
+  assert.ok(firstWrite > lastRead, `no animation write may precede a later state read: ${operations.join(", ")}`);
+  assert.equal(operations.filter(op => op.startsWith("pause-")).length, 12);
+  assert.equal(operations.filter(op => op.startsWith("write-")).length, 12);
+});
+
+test("shimmer ticker flushes pending style at most once per step, not once per shimmer", () => {
+  const { install, doc, timers, element, animation, start } = setup();
+  install(doc);
+  const tracked = Array.from({ length: 12 }, () => {
+    const host = element();
+    const shimmer = animation("dsh-shimmer", host);
+    start("dsh-shimmer", host);
+    return shimmer;
+  });
+  let dirty = true, flushes = 0;
+  const times = [];
+  for (const shimmer of tracked) {
+    Object.defineProperty(shimmer, "playState", { get() { if (dirty) { flushes++; dirty = false; } return "paused"; } });
+    Object.defineProperty(shimmer, "currentTime", { set(value) { dirty = true; times.push(value); } });
+  }
+  doc.timeline.currentTime = 2500;
+  [...timers.values()][0].fn();
+  assert.equal(flushes, 1, "reading playState after retiming an earlier shimmer forces another style flush");
+  assert.deepEqual(times, Array(12).fill(2500), "every shimmer keeps the same clock and frame");
+});

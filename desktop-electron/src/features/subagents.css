@@ -1,6 +1,6 @@
 /* Runtime > Subagents. The page carries its own palette (the chat's warm Claude light surface): it
    used the launcher's dark tokens for borders, fields and secondary text, which on its white
-   .ao-workflow surface left them invisible. The model pickers are the team editor's HarnessPicker. */
+   .ao-workflow surface left them invisible. */
 .subagents-page {
   --sa-bg: #faf9f5;
   --sa-panel: #ffffff;
@@ -18,7 +18,7 @@
   --sa-red: #c2463a;
   --sa-amber: #a86b12;
   --sa-shadow: 0 1px 2px rgb(31 30 29 / 4%), 0 4px 14px rgb(31 30 29 / 5%);
-  /* What the shared HarnessPicker and native controls read. */
+  /* What native controls read. */
   --color-text-primary: var(--sa-text);
   --color-text-secondary: var(--sa-text-2);
   --color-text-tertiary: var(--sa-text-3);
@@ -39,17 +39,12 @@
 .subagents-scroll { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: auto; padding: 36px 32px 96px; }
 .subagents-scroll > * { max-width: 820px; margin-left: auto; margin-right: auto; }
 
-/* ---------- Header ---------- */
-.sa-hero { margin-bottom: 8px; }
-.sa-hero h1 { margin: 0 0 8px; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
-.sa-hero p { margin: 0; max-width: 640px; color: var(--sa-text-2); font-size: 13.5px; line-height: 1.55; }
-.sa-hero-stats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
-.sa-pill { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border: 1px solid var(--sa-line-soft); border-radius: 999px; background: var(--sa-panel); color: var(--sa-text-2); font-size: 12px; }
-.sa-pill.is-on { border-color: rgb(63 125 46 / 25%); background: rgb(63 125 46 / 8%); color: var(--sa-green); }
-.sa-pill.is-running { border-color: rgb(47 111 219 / 25%); background: rgb(47 111 219 / 8%); color: var(--sa-blue); }
-/* margin-top only: a shorthand margin here reset the column's auto side margins (.subagents-scroll > *),
+/* ---------- Header: the title and the page's one on/off switch ---------- */
+.sa-hero { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.sa-hero h1 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
+/* Longhand margins only: a shorthand margin here reset the column's auto side margins (.subagents-scroll > *),
    and the banner sat on the page's left edge instead of in the column. */
-.sa-notice, .sa-warning { margin-top: 16px; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.45; }
+.sa-notice, .sa-warning { margin-top: 0; margin-bottom: 16px; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.45; }
 .sa-notice { border: 1px solid rgb(63 125 46 / 20%); background: rgb(63 125 46 / 7%); color: var(--sa-green); }
 .sa-warning { border: 1px solid rgb(168 107 18 / 22%); background: rgb(168 107 18 / 8%); color: var(--sa-amber); }
 
@@ -58,19 +53,16 @@
 .sa-section h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; color: var(--sa-text); font-size: 14px; font-weight: 600; }
 .sa-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .sa-section-head h2 { margin: 0; }
-.sa-count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--sa-hover); color: var(--sa-text-2); font-size: 11.5px; font-weight: 500; line-height: 20px; text-align: center; }
 .sa-panel { border: 1px solid var(--sa-line); border-radius: 12px; background: var(--sa-panel); box-shadow: var(--sa-shadow); }
-.sa-panel.is-padded { display: grid; gap: 12px; padding: 16px; }
-.sa-hint { margin: 0; color: var(--sa-text-2); font-size: 12.5px; }
 .sa-empty { margin: 0; color: var(--sa-text-2); font-size: 13px; }
 .sa-empty.is-page { padding: 40px; }
 
-/* A settings row: text on the left, its control on the right, a hairline between rows. */
-.sa-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 24px; padding: 14px 16px; }
+/* A settings row: its label on the left, its control on the right, a hairline between rows. */
+.sa-panel.is-off .sa-row { opacity: .55; }
+.sa-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 24px; min-height: 48px; padding: 8px 16px; box-sizing: border-box; }
 .sa-row + .sa-row { border-top: 1px solid var(--sa-line-soft); }
-.sa-row-text strong { display: block; color: var(--sa-text); font-size: 13px; font-weight: 500; }
-.sa-row-text p { max-width: 520px; margin: 3px 0 0; color: var(--sa-text-2); font-size: 12.5px; line-height: 1.45; }
-.sa-row-control { display: flex; align-items: center; justify-content: flex-end; }
+.sa-row-label { color: var(--sa-text); font-size: 13px; font-weight: 500; }
+.sa-row-control { display: flex; align-items: center; justify-content: flex-end; min-width: 0; }
 
 /* ---------- Controls ---------- */
 .sa-switch { position: relative; flex: none; width: 34px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: rgb(31 30 29 / 18%); cursor: pointer; transition: background .15s ease; }
@@ -84,8 +76,7 @@
 .subagents-page .sa-number input, .subagents-page .sa-select { height: 30px; border: 1px solid var(--sa-line); border-radius: 8px; background: var(--sa-field); color: var(--sa-text); font: inherit; font-size: 13px; }
 .subagents-page .sa-number input { width: 64px; padding: 0 8px; text-align: right; }
 .subagents-page .sa-select { width: auto; min-width: 150px; padding: 0 8px; }
-.subagents-page .sa-number input:focus, .subagents-page .sa-select:focus, .subagents-page .sa-field textarea:focus, .subagents-page .sa-agent-name:focus,
-.subagents-page .sa-picker select:focus, .subagents-page .sa-picker input:focus { border-color: var(--sa-accent); outline: 2px solid var(--sa-accent-soft); }
+.subagents-page .sa-number input:focus, .subagents-page .sa-select:focus, .subagents-page .sa-text:focus, .subagents-page .sa-agent-name:focus { border-color: var(--sa-accent); outline: 2px solid var(--sa-accent-soft); }
 .sa-button { display: inline-flex; align-items: center; height: 30px; padding: 0 12px; border: 1px solid var(--sa-line); border-radius: 8px; background: var(--sa-panel); color: var(--sa-text); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; }
 .sa-button:hover:not(:disabled) { background: var(--sa-hover); }
 .sa-button:disabled { cursor: default; opacity: .5; }
@@ -97,40 +88,21 @@
 .sa-icon-button { display: grid; flex: none; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: none; color: var(--sa-text-3); cursor: pointer; }
 .sa-icon-button:hover { background: rgb(194 70 58 / 9%); color: var(--sa-red); }
 
-/* The team editor's model picker: its labelled selects in two columns. */
-.sa-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; align-items: start; }
-.sa-picker > label { display: grid; gap: 5px; min-width: 0; color: var(--sa-text-2); font-size: 12px; font-weight: 500; }
-.subagents-page .sa-picker select, .subagents-page .sa-picker input { width: 100%; height: 32px; min-width: 0; box-sizing: border-box; padding: 0 8px; border: 1px solid var(--sa-line); border-radius: 8px; background: var(--sa-field); color: var(--sa-text); font: inherit; font-size: 12.5px; }
-.subagents-page .sa-picker select:disabled, .subagents-page .sa-picker input:disabled { background: var(--sa-bg); color: var(--sa-text-3); }
-.sa-picker p, .sa-picker small { grid-column: 1 / -1; margin: 0; color: var(--sa-text-2); font-size: 12px; }
-/* The picker's tuning group (effort, context window, back to the model's defaults). */
-.subagents-page .sa-picker .ao-route-tuning { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; min-width: 0; margin: 2px 0 0; padding: 10px 12px 12px; border: 1px solid var(--sa-line-soft); border-radius: 10px; background: var(--sa-bg); }
-.subagents-page .sa-picker .ao-route-tuning legend { padding: 0 4px; color: var(--sa-text-2); font-size: 11.5px; font-weight: 500; }
-.subagents-page .sa-picker .ao-route-tuning > label { display: grid; gap: 5px; min-width: 0; color: var(--sa-text-2); font-size: 12px; }
-.subagents-page .sa-picker .ao-route-tuning .ao-wide { grid-column: 1 / -1; }
-.subagents-page .sa-picker .ao-route-tuning button { justify-self: start; width: auto; height: 28px; padding: 0 10px; border: 1px solid var(--sa-line); border-radius: 7px; background: var(--sa-panel); color: var(--sa-text); font: inherit; font-size: 12px; cursor: pointer; }
-.subagents-page .sa-picker .ao-route-tuning button:hover { background: var(--sa-hover); }
-.subagents-page .sa-picker .ao-route-tuning .ao-hint { margin: 0; color: var(--sa-text-3); font-size: 11.5px; }
-
 /* ---------- Subagent cards ---------- */
 .sa-agents { display: grid; gap: 12px; }
-.sa-agent { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--sa-line); border-radius: 12px; background: var(--sa-panel); box-shadow: var(--sa-shadow); transition: opacity .15s ease; }
+.sa-agent { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--sa-line); border-radius: 12px; background: var(--sa-panel); box-shadow: var(--sa-shadow); transition: opacity .15s ease; }
 .sa-agent.is-off { opacity: .6; }
 .sa-agent-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.sa-avatar { display: grid; flex: none; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: var(--sa-accent-soft); color: var(--sa-accent); font-size: 15px; font-weight: 600; }
-.sa-agent-title { display: grid; flex: 1 1 auto; gap: 1px; min-width: 0; }
-.subagents-page .sa-agent-name { width: 100%; min-width: 0; height: 26px; box-sizing: border-box; margin-left: -6px; padding: 0 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--sa-text); font: inherit; font-size: 14.5px; font-weight: 600; }
+.subagents-page .sa-agent-name { flex: 1 1 auto; width: 100%; min-width: 0; height: 26px; box-sizing: border-box; margin-left: -6px; padding: 0 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--sa-text); font: inherit; font-size: 14.5px; font-weight: 600; }
 .subagents-page .sa-agent-name:hover { background: var(--sa-hover); }
-.sa-agent-title code { overflow: hidden; color: var(--sa-text-3); font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
-.sa-field { display: grid; gap: 6px; min-width: 0; }
-.sa-field > span { color: var(--sa-text); font-size: 12.5px; font-weight: 500; }
-.sa-field > span small { margin-left: 6px; color: var(--sa-text-3); font-size: 11.5px; font-weight: 400; }
-.subagents-page .sa-field textarea { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--sa-line); border-radius: 8px; background: var(--sa-field); color: var(--sa-text); font: inherit; font-size: 13px; line-height: 1.5; resize: vertical; }
-.sa-field textarea::placeholder { color: var(--sa-text-3); }
-.sa-segmented { display: inline-flex; justify-self: start; gap: 2px; padding: 3px; border: 1px solid var(--sa-line-soft); border-radius: 9px; background: var(--sa-bg); }
-.sa-segmented button { display: inline-flex; align-items: baseline; gap: 6px; height: 26px; padding: 0 10px; border: 0; border-radius: 7px; background: none; color: var(--sa-text-2); font: inherit; font-size: 12.5px; cursor: pointer; }
-.sa-segmented button small { color: var(--sa-text-3); font-size: 11.5px; }
-.sa-segmented button[aria-checked="true"] { background: var(--sa-panel); color: var(--sa-text); box-shadow: 0 1px 2px rgb(31 30 29 / 10%); }
+/* A model and, when it offers one, its effort. */
+.sa-model { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.subagents-page .sa-model .sa-select { min-width: 220px; max-width: 100%; }
+.subagents-page .sa-model .sa-select.is-effort { min-width: 130px; }
+.sa-agent > .sa-model .sa-select:first-child { flex: 1 1 260px; }
+.subagents-page .sa-text { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--sa-line); border-radius: 8px; background: var(--sa-field); color: var(--sa-text); font: inherit; font-size: 13px; line-height: 1.5; resize: vertical; }
+.sa-text::placeholder { color: var(--sa-text-3); }
+.sa-label { display: grid; gap: 4px; min-width: 0; color: var(--sa-text-2); font-size: 11.5px; font-weight: 500; }
 
 /* ---------- Runs ---------- */
 .sa-runs { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
@@ -154,14 +126,12 @@
 /* Its content lines up with the page's 820 px column (.subagents-scroll), not the window's edges. */
 .sa-savebar { position: absolute; right: 0; bottom: 0; left: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px max(32px, calc((100% - 820px) / 2)); border-top: 1px solid var(--sa-line-soft); background: rgb(250 249 245 / 92%); backdrop-filter: blur(8px); color: var(--sa-text-3); font-size: 12.5px; }
 .sa-savebar > span { margin-right: auto; }
-.sa-savebar.is-dirty > span { color: var(--sa-text-2); }
 .sa-savebar.is-error > span { color: var(--sa-amber); font-weight: 500; }
 
 @media (max-width: 680px) {
   .subagents-scroll { padding: 24px 16px 96px; }
   .sa-row { grid-template-columns: 1fr; gap: 10px; }
   .sa-row-control { justify-content: flex-start; }
-  .sa-picker { grid-template-columns: 1fr; }
   .sa-savebar { padding: 12px 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
