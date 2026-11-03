@@ -565,14 +565,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       logger?.info?.("ao.effort_fitted", { model: baseModel.slice(0, 120), effort, fitted: fitted || "auto" });
       effort = fitted;
     }
-    // Keep the body setting for harnesses that can forward it, but Claude Code also needs the
-    // validated suffix: AO clears AgentConfig.Effort for gateway sessions before its ACP driver
-    // runs, so a bare model lost "max" and DeepSeek requests fell back to "low". CPA's providers
-    // and Provider Manager read the suffix before the translated body's effort. Only a fitted
-    // level goes in the name: never "auto", an unsupported level, or a verbatim plugin's model.
+    // Keep the body setting for harnesses that can forward it, but both Claude Code and Codex
+    // need the validated suffix: AO clears AgentConfig.Effort for every gateway session. A bare
+    // model therefore lost "max"/"xhigh" before either driver ran. CPA's providers and Provider
+    // Manager read the suffix before the translated body's effort. Only a fitted level goes in
+    // the name: never "auto", an unsupported level, or a verbatim plugin's model.
     const bodyEffort = Boolean(viaCpa) && !verbatim && BODY_EFFORT_AGENTS.has(agent);
     let wireModel = viaCpa ? (verbatim || bodyEffort ? baseModel : viaCpa) : viaCpa;
-    if (viaCpa && effort && !verbatim && (!bodyEffort || agent === "claude-code")) {
+    if (viaCpa && effort && !verbatim) {
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = baseModel + "(" + effort + ")";
     }
@@ -3437,6 +3437,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // timeout left only the card's own model for ten minutes.
     const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
+    // This call bypasses the agent gateway: a same-model fallback still needs the card's effort.
+    // A different reviewer (notably codex-auto-review) keeps its own default, not the worker's max.
+    const route = approver.route ?? {};
+    const own = route.provider_id === "cliproxyapi-antigravity" ? route.model
+      : route.model?.startsWith(CPA_MODEL_PREFIX) ? route.model.slice(CPA_MODEL_PREFIX.length) : null;
+    const picked = route.effort ?? own?.match(/\((none|minimal|low|medium|high|xhigh|max|ultra)\)$/i)?.[1]?.toLowerCase();
+    const reviewEfforts = Object.fromEntries(candidates.map(model => {
+      const capability = catalog.capabilities?.[model];
+      const takes = CLINE_EFFORTS.get(model) ?? capability?.efforts;
+      const effort = model === own && tuningEfforts.has(picked) && picked !== "auto" && !verbatimModel(model, capability?.provider)
+        ? (Array.isArray(takes) ? nearestEffort(picked, takes) : picked) : "";
+      return [model, effort];
+    }));
     const deadline = now() + REVIEW_BUDGET_MS;
     const [folder, task, evidence] = await Promise.all([requestFolder(approval, mission), requestTask(mission), requestEvidence(approval)]);
     const scripts = await reviewScriptExcerpts(approval, folder);
@@ -3477,7 +3490,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The cache key leaves the evidence out (it changes with every step), so the same request in the
     // same chat still costs one review. Only an allow is reused: a request refused or unclear on
     // what the turn showed then is reviewed again on what it shows now.
-    const verdictKey = createHash("sha256").update(instructions).update(prompt).digest("hex");
+    const verdictKey = createHash("sha256").update(instructions).update(prompt).update(JSON.stringify(reviewEfforts)).digest("hex");
     const known = reviewVerdicts.get(verdictKey);
     if (known && now() - known.at < REVIEW_CACHE_MS && (known.action === "allow" || !evidence)) {
       logger?.info?.("ao.approval_reviewed", { cached: true, action: known.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
@@ -3498,6 +3511,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           // returned nothing, "Unexpected end of JSON input" three times over, and the request went
           // to the person. The answer itself is one short JSON line.
           body: JSON.stringify({ model, temperature: 0, max_tokens: 2000,
+            ...(reviewEfforts[model] ? { reasoning_effort: reviewEfforts[model] } : {}),
             messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }),
           signal: AbortSignal.timeout(left),
         });
