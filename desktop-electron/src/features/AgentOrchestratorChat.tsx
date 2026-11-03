@@ -1,4 +1,5 @@
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { ImagePreviewDialog, type MarkupResult } from "./ImagePreview";
 import { markupReadable } from "./image-markup";
 import { getCodingToolsClient } from "../api/client";
@@ -2099,12 +2100,33 @@ export function AgentOrchestratorChat({
   const saver = useRef(saveAttachment);
   saver.current = saveAttachment;
   const addMarkup = useCallback(async ({ bytes, preview, prompt, label = "Markup", mask }: MarkupResult, source?: ChatAttachment) => {
-    if (!saver.current) throw new Error("Could not prepare markup. Try again");
-    const { path } = await saver.current({ name: "markup.png", type: "image/png", bytes });
-    const masked = mask ? { name: "Mask", path: (await saver.current({ name: "mask.png", type: "image/png", bytes: mask.bytes })).path, image: true, preview: mask.preview } : null;
-    setAttachments((current) => [...current.filter(item => item !== source), { name: label, path, image: true, preview, markup: prompt },
-      ...(masked ? [masked] : [])].slice(0, 8));
-  }, []);
+    const save = saver.current;
+    if (!save) throw new Error("Could not prepare markup. Try again");
+    const attachmentError = (current: ChatAttachment[]) => {
+      if (!alive.current || composing.current.taskId !== selectedTaskId || composing.current.cacheKey !== draftKey
+        || (source && !current.includes(source))) return "This chat changed. Reopen the image in its chat and try again";
+      if (CHAT_DRAFTS.get(draftKey)?.attaching) return "Wait for files to finish attaching, then try again";
+      return current.filter(item => item !== source).length + (mask ? 2 : 1) > 8
+        ? "A message supports 8 attachments. Remove an attachment and try again" : "";
+    };
+    const before = attachmentError(composing.current.attachments);
+    if (before) throw new Error(before);
+    const { path } = await save({ name: "markup.png", type: "image/png", bytes });
+    const image: ChatAttachment = { name: label, path, image: true, preview, markup: prompt };
+    const masked: ChatAttachment | null = mask
+      ? { name: "Mask", path: (await save({ name: "mask.png", type: "image/png", bytes: mask.bytes })).path, image: true, preview: mask.preview } : null;
+    let accepted = false, failure = "";
+    // Resolve admission against queued React updates before transferring the preview URLs.
+    flushSync(() => setAttachments((current) => {
+      accepted = false;
+      failure = attachmentError(current);
+      if (failure) return current;
+      const remaining = current.filter(item => item !== source);
+      accepted = true;
+      return masked ? [image, masked, ...remaining] : [...remaining, image];
+    }));
+    if (!accepted) throw new Error(failure || "This chat changed. Reopen the image in its chat and try again");
+  }, [draftKey, selectedTaskId]);
   const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile, markup: saveAttachment ? addMarkup : undefined }),
     [attachmentPreview, revealFile, Boolean(saveAttachment), addMarkup]);
   // One work reader per run for DeepSeek turns, kept across renders so a finished turn stays memoized.
