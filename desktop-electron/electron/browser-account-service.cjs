@@ -222,7 +222,7 @@ function createBrowserAccountService(deps) {
     const wanted = [...new Set(Array.isArray(accountIds) ? accountIds.filter((id) => typeof id === "string") : [])];
     if (!wanted.length) throw new Error("Choose the accounts to remove");
     const listed = new Set(deps.registry.status().accounts.map((entry) => entry.id));
-    if (wanted.every((id) => listed.has(id)) && wanted.length >= listed.size) throw new Error("Keep at least one account: the Browser tab needs one");
+    if (wanted.every((id) => listed.has(id)) && wanted.length >= listed.size) throw new Error("Keep at least one account: the GPT Browser needs one");
     const active = deps.registry.activeId();
     const order = [...wanted.filter((id) => id !== active), ...wanted.filter((id) => id === active)];
     const removed = [];

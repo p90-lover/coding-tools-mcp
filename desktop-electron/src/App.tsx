@@ -32,7 +32,6 @@ import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
-import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
 import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
 import { RegisterSurface } from "./features/RegisterSurface";
@@ -453,7 +452,6 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
-  const [standaloneChatHost, setStandaloneChatHost] = useState<HTMLDivElement | null>(null);
   // Tabs mount on first visit and then stay mounted while hidden, so switching back never reloads
   // them. The MCP wizard is left out: it seeds its step from how it was opened.
   const [visitedSurfaces, setVisitedSurfaces] = useState<ReadonlySet<Surface>>(() => new Set([surface]));
@@ -509,9 +507,12 @@ function LauncherShell({
   // Native views (browser, ChatGPT, Register) are drawn above the page, so they step aside while
   // a sidebar is laid over them.
   const sidebarCovers = (compactSidebar && sidebarOpen) || (sidebarRail && sidebarExpanded);
-  const browserSurfaceActive = surface === "browser"
-    && !sidebarCovers
-    && !biggerContextRecommendationOpen;
+  const browserCovered = sidebarCovers || biggerContextRecommendationOpen;
+  const browserSurfaceActive = surface === "browser" && !browserCovered;
+  // A still of the GPT Browser's page, drawn in its slot while the page is off the window for the sidebar.
+  const [browserStill, setBrowserStill] = useState<string | null>(null);
+  // Whether the page is in the window now: only a page being shown has a still to take.
+  const browserShown = useRef(false);
   const needsBrowser = snapshot.state.browserInteractionMode === "automatic"
     && browser?.authenticated !== true;
   const needsSetup = !needsBrowser && !interactionSetupComplete;
@@ -565,6 +566,23 @@ function LauncherShell({
       });
     };
 
+    if (!browserSurfaceActive && surface === "browser" && browserCovered && browserShown.current) {
+      // The native view is drawn above the whole app page, so it must step aside for the sidebar;
+      // it left the pane black. A still of the page takes its place first, then the view goes.
+      void api!.browserStill().catch(() => null).then((url) => {
+        if (cancelled) return;
+        if (url) setBrowserStill(url);
+        requestAnimationFrame(() => {
+          if (cancelled) return;
+          browserShown.current = false;
+          void api!.setBrowserSurfaceActive(false).catch((cause) => setError(messageOf(cause)));
+        });
+      });
+      return () => { cancelled = true; };
+    }
+    browserShown.current = browserSurfaceActive;
+    // The view is back over the still; the still goes once the view has drawn.
+    const clearStill = browserSurfaceActive ? window.setTimeout(() => { if (!cancelled) setBrowserStill(null); }, 250) : 0;
     void api!.setBrowserSurfaceActive(browserSurfaceActive).then(() => {
       if (cancelled || !browserSurfaceActive || !browserSlot) return;
       measure();
@@ -575,11 +593,12 @@ function LauncherShell({
 
     return () => {
       cancelled = true;
+      window.clearTimeout(clearStill);
       cancelAnimationFrame(animationFrame);
       observer?.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [browserSlot, browserSurfaceActive, setError]);
+  }, [browserSlot, browserSurfaceActive, browserCovered, surface, setError]);
 
   useEffect(() => {
     const media = window.matchMedia(COMPACT_SIDEBAR_QUERY);
@@ -855,6 +874,7 @@ function LauncherShell({
                 <SidebarItem active={surface === "native-codex"} icon="terminal" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
               </SidebarGroup>
               <SidebarGroup label={copy.workspace}>
+                {/* GPT Browser is the one browser: the bridge's, its accounts and its pages (surface "browser"). */}
                 <SidebarItem
                   active={surface === "browser"}
                   badge={needsBrowser
@@ -862,8 +882,8 @@ function LauncherShell({
                     : browser?.status === "error"
                       ? <ActionDot tone="error" />
                       : null}
-                  icon="browser"
-                  label={copy.browser}
+                  icon="globe"
+                  label="GPT Browser"
                   onClick={() => navigateSurface("browser")}
                 />
                 <SidebarItem
@@ -871,12 +891,6 @@ function LauncherShell({
                   icon="layers"
                   label="ChatGPT browser management"
                   onClick={() => navigateSurface("chatgpt-browser-management")}
-                />
-                <SidebarItem
-                  active={surface === "gpt-browser"}
-                  icon="globe"
-                  label="GPT Browser"
-                  onClick={() => navigateSurface("gpt-browser")}
                 />
                 <SidebarItem
                   active={surface === "chatgpt-desktop"}
@@ -979,6 +993,7 @@ function LauncherShell({
               <BrowserSurface
                 browser={browser}
                 browserSlotRef={browserSlotRef}
+                still={browserStill}
                 copy={copy}
                 interactionMode={snapshot.state.browserInteractionMode}
                 operation={operation}
@@ -997,11 +1012,6 @@ function LauncherShell({
                   inspectionDisabled: snapshot.state.browserInteractionMode === "manual" }}
               />
             ))}
-            {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
-            {(surface === "gpt-browser" || visitedSurfaces.has("gpt-browser")) ? <GptBrowserDock
-              standaloneHost={standaloneChatHost} chatHost={null} inChat={false}
-              active={surface === "gpt-browser"} covered={sidebarCovers || biggerContextRecommendationOpen}
-              api={api!} setError={setError} /> : null}
             {keepAlive("chatgpt-desktop", () => (
               <ChatGptDesktopSurface
                 active={surface === "chatgpt-desktop" && !sidebarCovers && !biggerContextRecommendationOpen}
@@ -1317,9 +1327,49 @@ function SidebarItem({
   );
 }
 
+/**
+ * The address bar the GPT Browser brought: it shows the page's address and takes one typed in, which
+ * opens in a tab of the person's own (never the home page or a Codex turn's tab).
+ */
+function BrowserAddress({ url, copy, disabled, setError }: {
+  url: string | undefined;
+  copy: Copy;
+  disabled: boolean;
+  setError: (error: string | null) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const open = async (event: { preventDefault(): void }) => {
+    event.preventDefault();
+    const value = draft?.trim();
+    if (!value) { setDraft(null); return; }
+    try {
+      await api!.openBrowserUrl(value);
+      setDraft(null);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  return (
+    <form className="browser-address" title={url || copy.browserAddress} onSubmit={(event) => void open(event)}>
+      <Icon name="globe" />
+      <input
+        aria-label={copy.browserAddress}
+        disabled={disabled}
+        onBlur={() => setDraft(null)}
+        onChange={(event) => setDraft(event.target.value)}
+        onFocus={(event) => { setDraft(url ?? ""); event.target.select(); }}
+        onKeyDown={(event) => { if (event.key === "Escape") { setDraft(null); event.currentTarget.blur(); } }}
+        spellCheck={false}
+        value={draft ?? formatBrowserAddress(url, copy)}
+      />
+    </form>
+  );
+}
+
 function BrowserSurface({
   browser,
   browserSlotRef,
+  still,
   copy,
   interactionMode,
   operation,
@@ -1328,6 +1378,8 @@ function BrowserSurface({
 }: {
   browser: BrowserState | null;
   browserSlotRef: (node: HTMLDivElement | null) => void;
+  /** A still of the page, shown while the sidebar covers the pane and the page steps aside. */
+  still: string | null;
   copy: Copy;
   interactionMode: BrowserInteractionMode;
   operation: OperationState | null;
@@ -1487,10 +1539,7 @@ function BrowserSurface({
         </div>
         {/* Turns keep running on their own accounts across a switch; only a check or test of the shown page holds it. */}
         <BrowserAccountSwitcher api={api!} busy={browser?.status === "testing"} copy={copy} setError={setError} />
-        <div className="browser-address" title={browser?.url || copy.browserAddress}>
-          <Icon name="globe" />
-          <span>{formatBrowserAddress(browser?.url, copy)}</span>
-        </div>
+        <BrowserAddress url={browser?.url} copy={copy} disabled={!visible} setError={setError} />
         <div className="browser-zoom-controls">
           <IconButton icon="minus" label={copy.zoomOut} onClick={() => void zoom("out")} />
           <button
@@ -1532,6 +1581,7 @@ function BrowserSurface({
         />
       ) : null}
       <div className="browser-viewport" ref={browserSlotRef}>
+        {still && visible ? <img className="browser-still" src={still} alt="" draggable={false} /> : null}
         {!visible ? (
           <div className="browser-empty">
             <BrandMark />

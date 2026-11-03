@@ -169,6 +169,20 @@ export function turnWindowStart(count: number, shown: number, folds: Map<string,
   return start;
 }
 
+/** Turns an opened chat draws with the click: its newest, enough to fill what shows first. */
+export const FIRST_DRAWN_TURNS = 3;
+
+/**
+ * The first turn a chat has drawn so far while it fills in after opening: its newest
+ * FIRST_DRAWN_TURNS (`drawnFrom` null), then the rest of the window at once in a later render. One
+ * turn a frame was slower: each commit re-paints the whole window (ten chats side by side), so
+ * sixteen small commits cost far more than one. An index, not a count: a reply that arrives
+ * meanwhile is drawn below the others and never pushes an older one back out.
+ */
+export function turnDrawStart(count: number, windowStart: number, drawnFrom: number | null): number {
+  return Math.max(windowStart, Math.min(count, drawnFrom ?? count - FIRST_DRAWN_TURNS));
+}
+
 /** A card's attempt now (1 for a first run): one more than the earlier attempts it keeps. */
 export function stepAttempt(step: Pick<ChatStep, "earlier"> | undefined): number {
   return 1 + (step?.earlier ?? []).filter((round) => /^Attempt \d+/.test(round.label)).length;

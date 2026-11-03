@@ -1068,6 +1068,8 @@ export interface LauncherApi {
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;
   zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
   createBrowserTab(): Promise<BrowserState>;
+  openBrowserUrl(url: string): Promise<BrowserState>;
+  browserStill(): Promise<string | null>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   browserAccounts(): Promise<BrowserAccountsStatus>;
   addBrowserAccount(): Promise<BrowserAccountsStatus>;
