@@ -71,6 +71,39 @@ export function ImagePreviewDialog({ url, onClose, onMarkup }: { url: string; on
     return () => box.removeEventListener("wheel", wheel);
   }, [mode, natural, zoom, fit]);
 
+  // The buttons stand in a column at the image's top right, beside it: in the window's top right
+  // corner the title bar's minimize, maximize and close covered them.
+  const picture = useRef<HTMLImageElement>(null);
+  const [beside, setBeside] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const box = viewport.current;
+    if (mode !== "view" || !box) return undefined;
+    const measure = () => {
+      const view = box.getBoundingClientRect();
+      const shownBox = picture.current && natural ? picture.current.getBoundingClientRect() : view;
+      setBeside({ left: Math.min(Math.min(shownBox.right, view.right) + 12, window.innerWidth - 52), top: Math.max(shownBox.top, view.top) });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(box);
+    if (picture.current) observer.observe(picture.current);
+    box.addEventListener("scroll", measure, { passive: true });
+    return () => { observer.disconnect(); box.removeEventListener("scroll", measure); };
+  }, [mode, natural, shown, failed]);
+
+  // A press anywhere but the image and its controls closes it, its zoom pill's row included; a
+  // zoomed image's scrollbars are the viewport's own and only scroll.
+  const dismiss = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (mode !== "view" || target.closest("img, button, .cdx-zoom-pill")) return;
+    const box = viewport.current;
+    if (box && target === box) {
+      const rect = box.getBoundingClientRect();
+      if (event.clientX >= rect.left + box.clientWidth || event.clientY >= rect.top + box.clientHeight) return;
+    }
+    onClose();
+  };
+
   const download = () => {
     const link = document.createElement("a");
     link.href = url;
@@ -82,15 +115,14 @@ export function ImagePreviewDialog({ url, onClose, onMarkup }: { url: string; on
 
   // On <body>: it opens from inside a transcript, whose contained scroll box would otherwise hold
   // this full-window overlay to the pane.
-  return createPortal(<div className="cdx-preview" role="dialog" aria-modal="true" aria-label="Image preview">
+  return createPortal(<div className="cdx-preview" role="dialog" aria-modal="true" aria-label="Image preview" onPointerDown={dismiss}>
     <h2 className="cdx-sr-only">Image preview</h2>
     {mode === "markup" && natural && onMarkup
       ? <MarkupEditor url={url} natural={natural} onBack={() => setMode("view")} onDone={async (result) => { await onMarkup(result); onClose(); }} />
-      : <div className="cdx-preview-column" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-        <div className="cdx-preview-viewport" ref={viewport} data-testid="image-preview-dismiss-area"
-          onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      : <div className="cdx-preview-column">
+        <div className="cdx-preview-viewport" ref={viewport} data-testid="image-preview-dismiss-area">
           {failed ? <p className="cdx-preview-error">Could not load this image. Close and reopen the image to try again</p>
-            : <img src={url} alt="" draggable={false} className={zoomed ? "is-zoomed" : undefined}
+            : <img ref={picture} src={url} alt="" draggable={false} className={zoomed ? "is-zoomed" : undefined}
               style={zoomed && natural ? { width: natural.width * shown / 100, height: natural.height * shown / 100 } : undefined}
               onLoad={(event) => setNatural({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
               onError={() => setFailed(true)} />}
@@ -103,10 +135,10 @@ export function ImagePreviewDialog({ url, onClose, onMarkup }: { url: string; on
           </div>
         </div> : null}
       </div>}
-    {mode === "view" ? <div className="cdx-preview-actions">
-      {onMarkup && natural && !failed ? <button type="button" className="cdx-preview-button has-label" disabled={tooLarge}
-        title={tooLarge ? "Images over 20 megapixels can't be marked up" : undefined} onClick={() => setMode("markup")}>
-        <MarkupIcon name="pen" /><span>Markup</span></button> : null}
+    {mode === "view" ? <div className="cdx-preview-actions is-beside" style={beside ?? { visibility: "hidden" }}>
+      {onMarkup && natural && !failed ? <button type="button" className="cdx-preview-button" disabled={tooLarge} aria-label="Markup"
+        title={tooLarge ? "Images over 20 megapixels can't be marked up" : "Markup"} onClick={() => setMode("markup")}>
+        <MarkupIcon name="pen" /></button> : null}
       <button type="button" className="cdx-preview-button" aria-label="Download image" title="Download image" onClick={download}><Glyph d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14" size={16} /></button>
       <button type="button" className="cdx-preview-button" aria-label="Close image preview" title="Close image preview" onClick={onClose}><Glyph d="M6 6l12 12M18 6 6 18" /></button>
     </div> : null}

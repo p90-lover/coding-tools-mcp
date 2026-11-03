@@ -173,6 +173,25 @@ function authenticatedChatGptSession(payload, now = Date.now()) {
       && Date.parse(payload.expires) > now);
 }
 
+// Cloudflare can put its own check page ("Just a moment...") where ChatGPT should load. Only the
+// person can pass it, and the wait for ChatGPT then ran out as a "login" that was never the problem
+// (seen live 2026-11-03: the bridge upgrade failed this way on two launches in a row).
+const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the Browser tab, complete the check, then run Setup → Install models.";
+
+/**
+ * Runs inside the page (injected with toString, like authenticatedChatGptSession): true while the
+ * document is Cloudflare's check page in place of ChatGPT. `doc` and `win` are the page's document
+ * and window, passed in so the check can be tested without a browser.
+ */
+function isCloudflareCheckPage(doc, win) {
+  // The check page sets _cf_chl_opt and loads Cloudflare's challenge "orchestrate" script, in every
+  // language; its title is translated, and the old #challenge-form markup is gone (checked live).
+  // ChatGPT's own pages load Cloudflare's bot-detection script from /cdn-cgi/challenge-platform/
+  // too (scripts/jsd/), so that folder alone does not mean a check is showing.
+  if (win?._cf_chl_opt && typeof win._cf_chl_opt === "object") return true;
+  return [...(doc?.scripts ?? [])].some((script) => /\/cdn-cgi\/challenge-platform\/.*\/orchestrate\/chl_page\//.test(script.src || ""));
+}
+
 const WINDOW_VISIBILITY_EVENTS = ["show", "hide", "minimize", "restore"];
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
 const ZOOM_FACTORS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
@@ -3874,7 +3893,19 @@ class BrowserHost {
       if (state.authenticated) return state;
       await sleep(750);
     }
+    if (await this.cloudflareCheckShown()) {
+      this.logger.warn("browser.cloudflare_check_page", { url: urlWithoutQuery(this.view.webContents.getURL()) });
+      throw new Error(CHATGPT_SECURITY_CHECK_MESSAGE);
+    }
     throw new Error("ChatGPT login was not completed before the timeout");
+  }
+
+  /** Whether the shown page is Cloudflare's check instead of ChatGPT (isCloudflareCheckPage). */
+  async cloudflareCheckShown() {
+    const contents = this.view?.webContents;
+    if (!contents || contents.isDestroyed()) return false;
+    return await contents.executeJavaScript(`(${isCloudflareCheckPage.toString()})(document, window)`, true)
+      .then((shown) => shown === true, () => false);
   }
 
   async smokeTest() {
@@ -4182,6 +4213,7 @@ module.exports = {
   parkedHomeToUnload,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
+  isCloudflareCheckPage,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
   loadIdleSurfaceWithRetries,
