@@ -34,7 +34,7 @@ export interface RtkStatus {
 export interface AppPlugin {
   /** "cpa", "antigravity-cli", "rtk", or "cpa-plugin:<plugin id>". */
   id: string;
-  kind: "service" | "tool" | "cpa-plugin";
+  kind: "service" | "tool" | "browser" | "cpa-plugin";
   name: string;
   /** The plugin's DLL in CPA's plugins folder. */
   file?: string;
