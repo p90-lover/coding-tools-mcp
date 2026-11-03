@@ -105,6 +105,7 @@ function createHarness(hooks = {}) {
   }
 
   const dependencies = {
+    "./atomic-file.cjs": { writePrivateFileAtomicAsync: (filename, content) => dependencies["node:fs"].promises.writeFile(filename, content) },
     "./agent-orchestrator-workspace.cjs": hooks.workspaceBoard ? { createAoWorkspaceBoard: () => hooks.workspaceBoard } : require("../electron/agent-orchestrator-workspace.cjs"),
     "./agent-orchestrator-accounting.cjs": require("../electron/agent-orchestrator-accounting.cjs"),
     "./ao-context-breakdown.cjs": require("../electron/ao-context-breakdown.cjs"),
