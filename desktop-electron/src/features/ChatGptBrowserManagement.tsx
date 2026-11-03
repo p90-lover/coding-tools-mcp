@@ -291,10 +291,10 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
       <header className="cbm-header">
         <div>
           <h1>ChatGPT browser management</h1>
-          <p className="cbm-muted">Every ChatGPT account the Browser tab holds, what it is doing, and how it runs Codex.</p>
+          <p className="cbm-muted">Every ChatGPT account the GPT Browser holds, what it is doing, and how it runs Codex.</p>
         </div>
         {/* A disabled button shows no tooltip of its own: the wrapper carries why it is off. */}
-        <span title={full ? `The Browser tab holds ${accounts.maxAccounts} accounts at most. Remove one below to add another.` : undefined}>
+        <span title={full ? `The GPT Browser holds ${accounts.maxAccounts} accounts at most. Remove one below to add another.` : undefined}>
           <button
             className="cbm-button"
             disabled={switching || full}
@@ -434,7 +434,7 @@ function BulkRemoveBar({ total, ticked, locked, onSelectNotSignedIn, onClear, on
         className={`cbm-button cbm-bulk-remove${confirm ? " is-danger" : ""}`}
         disabled={locked || !count || all}
         onClick={remove}
-        title={all ? "Keep at least one account: the Browser tab needs one" : undefined}
+        title={all ? "Keep at least one account: the GPT Browser needs one" : undefined}
         type="button"
       >
         {confirm ? `Click again to remove ${count}` : count ? `Remove ${count} selected` : "Remove selected"}
@@ -509,7 +509,7 @@ function AccountCard({
     && (connection.state === "connecting" || connection.checkedAt >= observedAt) ? connection : undefined;
   // Losing creation authority does not disconnect a previously confirmed connector.
   const connector = signedIn === false
-    ? { tone: "warn", label: "Not connected", detail: "Sign in to this account in the Browser tab first" }
+    ? { tone: "warn", label: "Not connected", detail: "Sign in to this account in the GPT Browser first" }
     : !mcpAccess.allowed && connectionCheck?.state !== "connected" && !account.connector?.okAt
       ? { tone: "warn", label: "Owner required", detail: mcpAccess.detail }
       : connectionCheck
@@ -577,7 +577,7 @@ function AccountCard({
                 className="cbm-link"
                 disabled={isRunning(`signin:${account.id}`) || (!inUse && (switching || removing)) || (inUse && chatRunning)}
                 onClick={() => void signInNow()}
-                title={inUse ? "Opens ChatGPT's sign-in in the Browser tab" : "Switches the Browser tab to this account and opens ChatGPT's sign-in"}
+                title={inUse ? "Opens ChatGPT's sign-in in the GPT Browser" : "Switches the GPT Browser to this account and opens ChatGPT's sign-in"}
                 type="button"
               >
                 {isRunning(`signin:${account.id}`) ? "Opening…" : "Sign in"}
@@ -722,7 +722,7 @@ function AccountCard({
         </button>
         {!inUse ? (
           <button className="cbm-button" disabled={switching || removing || isRunning(`remove:${account.id}`)} onClick={() => void use()} type="button">
-            {isRunning(`use:${account.id}`) ? "Switching…" : "Use in Browser tab"}
+            {isRunning(`use:${account.id}`) ? "Switching…" : "Use in GPT Browser"}
           </button>
         ) : null}
         {canRemove ? (

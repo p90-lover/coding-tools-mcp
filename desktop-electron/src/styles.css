@@ -908,6 +908,25 @@ code {
   white-space: nowrap;
 }
 
+.browser-address input {
+  min-width: 0;
+  flex: 1;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-overflow: ellipsis;
+}
+
+.browser-address:focus-within {
+  border-color: var(--color-border-focus, var(--color-border-light));
+  background: var(--color-background-control-hover);
+  color: var(--color-text-primary);
+}
+
 .browser-zoom-controls {
   display: flex;
   height: 28px;

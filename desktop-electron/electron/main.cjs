@@ -35,6 +35,7 @@ const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cj
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent, readGptBrowserState } = require("./gpt-browser.cjs");
+const { mergeGptBrowserAccounts } = require("./gpt-browser-merge.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
@@ -2737,6 +2738,11 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, false);
     return browserHost.createUserTab();
   });
+  // The address bar the GPT Browser brought: any http(s) page, in a tab of the person's own.
+  handle("launcher:browser-open-url", (event, url) => {
+    assertFocusedMainWindow(event, false);
+    return browserHost.openUrl(url);
+  });
   // Browser-tab accounts. Every change needs the focused main window; status is read-only.
   handle("launcher:browser-accounts", () => {
     // Opening the accounts list reads each account's sign-in again; a change is published.
@@ -3364,7 +3370,7 @@ function registerIpc({ logger, stateStore }) {
       const signedIn = signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
       assertCurrent();
       if (!signedIn) {
-        throw new Error("Sign in to this account in the Browser tab before connecting MCP.");
+        throw new Error("Sign in to this account in the GPT Browser before connecting MCP.");
       }
       await routeIdleAccountPartition(partition, logger);
       assertCurrent();
@@ -5219,6 +5225,15 @@ async function start() {
     return host;
   };
   setProviderBrowserProxyBinding((partition) => browserAccounts.proxyForPartition(partition));
+  // GPT Browser is this browser now: its accounts, sign-ins included, join the list once, before
+  // any partition opens (gpt-browser-merge.cjs). A failed merge leaves them where they were.
+  await mergeGptBrowserAccounts({
+    gptDataRoot: path.join(CORE_HOME, "gpt-browser"),
+    partitionsRoot: path.join(app.getPath("userData"), "Partitions"),
+    trashRoot: path.join(app.getPath("userData"), "Trash", "gpt-browser"),
+    accounts: browserAccounts,
+    logger,
+  }).catch((error) => logger.warn("gpt_browser_merge.failed", { message: error instanceof Error ? error.message : String(error) }));
   await routeBrowserAccountPartition(browserAccounts.activePartition(), logger);
   browserHost = createBrowserHostForAccount(browserAccounts.activeId());
   void refreshBrowserAccountSignIns(logger);

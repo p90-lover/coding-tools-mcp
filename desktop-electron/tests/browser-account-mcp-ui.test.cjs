@@ -130,7 +130,7 @@ test("account setup preserves bulk removal, the tabs drawer, and opening the Bro
   const toggle = nodes(ui.card("second")).find(node => node.props["aria-controls"] === "cbm-tabs-second");
   toggle.props.onClick();
   assert.equal(nodes(ui.card("second")).find(node => node.type?.name === "AccountTabs").props.open, true);
-  button(ui.card("second"), "Use in Browser tab").props.onClick();
+  button(ui.card("second"), "Use in GPT Browser").props.onClick();
   await ui.flush();
   assert.deepEqual(ui.calls.switches, ["second"]);
   assert.equal(ui.calls.browserOpened, 1);

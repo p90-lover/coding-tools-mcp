@@ -172,7 +172,7 @@ test("a hidden docked sidebar folds to an icon rail that shows the whole panel o
   assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.sidebar-clip \{[^}]*transition:\s*width 180ms/);
   assert.match(appSource, /setTimeout\(\(\) => setSidebarExpanded\(false\), 190\)/);
   assert.doesNotMatch(appSource, /!\(compactSidebar && sidebarOpen\)/);
-  assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 4);
+  assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 3);
   // AO's view (its own UI, the project board, the Antigravity terminal) steps aside the same way:
   // it covered the hover panel's labels from the rail's edge (2026-11-01).
   assert.match(appSource, /<section className="workspace">\s*<NativeViewsCoveredContext\.Provider value=\{sidebarCovers \|\| biggerContextRecommendationOpen\}>/);

@@ -11,7 +11,7 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { browserPartitionForLauncherProfile, isBrowserAccountPartition } = require("./profile.cjs");
-const { cleanUserAgent } = require("./gpt-browser.cjs");
+const { browsableUrl, cleanUserAgent } = require("./gpt-browser.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
@@ -184,7 +184,7 @@ function authenticatedChatGptSession(payload, now = Date.now()) {
 // Cloudflare can put its own check page ("Just a moment...") where ChatGPT should load. Only the
 // person can pass it, and the wait for ChatGPT then ran out as a "login" that was never the problem
 // (seen live 2026-11-03: the bridge upgrade failed this way on two launches in a row).
-const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the Browser tab, complete the check, then run Setup → Install models.";
+const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the GPT Browser, complete the check, then run Setup → Install models.";
 
 /**
  * Runs inside the page (injected with toString, like authenticatedChatGptSession): true while the
@@ -1201,10 +1201,11 @@ class BrowserHost {
     return tab;
   }
 
-  createUserTab() {
+  /** A tab of the person's own; `initialUrl` (the address bar's) opens instead of a new chat. */
+  createUserTab(initialUrl = null) {
     const full = makeTabRoom(this, this.partition, false);
     if (full) throw new Error(`ChatGPT Web already has ${full} browser tabs; close one before opening another`);
-    if (!this.surfaceActive) throw new Error("Open the Browser before creating a tab");
+    if (!this.surfaceActive) throw new Error("Open the GPT Browser before creating a tab");
     if (this.manualOperation) throw new Error(`Browser tabs cannot open during ${this.manualOperation}`);
     // A signed-out account opens tabs too, as in GPT Browser: the new tab is ChatGPT's own sign-in.
     const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
@@ -1230,7 +1231,7 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: newChatUrlFor(this),
+      url: initialUrl ?? newChatUrlFor(this),
       status: "loading",
       loading: true,
       message: "Opening ChatGPT",
@@ -1243,7 +1244,7 @@ class BrowserHost {
     this.bindUserTabContents(tab);
     this.selectedTabId = tab.id;
     this.show();
-    void view.webContents.loadURL(newChatUrlFor(this)).catch((error) => {
+    void view.webContents.loadURL(tab.url).catch((error) => {
       if (this.userTabs.get(tab.id) !== tab || view.webContents.isDestroyed()
         || isAbortedNavigationError(error)) return;
       tab.loading = false;
@@ -1541,6 +1542,31 @@ class BrowserHost {
       });
       document.documentElement.dataset.codexWebGptSurface = ${encoded};
     })()`, true);
+  }
+
+  /**
+   * The address bar, from the GPT Browser this browser took in: an http(s) page opens in the shown
+   * tab of the person's own, or in a new one. The home page and Codex turn tabs are the bridge's and
+   * never browse away, so an address typed while one shows opens a tab.
+   */
+  openUrl(value) {
+    const url = browsableUrl(value);
+    if (!url) throw new Error("Enter a web address, for example chatgpt.com or https://example.com");
+    const tab = this.selectedUserTab();
+    if (!tab) return this.createUserTab(url);
+    tab.url = url;
+    tab.status = "loading";
+    tab.loading = true;
+    void tab.view.webContents.loadURL(url).catch((error) => {
+      if (this.userTabs.get(tab.id) !== tab || tab.view.webContents.isDestroyed() || isAbortedNavigationError(error)) return;
+      tab.loading = false;
+      tab.status = "error";
+      tab.message = error instanceof Error ? error.message : String(error);
+      this.logger.error("browser.user_tab_navigation_failed", { tabId: tab.id, ...navigationErrorForLog(error) });
+      this.publishState?.(this.snapshot());
+    });
+    this.publishState?.(this.snapshot());
+    return this.snapshot();
   }
 
   bindUserTabContents(tab) {
