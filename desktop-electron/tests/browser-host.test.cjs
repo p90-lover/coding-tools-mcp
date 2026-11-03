@@ -1038,7 +1038,7 @@ test("a sign-in wait that ends on Cloudflare's check page names the check, not t
   const { fixture, warnings } = securityCheckWaitFixture(async () => true);
   await assert.rejects(
     BrowserHost.prototype.waitForAuthenticated.call(fixture, 0),
-    /Cloudflare security check\. Open the Browser tab, complete the check, then run Setup → Install models\./,
+    /Cloudflare security check\. Open the GPT Browser, complete the check, then run Setup → Install models\./,
   );
   // The challenge token in the address never reaches the log.
   assert.deepEqual(warnings, [["browser.cloudflare_check_page", { url: "https://chatgpt.com/" }]]);
@@ -3237,6 +3237,43 @@ test("user and task browser tabs share the five additional-tab limit", async () 
   await assert.rejects(host.createTurnTab("trace_six", 444), /already has 5 browser tabs/);
   assert.throws(() => host.createManualTurnTab("trace_six", 444, null, "prompt", 30_000), /already has 5 browser tabs/);
   assert.throws(() => host.createUserTab(), /already has 5 browser tabs/);
+});
+
+test("the GPT Browser address bar opens a typed address in the shown tab, or in a new one", () => {
+  const loads = [];
+  const tab = { id: "user", status: "ready", loading: false, view: { webContents: { isDestroyed: () => false, loadURL: (url) => { loads.push(url); return Promise.resolve(); } } } };
+  const created = [];
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    userTabs: new Map([["user", tab]]),
+    selectedTabId: "user",
+    snapshot() { return { url: tab.url }; },
+    createUserTab(url) { created.push(url); return { created: url }; },
+  });
+
+  assert.deepEqual(host.openUrl(" example.com/page "), { url: "https://example.com/page" });
+  assert.deepEqual(loads, ["https://example.com/page"]);
+  assert.equal(tab.status, "loading");
+  assert.throws(() => host.openUrl("not a site"), /Enter a web address/);
+  assert.throws(() => host.openUrl("javascript:alert(1)"), /Enter a web address/);
+  // On the home tab nothing user-owned is shown: the address opens in a new tab.
+  host.selectedTabId = "home";
+  assert.deepEqual(host.openUrl("https://chatgpt.com/"), { created: "https://chatgpt.com/" });
+  assert.deepEqual(created, ["https://chatgpt.com/"]);
+});
+
+test("a still of the shown page stands in for it under the sidebar; none while the page is hidden", async () => {
+  const image = { isEmpty: () => false, toJPEG: (quality) => Buffer.from(`jpeg@${quality}`) };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    visible: true,
+    surfaceActive: true,
+    activeView: () => ({ webContents: { isDestroyed: () => false, capturePage: async () => image } }),
+  });
+  assert.equal(await host.captureStill(), `data:image/jpeg;base64,${Buffer.from("jpeg@80").toString("base64")}`);
+  host.surfaceActive = false;
+  assert.equal(await host.captureStill(), null);
+  host.surfaceActive = true;
+  host.activeView = () => ({ webContents: { isDestroyed: () => false, capturePage: async () => { throw new Error("gone"); } } });
+  assert.equal(await host.captureStill(), null);
 });
 
 test("five browser tabs are a hard account-safety limit", async () => {

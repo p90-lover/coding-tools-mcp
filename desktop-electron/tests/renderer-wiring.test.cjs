@@ -172,9 +172,11 @@ test("a hidden docked sidebar folds to an icon rail that shows the whole panel o
   assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.sidebar-clip \{[^}]*transition:\s*width 240ms cubic-bezier\(0\.32, 0\.72, 0, 1\)/);
   assert.match(appSource, /setTimeout\(\(\) => setSidebarExpanded\(false\), 250\)/);
   assert.doesNotMatch(appSource, /!\(compactSidebar && sidebarOpen\)/);
-  assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 3);
+  assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 2);
   // The GPT Browser stays shown under the sidebar as a still of its page: stepping aside left it black.
-  assert.match(appSource, /active=\{surface === "gpt-browser"\} covered=\{sidebarCovers \|\| biggerContextRecommendationOpen\}/);
+  assert.match(appSource, /const browserSurfaceActive = surface === "browser" && !browserCovered;/);
+  assert.match(appSource, /void api!\.browserStill\(\)\.catch\(\(\) => null\)\.then\(\(url\) => \{\s*if \(cancelled\) return;\s*if \(url\) setBrowserStill\(url\);\s*requestAnimationFrame/);
+  assert.match(appSource, /\{still && visible \? <img className="browser-still" src=\{still\}/);
   // The docked panel glides open and shut on one eased curve, keeping its full layout until it is shut.
   assert.match(appSource, /transition=\{\{ type: "tween", duration: 0\.26, ease: \[0\.32, 0\.72, 0, 1\] \}\}\s*onAnimationComplete=\{\(\) => setSidebarClosing\(false\)\}/);
   assert.match(appSource, /const sidebarRail = !compactSidebar && !sidebarOpen && !sidebarClosing;/);
