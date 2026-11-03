@@ -848,7 +848,7 @@ test("apply_patch is refused when any file it names is outside the worktree", as
 
 test("patchTargets names every file a patch touches, in both formats headless applies", () => {
   assert.deepEqual(patchTargets("*** Begin Patch\n*** Add File: a\n+x\n*** Update File: b/c\n*** Move to: e\n*** Delete File: d\n*** End Patch"),
-    ["a", "c", "e", "d"]);
+    ["a", "b/c", "e", "d"]);
   assert.deepEqual(patchTargets("--- a/x\n+++ b/y\n@@\n-1\n+2\n--- /dev/null\n+++ b/z\n"), ["x", "y", "z"]);
   // As patch.rs reads them: a `--- ` header with no `+++ ` still names a file; "*** Begin Patch "
   // (a trailing space) is not a Codex envelope, so its `---`/`+++` headers count.
@@ -860,6 +860,65 @@ test("patchTargets names every file a patch touches, in both formats headless ap
   assert.deepEqual(parsePatch("*** Begin Patch\r\n*** Update File: a.txt\r\n*** Move to: b.txt\r\n@@\r\n-x\r\n+y\r\n*** Delete File: c\\d.txt\r\n*** End Patch\r\n"), [
     { path: "a.txt", operation: "update", moveTo: "b.txt" }, { path: "c/d.txt", operation: "delete" },
   ]);
+});
+
+test("Codex patch paths keep literal prefixes while unified headers strip their markers", () => {
+  for (const operation of ["Add", "Update", "Delete"]) {
+    for (const [raw, expected] of [
+      ["a/note.txt", "a/note.txt"], ["b/note.txt", "b/note.txt"],
+      [" a/space name.txt ", "a/space name.txt"], ['"a/quoted.txt"', '"a/quoted.txt"'],
+      ["b\\nested\\note.txt", "b/nested/note.txt"], ["@linked/a/note.txt", "@linked/a/note.txt"],
+      ["/absolute/a/note.txt", "/absolute/a/note.txt"], ["/dev/null", ""], [" ", ""],
+    ]) {
+      const files = parsePatch(`*** Begin Patch\n*** ${operation} File: ${raw}\n*** Move to: b/moved.txt\n*** End Patch\n`);
+      assert.equal(files[0].path, expected, `${operation}: ${raw}`);
+      assert.equal(files[0].moveTo, "b/moved.txt");
+    }
+  }
+  assert.deepEqual(patchTargets("--- a/a/note.txt\n+++ b/a/note.txt\n@@\n-old\n+new\n"), ["a/note.txt"]);
+});
+
+test("Codex patch approval shows literal a and b directories", async () => {
+  const tree = tempTree();
+  const { tools, calls, confirmations } = fixture({ root: tree.root, results: {
+    apply_patch: (body) => ({ state: "completed", result: body.arguments.approval_token ? { ok: true } :
+      { ok: false, error: { code: "APPROVAL_REQUIRED", details: { request_id: "literal-paths" } } } }),
+    request_permissions: { state: "completed", result: { ok: true, approval_token: "literal-grant" } },
+  } });
+  try {
+    const { url, auth } = await session(tools);
+    const patch = "*** Begin Patch\n*** Add File: a/new.txt\n+x\n*** Update File: b/old.txt\n*** Move to: a/moved.txt\n@@\n-x\n+y\n*** Delete File: a/gone.txt\n*** End Patch\n";
+    assert.equal((await callTool(url, auth, "apply_patch", { patch })).isError, false);
+    assert.equal(confirmations.length, 1);
+    const detail = unwrapped(confirmations[0].detail);
+    for (const value of ["add: a/new.txt", "update: b/old.txt", "DELETE: a/gone.txt", "Move to: a/moved.txt"]) {
+      assert.ok(detail.includes(value), value);
+    }
+    assert.equal(calls.at(-1).body.arguments.patch, patch);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("Codex patch scope checks the literal prefixed path before forwarding", async (t) => {
+  const tree = tempTree();
+  fs.mkdirSync(path.join(tree.root, "a"));
+  try {
+    fs.symlinkSync(tree.elsewhere, path.join(tree.root, "a", "escape"), WINDOWS ? "junction" : "dir");
+  } catch (error) { tree.cleanup(); t.skip(`cannot create link: ${error.code}`); return; }
+  const { tools, calls } = fixture({ root: tree.root });
+  try {
+    const { url, auth } = await session(tools);
+    const before = calls.length;
+    for (const name of ["apply_patch", "patch_check"]) {
+      for (const target of ["a/escape/planted.txt", "a/../../outside.txt", "a/.git/config", "b/.mcp-paths/foreign"]) {
+        const patch = `*** Begin Patch\n*** Add File: ${target}\n+x\n*** End Patch\n`;
+        assert.equal((await callTool(url, auth, name, { patch })).isError, true, target);
+      }
+      const patch = "*** Begin Patch\n*** Update File: src/a.txt\n*** Move to: a/escape/moved.txt\n*** End Patch\n";
+      assert.equal((await callTool(url, auth, name, { patch })).isError, true, "Move metadata remains scoped");
+    }
+    assert.equal(calls.length, before);
+    assert.equal(fs.existsSync(path.join(tree.elsewhere, "planted.txt")), false);
+  } finally { await tools.close(); tree.cleanup(); }
 });
 
 test("exec_command always starts in the worktree", async () => {
