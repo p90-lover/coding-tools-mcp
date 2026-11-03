@@ -1011,7 +1011,7 @@ export interface LauncherApi {
   chatGptDesktopStatus(): Promise<ChatGptDesktopStatus>;
   openChatGptDesktop(slotId: string): Promise<ChatGptDesktopStatus>;
   newChatGptDesktopSignIn(): Promise<ChatGptDesktopStatus>;
-  clearChatGptDesktopAccount(): Promise<ChatGptDesktopStatus>;
+  clearChatGptDesktopAccount(expectedSlotId: string): Promise<ChatGptDesktopStatus>;
   stopChatGptDesktop(): Promise<ChatGptDesktopStatus>;
   setChatGptDesktopSurfaceActive(active: boolean): Promise<boolean>;
   chatGptLocalPreview(): Promise<ChatGptLocalPreview>;
