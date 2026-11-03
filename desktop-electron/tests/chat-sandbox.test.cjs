@@ -150,7 +150,7 @@ test("a command runs under codex sandbox, unelevated, with the worktree and cach
     const [{ file, args, options, script }] = spawned;
     assert.equal(file, "C:/codex/codex.exe");
     assert.deepEqual(args.slice(0, 9), ["sandbox", "-c", "windows.sandbox='unelevated'", "-c", "sandbox_mode='workspace-write'",
-      "-c", "sandbox_workspace_write.network_access=true", "-c", "sandbox_workspace_write.writable_roots=['G:/work','C:/cache/npm']"]);
+      "-c", "sandbox_workspace_write.network_access=true", "-c", 'sandbox_workspace_write.writable_roots=["G:/work","C:/cache/npm"]']);
     assert.deepEqual(args.slice(9, 13), ["--", "cmd.exe", "/d", "/c"]);
     assert.ok(!args.join(" ").includes("elevated'") || args.includes("windows.sandbox='unelevated'"), "never the elevated mode");
     assert.ok(script.endsWith('echo "a b" && echo second\r\n'), "the command reaches cmd.exe through a script, quotes intact");
@@ -163,6 +163,34 @@ test("a command runs under codex sandbox, unelevated, with the worktree and cach
       assert.equal(options.env[name], undefined, `${name} stays out of the command's environment`);
     }
   } finally { cleanup(); }
+});
+
+test("writable roots keep apostrophes, quotes and controls without adding permissions", async () => {
+  const cache = "G:\\Cache\\O'Brien";
+  for (const writable of [
+    "G:\\Fixture\\O'Brien", "G:/Fixture/ordinary", 'G:/Fixture/a"quote',
+    "G:/Fixture/space name/中文💡", "G:/Fixture/line\nnext\ttab\rreturn",
+    "G:/Fixture/control\0\b\f\u001b\u007f",
+    'G:/Fixture/x"], network_access=false, injected=["y',
+  ]) {
+    const { sandbox, spawned, cleanup } = runner({ roots: () => [cache, writable, cache, ""] });
+    try {
+      const id = await sandbox.start({ cmd: "echo fixture", cwd: writable, writable });
+      const [{ args, options, child }] = spawned;
+      const override = args.find(value => value.startsWith("sandbox_workspace_write.writable_roots="));
+      assert.ok(override.includes("O'Brien"), "a legal apostrophe is preserved");
+      // These TOML basic strings also form JSON strings; the separate TOML parser proof checks
+      // the actual generated override against TOML's grammar, including its DEL restriction.
+      const roots = JSON.parse(override.slice(override.indexOf("=") + 1));
+      assert.deepEqual(roots, [writable.replace(/\\/g, "/"), cache.replace(/\\/g, "/")]);
+      assert.ok(!/[\u0000-\u001f\u007f]/.test(override), "controls are escaped in the single-line override");
+      assert.equal(options.cwd, writable);
+      assert.deepEqual(args.slice(0, 7), ["sandbox", "-c", "windows.sandbox='unelevated'", "-c",
+        "sandbox_mode='workspace-write'", "-c", "sandbox_workspace_write.network_access=true"]);
+      child.finish(0);
+      await sandbox.wait(id, 1000);
+    } finally { cleanup(); }
+  }
 });
 
 test("AO's `ao` folder goes first on a command's PATH, and a broken provider changes nothing", async () => {
