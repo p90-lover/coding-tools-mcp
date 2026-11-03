@@ -34,7 +34,7 @@ export interface RtkStatus {
 export interface AppPlugin {
   /** "cpa", "antigravity-cli", "rtk", or "cpa-plugin:<plugin id>". */
   id: string;
-  kind: "service" | "tool" | "browser" | "cpa-plugin";
+  kind: "service" | "tool" | "cpa-plugin";
   name: string;
   /** The plugin's DLL in CPA's plugins folder. */
   file?: string;
@@ -1005,6 +1005,8 @@ export interface LauncherApi {
   removeGptBrowserAccount(id: string): Promise<GptBrowserStatus>;
   setGptBrowserSurfaceActive(active: boolean): Promise<GptBrowserStatus>;
   setGptBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
+  /** A JPEG data URL of the page in the window, or null: drawn in its place while the sidebar covers it. */
+  gptBrowserSnapshot(): Promise<string | null>;
   onGptBrowserChanged(listener: (status: GptBrowserStatus) => void): () => void;
   /** AO pushed a change: session ids whose conversation or state moved, "<workspace>:<run>" run keys. */
   onAoChanged?(listener: (change: { sessions: string[]; runs: string[]; moved?: { from: string; to: string; taskId: string }[] }) => void): () => void;
@@ -1066,6 +1068,8 @@ export interface LauncherApi {
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;
   zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
   createBrowserTab(): Promise<BrowserState>;
+  openBrowserUrl(url: string): Promise<BrowserState>;
+  browserStill(): Promise<string | null>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   browserAccounts(): Promise<BrowserAccountsStatus>;
   addBrowserAccount(): Promise<BrowserAccountsStatus>;

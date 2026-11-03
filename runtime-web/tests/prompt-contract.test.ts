@@ -837,6 +837,43 @@ test("plain prompts send the person's own words and one turn-token line when Cha
   expect(compileChatGptWebPrompt(first, capabilities, token).text).toContain("<codex_context_json>");
 });
 
+for (const { name, count, sentinel } of [
+  { name: "ten eligible images stay plain", count: 10, sentinel: false },
+  { name: "eleven eligible images use the newest-image budget", count: 11, sentinel: false },
+  { name: "a one-pixel sentinel does not use an attachment slot", count: 10, sentinel: true },
+]) test(`plain image budget: ${name}`, () => {
+  const token = "turn_12345678901234567890123456789012";
+  const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: false, proAvailable: false };
+  // The existing computer-vision fixture is 2x2; detail markers distinguish first/newest without changing its bytes.
+  const image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
+  const placeholder = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  const parsed = parseRequest({ model: CHATGPT_WEB_MODEL_ID, reasoning: { effort: "high" }, input: [{
+    role: "user", content: [
+      { type: "input_text", text: "Compare the newest image." },
+      ...Array.from({ length: count }, (_, index) => ({ type: "input_image", image_url: image,
+        detail: index === 0 ? "low" : index === 10 ? "high" : "auto" })),
+      ...(sentinel ? [{ type: "input_image", image_url: placeholder }] : []),
+    ],
+  }] });
+  const compiled = compileChatGptWebPrompt(parsed, capabilities, token, { plainPrompt: true });
+  const full = compileChatGptWebPrompt(parsed, capabilities, token);
+  expect(compiled.images).toEqual(full.images);
+  expect(compiled.images).toHaveLength(10);
+  if (count === 11) {
+    expect(compiled.text).toContain("<codex_context_json>");
+    expect(compiled.text.match(/older image not attached/g)).toHaveLength(1);
+    expect(compiled.images[0]?.detail).toBe("auto");
+    expect(compiled.images.at(-1)?.detail).toBe("high");
+  } else {
+    expect(compiled.text).toBe(`Compare the newest image.\n\n(turn_token ${token} — pass it to Codex tools)`);
+    expect(compiled.images[0]?.detail).toBe("low");
+    expect(compiled.images.some(item => item.imageUrl === placeholder)).toBe(false);
+  }
+  expect(estimateTokens(compiled.text)).toBeLessThan(
+    resolveChatGptWebMessageTokenBudget(CHATGPT_WEB_MODEL_ID, "high", capabilities, estimateChatGptWebImageTokens(compiled)),
+  );
+});
+
 for (const format of ["v1", "v2", "opaque"] as const) test.each([false, true])(
   `${format} post-compaction prompts restore current instructions in a fresh conversation (Bigger Context=%s)`,
   experimentalBiggerContext => {
