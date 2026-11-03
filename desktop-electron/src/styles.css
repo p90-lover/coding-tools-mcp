@@ -902,10 +902,21 @@ code {
   flex: none;
 }
 
-.browser-address span {
-  overflow: hidden;
+.browser-address input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.browser-address:focus-within {
+  border-color: var(--color-border-light);
+  color: var(--color-text-primary);
 }
 
 .browser-zoom-controls {

@@ -34,6 +34,7 @@ import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
 import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
+import { BrowserAddressBar } from "./features/BrowserAddressBar";
 import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
 import { RegisterSurface } from "./features/RegisterSurface";
 import { MCP_CATALOG, catalogServer, isWindows, parseMcpPaste, placeholdersIn, type McpCatalogEntry } from "./features/mcp-catalog";
@@ -1483,10 +1484,15 @@ function BrowserSurface({
         </div>
         {/* Turns keep running on their own accounts across a switch; only a check or test of the shown page holds it. */}
         <BrowserAccountSwitcher api={api!} busy={browser?.status === "testing"} copy={copy} setError={setError} />
-        <div className="browser-address" title={browser?.url || copy.browserAddress}>
-          <Icon name="globe" />
-          <span>{formatBrowserAddress(browser?.url, copy)}</span>
-        </div>
+        <BrowserAddressBar
+          key={browser?.navigationTargetId ?? browser?.activeTabId}
+          url={browser?.url ?? ""}
+          displayAddress={formatBrowserAddress(browser?.url, copy)}
+          targetId={browser?.navigationTargetId}
+          disabled={navigationLocked || !visible}
+          navigate={input => api!.navigateBrowser(input)}
+          setError={setError}
+        />
         <div className="browser-zoom-controls">
           <IconButton icon="minus" label={copy.zoomOut} onClick={() => void zoom("out")} />
           <button
