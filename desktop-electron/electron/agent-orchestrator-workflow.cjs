@@ -6457,19 +6457,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!chatQueue.list(workspaceId, taskId).length) return;
     draining.add(key);
     try {
-      const saved = await runs({ workspaceId });
+      let saved = await runs({ workspaceId });
       // An archived or deleted chat keeps its queue for when it is back.
-      if (taskLifecycle(saved, taskId).visibility !== "active") return;
-      // Read after the runs: a message joined to it meanwhile (chat_queue update) goes along.
-      const [next] = chatQueue.list(workspaceId, taskId);
-      if (!next) return;
-      const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
+      if (wakeupsDisposed || taskLifecycle(saved, taskId).visibility !== "active") return;
+      if (!chatQueue.list(workspaceId, taskId).length) return;
       // The short compaction watcher can expire while the provider still works. Queue retries
       // reconcile its owned session too, so later completion releases input without an open chat.
       if (sessionCompactions.get(runKey(workspaceId, taskId))?.status === "in_progress") {
         const progress = await compactSession({ workspaceId, taskId, status: true }).catch(() => null);
+        if (wakeupsDisposed) return;
         if (progress?.status !== "completed") { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
+        // The chat's lifecycle or latest model may have changed while compaction was pending.
+        runReads.delete(JSON.stringify([workspaceId, ""]));
+        try { saved = await runs({ workspaceId }); }
+        catch { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
+        if (wakeupsDisposed || taskLifecycle(saved, taskId).visibility !== "active") return;
       }
+      // Take the current head after every read: edits and replacement adds keep their order.
+      const [next] = chatQueue.list(workspaceId, taskId);
+      if (!next) return;
+      const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
       if (chatWorking(workspaceId, taskId, saved.runs)) {
         if (!next.steer) { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
         if (!steer) { armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(steerTries.get(next.id) ?? 0, 2)], true); return; }
