@@ -2197,7 +2197,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       if (!entry.pending) {
         entry.pending = (async () => {
-          let frame;
+          let frame, observedTurn;
           try {
             if (externalAgent(node)) {
               const session = node.receipt?.thread_id;
@@ -2205,9 +2205,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               else {
                 // A queued follow-up can be the session's newest turn while this card still owns
                 // another one. Read that turn, as the run loop does, rather than dropping its reply.
-                const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session);
+                const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session) || entry.turnId;
                 const observed = await harnessService().observe(session, expectedTurn);
                 const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
+                if (currentTurn && observed.turnState === "running" && typeof observed.turnId === "string" && observed.turnId) observedTurn = observed.turnId;
                 // Started: an agent took the message (AO starts the turn only then; see describeTurn).
                 frame = { ...base, turn_started: Boolean(observed.turnId) && observed.turnState !== "queued",
                   activity: currentTurn ? describeTurn(observed, { mission, node }) : observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
@@ -2242,7 +2243,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               || activityAttempt(id, run, latest.node) !== key) {
               entry.retired = true; entry.frame = null; return;
             }
-            if (!entry.retired && activityFrames.get(key) === entry) entry.frame = { ...frame, pending: false };
+            if (!entry.retired && activityFrames.get(key) === entry) {
+              // A cold spawn records only its session until it ends. Keep its first accepted turn
+              // in this bounded, receipt-checked frame so Recover can inspect it without replay.
+              if (!entry.turnId && observedTurn) entry.turnId = observedTurn;
+              entry.frame = { ...frame, pending: false };
+            }
           } catch (error) {
             if (!entry.retired) entry.frame = { ...(entry.frame || base), pending: false,
               activity: "unknown", error: publicText(error?.message || error, 300) };
@@ -5005,7 +5011,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // observe() may retry failed provisioning or interrupt an orphan; continuable() can drain
         // queued input. Neither is a contentless recovery primitive.
         const inspect = harnessService().recover;
-        result = typeof inspect === "function" ? await inspect(thread, before.card.receipt.turn_id || expectedTurns.get(thread))
+        result = typeof inspect === "function" ? await inspect(thread, before.card.receipt.turn_id || expectedTurns.get(thread)
+          || activityFrames.get(activityAttempt(id, run, before.card))?.turnId)
           : unavailable("The original agent cannot be inspected safely. No input was sent; its session was kept.");
       } else {
         // This status endpoint reads the existing hub only. Receipt-aware reattachment must be
