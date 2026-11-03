@@ -497,6 +497,72 @@ test("an AO agent's tool request is answered by clicking an option: no Submit or
   assert.equal(replies.length, 1);
 });
 
+function pendingApprovalAttempt() {
+  const view = renderer("AgentOrchestratorApproval.tsx", { persistentRefs: true });
+  const approval = { nodeId: "worker", approval_id: "pending-request", source: "ao", kind: "command", command: "echo fixture",
+    decisions: [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Deny" }] };
+  const owner = { workspaceId: "workspace", runId: "run" }, calls = [], errors = [];
+  let resolve, reject;
+  const response = new Promise((yes, no) => { resolve = yes; reject = no; });
+  const parent = { exports: {}, busy: "", workspaceId: owner.workspaceId, selectedRun: { id: owner.runId },
+    approvalScope: { current: owner }, selection: { current: owner }, mounted: { current: true }, shownApprovals: [approval],
+    setBusy(value) { parent.busy = value; }, setError(error) { if (error) errors.push(String(error)); },
+    setPendingApprovals(update) { parent.shownApprovals = update(parent.shownApprovals); },
+    moduleCall(operation, args) { calls.push({ operation, args }); return response; },
+  };
+  // The real parent swallows reported transport errors. Its returned promise must still last
+  // until that attempt settles, including a cancelled confirmation that sends no reply.
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  const file = ts.createSourceFile("Surface.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX), callbacks = {};
+  const visit = item => {
+    if (ts.isVariableDeclaration(item) && ["run", "approve"].includes(item.name.getText(file)) && item.initializer && ts.isArrowFunction(item.initializer)) {
+      assert.equal(callbacks[item.name.getText(file)], undefined, "callback must be unambiguous");
+      callbacks[item.name.getText(file)] = `const ${item.getText(file)};`;
+    }
+    ts.forEachChild(item, visit);
+  };
+  visit(file);
+  vm.runInNewContext(ts.transpileModule(`${callbacks.run}\n${callbacks.approve}\nexports.approve = approve;`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText, parent);
+  const options = () => {
+    const outer = view.render("AgentOrchestratorApproval", { approval, busy: Boolean(parent.busy), approve: parent.exports.approve });
+    const card = outer.type(outer.props);
+    return elements(card, item => typeof item.type === "function" && item.type.name === "CdxOptions")[0].props;
+  };
+  return { options, resolve, reject, calls, errors, parent };
+}
+
+for (const outcome of ["cancelled", "rejected"]) test(`AO approval permits an explicit retry after its parent attempt is ${outcome}`, async () => {
+  const attempt = pendingApprovalAttempt();
+  const pending = attempt.options().onPick("yes");
+  assert.equal(attempt.calls.length, 1);
+  assert.equal(attempt.options().disabled, true);
+  if (outcome === "cancelled") attempt.resolve({ cancelled: true });
+  else attempt.reject(new Error("fixture transport unavailable"));
+  await pending; await new Promise(setImmediate);
+  assert.equal(attempt.parent.busy, "");
+  assert.equal(attempt.parent.shownApprovals.length, 1, "same request remains pending");
+  assert.equal(attempt.options().disabled, false, "settlement releases the local send latch");
+  assert.deepEqual(plain(attempt.options().picked), []);
+  assert.equal(attempt.calls.length, 1, "settlement never resends automatically");
+  await attempt.options().onPick("no"); await new Promise(setImmediate);
+  assert.equal(attempt.calls.length, 2, "only the next explicit click sends again");
+  assert.equal(attempt.calls[1].args.approvalId, "pending-request");
+  assert.equal(attempt.calls[1].args.decisionId, "no");
+  if (outcome === "rejected") assert.match(attempt.errors[0], /fixture transport unavailable/);
+});
+
+test("AO approval blocks two same-frame picks and successful completion removes the pending request", async () => {
+  const attempt = pendingApprovalAttempt(), options = attempt.options();
+  const first = options.onPick("yes"), second = options.onPick("no");
+  attempt.resolve({});
+  await Promise.all([first, second]); await new Promise(setImmediate);
+  assert.equal(attempt.calls.length, 1, "the in-flight ref covers clicks before a React render");
+  assert.equal(attempt.parent.shownApprovals.length, 0);
+  assert.deepEqual(attempt.errors, []);
+});
+
 test("native decision objects are forwarded unchanged and unscoped requests are disabled", () => {
   const view = renderer("AgentOrchestratorApproval.tsx");
   const decision = { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["git", "status"] } };
