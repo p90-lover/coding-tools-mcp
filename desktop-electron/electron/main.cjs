@@ -27,6 +27,7 @@ const {
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
+const { createSignInRetryWait } = require("./sign-in-retry-wait.cjs");
 const { prepareBrowserDebugging } = require("./browser-debugging.cjs");
 const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
 const { codexThreadStats } = require("./codex-thread-stats.cjs");
@@ -687,7 +688,10 @@ async function waitForProxyRoute(timeoutMs) {
   }
 }
 const delay = (ms) => new Promise((resolve) => { setTimeout(resolve, ms).unref?.(); });
-function scheduleAuthenticationRetry(logger, attempt = 0) {
+// Shared by every check the app makes by itself (launch and its retries, Setup's look every 10 s):
+// one that did not sign in holds them all off ChatGPT for 10 minutes (sign-in-retry-wait.cjs).
+const signInRetryWait = createSignInRetryWait();
+function scheduleAuthenticationRetry(logger, attempt = 0, delayMs = AUTHENTICATION_RETRY_DELAYS_MS[attempt]) {
   if (attempt >= AUTHENTICATION_RETRY_DELAYS_MS.length) return;
   const timer = setTimeout(() => {
     if (quitting || shutdownInProgress || !browserHost) return;
@@ -697,13 +701,20 @@ function scheduleAuthenticationRetry(logger, attempt = 0) {
       scheduleAuthenticationRetry(logger, attempt);
       return;
     }
+    const waiting = signInRetryWait.remainingMs();
+    if (waiting > 0) {
+      scheduleAuthenticationRetry(logger, attempt, waiting);
+      return;
+    }
     void browserHost.refreshAuthentication().then((state) => {
+      signInRetryWait.settle(state, logger);
       logger.info("browser.session_refresh_retried", { attempt: attempt + 1, authenticated: state?.authenticated === true });
     }).catch((error) => {
+      signInRetryWait.settle(error, logger);
       logger.warn("browser.session_refresh_failed", { ...navigationErrorForLog(error), attempt: attempt + 1 });
       scheduleAuthenticationRetry(logger, attempt + 1);
     });
-  }, AUTHENTICATION_RETRY_DELAYS_MS[attempt]);
+  }, delayMs);
   timer.unref?.();
 }
 
@@ -2818,6 +2829,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-login", async () => {
     const browser = await browserHost.openLogin();
     if (browser.authenticated) {
+      signInRetryWait.clear();
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
       scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-login" });
@@ -2829,6 +2841,7 @@ function registerIpc({ logger, stateStore }) {
     if (stateStore.read().browserInteractionMode === "manual") return browserHost.snapshot();
     const browser = await browserHost.refreshAuthentication();
     if (browser.authenticated) {
+      signInRetryWait.clear();
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
       scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-refresh-auth" });
@@ -2838,18 +2851,24 @@ function registerIpc({ logger, stateStore }) {
   // Setup checks the sign-in on its own while it shows "Sign in". The first look asks
   // /api/auth/session with the browser's cookies and does not navigate, so a sign-in in progress
   // in the ChatGPT view is never interrupted; only a session that is signed in is then refreshed
-  // in the view. Nothing runs under a login, smoke test or turn.
+  // in the view. Nothing runs under a login, smoke test or turn, nor for 10 minutes after a refresh
+  // that did not sign in: ChatGPT refuses a page opened again every 10 s ("too many tries").
   handle("launcher:browser-check-auth", async () => {
     // Setup asks as soon as it shows, which can be before the browser exists (handlers are registered
     // first): that failed with "Cannot read properties of null (reading 'snapshot')" on every launch.
     if (!browserHost) return null;
     const current = browserHost.snapshot();
     if (stateStore.read().browserInteractionMode === "manual" || current?.authenticated === true
-      || browserHost.currentOperation?.() || browserHost.activeTraceId) return current;
+      || browserHost.currentOperation?.() || browserHost.activeTraceId
+      || signInRetryWait.remainingMs() > 0) return current;
     const readiness = await browserHost.authenticationReadiness().catch(() => null);
     if (readiness?.authenticated !== true) return browserHost.snapshot();
     logger.info("browser.setup_signin_detected", { recent: readiness.recent === true });
-    const browser = await browserHost.refreshAuthentication();
+    const browser = await browserHost.refreshAuthentication().catch((error) => {
+      signInRetryWait.settle(error, logger);
+      throw error;
+    });
+    signInRetryWait.settle(browser, logger);
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
@@ -2860,6 +2879,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-passkey-login", async () => {
     const browser = await browserHost.openPasskeyLogin();
     if (browser.authenticated) {
+      signInRetryWait.clear();
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
       scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-passkey-login" });
@@ -5231,7 +5251,11 @@ async function start() {
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
     // The local proxy (ProxyBridge) can still be starting when the app opens: loading chatgpt.com
     // through it then fails at once and the saved sign-in reads as signed out until the 30 s retry.
-    startupAuthenticationRefresh = waitForProxyRoute(PROXY_STARTUP_WAIT_MS).then(() => browserHost.refreshAuthentication()).catch((error) => {
+    startupAuthenticationRefresh = waitForProxyRoute(PROXY_STARTUP_WAIT_MS).then(() => browserHost.refreshAuthentication()).then((state) => {
+      signInRetryWait.settle(state, logger);
+      return state;
+    }).catch((error) => {
+      signInRetryWait.settle(error, logger);
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
