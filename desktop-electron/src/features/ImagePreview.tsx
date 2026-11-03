@@ -181,7 +181,12 @@ export function ImagePreviewDialog({ url, name, onClose, onMarkup }: {
   // this full-window overlay to the pane.
   return createPortal(<div className={`cdx-preview is-${mode}`} data-theme={dark ? "dark" : "light"} role="dialog" aria-modal="true" aria-label="Image preview"
     // A click on the space around the image closes it: one that didn't move over 5 px, on no control (Codex's).
-    onPointerDown={(event) => { press.current = mode === "view" && event.button === 0 && event.isPrimary ? { x: event.clientX, y: event.clientY } : null; }}
+    // A zoomed image's scrollbars are the viewport's own and only scroll.
+    onPointerDown={(event) => {
+      const box = viewport.current, rect = box?.getBoundingClientRect();
+      const onBar = box && rect && event.target === box && (event.clientX >= rect.left + box.clientWidth || event.clientY >= rect.top + box.clientHeight);
+      press.current = mode === "view" && event.button === 0 && event.isPrimary && !onBar ? { x: event.clientX, y: event.clientY } : null;
+    }}
     onClick={(event) => {
       const start = press.current;
       press.current = null;

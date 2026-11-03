@@ -229,12 +229,13 @@ test("the new chat's project chip opens Codex's project picker: search, projects
     [["New project", true], ["✕Don't work in a project", true]], "New project needs onAddProject; a project is always required");
 });
 
-test("the new chat is Codex's: no subtitle, a mic, and the gear opens the environment popover with the branch", () => {
+test("the new chat is Codex's: no subtitle, no placeholder mic, and the gear opens the environment popover with the branch", () => {
   const { props } = base({ composer: { mode: "single" }, projectBranch: "main", onSettings() {} });
   const view = mount(props);
   const empty = walk(view.render()).find((element) => element.props?.className === "cx-empty");
   assert.equal(walk(empty).filter((element) => element.type === "p").length, 0, "Codex has no subtitle under the question");
-  assert.equal(walk(view.render()).find((element) => element.props?.["aria-label"] === "Voice input").props.disabled, true);
+  // The mic was a disabled placeholder ("isn't available yet"); the clean chat box (2026-11-03) has none.
+  assert.equal(walk(view.render()).find((element) => element.props?.["aria-label"] === "Voice input"), undefined);
   const gear = { getBoundingClientRect: () => ({ right: 600, top: 500 }) };
   const pressGear = () => walk(view.render()).find((element) => element.props?.["aria-label"] === "Configure local environment").props.onClick({ currentTarget: gear });
   const menuOf = () => walk(view.render()).find((element) => element.type === "ChatMenu").props.menu;

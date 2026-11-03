@@ -582,8 +582,12 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 @keyframes cdx-preview-in { from { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .cdx-preview { animation: none; } }
 .cdx-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-/* The header: the file's menu at the left, zoom, Download and Close at the right; its gaps click through. */
-.cdx-viewer-head { position: absolute; top: 0; right: 0; left: 0; z-index: 30; display: flex; align-items: center; gap: 6px; padding: 8px; pointer-events: none; user-select: none; }
+/* The header: the file's menu at the left, zoom, Download and Close at the right; its gaps click through.
+   On Windows its right end stops short of the title bar's minimize, maximize and close (their width is
+   what the title bar area leaves): over them, they covered Download and Close (#983). */
+.cdx-preview { --cdx-window-buttons: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)); }
+.cdx-viewer-head { position: absolute; top: 0; right: 0; left: 0; z-index: 30; display: flex; align-items: center; gap: 6px;
+  padding: 8px calc(var(--cdx-window-buttons) + 8px) 8px 8px; pointer-events: none; user-select: none; }
 .cdx-viewer-head > *, .cdx-viewer-trail > * { pointer-events: auto; }
 .cdx-viewer-trail { display: flex; align-items: center; gap: 6px; margin-left: auto; pointer-events: none; }
 .cdx-control { position: relative; isolation: isolate; display: inline-flex; flex: none; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border: 0; border-radius: 9999px;
@@ -654,8 +658,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cdx-erase-canvas { position: absolute; inset: 0; color: #0285ff; opacity: .5; outline: none; touch-action: none; cursor: crosshair; }
 .cdx-markup-hint { position: absolute; top: 56px; left: 50%; z-index: 40; margin: 0; padding: 6px 12px; transform: translateX(-50%); border-radius: 9999px;
   background: var(--cdx-control); box-shadow: var(--cdx-control-ring); color: var(--cdx-text-2); font-size: 13px; pointer-events: none; }
-/* Markup's own Add to chat and Back to image, as the header's pills. */
-.cdx-preview-actions { position: absolute; top: 8px; right: 8px; z-index: 10; display: flex; align-items: center; gap: 6px; }
+/* Markup's own Add to chat and Back to image, as the header's pills, clear of the window buttons too. */
+.cdx-preview-actions { position: absolute; top: 8px; right: calc(var(--cdx-window-buttons) + 8px); z-index: 10; display: flex; align-items: center; gap: 6px; }
 .cdx-preview-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; min-width: 32px; padding: 0 12px; border: 0;
   border-radius: 9999px; background: var(--cdx-control); color: var(--cdx-text); box-shadow: var(--cdx-control-ring); backdrop-filter: blur(24px);
   font: inherit; font-size: 13px; cursor: pointer; }
@@ -684,9 +688,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cdx-markup-color { width: 20px; height: 20px; padding: 0; border: 1px solid rgb(0 0 0 / .2); border-radius: 50%; box-shadow: 0 1px 3px 0 rgb(0 0 0 / .1), 0 1px 2px -1px rgb(0 0 0 / .1); cursor: pointer; }
 .cdx-markup-color:hover { transform: scale(1.05); box-shadow: 0 0 0 2px rgb(0 0 0 / .15); }
 .cdx-markup-color.is-selected { box-shadow: 0 0 0 2px var(--cdx-surface), 0 0 0 4px #2c67c5; }
-.cdx-markup-stage { display: flex; flex: 1; align-items: center; justify-content: center; min-height: 0; padding: 64px 80px 24px; box-sizing: border-box; }
+/* Its 72 px bottom keeps the image clear of Add to chat and Back to image (16 + 40 + 16). */
+.cdx-markup-stage { display: flex; flex: 1; align-items: center; justify-content: center; min-height: 0; padding: 64px 80px 72px; box-sizing: border-box; }
 .cdx-markup-surface { position: relative; display: flex; max-width: 100%; max-height: 100%; isolation: isolate; }
-.cdx-markup-surface img { display: block; max-width: 100%; max-height: calc(100dvh - 88px); object-fit: contain; user-select: none;
+.cdx-markup-surface img { display: block; max-width: 100%; max-height: calc(100dvh - 136px); object-fit: contain; user-select: none;
   border: 1px solid var(--color-border-light, rgb(0 0 0 / .06)); box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1); }
 .cdx-markup-canvas { position: absolute; inset: 0; outline: none; touch-action: none; }
 .cdx-markup-canvas.is-draw { cursor: crosshair; }
@@ -1095,7 +1100,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-code pre code { padding: 0; background: transparent; }
 
 /* ---------- Composer ---------- */
-.cx-composer { position: relative; flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 16px; padding: 10px 12px 8px;
+.cx-composer { position: relative; flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 16px; padding: 8px 8px 6px 10px;
   border: 1px solid color-mix(in srgb, var(--ao-line) 70%, transparent); border-radius: 20px; background: var(--color-bg-primary);
   box-shadow: 0 4px 18px rgb(0 0 0 / 7%); }
 .cx-composer:focus-within { border-color: color-mix(in srgb, var(--color-text-primary) 25%, var(--ao-line)); }
@@ -1103,7 +1108,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
    outranks the orchestrator's `.ao-workflow textarea:focus-visible` outline. */
 .ao-workflow .cx-composer textarea:focus-visible { outline: none; }
 /* It grows with its text up to the cap (field-sizing), with no script measuring it on each key. */
-.cx-composer textarea { display: block; width: 100%; min-height: 24px; max-height: 240px; padding: 4px 4px 6px; border: 0; outline: none; resize: none; field-sizing: content; overflow-y: auto;
+.cx-composer textarea { display: block; width: 100%; min-height: 24px; max-height: 240px; padding: 4px 4px 4px; border: 0; outline: none; resize: none; field-sizing: content; overflow-y: auto;
   background: transparent; color: var(--color-text-primary); font: inherit; font-size: 14px; line-height: 1.5; }
 /* The line under the chat box: rounds, then the latest turn's model requests (ChatTurnStats). */
 .cx-turn-stats { display: flex; flex-wrap: wrap; justify-content: center; width: calc(100% - 48px); max-width: 780px; margin: -8px auto 10px; padding: 0;
@@ -1125,31 +1130,34 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-turn-foot span:first-child { padding-left: 0; }
 .cx-turn-foot span + span { border-left: 1px solid color-mix(in srgb, var(--ao-muted) 35%, transparent); }
 .cx-turn-foot span:hover { color: var(--color-text-primary); }
-.cx-composer-bar { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* The chat box's row on one 28 px grid: every control 28 px tall with 7 px corners, icons in 28 px
+   squares, Send a 28 px circle. No carets and no boxes: a control is its icon or its word, and the
+   hover tint says it opens. In reading order: attach, permissions, Single/Team, then the harness's
+   logo, the model and its effort and window side by side, and at the right end the context ring and
+   Send. Before (2026-11-03): four heights (28-32 px), a bordered Single/Team key, five carets, the
+   permission's name (148 px), a mic placeholder, and the window chip apart from its effort. */
+.cx-composer-bar { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .cx-composer-bar .ao-composer-controls { display: flex; flex: 1 1 auto; flex-wrap: nowrap; align-items: center; gap: 2px; min-width: 0; }
-/* Codex's bottom row is plain text: permission and Single|Team on the left, the model (effort dimmed)
-   on the right before the mic and the blue send. These override the orchestrator's bordered chips. */
-.ao-workflow .cx-composer .ao-composer-chip { height: 30px; gap: 5px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent;
-  color: var(--ao-muted); font-size: 13px; }
+.ao-workflow .cx-composer .ao-composer-controls .ao-composer-picker + .ao-composer-picker { margin-left: 0; }
+.ao-workflow .cx-composer :is(.ao-composer-chip, .ao-mode-toggle, .cx-icon-button) { height: 28px; border: 0; border-radius: 7px; }
+.ao-workflow .cx-composer .ao-composer-chip { gap: 5px; padding: 0 7px; background: transparent; color: var(--ao-muted); font-size: 12.5px; }
 .ao-workflow .cx-composer .ao-composer-chip:hover:not(:disabled), .ao-workflow .cx-composer .ao-composer-chip[aria-expanded="true"] {
   border: 0; background: var(--cx-hover); color: var(--color-text-primary); }
-.ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child { margin-left: auto; }
+/* Icon-only controls are squares: attach, the permission level, the harness's logo, the ring. */
+.ao-workflow .cx-composer :is(.cx-icon-button, .ao-permissions > .ao-composer-chip, .ao-composer-chip.is-logo) { justify-content: center; width: 28px; min-width: 28px; padding: 0; }
+/* The permission chip is its level's icon; Full access keeps its warning colour. */
+.ao-workflow .cx-composer .ao-permissions > .ao-composer-chip[data-danger] { color: var(--ao-red, #c0392b); }
+/* The model (or saved team) is what the row is about: full ink. Effort and window stay muted beside it. */
+.ao-workflow .cx-composer .ao-composer-chip:is([aria-label="Choose model"], [aria-label="Choose saved team"]) { color: var(--color-text-primary); }
 /* The effort and window chips are short words ("Extra high", "400K") and keep them whole; the
-   model name and the permission chip give up the room. Shrunk, the window read "4…" and its
-   caret ran up against the mic. */
+   model name gives up the room. Shrunk, the window read "4…". */
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:nth-last-child(-n+2):not(:first-child) { flex: none; }
-/* The context ring, the mic and Send: one group at the right end of the row it is on. */
-.cx-composer-send { display: flex; flex: none; align-items: center; gap: 6px; margin-left: auto; }
-.ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip { color: var(--color-text-primary); }
-.ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip > svg:first-child { display: none; }
-.ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-popover { left: auto; right: 0; }
+/* The context ring and Send: one group at the right end of the row it is on. */
+.cx-composer-send { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; }
 .ao-chip-effort { color: var(--ao-muted); }
-/* No down arrows on the chat box's chips or the branch: each is still a menu (named on hover), and
-   the row keeps their 16 px each (2026-11-03). */
-.ao-workflow :is(.cx-composer .ao-composer-chip, .cx-branch-chip) > .ui-caret { display: none; }
 /* A name cut short fades out where it is cut, not "…"; one that fits draws whole. The fade runs on
    the name's own scroll timeline, which exists only while the name overflows its chip. */
-.ao-workflow .cx-composer .ao-composer-chip > span:nth-last-child(2), .ao-workflow .cx-branch-chip > span:nth-of-type(1) {
+.ao-workflow :is(.cx-composer .ao-composer-chip, .cx-branch-chip) > span:last-of-type {
   text-overflow: clip; animation: cx-cut-fade linear both; animation-timeline: scroll(self inline); }
 @keyframes cx-cut-fade { from, to { mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent); } }
 /* The branch bar above the chat box: the branch in use, and every branch of the project. */
@@ -1228,13 +1236,14 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   .ao-workflow .cx-branch-option { transition: none; }
   .ao-workflow .cx-branch-option:hover:not(:disabled) { transform: none; }
 }
-/* Single or Team, one click: the logo of the mode in use on a tinted key, the other's out of sight.
-   A click rolls them like a dial, the one in use up and out as the next rises in, turning as it comes;
-   switching back rolls the other way. The key dips as it's pressed. */
-.ao-workflow .cx-composer .ao-mode-toggle { position: relative; display: grid; flex: none; place-items: center; width: 30px; height: 28px; margin: 0 2px; padding: 0;
-  overflow: hidden; border: 1px solid var(--ao-line); border-radius: 9px; background: color-mix(in srgb, var(--ao-blue) 12%, transparent); color: var(--ao-blue);
-  cursor: pointer; transition: background-color .2s ease, transform .12s ease; }
-.ao-workflow .cx-composer .ao-mode-toggle:hover:not(:disabled) { background: color-mix(in srgb, var(--ao-blue) 20%, transparent); }
+/* Single or Team, one click: a plain 28 px icon like its neighbours, the logo of the mode in use, the
+   other's out of sight; Team in use takes the accent. A click rolls them like a dial, the one in use up
+   and out as the next rises in, turning as it comes; switching back rolls the other way. It dips as
+   it's pressed. It sat on a tinted, bordered key, the only box in the row. */
+.ao-workflow .cx-composer .ao-mode-toggle { position: relative; display: grid; flex: none; place-items: center; width: 28px; margin: 0; padding: 0;
+  overflow: hidden; background: transparent; color: var(--ao-muted); cursor: pointer; transition: background-color .2s ease, color .2s ease, transform .12s ease; }
+.ao-workflow .cx-composer .ao-mode-toggle[data-mode="team"] { color: var(--ao-blue); }
+.ao-workflow .cx-composer .ao-mode-toggle:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
 .ao-workflow .cx-composer .ao-mode-toggle:active:not(:disabled) { transform: scale(.9); }
 .ao-workflow .cx-composer .ao-mode-toggle:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 1px; }
 .ao-workflow .cx-composer .ao-mode-toggle:disabled { cursor: default; opacity: .55; }
@@ -1243,12 +1252,12 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .ao-workflow .cx-composer .ao-mode-toggle[data-mode="single"] > .is-team { opacity: 0; transform: translateY(115%) rotate(-90deg) scale(.5); }
 .ao-workflow .cx-composer .ao-mode-toggle[data-mode="team"] > .is-single { opacity: 0; transform: translateY(-115%) rotate(90deg) scale(.5); }
 @media (prefers-reduced-motion: reduce) { .ao-workflow .cx-composer :is(.ao-mode-toggle, .ao-mode-face) { transition: none; } }
-.cx-send { display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%;
+.cx-send { display: grid; place-items: center; flex: 0 0 auto; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%;
   background: var(--ao-blue); color: #fff; cursor: pointer; }
 .cx-send svg { transform: rotate(-90deg); }
 .cx-send:disabled { background: var(--cx-active); color: var(--ao-muted); cursor: default; }
 .cx-send.is-stop { background: var(--color-text-primary); }
-.cx-send.is-stop span { width: 11px; height: 11px; border-radius: 2px; background: var(--color-bg-primary); }
+.cx-send.is-stop span { width: 10px; height: 10px; border-radius: 2px; background: var(--color-bg-primary); }
 .cx-attachments { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
 .cx-attachment { position: relative; display: inline-flex; align-items: center; gap: 2px; max-width: 260px; height: 26px; padding: 0 4px 0 0; border: 1px solid var(--ao-line); border-radius: 8px; font-size: 12px; }
 .cx-attachment-open { display: inline-flex; align-items: center; gap: 4px; min-width: 0; height: 100%; padding: 0 2px 0 8px; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
@@ -1975,18 +1984,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
      Wrapping while it didn't fit (#962) set every pane's chips differently: side by side, a 392 px pane
      put effort and window on a row of their own and a 421 px one kept one row, each by its model's
      name (2026-11-03). Only a pane too narrow for the row at all (360 px and under) takes two. */
-  .cx-composer-bar { gap: 4px; }
   .ao-workflow .cx-composer .ao-composer-controls > * { flex: none; }
-  .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child { margin-left: 0; }
   .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:has(> .ao-composer-chip:is([aria-label="Choose model"], [aria-label="Choose saved team"])) {
     flex: 0 1 auto; min-width: 40px; }
   /* The effort only once the model is down to its least: shrinking with it, "Max" read "Ma". */
   .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:has(> .ao-composer-chip[aria-label^="Reasoning effort"]) { flex: 0 0.001 auto; min-width: 34px; }
-  /* What makes one row hold up to ~720 px: the permission chip shows its level's icon (its name on
-     hover; each level has its own icon), and the mic, a placeholder ("isn't available yet"), steps out.
-     With both, a 620 px chat box took a second row for Send alone. */
-  .ao-workflow .cx-composer .ao-permissions > .ao-composer-chip > span { display: none; }
-  .cx-composer-send > .cx-mic { display: none; }
   /* The goal bar: the round is in its tooltip, and Model judges is its switch alone. */
   .cx-goal-round, .cx-model-judges.is-compact > span:last-child { display: none; }
 }
@@ -1998,11 +2000,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   .cx-browser-chip > span:last-child { display: none; }
   .cx-head-team { min-width: 0; }
   .cx-head-team select { min-width: 0; max-width: 120px; }
-  /* Tighter chips keep the model's name longer: 2 px less padding a side and between chips. */
-  .cx-composer-bar { gap: 2px; }
+  /* Tighter chips keep the model's name longer: 1 px less padding a side. */
   .ao-workflow .cx-composer .ao-composer-chip { padding: 0 6px; }
-  .ao-workflow .cx-composer .ao-mode-toggle { margin: 0; }
-  .cx-composer-send { gap: 4px; }
   /* The bars above and below the chat box keep its width, so the goal and queued bars line up with it. */
   :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 24px); }
   /* The goal bar's objective takes a line of its own under its state and buttons, beside its time:
@@ -2020,7 +2019,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 16px); }
 }
 @container cx-thread (max-width: 360px) {
-  /* Too narrow for one row (its chips at their least take ~312 px): two rows, the break right after
+  /* Too narrow for one row (on the 28 px grid its chips at their least take ~300 px, the model's
+     name down to two letters): two rows, the break right after
      the model, so a long name can't fold Send onto a third. On top attach, permissions, Single/Team,
      the harness and the model, which takes what that row leaves; under it effort and window, Send at
      the right end. Team mode has no effort or window chip, so nothing breaks its few chips apart. */
@@ -2039,6 +2039,5 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 @container cx-thread (max-width: 300px) {
   .cx-thread-head { padding: 0 6px 0 10px; }
   .cx-thread-head > :is(.cx-browser-chip, [aria-label="Preview"], [aria-label="Show cards"], [aria-label="Show side panel"]) { display: none; }
-  .cx-composer-bar { column-gap: 2px; }
   .cx-goal { gap: 4px; }
 }
