@@ -69,6 +69,7 @@ const {
 const { RuntimeSupervisor, watchdogExternalBackoff } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
+const { droppedAgentSessionEnvironment } = require("./agent-session-env.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
@@ -4176,6 +4177,8 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  const droppedAgentEnv = droppedAgentSessionEnvironment();
+  if (droppedAgentEnv.length) logger.warn("launcher.agent_session_env_dropped", { names: droppedAgentEnv });
   // An update that just placed this version is kept only once it proves it works: its window loaded,
   // its backend answered and AO, when started, is ready (update-health-gate.cjs). Until then the old
   // copies the worker held stay; a version still not healthy after Settings' health window goes back
