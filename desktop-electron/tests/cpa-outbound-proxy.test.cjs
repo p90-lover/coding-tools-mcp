@@ -8,7 +8,7 @@ const { createManagedExternalServicesController, resolveCpaProxyRoute, resolveMa
 const { runtimeConfiguration, installBundledCommandCodePlugin } = require("../electron/cpa-managed.cjs");
 const { redactText } = require("../electron/logging.cjs");
 
-test("CPA can use its own proxy profile without changing other components", (t) => {
+test("CPA can use its own proxy profile without changing other components", async (t) => {
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-scoped-proxy-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const safeStorage = { isEncryptionAvailable: () => false };
@@ -23,8 +23,10 @@ test("CPA can use its own proxy profile without changing other components", (t) 
     username: "ct", password: "cpa-test-key", scopes: ["all"] });
   store.setGlobalRouting({ enabled: true, profileId: "legacy" });
   const dataRoot = path.join(root, "integrations");
+  await store.saved();
   assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).profileId, "legacy");
   store.setProviderPolicy({ providerId: "cpa", mode: "profile", profileId: "cpa-only" });
+  await store.saved();
   const environment = resolveManagedProxyEnvironment("cpa", dataRoot, safeStorage);
   const route = new URL(environment.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL);
   assert.equal(route.port, "17894");
@@ -34,17 +36,21 @@ test("CPA can use its own proxy profile without changing other components", (t) 
   assert.equal(new URL(resolveManagedProxyEnvironment("antigravity-cli", dataRoot, safeStorage).HTTPS_PROXY).port, "17891");
   assert.equal(store.snapshot().routing.globalProfileId, "legacy");
   store.setGlobalRouting({ enabled: false, profileId: null });
+  await store.saved();
   assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).profileId, "cpa-only");
   store.setProviderPolicy({ providerId: "cpa", mode: "inherit" });
+  await store.saved();
   assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).url, "");
   store.setGlobalRouting({ enabled: true, profileId: "legacy" });
+  await store.saved();
   assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).profileId, "legacy");
   store.setProviderPolicy({ providerId: "cpa", mode: "direct" });
+  await store.saved();
   assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).url, "");
   assert.throws(() => resolveManagedProxyEnvironment("cpa", dataRoot, safeStorage), /Select a .*network proxy/);
 });
 
-test("CPA config follows the selected authenticated global profile", () => {
+test("CPA config follows the selected authenticated global profile", async () => {
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-outbound-proxy-"));
   const providers = path.join(root, "providers");
   fs.mkdirSync(providers, { recursive: true });
@@ -58,6 +64,7 @@ test("CPA config follows the selected authenticated global profile", () => {
     username: "account", password: "p@ss:word", scopes: ["all"] });
   store.setGlobalRouting({ enabled: true, profileId: "owned" });
 
+  await store.saved();
   const route = resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage);
   assert.equal(route.profileId, "owned");
   const environment = resolveManagedProxyEnvironment("cpa", path.join(root, "integrations"), safeStorage);
@@ -118,6 +125,7 @@ test("CPA config follows the selected authenticated global profile", () => {
   controller.dispose();
 
   store.setGlobalRouting({ enabled: false, profileId: null });
+  await store.saved();
   const direct = resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage);
   assert.equal(direct.url, "");
   assert.throws(() => resolveManagedProxyEnvironment("cpa", path.join(root, "integrations"), safeStorage), /Select a network proxy/);
@@ -148,6 +156,7 @@ test("a services snapshot reuses the proxy route until the saved settings change
     endpoint: { protocol: "http", host: "127.0.0.1", port: 17895 }, scopes: ["all"] });
   store.setGlobalRouting({ enabled: true, profileId: "owned" });
   const published = [];
+  await store.saved();
   const controller = createManagedExternalServicesController({
     dataRoot: path.join(root, "integrations"), safeStorage,
     filePath: path.join(root, "external-services.json"),
