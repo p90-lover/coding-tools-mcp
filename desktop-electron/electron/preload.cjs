@@ -110,6 +110,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   removeGptBrowserAccount: (id) => ipcRenderer.invoke("launcher:gpt-browser-remove", id),
   setGptBrowserSurfaceActive: (active) => ipcRenderer.invoke("launcher:gpt-browser-surface-active", active === true),
   setGptBrowserBounds: (bounds) => ipcRenderer.invoke("launcher:gpt-browser-bounds", bounds),
+  gptBrowserSnapshot: () => ipcRenderer.invoke("launcher:gpt-browser-snapshot"),
   onGptBrowserChanged: (listener) => subscription("launcher:gpt-browser-changed", listener),
   chatGptDesktopStatus: () => ipcRenderer.invoke("launcher:chatgpt-desktop-status"),
   openChatGptDesktop: (slotId) => ipcRenderer.invoke("launcher:chatgpt-desktop-open", slotId),

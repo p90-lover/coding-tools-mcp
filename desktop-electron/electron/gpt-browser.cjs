@@ -323,6 +323,20 @@ function createGptBrowserHost({
       bounds = next;
       place();
     },
+    /**
+     * A still of the page in the window, as a JPEG data URL (null when none is shown). The surface
+     * draws it in the view's place while the sidebar slides over it: the native view is drawn above
+     * the whole app page, so it steps aside and left the pane black.
+     */
+    async snapshot() {
+      const page = attachedId ? pages.get(attachedId) : null;
+      const contents = page?.view.webContents;
+      if (!contents || contents.isDestroyed()) return null;
+      try {
+        const image = await contents.capturePage();
+        return image.isEmpty() ? null : `data:image/jpeg;base64,${image.toJPEG(80).toString("base64")}`;
+      } catch { return null; }
+    },
     dispose() {
       pendingPages.clear();
       for (const id of [...pages.keys()]) unload(id);

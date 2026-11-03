@@ -2978,6 +2978,7 @@ function registerIpc({ logger, stateStore }) {
     });
     return true;
   });
+  handle("launcher:gpt-browser-snapshot", async () => (await getGptBrowser(logger)).snapshot());
   handle("launcher:chatgpt-desktop-surface-active", (_event, active) => {
     getChatGptDesktop(logger).setSurfaceActive(active === true);
     return true;

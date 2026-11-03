@@ -1005,6 +1005,8 @@ export interface LauncherApi {
   removeGptBrowserAccount(id: string): Promise<GptBrowserStatus>;
   setGptBrowserSurfaceActive(active: boolean): Promise<GptBrowserStatus>;
   setGptBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
+  /** A JPEG data URL of the page in the window, or null: drawn in its place while the sidebar covers it. */
+  gptBrowserSnapshot(): Promise<string | null>;
   onGptBrowserChanged(listener: (status: GptBrowserStatus) => void): () => void;
   /** AO pushed a change: session ids whose conversation or state moved, "<workspace>:<run>" run keys. */
   onAoChanged?(listener: (change: { sessions: string[]; runs: string[]; moved?: { from: string; to: string; taskId: string }[] }) => void): () => void;

@@ -169,10 +169,16 @@ test("a hidden docked sidebar folds to an icon rail that shows the whole panel o
   // Every native view steps aside while the hover panel or the compact drawer covers it, and stays
   // aside until the panel has slid shut.
   assert.match(appSource, /const sidebarCovers = \(compactSidebar && sidebarOpen\) \|\| \(sidebarRail && sidebarExpanded\);/);
-  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.sidebar-clip \{[^}]*transition:\s*width 180ms/);
-  assert.match(appSource, /setTimeout\(\(\) => setSidebarExpanded\(false\), 190\)/);
+  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.sidebar-clip \{[^}]*transition:\s*width 240ms cubic-bezier\(0\.32, 0\.72, 0, 1\)/);
+  assert.match(appSource, /setTimeout\(\(\) => setSidebarExpanded\(false\), 250\)/);
   assert.doesNotMatch(appSource, /!\(compactSidebar && sidebarOpen\)/);
-  assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 4);
+  assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 3);
+  // The GPT Browser stays shown under the sidebar as a still of its page: stepping aside left it black.
+  assert.match(appSource, /active=\{surface === "gpt-browser"\} covered=\{sidebarCovers \|\| biggerContextRecommendationOpen\}/);
+  // The docked panel glides open and shut on one eased curve, keeping its full layout until it is shut.
+  assert.match(appSource, /transition=\{\{ type: "tween", duration: 0\.26, ease: \[0\.32, 0\.72, 0, 1\] \}\}\s*onAnimationComplete=\{\(\) => setSidebarClosing\(false\)\}/);
+  assert.match(appSource, /const sidebarRail = !compactSidebar && !sidebarOpen && !sidebarClosing;/);
+  assert.match(appSource, /if \(!next && !compactSidebar\) setSidebarClosing\(true\);/);
   // AO's view (its own UI, the project board, the Antigravity terminal) steps aside the same way:
   // it covered the hover panel's labels from the rail's edge (2026-11-01).
   assert.match(appSource, /<section className="workspace">\s*<NativeViewsCoveredContext\.Provider value=\{sidebarCovers \|\| biggerContextRecommendationOpen\}>/);
@@ -180,10 +186,12 @@ test("a hidden docked sidebar folds to an icon rail that shows the whole panel o
   assert.match(aoViewSource, /const covered = laidOver \|\| tabHidden;/);
   assert.match(aoViewSource, /useEffect\(\(\) => \{\s*if \(covered\) return;/);
   assert.match(aoViewSource, /\}, \[covered, generation,/);
-  // The hover panel can be pinned from inside itself, and the toggle also clears the hover state.
-  assert.match(appSource, /\{sidebarRail \? \(\s*<IconButton icon="sidebar" label=\{copy\.keepSidebarOpen\} onClick=\{toggleSidebar\}/);
+  // The title bar's toggle opens and closes it (and clears the hover state); the panel has no second one.
+  assert.doesNotMatch(appSource, /keepSidebarOpen/);
   assert.match(appSource, /const toggleSidebar = \(\) => \{\s*closeSidebarPeek\(\);/);
-  assert.equal((i18nSource.match(/keepSidebarOpen: /g) || []).length, 3);
+  assert.equal((i18nSource.match(/keepSidebarOpen: /g) || []).length, 0);
+  // The logo shows with the open panel only, its row keeping its height on the rail.
+  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.app-sidebar:not\(\.is-expanded\) \.sidebar-brand-identity \{\s*visibility: hidden;/);
   // A saved hidden sidebar stays hidden on the next start; only crossing the compact width changes it.
   assert.match(appSource, /setSidebarOpen\(!media\.matches && sidebarPinned\.current\);\s*\};\s*media\.addEventListener/);
   assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.app-sidebar\.is-peek \.sidebar-clip \{[^}]*width: var\(--sidebar-width\)/);
