@@ -11,8 +11,8 @@ const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const tempRoot = (name) => fs.mkdtempSync(path.join(__dirname, `../../aiTemp/${name}-`));
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-/** A fake GitHub: the release lists per repository, and asset bytes behind a redirect. */
-function fakeGitHub({ releases, assets = {} }) {
+/** A fake GitHub: the release lists per repository, branch heads, and asset bytes behind a redirect. */
+function fakeGitHub({ releases, assets = {}, branches = {} }) {
   const calls = [];
   const fetchImpl = async (input, init = {}) => {
     const url = new URL(String(input));
@@ -20,6 +20,17 @@ function fakeGitHub({ releases, assets = {} }) {
     const list = /^\/repos\/([^/]+\/[^/]+)\/releases$/.exec(url.pathname);
     if (url.hostname === "api.github.com" && list) {
       return releases[list[1]] ? json(releases[list[1]]) : json({ message: "Not Found" }, 404);
+    }
+    // A branch's head commit, and how far it is ahead of a commit ({ head, ahead } per "owner/name@branch").
+    const branch = /^\/repos\/([^/]+\/[^/]+)\/branches\/([^/]+)$/.exec(url.pathname);
+    if (url.hostname === "api.github.com" && branch) {
+      const known = branches[`${branch[1]}@${branch[2]}`];
+      return known ? json({ name: branch[2], commit: { sha: known.head } }) : json({ message: "Not Found" }, 404);
+    }
+    const compare = /^\/repos\/([^/]+\/[^/]+)\/compare\/([0-9a-f]+)\.\.\.([0-9a-f]+)$/.exec(url.pathname);
+    if (url.hostname === "api.github.com" && compare) {
+      const known = Object.entries(branches).find(([key, value]) => key.startsWith(`${compare[1]}@`) && value.head === compare[3])?.[1];
+      return known ? json({ status: "ahead", ahead_by: known.ahead, behind_by: 0 }) : json({ message: "Not Found" }, 404);
     }
     // GitHub's latest: the first stable, non-draft release of the list.
     const latest = /^\/repos\/([^/]+\/[^/]+)\/releases\/latest$/.exec(url.pathname);
@@ -41,13 +52,18 @@ function fakeGitHub({ releases, assets = {} }) {
   return { fetchImpl, calls };
 }
 
-function setup({ releases, assets, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true }, antigravityCli = () => null, rtk = null }) {
+function setup({ releases, assets, branches, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true }, antigravityCli = () => null, rtk = null, aoManifest = null }) {
   const root = tempRoot("app-plugins");
   const stateDir = path.join(root, "cpa");
   const pluginDir = path.join(stateDir, "plugins", "windows", "amd64");
   fs.mkdirSync(pluginDir, { recursive: true });
   for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(pluginDir, name), body);
-  const github = fakeGitHub({ releases, assets });
+  const github = fakeGitHub({ releases, assets, branches });
+  const aoRoot = path.join(root, "agent-orchestrator");
+  if (aoManifest) {
+    fs.mkdirSync(aoRoot, { recursive: true });
+    fs.writeFileSync(path.join(aoRoot, "manifest.json"), JSON.stringify(aoManifest));
+  }
   const updates = [];
   let restarts = 0;
   const services = {
@@ -56,7 +72,7 @@ function setup({ releases, assets, files = {}, cpa = { version: "8.0.46", latest
     updateManagedComponent: async (id, options) => { updates.push([id, options]); return { swapped: true, from: cpa.version, to: cpa.latest }; },
   };
   const plugins = createAppPlugins({
-    cpaStateDir: stateDir, services: () => services, restartCpa: async () => { restarts += 1; }, antigravityCli, rtk,
+    cpaStateDir: stateDir, services: () => services, restartCpa: async () => { restarts += 1; }, antigravityCli, rtk, agentOrchestratorRoot: () => aoRoot,
     fetchImpl: github.fetchImpl, env: { GH_TOKEN: "ghp_testtoken0123456789abcdef" }, spawnImpl: () => { throw new Error("no gh"); },
     platform: "win32", arch: "x64", logger: { info() {} },
   });
@@ -80,6 +96,7 @@ test("App plugins lists CPA and each plugin with its installed and latest GitHub
       "cpa-provider-manager-v0.2.1.dll": "old",
       "commandcode-go-v1.0.0-codingtools.3.dll": "ours",
       "cpa-helper-v0.1.1.dll": "helper",
+      "cline-pass-switcher-v0.1.0-codingtools.10.dll": "switcher",
       "someone-else-v1.0.0.dll": "unknown",
     },
     releases: {
@@ -87,6 +104,7 @@ test("App plugins lists CPA and each plugin with its installed and latest GitHub
       "p90-lover/cpa_provider_manager": [release("v0.3.0", [], { prerelease: true }), release("v0.2.9", [], { draft: true }),
         release("v0.2.2", [{ id: 7, name: "cpa-provider-manager-v0.2.2.dll", size: dll.length, digest: `sha256:${sha(dll)}` }])],
       "sperictao/cpa-plugin-commandcode-go": [release("v1.1.0", [{ id: 9, name: "commandcode-go-v1.1.0.so", size: 3, digest: `sha256:${sha("x")}` }])],
+      "munmunjaklin458-afk/cline-pass-switcher": [],
     },
   });
   const { items } = await plugins.list();
@@ -97,12 +115,105 @@ test("App plugins lists CPA and each plugin with its installed and latest GitHub
   // A rebuild for Coding Tools shows its upstream's version, but the update comes with the app.
   const commandcode = byId["cpa-plugin:commandcode-go"];
   assert.deepEqual([commandcode.latest, commandcode.updateAvailable, commandcode.canUpdate], ["1.1.0", true, false]);
-  assert.match(commandcode.note, /app update/);
+  assert.equal(commandcode.viaAppUpdate, true);
   // No release for a private repository read without access: said plainly, nothing offered.
   assert.equal(byId["cpa-plugin:cpa-helper"].error, "Not found on GitHub");
   assert.match(byId["cpa-plugin:someone-else"].note, /repository isn't known/);
+  // A repository with no release yet is not a failure: nothing to compare with.
+  const switcher = byId["cpa-plugin:cline-pass-switcher"];
+  assert.deepEqual([switcher.latest, switcher.error, switcher.updateAvailable], [null, null, false]);
   // The token went to api.github.com only.
   assert.ok(github.calls.every((call) => call.auth === null || new URL(call.url).hostname === "api.github.com"));
+});
+
+test("Agent Orchestrator shows the commit built into the app against its fork's main branch", async () => {
+  const built = "265e9a39e73a173e3c15766a8dbf4a918548f33b";
+  const head = "7c1d2e0f".padEnd(40, "a");
+  const context = setup({ releases: {}, aoManifest: { repository: "p90-lover/agent-orchestrator", commit: built },
+    branches: { "p90-lover/agent-orchestrator@main": { head, ahead: 3 } } });
+  const ao = (await context.plugins.list()).items.find((item) => item.id === "agent-orchestrator");
+  assert.deepEqual([ao.kind, ao.installed, ao.latest, ao.updateAvailable, ao.canUpdate, ao.viaAppUpdate], ["service", "265e9a3", "7c1d2e0", true, false, true]);
+  assert.equal(ao.note, "3 new commits on main.");
+  assert.match(ao.releaseUrl, /\/compare\/265e9a39e73a\.\.\.7c1d2e0faaaa$/);
+  // Built from main's head: nothing to compare.
+  const current = setup({ releases: {}, aoManifest: { repository: "p90-lover/agent-orchestrator", commit: built },
+    branches: { "p90-lover/agent-orchestrator@main": { head: built, ahead: 0 } } });
+  const same = (await current.plugins.list()).items.find((item) => item.id === "agent-orchestrator");
+  assert.deepEqual([same.latest, same.updateAvailable, same.note], ["265e9a3", false, null]);
+  assert.equal(current.github.calls.some((call) => call.url.includes("/compare/")), false);
+  // A development copy with no AO build.
+  const none = (await setup({ releases: {} }).plugins.list()).items.find((item) => item.id === "agent-orchestrator");
+  assert.deepEqual([none.installed, none.note], [null, "Not built into this copy of the app."]);
+});
+
+test("Update all installs every update it can, CPA last, and keeps going past a failure", async () => {
+  const good = Buffer.from("provider manager 0.2.2");
+  const releases = {
+    "p90-lover/cpa_provider_manager": [release("v0.2.2", [{ id: 7, name: "cpa-provider-manager-v0.2.2.dll", size: good.length, digest: `sha256:${sha(good)}` }])],
+    "p90-lover/cpa_auto_review": [release("v0.3.0", [{ id: 8, name: "codex-review-account-selector-v0.3.0.dll", size: 3, digest: `sha256:${sha("bad")}` }])],
+    "sperictao/cpa-plugin-commandcode-go": [release("v1.1.0")],
+  };
+  const files = { "cpa-provider-manager-v0.2.1.dll": "old", "codex-review-account-selector-v0.2.0.dll": "old", "commandcode-go-v1.0.0-codingtools.3.dll": "built" };
+  const context = setup({ releases, files, assets: { 7: good, 8: Buffer.from("not it") } });
+  const { results, items } = await context.plugins.updateAll();
+  assert.deepEqual(results.map((entry) => [entry.id, entry.ok]),
+    [["cpa-plugin:codex-review-account-selector", false], ["cpa-plugin:cpa-provider-manager", true], ["cpa", true]]);
+  assert.match(results[0].error, /SHA-256/);
+  assert.deepEqual(context.updates, [["cpa", { swap: true }]]);
+  // CPA's own switch restarted it with the new plugin: no second restart.
+  assert.equal(context.restarts(), 0);
+  assert.equal(items.find((item) => item.id === "cpa-plugin:cpa-provider-manager").installed, "0.2.2");
+  // A rebuild that arrives with the app is left alone.
+  assert.ok(!results.some((entry) => entry.id === "cpa-plugin:commandcode-go"));
+
+  // Plugins alone: CPA restarts once for all of them.
+  const plugins = setup({ releases, files: { "cpa-provider-manager-v0.2.1.dll": "old" }, assets: { 7: good }, cpa: { version: "8.0.51", latest: "8.0.51", available: false } });
+  const second = await plugins.plugins.updateAll();
+  assert.deepEqual(second.results.map((entry) => entry.ok), [true]);
+  assert.equal(plugins.restarts(), 1);
+});
+
+test("auto-update is kept per item and installs only the items that have it on, on a timer", async () => {
+  const good = Buffer.from("provider manager 0.2.2");
+  const releases = {
+    "p90-lover/cpa_provider_manager": [release("v0.2.2", [{ id: 7, name: "cpa-provider-manager-v0.2.2.dll", size: good.length, digest: `sha256:${sha(good)}` }])],
+    "sperictao/cpa-plugin-commandcode-go": [release("v1.1.0")],
+  };
+  const files = { "cpa-provider-manager-v0.2.1.dll": "old", "commandcode-go-v1.0.0-codingtools.3.dll": "built" };
+  const context = setup({ releases, files, assets: { 7: good } });
+  const before = Object.fromEntries((await context.plugins.list()).items.map((item) => [item.id, item]));
+  assert.deepEqual([before.cpa.autoUpdatable, before.cpa.autoUpdate], [true, false]);
+  // What ships in an app update can't be auto-updated here.
+  assert.equal(before["agent-orchestrator"].autoUpdatable, false);
+  assert.equal(before["cpa-plugin:commandcode-go"].autoUpdatable, false);
+  await assert.rejects(context.plugins.setAutoUpdate("cpa-plugin:commandcode-go", true), /updates with the app/);
+  // Nothing on: a pass installs nothing.
+  assert.deepEqual((await context.plugins.autoUpdateNow()).results, []);
+  assert.equal(fs.existsSync(path.join(context.pluginDir, "cpa-provider-manager-v0.2.2.dll")), false);
+
+  const { items } = await context.plugins.setAutoUpdate("cpa-plugin:cpa-provider-manager", true);
+  assert.equal(items.find((item) => item.id === "cpa-plugin:cpa-provider-manager").autoUpdate, true);
+  const saved = JSON.parse(fs.readFileSync(path.join(context.root, "app-plugins.json"), "utf8"));
+  assert.deepEqual(saved.autoUpdate, { "cpa-plugin:cpa-provider-manager": true });
+
+  // The timer's pass installs that plugin and leaves CPA (auto-update off) alone.
+  const timers = [];
+  const stop = context.plugins.startAutoUpdates({ firstMs: 10, everyMs: 20, setTimer: (run, ms) => { timers.push({ run, ms }); return timers.length; }, clearTimer() {} });
+  assert.deepEqual(timers.map((timer) => timer.ms), [10]);
+  await timers[0].run();
+  assert.ok(fs.existsSync(path.join(context.pluginDir, "cpa-provider-manager-v0.2.2.dll")));
+  assert.deepEqual(context.updates, []);
+  assert.equal(context.restarts(), 1, "CPA restarts once to load the new plugin");
+  assert.deepEqual(timers.map((timer) => timer.ms), [10, 20], "and checks again later");
+  stop();
+
+  // A fresh start reads the saved choice; turning it off forgets it.
+  const again = createAppPlugins({ cpaStateDir: context.stateDir, services: () => ({ managedComponentsSnapshot: () => ({ components: [] }), checkManagedComponentUpdate: async () => ({}) }),
+    restartCpa: async () => {}, fetchImpl: async () => new Response("{}", { status: 404 }), env: { GH_TOKEN: "ghp_testtoken0123456789abcdef" },
+    platform: "win32", arch: "x64", logger: { info() {} } });
+  assert.equal((await again.list()).items.find((item) => item.id === "cpa-plugin:cpa-provider-manager").autoUpdate, true);
+  await again.setAutoUpdate("cpa-plugin:cpa-provider-manager", false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(context.root, "app-plugins.json"), "utf8")).autoUpdate, {});
 });
 
 test("a plugin update downloads the DLL, checks GitHub's SHA-256, keeps the old one in Trash and restarts CPA", async () => {
@@ -246,7 +357,7 @@ test("RTK shows GitHub's newest stable release past its dev prereleases and upda
   });
   const before = (await context.plugins.list()).items.find((item) => item.id === "rtk");
   assert.deepEqual([before.kind, before.installed, before.latest, before.canUpdate], ["tool", "1.0.1", "1.1.0", true]);
-  assert.match(before.note, /winget/);
+  assert.equal(before.note, null);
   const { items } = await context.plugins.update("rtk");
   assert.deepEqual(upgrades, ["1.0.1"]);
   const after = items.find((item) => item.id === "rtk");

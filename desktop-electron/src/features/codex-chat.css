@@ -727,8 +727,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-user:hover .cx-msg-actions, .cx-answer:hover .cx-msg-actions, .cx-msg-actions:focus-within { opacity: 1; }
 .cx-msg-actions button { display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font-size: 13px; cursor: pointer; }
 .cx-msg-actions button:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
-/* A sent message's footer: the read receipt first and always shown, then the hover actions (Claude Code's row). */
+/* Keep the always-visible receipt at the message edge; invisible hover actions still take space. */
 .cx-msg-foot { display: flex; align-items: center; justify-content: flex-end; gap: 2px; min-height: 26px; }
+.cx-msg-foot > .cx-receipt { order: 1; flex: none; }
+.cx-msg-foot > .cx-receipt[data-tip]::after { right: 0; left: auto; transform: none; }
 .cx-receipt { position: relative; display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; color: var(--ao-muted); outline: none; }
 .cx-receipt[data-receipt="unread"] svg { opacity: .5; }
 /* On its way to the agent: the check fades in and out until the agent has it. */

@@ -22,16 +22,22 @@ export function installShimmerTicker(doc: Document = document): () => void {
     // A minimized window still reads visible; the preload marks it away (see page-visibility.ts).
     const away = doc.hidden || doc.documentElement?.hasAttribute("data-window-away");
     const now = away ? null : doc.timeline.currentTime;
+    // playState can flush pending style. Read every animation before any pause/currentTime write:
+    // interleaving them made each shimmer flush the changes from the previous one (129 ms/tick
+    // in a ten-pane, 65k-element chat). Only the first read should need to settle pending style.
+    const running: Animation[] = [];
     for (const animation of shimmers) {
+      const state = animation.playState;
       // Removing the element or its class cancels the animation; a new one fires animationstart.
-      if (animation.playState === "idle" || !(animation.effect as KeyframeEffect | null)?.target?.isConnected) {
+      if (state === "idle" || !(animation.effect as KeyframeEffect | null)?.target?.isConnected) {
         shimmers.delete(animation);
         continue;
       }
-      if (animation.playState === "running") animation.pause();
-      // One shared clock, so every shimmer on screen stays in phase.
-      if (now !== null) animation.currentTime = now;
+      if (state === "running") running.push(animation);
     }
+    for (const animation of running) animation.pause();
+    // One shared clock, so every shimmer on screen stays in phase.
+    if (now !== null) for (const animation of shimmers) animation.currentTime = now;
     if (!shimmers.size) stop();
   };
   const onStart = (event: AnimationEvent) => {

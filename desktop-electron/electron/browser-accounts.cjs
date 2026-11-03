@@ -194,7 +194,7 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
       return id;
     },
     /**
-     * Takes in an account the GPT Browser kept (gpt-browser-merge.cjs), under its own id when that is
+     * Takes in an account the GPT Browser kept (#1044 merged them; gpt-browser-restore.cjs gives them back), under its own id when that is
      * free so its moved partition keeps its name, else a new one; `taken(id)` says an id is in use
      * outside the list (a partition folder already there). Returns the id, or null when the list is full.
      */

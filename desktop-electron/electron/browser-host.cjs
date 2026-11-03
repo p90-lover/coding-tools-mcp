@@ -62,9 +62,14 @@ const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 /** The primary view's idle-document windows at startup: a timed-out load is retried with the next. */
 const PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS = Object.freeze([PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS, 30_000, 60_000]);
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
-// Tabs one ChatGPT account may hold (its setting may lower it), and every account's together.
+// Codex turns' tabs one ChatGPT account may hold (its setting may lower it): a hard limit on the
+// bridge's parallel traffic on that account.
 const MAX_BROWSER_TABS = 5;
-const MAX_TOTAL_BROWSER_TABS = 15;
+// The person's own tabs per account, apart from that limit (2026-11-03: "add more tabs"; with the
+// two sharing five, a few running tasks left no room to open one).
+const MAX_USER_TABS = 10;
+// Every page together, turns' and the person's, on all accounts.
+const MAX_TOTAL_BROWSER_TABS = 30;
 const MAX_CANCELLED_TURN_TRACES = 256;
 const MANUAL_SUBMIT_TIMEOUT_MS = 30_000;
 const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
@@ -101,10 +106,14 @@ function tabLimitOf(host, partition) {
   return Number.isInteger(setting) && setting >= 1 && setting <= MAX_BROWSER_TABS ? setting : MAX_BROWSER_TABS;
 }
 
-/** The tabs on one account's partition: its Codex turns' tabs, and the Browser tab's own pages. */
+/** The Codex turns' tabs on one account's partition: what its turn limit counts. */
 function tabsOnPartition(host, partition) {
-  const ownPages = partition === host.partition ? (host.userTabs?.size ?? 0) : (host.parkedHomes?.get(partition)?.userTabs?.size ?? 0);
-  return ownPages + [...host.turnTabs.values()].filter((tab) => (tab.partition ?? host.partition) === partition).length;
+  return [...host.turnTabs.values()].filter((tab) => (tab.partition ?? host.partition) === partition).length;
+}
+
+/** The person's own tabs on one account's partition. */
+function userTabsOnPartition(host, partition) {
+  return partition === host.partition ? (host.userTabs?.size ?? 0) : (host.parkedHomes?.get(partition)?.userTabs?.size ?? 0);
 }
 
 // Accounts the Browser tab keeps loaded, the shown one included (GPT Browser keeps 4 as well).
@@ -187,7 +196,7 @@ function authenticatedChatGptSession(payload, now = Date.now()) {
 // Cloudflare can put its own check page ("Just a moment...") where ChatGPT should load. Only the
 // person can pass it, and the wait for ChatGPT then ran out as a "login" that was never the problem
 // (seen live 2026-11-03: the bridge upgrade failed this way on two launches in a row).
-const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the GPT Browser, complete the check, then run Setup → Install models.";
+const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the Browser tab, complete the check, then run Setup → Install models.";
 
 /**
  * Runs inside the page (injected with toString, like authenticatedChatGptSession): true while the
@@ -973,6 +982,7 @@ class BrowserHost {
       surfaceId: this.surfaceId,
       userTabs: this.userTabs,
       selectedTabId: this.userTabs.has(this.selectedTabId) ? this.selectedTabId : "home",
+      homeTabClosed: this.homeTabClosed === true,
       chatLifecycleSync: this.chatLifecycleSync,
       lastAuthenticatedAt: this.lastAuthenticatedAt ?? 0,
       viewportCssKey: this.viewportCssKey,
@@ -989,6 +999,7 @@ class BrowserHost {
     this.view = home.view;
     this.surfaceId = home.surfaceId;
     this.userTabs = home.userTabs;
+    this.homeTabClosed = home.homeTabClosed === true;
     this.chatLifecycleSync = home.chatLifecycleSync ?? this.chatLifecycleSync;
     this.lastAuthenticatedAt = home.lastAuthenticatedAt;
     this.viewportCssKey = home.viewportCssKey;
@@ -1206,9 +1217,13 @@ class BrowserHost {
 
   /** A tab of the person's own; `initialUrl` (the address bar's) opens instead of a new chat. */
   createUserTab(initialUrl = null) {
-    const full = makeTabRoom(this, this.partition, false);
-    if (full) throw new Error(`ChatGPT Web already has ${full} browser tabs; close one before opening another`);
-    if (!this.surfaceActive) throw new Error("Open the GPT Browser before creating a tab");
+    if (userTabsOnPartition(this, this.partition) >= MAX_USER_TABS) {
+      throw new Error(`This account already has ${MAX_USER_TABS} tabs of your own open; close one before opening another`);
+    }
+    const allTabs = this.turnTabs.size + (this.userTabs?.size ?? 0)
+      + [...(this.parkedHomes?.values() ?? [])].reduce((sum, home) => sum + home.userTabs.size, 0);
+    if (allTabs >= MAX_TOTAL_BROWSER_TABS) throw new Error(`ChatGPT Web already has ${MAX_TOTAL_BROWSER_TABS} browser tabs; close one before opening another`);
+    if (!this.surfaceActive) throw new Error("Open the Browser tab before creating a tab");
     if (this.manualOperation) throw new Error(`Browser tabs cannot open during ${this.manualOperation}`);
     // A signed-out account opens tabs too, as in GPT Browser: the new tab is ChatGPT's own sign-in.
     const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
@@ -2063,7 +2078,7 @@ class BrowserHost {
       status: this.state.status,
       loading: this.state.loading === true,
       active: this.selectedTabId === "home",
-      closable: false,
+      closable: true,
     };
     const state = selected
       ? {
@@ -2095,7 +2110,7 @@ class BrowserHost {
         readPageTitle: !manualInteraction,
       }),
       activeTabId: this.selectedTabId,
-      tabs: this.turnTabs.size + (this.userTabs?.size ?? 0) > 0
+      tabs: (this.turnTabs.size + (this.userTabs?.size ?? 0) > 0
         ? [
             // Home is listed while chosen, beside tabs of the user's own, and whenever the chosen
             // tab is a turn on another account (left out of the strip, which would show nothing).
@@ -2104,10 +2119,13 @@ class BrowserHost {
             ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
             ...[...(this.userTabs?.values() ?? [])].map((tab) => this.tabSnapshot(tab)),
           ]
-        : [homeTab],
+        : [homeTab]).filter((tab) => tab.id !== "home" || !this.homeTabClosed),
       // The shown account's limit and the tabs it holds; tabs of sessions on other accounts show too.
       maxTabs: tabLimitOf(this, this.partition),
       accountTabs: tabsOnPartition(this, this.partition),
+      // The person's own tabs on the shown account, and how many it may hold (the + button).
+      userTabs: userTabsOnPartition(this, this.partition),
+      maxUserTabs: MAX_USER_TABS,
     };
   }
 
@@ -2333,7 +2351,7 @@ class BrowserHost {
     // Non-browser launcher pages must never be covered by the native ChatGPT view. Keep the
     // descriptor-owned view attached while the browser page is selected, but fully hide it when
     // the launcher explicitly deactivates the browser surface.
-    if (!this.surfaceActive) {
+    if (!this.surfaceActive || this.homeTabClosed) {
       this.view.setVisible(false);
       return;
     }
@@ -2342,6 +2360,7 @@ class BrowserHost {
   }
 
   activateHomeSurface() {
+    this.homeTabClosed = false;
     this.selectedTabId = "home";
     this.syncViewVisibility();
     if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
@@ -2371,6 +2390,7 @@ class BrowserHost {
   selectTab(tabId) {
     if (tabId !== "home" && !this.turnTabs.has(tabId) && !this.userTabs?.has(tabId)) throw new Error("Browser tab does not exist");
     if (this.authView) this.closeAuthView(this.authView, true);
+    if (tabId === "home") this.homeTabClosed = false;
     this.selectedTabId = tabId;
     this.syncViewVisibility();
     if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
@@ -2492,6 +2512,22 @@ class BrowserHost {
   }
 
   async closeTab(tabId) {
+    if (tabId === "home") {
+      if (this.manualOperation || this.authView) throw new Error("The first tab cannot close during a browser operation");
+      // Keep the descriptor-owned account surface alive, but remove its visible tab. Task tabs
+      // own their own pages: closing this tab must never cancel a turn or delete a saved chat.
+      this.homeTabClosed = true;
+      if (this.selectedTabId === "home") {
+        const turns = [...this.turnTabs.values()].filter((tab) => (tab.partition ?? this.partition) === this.partition);
+        this.selectedTabId = [...turns.map((tab) => tab.id), ...(this.userTabs?.keys() ?? [])].at(-1) || "home";
+        if (this.selectedTabId === "home") this.hide();
+      }
+      this.syncViewVisibility();
+      if (this.visible && this.surfaceActive && this.selectedTabId !== "home") this.activeView().webContents.focus();
+      this.publishState?.(this.snapshot());
+      this.writeDescriptor();
+      return this.snapshot();
+    }
     const userTab = this.userTabs?.get(tabId);
     if (userTab) {
       this.removeUserTab(userTab);
@@ -2717,6 +2753,7 @@ class BrowserHost {
 
   async reveal(inspectSession = true) {
     if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
+    if (this.selectedTabId === "home") this.homeTabClosed = false;
     this.show();
     await this.openHomePage(inspectSession);
     return this.snapshot();
@@ -2727,8 +2764,15 @@ class BrowserHost {
    * account switched to while the Browser tab was hidden stayed blank: only reveal loaded it.
    */
   async openHomePage(inspectSession = true) {
-    if (this.selectedTurnTab() || this.view.webContents.getURL() !== IDLE_BROWSER_URL) return;
-    await this.view.webContents.loadURL(HOME_URL);
+    if (this.selectedTurnTab() || this.selectedUserTab()) return;
+    const url = this.view.webContents.getURL();
+    if (url !== IDLE_BROWSER_URL && !isTemporaryChatUrl(url)) return;
+    // A newer navigation that takes over (Cloudflare's check, ChatGPT's own redirect) rejects this
+    // load with ERR_ABORTED while the page goes on opening; an account switch failed on it (11-03).
+    await this.view.webContents.loadURL(HOME_URL).catch((error) => {
+      if (!isAbortedNavigationError(error)) throw error;
+      this.logger.info("browser.home_load_superseded", { url: urlWithoutQuery(this.view.webContents.getURL()) });
+    });
     if (inspectSession) await this.probeAuthentication();
   }
 

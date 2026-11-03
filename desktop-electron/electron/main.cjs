@@ -35,7 +35,7 @@ const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cj
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent, readGptBrowserState } = require("./gpt-browser.cjs");
-const { mergeGptBrowserAccounts } = require("./gpt-browser-merge.cjs");
+const { restoreGptBrowserAccounts } = require("./gpt-browser-restore.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
@@ -69,6 +69,7 @@ const {
 const { RuntimeSupervisor, watchdogExternalBackoff } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
+const { droppedAgentSessionEnvironment } = require("./agent-session-env.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
@@ -301,6 +302,8 @@ let upstreamToolController = null;
 let originalUiController = null;
 let appsHost = null;
 let agentOrchestratorUpstream = null;
+// AO's daemon folder (its build manifest.json names the commit), set when the backend starts.
+let agentOrchestratorResourceRoot = null;
 /** Stops the AO change push wired up with the current upstream module. */
 let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
@@ -2742,7 +2745,7 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, false);
     return browserHost.createUserTab();
   });
-  // The address bar the GPT Browser brought: any http(s) page, in a tab of the person's own.
+  // The address bar: any http(s) page, in a tab of the person's own.
   handle("launcher:browser-open-url", (event, url) => {
     assertFocusedMainWindow(event, false);
     return browserHost.openUrl(url);
@@ -3375,7 +3378,7 @@ function registerIpc({ logger, stateStore }) {
       const signedIn = signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
       assertCurrent();
       if (!signedIn) {
-        throw new Error("Sign in to this account in the GPT Browser before connecting MCP.");
+        throw new Error("Sign in to this account in the Browser tab before connecting MCP.");
       }
       await routeIdleAccountPartition(partition, logger);
       assertCurrent();
@@ -3779,6 +3782,16 @@ function registerIpc({ logger, stateStore }) {
     if (!appPluginsService) throw new Error("App plugins are still starting");
     return appPluginsService.update(String(id || ""));
   });
+  handle("launcher:app-plugin-auto-update", async (event, id, enabled) => {
+    assertFocusedMainWindow(event, true);
+    if (!appPluginsService) throw new Error("App plugins are still starting");
+    return appPluginsService.setAutoUpdate(String(id || ""), enabled === true);
+  });
+  handle("launcher:app-plugins-update-all", async (event) => {
+    assertFocusedMainWindow(event, true);
+    if (!appPluginsService) throw new Error("App plugins are still starting");
+    return appPluginsService.updateAll();
+  });
   // Plugins > MCPs: the person's own MCP servers for chat agents. Adding, changing or turning one on
   // runs its command (or reaches its address) in every new chat, so it is their own click in the
   // visible app; errors name the field, never a value (env and headers carry tokens).
@@ -4176,6 +4189,8 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  const droppedAgentEnv = droppedAgentSessionEnvironment();
+  if (droppedAgentEnv.length) logger.warn("launcher.agent_session_env_dropped", { names: droppedAgentEnv });
   // An update that just placed this version is kept only once it proves it works: its window loaded,
   // its backend answered and AO, when started, is ready (update-health-gate.cjs). Until then the old
   // copies the worker held stay; a version still not healthy after Settings' health window goes back
@@ -4371,8 +4386,11 @@ async function start() {
     restartCpa: () => externalServicesController.restart("cpa"),
     antigravityCli: () => antigravityCliService,
     rtk,
+    agentOrchestratorRoot: () => agentOrchestratorResourceRoot,
     logger,
   });
+  // Auto-update: only the items the person turned it on for; the first pass waits a few minutes.
+  appPluginsService.startAutoUpdates();
   managedBootstrapController = createManagedBootstrap({
     snapshot: () => externalServicesController.snapshot(),
     install: (serviceId) => externalServicesController.installManagedComponent(serviceId),
@@ -4781,12 +4799,13 @@ async function start() {
     const cpaQuota = backendBundles.requireModule(backend, "cpa-quota.cjs").createCpaQuota({
       getConnection: () => externalServicesController?.cpaConnection(), logger,
     });
+    agentOrchestratorResourceRoot = backend.source === "bundle"
+      ? path.join(backend.resourcesRoot, "agent-orchestrator")
+      : app.isPackaged
+        ? path.join(process.resourcesPath, "agent-orchestrator")
+        : path.join(__dirname, "..", "build", "agent-orchestrator");
     agentOrchestratorUpstream = createAgentOrchestratorUpstream({
-      resourceRoot: backend.source === "bundle"
-        ? path.join(backend.resourcesRoot, "agent-orchestrator")
-        : app.isPackaged
-          ? path.join(process.resourcesPath, "agent-orchestrator")
-          : path.join(__dirname, "..", "build", "agent-orchestrator"),
+      resourceRoot: agentOrchestratorResourceRoot,
       dataRoot: aoDataRoot,
       confirm: confirmAoAction, getWindow: () => mainWindow,
       getWorkspaces: listHeadlessWorkspaces,
@@ -5230,15 +5249,14 @@ async function start() {
     return host;
   };
   setProviderBrowserProxyBinding((partition) => browserAccounts.proxyForPartition(partition));
-  // GPT Browser is this browser now: its accounts, sign-ins included, join the list once, before
-  // any partition opens (gpt-browser-merge.cjs). A failed merge leaves them where they were.
-  await mergeGptBrowserAccounts({
+  // The GPT Browser is its own browser again: the accounts #1044 merged into this list come back
+  // to it once, before any partition opens (gpt-browser-restore.cjs). The Browser tab keeps them too.
+  await restoreGptBrowserAccounts({
     gptDataRoot: path.join(CORE_HOME, "gpt-browser"),
     partitionsRoot: path.join(app.getPath("userData"), "Partitions"),
     trashRoot: path.join(app.getPath("userData"), "Trash", "gpt-browser"),
-    accounts: browserAccounts,
     logger,
-  }).catch((error) => logger.warn("gpt_browser_merge.failed", { message: error instanceof Error ? error.message : String(error) }));
+  }).catch((error) => logger.warn("gpt_browser_restore.failed", { message: error instanceof Error ? error.message : String(error) }));
   await routeBrowserAccountPartition(browserAccounts.activePartition(), logger);
   browserHost = createBrowserHostForAccount(browserAccounts.activeId());
   void refreshBrowserAccountSignIns(logger);

@@ -32,6 +32,7 @@ import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
+import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
 import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
 import { RegisterSurface } from "./features/RegisterSurface";
@@ -454,6 +455,7 @@ function LauncherShell({
   );
   // Tabs mount on first visit and then stay mounted while hidden, so switching back never reloads
   // them. The MCP wizard is left out: it seeds its step from how it was opened.
+  const [standaloneChatHost, setStandaloneChatHost] = useState<HTMLDivElement | null>(null);
   const [visitedSurfaces, setVisitedSurfaces] = useState<ReadonlySet<Surface>>(() => new Set([surface]));
   useEffect(() => {
     setVisitedSurfaces((current) => (current.has(surface) ? current : new Set(current).add(surface)));
@@ -874,7 +876,6 @@ function LauncherShell({
                 <SidebarItem active={surface === "native-codex"} icon="terminal" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
               </SidebarGroup>
               <SidebarGroup label={copy.workspace}>
-                {/* GPT Browser is the one browser: the bridge's, its accounts and its pages (surface "browser"). */}
                 <SidebarItem
                   active={surface === "browser"}
                   badge={needsBrowser
@@ -882,9 +883,17 @@ function LauncherShell({
                     : browser?.status === "error"
                       ? <ActionDot tone="error" />
                       : null}
+                  icon="browser"
+                  label={copy.browser}
+                  onClick={() => navigateSurface("browser")}
+                />
+                {/* The GPT Browser is its own browser again (gpt-browser.cjs): pages you open and look at,
+                    one account at a time, apart from the pages the Codex bridge runs in the background. */}
+                <SidebarItem
+                  active={surface === "gpt-browser"}
                   icon="globe"
                   label="GPT Browser"
-                  onClick={() => navigateSurface("browser")}
+                  onClick={() => navigateSurface("gpt-browser")}
                 />
                 <SidebarItem
                   active={surface === "chatgpt-browser-management"}
@@ -1012,6 +1021,11 @@ function LauncherShell({
                   inspectionDisabled: snapshot.state.browserInteractionMode === "manual" }}
               />
             ))}
+            {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
+            {(surface === "gpt-browser" || visitedSurfaces.has("gpt-browser")) ? <GptBrowserDock
+              standaloneHost={standaloneChatHost} chatHost={null} inChat={false}
+              active={surface === "gpt-browser"} covered={browserCovered}
+              api={api!} setError={setError} /> : null}
             {keepAlive("chatgpt-desktop", () => (
               <ChatGptDesktopSurface
                 active={surface === "chatgpt-desktop" && !sidebarCovers && !biggerContextRecommendationOpen}
@@ -1350,18 +1364,29 @@ function BrowserAddress({ url, copy, disabled, setError }: {
     }
   };
   return (
-    <form className="browser-address" title={url || copy.browserAddress} onSubmit={(event) => void open(event)}>
-      <Icon name="globe" />
+    <form className="gpb-link" title={url || copy.browserAddress} onSubmit={(event) => void open(event)}>
       <input
         aria-label={copy.browserAddress}
         disabled={disabled}
+        inputMode="url"
         onBlur={() => setDraft(null)}
         onChange={(event) => setDraft(event.target.value)}
         onFocus={(event) => { setDraft(url ?? ""); event.target.select(); }}
         onKeyDown={(event) => { if (event.key === "Escape") { setDraft(null); event.currentTarget.blur(); } }}
+        placeholder="Enter a web address, like chatgpt.com"
         spellCheck={false}
+        autoComplete="off"
         value={draft ?? formatBrowserAddress(url, copy)}
       />
+      {/* mousedown would blur the field (dropping the draft) before the submit fires */}
+      <button
+        type="submit"
+        className="button-primary"
+        disabled={disabled || draft === null || !draft.trim()}
+        onMouseDown={(event) => event.preventDefault()}
+      >
+        Go
+      </button>
     </form>
   );
 }
@@ -1394,7 +1419,8 @@ function BrowserSurface({
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
-  const tabLimitReached = (browser?.accountTabs ?? browser?.tabs.filter(tab => tab.id !== "home").length ?? 0) >= (browser?.maxTabs ?? 5);
+  // The + button opens a tab of the person's own: those have their own allowance, apart from Codex tasks'.
+  const tabLimitReached = (browser?.userTabs ?? 0) >= (browser?.maxUserTabs ?? 10);
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
     && operation.status === "running"
@@ -1409,17 +1435,17 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
-  const zoom = async (action: "in" | "out" | "reset") => {
-    try {
-      await api!.zoomBrowser(action);
-    } catch (cause) {
-      setError(messageOf(cause));
-    }
-  };
   const toggle = async () => {
     try {
       if (visible) await api!.hideBrowser();
       else await api!.showBrowser();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const zoom = async (action: "in" | "out" | "reset") => {
+    try {
+      await api!.zoomBrowser(action);
     } catch (cause) {
       setError(messageOf(cause));
     }
@@ -1478,81 +1504,28 @@ function BrowserSurface({
   };
 
   return (
-    <section className="browser-surface">
-      <div className="browser-tab-strip" title={copy.browserTabLimit}>
-        {(browser?.tabs ?? []).filter(tab => !tab.otherAccount).map((tab) => (
-          <div
-            className={`browser-tab${tab.active ? " is-active" : ""}`}
-            key={tab.id}
-            onClick={() => void selectTab(tab.id)}
-            role="tab"
-            aria-selected={tab.active}
-          >
-            <BrandMark small />
-            <span title={[tab.title, tab.threadId && `Codex task: ${tab.threadId}`, tab.conversationUrl && `ChatGPT: ${tab.conversationUrl}`, tab.traceId && `Turn: ${tab.traceId}`].filter(Boolean).join("\n")}>
-              {browserTabTitleFromTitle(tab.title, copy)}
-              {tab.threadId ? ` · ${tab.threadId.slice(0, 8)}` : ""}
-            </span>
-            {tab.loading ? <i className="tab-spinner" /> : <StateDot state={browserTabTone(tab.status)} />}
-            {tab.closable ? (
-              <button
-                aria-label={copy.hideTab}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void closeTab(tab.id);
-                }}
-                title={copy.hideTab}
-                type="button"
-              >
-                <Icon name="close" />
-              </button>
-            ) : null}
-          </div>
-        ))}
-        <button
-          aria-label={copy.newTab}
-          className="browser-new-tab"
-          disabled={!browser || tabLimitReached}
-          onClick={() => void createTab()}
-          title={copy.newTab}
-          type="button"
-        >
-          <Icon name="plus" />
-        </button>
-        <div className="browser-tab-drag draggable" />
-      </div>
-      <div className="browser-toolbar">
-        <div className="browser-history">
-          <IconButton
-            disabled={navigationLocked || !browser?.canGoBack}
-            icon="back"
-            label={copy.back}
-            onClick={() => void navigate("back")}
-          />
-          <IconButton
-            disabled={navigationLocked || !browser?.canGoForward}
-            icon="forward"
-            label={copy.forward}
-            onClick={() => void navigate("forward")}
-          />
-          <IconButton disabled={navigationLocked || !visible} icon="reload" label={copy.reload} onClick={() => void navigate("reload")} />
-        </div>
+    <section className="gpb-surface browser-surface" aria-label="Browser">
+      {/* The GPT Browser's own bar (2026-11-03: its look came back over the bridge's browser): the
+          account, back, forward, reload and the address. */}
+      <header className="gpb-bar">
+        <strong>GPT Browser</strong>
         {/* Turns keep running on their own accounts across a switch; only a check or test of the shown page holds it. */}
         <BrowserAccountSwitcher api={api!} busy={browser?.status === "testing"} copy={copy} setError={setError} />
+        <span className="gpb-nav">
+          <button type="button" aria-label={copy.back} title={copy.back} disabled={navigationLocked || !browser?.canGoBack} onClick={() => void navigate("back")}>‹</button>
+          <button type="button" aria-label={copy.forward} title={copy.forward} disabled={navigationLocked || !browser?.canGoForward} onClick={() => void navigate("forward")}>›</button>
+          <button type="button" aria-label={copy.reload} title={copy.reload} disabled={navigationLocked || !visible} onClick={() => void navigate("reload")}>⟳</button>
+        </span>
         <BrowserAddress url={browser?.url} copy={copy} disabled={!visible} setError={setError} />
-        <div className="browser-zoom-controls">
-          <IconButton icon="minus" label={copy.zoomOut} onClick={() => void zoom("out")} />
-          <button
-            aria-label={copy.zoomReset}
-            className="browser-zoom-reset"
-            onClick={() => void zoom("reset")}
-            title={copy.zoomReset}
-            type="button"
-          >
+        {browser?.loading ? <span className="gpb-muted">{copy.loading}</span> : null}
+        <span className="gpb-nav gpb-zoom">
+          <button type="button" aria-label={copy.zoomOut} title={copy.zoomOut} onClick={() => void zoom("out")}>−</button>
+          <button type="button" className="gpb-zoom-reset" aria-label={copy.zoomReset} title={copy.zoomReset} onClick={() => void zoom("reset")}>
             {Math.round((browser?.zoomFactor ?? 1) * 100)}%
           </button>
-          <IconButton icon="plus" label={copy.zoomIn} onClick={() => void zoom("in")} />
-        </div>
+          <button type="button" aria-label={copy.zoomIn} title={copy.zoomIn} onClick={() => void zoom("in")}>+</button>
+        </span>
+        <span className="gpb-spacer" />
         {passkeyAvailable ? (
           <button
             className="toolbar-text-button"
@@ -1565,10 +1538,49 @@ function BrowserSurface({
               : copy.passkeySignIn}
           </button>
         ) : null}
-        <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
-          {visible ? copy.hideBrowser : copy.openChatgpt}
+        {visible ? <button className="button-secondary" onClick={() => void toggle()} type="button">{copy.hideBrowser}</button> : null}
+      </header>
+      {/* Tabs as in any browser: each of the person's own closes, and + opens another on this account.
+          Codex tasks' tabs sit beside them. */}
+      <div className="gpb-tabs" role="tablist" aria-label="Tabs" title={copy.browserTabLimit}>
+        {(browser?.tabs ?? []).filter(tab => !tab.otherAccount).map((tab) => (
+          <div
+            className={`gpb-tab${tab.active ? " is-active" : ""}${tab.threadId ? " is-task" : ""}`}
+            key={tab.id}
+            onClick={() => void selectTab(tab.id)}
+            role="tab"
+            aria-selected={tab.active}
+          >
+            {tab.loading ? <i className="tab-spinner" /> : <StateDot state={browserTabTone(tab.status)} />}
+            <span title={[tab.title, tab.threadId && `Codex task: ${tab.threadId}`, tab.conversationUrl && `ChatGPT: ${tab.conversationUrl}`, tab.traceId && `Turn: ${tab.traceId}`].filter(Boolean).join("\n")}>
+              {browserTabTitleFromTitle(tab.title, copy)}
+              {tab.threadId ? ` · ${tab.threadId.slice(0, 8)}` : ""}
+            </span>
+            {tab.closable ? (
+              <button
+                aria-label={copy.hideTab}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void closeTab(tab.id);
+                }}
+                title={copy.hideTab}
+                type="button"
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
+        ))}
+        <button
+          aria-label={copy.newTab}
+          className="gpb-new-tab"
+          disabled={!browser || tabLimitReached}
+          onClick={() => void createTab()}
+          title={tabLimitReached ? copy.browserTabLimit : copy.newTab}
+          type="button"
+        >
+          +
         </button>
-        {browser?.loading ? <i className="browser-loading-line" /> : null}
       </div>
       {selectedManualTab
         && ["awaiting-user", "sent"].includes(selectedManualTab.manualState ?? "") ? (
@@ -2685,15 +2697,31 @@ function RtkSurface({ active, enabled, setError, updateState }: {
 }
 
 /**
- * Connections > App plugins (app-plugins.cjs): CPA, the agent tools (Antigravity CLI, RTK) and CPA's
- * plugins, the version installed and the newest release on GitHub, and Update where the app can
- * install it (CPA's own updater, a build checked against GitHub's SHA-256, or winget for RTK).
+ * Connections > App plugins (app-plugins.cjs): CPA, Agent Orchestrator, the agent tools (Antigravity
+ * CLI, RTK) and CPA's plugins, installed against the newest on GitHub. Update installs one where the
+ * app can (CPA's own updater, a build checked against GitHub's SHA-256, or winget for RTK); Update
+ * all installs every such update, CPA last. What an update did shows on its row, not in a toast.
  */
-function AppPluginsSurface({ active, setError }: { active: boolean; setError: (error: string | null) => void }) {
+type AppPluginOutcome = { ok: boolean; text: string };
+const APP_PLUGIN_GROUPS: { kind: AppPlugin["kind"]; label: string }[] = [
+  { kind: "service", label: "Services" }, { kind: "tool", label: "Agent tools" }, { kind: "cpa-plugin", label: "CPA plugins" },
+];
+
+/** The chip a row shows when it has no Update button, and its tone. */
+function appPluginState(item: AppPlugin): { text: string; tone: "ok" | "attention" | "muted" | "error" } {
+  if (item.updateAvailable) return item.viaAppUpdate ? { text: "In an app update", tone: "muted" } : { text: "Update available", tone: "attention" };
+  if (!item.installed) return { text: "Not installed", tone: "muted" };
+  if (item.error) return { text: "Not checked", tone: "error" };
+  // A repository with no release yet has nothing to compare with.
+  return item.latest ? { text: "Up to date", tone: "ok" } : { text: "No releases", tone: "muted" };
+}
+
+export function AppPluginsSurface({ active, setError }: { active: boolean; setError: (error: string | null) => void }) {
   const [snapshot, setSnapshot] = useState<AppPluginsSnapshot | null>(null);
   const [checking, setChecking] = useState(false);
+  // The one item updating, or "all" while Update all runs.
   const [updating, setUpdating] = useState<string | null>(null);
-  const [done, setDone] = useState<Record<string, string>>({});
+  const [outcomes, setOutcomes] = useState<Record<string, AppPluginOutcome>>({});
   const load = useCallback(async (refresh: boolean) => {
     setChecking(true);
     try {
@@ -2705,62 +2733,105 @@ function AppPluginsSurface({ active, setError }: { active: boolean; setError: (e
     }
   }, [setError]);
   useEffect(() => { if (active) void load(false); }, [active, load]);
+  const due = snapshot?.items.filter((item) => item.updateAvailable && item.canUpdate) ?? [];
   const update = async (item: AppPlugin) => {
     setUpdating(item.id);
+    setOutcomes(({ [item.id]: _, ...rest }) => rest);
     try {
       setSnapshot(await api!.updateAppPlugin(item.id));
-      setDone((current) => ({ ...current, [item.id]: `Updated from ${item.installed ?? "an unknown version"} to ${item.latest}.` }));
+      setOutcomes((current) => ({ ...current, [item.id]: { ok: true, text: `Updated from ${item.installed ?? "an unknown version"} to ${item.latest}.` } }));
+    } catch (cause) {
+      setOutcomes((current) => ({ ...current, [item.id]: { ok: false, text: messageOf(cause) } }));
+    } finally {
+      setUpdating(null);
+    }
+  };
+  const updateAll = async () => {
+    setUpdating("all");
+    setOutcomes({});
+    try {
+      const result = await api!.updateAllAppPlugins();
+      setSnapshot(result);
+      setOutcomes(Object.fromEntries(result.results.map((entry) => [entry.id, entry.ok
+        ? { ok: true, text: `Updated from ${entry.from ?? "an unknown version"} to ${entry.to}.` }
+        : { ok: false, text: entry.error ?? "The update failed." }])));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
       setUpdating(null);
     }
   };
-  const row = (item: AppPlugin, last: boolean) => {
-    const github = item.latest ? `latest on GitHub ${item.latest}` : item.error ? `GitHub: ${item.error}` : "GitHub not checked yet";
-    const body = [`Installed ${item.installed ?? "(version unknown)"} · ${github}`, item.repository, done[item.id] ?? item.note]
-      .filter(Boolean).join(". ");
-    const busy = updating === item.id || item.updating;
+  const openRelease = (url: string) => void api!.openExternal(url).catch((cause) => setError(messageOf(cause)));
+  const setAuto = async (item: AppPlugin, enabled: boolean) => {
+    // Shown at once; the saved list replaces it.
+    setSnapshot((current) => current && { ...current, items: current.items.map((entry) => entry.id === item.id ? { ...entry, autoUpdate: enabled } : entry) });
+    try {
+      setSnapshot(await api!.setAppPluginAutoUpdate(item.id, enabled));
+    } catch (cause) {
+      setSnapshot((current) => current && { ...current, items: current.items.map((entry) => entry.id === item.id ? { ...entry, autoUpdate: !enabled } : entry) });
+      setError(messageOf(cause));
+    }
+  };
+  const row = (item: AppPlugin) => {
+    const busy = item.updating || updating === item.id || (updating === "all" && due.some((entry) => entry.id === item.id));
+    const outcome = outcomes[item.id];
+    const detail = outcome?.text ?? item.error ?? item.note;
+    const tone = outcome ? (outcome.ok ? "ok" : "error") : item.error ? "error" : "muted";
+    const state = appPluginState(item);
+    const newer = item.updateAvailable && item.latest && item.latest !== item.installed;
     return (
-      <SettingRow body={body} flushAfter={last} key={item.id} label={item.name}>
-        <div className="inline-actions">
-          {item.updateAvailable && item.canUpdate
-            ? <PrimaryButton disabled={busy || updating !== null} onClick={() => void update(item)}>{busy ? "Updating…" : `Update to ${item.latest}`}</PrimaryButton>
-            : <span className={`rtk-chip${item.updateAvailable ? " is-attention" : ""}`}>
-              {item.updateAvailable ? (item.kind === "tool" ? "Update available" : "Comes with the app")
-                : !item.installed && item.kind === "tool" ? "Not installed" : item.latest ? "Up to date" : item.error ? "Not checked" : "…"}
-            </span>}
-          {item.releaseUrl ? <IconButton icon="external" label="Open the release on GitHub"
-            onClick={() => void api!.openExternal(item.releaseUrl!).catch((cause) => setError(messageOf(cause)))} /> : null}
+      <div className="app-plugin-row" key={item.id}>
+        <div className="app-plugin-name">
+          <strong>{item.name}</strong>
+          {item.repository ? item.releaseUrl
+            ? <button type="button" className="app-plugin-repo" title="Open on GitHub" onClick={() => openRelease(item.releaseUrl!)}>{item.repository}<Icon name="external" /></button>
+            : <span className="app-plugin-repo">{item.repository}</span> : null}
         </div>
-      </SettingRow>
+        <div className="app-plugin-version" aria-label={newer ? `${item.installed ?? "Not installed"}, ${item.latest} available` : undefined}>
+          <span>{item.installed ?? "—"}</span>
+          {newer ? <><span aria-hidden="true">→</span><b>{item.latest}</b></> : null}
+        </div>
+        <div className="app-plugin-action">
+          {item.updateAvailable && item.canUpdate
+            ? <button type="button" className="button-primary" disabled={busy || updating !== null}
+              title={item.kind === "cpa-plugin" ? "Restarts CPA to load it; chats using CPA reconnect." : undefined}
+              onClick={() => void update(item)}>{busy ? "Updating…" : "Update"}</button>
+            : <span className={`app-plugin-chip is-${state.tone}`}>{state.text}</span>}
+        </div>
+        <div className="app-plugin-auto" title={item.autoUpdatable
+          ? item.kind === "cpa-plugin" ? "Install new versions on its own; CPA restarts to load one." : "Install new versions on its own."
+          : "Updates with the app"}>
+          {item.autoUpdatable ? <Switch checked={Boolean(item.autoUpdate)} label={`Auto-update ${item.name}`} onChange={(enabled) => void setAuto(item, enabled)} /> : null}
+        </div>
+        {detail ? <p className={`app-plugin-detail is-${tone}`} role={outcome ? "status" : undefined}>{detail}</p> : null}
+      </div>
     );
   };
-  const services = snapshot?.items.filter((item) => item.kind === "service") ?? [];
-  const tools = snapshot?.items.filter((item) => item.kind === "tool") ?? [];
-  const plugins = snapshot?.items.filter((item) => item.kind === "cpa-plugin") ?? [];
+  const placeholder = (count: number) => Array.from({ length: count }, (_, index) => (
+    <div className="app-plugin-row is-placeholder" aria-hidden="true" key={index}><span /><span /><span /><span /></div>
+  ));
   return (
-    <ContentSurface narrow title="App plugins" subtitle="What Coding Tools runs from other projects: the version installed and the newest release on GitHub. Private repositories are read with your GitHub CLI sign-in (gh auth login).">
-      <div className="inline-actions app-plugins-bar">
-        <SecondaryButton disabled={checking || updating !== null} icon="reload" onClick={() => void load(true)}>{checking ? "Checking GitHub…" : "Check GitHub now"}</SecondaryButton>
-        {snapshot ? <small>Checked {new Date(snapshot.checkedAt).toLocaleString()}</small> : null}
+    <ContentSurface narrow title="App plugins" subtitle="Installed versions against the newest on GitHub.">
+      <div className="app-plugins-bar">
+        <small role="status">{checking ? "Checking GitHub…" : snapshot
+          ? `Checked ${new Date(snapshot.checkedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}${due.length ? ` · ${due.length} update${due.length === 1 ? "" : "s"}` : " · All up to date"}`
+          : null}</small>
+        <SecondaryButton disabled={checking || updating !== null} icon="reload" onClick={() => void load(true)}>Check now</SecondaryButton>
+        {due.length ? <PrimaryButton disabled={checking || updating !== null} onClick={() => void updateAll()}>
+          {updating === "all" ? "Updating…" : "Update all"}</PrimaryButton> : null}
       </div>
-      <SectionHeading label="Services" />
-      <div className="settings-list">
-        {services.length ? services.map((item, index) => row(item, index === services.length - 1))
-          : <p className="surface-empty-note">{snapshot ? "No services." : "Checking…"}</p>}
-      </div>
-      <SectionHeading label="Agent tools" />
-      <div className="settings-list">
-        {tools.length ? tools.map((item, index) => row(item, index === tools.length - 1))
-          : <p className="surface-empty-note">{snapshot ? "No agent tools." : "Checking…"}</p>}
-      </div>
-      <SectionHeading label="CPA plugins" />
-      <div className="settings-list">
-        {plugins.length ? plugins.map((item, index) => row(item, index === plugins.length - 1))
-          : <p className="surface-empty-note">{snapshot ? "No CPA plugins are installed (they run on Windows x64)." : "Checking…"}</p>}
-      </div>
-      <p className="surface-empty-note">Updating a plugin restarts CPA so it loads the new one; chats using CPA reconnect.</p>
+      {APP_PLUGIN_GROUPS.map((group) => {
+        const items = snapshot?.items.filter((item) => item.kind === group.kind) ?? [];
+        return (
+          <section className="app-plugins-group" key={group.kind} aria-label={group.label}>
+            <SectionHeading label={group.label} meta="Auto-update" />
+            <div className="app-plugins-list">
+              {snapshot ? items.length ? items.map(row) : <p className="app-plugin-empty">{group.kind === "cpa-plugin" ? "None installed (CPA plugins run on Windows x64)." : "None."}</p>
+                : placeholder(group.kind === "cpa-plugin" ? 3 : 2)}
+            </div>
+          </section>
+        );
+      })}
     </ContentSurface>
   );
 }
@@ -3560,15 +3631,19 @@ function IconButton({
 function Switch({
   checked,
   disabled = false,
+  label,
   onChange,
 }: {
   checked: boolean;
   disabled?: boolean;
+  /** Its name for a screen reader, when no visible label sits beside it. */
+  label?: string;
   onChange: (checked: boolean) => void;
 }) {
   return (
     <button
       aria-checked={checked}
+      aria-label={label}
       className={`switch${checked ? " is-on" : ""}`}
       disabled={disabled}
       onClick={() => onChange(!checked)}
