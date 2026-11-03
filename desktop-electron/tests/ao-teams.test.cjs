@@ -6,13 +6,13 @@ const vm = require("node:vm");
 const ts = require("typescript");
 const { randomUUID } = require("node:crypto");
 
-function load(file, imports = {}) {
+function load(file, imports = {}, globals = {}) {
   const exports = {};
   const absolute = path.resolve(__dirname, "../src/features", file);
   if (!fs.existsSync(absolute)) return exports;
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(absolute, "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText, { exports, crypto: { randomUUID }, structuredClone, require: name => imports[name] ?? {} });
+  }).outputText, { exports, crypto: { randomUUID }, structuredClone, require: name => imports[name] ?? {}, ...globals });
   return exports;
 }
 const roles = load("AgentOrchestratorRoleEditor.tsx");
@@ -27,6 +27,111 @@ function canvasHelpers() {
 }
 const teams = load("AgentOrchestratorTeamsSurface.tsx", { "./AgentOrchestratorRoleEditor": roles, "./AgentOrchestratorTeam": teamEditor, "./AgentOrchestratorCanvas": canvasHelpers() });
 const fixture = () => roles.defaultTeam("workspace-a", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
+
+/** Runs the component's own hooks and event handlers with controlled AO replies and autosave timers. */
+async function mountedTeams() {
+  const slots = [], effects = [], pending = [], calls = [], timers = new Map(), events = [];
+  let cursor = 0, dirty = false, tree, timerId = 0;
+  const props = { active: true, setError() {} };
+  const original = fixture(), other = fixture();
+  original.name = "Original"; original.revision = 1;
+  other.name = "Other"; other.revision = 1;
+  let stored = [original, other], defaultId = original.id;
+  const effect = (work, deps, phase) => {
+    const index = cursor++, before = effects[index];
+    if (!before || !deps || deps.some((value, at) => !Object.is(value, before.deps?.[at]))) pending.push({ phase, run() {
+      before?.cleanup?.(); effects[index] = { deps, cleanup: work() };
+    } });
+  };
+  const hooks = {
+    useState(initial) { const index = cursor++; if (!(index in slots)) slots[index] = typeof initial === "function" ? initial() : initial;
+      return [slots[index], update => { const next = typeof update === "function" ? update(slots[index]) : update;
+        if (!Object.is(slots[index], next)) { slots[index] = next; dirty = true; } }]; },
+    useRef: value => slots[cursor++] ??= { current: value },
+    useCallback(work, deps) { const index = cursor++, before = slots[index];
+      if (!before || deps.some((value, at) => !Object.is(value, before.deps[at]))) slots[index] = { deps, work };
+      return slots[index].work; },
+    useEffect: (work, deps) => effect(work, deps, 1), useLayoutEffect: (work, deps) => effect(work, deps, 0),
+  };
+  const jsx = (type, props) => ({ type, props: props || {} });
+  const component = load("AgentOrchestratorTeamsSurface.tsx", {
+    react: hooks, "react/jsx-runtime": { jsx, jsxs: jsx }, "./AgentOrchestratorRoleEditor": roles,
+    "./AgentOrchestratorTeam": teamEditor, "./AgentOrchestratorCanvas": canvasHelpers(),
+    "./AgentOrchestratorSurface": {
+      aoLevels: () => [], listAllWorkspaces: async () => [{ id: "workspace-a", name: "Fixture" }],
+      watchHarnesses: () => () => {},
+      moduleCall: (operation, args) => new Promise(resolve => calls.push({ operation, args, resolve, answered: false })),
+    },
+  }, {
+    localStorage: { getItem: () => "workspace-a", setItem() {} },
+    window: { setTimeout(fn) { const id = ++timerId; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id),
+      confirm: () => true, dispatchEvent: event => events.push(event) },
+    CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
+  }).AgentOrchestratorTeamsSurface;
+  const nodes = node => !node || typeof node !== "object" ? [] : Array.isArray(node) ? node.flatMap(nodes) : [node, ...nodes(node.props?.children)];
+  const render = () => {
+    for (let pass = 0; pass < 10; pass++) {
+      cursor = 0; dirty = false; tree = component(props);
+      for (const item of pending.splice(0).sort((a, b) => a.phase - b.phase)) item.run();
+      if (!dirty) return;
+    }
+    throw new Error("team component did not settle");
+  };
+  const settle = async () => { await new Promise(setImmediate); render(); };
+  const next = operation => { const call = calls.find(item => !item.answered && item.operation === operation); assert.ok(call, operation); return call; };
+  const reply = async (operation, value) => { const call = next(operation); call.answered = true; call.resolve(value); await settle(); return call; };
+  const snapshot = () => ({ team: stored.find(item => item.id === defaultId), teams: stored });
+  const find = label => nodes(tree).find(node => node.props?.["aria-label"] === label);
+  const button = text => nodes(tree).find(node => node.type === "button" && node.props.children === text);
+  render(); await settle(); await reply("runs", snapshot());
+  return { calls, timers, events, original, other, find, next, values: () => slots,
+    edit(name) { const input = find("Team name"); assert.equal(input.props.disabled, false); input.props.onChange({ target: { value: name } }); render(); },
+    select(id) { find("Saved team").props.onChange({ target: { value: id } }); render(); },
+    async click(text) { const control = button(text); assert.ok(control, text); assert.equal(control.props.disabled, false); control.props.onClick(); await settle(); },
+    async autosave() { assert.equal(timers.size, 1); const [id, run] = timers.entries().next().value; timers.delete(id); run(); await settle(); },
+    async saveReply() { const sent = next("team_update").args.change.team; const updated = { ...structuredClone(sent), revision: sent.revision + 1 };
+      stored = stored.map(item => item.id === updated.id ? updated : item); if (updated.is_default) defaultId = updated.id;
+      await reply("team_update", { team: updated }); return updated; },
+    refreshReply: () => reply("runs", snapshot()),
+    notice: () => nodes(tree).find(node => node.props?.role === "status")?.props.children,
+    unmount() { for (const effect of effects) effect?.cleanup?.(); assert.equal(timers.size, 0); },
+  };
+}
+
+for (const phase of ["save reply", "refresh reply"]) {
+  test(`team save preserves newer edits made before the ${phase} and rebases the next autosave`, async () => {
+    const ui = await mountedTeams();
+    ui.edit("Sent edit"); await ui.autosave();
+    if (phase === "save reply") ui.edit("Latest edit");
+    const saved = await ui.saveReply();
+    if (phase === "refresh reply") ui.edit("Latest edit");
+    await ui.refreshReply();
+    assert.equal(ui.find("Team name").props.value, "Latest edit");
+    assert.equal(ui.values().includes("All changes saved"), false, "newer edits are not announced as saved");
+    await ui.autosave();
+    const next = ui.next("team_update").args.change;
+    assert.equal(next.team.name, "Latest edit");
+    assert.equal(next.expected_revision, saved.revision);
+    await ui.saveReply(); await ui.refreshReply();
+    assert.equal(ui.notice(), "All changes saved");
+    ui.unmount();
+  });
+}
+
+for (const mode of ["automatic", "manual", "default"]) {
+  test(`team save keeps the normal ${mode} completion and notification`, async () => {
+    const ui = await mountedTeams();
+    if (mode === "default") { ui.select(ui.other.id); await ui.click("Make default"); }
+    else { ui.edit("Saved edit"); if (mode === "automatic") await ui.autosave(); else await ui.click("Save team"); }
+    assert.equal(ui.find("Team name").props.disabled, mode !== "automatic");
+    if (mode === "default") assert.equal(ui.next("team_update").args.change.team.is_default, true);
+    await ui.saveReply(); await ui.refreshReply();
+    assert.equal(ui.find("Team name").props.value, mode === "default" ? "Other" : "Saved edit");
+    assert.equal(ui.notice(), mode === "default" ? "Default team saved" : "All changes saved");
+    assert.equal(ui.events.length, 1);
+    ui.unmount();
+  });
+}
 
 test("a mission editor never replaces its own snapshot with an unrelated default team", () => {
   const original = fixture(), other = fixture();
