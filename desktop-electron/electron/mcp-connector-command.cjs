@@ -6,6 +6,8 @@ const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomi
 
 const PREFLIGHT_FAILURES = new Map([
   ["manual_browser_inspection_disabled", "MCP connector setup is disabled in Zero Risk mode."],
+  ["workspace_owner_required", "Only a verified owner of this ChatGPT workspace can create its MCP connector. Add or sign in to the workspace owner account, refresh its workspace details, then retry."],
+  ["workspace_publish_required", "The workspace owner created the MCP connector, but ChatGPT did not make it available to this member. Publish the connector in that workspace's app settings, then retry."],
   ["workspace_admin_required", "No signed-in owner or admin of this ChatGPT workspace was found. Add or sign in to that workspace's owner/admin account in Browser Management, then retry."],
   ["workspace_publish_required", "The workspace admin created the MCP connector, but ChatGPT did not make it available to this member. Publish the connector in that workspace's app settings, then retry."],
   ["workspace_publish_required", "ChatGPT did not confirm workspace publication."],

@@ -15,6 +15,121 @@ const aoSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "Age
 const servicesSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "ExternalServicesSurface.tsx"), "utf8");
 const proxySource = fs.readFileSync(path.join(launcherRoot, "src", "features", "NetworkProxySurface.tsx"), "utf8");
 
+async function externalServiceEditor() {
+  const vm = require("node:vm"), ts = require("typescript");
+  const states = [], effects = [], pending = [], listeners = new Map(), errors = [], saves = [];
+  let index = 0, effectIndex = 0, tree, failSave = false;
+  let service = { id: "cpa", name: "CPA", endpoint: "http://127.0.0.1:8317", home: "G:/fixture",
+    executable: "fixture", arguments: [], enabled: true, autoStart: false, keepAlive: true,
+    status: "offline", owned: false, managedInstall: { state: "installed", strategy: "bundled-source", version: "fixture" } };
+  const snapshot = () => ({ version: 1, services: [{ ...service }] });
+  const subscribe = (name) => (listener) => { listeners.set(name, listener); return () => listeners.delete(name); };
+  const api = {
+    externalServicesSnapshot: async () => snapshot(),
+    providerSnapshot: async () => ({ accounts: [] }), managedBootstrapSnapshot: async () => ({ components: [] }),
+    onExternalServicesChanged: subscribe("services"), onManagedBootstrapChanged: subscribe("bootstrap"),
+    onProviderNetworkChanged: subscribe("providers"),
+    configureExternalService: async (id, input) => {
+      saves.push({ id, input });
+      listeners.get("services")(snapshot()); // A status notification can arrive before a failed save.
+      if (failSave) throw new Error("fixture save failed");
+      service = { ...service, ...input, endpoint: input.endpoint.trim() };
+      listeners.get("services")(snapshot());
+    },
+  };
+  const jsx = (type, props) => ({ type, props });
+  const react = {
+    useState: (initial) => { const slot = index++; if (!(slot in states)) states[slot] = initial;
+      return [states[slot], (next) => { states[slot] = typeof next === "function" ? next(states[slot]) : next; }]; },
+    useRef: (initial) => { const slot = index++; return states[slot] ??= { current: initial }; },
+    useEffect: (work, deps) => { const slot = effectIndex++, previous = effects[slot];
+      if (!previous || deps.some((value, i) => value !== previous.deps[i])) pending.push(() => {
+        previous?.cleanup?.(); effects[slot] = { deps, cleanup: work() };
+      }); },
+  };
+  const exports = {};
+  vm.runInNewContext(ts.transpileModule(servicesSource, { compilerOptions: {
+    module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
+  } }).outputText, { exports, window: { codexWebLauncher: api },
+    require: (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {} });
+  const props = { language: "en", setError: (error) => errors.push(error), openProviders() {}, openCpa() {} };
+  const nodes = (node, type) => !node || typeof node !== "object" ? [] : [
+    ...(node.type === type ? [node] : []), ...[node.props?.children].flat(Infinity).flatMap((child) => nodes(child, type))];
+  const render = () => { index = effectIndex = 0; tree = exports.ExternalServicesSurface(props);
+    for (const work of pending.splice(0)) work(); };
+  const settle = async () => { await new Promise(setImmediate); render(); render(); };
+  render(); await settle();
+  return {
+    errors, saves, settle,
+    inputs: () => nodes(tree, "input"),
+    change: (slot, value) => { const input = nodes(tree, "input")[slot];
+      input.props.onChange({ target: input.props.type === "checkbox" ? { checked: value } : { value } }); render(); },
+    emit: (next) => { service = { ...service, ...next }; listeners.get("services")(snapshot()); render(); },
+    click: (label) => { nodes(tree, "button").find((node) => node.props.children === label).props.onClick(); render(); },
+    failSave: () => { failSave = true; },
+    status: () => nodes(tree, "span").find((node) => node.props.className?.startsWith("external-service-status"))?.props.children,
+    close: () => { for (const effect of effects) effect?.cleanup?.(); assert.equal(listeners.size, 0); },
+  };
+}
+
+test("external service status updates preserve dirty text and checkbox edits", async () => {
+  const editor = await externalServiceEditor();
+  try {
+    editor.change(0, "http://127.0.0.1:9999"); editor.change(4, true);
+    editor.emit({ status: "ready" }); editor.emit({ status: "offline" });
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:9999");
+    assert.equal(editor.inputs()[4].props.checked, true);
+    assert.equal(editor.status(), "Offline");
+    editor.emit({ endpoint: "http://127.0.0.1:9000", status: "ready" });
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:9999", "external configuration must not replace a dirty draft");
+    assert.match(editor.status(), /Running/);
+  } finally { editor.close(); }
+});
+
+test("external service clean drafts follow configuration and status snapshots", async () => {
+  const editor = await externalServiceEditor();
+  try {
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:8317");
+    editor.emit({ endpoint: "http://127.0.0.1:9000", status: "ready" });
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:9000");
+    assert.match(editor.status(), /Running/);
+    editor.emit({ endpoint: "http://127.0.0.1:9001" });
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:9001");
+  } finally { editor.close(); }
+});
+
+test("external service failed saves retain the dirty draft through status notifications", async () => {
+  const editor = await externalServiceEditor();
+  try {
+    editor.change(0, "http://127.0.0.1:9999"); editor.failSave(); editor.click("Save"); await editor.settle();
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:9999");
+    assert.match(editor.errors.at(-1), /fixture save failed/);
+    assert.equal(editor.saves.length, 1);
+  } finally { editor.close(); }
+});
+
+test("external service successful saves accept normalized settings and reset the draft baseline", async () => {
+  const editor = await externalServiceEditor();
+  try {
+    editor.change(0, " http://127.0.0.1:9999 "); editor.click("Save"); await editor.settle();
+    assert.equal(editor.saves[0].input.endpoint, " http://127.0.0.1:9999 ");
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:9999");
+    editor.emit({ endpoint: "http://127.0.0.1:9000" });
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:9000");
+    assert.equal(editor.errors.at(-1), null);
+  } finally { editor.close(); }
+});
+
+test("external service explicit refresh still replaces a dirty draft", async () => {
+  const editor = await externalServiceEditor();
+  try {
+    editor.change(0, "http://127.0.0.1:9999"); editor.click("Refresh all"); await editor.settle();
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:8317");
+    editor.emit({ endpoint: "http://127.0.0.1:9000" });
+    assert.equal(editor.inputs()[0].props.value, "http://127.0.0.1:9000");
+  } finally { editor.close(); }
+});
+
 test("a new chat's Team picker sits in the chat header, with no setting bar above the chat (Codex)", () => {
   assert.match(aoSource, /headerExtra=\{chatTaskId === "" && composerMode === "team" && savedTeams\.length \? <label className="cx-head-team"/, "the picker is passed to the chat header for a new team chat");
   assert.match(aoSource, /aria-label="New chat team"/);

@@ -1,11 +1,11 @@
 "use strict";
 
 const { chatGptMcpContextScript, observeMcpSetupContext, extensionHelpersSource, createConfiguredConnector,
-  currentConnectorSettings, extraConnectorSettings,
-  requireAutomaticConnectorSetup } = require("./mcp-connector-setup.cjs");
+  requireAutomaticConnectorSetup, WORKSPACE_OWNER_REQUIRED } = require("./mcp-connector-setup.cjs");
 
-const ADMIN_REQUIRED = "No signed-in owner or admin of this ChatGPT workspace was found. Add or sign in to that workspace's owner/admin account in Browser Management, then retry.";
-const PUBLISH_REQUIRED = "The workspace admin created the MCP connector, but ChatGPT did not make it available to this member. Publish the connector in that workspace's app settings, then retry.";
+const ADMIN_REQUIRED = WORKSPACE_OWNER_REQUIRED;
+const PUBLISH_REQUIRED = "The workspace owner created the MCP connector, but ChatGPT did not make it available to this member. Publish the connector in that workspace's app settings, then retry.";
+const isWorkspaceOwner = context => context?.workspaceStructure === "workspace" && context.workspaceRole === "account-owner";
 const CONTEXT_CHANGED = "The MCP account or workspace context changed. Retry in the intended workspace.";
 const isWorkspaceAdmin = context => context?.workspaceStructure === "workspace"
   && ["account-owner", "account-admin"].includes(context.workspaceRole);
@@ -205,32 +205,15 @@ async function createWorkspaceConnector(options) {
   if (!accountCandidates) return createConfiguredConnector(options);
   const assertCurrent = () => { requireAutomaticConnectorSetup(options.runtimeHost, browserHost); options.assertCurrent?.(); };
   assertCurrent();
-  const settings = target?.tunnelId ? extraConnectorSettings(options.runtimeHost, target.tunnelId) : currentConnectorSettings(options.runtimeHost);
   return browserHost.withManualOperation("MCP connector creation", async () => {
-    const inspected = await inspectChatGptAccount({ ...options, partition: target.partition, assertCurrent }, async ({ context, fresh, contents }) => {
-      if (context.workspaceStructure !== 'workspace' || isWorkspaceAdmin(context)) return { context, allowed: true };
-      await contents.executeJavaScript(extensionHelpersSource(), true);
-      const access = await contents.executeJavaScript(workspaceUiScript('creation-access', { name: settings.name }), true);
-      await fresh();
-      return { context, allowed: access?.allowed };
-    });
-    const member = inspected.context;
+    const member = await inspectChatGptAccount({ ...options, partition: target.partition, assertCurrent });
     const connect = (partition, context, shared) => createConfiguredConnector({ ...options,
       operationHeld: true, expectedContext: context, shared, assertCurrent,
       target: { ...target, partition }, onContext });
-    if (member.workspaceStructure !== "workspace" || isWorkspaceAdmin(member)) return connect(target.partition, member);
-    // Saved publisher/member bindings are navigation hints, never permission to connect.
-    // Reinspect a signed-in publisher and its exact saved tunnel fields for every retry.
-    const creationRestricted = error => error?.mcpMutationStarted !== true
-      && (/connector form|custom MCP server form|Add action|Create action/i.test(error?.message || '')
-        || ["Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.",
-          "The selected tunnel belongs to a different Platform user. Choose a tunnel created by the signed-in account.",
-          "Platform authentication is different from the selected ChatGPT account. Sign in to the intended Platform account.",
-          "Platform tunnel access requires read and use permissions in the selected organization."].includes(error?.message));
-    if (inspected.allowed !== false) {
-      try { return await connect(target.partition, member); }
-      catch (error) { if (!creationRestricted(error)) throw error; }
-    }
+    if (member.workspaceStructure !== "workspace" || isWorkspaceOwner(member)) return connect(target.partition, member);
+    if (!["account-admin", "standard-user"].includes(member.workspaceRole)) throw new Error(ADMIN_REQUIRED);
+    // A visible Add control does not grant creation authority. Only a freshly verified owner of
+    // this exact workspace may publish for the member; saved bindings never supply that proof.
     const candidates = await accountCandidates();
     const admins = [];
     for (const candidate of candidates.slice(0, 12)) {
@@ -240,7 +223,7 @@ async function createWorkspaceConnector(options) {
         await candidate.prepare();
         const context = await inspectChatGptAccount({ ...options, partition: candidate.partition,
           workspaceId: member.workspaceId, assertCurrent: () => { assertCurrent?.(); candidate.assertCurrent(); } });
-        if (context.workspaceId === member.workspaceId && isWorkspaceAdmin(context) && context.userId !== member.userId) {
+        if (context.workspaceId === member.workspaceId && isWorkspaceOwner(context) && context.userId !== member.userId) {
           admins.push({ ...candidate, context });
         }
       } catch {
@@ -249,7 +232,6 @@ async function createWorkspaceConnector(options) {
       }
     }
     if (!admins.length) throw new Error(ADMIN_REQUIRED);
-    admins.sort((a, b) => Number(b.context.workspaceRole === 'account-owner') - Number(a.context.workspaceRole === 'account-owner'));
     let admin, created, preflightError;
     for (const candidate of admins) {
       const checkCandidate = () => { assertCurrent?.(); candidate.assertCurrent(); };
@@ -270,7 +252,7 @@ async function createWorkspaceConnector(options) {
     await inspectChatGptAccount({ ...options, partition: admin.partition,
       workspaceId: member.workspaceId, expectedContext: admin.context, assertCurrent: checkAdmin },
     async ({ context, fresh, contents, load }) => {
-      if (!isWorkspaceAdmin(context)) throw new Error(ADMIN_REQUIRED);
+      if (!isWorkspaceOwner(context)) throw new Error(ADMIN_REQUIRED);
       const url = new URL(created.href, "https://chatgpt.com");
       await load(url.href);
       await contents.executeJavaScript(extensionHelpersSource(), true);
@@ -279,7 +261,7 @@ async function createWorkspaceConnector(options) {
       const prepared = await contents.executeJavaScript(workspaceUiScript("prepare-publish", input), true);
       if (prepared?.available !== true) return false;
       await fresh();
-      if (!isWorkspaceAdmin(await fresh())) throw new Error(ADMIN_REQUIRED);
+      if (!isWorkspaceOwner(await fresh())) throw new Error(ADMIN_REQUIRED);
       const confirmed = await contents.executeJavaScript(workspaceUiScript("confirm-publish", input), true);
       if (confirmed?.submitted !== true || confirmed?.published !== true) throw new Error(PUBLISH_REQUIRED);
       return true;
